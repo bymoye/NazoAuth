@@ -24,7 +24,6 @@ services:
       - perf_postgres_data:/var/lib/postgresql
     networks:
       perf_net:
-        ipv4_address: 10.111.0.10
 
   valkey:
     image: docker.io/valkey/valkey:8-alpine
@@ -36,7 +35,6 @@ services:
       retries: 20
     networks:
       perf_net:
-        ipv4_address: 10.111.0.11
 
   keyset:
     image: docker.io/library/python:3.13-alpine
@@ -143,7 +141,3 @@ volumes:
 networks:
   perf_net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 10.111.0.0/24
-          gateway: 10.111.0.1
