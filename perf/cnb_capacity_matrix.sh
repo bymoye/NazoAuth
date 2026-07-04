@@ -99,6 +99,38 @@ run_capacity_child oidc_logged_in_authorization_code oidc-logged-in "${oidc_logg
 run_capacity_child oidc_refresh_only oidc-refresh-only "${oidc_refresh_cpuset}"
 run_capacity_child fapi2_full_security fapi2-full-security "${fapi2_cpuset}"
 
+report_child_logs() {
+  interval_seconds="${CAPACITY_LOG_INTERVAL_SECONDS:-60}"
+  tail_lines="${CAPACITY_LOG_TAIL_LINES:-20}"
+  while :; do
+    running=0
+    echo "capacity matrix heartbeat $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    while read -r pid suffix log_path; do
+      if [ -z "${pid}" ]; then
+        continue
+      fi
+      state="exited"
+      if kill -0 "${pid}" 2>/dev/null; then
+        state="running"
+        running=1
+      fi
+      log_lines="$(wc -l <"${log_path}" 2>/dev/null || echo 0)"
+      echo "[${suffix}] pid=${pid} state=${state} log_lines=${log_lines} log=${log_path}"
+      if [ -s "${log_path}" ]; then
+        echo "[${suffix}] last ${tail_lines} log lines:"
+        tail -n "${tail_lines}" "${log_path}" | sed "s/^/[${suffix}] /" || true
+      fi
+    done <"${children_file}"
+    if [ "${running}" -eq 0 ]; then
+      break
+    fi
+    sleep "${interval_seconds}"
+  done
+}
+
+report_child_logs &
+reporter_pid="$!"
+
 status=0
 while read -r pid suffix log_path; do
   if [ -z "${pid}" ]; then
@@ -114,6 +146,9 @@ while read -r pid suffix log_path; do
     tail -n 120 "${log_path}" || true
   fi
 done <"${children_file}"
+
+kill "${reporter_pid}" 2>/dev/null || true
+wait "${reporter_pid}" 2>/dev/null || true
 
 if find docs -maxdepth 1 -name 'performance-capacity-curve-*.md' -print -quit | grep -q .; then
   git config user.name "${CNB_GIT_USER_NAME:-NazoAuth Capacity Bot}"
