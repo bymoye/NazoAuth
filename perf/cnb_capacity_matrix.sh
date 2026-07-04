@@ -1,7 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
+echo "capacity matrix bootstrap started $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo "installing capacity matrix dependencies: coreutils git jq python3"
 apk add --no-cache coreutils git jq python3 >/dev/null
+echo "dependency installation completed"
+echo "docker compose version: $(docker compose version --short 2>/dev/null || docker compose version)"
 docker compose version >/dev/null
 
 mkdir -p docs perf/results
@@ -72,7 +76,7 @@ oidc_logged_cpuset="$(sed -n '3p' "${cpusets_file}")"
 oidc_refresh_cpuset="$(sed -n '4p' "${cpusets_file}")"
 fapi2_cpuset="$(sed -n '5p' "${cpusets_file}")"
 
-echo "using capacity CPU sets:"
+echo "using capacity CPU sets derived from /proc/self/status:"
 cat "${cpusets_file}"
 
 run_capacity_child() {
