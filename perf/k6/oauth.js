@@ -186,6 +186,20 @@ function jsonHeaders(tags = {}) {
   };
 }
 
+function cookieHeaderFromResponse(response) {
+  const parts = [];
+  for (const [name, values] of Object.entries(response.cookies || {})) {
+    if (values && values.length > 0) {
+      parts.push(`${name}=${values[0].value}`);
+    }
+  }
+  return parts.join('; ');
+}
+
+function sessionHeaders() {
+  return __VU_STATE.cookieHeader ? { Cookie: __VU_STATE.cookieHeader } : {};
+}
+
 function vector() {
   const offset = vectorOffsets[scenario] || 0;
   const index = offset + exec.scenario.iterationInTest;
@@ -242,6 +256,7 @@ function ensureUserSession(user, cacheSession = false) {
     fail(`login failed: ${response.status} ${response.body}`);
   }
   __VU_STATE.csrf = response.cookies.nazo_oauth_csrf[0].value;
+  __VU_STATE.cookieHeader = cookieHeaderFromResponse(response);
 }
 
 const __VU_STATE = {};
@@ -303,6 +318,7 @@ function authorizePar(clientId, requestUri, user, cacheSession = false) {
   const response = http.get(
     `${BASE_URL}/authorize?${form({ client_id: clientId, request_uri: requestUri })}`,
     {
+      headers: sessionHeaders(),
       redirects: 0,
       tags: requestTags('authorize', {
         endpoint: '/authorize',
@@ -327,7 +343,7 @@ function approveAuthorization(requestId, expectedState) {
       decision: 'approve',
       csrf_token: __VU_STATE.csrf,
     }),
-    formHeaders({}, requestTags('authorize_decision', {
+    formHeaders(sessionHeaders(), requestTags('authorize_decision', {
       endpoint: '/authorize/decision',
     })),
   );
@@ -607,6 +623,9 @@ export function fapi2_par_jar_private_key_jwt_dpop() {
     'fapi DPoP refresh status is 200': (r) => r.status === 200,
     'fapi DPoP refresh returns DPoP token': (r) => r.json('token_type') === 'DPoP',
   });
+  if (response.status !== 200) {
+    fail(`fapi refresh failed: ${response.status} ${response.body}`);
+  }
 }
 
 export function fapi2_full_security() {

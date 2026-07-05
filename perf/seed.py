@@ -14,8 +14,9 @@ from typing import Any
 
 import psycopg
 from argon2 import PasswordHasher
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, utils
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from psycopg.types.json import Jsonb
 
 
@@ -31,6 +32,21 @@ CLIENT_SECRET_PEPPER = os.environ.get(
 MTLS_THUMBPRINT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REDIRECT_URI = "https://client.example/callback"
 CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+VECTOR_STRIDE_FLOOR = 100
+VECTOR_OFFSET_MULTIPLIERS = {
+    "par_signed_request_object": 0,
+    "refresh_token_rotation": 1,
+    "introspect_opaque_refresh_token": 2,
+    "authorize_par_session": 3,
+    "fapi2_par_jar_private_key_jwt_dpop": 4,
+    "same_user_refresh_token_rotation": 5,
+    "same_user_introspect_opaque_refresh_token": 6,
+    "same_user_authorize_par_session": 7,
+    "oidc_cold_login_refresh": 8,
+    "oidc_logged_in_authorization_code": 9,
+    "oidc_refresh_only": 10,
+    "fapi2_full_security": 11,
+}
 
 
 def b64url(data: bytes) -> str:
@@ -81,6 +97,40 @@ def ec_public_jwk(private_key: ec.EllipticCurvePrivateKey, kid: str) -> dict[str
     }
 
 
+def rsa_private_jwk(private_key: rsa.RSAPrivateKey, kid: str) -> dict[str, str]:
+    public = private_key.public_key().public_numbers()
+    private = private_key.private_numbers()
+    return {
+        "kty": "RSA",
+        "kid": kid,
+        "use": "sig",
+        "alg": "RS256",
+        "n": b64url_uint(public.n),
+        "e": b64url_uint(public.e),
+        "d": b64url_uint(private.d),
+        "p": b64url_uint(private.p),
+        "q": b64url_uint(private.q),
+        "dp": b64url_uint(private.dmp1),
+        "dq": b64url_uint(private.dmq1),
+        "qi": b64url_uint(private.iqmp),
+    }
+
+
+def ec_private_jwk(private_key: ec.EllipticCurvePrivateKey, kid: str) -> dict[str, str]:
+    public = private_key.public_key().public_numbers()
+    private = private_key.private_numbers()
+    return {
+        "kty": "EC",
+        "kid": kid,
+        "use": "sig",
+        "alg": "ES256",
+        "crv": "P-256",
+        "x": b64url_uint(public.x),
+        "y": b64url_uint(public.y),
+        "d": b64url_uint(private.private_value),
+    }
+
+
 def jwk_thumbprint(jwk: dict[str, str]) -> str:
     canonical = json.dumps(
         {"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"], "y": jwk["y"]},
@@ -104,14 +154,23 @@ def sign_es256(private_key: ec.EllipticCurvePrivateKey, header: dict[str, Any], 
     return f"{signing_input}.{b64url(signature)}"
 
 
+def scheduled_now(base_now: int, index: int, scenario: str, rate: int) -> int:
+    if rate <= 0 or not scenario:
+        return base_now
+    vector_stride = max(int(os.environ.get("PERF_ITERATIONS", "50")), VECTOR_STRIDE_FLOOR)
+    offset = VECTOR_OFFSET_MULTIPLIERS.get(scenario, 0) * vector_stride
+    relative_iteration = max(0, index - offset)
+    return base_now + relative_iteration // rate
+
+
 def client_assertion(
     private_key: rsa.RSAPrivateKey,
     kid: str,
     client_id: str,
     issuer: str,
     jti_suffix: str,
+    now: int,
 ) -> str:
-    now = int(time.time())
     return sign_rs256(
         private_key,
         {"alg": "RS256", "kid": kid, "typ": "JWT"},
@@ -136,8 +195,8 @@ def request_object(
     nonce: str,
     code_challenge: str,
     dpop_jkt: str | None,
+    now: int,
 ) -> str:
-    now = int(time.time())
     claims: dict[str, Any] = {
         "client_id": client_id,
         "iss": client_id,
@@ -166,6 +225,7 @@ def dpop_proof(
     method: str,
     htu: str,
     jti_suffix: str,
+    now: int,
 ) -> str:
     return sign_es256(
         private_key,
@@ -173,7 +233,7 @@ def dpop_proof(
         {
             "htm": method,
             "htu": htu,
-            "iat": int(time.time()),
+            "iat": now,
             "jti": f"{jti_suffix}-{uuid.uuid4()}",
         },
     )
@@ -326,11 +386,15 @@ def prepare_vectors(
     dpop_key: ec.EllipticCurvePrivateKey,
     dpop_jwk: dict[str, str],
     dpop_jkt: str,
+    scenario: str,
+    rate: int,
 ) -> list[dict[str, Any]]:
     vectors: list[dict[str, Any]] = []
     oidc_client = "perf-oidc-client"
     fapi_client = "perf-fapi-private-jwt-dpop-client"
+    base_now = int(time.time())
     for index in range(count):
+        vector_now = scheduled_now(base_now, index, scenario, rate)
         verifier, challenge = pkce_pair()
         fapi_verifier, fapi_challenge = pkce_pair()
         state = f"perf-state-{index}-{uuid.uuid4()}"
@@ -349,6 +413,7 @@ def prepare_vectors(
                     nonce=nonce,
                     code_challenge=challenge,
                     dpop_jkt=None,
+                    now=vector_now,
                 ),
                 "oidc_state": state,
                 "fapi_pkce_verifier": fapi_verifier,
@@ -361,27 +426,32 @@ def prepare_vectors(
                     nonce=fapi_nonce,
                     code_challenge=fapi_challenge,
                     dpop_jkt=dpop_jkt,
+                    now=vector_now,
                 ),
                 "fapi_state": fapi_state,
                 "fapi_par_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-par"
+                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-par", vector_now
                 ),
                 "fapi_token_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-token"
+                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-token", vector_now
                 ),
                 "fapi_refresh_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-refresh"
+                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-refresh", vector_now
                 ),
                 "fapi_client_credentials_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-client-credentials"
+                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-client-credentials", vector_now
                 ),
                 "fapi_introspection_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-introspection"
+                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-introspection", vector_now
                 ),
-                "dpop_par": dpop_proof(dpop_key, dpop_jwk, "POST", f"{issuer}/par", "dpop-par"),
-                "dpop_token": dpop_proof(dpop_key, dpop_jwk, "POST", f"{issuer}/token", "dpop-token"),
+                "dpop_par": dpop_proof(
+                    dpop_key, dpop_jwk, "POST", f"{issuer}/par", "dpop-par", vector_now
+                ),
+                "dpop_token": dpop_proof(
+                    dpop_key, dpop_jwk, "POST", f"{issuer}/token", "dpop-token", vector_now
+                ),
                 "dpop_refresh": dpop_proof(
-                    dpop_key, dpop_jwk, "POST", f"{issuer}/token", "dpop-refresh"
+                    dpop_key, dpop_jwk, "POST", f"{issuer}/token", "dpop-refresh", vector_now
                 ),
             }
         )
@@ -470,11 +540,9 @@ def seed() -> None:
             "mtls": "perf-mtls-client",
         },
         "dpop_jkt": dpop_jkt,
-        "private_jwk": rsa_key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        ).decode("ascii"),
+        "private_jwk": rsa_private_jwk(rsa_key, rsa_kid),
+        "dpop_private_jwk": ec_private_jwk(ec_key, "perf-dpop-es256"),
+        "dpop_public_jwk": dpop_jwk,
     }
     (state_dir / "secrets.json").write_text(json.dumps(secrets_doc, indent=2), encoding="utf-8")
     vectors = prepare_vectors(
@@ -485,9 +553,11 @@ def seed() -> None:
         dpop_key=ec_key,
         dpop_jwk=dpop_jwk,
         dpop_jkt=dpop_jkt,
+        scenario=os.environ.get("PERF_SCENARIO", "").strip(),
+        rate=int(os.environ.get("PERF_RATE", "0") or "0"),
     )
     (state_dir / "vectors.json").write_text(json.dumps(vectors), encoding="utf-8")
-    print(f"seeded {user_count} perf users, clients, and {vector_count} signed vectors")
+    print(f"seeded {user_count} perf users, clients, and {vector_count} scheduled signed vectors")
 
 
 if __name__ == "__main__":

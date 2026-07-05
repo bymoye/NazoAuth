@@ -58,6 +58,22 @@ PROFILES: dict[str, list[str]] = {
 }
 
 VECTOR_STRIDE_MULTIPLIER = 12
+VECTOR_STRIDE_FLOOR = 100
+VECTOR_OFFSET_MULTIPLIERS = {
+    "par_signed_request_object": 0,
+    "refresh_token_rotation": 1,
+    "introspect_opaque_refresh_token": 2,
+    "authorize_par_session": 3,
+    "fapi2_par_jar_private_key_jwt_dpop": 4,
+    "same_user_refresh_token_rotation": 5,
+    "same_user_introspect_opaque_refresh_token": 6,
+    "same_user_authorize_par_session": 7,
+    "oidc_cold_login_refresh": 8,
+    "oidc_logged_in_authorization_code": 9,
+    "oidc_refresh_only": 10,
+    "fapi2_full_security": 11,
+}
+VECTORIZED_SCENARIOS = set(VECTOR_OFFSET_MULTIPLIERS)
 
 
 def wait_for_service() -> None:
@@ -655,8 +671,19 @@ def ensure_vector_capacity() -> None:
     requested = int(os.environ.get("PERF_VECTOR_COUNT", "1000"))
     duration = duration_seconds(os.environ.get("PERF_DURATION", "20s"))
     rate = int(os.environ.get("PERF_RATE", "0") or 0)
-    fixed_rate_iterations = rate * duration if os.environ.get("PERF_EXECUTOR") == "constant-arrival-rate" else 0
-    minimum = max(iterations, fixed_rate_iterations, 100) * VECTOR_STRIDE_MULTIPLIER
+    scenario = os.environ.get("PERF_SCENARIO", "").strip()
+    vector_stride = max(iterations, VECTOR_STRIDE_FLOOR)
+    if os.environ.get("PERF_EXECUTOR") == "constant-arrival-rate" and scenario:
+        offset = VECTOR_OFFSET_MULTIPLIERS.get(scenario, 0) * vector_stride
+        if scenario not in VECTORIZED_SCENARIOS:
+            minimum = VECTOR_STRIDE_FLOOR
+        elif scenario == "oidc_refresh_only":
+            max_vus = int(os.environ.get("PERF_MAX_VUS") or os.environ.get("PERF_PRE_ALLOCATED_VUS") or 64)
+            minimum = offset + max(max_vus, VECTOR_STRIDE_FLOOR)
+        else:
+            minimum = offset + max(rate * duration, VECTOR_STRIDE_FLOOR)
+    else:
+        minimum = max(iterations, VECTOR_STRIDE_FLOOR) * VECTOR_STRIDE_MULTIPLIER
     if requested < minimum:
         os.environ["PERF_VECTOR_COUNT"] = str(minimum)
         print(
