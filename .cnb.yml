@@ -1,4 +1,33 @@
 $:
+  vscode:
+    - name: nazoauth-dev
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 64
+      services:
+        - vscode
+        - docker
+      docker:
+        build: .ide/Dockerfile
+      env:
+        CARGO_TERM_COLOR: always
+        RUST_BACKTRACE: "1"
+      stages:
+        - name: verify development toolchain
+          script:
+            - rustc --version
+            - cargo --version
+            - python3 --version
+            - k6 version
+            - for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+            - docker version
+            - docker compose version
+            - psql --version
+            - redis-cli --version
+        - name: prefetch rust dependencies
+          script:
+            - cargo fetch --locked
+
   api_trigger_capacity_curve:
     capacity_curve:
       runner:
