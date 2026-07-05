@@ -22,6 +22,7 @@ RUN apt-get update \
         llvm \
         make \
         openssh-client \
+        openssh-server \
         pkg-config \
         postgresql-client \
         protobuf-compiler \
@@ -32,6 +33,9 @@ RUN apt-get update \
         shellcheck \
         vim-tiny \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /run/sshd \
+    && sshd -t
 
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
         "argon2-cffi==25.1.0" \
@@ -49,6 +53,7 @@ RUN printf '[registries.crates-io]\nprotocol = "sparse"\n' > /usr/local/cargo/co
     && docker --version \
     && docker compose version \
     && k6 version \
+    && sshd -t \
     && rustc --version \
     && cargo --version
 
