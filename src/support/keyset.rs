@@ -336,6 +336,10 @@ pub(crate) async fn try_load_keyset(
             }
             _ => anyhow::bail!("keyset entry {kid} has unsupported backend {backend}"),
         };
+        let local_signing_key = match &signing_key {
+            Some(ActiveSigningKey::LocalPkcs8Der(der)) => Some(der.clone()),
+            _ => None,
+        };
         if is_active {
             active_signing_key = signing_key;
             active_alg = Some(alg);
@@ -343,6 +347,7 @@ pub(crate) async fn try_load_keyset(
         verification_keys.push(VerificationKey {
             kid: kid.to_owned(),
             public_jwk,
+            local_signing_key,
         });
     }
 
@@ -380,8 +385,12 @@ pub(crate) async fn create_new_keyset(settings: &Settings) -> anyhow::Result<Key
     Ok(Keyset {
         active_kid: kid.clone(),
         active_alg: jsonwebtoken::Algorithm::RS256,
-        active_signing_key: ActiveSigningKey::LocalPkcs8Der(private_pkcs8_der),
-        verification_keys: vec![VerificationKey { kid, public_jwk }],
+        active_signing_key: ActiveSigningKey::LocalPkcs8Der(private_pkcs8_der.clone()),
+        verification_keys: vec![VerificationKey {
+            kid,
+            public_jwk,
+            local_signing_key: Some(private_pkcs8_der),
+        }],
     })
 }
 
@@ -666,6 +675,36 @@ pub(crate) fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
 }
 
 impl Keyset {
+    pub(crate) fn response_signing_alg_values_supported(&self) -> Vec<&'static str> {
+        const ORDERED_ALGORITHMS: [jsonwebtoken::Algorithm; 4] = [
+            jsonwebtoken::Algorithm::EdDSA,
+            jsonwebtoken::Algorithm::RS256,
+            jsonwebtoken::Algorithm::ES256,
+            jsonwebtoken::Algorithm::PS256,
+        ];
+
+        ORDERED_ALGORITHMS
+            .into_iter()
+            .filter(|algorithm| {
+                *algorithm == self.active_alg
+                    || self.local_response_signing_key(*algorithm).is_some()
+            })
+            .filter_map(super::signing_algorithm_name)
+            .collect()
+    }
+
+    pub(crate) fn local_response_signing_key(
+        &self,
+        algorithm: jsonwebtoken::Algorithm,
+    ) -> Option<(&str, &[u8])> {
+        let algorithm_name = super::signing_algorithm_name(algorithm)?;
+        self.verification_keys.iter().find_map(|key| {
+            let private_key = key.local_signing_key.as_deref()?;
+            (key.public_jwk.get("alg").and_then(Value::as_str) == Some(algorithm_name))
+                .then_some((key.kid.as_str(), private_key))
+        })
+    }
+
     pub(crate) fn jwks(&self) -> Value {
         let keys = self
             .verification_keys

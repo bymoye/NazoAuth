@@ -67,6 +67,7 @@ fn fapi_signing_state_with_invalid_db() -> Data<AppState> {
             verification_keys: vec![VerificationKey {
                 kid: "fapi-resource-test-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     })
@@ -104,6 +105,7 @@ fn live_fapi_signing_state_from_database_url(database_url: String) -> Option<Dat
             verification_keys: vec![VerificationKey {
                 kid: "fapi-resource-test-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     }))

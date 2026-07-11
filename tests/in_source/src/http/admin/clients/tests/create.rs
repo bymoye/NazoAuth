@@ -12,6 +12,7 @@ async fn prepare_client_insert_for_test(
         pairwise_subject_secret,
         LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
         issuer,
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
 }
@@ -44,6 +45,12 @@ fn create_request() -> CreateClientRequest {
         jwks: Some(json!({"keys": []})),
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         allow_jwks_without_kid: false,
         subject_type: None,
         sector_identifier_uri: None,

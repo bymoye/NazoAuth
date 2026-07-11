@@ -103,6 +103,7 @@ impl LiveLogoutFixture {
                     verification_keys: vec![VerificationKey {
                         kid: "logout-kid".to_owned(),
                         public_jwk: verification_key,
+                        local_signing_key: None,
                     }],
                 }),
             }),
@@ -752,6 +753,7 @@ fn id_token_hint_decoder_rejects_malformed_unsupported_and_unidentified_tokens()
         verification_keys: vec![crate::domain::VerificationKey {
             kid: "logout-kid".to_owned(),
             public_jwk,
+            local_signing_key: None,
         }],
     });
     let claims = json!({

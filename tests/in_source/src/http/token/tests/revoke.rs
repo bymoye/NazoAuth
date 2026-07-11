@@ -72,6 +72,7 @@ fn live_revocation_state_from_database_url(database_url: String) -> Option<Data<
             verification_keys: vec![VerificationKey {
                 kid: "revoke-test-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     }))
@@ -190,6 +191,12 @@ async fn insert_revocation_client(
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,

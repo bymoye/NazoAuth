@@ -164,14 +164,46 @@ pub(crate) async fn userinfo(state: Data<AppState>, req: HttpRequest, body: Byte
             );
         }
     };
-    let mut response = json_response_no_store(oidc_user_claims(
+    let client =
+        match crate::support::find_client_in_tenant(&state.diesel_db, tenant_id, &claims.client_id)
+            .await
+        {
+            Ok(Some(client)) if client.is_active => client,
+            Ok(_) => {
+                return oauth_bearer_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "userinfo 客户端状态不可用.",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to load userinfo client response policy");
+                return oauth_bearer_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "userinfo 查询失败.",
+                );
+            }
+        };
+    let response_claims = oidc_user_claims(
         &user,
         &scopes,
         &claims.sub,
         &claims.userinfo_claims,
         &claims.userinfo_claim_requests,
         None,
-    ));
+    );
+    let mut response = match userinfo_success_response(&state, &client, response_claims).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, client_id_hash = %blake3_hex(&client.client_id), "failed to protect userinfo response");
+            return oauth_bearer_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "userinfo 响应生成失败.",
+            );
+        }
+    };
     if let Some(nonce) = next_dpop_nonce
         && let Ok(value) = HeaderValue::from_str(&nonce)
     {
@@ -180,6 +212,54 @@ pub(crate) async fn userinfo(state: Data<AppState>, req: HttpRequest, body: Byte
             .insert(header::HeaderName::from_static("dpop-nonce"), value);
     }
     response
+}
+
+async fn userinfo_success_response(
+    state: &AppState,
+    client: &ClientRow,
+    mut claims: Value,
+) -> anyhow::Result<HttpResponse> {
+    let signing_alg = match client.userinfo_signed_response_alg.as_deref() {
+        Some(value) => Some(
+            signing_algorithm_from_name(value)
+                .ok_or_else(|| anyhow::anyhow!("unsupported UserInfo signing algorithm"))?,
+        ),
+        None => None,
+    };
+    let encryption_key = client_jwe_key(
+        client.jwks.as_ref(),
+        client.userinfo_encrypted_response_alg.as_deref(),
+        client.userinfo_encrypted_response_enc.as_deref(),
+        "userinfo",
+    )?;
+    if signing_alg.is_none() && encryption_key.is_none() {
+        return Ok(json_response_no_store(claims));
+    }
+
+    let body = if let Some(signing_alg) = signing_alg {
+        let object = claims
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("UserInfo claims must be a JSON object"))?;
+        object.insert("iss".to_owned(), json!(state.settings.issuer));
+        object.insert("aud".to_owned(), json!(client.client_id));
+        let signed = sign_response_jwt(state, &claims, "JWT", Some(signing_alg)).await?;
+        match encryption_key {
+            Some(key) => encrypt_compact_jwe(&key, signed.as_bytes(), JwePayloadKind::NestedJwt)?,
+            None => signed,
+        }
+    } else {
+        let key = encryption_key.expect("checked UserInfo encryption key is present");
+        encrypt_compact_jwe(&key, &serde_json::to_vec(&claims)?, JwePayloadKind::Claims)?
+    };
+
+    Ok(HttpResponse::Ok()
+        .insert_header((
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/jwt"),
+        ))
+        .insert_header((header::CACHE_CONTROL, HeaderValue::from_static("no-store")))
+        .insert_header((header::PRAGMA, HeaderValue::from_static("no-cache")))
+        .body(body))
 }
 
 async fn access_token_user_id(

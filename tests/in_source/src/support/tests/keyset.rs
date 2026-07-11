@@ -23,6 +23,7 @@ fn jwks_publishes_active_and_previous_verification_keys() {
                     &active_der,
                 )
                 .unwrap(),
+                local_signing_key: None,
             },
             VerificationKey {
                 kid: "previous".to_owned(),
@@ -32,6 +33,7 @@ fn jwks_publishes_active_and_previous_verification_keys() {
                     &previous_der,
                 )
                 .unwrap(),
+                local_signing_key: None,
             },
         ],
     };
@@ -39,6 +41,55 @@ fn jwks_publishes_active_and_previous_verification_keys() {
     let jwks = keyset.jwks();
     assert_eq!(jwks["keys"].as_array().unwrap().len(), 2);
     assert!(keyset.verification_key("previous").is_some());
+}
+
+#[test]
+fn response_signing_capabilities_include_only_active_or_locally_signable_keys() {
+    let rs256 = generate_key_material(jsonwebtoken::Algorithm::RS256).unwrap();
+    let ps256 = generate_key_material(jsonwebtoken::Algorithm::PS256).unwrap();
+    let keyset = Keyset {
+        active_kid: "active-eddsa".to_owned(),
+        active_alg: jsonwebtoken::Algorithm::EdDSA,
+        active_signing_key: ActiveSigningKey::LocalPkcs8Der(Vec::new()),
+        verification_keys: vec![
+            VerificationKey {
+                kid: "local-rs256".to_owned(),
+                public_jwk: public_jwk_from_private_der(
+                    "local-rs256",
+                    jsonwebtoken::Algorithm::RS256,
+                    &rs256.private_pkcs8_der,
+                )
+                .unwrap(),
+                local_signing_key: Some(rs256.private_pkcs8_der.clone()),
+            },
+            VerificationKey {
+                kid: "public-only-ps256".to_owned(),
+                public_jwk: public_jwk_from_private_der(
+                    "public-only-ps256",
+                    jsonwebtoken::Algorithm::PS256,
+                    &ps256.private_pkcs8_der,
+                )
+                .unwrap(),
+                local_signing_key: None,
+            },
+        ],
+    };
+
+    assert_eq!(
+        keyset.response_signing_alg_values_supported(),
+        vec!["EdDSA", "RS256"]
+    );
+    let (kid, private_key) = keyset
+        .local_response_signing_key(jsonwebtoken::Algorithm::RS256)
+        .expect("locally signable auxiliary key should be selectable");
+    assert_eq!(kid, "local-rs256");
+    assert_eq!(private_key, rs256.private_pkcs8_der.as_slice());
+    assert!(
+        keyset
+            .local_response_signing_key(jsonwebtoken::Algorithm::PS256)
+            .is_none(),
+        "verification-only keys must not be advertised as signing capabilities"
+    );
 }
 
 #[test]
@@ -688,6 +739,16 @@ async fn load_or_create_keyset_backfills_oidc_default_rs256_signing_key() {
             .unwrap()
             .iter()
             .any(|key| key["alg"] == "RS256")
+    );
+    assert_eq!(
+        keyset.response_signing_alg_values_supported(),
+        vec!["RS256", "PS256"]
+    );
+    assert!(
+        keyset
+            .local_response_signing_key(jsonwebtoken::Algorithm::RS256)
+            .is_some(),
+        "the backfilled RS256 private key must remain available in the loaded snapshot"
     );
 }
 

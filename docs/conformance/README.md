@@ -12,20 +12,21 @@ in the repository.
 - Certification baseline: [2026-06-09 OIDF full matrix](2026-06-09-oidf-full-matrix.md)
 - Matrix scope: [OIDF full matrix](oidf-full-matrix.md)
 - Latest private full-matrix regression: [2026-07-01 TP/PS OIDF full matrix](2026-07-01-tp-ps-full-matrix.md)
-- Latest official full matrix: [2026-07-02 NI-004 official OIDF full matrix](2026-07-02-ni-004-official-oidf-full-matrix.md)
+- Latest official full matrix: [2026-07-11 M7 encrypted response OIDF results](2026-07-11-m7-official-encrypted-responses-oidf-results.md)
 - Latest RFC coverage check: [2026-07-02 NI-005 RFC 7592 OIDF coverage](2026-07-02-ni-005-oidf-coverage.md)
 - Latest NI-006~NI-011 private targeted OIDF results: [2026-07-02 NI-006~NI-011 private OIDF results](2026-07-02-ni-006-011-private-oidf-results.md)
 - Latest public NI-007 FAPI-CIBA targeted OIDF result: [2026-07-03 NI-007 public FAPI-CIBA OIDF results](2026-07-03-ni-007-public-ciba-oidf-results.md)
 - Latest NI-006~NI-011 official parallel-isolated full matrix: [2026-07-03 NI-006~NI-011 official parallel-isolated OIDF results](2026-07-03-ni-006-011-official-parallel-isolated-oidf-results.md)
 - Latest M2 official parallel-isolated full matrix: [2026-07-08 M2 official parallel-isolated OIDF results](2026-07-08-m2-official-parallel-isolated-oidf-results.md)
 - Latest M6 FAPI-CIBA local and official full matrix: [2026-07-11 M6 FAPI-CIBA OIDF results](2026-07-11-m6-official-fapi-ciba-oidf-results.md)
+- Latest encrypted-response coverage check: [2026-07-11 M7 encrypted response OIDF coverage](2026-07-11-m7-oidf-coverage.md)
 
-The latest recorded official full-matrix suite run is the 2026-07-11 M6
+The latest recorded official full-matrix suite run is the 2026-07-11 M7
 parallel-isolated run against `https://auth.nazo.run`. It ran from workflow head
-SHA `07e69855948ca0a12d4dcd26bb9372e3ea2d04d3`, deployed image
-`localhost/nazo-oauth-server:m6-07e6985`, and completed the repository's
-20-plan public OIDF matrix in the 18+2 layout with all GitHub Actions jobs
-ending in `success`. The exported results contain 639 modules: 631 passed, 6
+SHA `371b4f6e61674c4d1bd9ace7ba5b518314c8ff0f`, deployed image
+`localhost/nazo-oauth-server:m7-371b4f6`, and completed the repository's
+21-plan public OIDF matrix in the 19+2 layout with all GitHub Actions jobs
+ending in `success`. The exported results contain 640 modules: 632 passed, 6
 expected review states, 2 expected skips, and no failed module, condition
 failure, or warning.
 

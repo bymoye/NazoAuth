@@ -18,6 +18,7 @@ fn keyset(alg: jsonwebtoken::Algorithm) -> Keyset {
         verification_keys: vec![VerificationKey {
             kid: "active".to_owned(),
             public_jwk: json!({"kty": "RSA", "kid": "active", "alg": alg_name, "use": "sig"}),
+            local_signing_key: None,
         }],
     }
 }
@@ -379,11 +380,6 @@ fn discovery_does_not_advertise_unimplemented_protocol_extensions() {
         "introspection_encryption_enc_values_supported",
         "frontchannel_logout_supported",
         "check_session_iframe",
-        "userinfo_signing_alg_values_supported",
-        "userinfo_encryption_alg_values_supported",
-        "userinfo_encryption_enc_values_supported",
-        "authorization_encryption_alg_values_supported",
-        "authorization_encryption_enc_values_supported",
     ] {
         assert!(
             metadata.get(field).is_none(),
@@ -623,6 +619,55 @@ fn discovery_authorization_response_algs_match_active_key_only() {
     let keyset = keyset(jsonwebtoken::Algorithm::PS256);
 
     assert_eq!(active_signing_alg_values_supported(&keyset), vec!["PS256"]);
+}
+
+#[test]
+fn discovery_advertises_only_response_algorithms_signable_by_current_keyset() {
+    let metadata = authorization_server_metadata(
+        &settings(AuthorizationServerProfile::Oauth2Baseline, Vec::new()),
+        &keyset(jsonwebtoken::Algorithm::PS256),
+    );
+
+    assert_eq!(
+        metadata["userinfo_signing_alg_values_supported"],
+        json!(["PS256"])
+    );
+    assert_eq!(
+        metadata["authorization_signing_alg_values_supported"],
+        json!(["PS256"])
+    );
+    assert_eq!(
+        metadata["userinfo_encryption_alg_values_supported"],
+        json!(["RSA-OAEP-256"])
+    );
+    assert_eq!(
+        metadata["userinfo_encryption_enc_values_supported"],
+        json!(["A256GCM"])
+    );
+    assert_eq!(
+        metadata["authorization_encryption_alg_values_supported"],
+        json!(["RSA-OAEP-256"])
+    );
+    assert_eq!(
+        metadata["authorization_encryption_enc_values_supported"],
+        json!(["A256GCM"])
+    );
+    for field in [
+        "userinfo_signing_alg_values_supported",
+        "userinfo_encryption_alg_values_supported",
+        "userinfo_encryption_enc_values_supported",
+        "authorization_encryption_alg_values_supported",
+        "authorization_encryption_enc_values_supported",
+    ] {
+        assert!(
+            metadata[field]
+                .as_array()
+                .expect("crypto metadata must be an array")
+                .iter()
+                .all(|value| value != "none" && value != "HS256"),
+            "{field} must not advertise unsafe algorithms"
+        );
+    }
 }
 
 #[test]

@@ -29,6 +29,7 @@ async fn prepare_client_insert_for_test(
         pairwise_subject_secret,
         crate::support::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
         issuer,
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
 }
@@ -106,6 +107,12 @@ fn create_client_request(client_name: &str) -> CreateClientRequest {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         allow_jwks_without_kid: false,
         subject_type: None,
         sector_identifier_uri: None,
@@ -341,6 +348,12 @@ fn current_client() -> ClientRow {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!(["https://client.example/logout"]),
         backchannel_logout_uri: Some("https://client.example/backchannel".to_owned()),
         backchannel_logout_session_required: true,
@@ -386,6 +399,12 @@ fn empty_patch() -> PatchClientRequest {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         is_active: None,
         subject_type: None,
         sector_identifier_uri: None,
@@ -398,9 +417,15 @@ async fn patch_preserves_unsubmitted_security_metadata() {
     patch.client_name = Some("Renamed client".to_owned());
     patch.is_active = Some(false);
 
-    let prepared = prepare_client_patch(&current_client(), patch, None, "http://localhost:8000")
-        .await
-        .expect("renaming a client must not require resubmitting security metadata");
+    let prepared = prepare_client_patch(
+        &current_client(),
+        patch,
+        None,
+        "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )
+    .await
+    .expect("renaming a client must not require resubmitting security metadata");
 
     assert_eq!(prepared.client_name, "Renamed client");
     assert_eq!(
@@ -428,10 +453,16 @@ async fn patch_rejects_redirect_uri_with_surrounding_whitespace() {
     let mut patch = empty_patch();
     patch.redirect_uris = Some(vec![" https://client.example/callback ".to_owned()]);
 
-    let error = prepare_client_patch(&current_client(), patch, None, "http://localhost:8000")
-        .await
-        .err()
-        .expect("redirect_uri metadata must be an exact registered value");
+    let error = prepare_client_patch(
+        &current_client(),
+        patch,
+        None,
+        "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )
+    .await
+    .err()
+    .expect("redirect_uri metadata must be an exact registered value");
 
     assert!(
         error.to_string().contains("redirect_uri"),
@@ -444,10 +475,16 @@ async fn patch_rejects_post_logout_redirect_uri_with_surrounding_whitespace() {
     let mut patch = empty_patch();
     patch.post_logout_redirect_uris = Some(vec![" https://client.example/logout ".to_owned()]);
 
-    let error = prepare_client_patch(&current_client(), patch, None, "http://localhost:8000")
-        .await
-        .err()
-        .expect("post_logout_redirect_uri metadata must not be silently normalized");
+    let error = prepare_client_patch(
+        &current_client(),
+        patch,
+        None,
+        "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )
+    .await
+    .err()
+    .expect("post_logout_redirect_uri metadata must not be silently normalized");
 
     assert!(
         error.to_string().contains("post_logout_redirect_uri"),
@@ -460,10 +497,16 @@ async fn patch_rejects_pairwise_when_secret_is_not_configured() {
     let mut patch = empty_patch();
     patch.subject_type = Some("pairwise".to_owned());
 
-    let error = prepare_client_patch(&current_client(), patch, None, "http://localhost:8000")
-        .await
-        .err()
-        .expect("pairwise subject update requires a configured server secret");
+    let error = prepare_client_patch(
+        &current_client(),
+        patch,
+        None,
+        "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )
+    .await
+    .err()
+    .expect("pairwise subject update requires a configured server secret");
 
     assert!(
         error.to_string().contains("PAIRWISE_SUBJECT_SECRET"),
@@ -485,6 +528,7 @@ async fn patch_derives_pairwise_sector_from_updated_single_redirect_host() {
         patch,
         Some("01234567890123456789012345678901"),
         "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
     .expect("pairwise update with one redirect host should be accepted");
@@ -511,6 +555,7 @@ async fn patch_rejects_pairwise_redirects_with_multiple_hosts_without_sector_uri
         patch,
         Some("01234567890123456789012345678901"),
         "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
     .err()
@@ -537,6 +582,7 @@ async fn patch_reports_sector_identifier_fetch_failure_for_new_pairwise_uri() {
         patch,
         Some("01234567890123456789012345678901"),
         "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
     .err()
@@ -558,6 +604,7 @@ async fn patch_preserves_existing_pairwise_sector_host_without_refetching_uri() 
         patch,
         Some("01234567890123456789012345678901"),
         "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
     .expect("unrelated patch should preserve existing pairwise sector metadata");
@@ -583,6 +630,7 @@ async fn patch_rejects_modifying_existing_sector_identifier_uri() {
         patch,
         Some("01234567890123456789012345678901"),
         "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
     .err()
@@ -604,6 +652,7 @@ async fn patch_clears_pairwise_sector_metadata_when_subject_becomes_public() {
         patch,
         Some("01234567890123456789012345678901"),
         "http://localhost:8000",
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
     .expect("switching back to public should remove pairwise-only metadata");

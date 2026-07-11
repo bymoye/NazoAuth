@@ -39,7 +39,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 | 静态安全分析 | CodeQL Rust analysis，启用 `security-extended` 和 `security-and-quality` queries。 |
 | 依赖策略 | GitHub dependency review、`cargo audit`、`cargo deny`，覆盖 advisories、bans、licenses 和 sources。 |
 | 运行时安全行为 | `conformance-security` 中的真实 HTTP E2E、load/race gate、Valkey outage injection。 |
-| 协议一致性 | OIDF/FAPI conformance workflows，以及已归档的官方 17-plan matrix 证据。 |
+| 协议一致性 | OIDF/FAPI conformance workflows，以及已归档的官方 21-plan matrix 证据。 |
 | 覆盖率趋势 | 专用 coverage workflow 上传 Codecov LCOV。 |
 | 发布来源证明 | CycloneDX SBOM、Trivy image scan、Sigstore signing、GitHub artifact attestations。 |
 
@@ -81,11 +81,11 @@ OpenID Foundation：
 
 | 规格 | 实现 |
 | --- | --- |
-| [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | ID Token、UserInfo、claims、authorization code flow |
+| [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | ID Token、JSON/signed/encrypted UserInfo、claims、authorization code flow |
 | [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) | `/.well-known/openid-configuration` |
 | [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html) | `/logout` |
 | [OpenID Connect Back-Channel Logout 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html) | signed logout token + durable outbox delivery |
-| [JWT Secured Authorization Response Mode](https://openid.net/specs/oauth-v2-jarm.html) | active profile 声明时支持 JARM |
+| [JWT Secured Authorization Response Mode](https://openid.net/specs/oauth-v2-jarm.html) | active profile 或请求选择 JARM 时支持签名响应，并支持可选 per-client nested JWE |
 | [FAPI 2.0 Security Profile Final](https://openid.net/specs/fapi-security-profile-2_0-final.html) | `fapi2-security` profile |
 | [FAPI 2.0 Message Signing Final](https://openid.net/specs/fapi-message-signing-2_0-final.html) | signed authorization request、JARM 和 signed introspection profile support |
 
@@ -111,20 +111,21 @@ OpenID Foundation Conformance Suite 结果 URL：
 | --- | --- |
 | OIDC Basic OP | <https://www.certification.openid.net/plan-detail.html?plan=Srk6iaVDVcqO5> |
 | OIDC Config OP | <https://www.certification.openid.net/plan-detail.html?plan=fGiz8QZYR1LVy> |
-| 最新 17-plan 官方矩阵 | [docs/conformance/2026-07-02-ni-004-official-oidf-full-matrix.md](docs/conformance/2026-07-02-ni-004-official-oidf-full-matrix.md#plan-results) |
+| 最新 21-plan 官方矩阵 | [docs/conformance/2026-07-11-m7-official-encrypted-responses-oidf-results.md](docs/conformance/2026-07-11-m7-official-encrypted-responses-oidf-results.md#plan-ids) |
 | OIDF 矩阵范围 | [docs/conformance/oidf-full-matrix.zh-CN.md](docs/conformance/oidf-full-matrix.zh-CN.md) |
 | 最新私有 full-matrix 回归 | [docs/conformance/2026-07-01-tp-ps-full-matrix.md](docs/conformance/2026-07-01-tp-ps-full-matrix.md) |
 
 最新官方 full matrix 针对 `https://auth.nazo.run` 执行，workflow head SHA 为
-`0b00ea7d50443cb54fc17631a9238126fa837e42`，跑完 17 个 plan、617 个模块，结果
-为 `0 failures`、`0 warnings`。dynamic-registration OIDC plan 中有 2 个
-expected `SKIPPED` module，因此不能作为 zero-SKIPPED 证据。
+`371b4f6e61674c4d1bd9ace7ba5b518314c8ff0f`。该运行以 19+2
+parallel-isolated 形式完成 21 个 plan，导出 640 个模块：632 个 `PASSED`、6 个
+预期 `REVIEW`、2 个预期 `SKIPPED`，没有失败模块、condition failure 或
+warning，因此不能作为 zero-SKIPPED 证据。
 
 最新私有 full-matrix 回归针对 runtime commit `31e8f9f` 执行，跑完全部 16 个 plan、578 个模块，结果为 `0 failures`、`0 warnings`。
 
 ## 功能
 
-- Authorization code + PKCE、refresh token、client credentials、受限 JWT bearer grant、受限 Token Exchange、revocation、introspection、signed/encrypted introspection、discovery、protected resource metadata、JWKS、UserInfo、PAR、JAR、DPoP、mTLS。
+- Authorization code + PKCE、refresh token、client credentials、受限 JWT bearer grant、受限 Token Exchange、revocation、introspection、signed/encrypted introspection、discovery、protected resource metadata、JWKS、JSON/signed/encrypted UserInfo、signed/encrypted JARM、PAR、JAR、DPoP、mTLS。
 - Runtime profile：`oauth2-baseline`、`fapi2-security`、`fapi2-message-signing-authz-request`、`fapi2-message-signing-jarm`、`fapi2-message-signing-introspection`。
 - 本地用户、资料、OAuth client、grant、access request、TOTP MFA、backup code、remembered MFA、WebAuthn/passkeys、SCIM provisioning。
 - 本地签名密钥生命周期，包含 prepublish、active、grace、retired 状态。也可以用 external-command signer 接 KMS/HSM。
@@ -202,6 +203,7 @@ RUST_LOG: "info"
 - QQ、微信、Google、Microsoft、企业 SAML 等模块化第三方登录 provider；在 provider-specific adapter、配置 gate、账号绑定、E2E 和负向测试完成前仅属于路线图能力。
 - 请求级动态 tenant 或 issuer routing。
 - signed-introspection profile 外，或未配置 per-client JWE response metadata 的 RFC 9701 encrypted introspection response。
+- 未配置受支持的 per-client JWE metadata 与唯一匹配公开加密密钥时的 UserInfo 或 JARM 加密。
 
 当前范围见 [docs/project/roadmap.md](docs/project/roadmap.md)。
 

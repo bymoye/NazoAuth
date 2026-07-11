@@ -28,6 +28,7 @@ async fn prepare_client_insert_for_test(
         pairwise_subject_secret,
         crate::support::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
         issuer,
+        crate::support::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
 }
@@ -63,6 +64,12 @@ fn client_row() -> ClientRow {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,
@@ -140,6 +147,12 @@ fn create_client_request(client_name: &str) -> CreateClientRequest {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         allow_jwks_without_kid: false,
         subject_type: None,
         sector_identifier_uri: None,

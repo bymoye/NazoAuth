@@ -349,7 +349,7 @@ pub(crate) enum ClientAssertionError {
 pub(crate) struct ValidatedClientAssertion {
     jti: String,
     exp: i64,
-    kid: String,
+    kid: Option<String>,
     alg: jsonwebtoken::Algorithm,
 }
 
@@ -372,11 +372,12 @@ fn verify_private_key_jwt_claims_with_settings(
         log_client_assertion_rejection(req, client, "decode_header");
         ClientAssertionError::Invalid
     })?;
-    let kid = header.kid.ok_or_else(|| {
-        log_client_assertion_rejection(req, client, "missing_kid");
-        ClientAssertionError::Invalid
-    })?;
-    let decoding_key = client_jwt_decoding_key(client, &kid, header.alg).ok_or_else(|| {
+    let (kid, decoding_key) = client_assertion_decoding_key(
+        client,
+        header.kid.as_deref().filter(|kid| !kid.trim().is_empty()),
+        header.alg,
+    )
+    .ok_or_else(|| {
         log_client_assertion_rejection(req, client, "key_not_found");
         ClientAssertionError::Invalid
     })?;
@@ -460,7 +461,7 @@ pub(crate) async fn consume_private_key_jwt(
                 audit_fields(&[
                     ("client_id", json!(client.client_id)),
                     ("jti_hash", json!(blake3_hex(&assertion.jti))),
-                    ("kid", json!(assertion.kid)),
+                    ("kid", json!(assertion.kid.as_deref())),
                 ]),
             );
             Err(ClientAssertionError::ReplayDetected)
@@ -531,6 +532,34 @@ pub(crate) fn client_jwt_decoding_key(
         .iter()
         .find(|key| key.get("kid").and_then(Value::as_str) == Some(kid))?;
     jwt_decoding_key_from_jwk(key, alg)
+}
+
+fn client_assertion_decoding_key(
+    client: &ClientRow,
+    kid: Option<&str>,
+    alg: jsonwebtoken::Algorithm,
+) -> Option<(Option<String>, jsonwebtoken::DecodingKey)> {
+    if let Some(kid) = kid {
+        return client_jwt_decoding_key(client, kid, alg)
+            .map(|decoding_key| (Some(kid.to_owned()), decoding_key));
+    }
+
+    let keys = client.jwks.as_ref()?.get("keys")?.as_array()?;
+    let mut matching = keys.iter().filter_map(|key| {
+        let registered_kid = key
+            .get("kid")
+            .and_then(Value::as_str)
+            .filter(|registered_kid| !registered_kid.trim().is_empty());
+        if registered_kid.is_some() {
+            return None;
+        }
+        jwt_decoding_key_from_jwk(key, alg).map(|decoding_key| (None, decoding_key))
+    });
+    let selected = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(selected)
 }
 
 pub(crate) fn jwt_decoding_key_from_jwk(

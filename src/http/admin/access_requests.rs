@@ -132,11 +132,16 @@ pub(crate) async fn admin_approve_access_request(
     };
     let request_user_id = pending_request.user_id;
     let site_name = pending_request.site_name;
+    let response_signing_algorithms = state
+        .keyset
+        .snapshot()
+        .response_signing_alg_values_supported();
     let prepared = match prepare_client_insert_with_secret_pepper(
         payload,
         state.settings.pairwise_subject_secret.as_deref(),
         &state.settings.client_secret_pepper,
         &state.settings.issuer,
+        &response_signing_algorithms,
     )
     .await
     {

@@ -74,6 +74,7 @@ fn live_refresh_state_from_database_url(
             verification_keys: vec![VerificationKey {
                 kid: active_kid,
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     })
@@ -405,6 +406,12 @@ fn client_row() -> ClientRow {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,

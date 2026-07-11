@@ -84,6 +84,12 @@ fn pkce_policy_client() -> ClientRow {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,
@@ -400,6 +406,7 @@ fn valid_keyset(kid: &str) -> Keyset {
         verification_keys: vec![VerificationKey {
             kid: kid.to_owned(),
             public_jwk,
+            local_signing_key: None,
         }],
     }
 }

@@ -18,17 +18,18 @@ Nazo Auth Server 已发布在 OpenID Foundation 官方认证列表中：
 - 认证基线：[2026-06-09 OIDF full matrix](2026-06-09-oidf-full-matrix.md)
 - 矩阵范围说明：[OIDF 完整矩阵](oidf-full-matrix.zh-CN.md)
 - 最新私有 full-matrix 回归：[2026-07-01 TP/PS OIDF full matrix](2026-07-01-tp-ps-full-matrix.md)
-- 最新官方 full matrix：[2026-07-02 NI-004 official OIDF full matrix](2026-07-02-ni-004-official-oidf-full-matrix.md)
+- 最新官方 full matrix：[2026-07-11 M7 encrypted response OIDF results](2026-07-11-m7-official-encrypted-responses-oidf-results.md)
 - 最新 RFC 覆盖检查：[2026-07-02 NI-005 RFC 7592 OIDF coverage](2026-07-02-ni-005-oidf-coverage.md)
 - 最新 NI-006~NI-011 私有 OIDF targeted 结果：[2026-07-02 NI-006~NI-011 private OIDF results](2026-07-02-ni-006-011-private-oidf-results.md)
 - 最新 public NI-007 FAPI-CIBA targeted 结果：[2026-07-03 NI-007 public FAPI-CIBA OIDF results](2026-07-03-ni-007-public-ciba-oidf-results.md)
 - 最新 NI-006~NI-011 官方 parallel-isolated full matrix：[2026-07-03 NI-006~NI-011 official parallel-isolated OIDF results](2026-07-03-ni-006-011-official-parallel-isolated-oidf-results.md)
 - 最新 M2 官方 parallel-isolated full matrix：[2026-07-08 M2 official parallel-isolated OIDF results](2026-07-08-m2-official-parallel-isolated-oidf-results.md)
 - 最新 M6 FAPI-CIBA 本地与官方 full matrix：[2026-07-11 M6 FAPI-CIBA OIDF results](2026-07-11-m6-official-fapi-ciba-oidf-results.md)
+- 最新 M7 encrypted-response 覆盖检查：[2026-07-11 M7 encrypted response OIDF coverage](2026-07-11-m7-oidf-coverage.md)
 
 `2026-06-09` full matrix 是当前官方认证证据，针对 `https://auth.nazo.run` 执行，覆盖 OIDC Basic、OIDC Config、FAPI2 Security Profile Final、FAPI2 Message Signing Final、mTLS、DPoP、`private_key_jwt`、client credentials 变体。结果为全计划完成，`0 failures`，`0 warnings`。
 
-最新记录的官方 full-matrix suite run 是 2026-07-11 M6 parallel-isolated 官方运行，针对 `https://auth.nazo.run` 执行。该运行使用 workflow head SHA `07e69855948ca0a12d4dcd26bb9372e3ea2d04d3`，部署镜像为 `localhost/nazo-oauth-server:m6-07e6985`，以 18+2 形式完成仓库 20-plan public OIDF 矩阵，三个 GitHub Actions jobs 均为 `success`。导出结果包含 639 个模块：631 个 `PASSED`、6 个预期 `REVIEW`、2 个预期 `SKIPPED`，没有失败模块、condition failure 或 warning。
+最新记录的官方 full-matrix suite run 是 2026-07-11 M7 parallel-isolated 官方运行，针对 `https://auth.nazo.run` 执行。该运行使用 workflow head SHA `371b4f6e61674c4d1bd9ace7ba5b518314c8ff0f`，部署镜像为 `localhost/nazo-oauth-server:m7-371b4f6`，以 19+2 形式完成仓库 21-plan public OIDF 矩阵，三个 GitHub Actions jobs 均为 `success`。导出结果包含 640 个模块：632 个 `PASSED`、6 个预期 `REVIEW`、2 个预期 `SKIPPED`，没有失败模块、condition failure 或 warning。
 
 最新私有 full-matrix 回归记录是 2026-07-01 TP/PS 运行，测试对象为 `https://auth.nazo.run`，runtime commit 为 `31e8f9f`。该运行使用仓库原有 16-plan 完整矩阵，导出 16 个 plan archives，共执行 578 个测试模块，结果为 `0 failures`、`0 warnings`。
 

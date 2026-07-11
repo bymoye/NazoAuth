@@ -34,6 +34,12 @@ pub(crate) struct PatchClientRequest {
     jwks: Option<Value>,
     introspection_encrypted_response_alg: Option<String>,
     introspection_encrypted_response_enc: Option<String>,
+    userinfo_signed_response_alg: Option<String>,
+    userinfo_encrypted_response_alg: Option<String>,
+    userinfo_encrypted_response_enc: Option<String>,
+    authorization_signed_response_alg: Option<String>,
+    authorization_encrypted_response_alg: Option<String>,
+    authorization_encrypted_response_enc: Option<String>,
     is_active: Option<bool>,
 }
 
@@ -65,6 +71,12 @@ struct PreparedClientPatch {
     jwks: Option<Value>,
     introspection_encrypted_response_alg: Option<String>,
     introspection_encrypted_response_enc: Option<String>,
+    userinfo_signed_response_alg: Option<String>,
+    userinfo_encrypted_response_alg: Option<String>,
+    userinfo_encrypted_response_enc: Option<String>,
+    authorization_signed_response_alg: Option<String>,
+    authorization_encrypted_response_alg: Option<String>,
+    authorization_encrypted_response_enc: Option<String>,
     is_active: bool,
 }
 
@@ -98,11 +110,16 @@ pub(crate) async fn admin_patch_client(
         }
     };
 
+    let response_signing_algorithms = state
+        .keyset
+        .snapshot()
+        .response_signing_alg_values_supported();
     let prepared = match prepare_client_patch(
         &current,
         payload,
         state.settings.pairwise_subject_secret.as_deref(),
         &state.settings.issuer,
+        &response_signing_algorithms,
     )
     .await
     {
@@ -164,6 +181,15 @@ pub(crate) async fn admin_patch_client(
             .eq(prepared.introspection_encrypted_response_alg),
         oauth_clients::introspection_encrypted_response_enc
             .eq(prepared.introspection_encrypted_response_enc),
+        oauth_clients::userinfo_signed_response_alg.eq(prepared.userinfo_signed_response_alg),
+        oauth_clients::userinfo_encrypted_response_alg.eq(prepared.userinfo_encrypted_response_alg),
+        oauth_clients::userinfo_encrypted_response_enc.eq(prepared.userinfo_encrypted_response_enc),
+        oauth_clients::authorization_signed_response_alg
+            .eq(prepared.authorization_signed_response_alg),
+        oauth_clients::authorization_encrypted_response_alg
+            .eq(prepared.authorization_encrypted_response_alg),
+        oauth_clients::authorization_encrypted_response_enc
+            .eq(prepared.authorization_encrypted_response_enc),
         oauth_clients::is_active.eq(prepared.is_active),
         oauth_clients::updated_at.eq(diesel_now),
     ))
@@ -200,6 +226,7 @@ async fn prepare_client_patch(
     payload: PatchClientRequest,
     pairwise_subject_secret: Option<&str>,
     _issuer: &str,
+    response_signing_algorithms: &[&'static str],
 ) -> anyhow::Result<PreparedClientPatch> {
     let new_client_name = payload
         .client_name
@@ -284,6 +311,36 @@ async fn prepare_client_patch(
         .map(Some)
         .map(trim_optional_string)
         .unwrap_or_else(|| current.introspection_encrypted_response_enc.clone());
+    let new_userinfo_signed_response_alg = payload
+        .userinfo_signed_response_alg
+        .map(Some)
+        .map(trim_optional_string)
+        .unwrap_or_else(|| current.userinfo_signed_response_alg.clone());
+    let new_userinfo_encrypted_response_alg = payload
+        .userinfo_encrypted_response_alg
+        .map(Some)
+        .map(trim_optional_string)
+        .unwrap_or_else(|| current.userinfo_encrypted_response_alg.clone());
+    let new_userinfo_encrypted_response_enc = payload
+        .userinfo_encrypted_response_enc
+        .map(Some)
+        .map(trim_optional_string)
+        .unwrap_or_else(|| current.userinfo_encrypted_response_enc.clone());
+    let new_authorization_signed_response_alg = payload
+        .authorization_signed_response_alg
+        .map(Some)
+        .map(trim_optional_string)
+        .unwrap_or_else(|| current.authorization_signed_response_alg.clone());
+    let new_authorization_encrypted_response_alg = payload
+        .authorization_encrypted_response_alg
+        .map(Some)
+        .map(trim_optional_string)
+        .unwrap_or_else(|| current.authorization_encrypted_response_alg.clone());
+    let new_authorization_encrypted_response_enc = payload
+        .authorization_encrypted_response_enc
+        .map(Some)
+        .map(trim_optional_string)
+        .unwrap_or_else(|| current.authorization_encrypted_response_enc.clone());
     let new_is_active = payload.is_active.unwrap_or(current.is_active);
 
     let new_subject_type = payload
@@ -360,6 +417,15 @@ async fn prepare_client_patch(
                 .as_deref(),
             introspection_encrypted_response_enc: new_introspection_encrypted_response_enc
                 .as_deref(),
+            userinfo_signed_response_alg: new_userinfo_signed_response_alg.as_deref(),
+            userinfo_encrypted_response_alg: new_userinfo_encrypted_response_alg.as_deref(),
+            userinfo_encrypted_response_enc: new_userinfo_encrypted_response_enc.as_deref(),
+            authorization_signed_response_alg: new_authorization_signed_response_alg.as_deref(),
+            authorization_encrypted_response_alg: new_authorization_encrypted_response_alg
+                .as_deref(),
+            authorization_encrypted_response_enc: new_authorization_encrypted_response_enc
+                .as_deref(),
+            response_signing_algorithms,
             mtls_binding: Some(&ClientMtlsMetadata {
                 tls_client_auth_subject_dn: new_tls_client_auth_subject_dn.clone(),
                 tls_client_auth_cert_sha256: new_tls_client_auth_cert_sha256.clone(),
@@ -398,6 +464,12 @@ async fn prepare_client_patch(
         jwks: new_jwks,
         introspection_encrypted_response_alg: new_introspection_encrypted_response_alg,
         introspection_encrypted_response_enc: new_introspection_encrypted_response_enc,
+        userinfo_signed_response_alg: new_userinfo_signed_response_alg,
+        userinfo_encrypted_response_alg: new_userinfo_encrypted_response_alg,
+        userinfo_encrypted_response_enc: new_userinfo_encrypted_response_enc,
+        authorization_signed_response_alg: new_authorization_signed_response_alg,
+        authorization_encrypted_response_alg: new_authorization_encrypted_response_alg,
+        authorization_encrypted_response_enc: new_authorization_encrypted_response_enc,
         is_active: new_is_active,
     })
 }

@@ -25,6 +25,13 @@ fn metadata<'a>(
         allow_jwks_without_kid: false,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
+        response_signing_algorithms: SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
         mtls_binding,
     }
 }
@@ -497,31 +504,36 @@ fn client_metadata_rejects_frontchannel_logout_uri_with_fragment_or_insecure_hos
 
 #[test]
 fn client_metadata_validates_optional_jwks_for_all_auth_methods() {
-    let private_jwk = json!({
+    let public_jwks = json!({
         "keys": [{
             "kty": "OKP",
             "crv": "Ed25519",
             "x": URL_SAFE_NO_PAD.encode([7u8; 32]),
-            "d": URL_SAFE_NO_PAD.encode([8u8; 32]),
+            "alg": "EdDSA",
+            "use": "sig",
             "kid": "key-1"
         }]
     });
 
-    let result = validate_client_metadata(metadata(
-        "confidential",
-        &["https://client.example/callback".to_owned()],
-        &["openid".to_owned()],
-        &["resource://default".to_owned()],
-        &["authorization_code".to_owned()],
-        "client_secret_basic",
-        Some(&private_jwk),
-        None,
-    ));
-    let error = result.expect_err("registered jwks must not contain private key material");
-    assert!(
-        error.to_string().contains("jwks 不能包含私钥材料"),
-        "unexpected error: {error}"
-    );
+    for private_member in ["d", "p", "q", "dp", "dq", "qi", "oth", "k"] {
+        let mut private_jwks = public_jwks.clone();
+        private_jwks["keys"][0][private_member] = json!(URL_SAFE_NO_PAD.encode([8u8; 32]));
+        let result = validate_client_metadata(metadata(
+            "confidential",
+            &["https://client.example/callback".to_owned()],
+            &["openid".to_owned()],
+            &["resource://default".to_owned()],
+            &["authorization_code".to_owned()],
+            "client_secret_basic",
+            Some(&private_jwks),
+            None,
+        ));
+        let error = result.expect_err("registered jwks must contain public material only");
+        assert!(
+            error.to_string().contains("jwks 不能包含私钥材料"),
+            "unexpected error for {private_member}: {error}"
+        );
+    }
 
     validate_client_metadata(metadata(
         "confidential",
@@ -657,4 +669,161 @@ fn client_metadata_validates_introspection_jwe_metadata() {
     valid.introspection_encrypted_response_enc = Some("A256GCM");
     validate_client_metadata(valid)
         .expect("supported JWE metadata with a matching encryption JWK should be accepted");
+}
+
+#[test]
+fn client_metadata_validates_userinfo_and_authorization_response_crypto_metadata() {
+    let redirect_uris = ["https://client.example/callback".to_owned()];
+    let scopes = ["openid".to_owned()];
+    let audiences = ["resource://default".to_owned()];
+    let grants = ["authorization_code".to_owned()];
+    let encryption_jwks = json!({
+        "keys": [{
+            "kty": "RSA",
+            "n": URL_SAFE_NO_PAD.encode([0x91u8; 256]),
+            "e": URL_SAFE_NO_PAD.encode([0x01u8, 0x00, 0x01]),
+            "alg": "RSA-OAEP-256",
+            "use": "enc",
+            "kid": "response-enc-key"
+        }]
+    });
+
+    let base = || {
+        metadata(
+            "confidential",
+            &redirect_uris,
+            &scopes,
+            &audiences,
+            &grants,
+            "client_secret_basic",
+            Some(&encryption_jwks),
+            None,
+        )
+    };
+
+    for field in ["userinfo", "authorization"] {
+        let mut missing_enc = base();
+        if field == "userinfo" {
+            missing_enc.userinfo_encrypted_response_alg = Some("RSA-OAEP-256");
+        } else {
+            missing_enc.authorization_encrypted_response_alg = Some("RSA-OAEP-256");
+        }
+        let error = validate_client_metadata(missing_enc)
+            .expect_err("response JWE alg without enc must fail closed");
+        assert!(
+            error.to_string().contains("必须同时配置"),
+            "unexpected {field} error: {error}"
+        );
+
+        let mut missing_alg = base();
+        if field == "userinfo" {
+            missing_alg.userinfo_encrypted_response_enc = Some("A256GCM");
+        } else {
+            missing_alg.authorization_encrypted_response_enc = Some("A256GCM");
+        }
+        let error = validate_client_metadata(missing_alg)
+            .expect_err("response JWE enc without alg must fail closed");
+        assert!(
+            error.to_string().contains("不能在未设置"),
+            "unexpected {field} error: {error}"
+        );
+
+        let mut unsupported_signing = base();
+        if field == "userinfo" {
+            unsupported_signing.userinfo_signed_response_alg = Some("none");
+        } else {
+            unsupported_signing.authorization_signed_response_alg = Some("HS256");
+        }
+        let error = validate_client_metadata(unsupported_signing)
+            .expect_err("none and symmetric response signing must be rejected");
+        assert!(
+            error.to_string().contains("签名算法"),
+            "unexpected {field} error: {error}"
+        );
+    }
+
+    let mut valid = base();
+    valid.userinfo_signed_response_alg = Some("RS256");
+    valid.userinfo_encrypted_response_alg = Some("RSA-OAEP-256");
+    valid.userinfo_encrypted_response_enc = Some("A256GCM");
+    valid.authorization_signed_response_alg = Some("PS256");
+    valid.authorization_encrypted_response_alg = Some("RSA-OAEP-256");
+    valid.authorization_encrypted_response_enc = Some("A256GCM");
+    validate_client_metadata(valid)
+        .expect("supported UserInfo and JARM response crypto metadata should be accepted");
+
+    let mut unavailable_signing = base();
+    unavailable_signing.response_signing_algorithms = &["PS256"];
+    unavailable_signing.userinfo_signed_response_alg = Some("RS256");
+    let error = validate_client_metadata(unavailable_signing)
+        .expect_err("registration must reject algorithms unavailable to the current keyset");
+    assert!(
+        error
+            .to_string()
+            .contains("签名算法必须是当前服务可用算法: PS256"),
+        "unexpected error: {error}"
+    );
+
+    let signing_only_jwks = json!({
+        "keys": [{
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode([7u8; 32]),
+            "alg": "EdDSA",
+            "use": "sig",
+            "kid": "sig-key"
+        }]
+    });
+    let mut missing_encryption_key = metadata(
+        "confidential",
+        &redirect_uris,
+        &scopes,
+        &audiences,
+        &grants,
+        "client_secret_basic",
+        Some(&signing_only_jwks),
+        None,
+    );
+    missing_encryption_key.userinfo_encrypted_response_alg = Some("RSA-OAEP-256");
+    missing_encryption_key.userinfo_encrypted_response_enc = Some("A256GCM");
+    let error = validate_client_metadata(missing_encryption_key)
+        .expect_err("response encryption requires a matching use=enc key");
+    assert!(
+        error.to_string().contains("必须配置匹配的 jwks 加密公钥"),
+        "unexpected error: {error}"
+    );
+
+    let duplicate_encryption_jwks = json!({
+        "keys": [
+            encryption_jwks["keys"][0].clone(),
+            {
+                "kty": "RSA",
+                "n": URL_SAFE_NO_PAD.encode([0x92u8; 256]),
+                "e": URL_SAFE_NO_PAD.encode([0x01u8, 0x00, 0x01]),
+                "alg": "RSA-OAEP-256",
+                "use": "enc",
+                "kid": "response-enc-key-2"
+            }
+        ]
+    });
+    let mut ambiguous_encryption_key = metadata(
+        "confidential",
+        &redirect_uris,
+        &scopes,
+        &audiences,
+        &grants,
+        "client_secret_basic",
+        Some(&duplicate_encryption_jwks),
+        None,
+    );
+    ambiguous_encryption_key.userinfo_encrypted_response_alg = Some("RSA-OAEP-256");
+    ambiguous_encryption_key.userinfo_encrypted_response_enc = Some("A256GCM");
+    let error = validate_client_metadata(ambiguous_encryption_key)
+        .expect_err("response encryption key selection must be unambiguous");
+    assert!(
+        error
+            .to_string()
+            .contains("必须且只能配置一个匹配的 jwks 加密公钥"),
+        "unexpected error: {error}"
+    );
 }

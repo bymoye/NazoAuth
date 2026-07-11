@@ -50,6 +50,12 @@ fn private_key_jwt_client(jwks: Value) -> ClientRow {
         jwks: Some(jwks),
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,
@@ -86,6 +92,31 @@ fn signed_client_assertion(
         &jsonwebtoken::EncodingKey::from_rsa_der(private_pkcs8_der),
     )
     .expect("client assertion should sign")
+}
+
+fn signed_client_assertion_without_kid(
+    client_id: &str,
+    audience: &str,
+    private_pkcs8_der: &[u8],
+    jti: &str,
+) -> String {
+    let now = Utc::now().timestamp();
+    let claims = json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "nbf": now,
+        "exp": now + 120,
+        "jti": jti
+    });
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_rsa_der(private_pkcs8_der),
+    )
+    .expect("kidless client assertion should sign")
 }
 
 #[tokio::test]

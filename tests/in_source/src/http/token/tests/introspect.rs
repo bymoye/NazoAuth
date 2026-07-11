@@ -74,6 +74,7 @@ fn signed_introspection_offline_state() -> Data<AppState> {
             verification_keys: vec![VerificationKey {
                 kid: "introspect-offline-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     })
@@ -119,6 +120,7 @@ fn live_introspection_state_from_database_url(database_url: String) -> Option<Da
             verification_keys: vec![VerificationKey {
                 kid: "introspect-test-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     }))
@@ -172,6 +174,12 @@ fn introspection_response_client(
         jwks,
         introspection_encrypted_response_alg: encrypted_response_alg.map(ToOwned::to_owned),
         introspection_encrypted_response_enc: encrypted_response_enc.map(ToOwned::to_owned),
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,
@@ -374,6 +382,12 @@ async fn insert_introspection_client(
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,

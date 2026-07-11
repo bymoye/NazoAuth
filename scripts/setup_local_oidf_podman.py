@@ -45,7 +45,12 @@ OIDCC_SECOND_LOGIN_SCREENSHOT_MODULES = (
     "oidcc-prompt-login",
     "oidcc-max-age-1",
 )
-OIDCC_REGISTERED_REDIRECT_URI_MODULE = "oidcc-ensure-registered-redirect-uri"
+OIDCC_LOCAL_AUTHORIZATION_ERROR_MODULES = (
+    "oidcc-ensure-registered-redirect-uri",
+    "oidcc-ensure-redirect-uri-in-authorization-request",
+    "oidcc-redirect-uri-query-mismatch",
+    "oidcc-redirect-uri-query-added",
+)
 FAPI_SECURITY_FINAL_PAR_REUSE_BEFORE_AUTH = (
     "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds"
 )
@@ -61,6 +66,7 @@ FAPI_SECURITY_ID2_USER_REJECTS_AUTHENTICATION = (
 PLAN_CONFIG_FILES = (
     "oidf-oidcc-basic-plan-config.json",
     "oidf-oidcc-dynamic-plan-config.json",
+    "oidf-oidcc-dynamic-crypto-plan-config.json",
     "oidf-oidcc-config-plan-config.json",
     "oidf-oidcc-frontchannel-logout-plan-config.json",
     "oidf-oidcc-session-management-plan-config.json",
@@ -299,7 +305,7 @@ def ensure_cert() -> None:
     key.chmod(0o600)
 
 
-def ensure_mtls_certs() -> None:
+def ensure_mtls_ca() -> None:
     cert_dir = RUNTIME / "certs"
     cert_dir.mkdir(parents=True, exist_ok=True)
     ca_key = cert_dir / "mtls-ca.key"
@@ -329,11 +335,15 @@ def ensure_mtls_certs() -> None:
         )
         ca_key.chmod(0o600)
 
+
+def ensure_mtls_certs() -> None:
+    ensure_mtls_ca()
     for name in ("mtls-client-1", "mtls-client-2"):
         ensure_mtls_client_cert(name)
 
 
 def ensure_mtls_client_cert(name: str) -> None:
+    ensure_mtls_ca()
     cert_dir = RUNTIME / "certs"
     ca_key = cert_dir / "mtls-ca.key"
     ca_cert = cert_dir / "mtls-ca.crt"
@@ -937,14 +947,15 @@ def write_basic_plan_config() -> dict[str, object]:
             for module_name in OIDCC_SECOND_LOGIN_SCREENSHOT_MODULES
         },
     }
-    config["override"][OIDCC_REGISTERED_REDIRECT_URI_MODULE] = {
-        "browser": redirect_error_browser_automation()
-    }
+    for module_name in OIDCC_LOCAL_AUTHORIZATION_ERROR_MODULES:
+        config["override"][module_name] = {
+            "browser": redirect_error_browser_automation()
+        }
     write_plan_config("oidf-oidcc-basic-plan-config.json", config)
     return config
 
 
-def write_dynamic_plan_config() -> dict[str, object]:
+def dynamic_plan_config() -> dict[str, object]:
     browser = browser_automation()
     config = {
         "alias": f"{BASIC_ALIAS}-dynamic",
@@ -971,10 +982,26 @@ def write_dynamic_plan_config() -> dict[str, object]:
             for module_name in OIDCC_SECOND_LOGIN_SCREENSHOT_MODULES
         },
     }
-    config["override"][OIDCC_REGISTERED_REDIRECT_URI_MODULE] = {
-        "browser": redirect_error_browser_automation()
-    }
+    for module_name in OIDCC_LOCAL_AUTHORIZATION_ERROR_MODULES:
+        config["override"][module_name] = {
+            "browser": redirect_error_browser_automation()
+        }
+    return config
+
+
+def write_dynamic_plan_config() -> dict[str, object]:
+    config = dynamic_plan_config()
     write_plan_config("oidf-oidcc-dynamic-plan-config.json", config)
+    return config
+
+
+def write_dynamic_crypto_plan_config() -> dict[str, object]:
+    config = copy.deepcopy(dynamic_plan_config())
+    config["alias"] = f"{BASIC_ALIAS}-dynamic-crypto"
+    config["description"] = (
+        "OIDC dynamic-registration signed UserInfo interoperability coverage."
+    )
+    write_plan_config("oidf-oidcc-dynamic-crypto-plan-config.json", config)
     return config
 
 
@@ -1371,6 +1398,7 @@ def write_all_plan_configs() -> None:
     configs: dict[str, dict[str, object]] = {
         "oidf-oidcc-basic-plan-config.json": write_basic_plan_config(),
         "oidf-oidcc-dynamic-plan-config.json": write_dynamic_plan_config(),
+        "oidf-oidcc-dynamic-crypto-plan-config.json": write_dynamic_crypto_plan_config(),
         "oidf-oidcc-config-plan-config.json": write_oidcc_config_plan_config(),
         "oidf-oidcc-frontchannel-logout-plan-config.json": write_frontchannel_logout_plan_config(),
         "oidf-oidcc-session-management-plan-config.json": write_session_management_plan_config(),
@@ -1379,9 +1407,29 @@ def write_all_plan_configs() -> None:
     configs.update(write_fapi_ciba_plan_config())
     configs.update(write_fapi_matrix_plan_configs())
     plan_set = plan_expressions_for_configs(configs)
+    concurrent, frontchannel, session = partition_plan_expressions(plan_set)
+    if len(frontchannel) != 1 or len(session) != 1:
+        raise RuntimeError(
+            "OIDF full matrix must contain exactly one front-channel and one session-management plan"
+        )
     plan_manifest = plan_manifest_for_expressions(plan_set, configs)
     write_text(RUNTIME / "oidf-plan-configs.json", json.dumps({"configs": configs}, indent=2) + "\n", 0o600)
     write_text(RUNTIME / "oidf-plan-set.json", json.dumps(plan_set, indent=2) + "\n", 0o600)
+    write_text(
+        RUNTIME / "oidf-plan-set-concurrent.json",
+        json.dumps(concurrent, indent=2) + "\n",
+        0o600,
+    )
+    write_text(
+        RUNTIME / "oidf-plan-set-frontchannel.json",
+        json.dumps(frontchannel, indent=2) + "\n",
+        0o600,
+    )
+    write_text(
+        RUNTIME / "oidf-plan-set-session.json",
+        json.dumps(session, indent=2) + "\n",
+        0o600,
+    )
     write_text(RUNTIME / "oidf-plan-set-manifest.json", json.dumps(plan_manifest, indent=2) + "\n", 0o600)
     write_text(
         RUNTIME / "oidf-local.env",
@@ -1431,6 +1479,9 @@ def plan_expressions_for_configs(configs: dict[str, dict[str, object]]) -> list[
         "oidf-oidcc-basic-plan-config.json",
         "oidcc-basic-certification-test-plan[server_metadata=discovery][client_registration=dynamic_client] "
         "oidf-oidcc-dynamic-plan-config.json",
+        "oidcc-dynamic-certification-test-plan[response_type=code]:"
+        "oidcc-userinfo-rs256 "
+        "oidf-oidcc-dynamic-crypto-plan-config.json",
         "oidcc-config-certification-test-plan oidf-oidcc-config-plan-config.json",
         "oidcc-frontchannel-rp-initiated-logout-certification-test-plan[client_registration=static_client][response_type=code] "
         "oidf-oidcc-frontchannel-logout-plan-config.json",
@@ -1466,6 +1517,26 @@ def plan_expressions_for_configs(configs: dict[str, dict[str, object]]) -> list[
     return expressions
 
 
+def partition_plan_expressions(
+    expressions: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    frontchannel = [
+        expression
+        for expression in expressions
+        if "frontchannel-rp-initiated-logout" in expression
+    ]
+    session = [
+        expression
+        for expression in expressions
+        if "session-management-certification-test-plan" in expression
+    ]
+    browser_sensitive = set(frontchannel + session)
+    concurrent = [
+        expression for expression in expressions if expression not in browser_sensitive
+    ]
+    return concurrent, frontchannel, session
+
+
 def plan_manifest_for_expressions(
     expressions: list[str], configs: dict[str, dict[str, object]]
 ) -> dict[str, object]:
@@ -1473,6 +1544,7 @@ def plan_manifest_for_expressions(
     oidc_titles = {
         "oidf-oidcc-basic-plan-config.json": "OIDC Basic OP",
         "oidf-oidcc-dynamic-plan-config.json": "OIDC Basic OP Dynamic Registration",
+        "oidf-oidcc-dynamic-crypto-plan-config.json": "OIDC Dynamic Registration: Signed UserInfo",
         "oidf-oidcc-config-plan-config.json": "OIDC Config OP",
         "oidf-oidcc-frontchannel-logout-plan-config.json": "OIDC Front-Channel Logout OP",
         "oidf-oidcc-session-management-plan-config.json": "OIDC Session Management OP",
@@ -1489,6 +1561,12 @@ def plan_manifest_for_expressions(
             "registration endpoint metadata",
             "authorization code flow",
             "userinfo and ID token interoperability",
+        ],
+        "oidf-oidcc-dynamic-crypto-plan-config.json": [
+            "RFC 7591 dynamic client registration",
+            "userinfo_signed_response_alg=RS256",
+            "signed UserInfo content type and claims",
+            "client response cryptography metadata",
         ],
         "oidf-oidcc-config-plan-config.json": [
             "provider metadata accuracy",
@@ -1532,7 +1610,7 @@ def plan_manifest_for_expressions(
     return {
         "name": "NazoAuth OIDF full conformance matrix",
         "description": (
-            "Twenty-plan OpenID Foundation regression matrix for the public issuer. "
+            "Twenty-one-plan OpenID Foundation regression matrix for the public issuer. "
             "Targeted TP/PS checks are mapped onto these plans instead of being run as a separate matrix."
         ),
         "plans": plans,

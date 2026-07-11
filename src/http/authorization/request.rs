@@ -598,20 +598,27 @@ pub(crate) async fn authorization_response_redirect(
                 "authorization response signing failed.",
             );
         }
-        return authorization_response_jwt_result(
-            input.redirect_uri,
-            make_authorization_response_jwt(
-                state,
-                AuthorizationResponseJwtInput {
-                    client_id: input.client_id,
-                    code: input.code,
-                    error: input.error,
-                    state: input.state,
-                    ttl: state.settings.auth_code_ttl_seconds as i64,
-                },
-            )
-            .await,
-        );
+        let client = match find_client(&state.diesel_db, input.client_id).await {
+            Ok(Some(client)) if client.is_active => client,
+            Ok(_) => {
+                tracing::warn!(client_id_hash = %blake3_hex(input.client_id), "JARM client is missing or inactive");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "authorization response protection failed.",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, client_id_hash = %blake3_hex(input.client_id), "failed to load JARM client response policy");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "authorization response protection failed.",
+                );
+            }
+        };
+        let protection = AuthorizationResponseProtection::from(&client);
+        return authorization_response_redirect_with_protection(state, input, protection).await;
     }
     let session_state = if state.settings.enable_session_management
         && input.code.is_some()
@@ -633,14 +640,81 @@ pub(crate) async fn authorization_response_redirect(
     ))
 }
 
+#[derive(Clone, Copy, Default)]
+struct AuthorizationResponseProtection<'a> {
+    signing_alg: Option<&'a str>,
+    encryption_alg: Option<&'a str>,
+    encryption_enc: Option<&'a str>,
+    jwks: Option<&'a Value>,
+}
+
+impl<'a> From<&'a ClientRow> for AuthorizationResponseProtection<'a> {
+    fn from(client: &'a ClientRow) -> Self {
+        Self {
+            signing_alg: client.authorization_signed_response_alg.as_deref(),
+            encryption_alg: client.authorization_encrypted_response_alg.as_deref(),
+            encryption_enc: client.authorization_encrypted_response_enc.as_deref(),
+            jwks: client.jwks.as_ref(),
+        }
+    }
+}
+
+async fn authorization_response_redirect_with_protection(
+    state: &AppState,
+    input: AuthorizationResponseRedirect<'_>,
+    protection: AuthorizationResponseProtection<'_>,
+) -> HttpResponse {
+    let result = protected_authorization_response_jwt(state, &input, protection).await;
+    authorization_response_jwt_result(input.redirect_uri, result)
+}
+
+async fn protected_authorization_response_jwt(
+    state: &AppState,
+    input: &AuthorizationResponseRedirect<'_>,
+    protection: AuthorizationResponseProtection<'_>,
+) -> anyhow::Result<String> {
+    let signing_alg = protection
+        .signing_alg
+        .map(|value| {
+            signing_algorithm_from_name(value)
+                .ok_or_else(|| anyhow::anyhow!("unsupported JARM signing algorithm"))
+        })
+        .transpose()?;
+    let signed = make_authorization_response_jwt(
+        state,
+        AuthorizationResponseJwtInput {
+            client_id: input.client_id,
+            code: input.code,
+            error: input.error,
+            state: input.state,
+            ttl: state.settings.auth_code_ttl_seconds as i64,
+        },
+        signing_alg,
+    )
+    .await?;
+    match client_jwe_key(
+        protection.jwks,
+        protection.encryption_alg,
+        protection.encryption_enc,
+        "authorization response",
+    )? {
+        Some(key) => Ok(encrypt_compact_jwe(
+            &key,
+            signed.as_bytes(),
+            JwePayloadKind::NestedJwt,
+        )?),
+        None => Ok(signed),
+    }
+}
+
 fn authorization_response_jwt_result(
     redirect_uri: &str,
-    result: jsonwebtoken::errors::Result<String>,
+    result: anyhow::Result<String>,
 ) -> HttpResponse {
     match result {
         Ok(response) => authorization_response_jwt_redirect(redirect_uri, &response),
-        Err(signing_error) => {
-            tracing::warn!(%signing_error, "failed to sign JARM authorization response");
+        Err(error) => {
+            tracing::warn!(%error, "failed to protect JARM authorization response");
             oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",

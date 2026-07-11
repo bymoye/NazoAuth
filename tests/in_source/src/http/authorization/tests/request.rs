@@ -74,6 +74,12 @@ fn pkce_policy_client() -> ClientRow {
         jwks: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
         post_logout_redirect_uris: json!([]),
         backchannel_logout_uri: None,
         backchannel_logout_session_required: true,
@@ -567,9 +573,12 @@ fn authorization_response_jwt_redirect_uses_only_response_parameter() {
 fn authorization_response_jwt_signing_failure_does_not_fallback_to_query() {
     let response = authorization_response_jwt_result(
         "https://client.example/callback",
-        Err(jsonwebtoken::errors::new_error(
-            jsonwebtoken::errors::ErrorKind::Signing("test signing failure".to_owned()),
-        )),
+        Err(
+            jsonwebtoken::errors::new_error(jsonwebtoken::errors::ErrorKind::Signing(
+                "test signing failure".to_owned(),
+            ))
+            .into(),
+        ),
     );
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

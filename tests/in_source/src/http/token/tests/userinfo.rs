@@ -6,6 +6,7 @@ use crate::config::ConfigSource;
 use crate::db::{create_pool, get_conn};
 use crate::domain::{ActiveSigningKey, Claims, Keyset, KeysetStore, VerificationKey};
 use crate::support::{IpCidr, generate_key_material, public_jwk_from_private_der};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use diesel::sql_query;
 use diesel::sql_types::{Bool, Text, Timestamptz, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
@@ -13,6 +14,11 @@ use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
+use openssl::encrypt::Decrypter;
+use openssl::hash::MessageDigest;
+use openssl::pkey::{PKey, Private};
+use openssl::rsa::{Padding, Rsa};
+use openssl::symm::{Cipher, decrypt_aead};
 
 fn disconnected_valkey_client() -> fred::prelude::Client {
     let mut builder = ValkeyBuilder::default_centralized();
@@ -97,6 +103,7 @@ async fn live_userinfo_state_from_database_url(database_url: String) -> Option<D
             verification_keys: vec![VerificationKey {
                 kid: "userinfo-test-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     }))
@@ -187,6 +194,7 @@ fn userinfo_state_with_valid_signing_key_invalid_db() -> Data<AppState> {
             verification_keys: vec![VerificationKey {
                 kid: "userinfo-test-kid".to_owned(),
                 public_jwk,
+                local_signing_key: None,
             }],
         }),
     })
@@ -345,6 +353,120 @@ async fn insert_userinfo_client(state: &Data<AppState>, client_id: &str) -> Uuid
     .id
 }
 
+async fn update_userinfo_crypto_policy(
+    state: &Data<AppState>,
+    client_id: &str,
+    signing_alg: Option<&str>,
+    encryption_alg: Option<&str>,
+    encryption_enc: Option<&str>,
+    jwks: Option<Value>,
+) {
+    let mut conn = get_conn(&state.diesel_db)
+        .await
+        .expect("database connection should be available");
+    diesel::update(
+        oauth_clients::table
+            .filter(oauth_clients::tenant_id.eq(DEFAULT_TENANT_ID))
+            .filter(oauth_clients::client_id.eq(client_id)),
+    )
+    .set((
+        oauth_clients::userinfo_signed_response_alg.eq(signing_alg),
+        oauth_clients::userinfo_encrypted_response_alg.eq(encryption_alg),
+        oauth_clients::userinfo_encrypted_response_enc.eq(encryption_enc),
+        oauth_clients::jwks.eq(jwks),
+    ))
+    .execute(&mut conn)
+    .await
+    .expect("UserInfo response crypto policy should update");
+}
+
+fn rsa_userinfo_jwe_keypair(kid: &str) -> (PKey<Private>, Value) {
+    let rsa = Rsa::generate(2048).expect("test RSA key should generate");
+    let jwk = json!({
+        "kty": "RSA",
+        "kid": kid,
+        "use": "enc",
+        "alg": "RSA-OAEP-256",
+        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
+        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
+    });
+    (
+        PKey::from_rsa(rsa).expect("test RSA key should convert to PKey"),
+        jwk,
+    )
+}
+
+fn decrypt_userinfo_jwe(private_key: &PKey<Private>, compact_jwe: &str) -> (Value, String) {
+    let parts = compact_jwe.split('.').collect::<Vec<_>>();
+    assert_eq!(parts.len(), 5, "compact JWE must have five parts");
+    let protected_header: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .expect("protected header should be base64url"),
+    )
+    .expect("protected header should be JSON");
+    let encrypted_key = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("encrypted key should be base64url");
+    let iv = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .expect("iv should be base64url");
+    let ciphertext = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .expect("ciphertext should be base64url");
+    let tag = URL_SAFE_NO_PAD
+        .decode(parts[4])
+        .expect("tag should be base64url");
+    let mut decrypter = Decrypter::new(private_key).expect("RSA decrypter should initialize");
+    decrypter
+        .set_rsa_padding(Padding::PKCS1_OAEP)
+        .expect("RSA-OAEP padding should configure");
+    decrypter
+        .set_rsa_oaep_md(MessageDigest::sha256())
+        .expect("RSA-OAEP SHA-256 should configure");
+    decrypter
+        .set_rsa_mgf1_md(MessageDigest::sha256())
+        .expect("RSA-OAEP MGF1 SHA-256 should configure");
+    let mut cek = vec![
+        0;
+        decrypter
+            .decrypt_len(&encrypted_key)
+            .expect("encrypted key length should be known")
+    ];
+    let len = decrypter
+        .decrypt(&encrypted_key, &mut cek)
+        .expect("content-encryption key should decrypt");
+    cek.truncate(len);
+    let plaintext = decrypt_aead(
+        Cipher::aes_256_gcm(),
+        &cek,
+        Some(&iv),
+        parts[0].as_bytes(),
+        &ciphertext,
+        &tag,
+    )
+    .expect("A256GCM ciphertext should decrypt");
+    (
+        protected_header,
+        String::from_utf8(plaintext).expect("JWE plaintext should be UTF-8"),
+    )
+}
+
+fn decode_signed_userinfo(state: &AppState, client_id: &str, token: &str) -> Value {
+    let header = jsonwebtoken::decode_header(token).expect("UserInfo JWS header should decode");
+    let decoding_key =
+        jwt_decoding_key_from_jwk(&state.keyset.snapshot().jwks()["keys"][0], header.alg)
+            .expect("UserInfo JWS decoding key should derive");
+    let mut validation = jsonwebtoken::Validation::new(header.alg);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    validation.set_audience(&[client_id]);
+    validation.set_issuer(&[state.settings.issuer.as_str()]);
+    jsonwebtoken::decode::<Value>(token, &decoding_key, &validation)
+        .expect("UserInfo JWS should verify")
+        .claims
+}
+
 async fn insert_userinfo_user(state: &Data<AppState>, active: bool) -> UserRow {
     let suffix = Uuid::now_v7();
     let mut conn = get_conn(&state.diesel_db)
@@ -435,6 +557,39 @@ async fn userinfo_error_for_token(
     let req = actix_web::test::TestRequest::get()
         .uri("/userinfo")
         .insert_header((header::AUTHORIZATION, format!("{scheme} {token}")))
+        .to_http_request();
+    userinfo(state, req, Bytes::new()).await
+}
+
+async fn userinfo_response_for_active_user(
+    state: Data<AppState>,
+    user: &UserRow,
+    client_id: &str,
+) -> HttpResponse {
+    let token = make_jwt(
+        &state,
+        AccessTokenJwtInput {
+            tenant_id: DEFAULT_TENANT_ID,
+            subject: &user.id.to_string(),
+            user_id: Some(user.id),
+            subject_type: "user",
+            client_id,
+            audiences: &["resource://default".to_owned()],
+            scopes: &["openid".to_owned(), "email".to_owned()],
+            authorization_details: &json!([]),
+            userinfo_claims: &[],
+            userinfo_claim_requests: &[],
+            ttl: 300,
+            dpop_jkt: None,
+            mtls_x5t_s256: None,
+            actor: None,
+        },
+    )
+    .await
+    .expect("access token should sign");
+    let req = actix_web::test::TestRequest::get()
+        .uri("/userinfo")
+        .insert_header((header::AUTHORIZATION, format!("Bearer {}", token.token)))
         .to_http_request();
     userinfo(state, req, Bytes::new()).await
 }
@@ -729,25 +884,10 @@ async fn userinfo_returns_claims_for_active_user_access_token() {
     let Some(state) = live_userinfo_state().await else {
         return;
     };
+    let client_id = format!("userinfo-json-{}", Uuid::now_v7());
+    insert_userinfo_client(&state, &client_id).await;
     let user = insert_userinfo_user(&state, true).await;
-    let token = signed_userinfo_access_token(
-        &state,
-        DEFAULT_TENANT_ID,
-        &user.id.to_string(),
-        Some(user.id),
-        "user",
-        &["resource://default".to_owned()],
-        &["openid".to_owned(), "email".to_owned()],
-        None,
-        None,
-    )
-    .await;
-    let req = actix_web::test::TestRequest::get()
-        .uri("/userinfo")
-        .insert_header((header::AUTHORIZATION, format!("Bearer {}", token.token)))
-        .to_http_request();
-
-    let response = userinfo(state, req, Bytes::new()).await;
+    let response = userinfo_response_for_active_user(state, &user, &client_id).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = actix_web::body::to_bytes(response.into_body())
@@ -756,6 +896,151 @@ async fn userinfo_returns_claims_for_active_user_access_token() {
     let value: Value = serde_json::from_slice(&body).expect("userinfo body should be JSON");
     assert_eq!(value["sub"], user.id.to_string());
     assert_eq!(value["email"], user.email);
+}
+
+#[actix_web::test]
+async fn userinfo_returns_signed_jwt_for_registered_client_policy() {
+    let Some(state) = live_userinfo_state().await else {
+        return;
+    };
+    let client_id = format!("userinfo-signed-{}", Uuid::now_v7());
+    insert_userinfo_client(&state, &client_id).await;
+    update_userinfo_crypto_policy(&state, &client_id, Some("EdDSA"), None, None, None).await;
+    let user = insert_userinfo_user(&state, true).await;
+
+    let response = userinfo_response_for_active_user(state.clone(), &user, &client_id).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/jwt")
+    );
+    let body = actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("signed UserInfo body should collect");
+    let claims = decode_signed_userinfo(
+        &state,
+        &client_id,
+        std::str::from_utf8(&body).expect("signed UserInfo body should be UTF-8"),
+    );
+    assert_eq!(claims["iss"], state.settings.issuer);
+    assert_eq!(claims["aud"], client_id);
+    assert_eq!(claims["sub"], user.id.to_string());
+    assert_eq!(claims["email"], user.email);
+    assert!(claims.get("scope").is_none());
+    assert!(claims.get("client_id").is_none());
+}
+
+#[actix_web::test]
+async fn userinfo_returns_encrypted_claims_for_registered_client_policy() {
+    let Some(state) = live_userinfo_state().await else {
+        return;
+    };
+    let client_id = format!("userinfo-encrypted-{}", Uuid::now_v7());
+    insert_userinfo_client(&state, &client_id).await;
+    let (private_key, public_jwk) = rsa_userinfo_jwe_keypair("userinfo-enc");
+    update_userinfo_crypto_policy(
+        &state,
+        &client_id,
+        None,
+        Some("RSA-OAEP-256"),
+        Some("A256GCM"),
+        Some(json!({"keys": [public_jwk]})),
+    )
+    .await;
+    let user = insert_userinfo_user(&state, true).await;
+
+    let response = userinfo_response_for_active_user(state, &user, &client_id).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/jwt")
+    );
+    let body = actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("encrypted UserInfo body should collect");
+    let (protected, plaintext) = decrypt_userinfo_jwe(
+        &private_key,
+        std::str::from_utf8(&body).expect("encrypted UserInfo body should be UTF-8"),
+    );
+    assert_eq!(protected["alg"], "RSA-OAEP-256");
+    assert_eq!(protected["enc"], "A256GCM");
+    assert_eq!(protected["kid"], "userinfo-enc");
+    assert_eq!(protected["typ"], "JWT");
+    assert!(protected.get("cty").is_none());
+    let claims: Value = serde_json::from_str(&plaintext).expect("JWE claims should be JSON");
+    assert_eq!(claims["sub"], user.id.to_string());
+    assert_eq!(claims["email"], user.email);
+    assert!(claims.get("scope").is_none());
+}
+
+#[actix_web::test]
+async fn userinfo_signs_then_encrypts_when_both_policies_are_registered() {
+    let Some(state) = live_userinfo_state().await else {
+        return;
+    };
+    let client_id = format!("userinfo-nested-{}", Uuid::now_v7());
+    insert_userinfo_client(&state, &client_id).await;
+    let (private_key, public_jwk) = rsa_userinfo_jwe_keypair("userinfo-nested");
+    update_userinfo_crypto_policy(
+        &state,
+        &client_id,
+        Some("EdDSA"),
+        Some("RSA-OAEP-256"),
+        Some("A256GCM"),
+        Some(json!({"keys": [public_jwk]})),
+    )
+    .await;
+    let user = insert_userinfo_user(&state, true).await;
+
+    let response = userinfo_response_for_active_user(state.clone(), &user, &client_id).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("nested UserInfo body should collect");
+    let (protected, nested_jwt) = decrypt_userinfo_jwe(
+        &private_key,
+        std::str::from_utf8(&body).expect("nested UserInfo body should be UTF-8"),
+    );
+    assert_eq!(protected["cty"], "JWT");
+    assert!(protected.get("typ").is_none());
+    let claims = decode_signed_userinfo(&state, &client_id, &nested_jwt);
+    assert_eq!(claims["iss"], state.settings.issuer);
+    assert_eq!(claims["aud"], client_id);
+    assert_eq!(claims["sub"], user.id.to_string());
+    assert_eq!(claims["email"], user.email);
+}
+
+#[actix_web::test]
+async fn userinfo_crypto_failure_never_falls_back_to_json() {
+    let Some(state) = live_userinfo_state().await else {
+        return;
+    };
+    let client_id = format!("userinfo-failure-{}", Uuid::now_v7());
+    insert_userinfo_client(&state, &client_id).await;
+    update_userinfo_crypto_policy(
+        &state,
+        &client_id,
+        None,
+        Some("RSA-OAEP-256"),
+        Some("A256GCM"),
+        None,
+    )
+    .await;
+    let user = insert_userinfo_user(&state, true).await;
+
+    let response = userinfo_response_for_active_user(state, &user, &client_id).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response).as_deref(), Some("server_error"));
 }
 
 #[actix_web::test]

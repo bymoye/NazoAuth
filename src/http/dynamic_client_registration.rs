@@ -56,6 +56,18 @@ pub(crate) struct DynamicClientRegistrationRequest {
     #[serde(default)]
     pub(crate) jwks: Option<Value>,
     #[serde(default)]
+    pub(crate) userinfo_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) userinfo_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) userinfo_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub(crate) authorization_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) authorization_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) authorization_encrypted_response_enc: Option<String>,
+    #[serde(default)]
     pub(crate) request_uris: Vec<String>,
     #[serde(default)]
     pub(crate) software_statement: Option<String>,
@@ -91,6 +103,12 @@ pub(crate) struct PreparedDynamicClientRegistration {
     pub(crate) tls_client_auth_san_ip: Vec<String>,
     pub(crate) tls_client_auth_san_email: Vec<String>,
     pub(crate) jwks: Option<Value>,
+    pub(crate) userinfo_signed_response_alg: Option<String>,
+    pub(crate) userinfo_encrypted_response_alg: Option<String>,
+    pub(crate) userinfo_encrypted_response_enc: Option<String>,
+    pub(crate) authorization_signed_response_alg: Option<String>,
+    pub(crate) authorization_encrypted_response_alg: Option<String>,
+    pub(crate) authorization_encrypted_response_enc: Option<String>,
 }
 
 #[derive(Debug)]
@@ -138,12 +156,17 @@ pub(crate) async fn dynamic_client_registration(
     };
     let response_types = prepared.response_types.clone();
     let registration_access_token = random_urlsafe_token();
+    let response_signing_algorithms = state
+        .keyset
+        .snapshot()
+        .response_signing_alg_values_supported();
     match prepare_dynamic_client_insert_with_secret_pepper(
         prepared,
         state.settings.pairwise_subject_secret.as_deref(),
         &state.settings.client_secret_pepper,
         &state.settings.issuer,
         &registration_access_token,
+        &response_signing_algorithms,
     )
     .await
     {
@@ -271,12 +294,17 @@ pub(crate) async fn client_configuration_put(
     };
     let response_types = registration.response_types.clone();
     let registration_access_token = random_urlsafe_token();
+    let response_signing_algorithms = state
+        .keyset
+        .snapshot()
+        .response_signing_alg_values_supported();
     let prepared = match prepare_dynamic_client_insert_with_secret_pepper(
         registration,
         state.settings.pairwise_subject_secret.as_deref(),
         &state.settings.client_secret_pepper,
         &state.settings.issuer,
         &registration_access_token,
+        &response_signing_algorithms,
     )
     .await
     {
@@ -335,12 +363,14 @@ pub(crate) async fn prepare_dynamic_client_insert_with_secret_pepper(
     client_secret_pepper: &str,
     issuer: &str,
     registration_access_token: &str,
+    response_signing_algorithms: &[&'static str],
 ) -> Result<PreparedClientInsert, InsertClientError> {
     let mut prepared = crate::http::admin::prepare_client_insert_with_secret_pepper(
         registration.into_create_client_request(),
         pairwise_subject_secret,
         client_secret_pepper,
         issuer,
+        response_signing_algorithms,
     )
     .await?;
     prepared.registration_access_token_blake3 = Some(blake3_hex(registration_access_token));
@@ -499,6 +529,17 @@ async fn replace_client_configuration(
             .eq(&prepared.introspection_encrypted_response_alg),
         oauth_clients::introspection_encrypted_response_enc
             .eq(&prepared.introspection_encrypted_response_enc),
+        oauth_clients::userinfo_signed_response_alg.eq(&prepared.userinfo_signed_response_alg),
+        oauth_clients::userinfo_encrypted_response_alg
+            .eq(&prepared.userinfo_encrypted_response_alg),
+        oauth_clients::userinfo_encrypted_response_enc
+            .eq(&prepared.userinfo_encrypted_response_enc),
+        oauth_clients::authorization_signed_response_alg
+            .eq(&prepared.authorization_signed_response_alg),
+        oauth_clients::authorization_encrypted_response_alg
+            .eq(&prepared.authorization_encrypted_response_alg),
+        oauth_clients::authorization_encrypted_response_enc
+            .eq(&prepared.authorization_encrypted_response_enc),
         oauth_clients::updated_at.eq(diesel_now),
     ))
     .returning(ClientRow::as_returning())
@@ -724,6 +765,12 @@ pub(crate) fn prepare_dynamic_client_registration(
         tls_client_auth_san_ip: request.tls_client_auth_san_ip,
         tls_client_auth_san_email: request.tls_client_auth_san_email,
         jwks: request.jwks,
+        userinfo_signed_response_alg: request.userinfo_signed_response_alg,
+        userinfo_encrypted_response_alg: request.userinfo_encrypted_response_alg,
+        userinfo_encrypted_response_enc: request.userinfo_encrypted_response_enc,
+        authorization_signed_response_alg: request.authorization_signed_response_alg,
+        authorization_encrypted_response_alg: request.authorization_encrypted_response_alg,
+        authorization_encrypted_response_enc: request.authorization_encrypted_response_enc,
     })
 }
 
@@ -828,10 +875,6 @@ pub(crate) fn parse_client_configuration_update_with_secret_pepper(
 
 impl PreparedDynamicClientRegistration {
     fn to_create_client_request(&self) -> CreateClientRequest {
-        let secret_auth_method = matches!(
-            self.token_endpoint_auth_method.as_str(),
-            "client_secret_basic" | "client_secret_post"
-        );
         let allow_authorization_code_without_pkce =
             self.client_type == "confidential" && !self.require_dpop_bound_tokens;
         CreateClientRequest {
@@ -863,7 +906,13 @@ impl PreparedDynamicClientRegistration {
             jwks: self.jwks.clone(),
             introspection_encrypted_response_alg: None,
             introspection_encrypted_response_enc: None,
-            allow_jwks_without_kid: secret_auth_method,
+            userinfo_signed_response_alg: self.userinfo_signed_response_alg.clone(),
+            userinfo_encrypted_response_alg: self.userinfo_encrypted_response_alg.clone(),
+            userinfo_encrypted_response_enc: self.userinfo_encrypted_response_enc.clone(),
+            authorization_signed_response_alg: self.authorization_signed_response_alg.clone(),
+            authorization_encrypted_response_alg: self.authorization_encrypted_response_alg.clone(),
+            authorization_encrypted_response_enc: self.authorization_encrypted_response_enc.clone(),
+            allow_jwks_without_kid: true,
         }
     }
 
@@ -1010,6 +1059,36 @@ fn dynamic_registration_response(
     }
     if let Some(jwks) = &client.jwks {
         body["jwks"] = jwks.clone();
+    }
+    for (field, value) in [
+        (
+            "userinfo_signed_response_alg",
+            client.userinfo_signed_response_alg.as_ref(),
+        ),
+        (
+            "userinfo_encrypted_response_alg",
+            client.userinfo_encrypted_response_alg.as_ref(),
+        ),
+        (
+            "userinfo_encrypted_response_enc",
+            client.userinfo_encrypted_response_enc.as_ref(),
+        ),
+        (
+            "authorization_signed_response_alg",
+            client.authorization_signed_response_alg.as_ref(),
+        ),
+        (
+            "authorization_encrypted_response_alg",
+            client.authorization_encrypted_response_alg.as_ref(),
+        ),
+        (
+            "authorization_encrypted_response_enc",
+            client.authorization_encrypted_response_enc.as_ref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            body[field] = json!(value);
+        }
     }
     if let Some(secret) = issued_secret {
         body["client_secret"] = json!(secret);

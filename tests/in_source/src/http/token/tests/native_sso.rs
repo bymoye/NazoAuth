@@ -39,6 +39,7 @@ fn native_sso_state_with_signing_key() -> (AppState, Vec<u8>) {
                 verification_keys: vec![VerificationKey {
                     kid: "native-sso-kid".to_owned(),
                     public_jwk,
+                    local_signing_key: None,
                 }],
             }),
         },

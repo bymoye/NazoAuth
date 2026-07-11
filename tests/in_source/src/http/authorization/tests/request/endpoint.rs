@@ -8,6 +8,11 @@ use fred::interfaces::ClientLike;
 use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
+use openssl::encrypt::Decrypter;
+use openssl::hash::MessageDigest;
+use openssl::pkey::{PKey, Private};
+use openssl::rsa::{Padding, Rsa};
+use openssl::symm::{Cipher, decrypt_aead};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -84,6 +89,7 @@ fn local_signing_keyset() -> Keyset {
         verification_keys: vec![VerificationKey {
             kid: kid.to_owned(),
             public_jwk,
+            local_signing_key: None,
         }],
     }
 }
@@ -446,6 +452,51 @@ fn decode_jarm_claims(state: &AppState, response_jwt: &str, audience: &str) -> V
     jsonwebtoken::decode::<Value>(response_jwt, &decoding_key, &validation)
         .expect("JARM response should verify with the active key")
         .claims
+}
+
+fn rsa_jarm_jwe_keypair(kid: &str) -> (PKey<Private>, Value) {
+    let rsa = Rsa::generate(2048).expect("test RSA key should generate");
+    let jwk = json!({
+        "kty": "RSA",
+        "kid": kid,
+        "use": "enc",
+        "alg": "RSA-OAEP-256",
+        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
+        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
+    });
+    (
+        PKey::from_rsa(rsa).expect("test RSA key should convert to PKey"),
+        jwk,
+    )
+}
+
+fn decrypt_jarm_jwe(
+    private_key: &PKey<Private>,
+    compact_jwe: &str,
+) -> anyhow::Result<(Value, String)> {
+    let parts = compact_jwe.split('.').collect::<Vec<_>>();
+    anyhow::ensure!(parts.len() == 5, "compact JWE must have five parts");
+    let protected_header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0])?)?;
+    let encrypted_key = URL_SAFE_NO_PAD.decode(parts[1])?;
+    let iv = URL_SAFE_NO_PAD.decode(parts[2])?;
+    let ciphertext = URL_SAFE_NO_PAD.decode(parts[3])?;
+    let tag = URL_SAFE_NO_PAD.decode(parts[4])?;
+    let mut decrypter = Decrypter::new(private_key)?;
+    decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
+    decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
+    decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
+    let mut cek = vec![0; decrypter.decrypt_len(&encrypted_key)?];
+    let len = decrypter.decrypt(&encrypted_key, &mut cek)?;
+    cek.truncate(len);
+    let plaintext = decrypt_aead(
+        Cipher::aes_256_gcm(),
+        &cek,
+        Some(&iv),
+        parts[0].as_bytes(),
+        &ciphertext,
+        &tag,
+    )?;
+    Ok((protected_header, String::from_utf8(plaintext)?))
 }
 
 #[actix_web::test]
@@ -1882,7 +1933,7 @@ async fn authorization_response_redirect_emits_signed_jarm_response() {
     state.keyset.replace(local_signing_keyset());
     let state = Data::new(state);
 
-    let response = authorization_response_redirect(
+    let response = authorization_response_redirect_with_protection(
         &state,
         AuthorizationResponseRedirect {
             redirect_uri: "https://client.example/callback?existing=1",
@@ -1893,6 +1944,7 @@ async fn authorization_response_redirect_emits_signed_jarm_response() {
             state: Some("state-123"),
             oidc_sid: None,
         },
+        AuthorizationResponseProtection::default(),
     )
     .await;
 
@@ -1928,7 +1980,7 @@ async fn authorization_response_redirect_jarm_profile_signs_without_response_mod
     state.keyset.replace(local_signing_keyset());
     let state = Data::new(state);
 
-    let response = authorization_response_redirect(
+    let response = authorization_response_redirect_with_protection(
         &state,
         AuthorizationResponseRedirect {
             redirect_uri: "https://client.example/callback",
@@ -1939,6 +1991,7 @@ async fn authorization_response_redirect_jarm_profile_signs_without_response_mod
             state: Some("state-456"),
             oidc_sid: None,
         },
+        AuthorizationResponseProtection::default(),
     )
     .await;
 
@@ -1961,4 +2014,97 @@ async fn authorization_response_redirect_jarm_profile_signs_without_response_mod
     assert_eq!(claims["aud"], "client-jarm-profile");
     assert_eq!(claims["code"], "code-456");
     assert_eq!(claims["state"], "state-456");
+}
+
+#[actix_web::test]
+async fn authorization_response_redirect_signs_then_encrypts_jarm_for_client_policy() {
+    let state = endpoint_state(false);
+    state.keyset.replace(local_signing_keyset());
+    let state = Data::new(state);
+    let (private_key, public_jwk) = rsa_jarm_jwe_keypair("jarm-enc");
+    let (wrong_private_key, _) = rsa_jarm_jwe_keypair("wrong-jarm-enc");
+    let jwks = json!({"keys": [public_jwk]});
+
+    let response = authorization_response_redirect_with_protection(
+        &state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback?existing=1",
+            client_id: "client-encrypted-jarm",
+            response_mode: Some("jwt"),
+            code: Some("encrypted-code"),
+            error: None,
+            state: Some("encrypted-state"),
+            oidc_sid: None,
+        },
+        AuthorizationResponseProtection {
+            signing_alg: Some("RS256"),
+            encryption_alg: Some("RSA-OAEP-256"),
+            encryption_enc: Some("A256GCM"),
+            jwks: Some(&jwks),
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = authorization_location(&response);
+    let pairs = location.query_pairs().collect::<HashMap<_, _>>();
+    assert_eq!(pairs.get("existing").map(|value| value.as_ref()), Some("1"));
+    assert!(!pairs.contains_key("code"));
+    assert!(!pairs.contains_key("state"));
+    let encrypted = pairs
+        .get("response")
+        .expect("encrypted JARM response parameter should be present");
+    assert!(
+        decrypt_jarm_jwe(&wrong_private_key, encrypted).is_err(),
+        "an unrelated private key must not decrypt JARM"
+    );
+    let (protected, nested_jwt) =
+        decrypt_jarm_jwe(&private_key, encrypted).expect("matching key should decrypt JARM");
+    assert_eq!(protected["alg"], "RSA-OAEP-256");
+    assert_eq!(protected["enc"], "A256GCM");
+    assert_eq!(protected["kid"], "jarm-enc");
+    assert_eq!(protected["cty"], "JWT");
+    let claims = decode_jarm_claims(&state, &nested_jwt, "client-encrypted-jarm");
+    assert_eq!(claims["code"], "encrypted-code");
+    assert_eq!(claims["state"], "encrypted-state");
+}
+
+#[actix_web::test]
+async fn authorization_response_crypto_failure_never_falls_back_to_plain_query() {
+    let state = endpoint_state(false);
+    state.keyset.replace(local_signing_keyset());
+    let state = Data::new(state);
+    for protection in [
+        AuthorizationResponseProtection {
+            signing_alg: Some("none"),
+            ..AuthorizationResponseProtection::default()
+        },
+        AuthorizationResponseProtection {
+            encryption_alg: Some("RSA-OAEP-256"),
+            encryption_enc: Some("A256GCM"),
+            jwks: None,
+            ..AuthorizationResponseProtection::default()
+        },
+    ] {
+        let response = authorization_response_redirect_with_protection(
+            &state,
+            AuthorizationResponseRedirect {
+                redirect_uri: "https://client.example/callback",
+                client_id: "client-failed-jarm",
+                response_mode: Some("jwt"),
+                code: Some("must-not-leak"),
+                error: None,
+                state: Some("must-not-leak-state"),
+                oidc_sid: None,
+            },
+            protection,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response.headers().get(header::LOCATION).is_none(),
+            "crypto failure must not emit any redirect containing code or state"
+        );
+    }
 }

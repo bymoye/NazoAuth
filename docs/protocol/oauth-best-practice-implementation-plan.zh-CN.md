@@ -1,6 +1,6 @@
 # NazoAuth OAuth/OIDC/FAPI 最佳实践未来路线图
 
-Last reviewed: 2026-07-04.
+Last reviewed: 2026-07-11.
 
 ## 文档定位
 
@@ -363,11 +363,11 @@ cargo test --locked well_known --lib
 
 优先任务：
 
-- [ ] **M7-01：NI-012 UserInfo signing/encryption**
+- [x] **M7-01：NI-012 UserInfo signing/encryption**
   - per-client signing/encryption metadata、JWS/JWE alg allowlist、claim minimization、negative tests。
-- [ ] **M7-02：NI-013 JARM/JWE encrypted authorization responses**
+- [x] **M7-02：NI-013 JARM/JWE encrypted authorization responses**
   - JWE alg/enc policy、key management、metadata gating、decryption negative tests。
-- [ ] **M7-03：更新 OIDF matrix**
+- [x] **M7-03：更新 OIDF matrix**
   - 若 OIDF suite 有对应 OP plan，加入 full matrix；若没有，记录检索日期和缺口。
 
 验收：
@@ -409,14 +409,15 @@ cargo test --locked well_known --lib
 | --- | --- |
 | 已具备的 OP/AS 基线 | BP-001 到 BP-028 已作为当前基础能力维护；TP-001 到 TP-008 已作为精确测试包维护。 |
 | Public OP/AS 基线硬化 | M1 / BP-029 已完成；后续新增 endpoint 必须复用同等 CORS、cookie/session、CSRF、rate limit、日志脱敏和错误语义门禁。 |
-| 当前优先缺口 | M6 已完成；M7 加密响应与 M8 watchlist 审计是后续阶段。 |
+| 当前优先缺口 | M7 已完成；M8 watchlist 保持 deferred，尚未开始。 |
 | FAPI2 / Message Signing | M2 已完成；后续新增 FAPI / Message Signing 行为必须继续保持 profile-scoped metadata truth 与负向测试。 |
 | DCR / DCRM | M3 已完成；NI-004 / NI-005 以 default-closed DCR/DCRM、管理凭据轮换、非秘密审计事件和 onboarding 文档维护。 |
 | Token trust | M4 已完成；NI-003 是 bounded local Token Exchange，NI-006 是第三方 JWT bearer trust 设计完成且实现 deferred，外部 issuer trust 不属于当前默认能力。 |
 | CIBA | M6 已完成；官方 FAPI-CIBA poll profile 与内部 `fapi2-ciba` 已隔离，状态生命周期、并发轮询、审计提交点和 metadata truth 已通过本地与官方全矩阵回归。 |
+| 加密响应 | M7 已完成；UserInfo 支持 JSON、JWS、JWE 和 nested JWS/JWE，JARM 支持 per-client 签名与 nested JWE；OIDF signed UserInfo 模块及本地与官方 19+2 全矩阵已纳入验收。 |
 | 外部第三方登录 | M5 已完成为配置驱动的热插拔 provider registry；外部 OIDC、OAuth2 social、SAML gateway、非敏感 admin onboarding 和本地 session 边界已实现。 |
 | 非目标 | NI-010 OpenID Federation 当前不实现；第三方登录不依赖 OpenID Federation。 |
-| 可选未来项 | NI-012、NI-013、NI-014、NI-015 和 M8 watchlist 项按需求进入后续路线。 |
+| 可选未来项 | NI-014、NI-015 和 M8 watchlist 仍为 deferred，不属于当前实现范围。 |
 
 ## 更新规则
 

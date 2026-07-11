@@ -1,6 +1,6 @@
 # OIDF Full Matrix
 
-This document describes the repository-owned OpenID Foundation Conformance Suite matrix. The matrix is a 20-plan suite. New TP/PS and NI checks are mapped onto these plans instead of being added as a separate temporary matrix.
+This document describes the repository-owned OpenID Foundation Conformance Suite matrix. The matrix is a 21-plan suite. New TP/PS and NI checks are mapped onto these plans instead of being added as a separate temporary matrix.
 
 The execution entry point is still `runtime/oidf/oidf-plan-set.json`. `scripts/setup_local_oidf_podman.py` also writes `runtime/oidf/oidf-plan-set-manifest.json` with a title, description, and coverage focus for every plan.
 
@@ -28,15 +28,17 @@ The execution entry point is still `runtime/oidf/oidf-plan-set.json`. `scripts/s
 | 18 | OIDC Front-Channel Logout OP | Validates front-channel logout metadata, RP-initiated logout, iframe logout notification, `iss`/`sid` parameters, and `post_logout_redirect_uri`. |
 | 19 | OIDC Session Management OP | Validates `check_session_iframe` metadata, authorization response `session_state`, and the session-state transition after RP-initiated logout. |
 | 20 | FAPI-CIBA ID1 / private_key_jwt / poll / plain FAPI | Validates FAPI-CIBA AS discovery, the backchannel authentication endpoint, `private_key_jwt` client authentication, poll-mode token exchange, error handling, refresh tokens, and resource access. |
+| 21 | OIDC Dynamic Registration / Signed UserInfo | Runs the official `oidcc-userinfo-rs256` module only, dynamically registers `userinfo_signed_response_alg=RS256`, and validates signed UserInfo response serialization, content type, and claims without claiming the legacy implicit-flow dynamic certification profile. |
 
 ## TP/PS Coverage Boundary
 
 The matrix covers the current TP/PS work through these paths:
 
 - `OIDC Basic OP Dynamic Registration` covers RFC 7591 dynamic client registration and `registration_endpoint` metadata.
+- `OIDC Dynamic Registration / Signed UserInfo` selects the official OP-side `oidcc-userinfo-rs256` module. The complete legacy dynamic-certification plan is not used because it requires implicit-flow capabilities that the issuer deliberately does not implement or advertise. Encrypted UserInfo and encrypted JARM remain local-test-only because no corresponding OP module exists in suite snapshot `f326f6aa25d6a2b8f1ae30a6ec80a57e342333ce`.
 - `OIDC Config OP` covers metadata truth and prevents discovery from advertising unsupported capabilities.
 - FAPI2 Security and Message Signing plans cover PAR enforcement, `request_uri` expiry, `request_uri` replay, cross-client `request_uri` use, outer authorization request parameters, PKCE, redirect URI, audience, and client assertions.
-- `private_key_jwt / DPoP / OpenID Connect / authorization code` is the closest single-plan regression for TP/PS change sets; full evidence comes from the 20-plan matrix.
+- `private_key_jwt / DPoP / OpenID Connect / authorization code` is the closest single-plan regression for TP/PS change sets; full evidence comes from the 21-plan matrix.
 - `OIDC Front-Channel Logout OP` covers NI-008.
 - `OIDC Session Management OP` covers NI-009.
 - `FAPI-CIBA ID1 / private_key_jwt / poll / plain FAPI` covers the FAPI-CIBA AS side of NI-007.
@@ -44,11 +46,11 @@ The matrix covers the current TP/PS work through these paths:
 - NI-010 tracks OpenID Federation 1.1 / OpenID Federation for OpenID Connect 1.1. The project does not implement this trust-chain ecosystem surface and no longer exposes `/.well-known/openid-federation`, so Federation plans are not must-pass matrix entries.
 - No official OP plan was found for NI-011 Native SSO / `device_secret`; local tests cover device-secret lifecycle, `ds_hash` binding, token exchange, and refresh-family activity.
 
-Targeted plan-sets are useful for development triage. Durable regression evidence should cite the full 20-plan matrix.
+Targeted plan-sets are useful for development triage. Durable regression evidence should cite the full 21-plan matrix.
 
 ## Expected Skip Policy
 
-The current official workflow allows two expected skips in the OIDC Basic OP
+The current official workflow allows two expected skips in the general OIDC
 dynamic-registration plan:
 
 - `oidcc-idtoken-unsigned`

@@ -48,7 +48,7 @@ composite score:
 | Static security analysis | CodeQL Rust analysis with `security-extended` and `security-and-quality` queries. |
 | Dependency policy | GitHub dependency review, `cargo audit`, and `cargo deny` over advisories, bans, licenses, and sources. |
 | Runtime security behavior | Real HTTP E2E, load/race gate, and Valkey outage injection in `conformance-security`. |
-| Protocol conformance | OIDF/FAPI conformance workflows and archived official 17-plan matrix evidence. |
+| Protocol conformance | OIDF/FAPI conformance workflows and archived official 21-plan matrix evidence. |
 | Coverage trend | Codecov LCOV upload from the dedicated coverage workflow. |
 | Release provenance | CycloneDX SBOM, Trivy image scan, Sigstore signing, and GitHub artifact attestations. |
 
@@ -92,11 +92,11 @@ OpenID Foundation:
 
 | Specification | Implementation |
 | --- | --- |
-| [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | ID Token, UserInfo, claims, authorization code flow |
+| [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | ID Token, JSON/signed/encrypted UserInfo, claims, authorization code flow |
 | [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) | `/.well-known/openid-configuration` |
 | [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html) | `/logout` |
 | [OpenID Connect Back-Channel Logout 1.0](https://openid.net/specs/openid-connect-backchannel-1_0.html) | signed logout tokens with durable outbox delivery |
-| [JWT Secured Authorization Response Mode](https://openid.net/specs/oauth-v2-jarm.html) | JARM where advertised by the active profile |
+| [JWT Secured Authorization Response Mode](https://openid.net/specs/oauth-v2-jarm.html) | signed JARM and optional per-client nested JWE where the request/profile selects JARM |
 | [FAPI 2.0 Security Profile Final](https://openid.net/specs/fapi-security-profile-2_0-final.html) | `fapi2-security` profile |
 | [FAPI 2.0 Message Signing Final](https://openid.net/specs/fapi-message-signing-2_0-final.html) | signed authorization request, JARM, and signed introspection profile support |
 
@@ -122,15 +122,15 @@ OpenID Foundation Conformance Suite result URLs:
 | --- | --- |
 | OIDC Basic OP | <https://www.certification.openid.net/plan-detail.html?plan=Srk6iaVDVcqO5> |
 | OIDC Config OP | <https://www.certification.openid.net/plan-detail.html?plan=fGiz8QZYR1LVy> |
-| Latest 17-plan official matrix | [docs/conformance/2026-07-02-ni-004-official-oidf-full-matrix.md](docs/conformance/2026-07-02-ni-004-official-oidf-full-matrix.md#plan-results) |
+| Latest 21-plan official matrix | [docs/conformance/2026-07-11-m7-official-encrypted-responses-oidf-results.md](docs/conformance/2026-07-11-m7-official-encrypted-responses-oidf-results.md#plan-ids) |
 | OIDF matrix scope | [docs/conformance/oidf-full-matrix.md](docs/conformance/oidf-full-matrix.md) |
 | Latest private full-matrix regression | [docs/conformance/2026-07-01-tp-ps-full-matrix.md](docs/conformance/2026-07-01-tp-ps-full-matrix.md) |
 
 The latest official full matrix tested `https://auth.nazo.run` from workflow
-head SHA `0b00ea7d50443cb54fc17631a9238126fa837e42`, ran all 17 plans and 617
-modules, and reported `0 failures` and `0 warnings`. It contains 2 expected
-`SKIPPED` modules in the dynamic-registration OIDC plan, so it is not
-zero-SKIPPED evidence.
+head SHA `371b4f6e61674c4d1bd9ace7ba5b518314c8ff0f`. It ran the 21-plan matrix in
+the 19+2 parallel-isolated layout and exported 640 modules: 632 passed, 6
+expected review states, 2 expected skips, and no failed module, condition
+failure, or warning. It is therefore not zero-SKIPPED evidence.
 
 The latest private full-matrix regression tested runtime commit `31e8f9f`, ran
 all 16 plans and 578 modules, and reported `0 failures` and `0 warnings`.
@@ -140,7 +140,8 @@ all 16 plans and 578 modules, and reported `0 failures` and `0 warnings`.
 - Authorization code + PKCE, refresh tokens, client credentials, bounded JWT
   bearer grant, bounded Token Exchange, revocation, introspection,
   signed/encrypted introspection, discovery, protected resource metadata, JWKS,
-  UserInfo, PAR, JAR, DPoP, and mTLS.
+  JSON/signed/encrypted UserInfo, signed/encrypted JARM, PAR, JAR, DPoP, and
+  mTLS.
 - Runtime profiles: `oauth2-baseline`, `fapi2-security`,
   `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and
   `fapi2-message-signing-introspection`.
@@ -231,6 +232,8 @@ and are not advertised unless implemented, tested, and explicitly enabled:
 - Request-level dynamic tenant or issuer routing.
 - RFC 9701 encrypted introspection responses outside the signed-introspection
   profile, or without per-client JWE response metadata.
+- UserInfo or JARM encryption without supported per-client JWE metadata and a
+  unique matching public encryption key.
 
 See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope record.
 

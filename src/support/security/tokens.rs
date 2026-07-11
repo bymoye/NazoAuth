@@ -1,15 +1,12 @@
 use super::jwt_decoding_key_from_jwk;
-use std::path::Path;
 
 use base64::Engine as _;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{AppState, Claims, ConfirmationClaims, OidcClaimRequest};
-use crate::support::{
-    pem_to_der, sign_local_jwt_input, signing_algorithm_name, sorted_scope_string,
-};
+use crate::support::{sign_local_jwt_input, signing_algorithm_name, sorted_scope_string};
 
 pub(crate) struct AccessTokenJwtInput<'a> {
     pub(crate) tenant_id: Uuid,
@@ -137,80 +134,38 @@ pub(crate) async fn make_id_token(
 ) -> jsonwebtoken::errors::Result<String> {
     let now = Utc::now().timestamp();
     let claims = id_token_claims(&state.settings.issuer, &input, now);
+    sign_response_jwt(state, &Value::Object(claims), "JWT", input.signing_alg).await
+}
+
+pub(crate) async fn sign_response_jwt(
+    state: &AppState,
+    claims: &Value,
+    typ: &str,
+    signing_alg: Option<jsonwebtoken::Algorithm>,
+) -> jsonwebtoken::errors::Result<String> {
     let keyset = state.keyset.snapshot();
-    let alg = input.signing_alg.unwrap_or(keyset.active_alg);
-    let (kid, token) = if alg == keyset.active_alg {
+    let alg = signing_alg.unwrap_or(keyset.active_alg);
+    if alg == keyset.active_alg {
         let mut header = jsonwebtoken::Header::new(keyset.active_alg);
-        header.typ = Some("JWT".to_string());
+        header.typ = Some(typ.to_owned());
         header.kid = Some(keyset.active_kid.clone());
-        return keyset.sign_jwt(&header, &Value::Object(claims)).await;
-    } else {
-        local_signing_key_for_alg(&state.settings.jwk_keys_dir, alg).await?
-    };
+        return keyset.sign_jwt(&header, claims).await;
+    }
+    let (kid, private_key) = keyset
+        .local_response_signing_key(alg)
+        .ok_or(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm)?;
     let mut header = jsonwebtoken::Header::new(alg);
-    header.typ = Some("JWT".to_string());
-    header.kid = Some(kid);
+    header.typ = Some(typ.to_owned());
+    header.kid = Some(kid.to_owned());
     let encoded_header = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
-    let encoded_claims = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Value::Object(claims))?);
+    let encoded_claims = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?);
     let signing_input = format!("{encoded_header}.{encoded_claims}");
-    let signature = sign_local_jwt_input(alg, &token, signing_input.as_bytes())?;
+    let signature = sign_local_jwt_input(alg, private_key, signing_input.as_bytes())?;
     Ok(format!("{signing_input}.{signature}"))
 }
 
 const BASE64_URL_SAFE_NO_PAD: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-async fn local_signing_key_for_alg(
-    jwk_keys_dir: &Path,
-    alg: jsonwebtoken::Algorithm,
-) -> jsonwebtoken::errors::Result<(String, Vec<u8>)> {
-    let Some(alg_name) = signing_algorithm_name(alg) else {
-        return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into());
-    };
-    let keyset_path = jwk_keys_dir.join("keyset.json");
-    let raw = tokio::fs::read_to_string(&keyset_path)
-        .await
-        .map_err(|_| jsonwebtoken::errors::ErrorKind::InvalidAlgorithm)?;
-    let payload = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| jsonwebtoken::errors::ErrorKind::InvalidAlgorithm)?;
-    let Some(keys) = payload.get("keys").and_then(Value::as_array) else {
-        return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into());
-    };
-    for entry in keys {
-        if entry.get("alg").and_then(Value::as_str) != Some(alg_name)
-            || key_is_retired(entry)
-            || entry
-                .get("backend")
-                .and_then(Value::as_str)
-                .unwrap_or("local-pem")
-                != "local-pem"
-        {
-            continue;
-        }
-        let Some(kid) = entry.get("kid").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(file_name) = entry.get("file").and_then(Value::as_str) else {
-            continue;
-        };
-        let raw_key = match tokio::fs::read_to_string(jwk_keys_dir.join(file_name)).await {
-            Ok(raw_key) => raw_key,
-            Err(_) => continue,
-        };
-        if let Some(der) = pem_to_der(&raw_key) {
-            return Ok((kid.to_owned(), der));
-        }
-    }
-    Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into())
-}
-
-fn key_is_retired(entry: &Value) -> bool {
-    entry
-        .get("retire_at")
-        .and_then(Value::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .is_some_and(|retire_at| retire_at.with_timezone(&Utc) <= Utc::now())
-}
 
 pub(super) fn id_token_claims(
     issuer: &str,
@@ -321,14 +276,17 @@ pub(super) fn backchannel_logout_token_claims(
 pub(crate) async fn make_authorization_response_jwt(
     state: &AppState,
     input: AuthorizationResponseJwtInput<'_>,
+    signing_alg: Option<jsonwebtoken::Algorithm>,
 ) -> jsonwebtoken::errors::Result<String> {
     let now = Utc::now().timestamp();
     let claims = authorization_response_jwt_claims(&state.settings.issuer, &input, now);
-    let keyset = state.keyset.snapshot();
-    let mut header = jsonwebtoken::Header::new(keyset.active_alg);
-    header.typ = Some("oauth-authz-resp+jwt".to_string());
-    header.kid = Some(keyset.active_kid.clone());
-    keyset.sign_jwt(&header, &Value::Object(claims)).await
+    sign_response_jwt(
+        state,
+        &Value::Object(claims),
+        "oauth-authz-resp+jwt",
+        signing_alg,
+    )
+    .await
 }
 
 pub(super) fn authorization_response_jwt_claims(

@@ -11,6 +11,9 @@ use std::{
 pub(crate) struct VerificationKey {
     pub(crate) kid: String,
     pub(crate) public_jwk: Value,
+    /// Paired private material retained only for live local keys so response
+    /// signing capabilities and signing execution use the same keyset snapshot.
+    pub(crate) local_signing_key: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]

@@ -203,6 +203,73 @@ fn private_key_jwt_accepts_current_and_previous_jwks_during_rotation() {
 }
 
 #[test]
+fn private_key_jwt_accepts_missing_kid_only_for_one_kidless_matching_key() {
+    let private_key = generate_key_material(jsonwebtoken::Algorithm::RS256)
+        .expect("client key should generate")
+        .private_pkcs8_der;
+    let mut public_jwk = public_jwk_from_private_der(
+        "temporary-kid",
+        jsonwebtoken::Algorithm::RS256,
+        &private_key,
+    )
+    .expect("client jwk should derive");
+    public_jwk
+        .as_object_mut()
+        .expect("public JWK should be an object")
+        .remove("kid");
+    let client = private_key_jwt_client(json!({"keys": [public_jwk]}));
+    let settings = test_settings();
+    let req = TestRequest::post().uri("/token").to_http_request();
+    let assertion = signed_client_assertion_without_kid(
+        &client.client_id,
+        &settings.issuer,
+        &private_key,
+        "kidless-single-key-jti",
+    );
+
+    let result = verify_private_key_jwt_claims_with_settings(&settings, &req, &client, &assertion);
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn private_key_jwt_rejects_missing_kid_when_key_selection_is_ambiguous() {
+    let first = generate_key_material(jsonwebtoken::Algorithm::RS256)
+        .expect("first key should generate")
+        .private_pkcs8_der;
+    let second = generate_key_material(jsonwebtoken::Algorithm::RS256)
+        .expect("second key should generate")
+        .private_pkcs8_der;
+    let mut first_jwk =
+        public_jwk_from_private_der("first", jsonwebtoken::Algorithm::RS256, &first)
+            .expect("first jwk should derive");
+    let mut second_jwk =
+        public_jwk_from_private_der("second", jsonwebtoken::Algorithm::RS256, &second)
+            .expect("second jwk should derive");
+    first_jwk
+        .as_object_mut()
+        .expect("first JWK should be an object")
+        .remove("kid");
+    second_jwk
+        .as_object_mut()
+        .expect("second JWK should be an object")
+        .remove("kid");
+    let client = private_key_jwt_client(json!({"keys": [first_jwk, second_jwk]}));
+    let settings = test_settings();
+    let req = TestRequest::post().uri("/token").to_http_request();
+    let assertion = signed_client_assertion_without_kid(
+        &client.client_id,
+        &settings.issuer,
+        &first,
+        "kidless-ambiguous-key-jti",
+    );
+
+    let result = verify_private_key_jwt_claims_with_settings(&settings, &req, &client, &assertion);
+
+    assert!(matches!(result, Err(ClientAssertionError::Invalid)));
+}
+
+#[test]
 fn private_key_jwt_rejects_valid_signature_with_wrong_audience() {
     let private_key = generate_key_material(jsonwebtoken::Algorithm::RS256)
         .expect("client key should generate")
@@ -274,7 +341,7 @@ fn private_key_jwt_replay_ttl_is_bounded_to_assertion_window() {
     let assertion = ValidatedClientAssertion {
         jti: "jti-1".to_owned(),
         exp: 1_000,
-        kid: "kid-1".to_owned(),
+        kid: Some("kid-1".to_owned()),
         alg: jsonwebtoken::Algorithm::PS256,
     };
 

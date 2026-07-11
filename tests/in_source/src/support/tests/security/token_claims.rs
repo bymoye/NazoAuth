@@ -321,6 +321,53 @@ async fn make_jwt_rejects_conflicting_sender_constraints_before_signing() {
     ));
 }
 
+#[tokio::test]
+async fn response_signing_uses_auxiliary_key_from_current_keyset_snapshot() {
+    let auxiliary = generate_key_material(jsonwebtoken::Algorithm::RS256)
+        .expect("auxiliary response signing key should generate");
+    let public_jwk = public_jwk_from_private_der(
+        "auxiliary-rs256",
+        jsonwebtoken::Algorithm::RS256,
+        &auxiliary.private_pkcs8_der,
+    )
+    .expect("auxiliary public JWK should derive");
+    let state = AppState {
+        diesel_db: crate::db::create_pool(
+            "postgres://nazo_token_test_invalid:nazo_token_test_invalid@127.0.0.1:1/nazo"
+                .to_owned(),
+            1,
+        )
+        .expect("pool construction should not connect"),
+        valkey: fred::prelude::Builder::default_centralized()
+            .build()
+            .expect("valkey client construction should not connect"),
+        settings: std::sync::Arc::new(test_settings()),
+        keyset: crate::domain::KeysetStore::new(Keyset {
+            active_kid: "active-eddsa".to_owned(),
+            active_alg: jsonwebtoken::Algorithm::EdDSA,
+            active_signing_key: ActiveSigningKey::LocalPkcs8Der(Vec::new()),
+            verification_keys: vec![VerificationKey {
+                kid: "auxiliary-rs256".to_owned(),
+                public_jwk,
+                local_signing_key: Some(auxiliary.private_pkcs8_der),
+            }],
+        }),
+    };
+
+    let token = sign_response_jwt(
+        &state,
+        &json!({"sub": "subject-1"}),
+        "JWT",
+        Some(jsonwebtoken::Algorithm::RS256),
+    )
+    .await
+    .expect("response signing should use the key material loaded in the snapshot");
+    let header = jsonwebtoken::decode_header(&token).expect("signed response header should decode");
+
+    assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
+    assert_eq!(header.kid.as_deref(), Some("auxiliary-rs256"));
+}
+
 #[test]
 fn access_token_without_sender_constraints_does_not_emit_cnf() {
     let claims = access_token_claims(

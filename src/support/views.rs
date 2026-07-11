@@ -116,7 +116,13 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
         "is_active": client.is_active,
         "jwks": client.jwks,
         "introspection_encrypted_response_alg": client.introspection_encrypted_response_alg,
-        "introspection_encrypted_response_enc": client.introspection_encrypted_response_enc
+        "introspection_encrypted_response_enc": client.introspection_encrypted_response_enc,
+        "userinfo_signed_response_alg": client.userinfo_signed_response_alg,
+        "userinfo_encrypted_response_alg": client.userinfo_encrypted_response_alg,
+        "userinfo_encrypted_response_enc": client.userinfo_encrypted_response_enc,
+        "authorization_signed_response_alg": client.authorization_signed_response_alg,
+        "authorization_encrypted_response_alg": client.authorization_encrypted_response_alg,
+        "authorization_encrypted_response_enc": client.authorization_encrypted_response_enc
     })
 }
 

@@ -12,7 +12,7 @@ deployment can satisfy.
 | --- | --- | --- |
 | `oauth2-baseline` | General OAuth authorization server profile for authorization code, refresh token, client credentials, revocation, introspection, metadata, and JWKS. | Implemented and covered by local matrix tests |
 | `oauth2-security-bcp` | OAuth baseline constrained by RFC 9700-style security defaults. | Policy defined; enforced through baseline controls and client/profile policy |
-| `oidc-basic-op` | OpenID Connect Authorization Code OP with discovery, ID Token, JWKS, and UserInfo. | OIDF-tested |
+| `oidc-basic-op` | OpenID Connect Authorization Code OP with discovery, ID Token, JWKS, and JSON or per-client protected UserInfo. | OIDF-tested baseline; response crypto has local negative coverage |
 | `oidc-config` | OIDC discovery/server metadata verification. | OIDF-tested |
 | `fapi2-security` | FAPI2 Security profile without message-signing options. | Runtime profile switch implemented; OIDF-tested for recorded matrix variants |
 | `fapi2-message-signing-authz-request` | FAPI2 Security plus signed authorization requests at PAR. | Runtime profile switch implemented; OIDF-tested for recorded matrix variants |
@@ -32,7 +32,7 @@ deployment can satisfy.
 | PKCE | S256 required by default for authorization code requests; explicit no-PKCE legacy compatibility is limited to registered confidential clients and is forbidden for sender-constrained clients |
 | PAR | Supported, not globally required by default |
 | JAR | Supported; unsigned request objects are baseline compatibility only |
-| JARM | Supported as `response_mode=jwt` when negotiated |
+| JARM | Supported as `response_mode=jwt` when negotiated; per-client metadata may select signing and nested JWE protection |
 | RAR | RFC 9396-style `authorization_details` accepted on authorization, PAR, and signed request object inputs only when `ENABLE_AUTHORIZATION_DETAILS=true` |
 | Refresh policy | Rotation by default for refresh-token grants |
 | Token TTLs | Authorization code <= configured `AUTH_CODE_TTL_SECONDS`; access token <= configured `ACCESS_TOKEN_TTL_SECONDS` |
@@ -52,6 +52,24 @@ Required negative tests:
 - disabled, unknown, or malformed `authorization_details`
 - disabled Device Authorization Grant metadata or token dispatch overclaim
 - Token Exchange subject/actor token type, target, scope, and sender-constraint boundary violations
+
+## Per-client OIDC response protection
+
+| Field | Policy |
+| --- | --- |
+| UserInfo default | UTF-8 JSON with `application/json` when no response-protection metadata is registered |
+| Signed UserInfo | `userinfo_signed_response_alg` selects an asymmetric JWS algorithm that the current Keyset snapshot can actually sign; signed claims include `iss` and client-bound `aud` |
+| Encrypted UserInfo | `userinfo_encrypted_response_alg=RSA-OAEP-256` and `userinfo_encrypted_response_enc=A256GCM` require exactly one matching public RSA JWK with `use=enc` and `kid`; signing plus encryption produces a nested JWT |
+| Encrypted JARM | A JARM response is signed first, then encrypted with the same narrow JWE policy when `authorization_encrypted_response_alg` and `authorization_encrypted_response_enc` are registered |
+| Metadata surfaces | Admin client management and RFC 7591/7592 registration persist and return all six response-crypto metadata fields |
+| Failure behavior | Metadata, key lookup, signing, and encryption failures return `server_error`; UserInfo never falls back to JSON and JARM never exposes a code/state in a plain query response |
+
+The server does not fetch remote `jwks_uri` values. Encryption keys are
+registered by value, validated as public material, and selected only when the
+`use` and `alg` policy has exactly one matching non-empty `kid`. UserInfo and
+authorization-response signing algorithms advertised by discovery are the
+same Keyset-snapshot capabilities accepted by registration and used by
+signing execution.
 
 ## Ecosystem Onboarding Surfaces
 
@@ -233,9 +251,9 @@ Required negative tests:
 | Field | Policy |
 | --- | --- |
 | Base | `fapi2-security` |
-| Authorization response | Signed authorization response JWT |
+| Authorization response | Signed authorization response JWT; optionally signed then encrypted according to per-client JWE metadata |
 | Metadata | `authorization_signing_alg_values_supported` must match active signing capability |
-| Failure behavior | Signing failure must not fall back to query response |
+| Failure behavior | Signing, client-policy lookup, or encryption failure must not fall back to a plain query response |
 
 Runtime enforcement is selected with
 `AUTHORIZATION_SERVER_PROFILE=fapi2-message-signing-jarm`. The profile includes
@@ -251,6 +269,7 @@ Required negative tests:
 - wrong `iss` or `aud`
 - missing `state` preservation
 - fallback to plain query after signing failure
+- wrong JWE key, incomplete JWE metadata, or fallback after encryption failure
 
 ## `fapi2-message-signing-introspection`
 

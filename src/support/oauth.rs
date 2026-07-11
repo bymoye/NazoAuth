@@ -2,6 +2,7 @@
 // 只处理 OAuth 语义中的集合判断和授权记录 upsert。
 
 use super::{
+    keyset::reject_private_jwk_members,
     mtls::{certificate_x5c_thumbprint, normalize_sha256_thumbprint},
     prelude::*,
     security::{
@@ -200,6 +201,13 @@ pub(crate) struct ClientMetadata<'a> {
     pub(crate) allow_jwks_without_kid: bool,
     pub(crate) introspection_encrypted_response_alg: Option<&'a str>,
     pub(crate) introspection_encrypted_response_enc: Option<&'a str>,
+    pub(crate) userinfo_signed_response_alg: Option<&'a str>,
+    pub(crate) userinfo_encrypted_response_alg: Option<&'a str>,
+    pub(crate) userinfo_encrypted_response_enc: Option<&'a str>,
+    pub(crate) authorization_signed_response_alg: Option<&'a str>,
+    pub(crate) authorization_encrypted_response_alg: Option<&'a str>,
+    pub(crate) authorization_encrypted_response_enc: Option<&'a str>,
+    pub(crate) response_signing_algorithms: &'a [&'static str],
     pub(crate) mtls_binding: Option<&'a ClientMtlsMetadata>,
 }
 
@@ -218,6 +226,13 @@ pub(crate) fn validate_client_metadata(metadata: ClientMetadata<'_>) -> anyhow::
         allow_jwks_without_kid,
         introspection_encrypted_response_alg,
         introspection_encrypted_response_enc,
+        userinfo_signed_response_alg,
+        userinfo_encrypted_response_alg,
+        userinfo_encrypted_response_enc,
+        authorization_signed_response_alg,
+        authorization_encrypted_response_alg,
+        authorization_encrypted_response_enc,
+        response_signing_algorithms,
         mtls_binding,
     } = metadata;
     if !matches!(client_type, "public" | "confidential") {
@@ -254,6 +269,22 @@ pub(crate) fn validate_client_metadata(metadata: ClientMetadata<'_>) -> anyhow::
         introspection_encrypted_response_alg,
         introspection_encrypted_response_enc,
         jwks,
+    )?;
+    validate_response_crypto_metadata(
+        "userinfo",
+        userinfo_signed_response_alg,
+        userinfo_encrypted_response_alg,
+        userinfo_encrypted_response_enc,
+        jwks,
+        response_signing_algorithms,
+    )?;
+    validate_response_crypto_metadata(
+        "authorization",
+        authorization_signed_response_alg,
+        authorization_encrypted_response_alg,
+        authorization_encrypted_response_enc,
+        jwks,
+        response_signing_algorithms,
     )?;
     if token_endpoint_auth_method == "private_key_jwt" {
         let Some(jwks) = jwks else {
@@ -350,8 +381,14 @@ fn validate_introspection_jwe_metadata(
                     SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS.join(", ")
                 );
             }
-            if !jwks.is_some_and(|jwks| client_jwks_contains_encryption_key(jwks, alg)) {
-                anyhow::bail!("启用 encrypted introspection response 必须配置匹配的 jwks 加密公钥");
+            match jwks.map(|jwks| client_jwks_matching_encryption_key_count(jwks, alg)) {
+                Some(1) => {}
+                Some(2..) => anyhow::bail!(
+                    "启用 encrypted introspection response 必须且只能配置一个匹配的 jwks 加密公钥"
+                ),
+                _ => anyhow::bail!(
+                    "启用 encrypted introspection response 必须配置匹配的 jwks 加密公钥"
+                ),
             }
             Ok(())
         }
@@ -361,15 +398,69 @@ fn validate_introspection_jwe_metadata(
     }
 }
 
-pub(crate) fn client_jwks_contains_encryption_key(jwks: &Value, alg: &str) -> bool {
+fn validate_response_crypto_metadata(
+    response_name: &str,
+    signing_alg: Option<&str>,
+    encryption_alg: Option<&str>,
+    encryption_enc: Option<&str>,
+    jwks: Option<&Value>,
+    response_signing_algorithms: &[&str],
+) -> anyhow::Result<()> {
+    if let Some(signing_alg) = signing_alg
+        && (!SUPPORTED_CLIENT_JWT_SIGNING_ALGS.contains(&signing_alg)
+            || !response_signing_algorithms.contains(&signing_alg))
+    {
+        anyhow::bail!(
+            "{response_name}_signed_response_alg 签名算法必须是当前服务可用算法: {}",
+            response_signing_algorithms.join(", ")
+        );
+    }
+    match (encryption_alg, encryption_enc) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => anyhow::bail!(
+            "{response_name}_encrypted_response_enc 不能在未设置 {response_name}_encrypted_response_alg 时使用"
+        ),
+        (Some(_), None) => anyhow::bail!(
+            "{response_name}_encrypted_response_alg 必须同时配置 {response_name}_encrypted_response_enc"
+        ),
+        (Some(alg), Some(enc)) => {
+            if !SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS.contains(&alg) {
+                anyhow::bail!(
+                    "{response_name}_encrypted_response_alg 必须是 {}",
+                    SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS.join(", ")
+                );
+            }
+            if !SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS.contains(&enc) {
+                anyhow::bail!(
+                    "{response_name}_encrypted_response_enc 必须是 {}",
+                    SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS.join(", ")
+                );
+            }
+            match jwks.map(|jwks| client_jwks_matching_encryption_key_count(jwks, alg)) {
+                Some(1) => {}
+                Some(2..) => anyhow::bail!(
+                    "启用 {response_name} encrypted response 必须且只能配置一个匹配的 jwks 加密公钥"
+                ),
+                _ => anyhow::bail!(
+                    "启用 {response_name} encrypted response 必须配置匹配的 jwks 加密公钥"
+                ),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn client_jwks_matching_encryption_key_count(jwks: &Value, alg: &str) -> usize {
     jwks.get("keys")
         .and_then(Value::as_array)
-        .is_some_and(|keys| {
-            keys.iter().any(|key| {
-                key.get("use").and_then(Value::as_str) == Some("enc")
-                    && key.get("alg").and_then(Value::as_str) == Some(alg)
-                    && valid_rsa_jwe_encryption_key(key)
-            })
+        .map_or(0, |keys| {
+            keys.iter()
+                .filter(|key| {
+                    key.get("use").and_then(Value::as_str) == Some("enc")
+                        && key.get("alg").and_then(Value::as_str) == Some(alg)
+                        && valid_rsa_jwe_encryption_key(key)
+                })
+                .count()
         })
 }
 
@@ -501,18 +592,30 @@ fn validate_client_jwks_with_policy(
         anyhow::bail!("jwks.keys 不能为空");
     }
     let mut seen_kids = std::collections::HashSet::new();
+    let mut signing_key_count = 0usize;
+    let mut kidless_signing_key_count = 0usize;
     for key in keys {
+        let key_object = key
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("jwks 公钥必须是 JSON object"))?;
+        reject_private_jwk_members(key_object)
+            .map_err(|_| anyhow::anyhow!("jwks 不能包含私钥材料或对称密钥材料"))?;
         let kid = key.get("kid").and_then(Value::as_str).unwrap_or_default();
-        if kid.trim().is_empty() && !policy.allow_missing_kid {
-            anyhow::bail!("jwks 公钥必须包含 kid");
+        let public_key_use = key.get("use").and_then(Value::as_str).unwrap_or("sig");
+        if public_key_use == "sig" {
+            signing_key_count += 1;
         }
-        if !kid.trim().is_empty() && !seen_kids.insert(kid) {
+        if kid.trim().is_empty() {
+            if public_key_use == "enc" {
+                anyhow::bail!("jwks 加密公钥必须包含 kid");
+            }
+            if !policy.allow_missing_kid {
+                anyhow::bail!("jwks 公钥必须包含 kid");
+            }
+            kidless_signing_key_count += 1;
+        } else if !seen_kids.insert(kid) {
             anyhow::bail!("jwks kid 不能重复: {kid}");
         }
-        if key.get("d").is_some() {
-            anyhow::bail!("jwks 不能包含私钥材料");
-        }
-        let public_key_use = key.get("use").and_then(Value::as_str).unwrap_or("sig");
         let Some(alg) = key.get("alg").and_then(Value::as_str) else {
             anyhow::bail!("jwks 公钥必须声明 alg");
         };
@@ -540,6 +643,9 @@ fn validate_client_jwks_with_policy(
             }
             _ => anyhow::bail!("jwks 公钥 use 必须为 sig 或 enc"),
         }
+    }
+    if kidless_signing_key_count > 0 && signing_key_count != 1 {
+        anyhow::bail!("省略 kid 时 jwks 必须且只能包含一个签名公钥");
     }
     Ok(())
 }

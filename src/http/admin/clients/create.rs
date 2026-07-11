@@ -53,6 +53,18 @@ pub(crate) struct CreateClientRequest {
     pub(crate) introspection_encrypted_response_alg: Option<String>,
     #[serde(default)]
     pub(crate) introspection_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub(crate) userinfo_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) userinfo_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) userinfo_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub(crate) authorization_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) authorization_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub(crate) authorization_encrypted_response_enc: Option<String>,
     #[serde(default, skip_deserializing)]
     pub(crate) allow_jwks_without_kid: bool,
 }
@@ -95,6 +107,12 @@ pub(crate) struct PreparedClientInsert {
     pub(crate) jwks: Option<Value>,
     pub(crate) introspection_encrypted_response_alg: Option<String>,
     pub(crate) introspection_encrypted_response_enc: Option<String>,
+    pub(crate) userinfo_signed_response_alg: Option<String>,
+    pub(crate) userinfo_encrypted_response_alg: Option<String>,
+    pub(crate) userinfo_encrypted_response_enc: Option<String>,
+    pub(crate) authorization_signed_response_alg: Option<String>,
+    pub(crate) authorization_encrypted_response_alg: Option<String>,
+    pub(crate) authorization_encrypted_response_enc: Option<String>,
     pub(crate) issued_secret: Option<String>,
     pub(crate) client_secret_hash: Option<String>,
     pub(crate) registration_access_token_blake3: Option<String>,
@@ -159,11 +177,16 @@ pub(crate) async fn insert_client_row(
     payload: CreateClientRequest,
 ) -> Result<(ClientRow, Option<String>), InsertClientError> {
     let pairwise_subject_secret = state.settings.pairwise_subject_secret.clone();
+    let response_signing_algorithms = state
+        .keyset
+        .snapshot()
+        .response_signing_alg_values_supported();
     let prepared = prepare_client_insert_with_secret_pepper(
         payload,
         pairwise_subject_secret.as_deref(),
         &state.settings.client_secret_pepper,
         &state.settings.issuer,
+        &response_signing_algorithms,
     )
     .await?;
     let issued_secret = prepared.issued_secret.clone();
@@ -194,8 +217,9 @@ pub(crate) async fn prepare_client_insert_with_secret_pepper(
     pairwise_subject_secret: Option<&str>,
     client_secret_pepper: &str,
     issuer: &str,
+    response_signing_algorithms: &[&'static str],
 ) -> Result<PreparedClientInsert, InsertClientError> {
-    validate_client_payload(&payload)
+    validate_client_payload(&payload, response_signing_algorithms)
         .map_err(|error| InsertClientError::InvalidRequest(error.to_string()))?;
     let (issued_secret, secret_hash) = issue_client_secret(
         &payload.client_type,
@@ -249,6 +273,22 @@ pub(crate) async fn prepare_client_insert_with_secret_pepper(
         ),
         introspection_encrypted_response_enc: trim_optional_string(
             payload.introspection_encrypted_response_enc,
+        ),
+        userinfo_signed_response_alg: trim_optional_string(payload.userinfo_signed_response_alg),
+        userinfo_encrypted_response_alg: trim_optional_string(
+            payload.userinfo_encrypted_response_alg,
+        ),
+        userinfo_encrypted_response_enc: trim_optional_string(
+            payload.userinfo_encrypted_response_enc,
+        ),
+        authorization_signed_response_alg: trim_optional_string(
+            payload.authorization_signed_response_alg,
+        ),
+        authorization_encrypted_response_alg: trim_optional_string(
+            payload.authorization_encrypted_response_alg,
+        ),
+        authorization_encrypted_response_enc: trim_optional_string(
+            payload.authorization_encrypted_response_enc,
         ),
         issued_secret,
         client_secret_hash: secret_hash,
@@ -324,6 +364,17 @@ pub(crate) async fn insert_prepared_client(
                 .eq(&prepared.introspection_encrypted_response_alg),
             oauth_clients::introspection_encrypted_response_enc
                 .eq(&prepared.introspection_encrypted_response_enc),
+            oauth_clients::userinfo_signed_response_alg.eq(&prepared.userinfo_signed_response_alg),
+            oauth_clients::userinfo_encrypted_response_alg
+                .eq(&prepared.userinfo_encrypted_response_alg),
+            oauth_clients::userinfo_encrypted_response_enc
+                .eq(&prepared.userinfo_encrypted_response_enc),
+            oauth_clients::authorization_signed_response_alg
+                .eq(&prepared.authorization_signed_response_alg),
+            oauth_clients::authorization_encrypted_response_alg
+                .eq(&prepared.authorization_encrypted_response_alg),
+            oauth_clients::authorization_encrypted_response_enc
+                .eq(&prepared.authorization_encrypted_response_enc),
             oauth_clients::is_active.eq(true),
         ))
         .returning(ClientRow::as_returning())
@@ -332,7 +383,10 @@ pub(crate) async fn insert_prepared_client(
 }
 
 /// 校验客户端注册请求的协议约束。
-fn validate_client_payload(payload: &CreateClientRequest) -> anyhow::Result<()> {
+fn validate_client_payload(
+    payload: &CreateClientRequest,
+    response_signing_algorithms: &[&'static str],
+) -> anyhow::Result<()> {
     validate_pkce_compatibility_policy(
         payload.allow_authorization_code_without_pkce,
         &payload.client_type,
@@ -356,6 +410,17 @@ fn validate_client_payload(payload: &CreateClientRequest) -> anyhow::Result<()> 
         introspection_encrypted_response_enc: payload
             .introspection_encrypted_response_enc
             .as_deref(),
+        userinfo_signed_response_alg: payload.userinfo_signed_response_alg.as_deref(),
+        userinfo_encrypted_response_alg: payload.userinfo_encrypted_response_alg.as_deref(),
+        userinfo_encrypted_response_enc: payload.userinfo_encrypted_response_enc.as_deref(),
+        authorization_signed_response_alg: payload.authorization_signed_response_alg.as_deref(),
+        authorization_encrypted_response_alg: payload
+            .authorization_encrypted_response_alg
+            .as_deref(),
+        authorization_encrypted_response_enc: payload
+            .authorization_encrypted_response_enc
+            .as_deref(),
+        response_signing_algorithms,
         mtls_binding: Some(&ClientMtlsMetadata {
             tls_client_auth_subject_dn: payload.tls_client_auth_subject_dn.clone(),
             tls_client_auth_cert_sha256: payload.tls_client_auth_cert_sha256.clone(),
