@@ -176,36 +176,45 @@ fn authorization_response_mode_rejects_unknown_value() {
 fn requested_acr_selects_supported_query_acr_value() {
     let mut q = HashMap::new();
     q.insert("acr_values".to_owned(), "2 1".to_owned());
-    assert_eq!(requested_acr(&q, None).as_deref(), Some("1"));
+    assert_eq!(requested_acr(&q, None), Ok(Some("1".to_owned())));
 }
 
 #[test]
 fn requested_acr_returns_none_when_acr_values_are_all_empty() {
     let mut q = HashMap::new();
     q.insert("acr_values".to_owned(), "   ".to_owned());
-    assert_eq!(requested_acr(&q, None), None);
+    assert_eq!(requested_acr(&q, None), Ok(None));
 }
 
 #[test]
-fn requested_acr_ignores_claims_acr() {
+fn requested_acr_ignores_unsupported_voluntary_claims_acr() {
     let q = HashMap::new();
-    assert_eq!(requested_acr(&q, Some("phr".to_owned())), None);
+    let claim = OidcClaimRequest {
+        name: "acr".to_owned(),
+        essential: false,
+        value: Some(json!("phr")),
+        values: Vec::new(),
+    };
+    assert_eq!(requested_acr(&q, Some(&claim)), Ok(None));
 }
 
 #[test]
 fn requested_acr_does_not_trust_query_or_claims() {
     let mut q = HashMap::new();
     q.insert("acr_values".to_owned(), "phr".to_owned());
-    assert_eq!(
-        requested_acr(&q, Some("urn:mace:incommon:iap:bronze".to_owned())),
-        None
-    );
+    let claim = OidcClaimRequest {
+        name: "acr".to_owned(),
+        essential: false,
+        value: Some(json!("urn:mace:incommon:iap:bronze")),
+        values: Vec::new(),
+    };
+    assert_eq!(requested_acr(&q, Some(&claim)), Ok(None));
 }
 
 #[test]
 fn requested_acr_returns_none_when_both_absent() {
     let q = HashMap::new();
-    assert_eq!(requested_acr(&q, None), None);
+    assert_eq!(requested_acr(&q, None), Ok(None));
 }
 
 #[test]
@@ -365,47 +374,86 @@ fn requested_claims_parses_id_token_claims() {
 }
 
 #[test]
-fn requested_claims_validates_acr_claim_with_value_without_returning_it() {
+fn requested_claims_preserves_acr_claim_with_value() {
     let mut q = HashMap::new();
     q.insert(
         "claims".to_owned(),
         r#"{"id_token":{"acr":{"value":"phr"}}}"#.to_owned(),
     );
     let result = requested_claims(&q).unwrap();
-    assert_eq!(result.acr, None);
+    assert_eq!(
+        result.acr.and_then(|request| request.value),
+        Some(json!("phr"))
+    );
 }
 
 #[test]
-fn requested_claims_validates_acr_claim_with_values_without_returning_them() {
+fn requested_acr_satisfies_supported_essential_claim_request() {
+    let mut q = HashMap::new();
+    q.insert(
+        "claims".to_owned(),
+        r#"{"id_token":{"acr":{"essential":true,"value":"1"}}}"#.to_owned(),
+    );
+    let claims = requested_claims(&q).expect("claims request should parse");
+
+    assert_eq!(
+        requested_acr(&q, claims.acr.as_ref()),
+        Ok(Some("1".to_owned()))
+    );
+}
+
+#[test]
+fn requested_acr_rejects_unsupported_essential_claim_request() {
+    let mut q = HashMap::new();
+    q.insert(
+        "claims".to_owned(),
+        r#"{"id_token":{"acr":{"essential":true,"value":"phr"}}}"#.to_owned(),
+    );
+    let claims = requested_claims(&q).expect("claims request should parse");
+
+    assert_eq!(requested_acr(&q, claims.acr.as_ref()), Err(()));
+}
+
+#[test]
+fn requested_claims_preserves_acr_claim_with_values() {
     let mut q = HashMap::new();
     q.insert(
         "claims".to_owned(),
         r#"{"id_token":{"acr":{"values":["phr","phrh"]}}}"#.to_owned(),
     );
     let result = requested_claims(&q).unwrap();
-    assert_eq!(result.acr, None);
+    assert_eq!(
+        result.acr.expect("ACR request should be preserved").values,
+        vec![json!("phr"), json!("phrh")]
+    );
 }
 
 #[test]
-fn requested_claims_ignores_blank_acr_value() {
+fn requested_claims_preserves_blank_acr_value_for_satisfaction_decision() {
     let mut q = HashMap::new();
     q.insert(
         "claims".to_owned(),
         r#"{"id_token":{"acr":{"value":"   "}}}"#.to_owned(),
     );
     let result = requested_claims(&q).unwrap();
-    assert_eq!(result.acr, None);
+    assert_eq!(
+        result.acr.and_then(|request| request.value),
+        Some(json!("   "))
+    );
 }
 
 #[test]
-fn requested_claims_validates_acr_values_without_returning_them() {
+fn requested_claims_preserves_mixed_acr_values() {
     let mut q = HashMap::new();
     q.insert(
         "claims".to_owned(),
         r#"{"id_token":{"acr":{"values":["  ","phr","phrh"]}}}"#.to_owned(),
     );
     let result = requested_claims(&q).unwrap();
-    assert_eq!(result.acr, None);
+    assert_eq!(
+        result.acr.expect("ACR request should be preserved").values,
+        vec![json!("  "), json!("phr"), json!("phrh")]
+    );
 }
 
 #[test]

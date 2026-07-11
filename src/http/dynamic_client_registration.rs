@@ -150,14 +150,17 @@ pub(crate) async fn dynamic_client_registration(
         Ok(prepared_insert) => {
             let issued_secret = prepared_insert.issued_secret.clone();
             match crate::http::admin::insert_prepared_client_row(&state, &prepared_insert).await {
-                Ok(client) => dynamic_registration_created_response(
-                    &client,
-                    &response_types,
-                    issued_secret,
-                    &state.settings.issuer,
-                    &registration_access_token,
-                    Utc::now(),
-                ),
+                Ok(client) => {
+                    audit_dynamic_client_event("dynamic_client_registered", &client, &req, &state);
+                    dynamic_registration_created_response(
+                        &client,
+                        &response_types,
+                        issued_secret,
+                        &state.settings.issuer,
+                        &registration_access_token,
+                        Utc::now(),
+                    )
+                }
                 Err(crate::http::admin::InsertClientError::InvalidRequest(message)) => {
                     dynamic_registration_error_response(map_insert_error(message))
                 }
@@ -220,6 +223,7 @@ pub(crate) async fn client_configuration_get(
         Ok(client) => client,
         Err(response) => return response,
     };
+    audit_dynamic_client_event("dynamic_client_configuration_read", &client, &req, &state);
 
     json_response_no_store(dynamic_registration_response(
         &client,
@@ -284,6 +288,12 @@ pub(crate) async fn client_configuration_put(
         Ok(client) => client,
         Err(response) => return response,
     };
+    audit_dynamic_client_event(
+        "dynamic_client_configuration_updated",
+        &client,
+        &req,
+        &state,
+    );
 
     json_response_no_store(dynamic_registration_response(
         &client,
@@ -314,6 +324,7 @@ pub(crate) async fn client_configuration_delete(
     if let Err(response) = deactivate_dynamic_client(&state, &current).await {
         return response;
     }
+    audit_dynamic_client_event("dynamic_client_deleted", &current, &req, &state);
 
     empty_response_no_store(StatusCode::NO_CONTENT)
 }
@@ -586,6 +597,37 @@ fn response_types_from_client(client: &ClientRow) -> Vec<String> {
     }
 }
 
+fn audit_dynamic_client_event(
+    event: &str,
+    client: &ClientRow,
+    req: &HttpRequest,
+    state: &AppState,
+) {
+    audit_event(
+        event,
+        dynamic_client_audit_fields(client, blake3_hex(&client_ip(req, &state.settings))),
+    );
+}
+
+fn dynamic_client_audit_fields(
+    client: &ClientRow,
+    source_ip_hash: String,
+) -> serde_json::Map<String, Value> {
+    audit_fields(&[
+        ("client_id", json!(client.client_id)),
+        ("client_type", json!(client.client_type)),
+        (
+            "grant_types",
+            json!(json_array_to_strings(&client.grant_types)),
+        ),
+        (
+            "token_endpoint_auth_method",
+            json!(client.token_endpoint_auth_method),
+        ),
+        ("source_ip_hash", json!(source_ip_hash)),
+    ])
+}
+
 pub(crate) fn prepare_dynamic_client_registration(
     request: DynamicClientRegistrationRequest,
     defaults: DynamicRegistrationDefaults<'_>,
@@ -791,7 +833,7 @@ impl PreparedDynamicClientRegistration {
             "client_secret_basic" | "client_secret_post"
         );
         let allow_authorization_code_without_pkce =
-            self.allows_non_pkce_authorization_code_compatibility(secret_auth_method);
+            self.client_type == "confidential" && !self.require_dpop_bound_tokens;
         CreateClientRequest {
             client_name: self.client_name.clone(),
             client_type: self.client_type.clone(),
@@ -827,16 +869,6 @@ impl PreparedDynamicClientRegistration {
 
     fn into_create_client_request(self) -> CreateClientRequest {
         self.to_create_client_request()
-    }
-
-    fn allows_non_pkce_authorization_code_compatibility(&self, secret_auth_method: bool) -> bool {
-        self.client_type == "confidential"
-            && secret_auth_method
-            && !self.require_dpop_bound_tokens
-            && self
-                .grant_types
-                .iter()
-                .any(|grant| grant == "authorization_code")
     }
 }
 

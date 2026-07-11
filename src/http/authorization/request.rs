@@ -317,6 +317,13 @@ async fn authorize_request(
                 .await;
         }
     };
+    let acr = match requested_acr(q, requested_claims.acr.as_ref()) {
+        Ok(acr) => acr,
+        Err(()) => {
+            return authorization_oauth_error_redirect(&state, &redirect_uri, "invalid_request", q)
+                .await;
+        }
+    };
 
     let session = match current_session(&state, &req).await {
         Ok(session) => session,
@@ -450,7 +457,7 @@ async fn authorize_request(
         auth_time: session.auth_time,
         amr: session.amr,
         oidc_sid: Some(session.oidc_sid),
-        acr: requested_acr(q, requested_claims.acr),
+        acr,
         userinfo_claims: claim_request_names(&requested_claims.userinfo),
         userinfo_claim_requests: requested_claims.userinfo,
         id_token_claims: claim_request_names(&requested_claims.id_token),
@@ -578,7 +585,19 @@ pub(crate) async fn authorization_response_redirect(
     state: &AppState,
     input: AuthorizationResponseRedirect<'_>,
 ) -> HttpResponse {
-    if input.response_mode == Some("jwt") && !input.client_id.trim().is_empty() {
+    let signed_response_required = state
+        .settings
+        .authorization_server_profile
+        .requires_signed_authorization_response();
+    if input.response_mode == Some("jwt") || signed_response_required {
+        if input.client_id.trim().is_empty() {
+            tracing::warn!("cannot build signed authorization response without client_id");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "authorization response signing failed.",
+            );
+        }
         return authorization_response_jwt_result(
             input.redirect_uri,
             make_authorization_response_jwt(

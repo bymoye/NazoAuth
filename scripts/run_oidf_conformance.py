@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import http.client
 import json
 import os
 import re
@@ -976,7 +977,7 @@ def oidf_api_request(
                 break
             time.sleep(attempt * 2)
             continue
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, http.client.RemoteDisconnected) as exc:
             last_error = exc
             if attempt == attempts:
                 fail(f"OIDF API {method} {path} failed: {exc}")

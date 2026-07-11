@@ -128,26 +128,26 @@ async fn live_reauth_nonce_state() -> Option<AppState> {
 #[test]
 fn requested_acr_selects_supported_request_value() {
     assert_eq!(
-        requested_acr(&query(&[("acr_values", "2 1")]), None).as_deref(),
-        Some("1")
+        requested_acr(&query(&[("acr_values", "2 1")]), None),
+        Ok(Some("1".to_owned()))
     );
 }
 
 #[test]
 fn requested_acr_ignores_unsupported_request_values() {
+    let claim = OidcClaimRequest {
+        name: "acr".to_owned(),
+        essential: false,
+        value: Some(json!("urn:claims")),
+        values: Vec::new(),
+    };
     assert_eq!(
-        requested_acr(
-            &query(&[("acr_values", "urn:one urn:two")]),
-            Some("urn:claims".to_owned()),
-        ),
-        None
+        requested_acr(&query(&[("acr_values", "urn:one urn:two")]), Some(&claim),),
+        Ok(None)
     );
     assert_eq!(
-        requested_acr(
-            &query(&[("acr_values", "   ")]),
-            Some("urn:claims".to_owned())
-        ),
-        None
+        requested_acr(&query(&[("acr_values", "   ")]), Some(&claim)),
+        Ok(None)
     );
 }
 
@@ -163,7 +163,10 @@ fn claims_parameter_extracts_supported_user_claim_names() {
     assert!(requested.userinfo[0].essential);
     assert_eq!(claim_request_names(&requested.id_token), vec!["email"]);
     assert!(requested.id_token[0].essential);
-    assert_eq!(requested.acr, None);
+    assert_eq!(
+        requested.acr.and_then(|request| request.value),
+        Some(json!("urn:acr:1"))
+    );
     assert!(requested.auth_time);
 }
 
@@ -199,7 +202,13 @@ fn claims_parameter_accepts_value_values_and_null_requests() {
         vec!["email_verified"]
     );
     assert!(!requested.id_token[0].essential);
-    assert_eq!(requested.acr, None);
+    assert_eq!(
+        requested
+            .acr
+            .expect("ACR request should be preserved")
+            .values,
+        vec![json!("urn:acr:2")]
+    );
     assert!(!requested.auth_time);
 }
 
@@ -253,14 +262,20 @@ fn malformed_claims_parameter_is_invalid() {
 }
 
 #[test]
-fn claims_parameter_does_not_return_requested_acr_values() {
+fn claims_parameter_preserves_requested_acr_values() {
     let requested = requested_claims(&query(&[(
         "claims",
         r#"{"id_token":{"acr":{"values":["","urn:acr:2","urn:acr:3"]}}}"#,
     )]))
     .unwrap();
 
-    assert_eq!(requested.acr, None);
+    assert_eq!(
+        requested
+            .acr
+            .expect("ACR request should be preserved")
+            .values,
+        vec![json!(""), json!("urn:acr:2"), json!("urn:acr:3")]
+    );
 }
 
 #[test]

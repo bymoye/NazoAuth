@@ -68,9 +68,8 @@ pub(crate) fn cors_admin(settings: &Settings) -> Cors {
 
 pub(crate) fn cors_scim(settings: &Settings) -> Cors {
     let cors = Cors::default()
-        .allowed_methods(vec!["GET", "POST", "PATCH", "DELETE"])
+        .allowed_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE"])
         .allowed_headers(vec![header::AUTHORIZATION, header::CONTENT_TYPE])
-        .supports_credentials()
         .max_age(3600);
     apply_allowed_origins(cors, settings)
 }

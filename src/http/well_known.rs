@@ -97,6 +97,7 @@ fn authorization_server_metadata(settings: &Settings, keyset: &Keyset) -> Value 
         settings.authorization_server_profile,
         authorization_signing_algs.as_slice(),
     );
+    let response_modes = response_modes_supported(settings.authorization_server_profile);
     let mut grant_types = vec![
         "authorization_code",
         "refresh_token",
@@ -125,7 +126,7 @@ fn authorization_server_metadata(settings: &Settings, keyset: &Keyset) -> Value 
         "userinfo_endpoint": format!("{issuer}/userinfo"),
         "jwks_uri": format!("{issuer}/jwks.json"),
         "response_types_supported": ["code"],
-        "response_modes_supported": ["query", "jwt"],
+        "response_modes_supported": response_modes,
         "subject_types_supported": match (&settings.pairwise_subject_secret, &settings.subject_type) {
             (None, _) => vec!["public"],
             (Some(_), SubjectType::Pairwise) => vec!["pairwise"],
@@ -271,6 +272,13 @@ fn request_object_signing_alg_values_supported(
         return REQUEST_OBJECT_SIGNING_ALGS.to_vec();
     }
     BASELINE_REQUEST_OBJECT_SIGNING_ALGS.to_vec()
+}
+
+fn response_modes_supported(profile: AuthorizationServerProfile) -> Vec<&'static str> {
+    if profile.requires_signed_authorization_response() {
+        return vec!["jwt"];
+    }
+    vec!["query", "jwt"]
 }
 
 fn active_signing_alg_values_supported(keyset: &Keyset) -> Vec<&'static str> {

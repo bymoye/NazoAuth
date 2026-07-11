@@ -1,7 +1,25 @@
 //! 会话用户与权限解析。
 // 只处理从请求 Cookie 到当前用户/管理员身份的解析。
 
-use super::{login_required_response, oauth_error, prelude::*, valkey_del, valkey_set_ex};
+#[cfg(test)]
+use super::valkey_set_ex;
+use super::{
+    login_required_response, oauth_error, prelude::*, random_urlsafe_token, valkey_del,
+    valkey_eval_string,
+};
+
+const ROTATE_SESSION_SCRIPT: &str = r#"
+local current = redis.call('GET', KEYS[1])
+if current ~= ARGV[1] then
+  return 'conflict'
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return 'collision'
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+redis.call('DEL', KEYS[1])
+return 'ok'
+"#;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SessionPayload {
@@ -19,6 +37,11 @@ pub(crate) struct CurrentSession {
     pub(crate) auth_time: i64,
     pub(crate) amr: Vec<String>,
     pub(crate) oidc_sid: String,
+}
+
+pub(crate) struct SessionRotation {
+    pub(crate) session_id: String,
+    pub(crate) csrf_token: String,
 }
 
 pub(crate) async fn current_user(
@@ -96,7 +119,7 @@ pub(crate) async fn complete_mfa_session(
     state: &AppState,
     req: &HttpRequest,
     method: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<SessionRotation>> {
     record_mfa_step_up(state, req, method, true).await
 }
 
@@ -104,7 +127,7 @@ pub(crate) async fn step_up_current_session(
     state: &AppState,
     req: &HttpRequest,
     method: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<SessionRotation>> {
     record_mfa_step_up(state, req, method, false).await
 }
 
@@ -113,13 +136,13 @@ async fn record_mfa_step_up(
     req: &HttpRequest,
     method: &str,
     require_pending_mfa: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<SessionRotation>> {
     let Some(sid) = cookie_value(req, &state.settings.session_cookie_name) else {
-        return Ok(false);
+        return Ok(None);
     };
     let session_key = format!("oauth:session:{sid}");
     let Some(raw) = valkey_get(&state.valkey, &session_key).await? else {
-        return Ok(false);
+        return Ok(None);
     };
     let now = Utc::now().timestamp();
     let mut payload = match serde_json::from_str::<SessionPayload>(&raw) {
@@ -129,11 +152,11 @@ async fn record_mfa_step_up(
         {
             payload
         }
-        Ok(_) => return Ok(false),
+        Ok(_) => return Ok(None),
         Err(error) => {
             tracing::warn!(%error, "MFA session payload is malformed");
             let _ = valkey_del(&state.valkey, session_key).await;
-            return Ok(false);
+            return Ok(None);
         }
     };
     payload.pending_mfa = false;
@@ -141,14 +164,24 @@ async fn record_mfa_step_up(
     add_amr(&mut payload.amr, method);
     add_amr(&mut payload.amr, "mfa");
     let body = serde_json::to_string(&payload)?;
-    valkey_set_ex(
+    let new_session_id = random_urlsafe_token();
+    let new_session_key = format!("oauth:session:{new_session_id}");
+    let result = valkey_eval_string(
         &state.valkey,
-        session_key,
-        body,
-        state.settings.session_ttl_seconds,
+        ROTATE_SESSION_SCRIPT,
+        vec![session_key, new_session_key],
+        vec![raw, body, state.settings.session_ttl_seconds.to_string()],
     )
     .await?;
-    Ok(true)
+    match result.as_str() {
+        "ok" => Ok(Some(SessionRotation {
+            session_id: new_session_id,
+            csrf_token: random_urlsafe_token(),
+        })),
+        "conflict" => Ok(None),
+        "collision" => anyhow::bail!("generated MFA session identifier already exists"),
+        unexpected => anyhow::bail!("unexpected MFA session rotation response: {unexpected}"),
+    }
 }
 
 async fn session_from_payload(

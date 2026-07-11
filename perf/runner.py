@@ -47,6 +47,19 @@ PROFILES: dict[str, list[str]] = {
     ],
     "fapi2-high-security": [
         "fapi2_par_jar_private_key_jwt_dpop",
+        "fapi2_logged_in_high_security",
+    ],
+    "extended-capacity": [
+        "mtls_client_credentials",
+        "par_signed_request_object",
+        "introspect_opaque_refresh_token",
+        "authorize_par_session",
+        "revoke_refresh_token",
+        "metadata_jwks",
+        "ciba_private_key_jwt_dpop_poll",
+        "same_user_refresh_token_rotation",
+        "same_user_introspect_opaque_refresh_token",
+        "same_user_authorize_par_session",
     ],
     "capacity": [
         "token_only_client_credentials",
@@ -54,6 +67,7 @@ PROFILES: dict[str, list[str]] = {
         "oidc_logged_in_authorization_code",
         "oidc_refresh_only",
         "fapi2_full_security",
+        "fapi2_logged_in_high_security",
     ],
 }
 
@@ -72,6 +86,8 @@ VECTOR_OFFSET_MULTIPLIERS = {
     "oidc_logged_in_authorization_code": 9,
     "oidc_refresh_only": 10,
     "fapi2_full_security": 11,
+    "fapi2_logged_in_high_security": 12,
+    "revoke_refresh_token": 13,
 }
 VECTORIZED_SCENARIOS = set(VECTOR_OFFSET_MULTIPLIERS)
 
@@ -335,18 +351,52 @@ def k6_http_reqs(summary: dict[str, Any]) -> int:
     return int(values.get("count", 0))
 
 
+def k6_metric_values(summary: dict[str, Any], metric_name: str) -> dict[str, Any]:
+    metric = summary.get("metrics", {}).get(metric_name, {})
+    return metric.get("values", metric)
+
+
+def k6_metric_ratio(summary: dict[str, Any], metric_name: str, default: float) -> float:
+    values = k6_metric_values(summary, metric_name)
+    return metric_ratio(values, default)
+
+
+def metric_ratio(values: dict[str, Any], default: float) -> float:
+    if "rate" in values:
+        return float(values["rate"])
+    if "value" in values:
+        return float(values["value"])
+    return default
+
+
+def k6_check_rate(summary: dict[str, Any]) -> float:
+    return k6_metric_ratio(summary, "checks", 0)
+
+
+def k6_error_rate(summary: dict[str, Any]) -> float:
+    return k6_metric_ratio(summary, "http_req_failed", 0)
+
+
+def k6_protocol_failed(summary: dict[str, Any]) -> bool:
+    return k6_error_rate(summary) >= 0.01 or k6_check_rate(summary) < 0.99
+
+
 def k6_brief(summary: dict[str, Any]) -> dict[str, Any]:
     metrics = summary.get("metrics", {})
     duration_metric = metrics.get("http_req_duration", {})
     failed_metric = metrics.get("http_req_failed", {})
     reqs_metric = metrics.get("http_reqs", {})
+    dropped_metric = metrics.get("dropped_iterations", {})
     duration = duration_metric.get("values", duration_metric)
     failed = failed_metric.get("values", failed_metric)
     reqs = reqs_metric.get("values", reqs_metric)
+    dropped = dropped_metric.get("values", dropped_metric)
     return {
         "http_reqs": int(reqs.get("count", 0)),
         "rps": round(float(reqs.get("rate", 0)), 3),
-        "error_rate": round(float(failed.get("rate", 0)), 6),
+        "error_rate": round(k6_error_rate(summary), 6),
+        "dropped_iterations": int(dropped.get("count", 0)),
+        "dropped_iterations_rate": round(float(dropped.get("rate", 0)), 3),
         "latency_ms": {
             "p50": round(float(duration.get("med", 0)), 3),
             "p95": round(float(duration.get("p(95)", 0)), 3),
@@ -399,7 +449,7 @@ def k6_step_brief(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "step": step,
                 "http_reqs": request_count,
                 "rps": round(float(request.get("rate", 0)), 3),
-                "error_rate": round(float(failed.get("rate", 0)), 6),
+                "error_rate": round(metric_ratio(failed, 0), 6),
                 "latency_ms": {
                     "p50": round(float(duration.get("med", 0)), 3),
                     "p95": round(float(duration.get("p(95)", 0)), 3),
@@ -423,6 +473,11 @@ def run_scenario(profile: str, scenario: str) -> dict[str, Any]:
     command = [
         "k6",
         "run",
+        *(
+            ["--log-output", "file=/dev/null"]
+            if os.environ.get("PERF_EXECUTOR") == "constant-arrival-rate"
+            else []
+        ),
         "--summary-export",
         str(k6_summary_path),
         "/perf/k6/oauth.js",
@@ -431,8 +486,8 @@ def run_scenario(profile: str, scenario: str) -> dict[str, Any]:
     with StatsSampler() as sampler:
         completed = subprocess.run(command, env=env, text=True)
     elapsed = time.perf_counter() - started
-    if completed.returncode != 0:
-        raise RuntimeError(f"k6 scenario failed: {profile}/{scenario}")
+    if not k6_summary_path.exists():
+        raise RuntimeError(f"k6 scenario failed before writing summary: {profile}/{scenario}")
     k6_summary = json.loads(k6_summary_path.read_text(encoding="utf-8"))
     app_after = get_app_metrics()
     pg = pg_stats()
@@ -444,11 +499,25 @@ def run_scenario(profile: str, scenario: str) -> dict[str, Any]:
     db_pool_after = app_after["db_pool"]
     acquire_delta = db_pool_after["acquire_count"] - db_pool_before["acquire_count"]
     wait_delta = db_pool_after["wait_nanos_total"] - db_pool_before["wait_nanos_total"]
+    k6 = k6_brief(k6_summary)
+    target_rate = int(os.environ.get("PERF_RATE", "0") or 0)
+    target_miss = (
+        os.environ.get("PERF_EXECUTOR") == "constant-arrival-rate"
+        and target_rate > 0
+        and (k6["rps"] < target_rate * 0.99 or k6["dropped_iterations"] > 0)
+    )
+    status = "passed"
+    if completed.returncode != 0:
+        status = "threshold_failed"
+    elif target_miss:
+        status = "target_miss"
     combined = {
         "profile": profile,
         "scenario": scenario,
         "elapsed_seconds": round(elapsed, 3),
-        "k6": k6_brief(k6_summary),
+        "status": status,
+        "k6_exit_code": completed.returncode,
+        "k6": k6,
         "steps": k6_step_brief(k6_summary),
         "postgres": {
             **pg,
@@ -464,15 +533,19 @@ def run_scenario(profile: str, scenario: str) -> dict[str, Any]:
         "containers": sampler.summary(),
         "load_model": {
             "executor": os.environ.get("PERF_EXECUTOR", "") or "default",
-            "target_rate": int(os.environ.get("PERF_RATE", "0") or 0),
+            "target_rate": target_rate,
             "duration": os.environ.get("PERF_DURATION", "20s"),
             "app_replicas": int(os.environ.get("PERF_APP_REPLICAS", str(app_after.get("instances", 1))) or 1),
             "observed_app_instances": app_after.get("instances", 1),
         },
     }
     combined_path.write_text(json.dumps(combined, indent=2), encoding="utf-8")
+    is_capacity_run = os.environ.get("PERF_EXECUTOR") == "constant-arrival-rate"
+    if completed.returncode != 0 and k6_protocol_failed(k6_summary) and not is_capacity_run:
+        raise RuntimeError(f"k6 scenario failed protocol checks: {profile}/{scenario}")
     print(
         f"{profile}/{scenario}: "
+        f"status={combined['status']} "
         f"rps={combined['k6']['rps']} "
         f"p95={combined['k6']['latency_ms']['p95']}ms "
         f"errors={combined['k6']['error_rate']} "
@@ -679,16 +752,18 @@ def ensure_vector_capacity() -> None:
             minimum = VECTOR_STRIDE_FLOOR
         elif scenario == "oidc_refresh_only":
             max_vus = int(os.environ.get("PERF_MAX_VUS") or os.environ.get("PERF_PRE_ALLOCATED_VUS") or 64)
-            minimum = offset + max(max_vus, VECTOR_STRIDE_FLOOR)
+            minimum = offset + max(max_vus + 1, VECTOR_STRIDE_FLOOR)
         else:
-            minimum = offset + max(rate * duration, VECTOR_STRIDE_FLOOR)
+            scheduled_iterations = rate * duration
+            boundary_cushion = max(rate, 1)
+            minimum = offset + max(scheduled_iterations + boundary_cushion, VECTOR_STRIDE_FLOOR)
     else:
         minimum = max(iterations, VECTOR_STRIDE_FLOOR) * VECTOR_STRIDE_MULTIPLIER
     if requested < minimum:
         os.environ["PERF_VECTOR_COUNT"] = str(minimum)
         print(
             f"PERF_VECTOR_COUNT={requested} is below the replay-safe minimum; "
-            f"using {minimum} signed vectors"
+            f"using {minimum} flow vectors"
         )
 
 

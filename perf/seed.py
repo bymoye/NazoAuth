@@ -7,15 +7,15 @@ import hmac
 import json
 import os
 import secrets
-import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import psycopg
+import redis
+from blake3 import blake3
 from argon2 import PasswordHasher
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding, utils
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from psycopg.types.json import Jsonb
 
@@ -29,24 +29,13 @@ CLIENT_SECRET = "PerfClientSecret-2026!"
 CLIENT_SECRET_PEPPER = os.environ.get(
     "CLIENT_SECRET_PEPPER", "perf-client-secret-pepper-000000000000000001"
 )
+REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", "2592000"))
 MTLS_THUMBPRINT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REDIRECT_URI = "https://client.example/callback"
 CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-VECTOR_STRIDE_FLOOR = 100
-VECTOR_OFFSET_MULTIPLIERS = {
-    "par_signed_request_object": 0,
-    "refresh_token_rotation": 1,
-    "introspect_opaque_refresh_token": 2,
-    "authorize_par_session": 3,
-    "fapi2_par_jar_private_key_jwt_dpop": 4,
-    "same_user_refresh_token_rotation": 5,
-    "same_user_introspect_opaque_refresh_token": 6,
-    "same_user_authorize_par_session": 7,
-    "oidc_cold_login_refresh": 8,
-    "oidc_logged_in_authorization_code": 9,
-    "oidc_refresh_only": 10,
-    "fapi2_full_security": 11,
-}
+CIBA_GRANT_TYPE = "urn:openid:params:grant-type:ciba"
+CIBA_AUTOMATED_DECISION_TOKEN = "perf-ciba-automated-decision-token-2026"
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))
 
 
 def b64url(data: bytes) -> str:
@@ -56,10 +45,6 @@ def b64url(data: bytes) -> str:
 def b64url_uint(value: int) -> str:
     size = max(1, (value.bit_length() + 7) // 8)
     return b64url(value.to_bytes(size, "big"))
-
-
-def json_b64(value: dict[str, Any]) -> str:
-    return b64url(json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8"))
 
 
 def random_token(byte_count: int = 32) -> str:
@@ -72,13 +57,13 @@ def pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def rsa_public_jwk(private_key: rsa.RSAPrivateKey, kid: str) -> dict[str, str]:
+def rsa_public_jwk(private_key: rsa.RSAPrivateKey, kid: str, alg: str = "RS256") -> dict[str, str]:
     numbers = private_key.public_key().public_numbers()
     return {
         "kty": "RSA",
         "kid": kid,
         "use": "sig",
-        "alg": "RS256",
+        "alg": alg,
         "n": b64url_uint(numbers.n),
         "e": b64url_uint(numbers.e),
     }
@@ -97,14 +82,14 @@ def ec_public_jwk(private_key: ec.EllipticCurvePrivateKey, kid: str) -> dict[str
     }
 
 
-def rsa_private_jwk(private_key: rsa.RSAPrivateKey, kid: str) -> dict[str, str]:
+def rsa_private_jwk(private_key: rsa.RSAPrivateKey, kid: str, alg: str = "RS256") -> dict[str, str]:
     public = private_key.public_key().public_numbers()
     private = private_key.private_numbers()
     return {
         "kty": "RSA",
         "kid": kid,
         "use": "sig",
-        "alg": "RS256",
+        "alg": alg,
         "n": b64url_uint(public.n),
         "e": b64url_uint(public.e),
         "d": b64url_uint(private.d),
@@ -140,105 +125,6 @@ def jwk_thumbprint(jwk: dict[str, str]) -> str:
     return b64url(hashlib.sha256(canonical.encode("utf-8")).digest())
 
 
-def sign_rs256(private_key: rsa.RSAPrivateKey, header: dict[str, Any], claims: dict[str, Any]) -> str:
-    signing_input = f"{json_b64(header)}.{json_b64(claims)}"
-    signature = private_key.sign(signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
-    return f"{signing_input}.{b64url(signature)}"
-
-
-def sign_es256(private_key: ec.EllipticCurvePrivateKey, header: dict[str, Any], claims: dict[str, Any]) -> str:
-    signing_input = f"{json_b64(header)}.{json_b64(claims)}"
-    der_signature = private_key.sign(signing_input.encode("ascii"), ec.ECDSA(hashes.SHA256()))
-    r, s = utils.decode_dss_signature(der_signature)
-    signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-    return f"{signing_input}.{b64url(signature)}"
-
-
-def scheduled_now(base_now: int, index: int, scenario: str, rate: int) -> int:
-    if rate <= 0 or not scenario:
-        return base_now
-    vector_stride = max(int(os.environ.get("PERF_ITERATIONS", "50")), VECTOR_STRIDE_FLOOR)
-    offset = VECTOR_OFFSET_MULTIPLIERS.get(scenario, 0) * vector_stride
-    relative_iteration = max(0, index - offset)
-    return base_now + relative_iteration // rate
-
-
-def client_assertion(
-    private_key: rsa.RSAPrivateKey,
-    kid: str,
-    client_id: str,
-    issuer: str,
-    jti_suffix: str,
-    now: int,
-) -> str:
-    return sign_rs256(
-        private_key,
-        {"alg": "RS256", "kid": kid, "typ": "JWT"},
-        {
-            "iss": client_id,
-            "sub": client_id,
-            "aud": issuer,
-            "iat": now,
-            "exp": now + 240,
-            "jti": f"{jti_suffix}-{uuid.uuid4()}",
-        },
-    )
-
-
-def request_object(
-    private_key: rsa.RSAPrivateKey,
-    kid: str,
-    client_id: str,
-    issuer: str,
-    *,
-    state: str,
-    nonce: str,
-    code_challenge: str,
-    dpop_jkt: str | None,
-    now: int,
-) -> str:
-    claims: dict[str, Any] = {
-        "client_id": client_id,
-        "iss": client_id,
-        "sub": client_id,
-        "aud": issuer,
-        "iat": now,
-        "nbf": now - 5,
-        "exp": now + 240,
-        "jti": f"jar-{uuid.uuid4()}",
-        "response_type": "code",
-        "redirect_uri": REDIRECT_URI,
-        "scope": "openid profile offline_access",
-        "state": state,
-        "nonce": nonce,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    if dpop_jkt:
-        claims["dpop_jkt"] = dpop_jkt
-    return sign_rs256(private_key, {"alg": "RS256", "kid": kid, "typ": "JWT"}, claims)
-
-
-def dpop_proof(
-    private_key: ec.EllipticCurvePrivateKey,
-    public_jwk: dict[str, str],
-    method: str,
-    htu: str,
-    jti_suffix: str,
-    now: int,
-) -> str:
-    return sign_es256(
-        private_key,
-        {"alg": "ES256", "typ": "dpop+jwt", "jwk": public_jwk},
-        {
-            "htm": method,
-            "htu": htu,
-            "iat": now,
-            "jti": f"{jti_suffix}-{uuid.uuid4()}",
-        },
-    )
-
-
 def hash_secret(value: str) -> str:
     return PasswordHasher().hash(value)
 
@@ -251,6 +137,10 @@ def hash_client_secret(value: str) -> str:
         hashlib.sha256,
     ).digest()
     return f"client-secret-v1:{salt}:{b64url(digest)}"
+
+
+def blake3_hex(value: str) -> str:
+    return blake3(value.encode("utf-8")).hexdigest()
 
 
 def user_credentials(count: int) -> list[dict[str, str]]:
@@ -377,6 +267,123 @@ def upsert_client(
     )
 
 
+def seed_oidc_refresh_tokens(
+    conn: psycopg.Connection[Any],
+    users: list[dict[str, str]],
+) -> list[str]:
+    client_row = conn.execute(
+        """
+        SELECT id
+        FROM oauth_clients
+        WHERE tenant_id = %s::uuid
+          AND client_id = 'perf-oidc-client'
+        """,
+        (TENANT_ID,),
+    ).fetchone()
+    if client_row is None:
+        raise RuntimeError("perf OIDC client was not seeded")
+    client_db_id = client_row[0]
+    conn.execute(
+        """
+        DELETE FROM oauth_tokens
+        WHERE tenant_id = %s::uuid
+          AND client_id = %s
+        """,
+        (TENANT_ID, client_db_id),
+    )
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)
+    refresh_tokens: list[str] = []
+    for user in users:
+        user_row = conn.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE tenant_id = %s::uuid
+              AND lower(email) = %s
+            """,
+            (TENANT_ID, user["email"].lower()),
+        ).fetchone()
+        if user_row is None:
+            raise RuntimeError(f"perf user was not seeded: {user['email']}")
+        user_db_id = user_row[0]
+        raw_refresh_token = random_token(48)
+        conn.execute(
+            """
+            INSERT INTO oauth_tokens (
+                tenant_id, refresh_token_blake3, token_family_id, rotated_from_id,
+                client_id, user_id, scopes, audience, authorization_details,
+                issued_at, expires_at, subject, dpop_jkt, mtls_x5t_s256
+            )
+            VALUES (
+                %s::uuid, %s, %s, NULL,
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, NULL, NULL
+            )
+            """,
+            (
+                TENANT_ID,
+                blake3_hex(raw_refresh_token),
+                uuid.uuid4(),
+                client_db_id,
+                user_db_id,
+                Jsonb(["openid", "profile", "offline_access"]),
+                Jsonb(["resource://default"]),
+                Jsonb([]),
+                now,
+                expires_at,
+                str(user_db_id),
+            ),
+        )
+        refresh_tokens.append(raw_refresh_token)
+    return refresh_tokens
+
+
+def seed_logged_in_sessions(
+    conn: psycopg.Connection[Any],
+    users: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    valkey_url = os.environ["VALKEY_URL"]
+    client = redis.Redis.from_url(valkey_url, decode_responses=True)
+    now = int(datetime.now(UTC).timestamp())
+    sessions: list[dict[str, str]] = []
+    for user in users:
+        user_row = conn.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE tenant_id = %s::uuid
+              AND lower(email) = %s
+            """,
+            (TENANT_ID, user["email"].lower()),
+        ).fetchone()
+        if user_row is None:
+            raise RuntimeError(f"perf user was not seeded: {user['email']}")
+        session_id = random_token()
+        csrf_token = random_token()
+        payload = {
+            "user_id": str(user_row[0]),
+            "auth_time": now,
+            "amr": ["password"],
+            "pending_mfa": False,
+            "oidc_sid": random_token(),
+        }
+        client.setex(
+            f"oauth:session:{session_id}",
+            SESSION_TTL_SECONDS,
+            json.dumps(payload, separators=(",", ":")),
+        )
+        sessions.append(
+            {
+                "email": user["email"],
+                "session_id": session_id,
+                "csrf_token": csrf_token,
+                "cookie_header": f"nazo_oauth_session={session_id}; nazo_oauth_csrf={csrf_token}",
+            }
+        )
+    return sessions
+
+
 def prepare_vectors(
     *,
     count: int,
@@ -390,11 +397,7 @@ def prepare_vectors(
     rate: int,
 ) -> list[dict[str, Any]]:
     vectors: list[dict[str, Any]] = []
-    oidc_client = "perf-oidc-client"
-    fapi_client = "perf-fapi-private-jwt-dpop-client"
-    base_now = int(time.time())
     for index in range(count):
-        vector_now = scheduled_now(base_now, index, scenario, rate)
         verifier, challenge = pkce_pair()
         fapi_verifier, fapi_challenge = pkce_pair()
         state = f"perf-state-{index}-{uuid.uuid4()}"
@@ -404,55 +407,13 @@ def prepare_vectors(
         vectors.append(
             {
                 "pkce_verifier": verifier,
-                "oidc_request": request_object(
-                    rsa_key,
-                    rsa_kid,
-                    oidc_client,
-                    issuer,
-                    state=state,
-                    nonce=nonce,
-                    code_challenge=challenge,
-                    dpop_jkt=None,
-                    now=vector_now,
-                ),
+                "oidc_code_challenge": challenge,
                 "oidc_state": state,
+                "oidc_nonce": nonce,
                 "fapi_pkce_verifier": fapi_verifier,
-                "fapi_request": request_object(
-                    rsa_key,
-                    rsa_kid,
-                    fapi_client,
-                    issuer,
-                    state=fapi_state,
-                    nonce=fapi_nonce,
-                    code_challenge=fapi_challenge,
-                    dpop_jkt=dpop_jkt,
-                    now=vector_now,
-                ),
+                "fapi_code_challenge": fapi_challenge,
                 "fapi_state": fapi_state,
-                "fapi_par_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-par", vector_now
-                ),
-                "fapi_token_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-token", vector_now
-                ),
-                "fapi_refresh_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-refresh", vector_now
-                ),
-                "fapi_client_credentials_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-client-credentials", vector_now
-                ),
-                "fapi_introspection_assertion": client_assertion(
-                    rsa_key, rsa_kid, fapi_client, issuer, "fapi-introspection", vector_now
-                ),
-                "dpop_par": dpop_proof(
-                    dpop_key, dpop_jwk, "POST", f"{issuer}/par", "dpop-par", vector_now
-                ),
-                "dpop_token": dpop_proof(
-                    dpop_key, dpop_jwk, "POST", f"{issuer}/token", "dpop-token", vector_now
-                ),
-                "dpop_refresh": dpop_proof(
-                    dpop_key, dpop_jwk, "POST", f"{issuer}/token", "dpop-refresh", vector_now
-                ),
+                "fapi_nonce": fapi_nonce,
             }
         )
     return vectors
@@ -469,11 +430,13 @@ def seed() -> None:
 
     rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     rsa_kid = "perf-rs256"
+    ps256_kid = "perf-ps256"
     rsa_jwk = rsa_public_jwk(rsa_key, rsa_kid)
+    ps256_jwk = rsa_public_jwk(rsa_key, ps256_kid, "PS256")
     ec_key = ec.generate_private_key(ec.SECP256R1())
     dpop_jwk = ec_public_jwk(ec_key, "perf-dpop-es256")
     dpop_jkt = jwk_thumbprint(dpop_jwk)
-    jwks = {"keys": [rsa_jwk]}
+    jwks = {"keys": [rsa_jwk, ps256_jwk]}
     secret_hash = hash_client_secret(CLIENT_SECRET)
 
     with psycopg.connect(database_url) as conn:
@@ -523,6 +486,20 @@ def seed() -> None:
             require_mtls=True,
             tls_thumbprint=MTLS_THUMBPRINT,
         )
+        upsert_client(
+            conn,
+            client_id="perf-ciba-private-jwt-dpop-client",
+            name="Perf CIBA Private JWT DPoP Client",
+            auth_method="private_key_jwt",
+            grants=[CIBA_GRANT_TYPE],
+            scopes=["openid", "profile"],
+            secret_hash=None,
+            jwks=jwks,
+            require_dpop=True,
+            require_par_request_object=True,
+        )
+        oidc_refresh_tokens = seed_oidc_refresh_tokens(conn, users)
+        logged_in_sessions = seed_logged_in_sessions(conn, users)
         conn.commit()
 
     secrets_doc = {
@@ -530,17 +507,22 @@ def seed() -> None:
         "redirect_uri": REDIRECT_URI,
         "user": users[0],
         "users": users,
+        "logged_in_sessions": logged_in_sessions,
         "client_assertion_type": CLIENT_ASSERTION_TYPE,
         "client_secret": CLIENT_SECRET,
+        "oidc_refresh_tokens": oidc_refresh_tokens,
         "mtls_thumbprint": MTLS_THUMBPRINT,
         "clients": {
             "client_credentials": "perf-client-credentials",
             "oidc": "perf-oidc-client",
             "fapi": "perf-fapi-private-jwt-dpop-client",
             "mtls": "perf-mtls-client",
+            "ciba": "perf-ciba-private-jwt-dpop-client",
         },
+        "ciba_automated_decision_token": CIBA_AUTOMATED_DECISION_TOKEN,
         "dpop_jkt": dpop_jkt,
         "private_jwk": rsa_private_jwk(rsa_key, rsa_kid),
+        "ps256_private_jwk": rsa_private_jwk(rsa_key, ps256_kid, "PS256"),
         "dpop_private_jwk": ec_private_jwk(ec_key, "perf-dpop-es256"),
         "dpop_public_jwk": dpop_jwk,
     }
@@ -557,7 +539,11 @@ def seed() -> None:
         rate=int(os.environ.get("PERF_RATE", "0") or "0"),
     )
     (state_dir / "vectors.json").write_text(json.dumps(vectors), encoding="utf-8")
-    print(f"seeded {user_count} perf users, clients, and {vector_count} scheduled signed vectors")
+    print(
+        f"seeded {user_count} perf users, clients, and {vector_count} flow vectors "
+        f"(scenario={os.environ.get('PERF_SCENARIO', '').strip() or 'all'}, "
+        f"rate={os.environ.get('PERF_RATE', '0') or '0'}/s)"
+    )
 
 
 if __name__ == "__main__":

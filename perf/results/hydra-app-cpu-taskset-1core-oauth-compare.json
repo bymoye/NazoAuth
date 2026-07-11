@@ -1,0 +1,102 @@
+[
+  {
+    "target_rate": 1000,
+    "duration": "2m",
+    "status": "failed",
+    "provider_key": "hydra",
+    "provider": {
+      "rps": 65.992,
+      "requests": 8192,
+      "dropped_iterations": 111809,
+      "dropped_iterations_rate": 900.698,
+      "latency_ms": {
+        "p50": 60000.442,
+        "p95": 60000.972,
+        "p99": 60001.029,
+        "max": 60013.83
+      },
+      "error_rate": 1.0,
+      "check_rate": 0.0,
+      "steps": {
+        "token_client_credentials": {
+          "requests": 8192,
+          "rps": 65.992,
+          "latency_ms": {
+            "p50": 60000.442,
+            "p95": 60000.972,
+            "p99": 60001.029
+          },
+          "error_rate": 1.0
+        }
+      }
+    },
+    "containers": {
+      "by_service": {
+        "hydra": {
+          "samples": 28,
+          "cpu_percent_avg": 27.642,
+          "cpu_percent_max": 100.23,
+          "memory_bytes_avg": 412018465,
+          "memory_bytes_max": 567908761
+        },
+        "hydra-postgres": {
+          "samples": 28,
+          "cpu_percent_avg": 0.892,
+          "cpu_percent_max": 9.56,
+          "memory_bytes_avg": 48283928,
+          "memory_bytes_max": 51044679
+        }
+      }
+    }
+  },
+  {
+    "target_rate": 2000,
+    "duration": "2m",
+    "status": "failed",
+    "provider_key": "hydra",
+    "provider": {
+      "rps": 67.098,
+      "requests": 8192,
+      "dropped_iterations": 231809,
+      "dropped_iterations_rate": 1898.683,
+      "latency_ms": {
+        "p50": 60000.372,
+        "p95": 60000.964,
+        "p99": 60001.034,
+        "max": 60009.122
+      },
+      "error_rate": 1.0,
+      "check_rate": 0.0,
+      "steps": {
+        "token_client_credentials": {
+          "requests": 8192,
+          "rps": 67.098,
+          "latency_ms": {
+            "p50": 60000.372,
+            "p95": 60000.964,
+            "p99": 60001.034
+          },
+          "error_rate": 1.0
+        }
+      }
+    },
+    "containers": {
+      "by_service": {
+        "hydra": {
+          "samples": 27,
+          "cpu_percent_avg": 25.883,
+          "cpu_percent_max": 100.15,
+          "memory_bytes_avg": 432704595,
+          "memory_bytes_max": 582483968
+        },
+        "hydra-postgres": {
+          "samples": 27,
+          "cpu_percent_avg": 0.844,
+          "cpu_percent_max": 2.99,
+          "memory_bytes_avg": 48446929,
+          "memory_bytes_max": 51201966
+        }
+      }
+    }
+  }
+]

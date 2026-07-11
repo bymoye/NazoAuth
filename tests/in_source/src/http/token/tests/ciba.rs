@@ -3,7 +3,39 @@ use crate::config::ConfigSource;
 use crate::db::create_pool;
 use crate::domain::{ActiveSigningKey, Keyset, KeysetStore};
 use crate::support::{generate_key_material, public_jwk_from_private_der};
-use std::sync::Arc;
+use std::io::{self, Write};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use tracing::Subscriber;
+use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+#[derive(Clone)]
+struct AuditCounter(Arc<AtomicUsize>);
+
+impl<S> Layer<S> for AuditCounter
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+        if event.metadata().target() == "audit" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+struct FailingAuditWriter;
+
+impl Write for FailingAuditWriter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("deliberate audit writer failure"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::other("deliberate audit writer failure"))
+    }
+}
 
 fn ciba_test_state_with(configure: impl FnOnce(&mut Settings)) -> AppState {
     let mut settings =
@@ -151,6 +183,165 @@ fn ciba_status_serializes_as_protocol_state() {
     );
 }
 
+#[test]
+fn ciba_start_audit_fields_are_redacted() {
+    let now = Utc::now().timestamp();
+    let state = CibaRequestState {
+        client_id: "client-1".to_owned(),
+        user_id: Uuid::now_v7(),
+        scopes: vec!["openid".to_owned(), "profile".to_owned()],
+        audiences: vec!["resource://default".to_owned()],
+        acr: None,
+        binding_message: Some("sensitive binding text".to_owned()),
+        issued_at: now,
+        status: CibaStatus::Pending,
+        interval_seconds: 5,
+        expires_at: now + 60,
+        retention_expires_at: now + 180,
+        last_poll_at: None,
+    };
+
+    let fields = ciba_start_audit_fields(
+        &state,
+        "secret-auth-req-id",
+        Some("source-ip-hash".to_owned()),
+    );
+    let serialized = serde_json::to_string(&fields).unwrap();
+
+    assert!(serialized.contains(&blake3_hex("secret-auth-req-id")));
+    assert!(!serialized.contains("secret-auth-req-id"));
+    assert!(!serialized.contains("sensitive binding text"));
+    assert!(!serialized.contains("binding_message"));
+    assert!(!serialized.contains("client_assertion"));
+    assert_eq!(fields.get("client_id"), Some(&json!("client-1")));
+    assert_eq!(fields.get("source_ip_hash"), Some(&json!("source-ip-hash")));
+}
+
+fn committed_decision_fixture(decision: CibaDecision) -> CommittedCibaDecision {
+    let now = Utc::now().timestamp();
+    CommittedCibaDecision {
+        auth_req_id_hash: blake3_hex("auth-req-id"),
+        state: CibaRequestState {
+            client_id: "client-1".to_owned(),
+            user_id: Uuid::now_v7(),
+            scopes: vec!["openid".to_owned()],
+            audiences: vec!["resource://default".to_owned()],
+            acr: None,
+            binding_message: None,
+            issued_at: now,
+            status: match decision {
+                CibaDecision::Approve => CibaStatus::Approved,
+                CibaDecision::Deny => CibaStatus::Denied,
+            },
+            interval_seconds: 5,
+            expires_at: now + 60,
+            retention_expires_at: now + 180,
+            last_poll_at: None,
+        },
+        decision,
+    }
+}
+
+#[test]
+fn ciba_decision_audit_is_emitted_only_for_committed_outcome() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(AuditCounter(Arc::clone(&count)));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for failure in [
+            CibaDecisionFailure::Missing,
+            CibaDecisionFailure::UserMismatch,
+            CibaDecisionFailure::AlreadyHandled,
+            CibaDecisionFailure::Expired,
+            CibaDecisionFailure::Contended,
+            CibaDecisionFailure::Storage(CibaStateError::Malformed("bad state".to_owned())),
+        ] {
+            let _ = complete_ciba_decision(
+                Err(failure),
+                CibaDecisionSource::User,
+                Some("source-ip-hash".to_owned()),
+            );
+        }
+        assert_eq!(count.as_ref().load(Ordering::SeqCst), 0);
+
+        let response = complete_ciba_decision(
+            Ok(committed_decision_fixture(CibaDecision::Approve)),
+            CibaDecisionSource::User,
+            Some("source-ip-hash".to_owned()),
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    });
+
+    assert_eq!(count.as_ref().load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn ciba_audit_writer_failure_does_not_change_committed_response() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(|| FailingAuditWriter)
+        .finish();
+
+    let response = tracing::subscriber::with_default(subscriber, || {
+        complete_ciba_decision(
+            Ok(committed_decision_fixture(CibaDecision::Deny)),
+            CibaDecisionSource::Automation,
+            None,
+        )
+    });
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[test]
+fn ciba_decision_storage_failure_maps_to_non_cacheable_server_error() {
+    let response = complete_ciba_decision(
+        Err(CibaDecisionFailure::Storage(CibaStateError::Malformed(
+            "bad state".to_owned(),
+        ))),
+        CibaDecisionSource::User,
+        None,
+    );
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("server_error")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+}
+
+#[test]
+fn ciba_poll_storage_failure_returns_503_and_never_protocol_progress() {
+    let response = ciba_poll_failure_response(CibaPollFailure::Storage(CibaStateError::Malformed(
+        "bad state".to_owned(),
+    )));
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("server_error")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+}
+
 #[actix_web::test]
 async fn ciba_automated_decision_route_accepts_empty_post_without_json_content_type() {
     let state = ciba_test_state_with(|settings| {
@@ -162,7 +353,7 @@ async fn ciba_automated_decision_route_accepts_empty_post_without_json_content_t
     let app = actix_web::test::init_service(
         actix_web::App::new()
             .app_data(actix_web::web::Data::new(state))
-            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings)),
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
     )
     .await;
 
@@ -252,6 +443,33 @@ fn fapi_ciba_compatibility_profile_preserves_client_request_object_policy() {
         &BackchannelAuthenticationForm::default(),
     )
     .expect("OIDF FAPI-CIBA compatibility profile must preserve per-client request-object policy");
+}
+
+#[test]
+fn ciba_profile_does_not_apply_authorization_code_only_controls() {
+    let mut settings = ciba_test_state().settings.as_ref().clone();
+    settings.authorization_server_profile =
+        crate::settings::AuthorizationServerProfile::Fapi2Security;
+    settings.require_pushed_authorization_requests = true;
+    settings.enable_request_uri_parameter = false;
+    settings.ciba_security_profile =
+        crate::settings::CibaSecurityProfile::FapiCibaId1PlainPrivateKeyJwtPoll;
+    let key = generate_key_material(jsonwebtoken::Algorithm::PS256)
+        .expect("client key should generate")
+        .private_pkcs8_der;
+    let mut client = ciba_private_key_jwt_client("ciba-kid", &key);
+    client.require_dpop_bound_tokens = true;
+    let form = BackchannelAuthenticationForm {
+        request: Some("signed-request-object".to_owned()),
+        ..BackchannelAuthenticationForm::default()
+    };
+
+    validate_token_request_profile(&settings, &client, "private_key_jwt")
+        .expect("CIBA-compatible client authentication should pass the server profile");
+    validate_ciba_security_profile_client(&settings, &client, "private_key_jwt")
+        .expect("official FAPI-CIBA compatibility policy should remain separate");
+    validate_ciba_request_object_presence(&settings, &client, &form)
+        .expect("CIBA must not require PAR, PKCE, or authorization response_type fields");
 }
 
 #[test]
@@ -371,18 +589,6 @@ fn ciba_selected_acr_uses_supported_requested_value() {
 }
 
 #[test]
-fn ciba_state_storage_ttl_retains_expired_state_briefly() {
-    assert_eq!(
-        ciba_state_storage_ttl(1_030, 1_000),
-        30 + CIBA_EXPIRED_STATE_RETENTION_SECONDS
-    );
-    assert_eq!(
-        ciba_state_storage_ttl(900, 1_000),
-        CIBA_EXPIRED_STATE_RETENTION_SECONDS
-    );
-}
-
-#[test]
 fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
     let ciba = CibaRequestState {
         client_id: "client-1".to_owned(),
@@ -395,6 +601,7 @@ fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
         status: CibaStatus::Approved,
         interval_seconds: 5,
         expires_at: Utc::now().timestamp() + 600,
+        retention_expires_at: Utc::now().timestamp() + 720,
         last_poll_at: None,
     };
 
@@ -429,6 +636,7 @@ fn ciba_token_grant_state_rejects_other_client_auth_req_id_as_invalid_grant() {
         status: CibaStatus::Pending,
         interval_seconds: 5,
         expires_at: Utc::now().timestamp() + 600,
+        retention_expires_at: Utc::now().timestamp() + 720,
         last_poll_at: None,
     };
     let mut client = ciba_private_key_jwt_client("ciba-kid", &key);

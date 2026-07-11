@@ -1,0 +1,7 @@
+FROM docker.io/library/python:3.13-alpine
+
+RUN apk add --no-cache openssl
+
+COPY scripts/ensure_runtime_keyset.py /scripts/ensure_runtime_keyset.py
+
+CMD ["python", "/scripts/ensure_runtime_keyset.py"]

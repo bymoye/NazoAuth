@@ -88,6 +88,9 @@ fn settings(profile: AuthorizationServerProfile) -> Settings {
             auth_max_requests: 30,
             token_max_requests: 60,
             token_management_max_requests: 120,
+            login_failure_window_seconds: 900,
+            login_failure_email_max_attempts: 50,
+            login_failure_ip_email_max_attempts: 5,
         },
         email: EmailSettings {
             delivery: EmailDelivery::Disabled,
@@ -118,7 +121,7 @@ fn settings(profile: AuthorizationServerProfile) -> Settings {
             strict_base64: true,
         },
         federation: crate::settings::FederationSettings {
-            oidc: None,
+            providers: crate::settings::FederationProviderRegistry::default(),
             saml_gateway: None,
         },
         enable_request_object: false,
@@ -1999,6 +2002,17 @@ fn active_client_with_registered_grant_is_allowed_to_dispatch() {
     let client = client();
 
     assert!(validate_token_client_enabled(&client, "authorization_code").is_ok());
+}
+
+#[test]
+fn ciba_dispatch_requires_the_client_registered_grant() {
+    let client = client();
+
+    let response = validate_token_client_enabled(&client, CIBA_GRANT_TYPE)
+        .expect_err("client without the CIBA grant must fail before CIBA execution");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "unauthorized_client");
 }
 
 #[test]

@@ -177,11 +177,16 @@ impl LiveMfaFixture {
     }
 
     async fn session_payload(&self, sid: &str) -> SessionPayload {
-        let raw = valkey_get(&self.state.valkey, &format!("oauth:session:{sid}"))
+        self.optional_session_payload(sid)
+            .await
+            .expect("session should remain present")
+    }
+
+    async fn optional_session_payload(&self, sid: &str) -> Option<SessionPayload> {
+        valkey_get(&self.state.valkey, &format!("oauth:session:{sid}"))
             .await
             .expect("session lookup should succeed")
-            .expect("session should remain present");
-        serde_json::from_str(&raw).expect("session payload should deserialize")
+            .map(|raw| serde_json::from_str(&raw).expect("session payload should deserialize"))
     }
 }
 
@@ -502,6 +507,66 @@ async fn mfa_totp_confirm_rejects_wrong_code_without_enabling_mfa_or_backup_code
 }
 
 #[actix_web::test]
+async fn mfa_totp_confirm_rotates_session_and_csrf_after_valid_code() {
+    let Some(fixture) = LiveMfaFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture.create_user(&suffix, false).await;
+    let sid = format!("totp-confirm-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    fixture.store_session(&user, &sid, false).await;
+    let mut conn = get_conn(&fixture.state.diesel_db)
+        .await
+        .expect("database connection");
+    diesel::insert_into(user_totp_credentials::table)
+        .values((
+            user_totp_credentials::tenant_id.eq(user.tenant_id),
+            user_totp_credentials::user_id.eq(user.id),
+            user_totp_credentials::secret_base32.eq(secret),
+            user_totp_credentials::label.eq("pending enrollment"),
+            user_totp_credentials::confirmed_at.eq::<Option<DateTime<Utc>>>(None),
+            user_totp_credentials::last_used_step.eq::<Option<i64>>(None),
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("pending TOTP credential should insert");
+    let code = totp_for_step(
+        b"12345678901234567890",
+        Utc::now().timestamp() / MFA_TOTP_PERIOD_SECONDS,
+    )
+    .expect("TOTP code should generate");
+
+    let response = mfa_totp_confirm(
+        fixture.state.clone(),
+        fixture.request(&sid, &csrf),
+        Json(ConfirmTotpRequest { code }),
+    )
+    .await;
+    let rotated_sid = set_cookie_value(&response, &fixture.state.settings.session_cookie_name)
+        .expect("TOTP confirmation must rotate the session cookie");
+    let rotated_csrf = set_cookie_value(&response, &fixture.state.settings.csrf_cookie_name)
+        .expect("TOTP confirmation must rotate the CSRF cookie");
+    let (status, body, has_set_cookie) = response_json(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mfa_enabled"], true);
+    assert!(has_set_cookie);
+    assert_ne!(rotated_sid, sid);
+    assert_ne!(rotated_csrf, csrf);
+    assert!(fixture.optional_session_payload(&sid).await.is_none());
+    let session = fixture.session_payload(&rotated_sid).await;
+    assert!(session.amr.iter().any(|method| method == "otp"));
+    assert!(session.amr.iter().any(|method| method == "mfa"));
+    assert!(fresh_user(&fixture, user.id).await.mfa_enabled);
+    assert_eq!(
+        backup_code_count(&fixture, &user).await,
+        MFA_BACKUP_CODE_COUNT as i64
+    );
+}
+
+#[actix_web::test]
 async fn mfa_verify_rejects_session_request_without_csrf_before_completing_challenge() {
     let state = Data::new(test_state());
     let req = request_with_session_but_no_csrf(&state);
@@ -650,13 +715,20 @@ async fn mfa_verify_completes_pending_totp_challenge_and_updates_session_amr() {
         }),
     )
     .await;
+    let rotated_sid = set_cookie_value(&response, &fixture.state.settings.session_cookie_name)
+        .expect("MFA completion must rotate the session cookie");
+    let rotated_csrf = set_cookie_value(&response, &fixture.state.settings.csrf_cookie_name)
+        .expect("MFA completion must rotate the CSRF cookie");
     let (status, body, has_set_cookie) = response_json(response).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["success"], true);
     assert_eq!(body["method"], MfaVerificationMethod::Totp.amr());
-    assert!(!has_set_cookie);
-    let session = fixture.session_payload(&sid).await;
+    assert!(has_set_cookie);
+    assert_ne!(rotated_sid, sid);
+    assert_ne!(rotated_csrf, csrf);
+    assert!(fixture.optional_session_payload(&sid).await.is_none());
+    let session = fixture.session_payload(&rotated_sid).await;
     assert!(!session.pending_mfa);
     assert!(session.amr.iter().any(|method| method == "pwd"));
     assert!(session.amr.iter().any(|method| method == "otp"));
@@ -766,6 +838,8 @@ async fn mfa_verify_remember_device_sets_cookie_and_persists_remembered_device()
     .await;
     let remembered_token = set_cookie_value(&response, MFA_REMEMBERED_COOKIE_NAME)
         .expect("remember-device success must issue the remembered-device cookie");
+    let rotated_sid = set_cookie_value(&response, &fixture.state.settings.session_cookie_name)
+        .expect("MFA completion must rotate the session cookie");
     let (status, body, has_set_cookie) = response_json(response).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -773,7 +847,9 @@ async fn mfa_verify_remember_device_sets_cookie_and_persists_remembered_device()
     assert_eq!(body["method"], MfaVerificationMethod::Totp.amr());
     assert!(has_set_cookie);
     assert_eq!(remembered_device_count(&fixture, &user).await, 1);
-    let session = fixture.session_payload(&sid).await;
+    assert_ne!(rotated_sid, sid);
+    assert!(fixture.optional_session_payload(&sid).await.is_none());
+    let session = fixture.session_payload(&rotated_sid).await;
     assert!(!session.pending_mfa);
     assert!(session.amr.iter().any(|method| method == "mfa"));
     assert!(session.amr.iter().any(|method| method == "otp"));
@@ -840,18 +916,18 @@ async fn mfa_backup_codes_regenerate_rotates_codes_after_valid_totp() {
     )
     .expect("TOTP code should generate");
 
-    let (status, body, has_set_cookie) = response_json(
-        mfa_backup_codes_regenerate(
-            fixture.state.clone(),
-            fixture.request(&sid, &csrf),
-            Json(MfaProtectedRequest { code }),
-        )
-        .await,
+    let response = mfa_backup_codes_regenerate(
+        fixture.state.clone(),
+        fixture.request(&sid, &csrf),
+        Json(MfaProtectedRequest { code }),
     )
     .await;
+    let rotated_sid = set_cookie_value(&response, &fixture.state.settings.session_cookie_name)
+        .expect("MFA step-up must rotate the session cookie");
+    let (status, body, has_set_cookie) = response_json(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(!has_set_cookie);
+    assert!(has_set_cookie);
     let rotated_codes = body["backup_codes"]
         .as_array()
         .expect("backup codes should be an array");
@@ -880,7 +956,9 @@ async fn mfa_backup_codes_regenerate_rotates_codes_after_valid_totp() {
         Some(MfaVerificationMethod::BackupCode),
         "a freshly rotated backup code must immediately become the valid recovery factor"
     );
-    let session = fixture.session_payload(&sid).await;
+    assert_ne!(rotated_sid, sid);
+    assert!(fixture.optional_session_payload(&sid).await.is_none());
+    let session = fixture.session_payload(&rotated_sid).await;
     assert!(session.amr.iter().any(|method| method == "otp"));
     assert!(session.amr.iter().any(|method| method == "mfa"));
 }

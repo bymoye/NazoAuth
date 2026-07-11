@@ -38,3 +38,17 @@ fn test_endpoint_uri_uses_same_alias_scope_as_callback() {
         "https://suite.example/test/a/alias-1/post_logout_redirect"
     );
 }
+
+#[test]
+fn seed_client_secret_pepper_comes_from_loaded_config() {
+    let config = crate::config::ConfigSource::from_pairs_for_test([(
+        "CLIENT_SECRET_PEPPER",
+        "production-client-secret-pepper",
+    )]);
+
+    assert_eq!(
+        seed_client_secret_pepper(&config),
+        "production-client-secret-pepper",
+        "the OIDF seed must hash client secrets with the same loaded configuration as the server"
+    );
+}

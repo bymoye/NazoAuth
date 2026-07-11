@@ -20,7 +20,13 @@ mod profile;
 mod rate_limit;
 
 pub(crate) use email::{EmailDelivery, EmailSettings, SmtpEmailSettings, SmtpTlsMode};
-pub(crate) use federation::{FederationSettings, OidcFederationSettings, SamlGatewaySettings};
+#[cfg(test)]
+// provider registry 在生产路径通过 FederationSettings 持有；测试夹具需要直接构造。
+pub(crate) use federation::FederationProviderRegistry;
+pub(crate) use federation::{
+    ExternalLoginProvider, ExternalLoginProviderAdapter, FederationSettings,
+    OidcFederationSettings, SamlGatewaySettings, SocialProviderKind, SocialProviderSettings,
+};
 pub(crate) use passkey::PasskeySettings;
 pub(crate) use profile::{
     AuthorizationServerProfile, CibaSecurityProfile, DpopNoncePolicy, RequestObjectJtiPolicy,

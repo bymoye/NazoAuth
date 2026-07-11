@@ -22,6 +22,8 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "CLIENT_IP_HEADER_MODE",
     "CLIENT_SECRET_PEPPER",
     "CIBA_AUTOMATED_DECISION_TOKEN",
+    "CIBA_AUTH_REQ_ID_TTL_SECONDS",
+    "CIBA_POLL_INTERVAL_SECONDS",
     "CIBA_SECURITY_PROFILE",
     "COOKIE_SECURE",
     "CORS_ALLOWED_ORIGINS",
@@ -30,14 +32,21 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "DATABASE_MAX_CONNECTIONS",
     "DATA_DIR",
     "DEFAULT_AUDIENCE",
+    "DEVICE_AUTHORIZATION_POLL_INTERVAL_SECONDS",
+    "DEVICE_AUTHORIZATION_TTL_SECONDS",
     "DPOP_NONCE_POLICY",
     "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
     "ENABLE_AUTHORIZATION_DETAILS",
+    "ENABLE_CIBA",
+    "ENABLE_DEVICE_AUTHORIZATION_GRANT",
     "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
+    "ENABLE_FRONTCHANNEL_LOGOUT",
     "ENABLE_LEGACY_AUDIENCE_PARAM",
+    "ENABLE_NATIVE_SSO",
     "ENABLE_PAR_REQUEST_OBJECT",
     "ENABLE_REQUEST_OBJECT",
     "ENABLE_REQUEST_URI_PARAMETER",
+    "ENABLE_SESSION_MANAGEMENT",
     "EMAIL_CODE_DEV_RESPONSE_ENABLED",
     "EMAIL_CODE_PEER_COOLDOWN_SECONDS",
     "EMAIL_CODE_SEND_COOLDOWN_SECONDS",
@@ -50,15 +59,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "EMAIL_SMTP_TLS",
     "EMAIL_SMTP_USERNAME",
     "FRONTEND_BASE_URL",
-    "FEDERATION_OIDC_AUTHORIZATION_ENDPOINT",
-    "FEDERATION_OIDC_CLIENT_ID",
-    "FEDERATION_OIDC_CLIENT_SECRET",
-    "FEDERATION_OIDC_JWKS_URL",
-    "FEDERATION_OIDC_PROVIDER_ID",
-    "FEDERATION_OIDC_REDIRECT_URI",
-    "FEDERATION_OIDC_SCOPES",
-    "FEDERATION_OIDC_TOKEN_ENDPOINT",
-    "FEDERATION_OIDC_ISSUER",
+    "FEDERATION_PROVIDER_CONFIGS",
     "FEDERATION_SAML_GATEWAY_AUDIENCE",
     "FEDERATION_SAML_GATEWAY_ENABLED",
     "FEDERATION_SAML_GATEWAY_ISSUER",
@@ -66,6 +67,9 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "ID_TOKEN_TTL_SECONDS",
     "ISSUER",
     "JWK_KEYS_DIR",
+    "LOGIN_FAILURE_EMAIL_MAX_ATTEMPTS",
+    "LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS",
+    "LOGIN_FAILURE_WINDOW_SECONDS",
     "MTLS_ENDPOINT_BASE_URL",
     "SIGNING_EXTERNAL_COMMAND",
     "SIGNING_EXTERNAL_TIMEOUT_MS",
@@ -81,6 +85,9 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "PASSKEY_REQUIRE_USER_VERIFICATION",
     "PASSKEY_REQUIRE_USER_HANDLE",
     "PASSKEY_STRICT_BASE64",
+    "PASSWORD_HASH_MAX_CONCURRENCY",
+    "PASSWORD_HASH_QUEUE_TIMEOUT_MS",
+    "PERF_METRICS_ENABLED",
     "PUBLIC_BASE_URL",
     "PROTECTED_RESOURCE_IDENTIFIER",
     "RATE_LIMIT_WINDOW_SECONDS",
@@ -121,6 +128,17 @@ impl ConfigSource {
                 .into_iter()
                 .map(|(key, value)| (key.to_owned(), value.to_owned()))
                 .collect(),
+            env_values: HashMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_owned_pairs_for_test(
+        values: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        // 动态端点测试需要在运行时生成配置值；生产加载仍只走文件和环境变量。
+        Self {
+            file_values: values.into_iter().collect(),
             env_values: HashMap::new(),
         }
     }
@@ -213,6 +231,9 @@ impl ConfigSource {
             let Some(key) = key.as_str().map(str::trim).filter(|key| !key.is_empty()) else {
                 bail!("{} contains a non-string or empty key", path.display());
             };
+            if !ENV_CONFIG_KEYS.contains(&key) {
+                bail!("{} contains unknown config key {key}", path.display());
+            }
             let value = yaml_value_to_string(key, &value)?;
             self.file_values.insert(key.to_owned(), value);
         }

@@ -37,14 +37,15 @@ services:
       perf_net:
 
   keyset:
-    image: docker.io/library/python:3.13-alpine
+    build:
+      context: .
+      dockerfile: perf/keyset/Containerfile
     volumes:
-      - ./scripts:/scripts:ro
       - perf_runtime:/var/lib/nazo_oauth
     command:
       - sh
       - -c
-      - apk add --no-cache openssl >/dev/null && python /scripts/ensure_runtime_keyset.py --key-dir /var/lib/nazo_oauth/keys --active-alg RS256 --required-alg PS256 && touch /tmp/keyset-ready && tail -f /dev/null
+      - python /scripts/ensure_runtime_keyset.py --key-dir /var/lib/nazo_oauth/keys --active-alg RS256 --required-alg PS256 && touch /tmp/keyset-ready && tail -f /dev/null
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/keyset-ready"]
       interval: 2s
@@ -57,11 +58,10 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-      target: runtime
+      target: perf-runtime
     environment:
       PERF_METRICS_ENABLED: "true"
     volumes:
-      - ./perf/env.yaml:/app/.env.yaml:ro
       - perf_runtime:/var/lib/nazo_oauth
     command: ["nazo-oauth-server"]
     depends_on:
@@ -74,9 +74,8 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-      target: runtime
+      target: perf-runtime
     volumes:
-      - ./perf/env.yaml:/app/.env.yaml:ro
       - perf_runtime:/var/lib/nazo_oauth
     command: ["sh", "-c", "nazo-oauth-migrate && touch /tmp/migrate-ready && tail -f /dev/null"]
     healthcheck:
@@ -119,12 +118,10 @@ services:
       PERF_USER_COUNT: "${PERF_USER_COUNT:-64}"
       PERF_APP_REPLICAS: "${PERF_APP_REPLICAS:-1}"
       PERF_RESULTS_DIR: "/results"
-      PERF_REPORT_PATH: "${PERF_REPORT_PATH:-/docs/performance-benchmarks.md}"
+      PERF_REPORT_PATH: "${PERF_REPORT_PATH:-/docs/performance/performance-benchmarks.md}"
       CLIENT_SECRET_PEPPER: "perf-client-secret-pepper-000000000000000001"
     volumes:
-      - ./perf:/perf:ro
-      - ${PERF_RESULTS_HOST_DIR:-./perf/results}:/results
-      - ./docs:/docs
+      - perf_results:/results
       - perf_state:/perf-state
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -136,6 +133,7 @@ services:
 volumes:
   perf_postgres_data:
   perf_runtime:
+  perf_results:
   perf_state:
 
 networks:

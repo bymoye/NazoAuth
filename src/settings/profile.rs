@@ -7,6 +7,7 @@ pub(crate) enum AuthorizationServerProfile {
     Oauth2Baseline,
     Fapi2Security,
     Fapi2MessageSigningAuthzRequest,
+    Fapi2MessageSigningJarm,
     Fapi2MessageSigningIntrospection,
 }
 
@@ -45,6 +46,7 @@ impl AuthorizationServerProfile {
             "oauth2-baseline" | "baseline" => Ok(Self::Oauth2Baseline),
             "fapi2-security" => Ok(Self::Fapi2Security),
             "fapi2-message-signing-authz-request" => Ok(Self::Fapi2MessageSigningAuthzRequest),
+            "fapi2-message-signing-jarm" => Ok(Self::Fapi2MessageSigningJarm),
             "fapi2-message-signing-introspection" => Ok(Self::Fapi2MessageSigningIntrospection),
             value => bail!("AUTHORIZATION_SERVER_PROFILE is not supported: {value}"),
         }
@@ -55,6 +57,7 @@ impl AuthorizationServerProfile {
             self,
             Self::Fapi2Security
                 | Self::Fapi2MessageSigningAuthzRequest
+                | Self::Fapi2MessageSigningJarm
                 | Self::Fapi2MessageSigningIntrospection
         )
     }
@@ -65,6 +68,10 @@ impl AuthorizationServerProfile {
 
     pub(crate) fn requires_signed_request_object_at_par(self) -> bool {
         self == Self::Fapi2MessageSigningAuthzRequest
+    }
+
+    pub(crate) fn requires_signed_authorization_response(self) -> bool {
+        self == Self::Fapi2MessageSigningJarm
     }
 
     pub(crate) fn requires_signed_introspection(self) -> bool {

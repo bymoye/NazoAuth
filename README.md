@@ -212,7 +212,7 @@ RUST_LOG: "info"
 | `AVATAR_STORAGE_DIR` | `DATA_DIR + "/avatars"` |
 
 Advanced settings still exist for compatibility and specialized deployments.
-They are documented in [docs/configuration.md](docs/configuration.md).
+They are documented in [docs/operations/configuration.md](docs/operations/configuration.md).
 
 ## Default boundaries
 
@@ -232,27 +232,30 @@ and are not advertised unless implemented, tested, and explicitly enabled:
 - RFC 9701 encrypted introspection responses outside the signed-introspection
   profile, or without per-client JWE response metadata.
 
-See [docs/roadmap.md](docs/roadmap.md) for the current scope record.
+See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope record.
 
 ## Documentation
 
 | Topic | Link |
 | --- | --- |
-| Configuration | [docs/configuration.md](docs/configuration.md) |
-| Deployment | [docs/deployment.md](docs/deployment.md) |
-| Chinese deployment guide | [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md) |
+| Documentation index | [docs/README.md](docs/README.md) |
+| Configuration | [docs/operations/configuration.md](docs/operations/configuration.md) |
+| Deployment | [docs/operations/deployment.md](docs/operations/deployment.md) |
+| Chinese deployment guide | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |
 | Conformance records | [docs/conformance](docs/conformance) |
-| OAuth/OIDC/FAPI best-practice matrix | [docs/rfc-compliance-matrix.md](docs/rfc-compliance-matrix.md) |
-| OAuth/OIDC/FAPI future roadmap | [docs/oauth-best-practice-implementation-plan.zh-CN.md](docs/oauth-best-practice-implementation-plan.zh-CN.md) |
-| Profile matrix | [docs/profile-matrix.md](docs/profile-matrix.md) |
-| Threat model | [docs/threat-model.md](docs/threat-model.md) |
-| Release security | [docs/release-security.md](docs/release-security.md) |
-| PostgreSQL and Valkey operations | [docs/ha-operations.md](docs/ha-operations.md) |
-| Resource server verifier | [docs/resource-server-verifier.md](docs/resource-server-verifier.md) |
-| SCIM | [docs/scim.md](docs/scim.md) |
-| Federation | [docs/federation.md](docs/federation.md) |
-| Passkeys | [docs/passkeys.md](docs/passkeys.md) |
-| MFA | [docs/mfa.md](docs/mfa.md) |
+| Performance benchmarks | [docs/performance/performance-capacity-curve.md](docs/performance/performance-capacity-curve.md) |
+| OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |
+| OAuth/OIDC/FAPI future roadmap | [docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md](docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md) |
+| Profile matrix | [docs/protocol/profile-matrix.md](docs/protocol/profile-matrix.md) |
+| Ecosystem client onboarding | [docs/features/ecosystem-onboarding.md](docs/features/ecosystem-onboarding.md) |
+| Threat model | [docs/security/threat-model.md](docs/security/threat-model.md) |
+| Release security | [docs/operations/release-security.md](docs/operations/release-security.md) |
+| PostgreSQL and Valkey operations | [docs/operations/ha-operations.md](docs/operations/ha-operations.md) |
+| Resource server verifier | [docs/features/resource-server-verifier.md](docs/features/resource-server-verifier.md) |
+| SCIM | [docs/features/scim.md](docs/features/scim.md) |
+| Federation | [docs/features/federation.md](docs/features/federation.md) |
+| Passkeys | [docs/features/passkeys.md](docs/features/passkeys.md) |
+| MFA | [docs/features/mfa.md](docs/features/mfa.md) |
 | Security policy | [SECURITY.md](SECURITY.md) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
 

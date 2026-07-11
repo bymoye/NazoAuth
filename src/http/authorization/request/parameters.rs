@@ -72,22 +72,52 @@ pub(super) fn authorization_response_mode(
 
 pub(super) fn requested_acr(
     q: &HashMap<String, String>,
-    _claims_acr: Option<String>,
-) -> Option<String> {
-    q.get("acr_values")
+    claims_acr: Option<&OidcClaimRequest>,
+) -> Result<Option<String>, ()> {
+    if let Some(claim) = claims_acr {
+        let constrained = claim.value.is_some() || !claim.values.is_empty();
+        let supports_baseline = claim
+            .value
+            .as_ref()
+            .map(acr_value_is_baseline)
+            .transpose()?
+            .unwrap_or(false)
+            || claim
+                .values
+                .iter()
+                .map(acr_value_is_baseline)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|supported| supported);
+        if claim.essential && constrained && !supports_baseline {
+            return Err(());
+        }
+        if !constrained || supports_baseline {
+            return Ok(Some(BASELINE_ACR_VALUE.to_owned()));
+        }
+    }
+
+    Ok(q.get("acr_values")
         .and_then(|values| {
             values
                 .split_whitespace()
                 .find(|value| *value == BASELINE_ACR_VALUE)
         })
-        .map(str::to_owned)
+        .map(str::to_owned))
+}
+
+fn acr_value_is_baseline(value: &Value) -> Result<bool, ()> {
+    value
+        .as_str()
+        .map(|value| value == BASELINE_ACR_VALUE)
+        .ok_or(())
 }
 
 #[derive(Debug, PartialEq)]
 pub(super) struct RequestedClaims {
     pub(super) userinfo: Vec<OidcClaimRequest>,
     pub(super) id_token: Vec<OidcClaimRequest>,
-    pub(super) acr: Option<String>,
+    pub(super) acr: Option<OidcClaimRequest>,
     pub(super) auth_time: bool,
 }
 
@@ -132,12 +162,12 @@ pub(super) fn requested_claims(q: &HashMap<String, String>) -> Result<RequestedC
     let claims: Value = serde_json::from_str(raw_claims).map_err(|_| ())?;
     let userinfo = requested_claim_requests(claims.get("userinfo"))?;
     let id_token = requested_claim_requests(claims.get("id_token"))?;
-    validate_acr_claim(claims.get("id_token"))?;
+    let acr = requested_acr_claim(claims.get("id_token"))?;
     let auth_time = requested_auth_time_claim(claims.get("id_token"))?;
     Ok(RequestedClaims {
         userinfo,
         id_token,
-        acr: None,
+        acr,
         auth_time,
     })
 }
@@ -162,17 +192,22 @@ fn requested_claim_requests(value: Option<&Value>) -> Result<Vec<OidcClaimReques
     Ok(requests)
 }
 
+#[cfg(test)]
 fn validate_acr_claim(value: Option<&Value>) -> Result<(), ()> {
+    requested_acr_claim(value).map(|_| ())
+}
+
+fn requested_acr_claim(value: Option<&Value>) -> Result<Option<OidcClaimRequest>, ()> {
     let Some(value) = value else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(object) = value.as_object() else {
         return Err(());
     };
-    if let Some(acr) = object.get("acr") {
-        validate_claim_request(acr)?;
-    }
-    Ok(())
+    object
+        .get("acr")
+        .map(|acr| parse_claim_request("acr", acr))
+        .transpose()
 }
 
 fn requested_auth_time_claim(value: Option<&Value>) -> Result<bool, ()> {

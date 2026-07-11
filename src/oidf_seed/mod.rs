@@ -3,7 +3,11 @@
 //! The binary performs database writes; this module owns deterministic parsing
 //! and URL/JWKS normalization logic that can be tested without external state.
 
+use crate::config::ConfigSource;
 use std::{collections::BTreeSet, env};
+
+const LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER: &str =
+    "local-development-client-secret-pepper-00000001";
 
 pub mod config;
 
@@ -24,6 +28,13 @@ pub fn suite_base_urls(primary_suite_base_url: &str) -> Vec<String> {
     suite_base_urls_from_extra(
         primary_suite_base_url,
         env::var("OIDF_LOCAL_EXTRA_SUITE_BASE_URLS").ok().as_deref(),
+    )
+}
+
+pub fn seed_client_secret_pepper(config: &ConfigSource) -> String {
+    config.string(
+        "CLIENT_SECRET_PEPPER",
+        LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
     )
 }
 

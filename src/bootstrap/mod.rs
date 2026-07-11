@@ -27,12 +27,29 @@ use crate::db::create_pool;
 use crate::domain::{AppState, KeysetStore};
 use crate::http::spawn_backchannel_logout_delivery_worker;
 use crate::settings::Settings;
-use crate::support::load_or_create_keyset;
+use crate::support::{
+    configure_password_hash_limits, default_password_hash_max_concurrency,
+    default_password_hash_queue_timeout_ms, initialize_dummy_password_hash, load_or_create_keyset,
+};
 use tracing::Instrument;
 
 pub async fn run() -> anyhow::Result<()> {
     let config = ConfigSource::load()?;
     let _observability = observability::init(&config)?;
+    let perf_metrics_enabled = config.bool("PERF_METRICS_ENABLED", false)?;
+    let password_hash_max_concurrency = config.parse::<usize>(
+        "PASSWORD_HASH_MAX_CONCURRENCY",
+        default_password_hash_max_concurrency(),
+    )?;
+    let password_hash_queue_timeout_ms = config.parse::<u64>(
+        "PASSWORD_HASH_QUEUE_TIMEOUT_MS",
+        default_password_hash_queue_timeout_ms(),
+    )?;
+    configure_password_hash_limits(
+        password_hash_max_concurrency,
+        password_hash_queue_timeout_ms,
+    )?;
+    initialize_dummy_password_hash()?;
 
     // 配置只在启动阶段读取，运行期通过 AppState 共享不可变配置。
     let database_url = database_url(&config);
@@ -109,7 +126,7 @@ pub async fn run() -> anyhow::Result<()> {
             })
             .wrap(from_fn(security_headers))
             .app_data(state.clone())
-            .configure(|cfg| routes::configure(cfg, &state.settings))
+            .configure(|cfg| routes::configure(cfg, &state.settings, perf_metrics_enabled))
     })
     .bind(addr)?
     .run()

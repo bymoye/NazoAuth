@@ -19,24 +19,57 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+// 测试使用非默认 provider id，避免把动态 provider 路由误写成固定 OIDC 入口。
+const TEST_OIDC_PROVIDER_ID: &str = "test-oidc";
+
 fn oidc_provider() -> OidcFederationSettings {
     OidcFederationSettings {
-        provider_id: "oidc".to_owned(),
+        provider_id: TEST_OIDC_PROVIDER_ID.to_owned(),
         issuer: "https://issuer.example".to_owned(),
         authorization_endpoint: "https://issuer.example/authorize".to_owned(),
         token_endpoint: "https://issuer.example/token".to_owned(),
         jwks_url: "https://issuer.example/jwks".to_owned(),
         client_id: "client-1".to_owned(),
         client_secret: "secret".to_owned(),
-        redirect_uri: "https://auth.example/federation/oidc/callback".to_owned(),
+        redirect_uri: "https://auth.example/federation/test-oidc/callback".to_owned(),
         scopes: "openid email".to_owned(),
     }
 }
 
+fn oidc_provider_registry_config(provider: &OidcFederationSettings) -> ConfigSource {
+    // 测试与生产启动保持同一事实源：OIDC provider 也必须来自 provider registry。
+    ConfigSource::from_owned_pairs_for_test([(
+        "FEDERATION_PROVIDER_CONFIGS".to_owned(),
+        json!([{
+            "provider_id": provider.provider_id.as_str(),
+            "enabled": true,
+            "display_name": "OIDC",
+            "adapter_type": "oidc",
+            "issuer": provider.issuer.as_str(),
+            "authorization_endpoint": provider.authorization_endpoint.as_str(),
+            "token_endpoint": provider.token_endpoint.as_str(),
+            "jwks_url": provider.jwks_url.as_str(),
+            "client_id": provider.client_id.as_str(),
+            "client_secret": provider.client_secret.as_str(),
+            "redirect_uri": provider.redirect_uri.as_str(),
+            "scopes": provider.scopes.as_str(),
+        }])
+        .to_string(),
+    )])
+}
+
+fn settings_with_oidc_provider(provider: Option<&OidcFederationSettings>) -> Settings {
+    // None 表示没有任何外部登录 provider；Some 表示通过 registry 注册一个 OIDC provider。
+    let config = match provider {
+        Some(provider) => oidc_provider_registry_config(provider),
+        None => ConfigSource::default(),
+    };
+    Settings::from_config(&config).expect("federation settings should load")
+}
+
 fn oidc_callback_state() -> AppState {
-    let mut settings =
-        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-    settings.federation.oidc = Some(oidc_provider());
+    let provider = oidc_provider();
+    let settings = settings_with_oidc_provider(Some(&provider));
     let mut valkey_builder = fred::prelude::Builder::default_centralized();
     valkey_builder.with_performance_config(|performance| {
         performance.default_command_timeout = Duration::from_millis(50);
@@ -66,17 +99,40 @@ fn oidc_callback_state() -> AppState {
     }
 }
 
-fn state_without_oidc_provider() -> AppState {
-    let mut settings =
-        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-    settings.federation.oidc = None;
+fn provider_list_state() -> AppState {
+    let config = ConfigSource::from_pairs_for_test([(
+        "FEDERATION_PROVIDER_CONFIGS",
+        r#"[
+            {
+                "provider_id": "google",
+                "enabled": true,
+                "display_name": "Google",
+                "adapter_type": "oidc",
+                "issuer": "https://accounts.google.com",
+                "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+                "token_endpoint": "https://oauth2.googleapis.com/token",
+                "jwks_url": "https://www.googleapis.com/oauth2/v3/certs",
+                "client_id": "google-client",
+                "client_secret": "google-secret",
+                "redirect_uri": "https://auth.example.test/auth/federation/google/callback",
+                "scopes": "openid email profile"
+            },
+            {
+                "provider_id": "disabled",
+                "enabled": false,
+                "display_name": "Disabled",
+                "adapter_type": "oauth2_social",
+                "provider_kind": "qq",
+                "client_id": "disabled-client",
+                "client_secret": "disabled-secret",
+                "redirect_uri": "https://auth.example.test/auth/federation/disabled/callback"
+            }
+        ]"#,
+    )]);
+    let settings = Settings::from_config(&config).expect("provider registry settings should load");
     let mut valkey_builder = fred::prelude::Builder::default_centralized();
     valkey_builder.with_performance_config(|performance| {
         performance.default_command_timeout = Duration::from_millis(50);
-    });
-    valkey_builder.with_connection_config(|connection| {
-        connection.connection_timeout = Duration::from_millis(50);
-        connection.internal_command_timeout = Duration::from_millis(50);
     });
 
     AppState {
@@ -92,7 +148,7 @@ fn state_without_oidc_provider() -> AppState {
         settings: Arc::new(settings),
         keyset: KeysetStore::new(Keyset {
             active_kid: "test-kid".to_owned(),
-            active_alg: jsonwebtoken::Algorithm::EdDSA,
+            active_alg: Algorithm::EdDSA,
             active_signing_key: ActiveSigningKey::LocalPkcs8Der(Vec::new()),
             verification_keys: Vec::new(),
         }),
@@ -104,9 +160,7 @@ async fn live_federation_state(
     saml_gateway: Option<SamlGatewaySettings>,
 ) -> Option<AppState> {
     let valkey_url = std::env::var("VALKEY_URL").ok()?;
-    let mut settings =
-        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-    settings.federation.oidc = oidc;
+    let mut settings = settings_with_oidc_provider(oidc.as_ref());
     settings.federation.saml_gateway = saml_gateway;
     settings.rate_limit.auth_max_requests = 1_000;
 
@@ -151,9 +205,7 @@ impl LiveFederationFixture {
     ) -> Option<Self> {
         let database_url = std::env::var("DATABASE_URL").ok()?;
         let valkey_url = std::env::var("VALKEY_URL").ok()?;
-        let mut settings =
-            Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-        settings.federation.oidc = oidc;
+        let mut settings = settings_with_oidc_provider(oidc.as_ref());
         settings.federation.saml_gateway = saml_gateway;
         settings.rate_limit.auth_max_requests = 1_000;
         settings.session_cookie_name = "nazo_federation_session".to_owned();
@@ -462,6 +514,27 @@ fn federation_token_trims_transport_whitespace_but_preserves_length_and_charset_
     );
 }
 
+#[actix_web::test]
+async fn federation_provider_list_returns_enabled_non_secret_provider_metadata() {
+    let response = federation_provider_list(Data::new(provider_list_state())).await;
+    let (status, body) = response_json(response).await;
+    let providers = body["providers"]
+        .as_array()
+        .expect("providers must be an array");
+
+    // 登录入口响应只能包含展示字段和 start URL；client_secret、token endpoint
+    // 和 JWKS URL 等敏感或后端专用配置不能泄漏给前端。
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["provider_id"], "google");
+    assert_eq!(providers[0]["display_name"], "Google");
+    assert_eq!(providers[0]["adapter_type"], "oidc");
+    assert_eq!(providers[0]["start_url"], "/auth/federation/google/start");
+    assert!(providers[0].get("client_secret").is_none());
+    assert!(providers[0].get("token_endpoint").is_none());
+    assert!(providers[0].get("jwks_url").is_none());
+}
+
 #[test]
 fn oidc_callback_input_rejects_provider_error_before_code_or_state_processing() {
     let query = OidcCallbackQuery {
@@ -539,8 +612,9 @@ fn oidc_callback_input_requires_urlsafe_state_and_bounded_non_empty_code() {
 #[actix_web::test]
 async fn oidc_callback_after_rate_limit_rejects_provider_error_before_state_lookup() {
     let state = Data::new(oidc_callback_state());
+    let provider = oidc_provider();
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?error=access_denied")
+        .uri("/auth/federation/test-oidc/callback?error=access_denied")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: None,
@@ -548,7 +622,7 @@ async fn oidc_callback_after_rate_limit_rejects_provider_error_before_state_look
         error: Some("access_denied".to_owned()),
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
@@ -561,10 +635,13 @@ async fn oidc_callback_after_rate_limit_rejects_provider_error_before_state_look
 }
 
 #[actix_web::test]
-async fn oidc_callback_after_rate_limit_requires_configured_provider_before_input_processing() {
-    let state = Data::new(state_without_oidc_provider());
+async fn federation_provider_callback_rejects_unknown_provider_before_input_processing() {
+    let Some(state) = live_federation_state(None, None).await else {
+        return;
+    };
+    let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?error=access_denied")
+        .uri("/auth/federation/missing/callback?error=access_denied")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: None,
@@ -572,23 +649,26 @@ async fn oidc_callback_after_rate_limit_requires_configured_provider_before_inpu
         error: Some("access_denied".to_owned()),
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response =
+        federation_provider_callback(state, req, Path::from("missing".to_owned()), Query(query))
+            .await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         response
             .extensions()
             .get::<OAuthJsonErrorFields>()
             .map(|fields| fields.error.as_str()),
-        Some("temporarily_unavailable")
+        Some("invalid_request")
     );
 }
 
 #[actix_web::test]
 async fn oidc_callback_after_rate_limit_validates_input_before_state_storage_errors() {
     let state = Data::new(oidc_callback_state());
+    let provider = oidc_provider();
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=valid&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=valid&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some(" code-1 ".to_owned()),
@@ -596,7 +676,7 @@ async fn oidc_callback_after_rate_limit_validates_input_before_state_storage_err
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
@@ -610,12 +690,13 @@ async fn oidc_callback_after_rate_limit_validates_input_before_state_storage_err
 
 #[actix_web::test]
 async fn oidc_callback_treats_missing_state_as_expired_before_token_exchange() {
-    let Some(state) = live_federation_state(Some(oidc_provider()), None).await else {
+    let provider = oidc_provider();
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=missing&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=missing&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some("code-1".to_owned()),
@@ -623,7 +704,7 @@ async fn oidc_callback_treats_missing_state_as_expired_before_token_exchange() {
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -634,7 +715,8 @@ async fn oidc_callback_treats_missing_state_as_expired_before_token_exchange() {
 
 #[actix_web::test]
 async fn oidc_callback_rejects_malformed_stored_state_before_token_exchange() {
-    let Some(state) = live_federation_state(Some(oidc_provider()), None).await else {
+    let provider = oidc_provider();
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
@@ -648,7 +730,7 @@ async fn oidc_callback_rejects_malformed_stored_state_before_token_exchange() {
     .expect("malformed test OIDC state should be written");
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=bad&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=bad&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some("code-1".to_owned()),
@@ -656,7 +738,7 @@ async fn oidc_callback_rejects_malformed_stored_state_before_token_exchange() {
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -667,7 +749,8 @@ async fn oidc_callback_rejects_malformed_stored_state_before_token_exchange() {
 
 #[actix_web::test]
 async fn oidc_callback_rejects_expired_stored_state_before_token_exchange() {
-    let Some(state) = live_federation_state(Some(oidc_provider()), None).await else {
+    let provider = oidc_provider();
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
@@ -679,7 +762,7 @@ async fn oidc_callback_rejects_expired_stored_state_before_token_exchange() {
     .await;
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=expired&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=expired&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some("code-1".to_owned()),
@@ -687,7 +770,7 @@ async fn oidc_callback_rejects_expired_stored_state_before_token_exchange() {
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -700,14 +783,14 @@ async fn oidc_callback_rejects_expired_stored_state_before_token_exchange() {
 async fn oidc_callback_requires_normalized_email_claim_before_identity_resolution() {
     let (provider, token_request, jwks_request, nonce) =
         provider_backed_by_local_oidc(json!({"email": null})).await;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&state, &state_token, &nonce, Utc::now().timestamp()).await;
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=email&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=email&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some("code-1".to_owned()),
@@ -715,7 +798,7 @@ async fn oidc_callback_requires_normalized_email_claim_before_identity_resolutio
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
     token_request
         .await
         .expect("token request should finish before email validation");
@@ -734,14 +817,14 @@ async fn oidc_callback_requires_normalized_email_claim_before_identity_resolutio
 async fn oidc_callback_rejects_unverified_email_before_identity_resolution() {
     let (provider, token_request, jwks_request, nonce) =
         provider_backed_by_local_oidc(json!({"email_verified": false})).await;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&state, &state_token, &nonce, Utc::now().timestamp()).await;
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=email&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=email&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some("code-1".to_owned()),
@@ -749,7 +832,7 @@ async fn oidc_callback_rejects_unverified_email_before_identity_resolution() {
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
     token_request
         .await
         .expect("token request should finish before email verification");
@@ -768,14 +851,14 @@ async fn oidc_callback_rejects_unverified_email_before_identity_resolution() {
 async fn oidc_callback_rejects_missing_email_verification_before_identity_resolution() {
     let (provider, token_request, jwks_request, nonce) =
         provider_backed_by_local_oidc(json!({"email_verified": null})).await;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&state, &state_token, &nonce, Utc::now().timestamp()).await;
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
-        .uri("/auth/federation/oidc/callback?state=email&code=code")
+        .uri("/auth/federation/test-oidc/callback?state=email&code=code")
         .to_http_request();
     let query = OidcCallbackQuery {
         code: Some("code-1".to_owned()),
@@ -783,7 +866,7 @@ async fn oidc_callback_rejects_missing_email_verification_before_identity_resolu
         error: None,
     };
 
-    let response = federation_oidc_callback_after_rate_limit(state, req, query).await;
+    let response = oidc_callback_after_rate_limit_for_provider(state, req, query, provider).await;
     token_request
         .await
         .expect("token request should finish before email verification");
@@ -1088,11 +1171,11 @@ async fn saml_acs_rejects_signed_assertion_with_wrong_audience_before_identity_r
 }
 
 #[actix_web::test]
-async fn federation_oidc_start_requires_configured_provider_after_rate_limit() {
+async fn federation_provider_start_rejects_unknown_provider_after_rate_limit() {
     let Some(state) = live_federation_state(None, None).await else {
         return;
     };
-    let response = federation_oidc_start(
+    let response = federation_provider_start(
         Data::new(state),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1101,23 +1184,25 @@ async fn federation_oidc_start_requires_configured_provider_after_rate_limit() {
                     .expect("peer address should parse"),
             )
             .to_http_request(),
+        Path::from("missing".to_owned()),
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         oauth_error_code(&response).as_deref(),
-        Some("temporarily_unavailable")
+        Some("invalid_request")
     );
 }
 
 #[actix_web::test]
-async fn federation_oidc_start_persists_state_nonce_and_pkce_binding() {
-    let Some(state) = live_federation_state(Some(oidc_provider()), None).await else {
+async fn federation_provider_start_persists_oidc_state_nonce_and_pkce_binding() {
+    let provider = oidc_provider();
+    let Some(state) = live_federation_state(Some(provider), None).await else {
         return;
     };
     let state = Data::new(state);
-    let response = federation_oidc_start(
+    let response = federation_provider_start(
         state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1126,6 +1211,7 @@ async fn federation_oidc_start_persists_state_nonce_and_pkce_binding() {
                     .expect("peer address should parse"),
             )
             .to_http_request(),
+        Path::from(TEST_OIDC_PROVIDER_ID.to_owned()),
     )
     .await;
 
@@ -1174,14 +1260,14 @@ async fn oidc_callback_denies_failed_token_exchange_and_consumes_state() {
     let (token_endpoint, token_request) = one_shot_json_server(json!({})).await;
     let mut provider = oidc_provider();
     provider.token_endpoint = token_endpoint;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state(&state, &state_token, Utc::now().timestamp()).await;
     let state = Data::new(state);
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1195,6 +1281,7 @@ async fn oidc_callback_denies_failed_token_exchange_and_consumes_state() {
             state: Some(state_token.clone()),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1232,14 +1319,14 @@ async fn oidc_callback_returns_server_error_when_jwks_response_is_invalid() {
     let (jwks_url, jwks_request) = one_shot_json_server(json!({ "not_keys": [] })).await;
     provider.token_endpoint = token_endpoint;
     provider.jwks_url = jwks_url;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&state, &state_token, &nonce, Utc::now().timestamp()).await;
     let state = Data::new(state);
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         state,
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1253,6 +1340,7 @@ async fn oidc_callback_returns_server_error_when_jwks_response_is_invalid() {
             state: Some(state_token),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1271,14 +1359,14 @@ async fn oidc_callback_rejects_id_token_policy_failures_and_consumes_state() {
     let wrong_nonce = random_urlsafe_token();
     let (provider, token_request, jwks_request, nonce) =
         provider_backed_by_local_oidc(json!({"nonce": wrong_nonce})).await;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&state, &state_token, &nonce, Utc::now().timestamp()).await;
     let state = Data::new(state);
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1292,6 +1380,7 @@ async fn oidc_callback_rejects_id_token_policy_failures_and_consumes_state() {
             state: Some(state_token.clone()),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1323,14 +1412,14 @@ async fn oidc_callback_reports_identity_resolution_db_failure_without_session_co
         "name": "Database Failure"
     }))
     .await;
-    let Some(state) = live_federation_state(Some(provider), None).await else {
+    let Some(state) = live_federation_state(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&state, &state_token, &nonce, Utc::now().timestamp()).await;
     let state = Data::new(state);
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1344,6 +1433,7 @@ async fn oidc_callback_reports_identity_resolution_db_failure_without_session_co
             state: Some(state_token.clone()),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1379,13 +1469,13 @@ async fn oidc_callback_creates_new_federated_user_session_and_external_link() {
         "name": "Federated User"
     }))
     .await;
-    let Some(fixture) = LiveFederationFixture::new(Some(provider), None).await else {
+    let Some(fixture) = LiveFederationFixture::new(Some(provider.clone()), None).await else {
         return;
     };
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&fixture.state, &state_token, &nonce, Utc::now().timestamp()).await;
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         fixture.state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1399,6 +1489,7 @@ async fn oidc_callback_creates_new_federated_user_session_and_external_link() {
             state: Some(state_token),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1430,7 +1521,7 @@ async fn oidc_callback_creates_new_federated_user_session_and_external_link() {
         .await
         .expect("OIDC login should provision a user for a new verified email");
     let link = fixture
-        .external_identity_link("oidc", "oidc", &subject)
+        .external_identity_link("oidc", TEST_OIDC_PROVIDER_ID, &subject)
         .await
         .expect("OIDC login should persist the external identity link");
     let session = fixture.session_payload(&session_cookie).await;
@@ -1446,7 +1537,7 @@ async fn oidc_callback_creates_new_federated_user_session_and_external_link() {
 }
 
 #[actix_web::test]
-async fn oidc_callback_links_existing_active_email_account_without_creating_duplicate_user() {
+async fn oidc_callback_rejects_existing_active_email_account_without_explicit_link() {
     let suffix = Uuid::now_v7().simple().to_string();
     let email = format!("oidc-existing-{suffix}@example.com");
     let subject = format!("oidc-existing-subject-{suffix}");
@@ -1456,14 +1547,14 @@ async fn oidc_callback_links_existing_active_email_account_without_creating_dupl
         "name": "Existing User"
     }))
     .await;
-    let Some(fixture) = LiveFederationFixture::new(Some(provider), None).await else {
+    let Some(fixture) = LiveFederationFixture::new(Some(provider.clone()), None).await else {
         return;
     };
     let existing_user = fixture.create_user(&email, true).await;
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&fixture.state, &state_token, &nonce, Utc::now().timestamp()).await;
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         fixture.state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1477,6 +1568,7 @@ async fn oidc_callback_links_existing_active_email_account_without_creating_dupl
             state: Some(state_token),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1486,25 +1578,27 @@ async fn oidc_callback_links_existing_active_email_account_without_creating_dupl
         .await
         .expect("JWKS endpoint should receive the fetch request");
 
+    // 拒绝自动绑定已有 email 账号时，响应不应创建新的登录会话。
     let session_cookie =
-        cookie_value_from_response(&response, &fixture.state.settings.session_cookie_name)
-            .expect("federated login must set a session cookie");
+        cookie_value_from_response(&response, &fixture.state.settings.session_cookie_name);
     let (status, body) = response_json(response).await;
     let linked_user = fixture
         .user_by_email(&email)
         .await
         .expect("existing user should still be present");
-    let link = fixture
-        .external_identity_link("oidc", "oidc", &subject)
-        .await
-        .expect("existing account should receive an external identity link");
-    let session = fixture.session_payload(&session_cookie).await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["mfa_required"], false);
+    // 已有本地账号必须走显式 linking 流程；不能只凭第三方 email claim
+    // 自动把外部 subject 绑定到该账号。
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "access_denied");
     assert_eq!(linked_user.id, existing_user.id);
-    assert_eq!(link.user_id, existing_user.id);
-    assert_eq!(session.user_id, existing_user.id);
+    assert!(
+        fixture
+            .external_identity_link("oidc", TEST_OIDC_PROVIDER_ID, &subject)
+            .await
+            .is_none()
+    );
+    assert!(session_cookie.is_none());
 }
 
 #[actix_web::test]
@@ -1518,14 +1612,14 @@ async fn oidc_callback_rejects_existing_inactive_email_account_without_link_or_s
         "name": "Inactive Existing User"
     }))
     .await;
-    let Some(fixture) = LiveFederationFixture::new(Some(provider), None).await else {
+    let Some(fixture) = LiveFederationFixture::new(Some(provider.clone()), None).await else {
         return;
     };
     let inactive_user = fixture.create_user(&email, false).await;
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&fixture.state, &state_token, &nonce, Utc::now().timestamp()).await;
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         fixture.state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1539,6 +1633,7 @@ async fn oidc_callback_rejects_existing_inactive_email_account_without_link_or_s
             state: Some(state_token),
             error: None,
         },
+        provider,
     )
     .await;
     token_request
@@ -1560,7 +1655,7 @@ async fn oidc_callback_rejects_existing_inactive_email_account_without_link_or_s
     );
     assert!(
         fixture
-            .external_identity_link("oidc", "oidc", &subject)
+            .external_identity_link("oidc", TEST_OIDC_PROVIDER_ID, &subject)
             .await
             .is_none(),
         "inactive local accounts must not be silently linked to a new OIDC subject"
@@ -1583,17 +1678,23 @@ async fn oidc_callback_rejects_inactive_linked_user() {
         "email": email
     }))
     .await;
-    let Some(fixture) = LiveFederationFixture::new(Some(provider), None).await else {
+    let Some(fixture) = LiveFederationFixture::new(Some(provider.clone()), None).await else {
         return;
     };
     let inactive_user = fixture.create_user(&email, false).await;
     fixture
-        .insert_external_identity_link(&inactive_user, "oidc", "oidc", &subject, &email)
+        .insert_external_identity_link(
+            &inactive_user,
+            "oidc",
+            TEST_OIDC_PROVIDER_ID,
+            &subject,
+            &email,
+        )
         .await;
     let state_token = random_urlsafe_token();
     store_oidc_state_with_nonce(&fixture.state, &state_token, &nonce, Utc::now().timestamp()).await;
 
-    let response = federation_oidc_callback_after_rate_limit(
+    let response = oidc_callback_after_rate_limit_for_provider(
         fixture.state.clone(),
         actix_web::test::TestRequest::get()
             .peer_addr(
@@ -1607,6 +1708,7 @@ async fn oidc_callback_rejects_inactive_linked_user() {
             state: Some(state_token),
             error: None,
         },
+        provider,
     )
     .await;
     token_request

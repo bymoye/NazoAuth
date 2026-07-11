@@ -41,13 +41,48 @@ Run the long fixed-arrival-rate capacity curve:
 make perf-capacity
 ```
 
+Run a short App CPU smoke test:
+
+```sh
+./perf/cnb_app_cpu_capacity_smoke.sh
+```
+
+This test uses the NazoAuth service CPU override only (`PERF_APP_CPUS`, default
+`1`; optionally `PERF_APP_TASKSET` for process-level CPU affinity). PostgreSQL,
+Valkey, migration, key setup, and the k6 perf runner remain unrestricted unless
+`APP_CPU_CAPACITY_INFRA_CPUSET` is set explicitly. In nested Docker
+environments where Docker CPU quota is not enforced reliably, process-level
+`taskset` is the effective limiter.
+
+Run a single-instance full-flow max test:
+
+```sh
+./perf/cnb_single_instance_full_flow_max.sh
+```
+
+This runs one NazoAuth instance through the full OIDC cold-login flow with
+short, high-arrival-rate points. The script splits the runner's allowed CPU set
+into an application half and an infrastructure half: NazoAuth is pinned to the
+application half, while PostgreSQL, Valkey, migration, key setup, and k6 use the
+infrastructure half. The default scenario is `oidc_cold_login_refresh`, which
+includes PAR, password login, authorization decision, authorization-code token
+exchange, and refresh-token rotation.
+
+Run the extended fixed-arrival-rate matrix on a dedicated CNB runner:
+
+```sh
+./perf/cnb_extended_capacity_matrix.sh
+```
+
 The long capacity curve runs 30 minutes per point across 1, 2, and 4 NazoAuth
 replicas. It is intended for dedicated benchmark machines, not routine local
 verification.
 
 Results are written to `perf/results/*.summary.json` and
-`perf/results/*.k6.json`. Markdown reports are written to
-`docs/performance-benchmarks.md` and `docs/performance-capacity-curve.md`.
+`perf/results/*.k6.json`. Markdown entry-point reports are written to
+`docs/performance/performance-benchmarks.md` and
+`docs/performance/performance-capacity-curve.md`; scenario-specific capacity
+reports are grouped under `docs/performance/reports/`.
 
 ## Load Model
 
@@ -78,6 +113,7 @@ FAPI paths can issue the required RS256 and PS256 server-side tokens.
 | `oidc-same-user-contention` | `same_user_refresh_token_rotation`, `same_user_introspect_opaque_refresh_token`, `same_user_authorize_par_session` | Exercises concurrent operations from one account to reveal account/session contention risks. |
 | `fapi2-high-security` | `fapi2_par_jar_private_key_jwt_dpop` | Exercises PAR + signed JAR + `private_key_jwt` + DPoP-bound authorization-code and refresh paths. |
 | `capacity` | `token_only_client_credentials`, `oidc_cold_login_refresh`, `oidc_logged_in_authorization_code`, `oidc_refresh_only`, `fapi2_full_security` | Fixed-arrival-rate scenarios used by `perf/capacity.py` to build 1/2/4 replica capacity curves. |
+| `extended-capacity` | `mtls_client_credentials`, `par_signed_request_object`, `introspect_opaque_refresh_token`, `authorize_par_session`, `revoke_refresh_token`, `metadata_jwks`, `ciba_private_key_jwt_dpop_poll`, `same_user_refresh_token_rotation`, `same_user_introspect_opaque_refresh_token`, `same_user_authorize_par_session` | Covers protocol and security surfaces that should not be mixed into the primary capacity curve. |
 
 ## Capacity Curve Model
 
@@ -94,9 +130,31 @@ The default long matrix covers:
 - `fapi2_full_security`: PAR + signed JAR + `private_key_jwt` + DPoP-bound
   authorization-code and refresh paths.
 
+`perf/cnb_extended_capacity_matrix.sh` runs a separate 30 minute per point
+matrix for mTLS, opaque-token introspection, PAR/JAR endpoint cost,
+authorization-session cost, token revocation, discovery/JWKS reads, CIBA poll
+mode, and same-user contention. The CIBA scenario uses `private_key_jwt`
+PS256 client authentication, a signed CIBA request object, automated approval,
+and a DPoP-bound CIBA token request. Dynamic Client Registration still requires
+dedicated provisioning setup and is kept out of this matrix.
+
 The report normalizes observed throughput by NazoAuth service CPU usage:
 `100%` Docker CPU is treated as one effective CPU core. This avoids claiming
 capacity only from raw RPS when the service is consuming many cores.
+
+For strict App CPU tests, `perf/cnb_capacity.sh` also supports:
+
+| Variable | Meaning |
+| --- | --- |
+| `PERF_APP_CPUS` | Docker CPU quota for the NazoAuth service, for example `1`, `2`, or `4`. |
+| `PERF_APP_TASKSET` | Process-level CPU affinity for NazoAuth. This is the effective limiter in CNB nested Docker environments where CPU quota is not enforced reliably. |
+| `PERF_APP_CPUSET` | Optional CPU set for NazoAuth. |
+| `PERF_INFRA_CPUSET` | Optional CPU set for PostgreSQL, Valkey, keyset, migrate, and perf runner. |
+| `PERF_CPUSET` | Legacy setting that pins all services to the same CPU set. |
+| `SINGLE_INSTANCE_MAX_DURATION` | Duration per point for `cnb_single_instance_full_flow_max.sh`, default `2m`. |
+| `SINGLE_INSTANCE_MAX_RATES` | Comma-separated fixed arrival rates for the full-flow max test, default `16,32,64,96,128,192,256,384,512`. |
+| `SINGLE_INSTANCE_MAX_MAX_VUS` | k6 maximum VUs for the full-flow max test, default `4096`. |
+| `SINGLE_INSTANCE_MAX_SCENARIO` | Scenario for the full-flow max test, default `oidc_cold_login_refresh`. |
 
 ## Metrics
 

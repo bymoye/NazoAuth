@@ -253,9 +253,113 @@ async fn missing_session_key_is_anonymous_even_when_cookie_is_present() {
             .is_none()
     );
     assert!(
-        !step_up_current_session(&state, &req, "otp")
+        step_up_current_session(&state, &req, "otp")
             .await
             .expect("missing session key cannot step up MFA")
+            .is_none()
+    );
+}
+
+#[actix_web::test]
+async fn mfa_step_up_rotates_session_and_invalidates_old_identifier() {
+    let Some(state) = live_session_state().await else {
+        return;
+    };
+    let old_sid = format!("pending-mfa-{}", Uuid::now_v7());
+    let payload = SessionPayload {
+        pending_mfa: true,
+        ..valid_payload()
+    };
+    store_raw_session(
+        &state,
+        &old_sid,
+        &serde_json::to_string(&payload).expect("session payload should serialize"),
+    )
+    .await;
+    let req = session_request(&state, &old_sid);
+
+    let rotation = complete_mfa_session(&state, &req, "otp")
+        .await
+        .expect("MFA completion should not fail")
+        .expect("pending MFA session should rotate");
+
+    assert_ne!(rotation.session_id, old_sid);
+    assert!(!rotation.csrf_token.is_empty());
+    assert_eq!(
+        valkey_get(&state.valkey, format!("oauth:session:{old_sid}"))
+            .await
+            .expect("old session lookup should succeed"),
+        None
+    );
+    let rotated = valkey_get(
+        &state.valkey,
+        format!("oauth:session:{}", rotation.session_id),
+    )
+    .await
+    .expect("rotated session lookup should succeed")
+    .expect("rotated session should exist");
+    let rotated: SessionPayload =
+        serde_json::from_str(&rotated).expect("rotated session should deserialize");
+    assert!(!rotated.pending_mfa);
+    assert!(rotated.amr.iter().any(|method| method == "otp"));
+    assert!(rotated.amr.iter().any(|method| method == "mfa"));
+    assert_eq!(rotated.oidc_sid, payload.oidc_sid);
+}
+
+#[actix_web::test]
+async fn concurrent_mfa_step_up_allows_exactly_one_session_rotation() {
+    let Some(state) = live_session_state().await else {
+        return;
+    };
+    let old_sid = format!("concurrent-pending-mfa-{}", Uuid::now_v7());
+    let payload = SessionPayload {
+        pending_mfa: true,
+        ..valid_payload()
+    };
+    store_raw_session(
+        &state,
+        &old_sid,
+        &serde_json::to_string(&payload).expect("session payload should serialize"),
+    )
+    .await;
+    let first_req = session_request(&state, &old_sid);
+    let second_req = session_request(&state, &old_sid);
+
+    let (first, second) = tokio::join!(
+        complete_mfa_session(&state, &first_req, "otp"),
+        complete_mfa_session(&state, &second_req, "otp")
+    );
+    let rotations = [
+        first.expect("first rotation attempt should not fail"),
+        second.expect("second rotation attempt should not fail"),
+    ];
+
+    assert_eq!(
+        rotations
+            .iter()
+            .filter(|rotation| rotation.is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        valkey_get(&state.valkey, format!("oauth:session:{old_sid}"))
+            .await
+            .expect("old session lookup should succeed"),
+        None
+    );
+    let rotation = rotations
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("one rotation must succeed");
+    assert!(
+        valkey_get(
+            &state.valkey,
+            format!("oauth:session:{}", rotation.session_id)
+        )
+        .await
+        .expect("new session lookup should succeed")
+        .is_some()
     );
 }
 
@@ -357,18 +461,20 @@ async fn mfa_step_up_rejects_invalid_or_malformed_session_state() {
     .await;
     let invalid_req = session_request(&state, &invalid_sid);
     assert!(
-        !complete_mfa_session(&state, &invalid_req, "otp")
+        complete_mfa_session(&state, &invalid_req, "otp")
             .await
             .expect("invalid MFA payload should not complete")
+            .is_none()
     );
 
     let malformed_sid = format!("malformed-mfa-session-{}", Uuid::now_v7());
     store_raw_session(&state, &malformed_sid, "not-json").await;
     let malformed_req = session_request(&state, &malformed_sid);
     assert!(
-        !step_up_current_session(&state, &malformed_req, "otp")
+        step_up_current_session(&state, &malformed_req, "otp")
             .await
             .expect("malformed MFA payload should not step up")
+            .is_none()
     );
     assert_eq!(
         valkey_get(&state.valkey, format!("oauth:session:{malformed_sid}"))
@@ -384,14 +490,16 @@ async fn missing_session_cookie_cannot_complete_or_step_up_mfa() {
     let req = TestRequest::default().to_http_request();
 
     assert!(
-        !complete_mfa_session(&state, &req, "otp")
+        complete_mfa_session(&state, &req, "otp")
             .await
             .expect("missing cookie should not hit storage")
+            .is_none()
     );
     assert!(
-        !step_up_current_session(&state, &req, "otp")
+        step_up_current_session(&state, &req, "otp")
             .await
             .expect("missing cookie should not hit storage")
+            .is_none()
     );
 }
 

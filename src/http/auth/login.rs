@@ -22,26 +22,23 @@ pub(crate) async fn login(state: Data<AppState>, req: HttpRequest, body: Bytes) 
         Err(response) => return response,
     };
 
+    if matches!(response_mode, LoginResponseMode::Form)
+        && !form_login_origin_is_allowed(&state.settings, &req)
+    {
+        return oauth_error(StatusCode::FORBIDDEN, "access_denied", "登录来源无效.");
+    }
+
     if let Err(response) = enforce_rate_limit(&state, &req, RateLimitPolicy::Auth).await {
         return response;
     }
 
     let email = payload.email.trim().to_lowercase();
+    if let Err(response) = enforce_login_failure_throttle(&state, &req, &email).await {
+        return response;
+    }
+
     let user = match find_user_by_email(&state.diesel_db, &email).await {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            audit_event(
-                "login_failure",
-                audit_fields(&[
-                    ("email_hash", json!(blake3_hex(&email))),
-                    (
-                        "source_ip_hash",
-                        json!(blake3_hex(&client_ip(&req, &state.settings))),
-                    ),
-                ]),
-            );
-            return oauth_error(StatusCode::UNAUTHORIZED, "access_denied", "邮箱或密码错误.");
-        }
+        Ok(user) => user,
         Err(error) => {
             tracing::warn!(%error, "failed to query user for login");
             return oauth_error(
@@ -51,22 +48,68 @@ pub(crate) async fn login(state: Data<AppState>, req: HttpRequest, body: Bytes) 
             );
         }
     };
-    let password_valid = user.is_active
-        && verify_password_blocking(payload.password.clone(), user.password_hash.clone()).await;
-    if !password_valid {
-        audit_event(
-            "login_failure",
-            audit_fields(&[
-                ("user_id", json!(user.id)),
-                ("email_hash", json!(blake3_hex(&email))),
-                (
-                    "source_ip_hash",
-                    json!(blake3_hex(&client_ip(&req, &state.settings))),
-                ),
-            ]),
-        );
+    let authenticatable = user.as_ref().is_some_and(|user| user.is_active);
+    let password_hash = if authenticatable {
+        user.as_ref()
+            .expect("authenticatable users must exist")
+            .password_hash
+            .clone()
+    } else {
+        match dummy_password_hash() {
+            Ok(hash) => hash,
+            Err(error) => {
+                tracing::error!(%error, "dummy password hash is unavailable");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "密码校验失败.",
+                );
+            }
+        }
+    };
+    let password_valid =
+        match verify_password_blocking_limited(payload.password.clone(), password_hash).await {
+            Ok(valid) => valid,
+            Err(PasswordVerificationError::Saturated) => {
+                tracing::warn!("password verification concurrency limit reached");
+                let mut response = oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "登录服务繁忙，请稍后重试.",
+                );
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+                return response;
+            }
+            Err(PasswordVerificationError::WorkerFailed) => {
+                tracing::warn!("password verification worker failed");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "密码校验失败.",
+                );
+            }
+        };
+    if !authenticatable || !password_valid {
+        if let Err(response) = record_login_failure(&state, &req, &email).await {
+            return response;
+        }
+        let mut fields = vec![
+            ("email_hash", json!(blake3_hex(&email))),
+            (
+                "source_ip_hash",
+                json!(blake3_hex(&client_ip(&req, &state.settings))),
+            ),
+        ];
+        if let Some(user) = &user {
+            fields.push(("user_id", json!(user.id)));
+        }
+        audit_event("login_failure", audit_fields(&fields));
         return oauth_error(StatusCode::UNAUTHORIZED, "access_denied", "邮箱或密码错误.");
     }
+    let user = user.expect("successful authentication requires an active user");
+    clear_login_failures(&state, &req, &email).await;
 
     let session_id = random_urlsafe_token();
     let csrf_token = random_urlsafe_token();
@@ -258,6 +301,52 @@ fn assign_once(slot: &mut Option<String>, value: String) -> Result<(), HttpRespo
     }
     *slot = Some(value);
     Ok(())
+}
+
+fn form_login_origin_is_allowed(settings: &Settings, req: &HttpRequest) -> bool {
+    let mut origin_headers = req.headers().get_all(header::ORIGIN);
+    let Some(origin_header) = origin_headers.next() else {
+        return false;
+    };
+    if origin_headers.next().is_some() {
+        return false;
+    }
+    let Ok(origin_header) = origin_header.to_str() else {
+        return false;
+    };
+    let Some(request_origin) = strict_request_origin(origin_header) else {
+        return false;
+    };
+
+    [&settings.issuer, &settings.frontend_base_url]
+        .into_iter()
+        .filter_map(|trusted_url| normalized_url_origin(trusted_url))
+        .any(|trusted_origin| trusted_origin == request_origin)
+}
+
+fn strict_request_origin(value: &str) -> Option<String> {
+    if value == "null" || value != value.trim() {
+        return None;
+    }
+    let parsed = url::Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+fn normalized_url_origin(value: &str) -> Option<String> {
+    let parsed = url::Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
 }
 
 fn safe_form_login_next(state: &AppState, req: &HttpRequest, submitted: Option<&str>) -> String {

@@ -35,3 +35,7 @@ COPY --from=builder /app/target/release/nazo-oauth-keyctl /usr/local/bin/nazo-oa
 EXPOSE 8000
 
 CMD ["nazo-oauth-server"]
+
+FROM runtime AS perf-runtime
+
+COPY perf/env.yaml /app/.env.yaml

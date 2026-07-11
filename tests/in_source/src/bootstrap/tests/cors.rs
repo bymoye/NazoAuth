@@ -73,7 +73,8 @@ async fn cors_preflight_allows_only_configured_origin_methods_and_security_heade
 async fn authorization_endpoint_is_not_cors_enabled() {
     let settings = test_settings(vec!["https://app.example".to_owned()]);
     let app =
-        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings))).await;
+        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, false)))
+            .await;
 
     let request = test::TestRequest::default()
         .method(actix_web::http::Method::OPTIONS)
@@ -108,7 +109,8 @@ async fn authorization_endpoint_is_not_cors_enabled() {
 async fn dynamic_client_registration_route_is_absent_when_disabled() {
     let settings = test_settings(vec!["https://app.example".to_owned()]);
     let app =
-        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings))).await;
+        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, false)))
+            .await;
 
     let request = test::TestRequest::post()
         .uri("/register")
@@ -128,7 +130,8 @@ async fn dynamic_client_registration_route_is_absent_when_disabled() {
 async fn openid_federation_route_is_not_registered() {
     let settings = test_settings(vec!["https://app.example".to_owned()]);
     let app =
-        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings))).await;
+        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, false)))
+            .await;
 
     let request = test::TestRequest::get()
         .uri("/.well-known/openid-federation")
@@ -140,6 +143,30 @@ async fn openid_federation_route_is_not_registered() {
         StatusCode::NOT_FOUND,
         "OpenID Federation is not part of the product surface"
     );
+}
+
+#[actix_web::test]
+async fn perf_metrics_route_is_controlled_by_the_typed_startup_flag() {
+    let settings = test_settings(Vec::new());
+    let disabled =
+        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, false)))
+            .await;
+    let response = test::call_service(
+        &disabled,
+        test::TestRequest::get().uri("/__perf/metrics").to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let enabled =
+        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, true)))
+            .await;
+    let response = test::call_service(
+        &enabled,
+        test::TestRequest::get().uri("/__perf/metrics").to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[actix_web::test]
@@ -317,6 +344,37 @@ async fn cors_auth_api_credentials_are_limited_to_configured_origins_and_csrf_he
     );
 }
 
+#[actix_web::test]
+async fn cors_scim_allows_put_without_browser_credentials() {
+    let settings = test_settings(vec!["https://scim-admin.example".to_owned()]);
+    let app = test::init_service(App::new().wrap(cors_scim(&settings)).route(
+        "/scim/v2/Users/user-1",
+        web::put().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+
+    let request = test::TestRequest::default()
+        .method(actix_web::http::Method::OPTIONS)
+        .uri("/scim/v2/Users/user-1")
+        .insert_header((header::ORIGIN, "https://scim-admin.example"))
+        .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "PUT"))
+        .insert_header((
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "authorization, content-type",
+        ))
+        .to_request();
+    let response = test::call_service(&app, request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none(),
+        "SCIM uses bearer authentication and must not authorize browser credentials"
+    );
+}
+
 fn test_settings(cors_allowed_origins: Vec<String>) -> Settings {
     Settings {
         issuer: "https://issuer.example".to_owned(),
@@ -346,6 +404,9 @@ fn test_settings(cors_allowed_origins: Vec<String>) -> Settings {
             auth_max_requests: 30,
             token_max_requests: 60,
             token_management_max_requests: 120,
+            login_failure_window_seconds: 900,
+            login_failure_email_max_attempts: 50,
+            login_failure_ip_email_max_attempts: 5,
         },
         email: EmailSettings {
             delivery: EmailDelivery::Disabled,
@@ -376,7 +437,7 @@ fn test_settings(cors_allowed_origins: Vec<String>) -> Settings {
             strict_base64: true,
         },
         federation: FederationSettings {
-            oidc: None,
+            providers: crate::settings::FederationProviderRegistry::default(),
             saml_gateway: None,
         },
         enable_request_object: false,

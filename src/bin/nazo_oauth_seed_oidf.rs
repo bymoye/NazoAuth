@@ -10,8 +10,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use nazo_oauth_server::config::{ConfigSource, database_url};
 use nazo_oauth_server::oidf_seed::{
     callback_uris, config::client_scopes, config::mtls_thumbprint, config::plan_config_files,
-    config::public_jwks, config::read_plan_config, config::string_value, suite_base_urls,
-    test_endpoint_uri, test_endpoint_uris,
+    config::public_jwks, config::read_plan_config, config::string_value, seed_client_secret_pepper,
+    suite_base_urls, test_endpoint_uri, test_endpoint_uris,
 };
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -20,9 +20,6 @@ use std::{collections::BTreeSet, env, path::Path};
 const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_REALM_ID: &str = "00000000-0000-0000-0000-000000000002";
 const DEFAULT_ORGANIZATION_ID: &str = "00000000-0000-0000-0000-000000000003";
-const LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER: &str =
-    "local-development-client-secret-pepper-00000001";
-
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Copy)]
@@ -348,10 +345,7 @@ fn main() -> anyhow::Result<()> {
     let user_email = env_or("OIDF_LOCAL_USER_EMAIL", "oidf-local@example.test");
     let user_password = env_or("OIDF_LOCAL_USER_PASSWORD", "oidf-local-password");
     let client_secret = env_or("OIDF_LOCAL_CLIENT_SECRET", "oidf-local-client-secret");
-    let client_secret_pepper = env_or(
-        "CLIENT_SECRET_PEPPER",
-        LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
-    );
+    let client_secret_pepper = seed_client_secret_pepper(&config);
     let basic_redirect_uris = json!(callback_uris(&suite_base_urls, &alias));
     let empty_post_logout_redirect_uris = json!([]);
     let frontchannel_redirect_uris = json!(callback_uris(&suite_base_urls, &frontchannel_alias));

@@ -88,15 +88,8 @@ jobs:
       TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS: "100000"
       REQUIRE_PUSHED_AUTHORIZATION_REQUESTS: "false"
       SCIM_BEARER_TOKEN: ci-scim-secret
-      FEDERATION_OIDC_PROVIDER_ID: ci-oidc
-      FEDERATION_OIDC_ISSUER: https://issuer.example
-      FEDERATION_OIDC_AUTHORIZATION_ENDPOINT: https://issuer.example/authorize
-      FEDERATION_OIDC_TOKEN_ENDPOINT: https://issuer.example/token
-      FEDERATION_OIDC_JWKS_URL: https://issuer.example/jwks
-      FEDERATION_OIDC_CLIENT_ID: ci-oidc-client
-      FEDERATION_OIDC_CLIENT_SECRET: ci-oidc-secret
-      FEDERATION_OIDC_REDIRECT_URI: http://127.0.0.1:18000/auth/federation/oidc/callback
-      FEDERATION_OIDC_SCOPES: openid email profile
+      FEDERATION_PROVIDER_CONFIGS: >-
+        [{"provider_id":"ci-oidc","enabled":true,"display_name":"CI OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"ci-oidc-client","client_secret":"ci-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/ci-oidc/callback","scopes":"openid email profile"}]
       FEDERATION_SAML_GATEWAY_ENABLED: "true"
       FEDERATION_SAML_GATEWAY_ISSUER: ci-saml-gateway
       FEDERATION_SAML_GATEWAY_AUDIENCE: nazo-oauth-ci

@@ -10,9 +10,9 @@ semantic versioning once public release tags are cut.
 - Added durable OpenID Foundation conformance evidence under `docs/conformance`, including retained full 16-plan matrix records, workflow URLs, artifact metadata, plan IDs, profile combinations, pass counts, and exported artifact filenames.
 - Added a production deployment guide covering container deployment, reverse proxy boundaries, key rotation, database and Valkey operations, live verification, and OIDF readiness.
 - Added `SECURITY.md` with reporting guidance, vulnerability classes, production boundaries, and disclosure expectations.
-- Added `docs/roadmap.md` as the current scope record for implemented profiles, deployment controls, product boundaries, and evidence links.
-- Added `docs/profile-matrix.md`, separating OAuth/OIDC, FAPI2 Security, FAPI2 Message Signing, deployment-security, and product-hardening requirements.
-- Added `docs/threat-model.md` and `docs/refresh-token-rotation.md` for security boundaries and refresh-token state-machine behavior.
+- Added `docs/project/roadmap.md` as the current scope record for implemented profiles, deployment controls, product boundaries, and evidence links.
+- Added `docs/protocol/profile-matrix.md`, separating OAuth/OIDC, FAPI2 Security, FAPI2 Message Signing, deployment-security, and product-hardening requirements.
+- Added `docs/security/threat-model.md` and `docs/protocol/refresh-token-rotation.md` for security boundaries and refresh-token state-machine behavior.
 - Added `CHANGELOG.md`.
 - Added token endpoint support for the standard RFC 8707 `resource` parameter as the normative single-resource input, while retaining the legacy `audience` parameter as an extension.
 - Added supply-chain and release security gates with `cargo audit`, `cargo deny`, CycloneDX SBOM generation, Trivy image scanning, keyless artifact signing, and GitHub provenance attestations.
@@ -21,6 +21,8 @@ semantic versioning once public release tags are cut.
 - Added bounded RFC 8693 Token Exchange support for locally issued access-token to access-token exchanges, including subject/actor token validation, target restrictions, scope downscoping, and `issued_token_type` responses.
 - Added default-closed RFC 7591 Dynamic Client Registration behind `ENABLE_DYNAMIC_CLIENT_REGISTRATION`, with optional initial access token enforcement and OIDF dynamic-client plan coverage.
 - Added default-closed RFC 7592 Dynamic Client Registration Management for DCR-created clients, with hashed registration access tokens, GET/PUT credential rotation, full-replacement updates, and DELETE deactivation.
+- Added dynamic-client lifecycle audit events and ecosystem onboarding documentation covering baseline, FAPI2, Message Signing, CIBA, Device Grant, DCR/DCRM, Token Exchange, and deferred third-party JWT bearer trust boundaries.
+- Added modular third-party login provider registry with dynamic OIDC/OAuth2 social provider routes, QQ/WeChat social adapter presets, non-secret provider discovery, and admin onboarding metadata.
 
 ### Changed
 

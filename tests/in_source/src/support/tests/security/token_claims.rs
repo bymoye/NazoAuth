@@ -262,33 +262,88 @@ fn access_token_claims_keep_client_credentials_subject_separate() {
 }
 
 #[test]
-fn access_token_does_not_emit_cnf_when_sender_constraints_conflict_or_are_absent() {
-    for (dpop_jkt, mtls_x5t_s256) in [(None, None), (Some("jkt"), Some("x5t"))] {
-        let claims = access_token_claims(
-            "https://issuer.example",
-            AccessTokenJwtInput {
-                tenant_id: DEFAULT_TENANT_ID,
-                subject: "subject-1",
-                user_id: None,
-                subject_type: "client",
-                client_id: "client-1",
-                audiences: &["resource://default".to_owned()],
-                scopes: &["read".to_owned()],
-                authorization_details: &json!([]),
-                userinfo_claims: &[],
-                userinfo_claim_requests: &[],
-                ttl: 120,
-                dpop_jkt,
-                mtls_x5t_s256,
-                actor: None,
-            },
-            2_000,
-            "jti-3",
-        );
+fn access_token_rejects_conflicting_sender_constraints() {
+    assert!(validate_access_token_sender_constraint(Some("jkt"), Some("x5t")).is_err());
+}
 
-        assert!(
-            claims.cnf.is_none(),
-            "a token must not publish ambiguous confirmation claims when sender constraints conflict"
-        );
-    }
+#[tokio::test]
+async fn make_jwt_rejects_conflicting_sender_constraints_before_signing() {
+    let state = AppState {
+        diesel_db: crate::db::create_pool(
+            "postgres://nazo_token_test_invalid:nazo_token_test_invalid@127.0.0.1:1/nazo"
+                .to_owned(),
+            1,
+        )
+        .expect("pool construction should not connect"),
+        valkey: fred::prelude::Builder::default_centralized()
+            .build()
+            .expect("valkey client construction should not connect"),
+        settings: std::sync::Arc::new(test_settings()),
+        keyset: crate::domain::KeysetStore::new(Keyset {
+            active_kid: "invalid-test-key".to_owned(),
+            active_alg: jsonwebtoken::Algorithm::EdDSA,
+            active_signing_key: ActiveSigningKey::LocalPkcs8Der(Vec::new()),
+            verification_keys: Vec::new(),
+        }),
+    };
+    let audiences = vec!["resource://default".to_owned()];
+    let scopes = vec!["read".to_owned()];
+    let authorization_details = json!([]);
+
+    let result = make_jwt(
+        &state,
+        AccessTokenJwtInput {
+            tenant_id: DEFAULT_TENANT_ID,
+            subject: "subject-1",
+            user_id: None,
+            subject_type: "client",
+            client_id: "client-1",
+            audiences: &audiences,
+            scopes: &scopes,
+            authorization_details: &authorization_details,
+            userinfo_claims: &[],
+            userinfo_claim_requests: &[],
+            ttl: 120,
+            dpop_jkt: Some("jkt"),
+            mtls_x5t_s256: Some("x5t"),
+            actor: None,
+        },
+    )
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("conflicting sender constraints must fail before signing"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.kind(),
+        jsonwebtoken::errors::ErrorKind::InvalidToken
+    ));
+}
+
+#[test]
+fn access_token_without_sender_constraints_does_not_emit_cnf() {
+    let claims = access_token_claims(
+        "https://issuer.example",
+        AccessTokenJwtInput {
+            tenant_id: DEFAULT_TENANT_ID,
+            subject: "subject-1",
+            user_id: None,
+            subject_type: "client",
+            client_id: "client-1",
+            audiences: &["resource://default".to_owned()],
+            scopes: &["read".to_owned()],
+            authorization_details: &json!([]),
+            userinfo_claims: &[],
+            userinfo_claim_requests: &[],
+            ttl: 120,
+            dpop_jkt: None,
+            mtls_x5t_s256: None,
+            actor: None,
+        },
+        2_000,
+        "jti-3",
+    );
+
+    assert!(claims.cnf.is_none());
 }

@@ -1,23 +1,102 @@
 //! External OIDC and trusted SAML-gateway federation.
 
 use crate::http::prelude::*;
+use crate::settings::{
+    ExternalLoginProvider, ExternalLoginProviderAdapter, OidcFederationSettings,
+};
+use actix_web::web::Path;
+use serde::Serialize;
 
 mod oidc;
 mod saml;
+mod social;
 use oidc::*;
 use saml::*;
+use social::*;
 
-pub(crate) async fn federation_oidc_start(state: Data<AppState>, req: HttpRequest) -> HttpResponse {
+#[derive(Serialize)]
+struct FederationProviderView {
+    provider_id: String,
+    display_name: String,
+    adapter_type: &'static str,
+    icon: Option<String>,
+    display_order: i32,
+    start_url: String,
+}
+
+pub(crate) async fn federation_provider_list(state: Data<AppState>) -> HttpResponse {
+    // 登录入口只返回已启用 provider 的非敏感元数据；client_secret、
+    // token endpoint 等配置绝不能出现在前端响应中。
+    let providers = state
+        .settings
+        .federation
+        .providers
+        .enabled_public_providers()
+        .map(provider_view)
+        .collect::<Vec<_>>();
+    json_response_no_store(json!({ "providers": providers }))
+}
+
+pub(crate) async fn federation_provider_start(
+    state: Data<AppState>,
+    req: HttpRequest,
+    path: Path<String>,
+) -> HttpResponse {
+    // Actix 的 Path 提取器不暴露内部字段，动态 provider id 通过 into_inner 取得。
+    let provider_id = path.into_inner();
     if let Err(response) = enforce_rate_limit(&state, &req, RateLimitPolicy::Auth).await {
         return response;
     }
-    let Some(provider) = state.settings.federation.oidc.as_ref() else {
-        return oauth_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "temporarily_unavailable",
-            "OIDC federation is not configured.",
-        );
+    let Some(provider) = state
+        .settings
+        .federation
+        .providers
+        .enabled_provider(&provider_id)
+    else {
+        return unknown_provider_response();
     };
+    match &provider.adapter {
+        ExternalLoginProviderAdapter::Oidc(oidc) => start_oidc_provider(&state, oidc).await,
+        ExternalLoginProviderAdapter::Social(social) => {
+            start_social_provider(&state, &provider.provider_id, social).await
+        }
+    }
+}
+
+pub(crate) async fn federation_provider_callback(
+    state: Data<AppState>,
+    req: HttpRequest,
+    path: Path<String>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> HttpResponse {
+    // callback 路径中的 provider id 是选择热插拔模块的唯一入口事实源。
+    let provider_id = path.into_inner();
+    if let Err(response) = enforce_rate_limit(&state, &req, RateLimitPolicy::Auth).await {
+        return response;
+    }
+    let Some(provider) = state
+        .settings
+        .federation
+        .providers
+        .enabled_provider(&provider_id)
+        .cloned()
+    else {
+        return unknown_provider_response();
+    };
+    let provider_id = provider.provider_id.clone();
+    match provider.adapter {
+        ExternalLoginProviderAdapter::Oidc(oidc) => {
+            oidc_callback_after_rate_limit_for_provider(state, req, query, oidc).await
+        }
+        ExternalLoginProviderAdapter::Social(social) => {
+            social_callback_after_rate_limit(state, req, query, provider_id, social).await
+        }
+    }
+}
+
+async fn start_oidc_provider(state: &AppState, provider: &OidcFederationSettings) -> HttpResponse {
+    // 每次发起登录都生成 state、nonce 和 PKCE verifier，并把 verifier
+    // 只保存在 Valkey 的短 TTL state 中，避免 provider callback 被重放。
     let state_token = random_urlsafe_token();
     let pkce_verifier = random_urlsafe_token();
     let nonce = random_urlsafe_token();
@@ -60,29 +139,12 @@ pub(crate) async fn federation_oidc_start(state: Data<AppState>, req: HttpReques
     ))
 }
 
-pub(crate) async fn federation_oidc_callback(
-    state: Data<AppState>,
-    req: HttpRequest,
-    Query(query): Query<OidcCallbackQuery>,
-) -> HttpResponse {
-    if let Err(response) = enforce_rate_limit(&state, &req, RateLimitPolicy::Auth).await {
-        return response;
-    }
-    federation_oidc_callback_after_rate_limit(state, req, query).await
-}
-
-async fn federation_oidc_callback_after_rate_limit(
+async fn oidc_callback_after_rate_limit_for_provider(
     state: Data<AppState>,
     req: HttpRequest,
     query: OidcCallbackQuery,
+    provider: OidcFederationSettings,
 ) -> HttpResponse {
-    let Some(provider) = state.settings.federation.oidc.clone() else {
-        return oauth_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "temporarily_unavailable",
-            "OIDC federation is not configured.",
-        );
-    };
     let OidcCallbackInput { state_token, code } = match validate_oidc_callback_input(&query) {
         Ok(input) => input,
         Err(response) => return response,
@@ -183,6 +245,107 @@ async fn federation_oidc_callback_after_rate_limit(
         Err(response) => return response,
     };
     create_federated_session(&state, &req, &user, "oidc").await
+}
+
+fn provider_view(provider: &ExternalLoginProvider) -> FederationProviderView {
+    // start_url 只包含 provider_id，不包含任何 secret 或 endpoint 配置。
+    FederationProviderView {
+        provider_id: provider.provider_id.clone(),
+        display_name: provider.display_name.clone(),
+        adapter_type: provider.adapter_type(),
+        icon: provider.icon.clone(),
+        display_order: provider.display_order,
+        start_url: format!("/auth/federation/{}/start", provider.provider_id),
+    }
+}
+
+fn unknown_provider_response() -> HttpResponse {
+    oauth_error(
+        StatusCode::NOT_FOUND,
+        "invalid_request",
+        "federation provider is not configured.",
+    )
+}
+
+async fn social_callback_after_rate_limit(
+    state: Data<AppState>,
+    req: HttpRequest,
+    query: OidcCallbackQuery,
+    provider_id: String,
+    provider: crate::settings::SocialProviderSettings,
+) -> HttpResponse {
+    let OidcCallbackInput { state_token, code } = match validate_oidc_callback_input(&query) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let stored = match take_social_state(&state, &state_token).await {
+        Ok(Some(stored)) if stored.provider_id == provider_id => stored,
+        Ok(Some(_)) | Ok(None) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "federation state expired.",
+            );
+        }
+        Err(response) => return response,
+    };
+    if Utc::now().timestamp().saturating_sub(stored.created_at)
+        > FEDERATION_STATE_TTL_SECONDS as i64
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "federation state expired.",
+        );
+    }
+    let identity = match resolve_social_identity(&provider, &code, &stored.pkce_verifier).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(%error, %provider_id, "OAuth2 social federation failed");
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "access_denied",
+                "social federation failed.",
+            );
+        }
+    };
+    let user = if let Some(email) = identity.email.as_deref() {
+        match resolve_external_identity(
+            &state,
+            "oauth2_social",
+            &provider_id,
+            &identity.subject,
+            email,
+            identity.display_name.as_deref(),
+            identity.claims,
+        )
+        .await
+        {
+            Ok(user) => user,
+            Err(response) => return response,
+        }
+    } else {
+        match resolve_existing_external_identity(
+            &state,
+            "oauth2_social",
+            &provider_id,
+            &identity.subject,
+            identity.claims,
+        )
+        .await
+        {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return oauth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "access_denied",
+                    "verified external email or existing link required.",
+                );
+            }
+            Err(response) => return response,
+        }
+    };
+    create_federated_session(&state, &req, &user, "oauth2_social").await
 }
 
 pub(crate) async fn federation_saml_acs(
@@ -374,8 +537,18 @@ async fn resolve_external_identity(
         return Ok(user);
     }
     let user = match find_user_by_email(&state.diesel_db, email).await {
-        Ok(Some(user)) if user.is_active && user.tenant_id == tenant.tenant_id => user,
         Ok(Some(_)) => {
+            // 第三方 email claim 只能作为已验证联系信息，不能作为账号根身份。
+            // 没有既有 external_identity_links 绑定时，遇到同邮箱本地账号必须拒绝，
+            // 后续由显式 account linking 流程完成绑定。
+            audit_event(
+                "external_identity_relink_denied",
+                audit_fields(&[
+                    ("provider_type", json!(provider_type)),
+                    ("provider_id", json!(provider_id)),
+                    ("email_hash", json!(blake3_hex(email))),
+                ]),
+            );
             return Err(oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "access_denied",
@@ -413,7 +586,79 @@ async fn resolve_external_identity(
                 "federation login failed.",
             )
         })?;
+    audit_event(
+        "external_identity_linked",
+        audit_fields(&[
+            ("user_id", json!(user.id)),
+            ("provider_type", json!(provider_type)),
+            ("provider_id", json!(provider_id)),
+        ]),
+    );
     Ok(user)
+}
+
+async fn resolve_existing_external_identity(
+    state: &AppState,
+    provider_type: &str,
+    provider_id: &str,
+    subject: &str,
+    claims: Value,
+) -> Result<Option<UserRow>, HttpResponse> {
+    // QQ/微信这类 social provider 可能不返回 email。此时只能使用已有
+    // external_identity_links 绑定登录，不能创建新用户或按 email 自动关联。
+    let tenant = default_tenant_context();
+    let mut conn = get_conn(&state.diesel_db).await.map_err(|error| {
+        tracing::warn!(%error, "failed to get database connection for existing federation link");
+        oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "federation login failed.",
+        )
+    })?;
+    let Some(link) = external_identity_links::table
+        .filter(external_identity_links::tenant_id.eq(tenant.tenant_id))
+        .filter(external_identity_links::provider_type.eq(provider_type))
+        .filter(external_identity_links::provider_id.eq(provider_id))
+        .filter(external_identity_links::subject.eq(subject))
+        .select(ExternalIdentityLinkRow::as_select())
+        .first::<ExternalIdentityLinkRow>(&mut conn)
+        .await
+        .optional()
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to query existing external identity link");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "federation login failed.",
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    let user = users::table
+        .find(link.user_id)
+        .filter(users::tenant_id.eq(tenant.tenant_id))
+        .filter(users::is_active.eq(true))
+        .select(UserRow::as_select())
+        .first::<UserRow>(&mut conn)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, link_id = %link.id, "linked social federation user is unavailable");
+            oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "access_denied",
+                "federation login failed.",
+            )
+        })?;
+    let _ = diesel::update(external_identity_links::table.find(link.id))
+        .set((
+            external_identity_links::claims.eq(claims),
+            external_identity_links::last_login_at.eq(Utc::now()),
+            external_identity_links::updated_at.eq(diesel_now),
+        ))
+        .execute(&mut conn)
+        .await;
+    Ok(Some(user))
 }
 
 async fn create_federated_user(

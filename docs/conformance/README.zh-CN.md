@@ -23,10 +23,12 @@ Nazo Auth Server 已发布在 OpenID Foundation 官方认证列表中：
 - 最新 NI-006~NI-011 私有 OIDF targeted 结果：[2026-07-02 NI-006~NI-011 private OIDF results](2026-07-02-ni-006-011-private-oidf-results.md)
 - 最新 public NI-007 FAPI-CIBA targeted 结果：[2026-07-03 NI-007 public FAPI-CIBA OIDF results](2026-07-03-ni-007-public-ciba-oidf-results.md)
 - 最新 NI-006~NI-011 官方 parallel-isolated full matrix：[2026-07-03 NI-006~NI-011 official parallel-isolated OIDF results](2026-07-03-ni-006-011-official-parallel-isolated-oidf-results.md)
+- 最新 M2 官方 parallel-isolated full matrix：[2026-07-08 M2 official parallel-isolated OIDF results](2026-07-08-m2-official-parallel-isolated-oidf-results.md)
+- 最新 M6 FAPI-CIBA 本地与官方 full matrix：[2026-07-11 M6 FAPI-CIBA OIDF results](2026-07-11-m6-official-fapi-ciba-oidf-results.md)
 
 `2026-06-09` full matrix 是当前官方认证证据，针对 `https://auth.nazo.run` 执行，覆盖 OIDC Basic、OIDC Config、FAPI2 Security Profile Final、FAPI2 Message Signing Final、mTLS、DPoP、`private_key_jwt`、client credentials 变体。结果为全计划完成，`0 failures`，`0 warnings`。
 
-最新记录的官方 full-matrix suite run 是 2026-07-02 NI-004 官方运行，针对 `https://auth.nazo.run` 执行，开始时间为 `2026-07-02 01:32:57 +08:00`，workflow head SHA 为 `0b00ea7d50443cb54fc17631a9238126fa837e42`。该运行完成 17-plan 矩阵，最终结果为 `0 failures`、`0 warnings`，但 dynamic-registration OIDC Basic plan 中存在 2 个 expected `SKIPPED` module；本次 workflow 日志未独立记录 runtime implementation commit，因此不能作为 zero-SKIPPED 证据。
+最新记录的官方 full-matrix suite run 是 2026-07-11 M6 parallel-isolated 官方运行，针对 `https://auth.nazo.run` 执行。该运行使用 workflow head SHA `07e69855948ca0a12d4dcd26bb9372e3ea2d04d3`，部署镜像为 `localhost/nazo-oauth-server:m6-07e6985`，以 18+2 形式完成仓库 20-plan public OIDF 矩阵，三个 GitHub Actions jobs 均为 `success`。导出结果包含 639 个模块：631 个 `PASSED`、6 个预期 `REVIEW`、2 个预期 `SKIPPED`，没有失败模块、condition failure 或 warning。
 
 最新私有 full-matrix 回归记录是 2026-07-01 TP/PS 运行，测试对象为 `https://auth.nazo.run`，runtime commit 为 `31e8f9f`。该运行使用仓库原有 16-plan 完整矩阵，导出 16 个 plan archives，共执行 578 个测试模块，结果为 `0 failures`、`0 warnings`。
 

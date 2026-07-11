@@ -4,6 +4,7 @@
 # Build and runtime output should never enter the Docker context.
 target/
 runtime/
+perf/results/
 
 # Local-only environment and editor files.
 .env

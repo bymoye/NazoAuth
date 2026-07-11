@@ -8,6 +8,7 @@ oidf-local-results/
 oidf-results-run-*/
 oidf-conformance-suite/
 .codex_remote_handoff/
+.worktrees/
 
 # Local environment overrides
 .env

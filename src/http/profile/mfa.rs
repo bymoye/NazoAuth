@@ -156,6 +156,25 @@ pub(crate) async fn mfa_totp_confirm(
     ) else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "MFA 验证码无效.");
     };
+    let rotation =
+        match step_up_current_session(&state, &req, MfaVerificationMethod::Totp.amr()).await {
+            Ok(Some(rotation)) => rotation,
+            Ok(None) => {
+                return oauth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "login_required",
+                    "当前会话已过期.",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to step up current session before TOTP enrollment");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "会话写入失败.",
+                );
+            }
+        };
     let confirm_result = diesel::update(user_totp_credentials::table.find(credential.id))
         .set((
             user_totp_credentials::confirmed_at.eq(Utc::now()),
@@ -166,10 +185,14 @@ pub(crate) async fn mfa_totp_confirm(
         .await;
     if let Err(error) = confirm_result {
         tracing::warn!(%error, "failed to confirm TOTP credential");
-        return oauth_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server_error",
-            "MFA 启用失败.",
+        return with_rotated_session_cookies(
+            &state,
+            &rotation,
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "MFA 启用失败.",
+            ),
         );
     }
     if let Err(error) = diesel::update(
@@ -185,36 +208,42 @@ pub(crate) async fn mfa_totp_confirm(
     .await
     {
         tracing::warn!(%error, "failed to enable MFA flag");
-        return oauth_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server_error",
-            "MFA 启用失败.",
+        return with_rotated_session_cookies(
+            &state,
+            &rotation,
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "MFA 启用失败.",
+            ),
         );
     }
     let backup_codes = match replace_backup_codes(&state.diesel_db, &user).await {
         Ok(codes) => codes,
         Err(error) => {
             tracing::warn!(%error, "failed to generate backup codes");
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "备份码生成失败.",
+            return with_rotated_session_cookies(
+                &state,
+                &rotation,
+                oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "备份码生成失败.",
+                ),
             );
         }
     };
-    if let Err(error) =
-        step_up_current_session(&state, &req, MfaVerificationMethod::Totp.amr()).await
-    {
-        tracing::warn!(%error, "failed to step up current session after TOTP enrollment");
-    }
     audit_event(
         "mfa_totp_enabled",
         audit_fields(&[("user_id", json!(user.id)), ("method", json!("totp"))]),
     );
-    json_response(json!({
-        "mfa_enabled": true,
-        "backup_codes": backup_codes
-    }))
+    with_cookie_headers(
+        json_response(json!({
+            "mfa_enabled": true,
+            "backup_codes": backup_codes
+        })),
+        &rotated_session_cookies(&state, &rotation),
+    )
 }
 
 pub(crate) async fn mfa_verify(
@@ -264,24 +293,6 @@ pub(crate) async fn mfa_verify(
             );
         }
     };
-    match complete_mfa_session(&state, &req, method.amr()).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                "login_required",
-                "MFA 登录挑战已过期.",
-            );
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to complete MFA session");
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "会话写入失败.",
-            );
-        }
-    }
     let mut cookies = Vec::new();
     if payload.remember_device.unwrap_or(false) {
         match remember_mfa_device(&state, &req, &session.user).await {
@@ -302,6 +313,25 @@ pub(crate) async fn mfa_verify(
             }
         }
     }
+    let rotation = match complete_mfa_session(&state, &req, method.amr()).await {
+        Ok(Some(rotation)) => rotation,
+        Ok(None) => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "login_required",
+                "MFA 登录挑战已过期.",
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to complete MFA session");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "会话写入失败.",
+            );
+        }
+    };
+    cookies.extend(rotated_session_cookies(&state, &rotation));
     audit_event(
         "mfa_challenge_success",
         audit_fields(&[
@@ -350,23 +380,77 @@ pub(crate) async fn mfa_backup_codes_regenerate(
             );
         }
     };
+    let rotation = match step_up_current_session(&state, &req, method.amr()).await {
+        Ok(Some(rotation)) => rotation,
+        Ok(None) => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "login_required",
+                "当前会话已过期.",
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to step up session before backup code regeneration");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "会话写入失败.",
+            );
+        }
+    };
     let backup_codes = match replace_backup_codes(&state.diesel_db, &user).await {
         Ok(codes) => codes,
         Err(error) => {
             tracing::warn!(%error, "failed to regenerate backup codes");
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "备份码生成失败.",
+            return with_rotated_session_cookies(
+                &state,
+                &rotation,
+                oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "备份码生成失败.",
+                ),
             );
         }
     };
-    let _ = step_up_current_session(&state, &req, method.amr()).await;
     audit_event(
         "mfa_backup_codes_regenerated",
         audit_fields(&[("user_id", json!(user.id)), ("method", json!(method.amr()))]),
     );
-    json_response(json!({ "backup_codes": backup_codes }))
+    with_cookie_headers(
+        json_response(json!({ "backup_codes": backup_codes })),
+        &rotated_session_cookies(&state, &rotation),
+    )
+}
+
+fn rotated_session_cookies(
+    state: &AppState,
+    rotation: &SessionRotation,
+) -> [actix_web::cookie::Cookie<'static>; 2] {
+    [
+        make_cookie(
+            &state.settings.session_cookie_name,
+            &rotation.session_id,
+            true,
+            state.settings.session_ttl_seconds,
+            state.settings.cookie_secure,
+        ),
+        make_cookie(
+            &state.settings.csrf_cookie_name,
+            &rotation.csrf_token,
+            false,
+            state.settings.session_ttl_seconds,
+            state.settings.cookie_secure,
+        ),
+    ]
+}
+
+fn with_rotated_session_cookies(
+    state: &AppState,
+    rotation: &SessionRotation,
+    response: HttpResponse,
+) -> HttpResponse {
+    with_cookie_headers(response, &rotated_session_cookies(state, rotation))
 }
 
 pub(crate) async fn mfa_disable(

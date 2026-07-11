@@ -1446,6 +1446,9 @@ fn test_settings(jwk_keys_dir: PathBuf) -> Settings {
             auth_max_requests: 30,
             token_max_requests: 60,
             token_management_max_requests: 120,
+            login_failure_window_seconds: 900,
+            login_failure_email_max_attempts: 50,
+            login_failure_ip_email_max_attempts: 5,
         },
         email: EmailSettings {
             delivery: EmailDelivery::Disabled,
@@ -1476,7 +1479,7 @@ fn test_settings(jwk_keys_dir: PathBuf) -> Settings {
             strict_base64: true,
         },
         federation: crate::settings::FederationSettings {
-            oidc: None,
+            providers: crate::settings::FederationProviderRegistry::default(),
             saml_gateway: None,
         },
         enable_request_object: false,

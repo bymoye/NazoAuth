@@ -53,7 +53,7 @@ function Get-CommandOutput {
 }
 
 function ConvertTo-ShellLiteral {
-    param([Parameter(Mandatory = $true)][string]$Value)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
     $singleQuote = [string][char]39
     $escapedQuote = $singleQuote + "\" + $singleQuote + $singleQuote
     return $singleQuote + $Value.Replace($singleQuote, $escapedQuote) + $singleQuote

@@ -29,6 +29,45 @@ fn audit_event_names_are_allowlisted_and_siem_ready() {
 }
 
 #[test]
+fn audit_event_definitions_include_dynamic_client_lifecycle() {
+    for name in [
+        "dynamic_client_registered",
+        "dynamic_client_configuration_read",
+        "dynamic_client_configuration_updated",
+        "dynamic_client_deleted",
+    ] {
+        assert_eq!(audit_event_category(name), Some("client_lifecycle"));
+    }
+}
+
+#[test]
+fn audit_event_definitions_include_external_identity_lifecycle() {
+    assert_eq!(
+        audit_event_category("external_identity_linked"),
+        Some("identity_lifecycle")
+    );
+    assert_eq!(
+        audit_event_category("external_identity_unlinked"),
+        Some("identity_lifecycle")
+    );
+    assert_eq!(
+        audit_event_category("external_identity_relink_denied"),
+        Some("identity_lifecycle")
+    );
+}
+
+#[test]
+fn audit_event_definitions_include_ciba_authorization_lifecycle() {
+    for name in [
+        "ciba_authorization_started",
+        "ciba_authorization_approved",
+        "ciba_authorization_denied",
+    ] {
+        assert_eq!(audit_event_category(name), Some("authorization"));
+    }
+}
+
+#[test]
 fn audit_schema_version_is_stable_for_collectors() {
     assert_eq!(AUDIT_SCHEMA_VERSION, "nazo.audit.v1");
 }

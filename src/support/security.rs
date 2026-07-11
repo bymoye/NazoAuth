@@ -2,7 +2,14 @@
 
 use super::prelude::*;
 use super::{audit_event, audit_fields, request_mtls_client_certificate, valkey_set_ex_nx};
+use anyhow::{anyhow, bail};
 use hmac::{Hmac, KeyInit, Mac};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
+use tokio::sync::Semaphore;
+use tokio::time::{Duration, timeout};
 
 mod tokens;
 pub(crate) use tokens::*;
@@ -12,9 +19,24 @@ type HmacSha256 = Hmac<Sha256>;
 const ARGON2_MEMORY_COST_KIB: u32 = 19_456;
 const ARGON2_TIME_COST: u32 = 2;
 const ARGON2_PARALLELISM: u32 = 1;
+const DEFAULT_PASSWORD_HASH_MAX_CONCURRENCY: usize = 8;
+const DEFAULT_PASSWORD_HASH_QUEUE_TIMEOUT_MS: u64 = 100;
 const CLIENT_SECRET_HASH_VERSION: &str = "client-secret-v1";
 pub(crate) const LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER: &str =
     "local-development-client-secret-pepper-00000001";
+
+static PASSWORD_HASH_MAX_CONCURRENCY: AtomicUsize =
+    AtomicUsize::new(DEFAULT_PASSWORD_HASH_MAX_CONCURRENCY);
+static PASSWORD_HASH_QUEUE_TIMEOUT_MS: AtomicU64 =
+    AtomicU64::new(DEFAULT_PASSWORD_HASH_QUEUE_TIMEOUT_MS);
+static PASSWORD_HASH_CONCURRENCY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static DUMMY_PASSWORD_HASH: OnceLock<Result<String, String>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PasswordVerificationError {
+    Saturated,
+    WorkerFailed,
+}
 
 pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
@@ -42,10 +64,68 @@ pub(crate) fn verify_password(password: &str, password_hash: &str) -> bool {
         .is_ok()
 }
 
-pub(crate) async fn verify_password_blocking(password: String, password_hash: String) -> bool {
+pub(crate) fn initialize_dummy_password_hash() -> anyhow::Result<()> {
+    dummy_password_hash().map(drop)
+}
+
+pub(crate) fn dummy_password_hash() -> anyhow::Result<String> {
+    match DUMMY_PASSWORD_HASH
+        .get_or_init(|| hash_password(&random_urlsafe_token()).map_err(|error| error.to_string()))
+    {
+        Ok(hash) => Ok(hash.clone()),
+        Err(error) => Err(anyhow!("failed to initialize dummy password hash: {error}")),
+    }
+}
+
+pub(crate) fn default_password_hash_max_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .map(|cpus| (cpus / 2).max(1))
+        .unwrap_or(DEFAULT_PASSWORD_HASH_MAX_CONCURRENCY)
+}
+
+pub(crate) fn default_password_hash_queue_timeout_ms() -> u64 {
+    DEFAULT_PASSWORD_HASH_QUEUE_TIMEOUT_MS
+}
+
+pub(crate) fn configure_password_hash_limits(
+    max_concurrency: usize,
+    queue_timeout_ms: u64,
+) -> anyhow::Result<()> {
+    if max_concurrency == 0 {
+        bail!("PASSWORD_HASH_MAX_CONCURRENCY must be positive");
+    }
+    if queue_timeout_ms == 0 {
+        bail!("PASSWORD_HASH_QUEUE_TIMEOUT_MS must be positive");
+    }
+    if PASSWORD_HASH_CONCURRENCY_LIMIT.get().is_some() {
+        bail!("password hash limits must be configured before password verification");
+    }
+    AtomicUsize::store(
+        &PASSWORD_HASH_MAX_CONCURRENCY,
+        max_concurrency,
+        Ordering::Relaxed,
+    );
+    AtomicU64::store(
+        &PASSWORD_HASH_QUEUE_TIMEOUT_MS,
+        queue_timeout_ms,
+        Ordering::Relaxed,
+    );
+    Ok(())
+}
+
+pub(crate) async fn verify_password_blocking_limited(
+    password: String,
+    password_hash: String,
+) -> Result<bool, PasswordVerificationError> {
+    let acquire = password_hash_concurrency_limit().clone().acquire_owned();
+    let Ok(Ok(_permit)) = timeout(password_hash_queue_timeout(), acquire).await else {
+        return Err(PasswordVerificationError::Saturated);
+    };
+
     tokio::task::spawn_blocking(move || verify_password(&password, &password_hash))
         .await
-        .unwrap_or(false)
+        .map_err(|_| PasswordVerificationError::WorkerFailed)
 }
 
 pub(crate) fn hash_client_secret(secret: &str, pepper: &str) -> String {
@@ -89,6 +169,22 @@ fn password_hasher() -> Argon2<'static> {
     )
     .expect("Argon2 password hash policy must be valid");
     Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
+fn password_hash_concurrency_limit() -> &'static Arc<Semaphore> {
+    PASSWORD_HASH_CONCURRENCY_LIMIT.get_or_init(|| {
+        Arc::new(Semaphore::new(AtomicUsize::load(
+            &PASSWORD_HASH_MAX_CONCURRENCY,
+            Ordering::Relaxed,
+        )))
+    })
+}
+
+fn password_hash_queue_timeout() -> Duration {
+    Duration::from_millis(AtomicU64::load(
+        &PASSWORD_HASH_QUEUE_TIMEOUT_MS,
+        Ordering::Relaxed,
+    ))
 }
 
 pub(crate) fn blake3_hex(value: &str) -> String {

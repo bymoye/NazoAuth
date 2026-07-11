@@ -893,6 +893,13 @@ def write_plan_config(name: str, config: dict[str, object]) -> None:
     write_text(RUNTIME / name, json.dumps(config, indent=2) + "\n", 0o600)
 
 
+def oidf_server_config() -> dict[str, object]:
+    return {
+        "discoveryUrl": f"{ISSUER}/.well-known/openid-configuration",
+        "allow_unexpected_metadata_fields": ["native_sso_supported"],
+    }
+
+
 def nazo_login_metadata() -> dict[str, str]:
     return {
         "oidf_user_email": USER_EMAIL,
@@ -905,7 +912,7 @@ def write_basic_plan_config() -> dict[str, object]:
     config = {
         "alias": BASIC_ALIAS,
         "description": "OIDC Basic OP: discovery and authorization-code interoperability.",
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
         "client": {
             "client_id": "local-oidf-basic-client",
             "client_secret": CLIENT_SECRET,
@@ -942,7 +949,7 @@ def write_dynamic_plan_config() -> dict[str, object]:
     config = {
         "alias": f"{BASIC_ALIAS}-dynamic",
         "description": "OIDC Basic OP: RFC 7591 dynamic client registration.",
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
         "client": {
             "initial_access_token": DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN,
             "scope": "openid profile email address phone offline_access",
@@ -1071,7 +1078,7 @@ def write_oidcc_config_plan_config() -> dict[str, object]:
     config = {
         "alias": "local-nazo-oauth-oidf-config",
         "description": "OIDC Config OP: provider metadata accuracy for the public issuer.",
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
     }
     write_plan_config("oidf-oidcc-config-plan-config.json", config)
     return config
@@ -1082,7 +1089,7 @@ def write_frontchannel_logout_plan_config() -> dict[str, object]:
     config = {
         "alias": f"{BASIC_ALIAS}-frontchannel-logout",
         "description": "OIDC Front-Channel Logout OP: RP-initiated logout, frontchannel iframe notification, and post-logout redirect validation.",
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
         "client": {
             "client_id": "local-oidf-frontchannel-client",
             "client_secret": CLIENT_SECRET,
@@ -1100,7 +1107,7 @@ def write_session_management_plan_config() -> dict[str, object]:
     config = {
         "alias": f"{BASIC_ALIAS}-session-management",
         "description": "OIDC Session Management OP: check_session_iframe, session_state, and RP-initiated logout state transition validation.",
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
         "client": {
             "client_id": "local-oidf-session-client",
             "client_secret": CLIENT_SECRET,
@@ -1142,7 +1149,7 @@ def fapi_plan_config(
     config: dict[str, object] = {
         "alias": alias,
         "description": description,
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
         "resource": {
             "resourceUrl": f"{resource_base_url}/fapi/resource",
             "resourceMethod": "GET",
@@ -1267,7 +1274,7 @@ def write_fapi_ciba_plan_config() -> dict[str, dict[str, object]]:
     config = {
         "alias": f"local-nazo-oauth-oidf-{slug}",
         "description": "FAPI-CIBA ID1 AS: plain FAPI profile with private_key_jwt client authentication and poll delivery mode.",
-        "server": {"discoveryUrl": f"{ISSUER}/.well-known/openid-configuration"},
+        "server": oidf_server_config(),
         "resource": {
             "resourceUrl": f"{ISSUER}/fapi/resource",
             "resourceMethod": "GET",

@@ -22,6 +22,94 @@ fn login_request(content_type: &'static str) -> HttpRequest {
         .to_http_request()
 }
 
+fn form_origin_settings() -> Settings {
+    let mut settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    settings.issuer = "https://issuer.example".to_owned();
+    settings.frontend_base_url = "https://app.example/base/".to_owned();
+    settings
+}
+
+#[test]
+fn form_login_requires_exact_issuer_or_frontend_origin() {
+    let settings = form_origin_settings();
+    let request_without_origin = actix_web::test::TestRequest::default().to_http_request();
+    let request_with_attacker_origin = actix_web::test::TestRequest::default()
+        .insert_header((header::ORIGIN, "https://attacker.example"))
+        .to_http_request();
+    let request_with_issuer_origin = actix_web::test::TestRequest::default()
+        .insert_header((header::ORIGIN, "https://issuer.example:443"))
+        .to_http_request();
+    let request_with_frontend_origin = actix_web::test::TestRequest::default()
+        .insert_header((header::ORIGIN, "https://app.example"))
+        .to_http_request();
+
+    assert!(!form_login_origin_is_allowed(
+        &settings,
+        &request_without_origin
+    ));
+    assert!(!form_login_origin_is_allowed(
+        &settings,
+        &request_with_attacker_origin
+    ));
+    assert!(form_login_origin_is_allowed(
+        &settings,
+        &request_with_issuer_origin
+    ));
+    assert!(form_login_origin_is_allowed(
+        &settings,
+        &request_with_frontend_origin
+    ));
+}
+
+#[test]
+fn form_login_rejects_null_and_ambiguous_origins() {
+    let settings = form_origin_settings();
+    let null_origin = actix_web::test::TestRequest::default()
+        .insert_header((header::ORIGIN, "null"))
+        .to_http_request();
+    let duplicate_origins = actix_web::test::TestRequest::default()
+        .append_header((header::ORIGIN, "https://issuer.example"))
+        .append_header((header::ORIGIN, "https://app.example"))
+        .to_http_request();
+
+    assert!(!form_login_origin_is_allowed(&settings, &null_origin));
+    assert!(!form_login_origin_is_allowed(&settings, &duplicate_origins));
+}
+
+#[actix_web::test]
+async fn form_login_without_trusted_origin_is_rejected_before_backend_access() {
+    let state = AppState {
+        diesel_db: create_pool(
+            "postgres://nazo_login_test_invalid:nazo_login_test_invalid@127.0.0.1:1/nazo"
+                .to_owned(),
+            1,
+        )
+        .expect("pool construction should not connect"),
+        valkey: fred::prelude::Builder::default_centralized()
+            .build()
+            .expect("valkey client construction should not connect"),
+        settings: Arc::new(form_origin_settings()),
+        keyset: KeysetStore::new(Keyset {
+            active_kid: "test-kid".to_owned(),
+            active_alg: jsonwebtoken::Algorithm::EdDSA,
+            active_signing_key: ActiveSigningKey::LocalPkcs8Der(Vec::new()),
+            verification_keys: Vec::new(),
+        }),
+    };
+    let req = login_request("application/x-www-form-urlencoded");
+    let response = login(
+        Data::new(state),
+        req,
+        Bytes::from_static(b"email=user%40example.test&password=s3cret"),
+    )
+    .await;
+
+    let (status, body) = error_json(response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+}
+
 fn test_login_password() -> String {
     ["correct", "horse", "battery", "staple"].join(" ")
 }
@@ -223,6 +311,7 @@ async fn login_form_request_creates_session_and_redirects_to_safe_next() {
         .await;
     let req = actix_web::test::TestRequest::default()
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+        .insert_header((header::ORIGIN, "https://app.example"))
         .insert_header((
             header::REFERER,
             "https://app.example/login?next=%2Fauthorize%3Fclient_id%3Dabc",
@@ -401,6 +490,72 @@ async fn login_rejects_wrong_password_as_access_denied() {
 }
 
 #[actix_web::test]
+async fn login_throttles_repeated_failures_for_same_email_and_source() {
+    let Some(fixture) = LiveLoginFixture::new_with_login_failure_limits(10, 2).await else {
+        return;
+    };
+    let password = test_login_password();
+    let user = fixture
+        .create_user(
+            "failure-throttle",
+            "failure-throttle@example.com",
+            &password,
+            true,
+            false,
+        )
+        .await;
+
+    for _ in 0..2 {
+        let response = fixture.login_json(&user.email, "wrong").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let response = fixture.login_json(&user.email, "wrong").await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("60")
+    );
+    let body = actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("throttled login body should be readable");
+    let body: Value = serde_json::from_slice(&body).expect("throttled body should parse");
+    assert_eq!(body["error"], "temporarily_unavailable");
+}
+
+#[actix_web::test]
+async fn successful_login_clears_previous_failure_throttle_state() {
+    let Some(fixture) = LiveLoginFixture::new_with_login_failure_limits(10, 2).await else {
+        return;
+    };
+    let password = test_login_password();
+    let user = fixture
+        .create_user(
+            "failure-clear",
+            "failure-clear@example.com",
+            &password,
+            true,
+            false,
+        )
+        .await;
+
+    let response = fixture.login_json(&user.email, "wrong").await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = fixture.login_json(&user.email, &password).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for _ in 0..2 {
+        let response = fixture.login_json(&user.email, "wrong").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = fixture.login_json(&user.email, "wrong").await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[actix_web::test]
 async fn login_rejects_inactive_user_as_access_denied() {
     let Some(fixture) = LiveLoginFixture::new().await else {
         return;
@@ -481,10 +636,18 @@ struct LiveLoginFixture {
 
 impl LiveLoginFixture {
     async fn new() -> Option<Self> {
+        Self::new_with_login_failure_limits(50, 5).await
+    }
+
+    async fn new_with_login_failure_limits(
+        email_max_attempts: u64,
+        ip_email_max_attempts: u64,
+    ) -> Option<Self> {
         let database_url = std::env::var("DATABASE_URL").ok()?;
         let valkey_url = std::env::var("VALKEY_URL").ok()?;
         let config = ConfigSource::from_pairs_for_test([
             ("ISSUER", "https://example.com"),
+            ("FRONTEND_BASE_URL", "https://app.example"),
             (
                 "CLIENT_SECRET_PEPPER",
                 "client-secret-pepper-for-tests-000000000001",
@@ -495,6 +658,9 @@ impl LiveLoginFixture {
         ]);
         let mut settings = Settings::from_config(&config).expect("test settings should load");
         settings.rate_limit.auth_max_requests = 100_000;
+        settings.rate_limit.login_failure_window_seconds = 60;
+        settings.rate_limit.login_failure_email_max_attempts = email_max_attempts;
+        settings.rate_limit.login_failure_ip_email_max_attempts = ip_email_max_attempts;
 
         let valkey_config = ValkeyConfig::from_url(&valkey_url).ok()?;
         let mut valkey_builder = ValkeyBuilder::from_config(valkey_config);
@@ -522,6 +688,17 @@ impl LiveLoginFixture {
                 }),
             }),
         })
+    }
+
+    async fn login_json(&self, email: &str, password: &str) -> HttpResponse {
+        let req = actix_web::test::TestRequest::default()
+            .insert_header((header::CONTENT_TYPE, "application/json"))
+            .to_http_request();
+        let body = Bytes::from(format!(
+            r#"{{"email":"{}","password":"{}"}}"#,
+            email, password
+        ));
+        login(self.state.clone(), req, body).await
     }
 
     async fn create_user(

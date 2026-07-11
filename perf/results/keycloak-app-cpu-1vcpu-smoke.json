@@ -1,0 +1,143 @@
+[
+  {
+    "target_rate": 100,
+    "duration": "2m",
+    "status": "passed",
+    "keycloak": {
+      "rps": 100.007,
+      "requests": 12001,
+      "latency_ms": {
+        "p50": 1.579,
+        "p95": 2.67,
+        "p99": 4.731,
+        "max": 341.864
+      },
+      "error_rate": 0.0,
+      "check_rate": 1.0,
+      "steps": {
+        "token_client_credentials": {
+          "requests": 12001,
+          "rps": 100.007,
+          "latency_ms": {
+            "p50": 1.579,
+            "p95": 2.67,
+            "p99": 4.731
+          },
+          "error_rate": 0.0
+        }
+      }
+    },
+    "containers": {
+      "by_service": {
+        "keycloak": {
+          "samples": 27,
+          "cpu_percent_avg": 36.277,
+          "cpu_percent_max": 124.41,
+          "memory_bytes_avg": 1377610759,
+          "memory_bytes_max": 1450625204
+        },
+        "keycloak-postgres": {
+          "samples": 27,
+          "cpu_percent_avg": 1.876,
+          "cpu_percent_max": 19.64,
+          "memory_bytes_avg": 127363147,
+          "memory_bytes_max": 129918566
+        }
+      }
+    }
+  },
+  {
+    "target_rate": 250,
+    "duration": "2m",
+    "status": "passed",
+    "keycloak": {
+      "rps": 250.004,
+      "requests": 30001,
+      "latency_ms": {
+        "p50": 1.199,
+        "p95": 1.913,
+        "p99": 2.886,
+        "max": 441.182
+      },
+      "error_rate": 0.0,
+      "check_rate": 1.0,
+      "steps": {
+        "token_client_credentials": {
+          "requests": 30001,
+          "rps": 250.004,
+          "latency_ms": {
+            "p50": 1.199,
+            "p95": 1.913,
+            "p99": 2.886
+          },
+          "error_rate": 0.0
+        }
+      }
+    },
+    "containers": {
+      "by_service": {
+        "keycloak": {
+          "samples": 27,
+          "cpu_percent_avg": 49.121,
+          "cpu_percent_max": 237.41,
+          "memory_bytes_avg": 2405977049,
+          "memory_bytes_max": 2557653024
+        },
+        "keycloak-postgres": {
+          "samples": 27,
+          "cpu_percent_avg": 3.493,
+          "cpu_percent_max": 49.7,
+          "memory_bytes_avg": 253689370,
+          "memory_bytes_max": 256796262
+        }
+      }
+    }
+  },
+  {
+    "target_rate": 500,
+    "duration": "2m",
+    "status": "passed",
+    "keycloak": {
+      "rps": 500.0,
+      "requests": 60001,
+      "latency_ms": {
+        "p50": 1.201,
+        "p95": 1.763,
+        "p99": 2.693,
+        "max": 421.882
+      },
+      "error_rate": 0.0,
+      "check_rate": 1.0,
+      "steps": {
+        "token_client_credentials": {
+          "requests": 60001,
+          "rps": 500.0,
+          "latency_ms": {
+            "p50": 1.201,
+            "p95": 1.763,
+            "p99": 2.693
+          },
+          "error_rate": 0.0
+        }
+      }
+    },
+    "containers": {
+      "by_service": {
+        "keycloak": {
+          "samples": 27,
+          "cpu_percent_avg": 76.29,
+          "cpu_percent_max": 334.82,
+          "memory_bytes_avg": 1519503753,
+          "memory_bytes_max": 1544040742
+        },
+        "keycloak-postgres": {
+          "samples": 27,
+          "cpu_percent_avg": 4.478,
+          "cpu_percent_max": 57.59,
+          "memory_bytes_avg": 265779063,
+          "memory_bytes_max": 268854886
+        }
+      }
+    }
+  }
+]

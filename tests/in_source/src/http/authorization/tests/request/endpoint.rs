@@ -433,7 +433,7 @@ async fn assert_authorization_invalid_request(response: HttpResponse) {
     }
 }
 
-fn decode_jarm_claims(state: &AppState, response_jwt: &str) -> Value {
+fn decode_jarm_claims(state: &AppState, response_jwt: &str, audience: &str) -> Value {
     let header =
         jsonwebtoken::decode_header(response_jwt).expect("JARM response header should decode");
     let decoding_key =
@@ -441,7 +441,7 @@ fn decode_jarm_claims(state: &AppState, response_jwt: &str) -> Value {
             .expect("JARM decoding key should derive from test JWKS");
     let mut validation = jsonwebtoken::Validation::new(header.alg);
     validation.validate_exp = false;
-    validation.set_audience(&["client-jarm"]);
+    validation.set_audience(&[audience]);
     validation.set_issuer(&[state.settings.issuer.as_str()]);
     jsonwebtoken::decode::<Value>(response_jwt, &decoding_key, &validation)
         .expect("JARM response should verify with the active key")
@@ -1910,9 +1910,55 @@ async fn authorization_response_redirect_emits_signed_jarm_response() {
         pairs
             .get("response")
             .expect("JARM response parameter should be present"),
+        "client-jarm",
     );
     assert_eq!(claims["iss"], "https://issuer.example");
     assert_eq!(claims["aud"], "client-jarm");
     assert_eq!(claims["code"], "code-123");
     assert_eq!(claims["state"], "state-123");
+}
+
+#[actix_web::test]
+async fn authorization_response_redirect_jarm_profile_signs_without_response_mode() {
+    let mut state = endpoint_state(false);
+    state.settings = Arc::new(Settings {
+        authorization_server_profile: AuthorizationServerProfile::Fapi2MessageSigningJarm,
+        ..state.settings.as_ref().clone()
+    });
+    state.keyset.replace(local_signing_keyset());
+    let state = Data::new(state);
+
+    let response = authorization_response_redirect(
+        &state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback",
+            client_id: "client-jarm-profile",
+            response_mode: None,
+            code: Some("code-456"),
+            error: None,
+            state: Some("state-456"),
+            oidc_sid: None,
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = authorization_location(&response);
+    let pairs = location.query_pairs().collect::<HashMap<_, _>>();
+    assert!(pairs.contains_key("response"));
+    assert!(!pairs.contains_key("code"));
+    assert!(!pairs.contains_key("state"));
+    assert!(!pairs.contains_key("iss"));
+
+    let claims = decode_jarm_claims(
+        &state,
+        pairs
+            .get("response")
+            .expect("JARM response parameter should be present"),
+        "client-jarm-profile",
+    );
+    assert_eq!(claims["iss"], "https://issuer.example");
+    assert_eq!(claims["aud"], "client-jarm-profile");
+    assert_eq!(claims["code"], "code-456");
+    assert_eq!(claims["state"], "state-456");
 }

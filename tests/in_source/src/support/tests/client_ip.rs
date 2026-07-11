@@ -90,7 +90,7 @@ fn client_ip_uses_forwarded_header_only_from_trusted_proxy() {
 }
 
 #[test]
-fn client_ip_uses_first_untrusted_x_forwarded_for_hop() {
+fn client_ip_uses_nearest_untrusted_x_forwarded_for_hop() {
     let settings = settings(
         ClientIpHeaderMode::XForwardedFor,
         "192.0.2.0/24,2001:db8::/32",
@@ -101,6 +101,48 @@ fn client_ip_uses_first_untrusted_x_forwarded_for_hop() {
         .to_http_request();
 
     assert_eq!(client_ip(&request, &settings), "203.0.113.8");
+}
+
+#[test]
+fn xff_discards_attacker_supplied_prefix_before_the_real_client() {
+    let settings = settings(ClientIpHeaderMode::XForwardedFor, "192.0.2.0/24");
+    let request = TestRequest::default()
+        .peer_addr("192.0.2.10:49152".parse().unwrap())
+        .insert_header(("x-forwarded-for", "198.51.100.77, 203.0.113.8, 192.0.2.11"))
+        .to_http_request();
+
+    assert_eq!(client_ip(&request, &settings), "203.0.113.8");
+}
+
+#[test]
+fn forwarded_discards_attacker_supplied_prefix_before_the_real_client() {
+    let settings = settings(ClientIpHeaderMode::Forwarded, "192.0.2.0/24");
+    let request = TestRequest::default()
+        .peer_addr("192.0.2.10:49152".parse().unwrap())
+        .insert_header((
+            "forwarded",
+            "for=198.51.100.77, for=203.0.113.8;proto=https, for=192.0.2.11",
+        ))
+        .to_http_request();
+
+    assert_eq!(client_ip(&request, &settings), "203.0.113.8");
+}
+
+#[test]
+fn malformed_proxy_chains_fall_back_to_the_socket_peer() {
+    let xff = settings(ClientIpHeaderMode::XForwardedFor, "192.0.2.0/24");
+    let malformed_xff = TestRequest::default()
+        .peer_addr("192.0.2.10:49152".parse().unwrap())
+        .insert_header(("x-forwarded-for", "203.0.113.8, not-an-ip, 192.0.2.11"))
+        .to_http_request();
+    assert_eq!(client_ip(&malformed_xff, &xff), "192.0.2.10");
+
+    let forwarded = settings(ClientIpHeaderMode::Forwarded, "192.0.2.0/24");
+    let obfuscated_forwarded = TestRequest::default()
+        .peer_addr("192.0.2.10:49152".parse().unwrap())
+        .insert_header(("forwarded", "for=203.0.113.8, for=_hidden, for=192.0.2.11"))
+        .to_http_request();
+    assert_eq!(client_ip(&obfuscated_forwarded, &forwarded), "192.0.2.10");
 }
 
 #[test]

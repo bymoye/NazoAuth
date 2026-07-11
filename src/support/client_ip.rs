@@ -86,8 +86,10 @@ pub(crate) fn client_ip(req: &HttpRequest, settings: &Settings) -> String {
     }
     let parsed = match settings.client_ip_header_mode {
         ClientIpHeaderMode::None => None,
-        ClientIpHeaderMode::Forwarded => forwarded_client_ip(req),
-        ClientIpHeaderMode::XForwardedFor => x_forwarded_for_client_ip(req, settings),
+        ClientIpHeaderMode::Forwarded => forwarded_ip_chain(req)
+            .and_then(|chain| nearest_untrusted_hop(chain, peer_ip, settings)),
+        ClientIpHeaderMode::XForwardedFor => x_forwarded_for_ip_chain(req)
+            .and_then(|chain| nearest_untrusted_hop(chain, peer_ip, settings)),
     };
     parsed.unwrap_or(peer_ip).to_string()
 }
@@ -105,19 +107,39 @@ fn trusted_proxy_peer_ip(peer_ip: IpAddr, settings: &Settings) -> bool {
         .any(|cidr| cidr.contains(peer_ip))
 }
 
-fn forwarded_client_ip(req: &HttpRequest) -> Option<IpAddr> {
-    let raw = req.headers().get("forwarded")?.to_str().ok()?;
-    for item in raw.split(',').flat_map(|part| part.split(';')) {
-        let (name, value) = item.trim().split_once('=')?;
-        if name.trim().eq_ignore_ascii_case("for") {
-            return parse_forwarded_for_value(value.trim());
-        }
+fn forwarded_ip_chain(req: &HttpRequest) -> Option<Vec<IpAddr>> {
+    let mut values = req.headers().get_all("forwarded");
+    let raw = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
     }
-    None
+
+    let mut chain = Vec::new();
+    for element in raw.split(',') {
+        if element.trim().is_empty() {
+            return None;
+        }
+        let mut forwarded_for = None;
+        for parameter in element.split(';') {
+            let (name, value) = parameter.trim().split_once('=')?;
+            if name.trim().eq_ignore_ascii_case("for") {
+                if forwarded_for.is_some() {
+                    return None;
+                }
+                forwarded_for = Some(parse_forwarded_for_value(value.trim())?);
+            }
+        }
+        chain.push(forwarded_for?);
+    }
+    (!chain.is_empty()).then_some(chain)
 }
 
 fn parse_forwarded_for_value(value: &str) -> Option<IpAddr> {
-    let value = value.trim_matches('"');
+    let value = match (value.strip_prefix('"'), value.strip_suffix('"')) {
+        (Some(without_prefix), Some(_)) => without_prefix.strip_suffix('"')?,
+        (None, None) => value,
+        _ => return None,
+    };
     if let Some(ip) = value
         .strip_prefix('[')
         .and_then(|rest| rest.split_once(']').map(|(ip, _)| ip))
@@ -131,17 +153,31 @@ fn parse_forwarded_for_value(value: &str) -> Option<IpAddr> {
     host.unwrap_or(value).parse().ok()
 }
 
-fn x_forwarded_for_client_ip(req: &HttpRequest, settings: &Settings) -> Option<IpAddr> {
-    let raw = req.headers().get("x-forwarded-for")?.to_str().ok()?;
-    raw.split(',')
+fn x_forwarded_for_ip_chain(req: &HttpRequest) -> Option<Vec<IpAddr>> {
+    let mut values = req.headers().get_all("x-forwarded-for");
+    let raw = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let chain = raw
+        .split(',')
         .map(str::trim)
-        .filter_map(|value| value.parse::<IpAddr>().ok())
-        .find(|ip| {
-            !settings
-                .trusted_proxy_cidrs
-                .iter()
-                .any(|cidr| cidr.contains(*ip))
-        })
+        .map(str::parse::<IpAddr>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!chain.is_empty()).then_some(chain)
+}
+
+fn nearest_untrusted_hop(
+    chain: Vec<IpAddr>,
+    peer_ip: IpAddr,
+    settings: &Settings,
+) -> Option<IpAddr> {
+    chain
+        .into_iter()
+        .chain(std::iter::once(peer_ip))
+        .rev()
+        .find(|ip| !trusted_proxy_peer_ip(*ip, settings))
 }
 
 fn ipv4_prefix_value(ip: Ipv4Addr, prefix: u8) -> u32 {

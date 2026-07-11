@@ -35,9 +35,33 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://nazo-oauth-e2e-server:8000")
 ISSUER_URL = os.environ.get("E2E_ISSUER_URL", BASE_URL)
+
+
+def configured_oidc_provider() -> dict[str, Any]:
+    # E2E 与服务端使用同一个 provider registry 事实源，避免脚本硬编码单 provider 路径。
+    raw = os.environ.get("FEDERATION_PROVIDER_CONFIGS", "")
+    if raw.strip():
+        providers = json.loads(raw)
+        for provider in providers:
+            if provider.get("enabled") and provider.get("adapter_type") == "oidc":
+                return provider
+    return {
+        "provider_id": os.environ.get("E2E_OIDC_PROVIDER_ID", "codecov-oidc"),
+        "client_id": os.environ.get("E2E_OIDC_CLIENT_ID", "codecov-oidc-client"),
+        "redirect_uri": f"{ISSUER_URL}/auth/federation/codecov-oidc/callback",
+        "scopes": "openid email profile",
+    }
+
+
+OIDC_PROVIDER = configured_oidc_provider()
+OIDC_PROVIDER_ID = str(OIDC_PROVIDER["provider_id"])
+OIDC_CLIENT_ID = str(OIDC_PROVIDER["client_id"])
+OIDC_SCOPE = str(OIDC_PROVIDER.get("scopes", "openid email profile"))
+OIDC_CALLBACK_PATH = f"/auth/federation/{OIDC_PROVIDER_ID}/callback"
+OIDC_START_PATH = f"/auth/federation/{OIDC_PROVIDER_ID}/start"
 OIDC_REDIRECT_URI = os.environ.get(
     "E2E_OIDC_REDIRECT_URI",
-    f"{ISSUER_URL}/auth/federation/oidc/callback",
+    str(OIDC_PROVIDER.get("redirect_uri") or f"{ISSUER_URL}{OIDC_CALLBACK_PATH}"),
 )
 DATABASE_URL = os.environ.get(
     "E2E_DATABASE_URL",
@@ -913,8 +937,8 @@ def exercise_saml_federation() -> None:
 
 def exercise_oidc_federation_start() -> None:
     start = expect_status(
-        "GET /auth/federation/oidc/start",
-        requests.get(f"{BASE_URL}/auth/federation/oidc/start", allow_redirects=False, timeout=10),
+        f"GET {OIDC_START_PATH}",
+        requests.get(f"{BASE_URL}{OIDC_START_PATH}", allow_redirects=False, timeout=10),
         302,
     )
     location = start.headers.get("Location", "")
@@ -928,9 +952,9 @@ def exercise_oidc_federation_start() -> None:
         and parsed.netloc == "issuer.example"
         and parsed.path == "/authorize"
         and query.get("response_type") == ["code"]
-        and query.get("client_id") == ["codecov-oidc-client"]
+        and query.get("client_id") == [OIDC_CLIENT_ID]
         and query.get("redirect_uri") == [OIDC_REDIRECT_URI]
-        and query.get("scope") == ["openid email profile"]
+        and query.get("scope") == [OIDC_SCOPE]
         and query.get("code_challenge_method") == ["S256"]
         and bool(query.get("code_challenge", [""])[0])
         and re.fullmatch(r"[A-Za-z0-9_-]{32,256}", state_token) is not None
@@ -939,9 +963,9 @@ def exercise_oidc_federation_start() -> None:
     )
     missing_state = expect_json(
         expect_status(
-            "GET /auth/federation/oidc/callback missing state",
+            f"GET {OIDC_CALLBACK_PATH} missing state",
             requests.get(
-                f"{BASE_URL}/auth/federation/oidc/callback",
+                f"{BASE_URL}{OIDC_CALLBACK_PATH}",
                 params={"state": "A" * 32, "code": "authorization-code"},
                 timeout=10,
             ),

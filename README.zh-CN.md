@@ -189,7 +189,7 @@ RUST_LOG: "info"
 | `AVATAR_STORAGE_DIR` | `DATA_DIR + "/avatars"` |
 
 高级配置仍然保留，用于兼容旧部署和特殊环境。详见
-[docs/configuration.md](docs/configuration.md)。
+[docs/operations/configuration.md](docs/operations/configuration.md)。
 
 ## 默认边界
 
@@ -203,27 +203,30 @@ RUST_LOG: "info"
 - 请求级动态 tenant 或 issuer routing。
 - signed-introspection profile 外，或未配置 per-client JWE response metadata 的 RFC 9701 encrypted introspection response。
 
-当前范围见 [docs/roadmap.md](docs/roadmap.md)。
+当前范围见 [docs/project/roadmap.md](docs/project/roadmap.md)。
 
 ## 文档
 
 | 主题 | 链接 |
 | --- | --- |
-| 配置 | [docs/configuration.md](docs/configuration.md) |
-| 部署 | [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md) |
-| 英文部署文档 | [docs/deployment.md](docs/deployment.md) |
+| 文档索引 | [docs/README.md](docs/README.md) |
+| 配置 | [docs/operations/configuration.md](docs/operations/configuration.md) |
+| 部署 | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |
+| 英文部署文档 | [docs/operations/deployment.md](docs/operations/deployment.md) |
 | Conformance 记录 | [docs/conformance](docs/conformance) |
-| OAuth/OIDC/FAPI best-practice matrix | [docs/rfc-compliance-matrix.md](docs/rfc-compliance-matrix.md) |
-| OAuth/OIDC/FAPI 未来路线图 | [docs/oauth-best-practice-implementation-plan.zh-CN.md](docs/oauth-best-practice-implementation-plan.zh-CN.md) |
-| Profile matrix | [docs/profile-matrix.md](docs/profile-matrix.md) |
-| Threat model | [docs/threat-model.md](docs/threat-model.md) |
-| 发布安全 | [docs/release-security.md](docs/release-security.md) |
-| PostgreSQL 和 Valkey 运维 | [docs/ha-operations.md](docs/ha-operations.md) |
-| Resource server verifier | [docs/resource-server-verifier.md](docs/resource-server-verifier.md) |
-| SCIM | [docs/scim.md](docs/scim.md) |
-| Federation | [docs/federation.md](docs/federation.md) |
-| Passkeys | [docs/passkeys.md](docs/passkeys.md) |
-| MFA | [docs/mfa.md](docs/mfa.md) |
+| 性能基准 | [docs/performance/performance-capacity-curve.md](docs/performance/performance-capacity-curve.md) |
+| OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |
+| OAuth/OIDC/FAPI 未来路线图 | [docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md](docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md) |
+| Profile matrix | [docs/protocol/profile-matrix.md](docs/protocol/profile-matrix.md) |
+| Ecosystem client onboarding | [docs/features/ecosystem-onboarding.md](docs/features/ecosystem-onboarding.md) |
+| Threat model | [docs/security/threat-model.md](docs/security/threat-model.md) |
+| 发布安全 | [docs/operations/release-security.md](docs/operations/release-security.md) |
+| PostgreSQL 和 Valkey 运维 | [docs/operations/ha-operations.md](docs/operations/ha-operations.md) |
+| Resource server verifier | [docs/features/resource-server-verifier.md](docs/features/resource-server-verifier.md) |
+| SCIM | [docs/features/scim.md](docs/features/scim.md) |
+| Federation | [docs/features/federation.md](docs/features/federation.md) |
+| Passkeys | [docs/features/passkeys.md](docs/features/passkeys.md) |
+| MFA | [docs/features/mfa.md](docs/features/mfa.md) |
 | 安全策略 | [SECURITY.md](SECURITY.md) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
 

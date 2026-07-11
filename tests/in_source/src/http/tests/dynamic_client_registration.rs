@@ -80,7 +80,7 @@ fn oidc_dynamic_registration_defaults_to_confidential_authorization_code_client(
 }
 
 #[test]
-fn oidc_dynamic_secret_clients_keep_non_pkce_code_flow_compatibility() {
+fn oidc_dynamic_confidential_secret_clients_allow_code_without_pkce() {
     let prepared = prepare_dynamic_client_registration(
         DynamicClientRegistrationRequest {
             redirect_uris: Some(vec!["https://client.example/callback".to_owned()]),
@@ -172,6 +172,26 @@ fn dynamic_registration_rejects_inconsistent_grant_and_response_types() {
         },
     )
     .expect_err("client_credentials must not be registered with code response type");
+
+    assert_eq!(err.error, "invalid_client_metadata");
+}
+
+#[test]
+fn dynamic_registration_rejects_hybrid_response_types() {
+    let request = DynamicClientRegistrationRequest {
+        redirect_uris: Some(vec!["https://client.example/callback".to_owned()]),
+        grant_types: Some(vec!["authorization_code".to_owned()]),
+        response_types: Some(vec!["code id_token".to_owned()]),
+        ..Default::default()
+    };
+
+    let err = prepare_dynamic_client_registration(
+        request,
+        DynamicRegistrationDefaults {
+            default_audience: "https://issuer.example/fapi/resource",
+        },
+    )
+    .expect_err("hybrid FAPI 1.0 response types must not be registered");
 
     assert_eq!(err.error, "invalid_client_metadata");
 }
@@ -605,4 +625,19 @@ async fn dynamic_registration_created_response_includes_registration_management_
         "https://issuer.example/register/dynamic-client"
     );
     assert_eq!(body["client_id_issued_at"], now.timestamp());
+}
+
+#[test]
+fn dynamic_client_audit_fields_exclude_management_credentials() {
+    let client = dynamic_registration_client_row();
+    let fields = dynamic_client_audit_fields(&client, "source-ip-hash".to_owned());
+
+    assert_eq!(fields.get("client_id"), Some(&json!("dynamic-client")));
+    assert_eq!(fields.get("source_ip_hash"), Some(&json!("source-ip-hash")));
+    assert_eq!(
+        fields.get("token_endpoint_auth_method"),
+        Some(&json!("client_secret_basic"))
+    );
+    assert!(!fields.contains_key("registration_access_token"));
+    assert!(!fields.contains_key("client_secret"));
 }

@@ -84,6 +84,18 @@ fn dotenv_file_is_rejected() {
 }
 
 #[test]
+fn unknown_yaml_key_is_rejected_with_the_key_name() {
+    let path = temp_config_dir("unknown_yaml_key");
+    std::fs::write(path.join(".env.yaml"), "COOKIE_SECUR: true\n").unwrap();
+
+    let result = ConfigSource::load_from_dir(&path);
+    let _ = std::fs::remove_dir_all(&path);
+
+    let error = result.expect_err("unknown YAML keys must fail startup");
+    assert!(error.to_string().contains("COOKIE_SECUR"));
+}
+
+#[test]
 fn missing_config_file_can_be_replaced_by_whitelisted_environment() {
     let path = temp_config_dir("env_only");
 
@@ -140,6 +152,7 @@ fn environment_overrides_yaml_by_allowlist() {
             ),
             ("VALKEY_COMMAND_TIMEOUT_MS".to_owned(), "1000".to_owned()),
             ("DATABASE_MAX_CONNECTIONS".to_owned(), "24".to_owned()),
+            ("PERF_METRICS_ENABLED".to_owned(), "true".to_owned()),
             ("UNKNOWN_ENV".to_owned(), "ignored".to_owned()),
         ])
         .unwrap();
@@ -158,7 +171,26 @@ fn environment_overrides_yaml_by_allowlist() {
     );
     assert_eq!(source.string("VALKEY_COMMAND_TIMEOUT_MS", ""), "1000");
     assert_eq!(source.string("DATABASE_MAX_CONNECTIONS", ""), "24");
+    assert_eq!(source.string("PERF_METRICS_ENABLED", ""), "true");
     assert!(source.get("UNKNOWN_ENV").is_none());
+}
+
+#[test]
+fn feature_and_polling_settings_are_in_the_canonical_key_set() {
+    for key in [
+        "CIBA_AUTH_REQ_ID_TTL_SECONDS",
+        "CIBA_POLL_INTERVAL_SECONDS",
+        "DEVICE_AUTHORIZATION_POLL_INTERVAL_SECONDS",
+        "DEVICE_AUTHORIZATION_TTL_SECONDS",
+        "ENABLE_CIBA",
+        "ENABLE_DEVICE_AUTHORIZATION_GRANT",
+        "ENABLE_FRONTCHANNEL_LOGOUT",
+        "ENABLE_NATIVE_SSO",
+        "ENABLE_SESSION_MANAGEMENT",
+        "PERF_METRICS_ENABLED",
+    ] {
+        assert!(ENV_CONFIG_KEYS.contains(&key), "missing config key {key}");
+    }
 }
 
 #[test]

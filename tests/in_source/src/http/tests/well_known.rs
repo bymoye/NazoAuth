@@ -51,6 +51,9 @@ fn settings(profile: AuthorizationServerProfile, trusted_proxy_cidrs: Vec<IpCidr
             auth_max_requests: 30,
             token_max_requests: 60,
             token_management_max_requests: 120,
+            login_failure_window_seconds: 900,
+            login_failure_email_max_attempts: 50,
+            login_failure_ip_email_max_attempts: 5,
         },
         email: EmailSettings {
             delivery: EmailDelivery::Disabled,
@@ -81,7 +84,7 @@ fn settings(profile: AuthorizationServerProfile, trusted_proxy_cidrs: Vec<IpCidr
             strict_base64: true,
         },
         federation: crate::settings::FederationSettings {
-            oidc: None,
+            providers: crate::settings::FederationProviderRegistry::default(),
             saml_gateway: None,
         },
         enable_request_object: false,
@@ -697,6 +700,109 @@ fn discovery_fapi2_security_metadata_is_profile_scoped() {
             .collect::<Vec<_>>(),
         vec!["private_key_jwt"]
     );
+    assert_eq!(
+        metadata
+            .get("response_types_supported")
+            .and_then(Value::as_array)
+            .expect("response types should be present")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        vec!["code"]
+    );
+    assert_eq!(
+        metadata
+            .get("response_modes_supported")
+            .and_then(Value::as_array)
+            .expect("response modes should be present")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        vec!["query", "jwt"]
+    );
+    assert!(
+        metadata
+            .get("introspection_signing_alg_values_supported")
+            .is_none(),
+        "base FAPI2 Security must not advertise signed introspection metadata"
+    );
+    assert!(
+        metadata
+            .get("introspection_encryption_alg_values_supported")
+            .is_none(),
+        "base FAPI2 Security must not advertise nested encrypted introspection metadata"
+    );
+}
+
+#[test]
+fn discovery_jarm_profile_requires_signed_authorization_response_metadata() {
+    let metadata = authorization_server_metadata(
+        &settings(
+            AuthorizationServerProfile::Fapi2MessageSigningJarm,
+            Vec::new(),
+        ),
+        &keyset(jsonwebtoken::Algorithm::PS256),
+    );
+
+    assert!(metadata.get("authorization_server_profile").is_none());
+    assert_eq!(
+        metadata
+            .get("require_pushed_authorization_requests")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("response_types_supported")
+            .and_then(Value::as_array)
+            .expect("response types should be present")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        vec!["code"]
+    );
+    assert_eq!(
+        metadata
+            .get("response_modes_supported")
+            .and_then(Value::as_array)
+            .expect("response modes should be present")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        vec!["jwt"]
+    );
+    assert_eq!(
+        metadata
+            .get("authorization_signing_alg_values_supported")
+            .and_then(Value::as_array)
+            .expect("authorization response algs should be present")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        vec!["PS256"]
+    );
+    assert_eq!(
+        metadata
+            .get("token_endpoint_auth_methods_supported")
+            .and_then(Value::as_array)
+            .expect("methods should be present")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>(),
+        vec!["private_key_jwt"]
+    );
+    assert!(
+        metadata
+            .get("introspection_signing_alg_values_supported")
+            .is_none(),
+        "JARM profile must not advertise signed introspection metadata"
+    );
+    assert!(
+        metadata
+            .get("introspection_encryption_alg_values_supported")
+            .is_none(),
+        "JARM profile must not advertise nested encrypted introspection metadata"
+    );
 }
 
 #[test]
@@ -804,6 +910,35 @@ fn discovery_ciba_request_object_algs_are_fapi_ciba_scoped() {
             .collect::<Vec<_>>(),
         vec!["EdDSA", "ES256", "PS256"]
     );
+}
+
+#[test]
+fn discovery_omits_entire_ciba_surface_when_disabled() {
+    let settings = settings(AuthorizationServerProfile::Oauth2Baseline, Vec::new());
+    assert!(!settings.enable_ciba);
+    let metadata =
+        authorization_server_metadata(&settings, &keyset(jsonwebtoken::Algorithm::PS256));
+
+    assert!(
+        !metadata
+            .get("grant_types_supported")
+            .and_then(Value::as_array)
+            .expect("grant types should be present")
+            .iter()
+            .any(|value| value.as_str() == Some(CIBA_GRANT_TYPE))
+    );
+    for field in [
+        "backchannel_authentication_endpoint",
+        "backchannel_token_delivery_modes_supported",
+        "backchannel_user_code_parameter_supported",
+        "backchannel_authentication_request_signing_alg_values_supported",
+        "pushed_backchannel_authentication_request_endpoint",
+    ] {
+        assert!(
+            metadata.get(field).is_none(),
+            "unexpected CIBA field {field}"
+        );
+    }
 }
 
 #[test]

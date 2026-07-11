@@ -8,14 +8,14 @@ use tokio::net::{TcpListener, TcpStream};
 
 fn provider() -> OidcFederationSettings {
     OidcFederationSettings {
-        provider_id: "oidc".to_owned(),
+        provider_id: "test-oidc".to_owned(),
         issuer: "https://issuer.example".to_owned(),
         authorization_endpoint: "https://issuer.example/authorize".to_owned(),
         token_endpoint: "https://issuer.example/token".to_owned(),
         jwks_url: "https://issuer.example/jwks".to_owned(),
         client_id: "client-1".to_owned(),
         client_secret: "secret".to_owned(),
-        redirect_uri: "https://auth.example/federation/oidc/callback".to_owned(),
+        redirect_uri: "https://auth.example/federation/test-oidc/callback".to_owned(),
         scopes: "openid email".to_owned(),
     }
 }
@@ -44,7 +44,7 @@ fn oidc_authorization_url_includes_all_required_params() {
     );
     assert_eq!(
         params.get("redirect_uri").map(|v| v.as_ref()),
-        Some("https://auth.example/federation/oidc/callback")
+        Some("https://auth.example/federation/test-oidc/callback")
     );
     assert_eq!(
         params.get("scope").map(|v| v.as_ref()),
@@ -212,7 +212,7 @@ async fn exchange_oidc_code_posts_basic_authenticated_authorization_code_request
     assert_eq!(form_body_value(&request, "code").as_deref(), Some("code-1"));
     assert_eq!(
         form_body_value(&request, "redirect_uri").as_deref(),
-        Some("https://auth.example/federation/oidc/callback")
+        Some("https://auth.example/federation/test-oidc/callback")
     );
     assert_eq!(
         form_body_value(&request, "code_verifier").as_deref(),

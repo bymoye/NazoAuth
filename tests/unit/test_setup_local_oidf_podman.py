@@ -53,6 +53,27 @@ class SetupLocalOidfPodmanTests(unittest.TestCase):
         self.assertIn("mtls", config)
         self.assertIn("mtls2", config)
 
+    def test_all_generated_plans_allow_the_native_sso_metadata_extension(self):
+        module = load_setup_module()
+
+        configs = [
+            module.write_basic_plan_config(),
+            module.write_dynamic_plan_config(),
+            module.write_oidcc_config_plan_config(),
+            module.write_frontchannel_logout_plan_config(),
+            module.write_session_management_plan_config(),
+        ]
+        configs.extend(module.write_fapi_plan_configs().values())
+        configs.extend(module.write_fapi_ciba_plan_config().values())
+        configs.extend(module.write_fapi_matrix_plan_configs().values())
+
+        self.assertGreaterEqual(len(configs), 20)
+        for config in configs:
+            self.assertEqual(
+                config["server"]["allow_unexpected_metadata_fields"],
+                ["native_sso_supported"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

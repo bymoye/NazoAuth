@@ -34,10 +34,23 @@ pub(crate) struct IssuedAccessToken {
     pub(crate) exp: i64,
 }
 
+pub(super) fn validate_access_token_sender_constraint(
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> jsonwebtoken::errors::Result<()> {
+    if dpop_jkt.is_some() && mtls_x5t_s256.is_some() {
+        return Err(jsonwebtoken::errors::Error::from(
+            jsonwebtoken::errors::ErrorKind::InvalidToken,
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn make_jwt(
     state: &AppState,
     input: AccessTokenJwtInput<'_>,
 ) -> jsonwebtoken::errors::Result<IssuedAccessToken> {
+    validate_access_token_sender_constraint(input.dpop_jkt, input.mtls_x5t_s256)?;
     let now = Utc::now().timestamp();
     let jti = Uuid::now_v7().to_string();
     let exp = now + input.ttl;
