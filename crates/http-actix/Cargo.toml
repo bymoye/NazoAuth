@@ -1,0 +1,30 @@
+[package]
+name = "nazo-http-actix"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+actix-web = { workspace = true, features = ["cookies"] }
+actix-cors.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+passkey-auth.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["v7"] }
+nazo-auth.workspace = true
+nazo-http-signatures.workspace = true
+nazo-identity.workspace = true
+nazo-resource-server.workspace = true
+nazo-runtime-modules.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

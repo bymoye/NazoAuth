@@ -84,7 +84,9 @@ The project separates three surfaces:
 ## Rust Resource Server Support
 
 - JWT access-token verifier for Rust resource servers.
-- Actix Web, Axum/Tower, and tonic adapters.
+- Framework-independent `http::Request` authorization helpers and the
+  project's Actix HTTP integration. Historical Axum/Tower and tonic adapters
+  have been removed rather than retained behind feature flags.
 - DPoP proof verification for `typ`, embedded-JWK signature, `htu`, `htm`,
   `ath`, `jti` replay, and optional nonce policy before sender-constraint
   context is populated.

@@ -10,6 +10,7 @@ on:
       - "rust-toolchain"
       - "rust-toolchain.toml"
       - "requirements/codecov.txt"
+      - "crates/**"
       - "src/**"
       - "scripts/generate_codecov_lcov.sh"
       - "scripts/full_real_request_e2e.py"
@@ -27,6 +28,7 @@ on:
       - "rust-toolchain"
       - "rust-toolchain.toml"
       - "requirements/codecov.txt"
+      - "crates/**"
       - "src/**"
       - "scripts/generate_codecov_lcov.sh"
       - "scripts/full_real_request_e2e.py"
@@ -51,9 +53,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt, clippy
 
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev

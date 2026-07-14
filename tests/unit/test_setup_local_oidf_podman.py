@@ -1,6 +1,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def load_setup_module():
@@ -132,6 +133,26 @@ class SetupLocalOidfPodmanTests(unittest.TestCase):
                 config["server"]["allow_unexpected_metadata_fields"],
                 ["native_sso_supported"],
             )
+
+    def test_help_exits_before_generating_runtime_files(self):
+        module = load_setup_module()
+
+        with mock.patch.object(module, "ensure_cert") as ensure_cert:
+            with self.assertRaises(SystemExit) as raised:
+                module.main(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        ensure_cert.assert_not_called()
+
+    def test_unknown_argument_exits_before_generating_runtime_files(self):
+        module = load_setup_module()
+
+        with mock.patch.object(module, "ensure_cert") as ensure_cert:
+            with self.assertRaises(SystemExit) as raised:
+                module.main(["--not-a-real-option"])
+
+        self.assertEqual(raised.exception.code, 2)
+        ensure_cert.assert_not_called()
 
 
 if __name__ == "__main__":

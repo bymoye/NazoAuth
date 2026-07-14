@@ -35,7 +35,7 @@
 本矩阵中与当前 TP/PS 工作直接相关的覆盖点包括：
 
 - `OIDC Basic OP Dynamic Registration` 覆盖 RFC 7591 动态客户端注册和 `registration_endpoint` metadata。
-- `OIDC Dynamic Registration / Signed UserInfo` 只选择官方 OP 侧 `oidcc-userinfo-rs256` 模块。完整的旧版 dynamic-certification plan 还要求 implicit flow，而本项目有意不实现也不声明该能力。suite snapshot `f326f6aa25d6a2b8f1ae30a6ec80a57e342333ce` 没有 encrypted UserInfo 或 encrypted JARM 的 OP 模块，因此这两项仍以本地负向测试为事实源。
+- `OIDC Dynamic Registration / Signed UserInfo` 只选择官方 OP 侧 `oidcc-userinfo-rs256` 模块。完整的旧版 dynamic-certification plan 还要求 implicit flow，而本项目有意不实现也不声明该能力。suite release `v5.2.0`（`dee9a25160e789f0f80517674693ef7989ab9fa1`）没有 encrypted UserInfo 或 encrypted JARM 的 OP 模块，因此这两项仍以本地负向测试为事实源。
 - `OIDC Config OP` 覆盖 metadata truth，防止 discovery 暴露未实现能力。
 - FAPI2 Security 和 Message Signing plans 覆盖 PAR 强制、`request_uri` 过期、`request_uri` 重用、跨客户端 `request_uri` 使用、外层授权请求参数、PKCE、redirect URI、audience 和 client assertion。
 - `private_key_jwt / DPoP / OpenID Connect / authorization code` 是 TP/PS 改动面的主要单 plan；完整回归以 21-plan 矩阵为准。

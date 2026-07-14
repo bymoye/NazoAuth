@@ -9,6 +9,62 @@ def workflow_heredoc_json(workflow: str, name: str):
     return json.loads(payload)
 
 class OidfWorkflowTests(unittest.TestCase):
+    def test_public_seed_artifacts_include_a_validated_mtls_ca_bundle(self):
+        root = Path(__file__).resolve().parents[2]
+        validation = (
+            "python scripts/oidf_mtls_ca_bundle.py verify \\\n"
+            "            --artifact-directory oidf-public-plan-configs"
+        )
+        for name in ("oidf-public-seed-configs.yml", "oidf-conformance-full.yml"):
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(validation, workflow)
+            self.assertIn('--source-commit "$GITHUB_SHA"', workflow)
+            self.assertIn('--expected-source-commit "$GITHUB_SHA"', workflow)
+            self.assertIn("path: oidf-public-plan-configs", workflow)
+
+    def test_oidf_workflows_default_to_latest_verified_release(self):
+        root = Path(__file__).resolve().parents[2]
+        expected = "dee9a25160e789f0f80517674693ef7989ab9fa1"
+        for name in ("oidf-conformance.yml", "oidf-conformance-full.yml"):
+            workflow = (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            self.assertIn(f"OIDF_CONFORMANCE_SUITE_REF || '{expected}'", workflow)
+            self.assertNotIn("33a724c7d809a6f9db05cbb513ff2a77cbac905e", workflow)
+
+    def test_every_oidf_suite_checkout_applies_the_sha_bound_runner_patch(self):
+        root = Path(__file__).resolve().parents[2]
+        patch_command = (
+            "python scripts/apply_oidf_runner_patch.py "
+            "--suite-dir oidf-conformance-suite"
+        )
+        for name in ("oidf-conformance.yml", "oidf-conformance-full.yml"):
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(
+                workflow.count(patch_command),
+                workflow.count("git -C oidf-conformance-suite checkout --detach FETCH_HEAD"),
+            )
+
+    def test_spec_freshness_workflow_separates_offline_and_online_checks(self):
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "spec-freshness.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("schedule:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("pull_request:", workflow)
+        self.assertIn("python scripts/check_spec_freshness.py --offline", workflow)
+        self.assertIn("python scripts/check_spec_freshness.py", workflow)
+        self.assertIn("github.event_name != 'pull_request'", workflow)
+        self.assertIn('      - "README.md"', workflow)
+        self.assertIn("    needs: offline", workflow)
+        self.assertIn("rhysd/actionlint:1.7.12", workflow)
+
     def test_full_matrix_workflow_defaults_to_no_parallel_runner(self):
         workflow = (
             Path(__file__).resolve().parents[2]

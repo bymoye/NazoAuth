@@ -64,15 +64,38 @@ before creating, listing, updating, or deleting users.
 
 ## Supported Operations
 
-Listing supports pagination with `startIndex` and `count`, and supports only `userName eq "email@example.com"` filters.
+Listing supports both index and RFC 9865 forward cursor pagination and supports
+only `userName eq "email@example.com"` filters.
+
+- Index pagination remains the default and accepts `startIndex` plus `count`.
+- Cursor pagination is selected by an empty first-page `cursor` parameter and
+  returns `nextCursor` on every non-final page.
+- Cursor pages are ordered by `(created_at, id)` and do not return
+  `startIndex` or the optional `previousCursor`.
+- Cursors are stateless AES-256-GCM values with a fresh nonce, a domain-separated
+  key derived from the stable client-secret pepper, and a 600-second lifetime.
+- Each cursor is bound to the SCIM credential, tenant, exact filter, effective
+  count, ordering policy, and last row. Every page repeats bearer, scope, and
+  tenant authorization.
+- Bearer authorization runs before raw query parsing. Malformed or duplicate
+  pagination fields therefore retain the SCIM error envelope instead of being
+  rejected by the framework's generic query extractor.
+- Invalid or substituted cursors use `invalidCursor`, authenticated expired
+  cursors use `expiredCursor`, and count changes use `invalidCount`.
+- Results are a live ordered set rather than a database snapshot: later inserts
+  after the marker may appear, deletes may reduce the remaining set, and an
+  already returned unchanged row is not repeated.
 
 `/ServiceProviderConfig` advertises the SCIM pagination and event capability
 boundary explicitly:
 
-- RFC 9865 cursor pagination is not supported; index pagination is the default.
+- RFC 9865 cursor pagination and index pagination are supported; index remains
+  `defaultPaginationMethod`, `cursorTimeout` is 600, and the maximum page size
+  is 200.
 - The default page size is 100 and the maximum page size is 200.
-- RFC 9967 asynchronous SCIM requests and SCIM Security Events are not supported;
-  `securityEvents.asyncRequest` is `none` and `eventUris` is empty.
+- RFC 9967 SCIM Security Event Tokens, event feeds, and asynchronous completion
+  events are not supported; `securityEvents.asyncRequest` is `none` and
+  `eventUris` is empty.
 
 PATCH supports `replace` for:
 

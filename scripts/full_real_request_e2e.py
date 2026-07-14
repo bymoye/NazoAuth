@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import struct
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -23,14 +24,224 @@ from email import message_from_bytes
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from full_real_request_source_policy import (
+    RuntimeCaseEvidence,
+    execute_case_registry,
+    validate_case_registry,
+)
+
+
+HTTP_SIGNATURE_REQUIRED_E2E_CASES = frozenset(
+    {
+        "fapi_http_signature_signed_get",
+        "fapi_http_signature_signed_post",
+        "fapi_http_signature_signed_extra_headers",
+        "fapi_http_signature_tampered_extra_header",
+        "fapi_http_signature_signed_dpop_bound_resource",
+        "fapi_http_signature_response_verification_and_request_binding",
+        "fapi_http_signature_response_tampered_content_type",
+        "fapi_http_signature_response_tampered_interaction_id",
+        "fapi_http_signature_tampered_method",
+        "fapi_http_signature_tampered_uri",
+        "fapi_http_signature_tampered_authorization",
+        "fapi_http_signature_tampered_dpop",
+        "fapi_http_signature_tampered_body",
+        "fapi_http_signature_stale_created",
+        "fapi_http_signature_future_created",
+        "fapi_http_signature_replay",
+        "fapi_http_signature_wrong_key",
+        "fapi_http_signature_wrong_client",
+        "fapi_http_signature_unsigned_fallback",
+    }
+)
+
+HTTP_SIGNATURE_CASE_REGISTRY = (
+    ("fapi_http_signature_signed_get", "signed_request", {"query": "signed-get", "expected_status": 200}),
+    ("fapi_http_signature_signed_post", "signed_post", {"query": "signed-post", "expected_status": 200}),
+    ("fapi_http_signature_signed_extra_headers", "signed_request", {"query": "signed-extra-headers", "signed_extra_headers": {"Content-Type": "application/json", "Idempotency-Key": "operation-123"}, "expected_status": 200}),
+    ("fapi_http_signature_tampered_extra_header", "signed_request", {"query": "tampered-extra-header", "signed_extra_headers": {"Content-Type": "application/json", "Idempotency-Key": "operation-123"}, "sent_extra_headers": {"Content-Type": "application/json", "Idempotency-Key": "operation-999"}, "expected_status": 401}),
+    ("fapi_http_signature_signed_dpop_bound_resource", "signed_dpop", {"query": "signed-dpop-bound", "expected_status": 200}),
+    ("fapi_http_signature_response_verification_and_request_binding", "response_binding", {"query": "response-binding", "expected_status": 200}),
+    ("fapi_http_signature_response_tampered_content_type", "response_header_tamper", {"query": "response-tampered-content-type", "header": "Content-Type", "value": "text/plain", "expected_status": 200}),
+    ("fapi_http_signature_response_tampered_interaction_id", "response_header_tamper", {"query": "response-tampered-interaction-id", "header": "X-Fapi-Interaction-Id", "value": "tampered-interaction-id", "expected_status": 200}),
+    ("fapi_http_signature_tampered_method", "signed_request", {"method": "POST", "signed_method": "GET", "query": "tampered-method", "expected_status": 401}),
+    ("fapi_http_signature_tampered_uri", "tampered_uri", {"query": "tampered-uri", "expected_status": 401}),
+    ("fapi_http_signature_tampered_authorization", "tampered_authorization", {"query": "tampered-authorization", "expected_status": 401}),
+    ("fapi_http_signature_tampered_dpop", "signed_request", {"query": "tampered-dpop", "signed_dpop": "signed-dpop-value", "sent_dpop": "altered-dpop-value", "expected_status": 401}),
+    ("fapi_http_signature_tampered_body", "tampered_body", {"query": "tampered-body", "expected_status": 401}),
+    ("fapi_http_signature_stale_created", "relative_created", {"query": "stale-created", "created_offset": -61, "expected_status": 401}),
+    ("fapi_http_signature_future_created", "relative_created", {"query": "future-created", "created_offset": 6, "expected_status": 401}),
+    ("fapi_http_signature_replay", "replay", {"query": "replay", "expected_status": 200}),
+    ("fapi_http_signature_wrong_key", "wrong_key", {"query": "wrong-key", "expected_status": 401}),
+    ("fapi_http_signature_wrong_client", "wrong_client", {"query": "wrong-client", "expected_status": 401}),
+    ("fapi_http_signature_unsigned_fallback", "unsigned_fallback", {"expected_status": 200}),
+)
+
+HTTP_SIGNATURE_HANDLER_NAMES = frozenset(
+    {
+        "relative_created",
+        "replay",
+        "response_binding",
+        "response_header_tamper",
+        "signed_dpop",
+        "signed_post",
+        "signed_request",
+        "tampered_authorization",
+        "tampered_body",
+        "tampered_uri",
+        "unsigned_fallback",
+        "wrong_client",
+        "wrong_key",
+    }
+)
+HTTP_SIGNATURE_RUNTIME_EVIDENCE = RuntimeCaseEvidence(HTTP_SIGNATURE_REQUIRED_E2E_CASES)
+
+
+def validate_http_signature_case_registry(registry: tuple[tuple[str, str, dict[str, object]], ...]) -> None:
+    validate_case_registry(
+        registry,
+        required=HTTP_SIGNATURE_REQUIRED_E2E_CASES,
+        allowed_handlers=HTTP_SIGNATURE_HANDLER_NAMES,
+    )
+
+
+def execute_http_signature_case_registry(
+    registry: tuple[tuple[str, str, dict[str, object]], ...],
+    handlers: dict[str, object],
+) -> tuple[str, ...]:
+    return execute_case_registry(
+        registry,
+        handlers,
+        required=HTTP_SIGNATURE_REQUIRED_E2E_CASES,
+        allowed_handlers=HTTP_SIGNATURE_HANDLER_NAMES,
+        evidence=HTTP_SIGNATURE_RUNTIME_EVIDENCE,
+    )
+
+
+def run_source_policy_check() -> None:
+    validate_http_signature_case_registry(HTTP_SIGNATURE_CASE_REGISTRY)
+    fake_handlers = {
+        name: (lambda case, _params: HTTP_SIGNATURE_RUNTIME_EVIDENCE.observe(case, True))
+        for name in HTTP_SIGNATURE_HANDLER_NAMES
+    }
+    executed = execute_http_signature_case_registry(HTTP_SIGNATURE_CASE_REGISTRY, fake_handlers)
+    if tuple(name for name, _, _ in HTTP_SIGNATURE_CASE_REGISTRY) != executed:
+        raise AssertionError("source-policy runner did not traverse the declared registry")
+
+
+def run_source_policy_self_tests() -> None:
+    run_source_policy_check()
+    required = frozenset({"required_case"})
+    allowed = frozenset({"handler"})
+    registry = (("required_case", "handler", {}),)
+
+    def must_fail(
+        candidate: tuple[tuple[str, str, dict[str, object]], ...],
+        handlers: dict[str, object],
+        expected: str,
+        evidence: RuntimeCaseEvidence | None = None,
+    ) -> None:
+        try:
+            execute_case_registry(
+                candidate,
+                handlers,
+                required=required,
+                allowed_handlers=allowed,
+                evidence=evidence or RuntimeCaseEvidence(required),
+            )
+        except AssertionError as error:
+            if expected not in str(error):
+                raise AssertionError(f"unexpected contract failure: {error}") from error
+            return
+        raise AssertionError(f"contract case did not fail: {expected}")
+
+    noop = lambda _case, _params: None
+    must_fail((), {"handler": noop}, "missing")
+    must_fail(registry + (("extra", "handler", {}),), {"handler": noop}, "extra")
+    must_fail(registry + registry, {"handler": noop}, "duplicates")
+    must_fail((("required_case", "unknown", {}),), {}, "unknown_handlers")
+    must_fail(registry, {"handler": object()}, "not callable")
+    must_fail(registry, {}, "handler map is not exact")
+    must_fail(
+        registry,
+        {"handler": noop, "extra_handler": noop},
+        "handler map is not exact",
+    )
+    must_fail(registry, {"handler": noop}, "did not assert")
+    must_fail(registry, {"handler": lambda _case, _params: None if False else None}, "did not assert")
+
+    wrong_evidence = RuntimeCaseEvidence(required | {"other_case"})
+    must_fail(
+        registry,
+        {"handler": lambda _case, _params: wrong_evidence.observe("other_case", True)},
+        "wrong active case",
+        wrong_evidence,
+    )
+
+    duplicate_evidence = RuntimeCaseEvidence(required)
+    def duplicate(case: str, _params: dict[str, object]) -> None:
+        duplicate_evidence.observe(case, True)
+        duplicate_evidence.observe(case, True)
+    must_fail(registry, {"handler": duplicate}, "duplicate runtime case assertion", duplicate_evidence)
+
+    clean_evidence = RuntimeCaseEvidence(required)
+    try:
+        execute_case_registry(
+            registry,
+            {"handler": lambda _case, _params: (_ for _ in ()).throw(RuntimeError("boom"))},
+            required=required,
+            allowed_handlers=allowed,
+            evidence=clean_evidence,
+        )
+    except RuntimeError:
+        pass
+    if clean_evidence.active_case is not None:
+        raise AssertionError("runtime evidence state leaked after handler exception")
+    execute_case_registry(
+        registry,
+        {"handler": lambda case, _params: clean_evidence.observe(case, True)},
+        required=required,
+        allowed_handlers=allowed,
+        evidence=clean_evidence,
+    )
+
+    nested_evidence = RuntimeCaseEvidence(required)
+    def nested(_case: str, _params: dict[str, object]) -> None:
+        execute_case_registry(
+            registry,
+            {"handler": lambda case, _params: nested_evidence.observe(case, True)},
+            required=required,
+            allowed_handlers=allowed,
+            evidence=nested_evidence,
+        )
+    must_fail(registry, {"handler": nested}, "nested runtime case execution", nested_evidence)
+    if nested_evidence.active_case is not None:
+        raise AssertionError("runtime evidence state leaked after nested execution")
+    execute_case_registry(
+        registry,
+        {"handler": lambda case, _params: nested_evidence.observe(case, True)},
+        required=required,
+        allowed_handlers=allowed,
+        evidence=nested_evidence,
+    )
+
+
+if sys.argv[1:] == ["--source-policy-check"]:
+    run_source_policy_check()
+    raise SystemExit(0)
+if sys.argv[1:] == ["--source-policy-self-test"]:
+    run_source_policy_self_tests()
+    raise SystemExit(0)
+
 import jwt
 import psycopg
 import redis
 import requests
 from aiosmtpd.controller import Controller
 from argon2 import PasswordHasher
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://nazo-oauth-e2e-server:8000")
@@ -90,7 +301,6 @@ DEFAULT_ORGANIZATION_ID = "00000000-0000-0000-0000-000000000003"
 CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 SESSION_COOKIE_NAME = "nazo_oauth_session"
 
-
 checks: list[str] = []
 
 
@@ -99,6 +309,7 @@ def fail(message: str) -> None:
 
 
 def check(name: str, condition: bool, detail: Any = None) -> None:
+    HTTP_SIGNATURE_RUNTIME_EVIDENCE.observe(name, condition)
     if not condition:
         if detail is None:
             fail(name)
@@ -128,6 +339,157 @@ def comma_header_values(response: requests.Response, name: str) -> set[str]:
 
 def b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def content_digest(body: bytes) -> str:
+    return f"sha-256=:{base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')}:"
+
+
+def fapi_http_signature_fields(
+    key: ed25519.Ed25519PrivateKey,
+    kid: str,
+    method: str,
+    target_uri: str,
+    authorization: str,
+    *,
+    body: bytes = b"",
+    dpop: str | None = None,
+    created: int | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Mirror the Rust core's fixed Ed25519 request vector for black-box transport tests.
+
+    The Rust crate remains the canonical cryptographic/vector implementation; the source-policy
+    gate pins every caller below and the crate tests independently pin canonicalization.
+    """
+    created = now() if created is None else created
+    components = ["@method", "@target-uri", "authorization"]
+    values = [
+        f'"@method": {method}',
+        f'"@target-uri": {target_uri}',
+        f'"authorization": {authorization.strip()}',
+    ]
+    if dpop is not None:
+        components.append("dpop")
+        values.append(f'"dpop": {dpop.strip()}')
+    headers = {"Authorization": authorization}
+    if dpop is not None:
+        headers["DPoP"] = dpop
+    if body:
+        digest = content_digest(body)
+        components.append("content-digest")
+        values.append(f'"content-digest": {digest}')
+        headers["Content-Digest"] = digest
+    for name, value in (extra_headers or {}).items():
+        component = name.lower()
+        components.append(component)
+        values.append(f'"{component}": {value.strip()}')
+        headers[name] = value
+    component_list = " ".join(f'"{component}"' for component in components)
+    params = (
+        f'({component_list});created={created};keyid="{kid}";alg="ed25519";'
+        'tag="fapi-2-request"'
+    )
+    signature_input = f"sig1={params}"
+    signature_base = "\n".join(values) + f'\n"@signature-params": {params}'
+    signature = key.sign(signature_base.encode("ascii"))
+    headers["Signature-Input"] = signature_input
+    headers["Signature"] = f"sig1=:{base64.b64encode(signature).decode('ascii')}:"
+    return headers
+
+
+def verify_fapi_http_signature_response(
+    response: requests.Response,
+    server_jwks: dict[str, Any],
+    *,
+    method: str,
+    target_uri: str,
+    request_body: bytes,
+    request_headers: dict[str, str] | None,
+) -> None:
+    signature_input = response.headers.get("Signature-Input", "")
+    signature_field = response.headers.get("Signature", "")
+    match = re.fullmatch(
+        r'nazo=\((?P<components>.+)\);created=(?P<created>-?\d+);keyid="(?P<kid>[^"]+)";alg="(?P<alg>ed25519|rsa-v1_5-sha256|ecdsa-p256-sha256)";tag="fapi-2-response"',
+        signature_input,
+    )
+    check("fapi_http_signature_response_input_shape", match is not None, signature_input)
+    assert match is not None
+    valid_request_digest = (
+        request_headers is not None
+        and bool(request_body)
+        and request_headers.get("Content-Digest") == content_digest(request_body)
+    )
+    expected_components = ['"@status"', '"content-digest"']
+    for header_name in ("Content-Type", "X-Fapi-Interaction-Id"):
+        if response.headers.get(header_name) is not None:
+            expected_components.append(f'"{header_name.lower()}"')
+    expected_components.extend(['"@method";req', '"@target-uri";req'])
+    if valid_request_digest:
+        expected_components.append('"content-digest";req')
+    if request_headers is not None:
+        expected_components.extend(['"signature-input";req', '"signature";req'])
+    check(
+        "fapi_http_signature_response_components",
+        match.group("components").split(" ") == expected_components,
+        match.group("components"),
+    )
+    digest = response.headers.get("Content-Digest", "")
+    check("fapi_http_signature_response_digest", digest == content_digest(response.content))
+    lines = [f'"@status": {response.status_code}', f'"content-digest": {digest}']
+    for header_name in ("Content-Type", "X-Fapi-Interaction-Id"):
+        header_value = response.headers.get(header_name)
+        if header_value is not None:
+            lines.append(f'"{header_name.lower()}": {header_value}')
+    lines.extend([f'"@method";req: {method}', f'"@target-uri";req: {target_uri}'])
+    if valid_request_digest:
+        assert request_headers is not None
+        lines.append(f'"content-digest";req: {request_headers["Content-Digest"]}')
+    if request_headers is not None:
+        lines.extend(
+            [
+                f'"signature-input";req: {request_headers["Signature-Input"]}',
+                f'"signature";req: {request_headers["Signature"]}',
+            ]
+        )
+    params = signature_input.removeprefix("nazo=")
+    signature_base = "\n".join(lines) + f'\n"@signature-params": {params}'
+    signature_match = re.fullmatch(r"nazo=:(?P<value>[A-Za-z0-9+/]+={0,2}):", signature_field)
+    check("fapi_http_signature_response_value_shape", signature_match is not None)
+    assert signature_match is not None
+    jwk = next(
+        (item for item in server_jwks.get("keys", []) if item.get("kid") == match.group("kid")),
+        None,
+    )
+    check("fapi_http_signature_response_kid_resolves", jwk is not None)
+    assert jwk is not None
+    signature_bytes = base64.b64decode(signature_match.group("value"))
+    signature_base_bytes = signature_base.encode("ascii")
+    if match.group("alg") == "ed25519":
+        check("fapi_http_signature_response_key_is_ed25519", jwk.get("kty") == "OKP" and jwk.get("crv") == "Ed25519")
+        public_key = ed25519.Ed25519PublicKey.from_public_bytes(
+            base64.urlsafe_b64decode(jwk["x"] + "=" * (-len(jwk["x"]) % 4))
+        )
+        public_key.verify(signature_bytes, signature_base_bytes)
+    elif match.group("alg") == "rsa-v1_5-sha256":
+        check("fapi_http_signature_response_key_is_rsa", jwk.get("kty") == "RSA")
+        modulus = int.from_bytes(base64.urlsafe_b64decode(jwk["n"] + "=" * (-len(jwk["n"]) % 4)))
+        exponent = int.from_bytes(base64.urlsafe_b64decode(jwk["e"] + "=" * (-len(jwk["e"]) % 4)))
+        rsa.RSAPublicNumbers(exponent, modulus).public_key().verify(
+            signature_bytes,
+            signature_base_bytes,
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    else:
+        check("fapi_http_signature_response_key_is_p256", jwk.get("kty") == "EC" and jwk.get("crv") == "P-256")
+        x = int.from_bytes(base64.urlsafe_b64decode(jwk["x"] + "=" * (-len(jwk["x"]) % 4)))
+        y = int.from_bytes(base64.urlsafe_b64decode(jwk["y"] + "=" * (-len(jwk["y"]) % 4)))
+        ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key().verify(
+            signature_bytes,
+            signature_base_bytes,
+            ec.ECDSA(hashes.SHA256()),
+        )
 
 
 def now() -> int:
@@ -919,10 +1281,44 @@ def exercise_saml_federation() -> None:
 
     replay = expect_json(
         expect_status(
-            "POST /auth/federation/saml/acs existing link",
+            "POST /auth/federation/saml/acs replay",
             federated.post(
                 f"{BASE_URL}/auth/federation/saml/acs",
                 json=payload,
+                timeout=10,
+            ),
+            401,
+        )
+    )
+    check(
+        "saml_federation_replay_is_rejected",
+        replay.get("error") == "access_denied",
+        replay,
+    )
+
+    fresh_issued_at = max(now(), issued_at + 1)
+    fresh_expires_at = fresh_issued_at + 120
+    fresh_payload = dict(payload)
+    fresh_payload.update(
+        {
+            "iat": fresh_issued_at,
+            "exp": fresh_expires_at,
+            "signature": saml_gateway_signature(
+                payload["issuer"],
+                payload["audience"],
+                payload["subject"],
+                email,
+                fresh_issued_at,
+                fresh_expires_at,
+            ),
+        }
+    )
+    existing_link = expect_json(
+        expect_status(
+            "POST /auth/federation/saml/acs existing link",
+            federated.post(
+                f"{BASE_URL}/auth/federation/saml/acs",
+                json=fresh_payload,
                 timeout=10,
             ),
             200,
@@ -930,8 +1326,9 @@ def exercise_saml_federation() -> None:
     )
     check(
         "saml_federation_existing_link_reauthenticates",
-        replay.get("mfa_required") is False and bool(federated.cookies.get(SESSION_COOKIE_NAME)),
-        replay,
+        existing_link.get("mfa_required") is False
+        and bool(federated.cookies.get(SESSION_COOKIE_NAME)),
+        existing_link,
     )
 
 
@@ -1094,17 +1491,40 @@ def seed_prerequisites() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
+                SELECT module_id, desired_mode, revision
+                FROM runtime_module_desired_states
+                ORDER BY module_id
+                """
+            )
+            desired_states_before_reset = cur.fetchall()
+            if not desired_states_before_reset:
+                fail("runtime module desired states were not seeded before E2E reset")
+            cur.execute(
+                """
                 TRUNCATE TABLE
                     access_token_revocations,
                     oauth_tokens,
                     user_client_grants,
                     client_access_requests,
                     external_identity_links,
-                    oauth_clients,
-                    users
+                    oauth_clients
                 RESTART IDENTITY CASCADE
                 """
             )
+            # DELETE preserves control-plane rows whose audit actor references use
+            # ON DELETE SET NULL. TRUNCATE ... CASCADE would silently erase the
+            # durable runtime-module desired state while the servers are running.
+            cur.execute("DELETE FROM users")
+            cur.execute(
+                """
+                SELECT module_id, desired_mode, revision
+                FROM runtime_module_desired_states
+                ORDER BY module_id
+                """
+            )
+            desired_states_after_reset = cur.fetchall()
+            if desired_states_after_reset != desired_states_before_reset:
+                fail("E2E reset changed durable runtime module desired states")
             cur.execute(
                 """
                 INSERT INTO users (
@@ -1234,7 +1654,11 @@ def approve_authorization(
     expect_status(f"authorize_decision_approve_{state}", response, 302)
     query = location_query(response)
     code = query.get("code", [None])[0]
-    check(f"authorize_code_issued_{state}", bool(code))
+    check(
+        f"authorize_code_issued_{state}",
+        bool(code),
+        response.headers.get("Location", ""),
+    )
     check(f"authorize_state_roundtrip_{state}", query.get("state", [None])[0] == state)
     return code, verifier
 
@@ -1343,6 +1767,301 @@ def token_with_dpop(
     return expect_json(response)
 
 
+def exercise_fapi_http_signature_profile(admin: requests.Session) -> None:
+    signed_base = os.environ.get("E2E_SIGNED_BASE_URL")
+    check("fapi_http_signature_signed_base_configured", bool(signed_base))
+    target = f"{ISSUER_URL.rstrip('/')}/fapi/resource"
+    kid = "fapi-http-signature-e2e"
+    other_kid = "fapi-http-signature-other-e2e"
+    key = ed25519.Ed25519PrivateKey.generate()
+    other_key = ed25519.Ed25519PrivateKey.generate()
+
+    def signature_client(
+        name: str,
+        public_key: ed25519.Ed25519PrivateKey,
+        key_id: str,
+        *,
+        require_dpop: bool = False,
+    ) -> dict[str, Any]:
+        return create_client(
+            admin,
+            {
+                "client_name": name,
+                "client_type": "confidential",
+                "redirect_uris": [],
+                "scopes": ["profile"],
+                "allowed_audiences": [target],
+                "grant_types": ["client_credentials"],
+                "token_endpoint_auth_method": "client_secret_post",
+                "require_dpop_bound_tokens": require_dpop,
+                "jwks": {"keys": [ed25519_public_jwk(public_key, key_id)]},
+            },
+            f"POST /admin/clients {name}",
+        )
+
+    client = signature_client("FAPI HTTP Signature E2E", key, kid)
+    other_client = signature_client("FAPI HTTP Signature Other E2E", other_key, other_kid)
+    dpop_client = signature_client("FAPI HTTP Signature DPoP E2E", key, kid, require_dpop=True)
+
+    def access_token(client_record: dict[str, Any]) -> str:
+        token = expect_json(
+            expect_status(
+                "POST /token FAPI HTTP signature client_credentials",
+                requests.post(
+                    f"{BASE_URL}/token",
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": client_record["client_id"],
+                        "client_secret": client_record["client_secret"],
+                        "scope": "profile",
+                        "resource": target,
+                    },
+                    timeout=10,
+                ),
+                200,
+            )
+        )
+        return str(token["access_token"])
+
+    token = access_token(client)
+    other_token = access_token(other_client)
+    dpop_key = ed25519.Ed25519PrivateKey.generate()
+    dpop_token_form = {
+        "grant_type": "client_credentials",
+        "client_id": dpop_client["client_id"],
+        "client_secret": dpop_client["client_secret"],
+        "scope": "profile",
+        "resource": target,
+    }
+    dpop_token_nonce = request_dpop_nonce(dpop_token_form, dpop_key)
+    dpop_token = token_with_dpop(
+        dpop_token_form,
+        dpop_key,
+        dpop_token_nonce,
+        "POST /token FAPI HTTP signature DPoP client_credentials",
+    )["access_token"]
+    server_jwks = expect_json(requests.get(f"{BASE_URL}/jwks.json", timeout=10))
+
+    def signed_request(
+        case: str,
+        *,
+        method: str = "GET",
+        query: str,
+        body: bytes = b"",
+        signing_key: ed25519.Ed25519PrivateKey = key,
+        signing_kid: str = kid,
+        signed_method: str | None = None,
+        signed_target: str | None = None,
+        signed_authorization: str | None = None,
+        sent_authorization: str | None = None,
+        signed_dpop: str | None = None,
+        sent_dpop: str | None = None,
+        signed_extra_headers: dict[str, str] | None = None,
+        sent_extra_headers: dict[str, str] | None = None,
+        signed_body: bytes | None = None,
+        created: int | None = None,
+        expected_status: int,
+    ) -> tuple[requests.Response, dict[str, str], str]:
+        target_uri = f"{target}?case={query}"
+        authorization = sent_authorization or f"Bearer {token}"
+        headers = fapi_http_signature_fields(
+            signing_key,
+            signing_kid,
+            signed_method or method,
+            signed_target or target_uri,
+            signed_authorization or authorization,
+            body=body if signed_body is None else signed_body,
+            dpop=signed_dpop,
+            created=created,
+            extra_headers=signed_extra_headers,
+        )
+        headers["Authorization"] = authorization
+        if sent_dpop is not None:
+            headers["DPoP"] = sent_dpop
+        for name, value in (sent_extra_headers or signed_extra_headers or {}).items():
+            headers[name] = value
+        response = requests.request(
+            method,
+            f"{signed_base}/fapi/resource?case={query}",
+            headers=headers,
+            data=body,
+            timeout=10,
+        )
+        check(case, response.status_code == expected_status, response.status_code)
+        verify_fapi_http_signature_response(
+            response,
+            server_jwks,
+            method=method,
+            target_uri=target_uri,
+            request_body=body,
+            request_headers=headers,
+        )
+        return response, headers, target_uri
+
+    def handle_signed_request(case: str, parameters: dict[str, object]) -> None:
+        signed_request(case, **parameters)
+
+    def handle_signed_post(case: str, parameters: dict[str, object]) -> None:
+        signed_request(case, method="POST", body=b'{"operation":"read"}', **parameters)
+
+    def handle_response_binding(case: str, parameters: dict[str, object]) -> None:
+        response, _, _ = signed_request(case, **parameters)
+        check("fapi_http_signature_response_binding_body", expect_json(response).get("client_id") == client["client_id"])
+
+    def handle_response_header_tamper(case: str, parameters: dict[str, object]) -> None:
+        header = str(parameters.pop("header"))
+        value = str(parameters.pop("value"))
+        response, request_headers, target_uri = signed_request(f"{case}_baseline", **parameters)
+        response.headers[header] = value
+        rejected = False
+        try:
+            verify_fapi_http_signature_response(
+                response,
+                server_jwks,
+                method="GET",
+                target_uri=target_uri,
+                request_body=b"",
+                request_headers=request_headers,
+            )
+        except InvalidSignature:
+            rejected = True
+        check(case, rejected)
+
+    def handle_tampered_uri(case: str, parameters: dict[str, object]) -> None:
+        signed_request(case, signed_target=f"{target}?case=different-uri", **parameters)
+
+    def handle_tampered_authorization(case: str, parameters: dict[str, object]) -> None:
+        signed_request(
+            case,
+            signed_authorization=f"Bearer {token}",
+            sent_authorization=f"Bearer {other_token}",
+            **parameters,
+        )
+
+    def handle_tampered_body(case: str, parameters: dict[str, object]) -> None:
+        signed_request(
+            case,
+            method="POST",
+            body=b'{"operation":"altered"}',
+            signed_body=b'{"operation":"signed"}',
+            **parameters,
+        )
+
+    def handle_relative_created(case: str, parameters: dict[str, object]) -> None:
+        created_offset = int(parameters.pop("created_offset"))
+        signed_request(case, created=now() + created_offset, **parameters)
+
+    def handle_replay(case: str, parameters: dict[str, object]) -> None:
+        response, headers, target_uri = signed_request(case, **parameters)
+        replay = requests.get(
+            f"{signed_base}/fapi/resource?case={parameters['query']}",
+            headers=headers,
+            timeout=10,
+        )
+        check("fapi_http_signature_replay_second_request_rejected", replay.status_code == 401)
+        verify_fapi_http_signature_response(
+            replay,
+            server_jwks,
+            method="GET",
+            target_uri=target_uri,
+            request_body=b"",
+            request_headers=headers,
+        )
+        check("fapi_http_signature_replay_first_request_succeeded", response.status_code == 200)
+
+    def handle_wrong_key(case: str, parameters: dict[str, object]) -> None:
+        signed_request(case, signing_key=ed25519.Ed25519PrivateKey.generate(), **parameters)
+
+    def handle_wrong_client(case: str, parameters: dict[str, object]) -> None:
+        signed_request(case, signing_key=other_key, signing_kid=other_kid, **parameters)
+
+    def handle_unsigned_fallback(case: str, parameters: dict[str, object]) -> None:
+        expected_status = int(parameters["expected_status"])
+        response = requests.get(
+            f"{BASE_URL}/fapi/resource",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        check(
+            case,
+            response.status_code == expected_status
+            and "Signature" not in response.headers
+            and "Signature-Input" not in response.headers,
+            response.status_code,
+        )
+
+    def handle_signed_dpop(case: str, parameters: dict[str, object]) -> None:
+        query = str(parameters["query"])
+        expected_status = int(parameters["expected_status"])
+        target_uri = f"{target}?case={query}"
+        authorization = f"DPoP {dpop_token}"
+        initial_proof = dpop_proof("GET", target_uri, dpop_key, access_token=dpop_token)
+        challenge_headers = fapi_http_signature_fields(
+            key,
+            kid,
+            "GET",
+            target_uri,
+            authorization,
+            dpop=initial_proof,
+        )
+        challenge = requests.get(
+            f"{signed_base}/fapi/resource?case={query}",
+            headers=challenge_headers,
+            timeout=10,
+        )
+        check("fapi_http_signature_dpop_nonce_challenge", challenge.status_code == 401)
+        nonce = challenge.headers.get("DPoP-Nonce")
+        check("fapi_http_signature_dpop_nonce_present", bool(nonce))
+        verify_fapi_http_signature_response(
+            challenge,
+            server_jwks,
+            method="GET",
+            target_uri=target_uri,
+            request_body=b"",
+            request_headers=challenge_headers,
+        )
+        proof = dpop_proof(
+            "GET",
+            target_uri,
+            dpop_key,
+            nonce=nonce,
+            access_token=dpop_token,
+        )
+        response, headers, _ = signed_request(
+            case,
+            query=query,
+            sent_authorization=authorization,
+            signed_dpop=proof,
+            sent_dpop=proof,
+            expected_status=expected_status,
+        )
+        check("fapi_http_signature_dpop_is_covered", '"dpop"' in headers["Signature-Input"])
+        check("fapi_http_signature_dpop_client_binding", expect_json(response).get("client_id") == dpop_client["client_id"])
+
+    handlers = {
+        "relative_created": handle_relative_created,
+        "replay": handle_replay,
+        "response_binding": handle_response_binding,
+        "response_header_tamper": handle_response_header_tamper,
+        "signed_dpop": handle_signed_dpop,
+        "signed_post": handle_signed_post,
+        "signed_request": handle_signed_request,
+        "tampered_authorization": handle_tampered_authorization,
+        "tampered_body": handle_tampered_body,
+        "tampered_uri": handle_tampered_uri,
+        "unsigned_fallback": handle_unsigned_fallback,
+        "wrong_client": handle_wrong_client,
+        "wrong_key": handle_wrong_key,
+    }
+    executed = execute_http_signature_case_registry(HTTP_SIGNATURE_CASE_REGISTRY, handlers)
+    check(
+        "fapi_http_signature_runtime_registry_exact",
+        set(executed) == HTTP_SIGNATURE_REQUIRED_E2E_CASES
+        and len(executed) == len(HTTP_SIGNATURE_REQUIRED_E2E_CASES),
+        executed,
+    )
+
+
 def run() -> None:
     seed_prerequisites()
     wait_for_service()
@@ -1413,7 +2132,7 @@ def run() -> None:
             headers={
                 "Origin": E2E_CORS_ORIGIN,
                 "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "authorization,content-type,dpop,x-csrf-token",
+                "Access-Control-Request-Headers": "authorization,content-type,dpop",
             },
             timeout=10,
         )
@@ -1421,6 +2140,21 @@ def run() -> None:
         check(
             "CORS allow origin",
             cors.headers.get("access-control-allow-origin") == E2E_CORS_ORIGIN,
+        )
+        cors_csrf = anonymous.options(
+            f"{BASE_URL}/token",
+            headers={
+                "Origin": E2E_CORS_ORIGIN,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "x-csrf-token",
+            },
+            timeout=10,
+        )
+        check(
+            "OPTIONS /token rejects CSRF header",
+            cors_csrf.status_code >= 400
+            and "access-control-allow-origin" not in cors_csrf.headers,
+            {"status": cors_csrf.status_code, "headers": dict(cors_csrf.headers)},
         )
         cors_actual = anonymous.get(
             f"{BASE_URL}/health",
@@ -1843,6 +2577,7 @@ def run() -> None:
                 "allowed_audiences": [DEFAULT_AUDIENCE],
                 "grant_types": ["client_credentials"],
                 "token_endpoint_auth_method": "private_key_jwt",
+                "allow_client_assertion_endpoint_audience": True,
                 "jwks": {"keys": [ed25519_public_jwk(private_key, "private-key-jwt-e2e")]},
             },
             "POST /admin/clients private_key_jwt",
@@ -1859,6 +2594,7 @@ def run() -> None:
                 "allowed_audiences": [DEFAULT_AUDIENCE],
                 "grant_types": ["client_credentials"],
                 "token_endpoint_auth_method": "private_key_jwt",
+                "allow_client_assertion_endpoint_audience": True,
                 "jwks": {
                     "keys": [
                         rsa_public_jwk(rsa_key, "private-key-jwt-rs256-e2e", "RS256"),
@@ -1881,6 +2617,7 @@ def run() -> None:
                 "allowed_audiences": [DEFAULT_AUDIENCE],
                 "grant_types": ["authorization_code"],
                 "token_endpoint_auth_method": "private_key_jwt",
+                "allow_client_assertion_endpoint_audience": True,
                 "jwks": {
                     "keys": [
                         ed25519_public_jwk(private_key, "private-key-jwt-e2e"),
@@ -1902,6 +2639,7 @@ def run() -> None:
                 "allowed_audiences": [DEFAULT_AUDIENCE],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "token_endpoint_auth_method": "private_key_jwt",
+                "allow_client_assertion_endpoint_audience": True,
                 "require_dpop_bound_tokens": True,
                 "jwks": {"keys": [ed25519_public_jwk(private_key, "private-key-jwt-e2e")]},
             },
@@ -4028,6 +4766,8 @@ def run() -> None:
             )
         )
         check("client_secret_post_access_token", bool(secret_cc.get("access_token")))
+
+        exercise_fapi_http_signature_profile(admin)
 
         for algorithm, key, public_jwk in [
             ("ES256", ec_key, ec_public_jwk(ec_key, "dpop-es256-e2e")),

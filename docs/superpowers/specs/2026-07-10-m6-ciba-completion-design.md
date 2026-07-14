@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-10  
 **Status:** Approved for implementation  
-**Backend repository:** `F:\projects\nazo_oauth\oauth_backend_rust`  
-**Frontend repository:** `F:\projects\nazo_oauth\NazoAuthWeb`
+**Backend repository:** verified NazoAuth checkout  
+**Frontend repository:** verified sibling NazoAuthWeb checkout
 
 ## 1. Context
 

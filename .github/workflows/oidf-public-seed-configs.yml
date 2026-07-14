@@ -57,7 +57,11 @@ jobs:
             --output oidf-plan-configs.json
           python scripts/export_oidf_public_plan_configs.py \
             --config-json-file oidf-plan-configs.json \
-            --output-dir oidf-public-plan-configs
+            --output-dir oidf-public-plan-configs \
+            --source-commit "$GITHUB_SHA"
+          python scripts/oidf_mtls_ca_bundle.py verify \
+            --artifact-directory oidf-public-plan-configs \
+            --expected-source-commit "$GITHUB_SHA"
         env:
           OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
           OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}

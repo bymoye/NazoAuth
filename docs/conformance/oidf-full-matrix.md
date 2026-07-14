@@ -35,7 +35,7 @@ The execution entry point is still `runtime/oidf/oidf-plan-set.json`. `scripts/s
 The matrix covers the current TP/PS work through these paths:
 
 - `OIDC Basic OP Dynamic Registration` covers RFC 7591 dynamic client registration and `registration_endpoint` metadata.
-- `OIDC Dynamic Registration / Signed UserInfo` selects the official OP-side `oidcc-userinfo-rs256` module. The complete legacy dynamic-certification plan is not used because it requires implicit-flow capabilities that the issuer deliberately does not implement or advertise. Encrypted UserInfo and encrypted JARM remain local-test-only because no corresponding OP module exists in suite snapshot `f326f6aa25d6a2b8f1ae30a6ec80a57e342333ce`.
+- `OIDC Dynamic Registration / Signed UserInfo` selects the official OP-side `oidcc-userinfo-rs256` module. The complete legacy dynamic-certification plan is not used because it requires implicit-flow capabilities that the issuer deliberately does not implement or advertise. Encrypted UserInfo and encrypted JARM remain local-test-only because no corresponding OP module exists in suite release `v5.2.0` (`dee9a25160e789f0f80517674693ef7989ab9fa1`).
 - `OIDC Config OP` covers metadata truth and prevents discovery from advertising unsupported capabilities.
 - FAPI2 Security and Message Signing plans cover PAR enforcement, `request_uri` expiry, `request_uri` replay, cross-client `request_uri` use, outer authorization request parameters, PKCE, redirect URI, audience, and client assertions.
 - `private_key_jwt / DPoP / OpenID Connect / authorization code` is the closest single-plan regression for TP/PS change sets; full evidence comes from the 21-plan matrix.

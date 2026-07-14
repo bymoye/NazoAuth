@@ -9,6 +9,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain"
       - "rust-toolchain.toml"
+      - "crates/**"
       - "src/**"
       - "tests/**"
       - "benches/**"
@@ -25,6 +26,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain"
       - "rust-toolchain.toml"
+      - "crates/**"
       - "src/**"
       - "tests/**"
       - "benches/**"
@@ -99,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
 
@@ -108,6 +110,9 @@ jobs:
 
       - name: Prepare runtime directories
         run: mkdir -p runtime/ci/avatars runtime/ci/keys
+
+      - name: Verify compatibility contracts
+        run: python scripts/verify_static_contracts.py --check
 
       - name: Format
         run: cargo fmt --check
@@ -121,8 +126,8 @@ jobs:
       - name: Run migrations
         run: cargo run --locked --bin nazo-oauth-migrate
 
-      - name: Test with PostgreSQL and Valkey
-        run: cargo test --locked --workspace --all-features --lib
+      - name: Test workspace with PostgreSQL and Valkey
+        run: cargo test --workspace --all-features --locked
 
   python-quality:
     name: Python script syntax gate

@@ -125,13 +125,17 @@ the release evidence listed in [docs/operations/release-security.md](release-sec
 
 ## Live Deployment Script
 
-The repository includes [scripts/deploy_live.ps1](../../scripts/deploy_live.ps1), which builds an image, transfers it to a remote host, runs migrations, replaces the running Podman container, and verifies health and discovery.
+The repository includes [scripts/deploy_live.ps1](../../scripts/deploy_live.ps1), which builds from clean backend and frontend worktrees at the requested commits. The worktrees must use branch `codex/modular-workspace-architecture` and the exact HTTPS origins `https://github.com/nazozero/NazoAuth[.git]` and `https://github.com/nazozero/NazoAuthWeb[.git]`. It reads the frontend's committed `packageManager`, requires the matching `package-lock.json` and exact npm version, runs `npm ci` and the aggregate verification script that actually exists in `package.json`, and accepts only the `dist` produced by that gate. It then hashes `dist`, builds the backend image from the verified backend worktree, and checks the immutable image ID again after the archive is loaded remotely. It records the current rollback targets, stages a SHA-named UI release in Angie's traversable static root, normalizes static-file permissions, verifies readability as the Angie worker, runs migrations once, replaces the Podman container, and verifies health and discovery. The application, PostgreSQL, and Valkey containers are assigned `unless-stopped` restart policies, and `podman-restart.service` is enabled before the active application container is replaced so both process exits and host reboots recover automatically. The public UI symlink changes only after the candidate is healthy. Before committing the transaction, the script also requires the public `/ui/auth` document and at least one referenced `/ui/assets/...` resource to return non-empty HTTP 200 responses. A detached verification watchdog starts as soon as the remote transaction state is durably recorded, so it covers artifact staging, image loading, migration, container replacement, and public verification.
 
 Default live assumptions:
 
 | Setting | Default |
 | --- | --- |
 | Remote host | Required `-RemoteHost` argument |
+| Backend commit | Required full SHA in `-BackendCommit` |
+| Frontend commit | Required full SHA in `-FrontendCommit` |
+| Backend worktree | `.`; must be clean and at the backend commit |
+| Frontend worktree | Discovered as sibling `NazoAuthWeb`, or set with `-LocalFrontendWorktree`; must be clean and at the frontend commit |
 | Container name | `nazo-oauth-server` |
 | Network | `nazo_oauth_net` |
 | Network subnet | `10.101.0.0/24` |
@@ -144,15 +148,50 @@ Default live assumptions:
 | Health URL | `https://auth.nazo.run/health` |
 | Discovery URL | `https://auth.nazo.run/.well-known/openid-configuration` |
 | Expected issuer | `https://auth.nazo.run` |
+| UI path | `/usr/local/angie/html/auth/ui` |
+| UI releases | `/usr/local/angie/html/auth-releases/<frontend-sha>` |
+| Angie worker | `www` |
+| Public UI probe | `https://auth.nazo.run/ui/auth` plus one referenced `/ui/assets/...` resource |
+| Verification lease | 120 seconds by default (`-VerificationLeaseSeconds`) |
+| Deployment records | `/opt/nazo-oauth/deployments/<backend-sha>-<frontend-sha>-<deployment-id>.json` |
 
 Example:
 
 ```powershell
 pwsh scripts/deploy_live.ps1 `
   -RemoteHost <ssh-host> `
-  -ImageRepository localhost/nazo-oauth-server `
-  -ImageTag main-$(git rev-parse --short=7 HEAD)
+  -BackendCommit (git rev-parse HEAD) `
+  -FrontendCommit (git -C $frontendWorktree rev-parse HEAD) `
+  -LocalBackendWorktree . `
+  -LocalFrontendWorktree $frontendWorktree `
+  -LocalUiDist (Join-Path $frontendWorktree dist)
 ```
+
+Omit `-LocalFrontendWorktree` to discover the sibling `NazoAuthWeb` repository.
+Whether discovered or explicit, the script verifies its origin, branch, HEAD,
+and clean status, including untracked files. Discovery starts from the resolved
+backend Git root; it never relies on a workstation-specific absolute path or
+accepts a same-named non-repository directory. The frontend package manager is
+selected from its committed lockfile, and validation uses the scripts that are
+actually declared in `package.json`. Do not assume an `npm test` script exists;
+if a required lint, unit, browser-security, delivery, or build gate is absent,
+add a real gate to the frontend repository before deployment. Production deployment
+does not accept `-SkipBuild` or `-SkipFrontendBuild`; those switches exist only
+for rendering the remote script in tests.
+
+Do not delete the previous image or UI release until local OIDF, official OIDF,
+and PR acceptance are complete. Each run writes a preflight record before the
+first destructive container action. A successful run atomically updates
+`deployments/current.json` through a temporary symlink plus `mv -T`; a failed
+run retains a `rolled-back` record without overwriting an earlier successful
+deployment record. Rollback is successful only after the old immutable image,
+UI target, deployment pointer, and application health are all verified. Any
+restore or verification failure exits nonzero, writes `rollback-failed`, and
+retains the state file, script, lease markers, active-transaction owner, and
+record for manual recovery. The state file is a schema-validated JSON document
+written through a mode-`0600` same-directory temporary file and atomic rename;
+missing, partial, corrupt, or foreign state fails closed. Only one remote
+deployment transaction may be active.
 
 The script uses the configured SSH target to deploy the `auth.nazo.run`
 environment. Recheck the live listener, reverse-proxy config, container
@@ -163,7 +202,8 @@ host.
 
 The `auth.nazo.run` live path uses Podman's `nazo_oauth_net` bridge network with
 subnet `10.101.0.0/24`, gateway `10.101.0.1`, and application container IP
-`10.101.0.20`. The deployment script creates or validates that network, verifies
+`10.101.0.20`. The deployment script requires that exact subnet/gateway layout
+(additional or different subnets fail closed), verifies
 the started container IP, and probes `http://10.101.0.20:8000/health` and
 discovery from the host.
 
@@ -280,6 +320,13 @@ Production requirements:
 - migration rollback planning
 - monitoring for replication lag or storage saturation
 
+Migration `20260712000050_social_federation_provider_type` expands the external
+identity provider constraint without changing existing OIDC or SAML links. Its
+down migration intentionally fails while `oauth2_social` links exist; operators
+must migrate or explicitly remove those links before rollback so rollback cannot
+silently discard federated identities. The `20260712000100` timestamp remains
+reserved for the runtime desired-state migration.
+
 `nazo_oauth_migrate` runs `nazo_oauth_cleanup_expired_security_state()` after
 pending migrations. The cleanup removes expired access-token revocation markers,
 expired refresh-token rows from leaf tokens upward, and SCIM audit events older
@@ -317,21 +364,40 @@ curl -fsS https://oauth.example.com/jwks.json
 Check that discovery `issuer` exactly equals `PUBLIC_BASE_URL`, unless `ISSUER`
 was explicitly overridden.
 
-The `nazo.run` deployment helper [scripts/verify_live_full_interfaces.py](../../scripts/verify_live_full_interfaces.py) exercises a broader HTTPS path against `https://auth.nazo.run`. It reads host-local secrets and runs only in the intended deployment environment.
+If the experimental FAPI HTTP Signatures resource profile is enabled, also
+send signed GET and POST probes and verify the response signature against the
+current server JWKS. Confirm tampered method, target URI, Authorization, DPoP,
+body, time, replay, client, and key cases fail closed. Do not enable the flag
+until client JWK rotation, clock monitoring, Valkey replay storage, signing-key
+custody, and evidence retention have named owners. The profile is default-off,
+is not advertised in metadata, and has no dedicated OIDF conformance plan.
+
+The `nazo.run` deployment helper [scripts/verify_live_full_interfaces.py](../../scripts/verify_live_full_interfaces.py) exercises a broader HTTPS path against `https://auth.nazo.run`. It reads host-local secrets and runs only in the intended deployment environment. The expected SHA is mandatory and is checked against both the successful deployment record and the running container image label:
+
+```sh
+python scripts/verify_live_full_interfaces.py \
+  --base-url https://auth.nazo.run \
+  --secrets-path /opt/nazo-oauth/secrets.json \
+  --expected-backend-sha "$BACKEND_COMMIT"
+```
+
+Its Python environment is installed from `.github/e2e-requirements.txt` with
+hash verification; update the input and regenerate the lock instead of adding
+unversioned `pip install` commands.
 
 ## OIDF Readiness
 
 Before launching a full OpenID Foundation conformance run:
 
-1. Select the exact commit to test and make sure unrelated deployment patches are not mixed in.
-2. Confirm Angie proxies to fixed container IP `10.101.0.20:8000`, and `.env.yaml` trusts only the actual controlled proxy address.
-3. Deploy the same commit to the public entrypoint with `scripts/deploy_live.ps1`; this runs migrations and verifies the Podman container IP is `10.101.0.20`.
-4. Run the `oidf-public-seed-configs` workflow and download the `oidf-public-plan-configs` artifact. This is the only official-source seed input for the server.
-5. Put that artifact in the live OIDF runtime directory and use the same commit's `oidf-seed` image / `nazo_oauth_seed_oidf` binary to seed the database used by the public `auth.nazo.run` entrypoint. Do not seed only the `compose.oidf.local.yml` 9443 stack and then run official public tests.
-6. Verify health, discovery, JWKS, mTLS aliases, and certificate forwarding over the public issuer. Discovery `issuer` must be `https://auth.nazo.run`.
+1. Select the exact commit to test, require a clean worktree, and make sure unrelated deployment patches are not mixed in. Retain the current immutable image, UI release, deployment record, database backup, and other material required for a verified rollback before changing production.
+2. Run `oidf-public-seed-configs` for that exact head and download its `oidf-public-plan-configs` artifact. The artifact contains the public plan JSON files, `oidf-mtls-ca-bundle.pem`, and a deterministic manifest binding the source commit, file tree, and CA DER fingerprints; private mTLS keys are never included. Preserve the workflow run ID, workflow head SHA, artifact digest, downloaded artifact digest, manifest digest, and CA-bundle digest as linked evidence. Reject an artifact whose head does not equal the deployment commit.
+3. Confirm Angie proxies to fixed container IP `10.101.0.20:8000`, and `.env.yaml` trusts only the actual controlled proxy address.
+4. Deploy the same commit to the public entrypoint with `scripts/deploy_live.ps1 -OidfPublicSeedArtifactArchive <downloaded-artifact.zip> -OidfPublicSeedWorkflowRunId <run-id> -OidfPublicSeedArtifactId <artifact-id> -OidfPublicSeedArtifactDigest sha256:<digest>`. For a real deployment all artifact identity arguments are mandatory: the script verifies the GitHub run result, branch, head, artifact identity and archive digest, extracts a private snapshot, and requires its manifest head to equal the backend commit. The deployment transaction then validates the public JSON and CA bundle together, binds the staged and installed bundle to the same SHA-256 digest, backs up the existing Angie CA file and hash, atomically replaces it in the same directory, validates and reloads Angie, and restores the prior bytes and metadata if deployment or verification rolls back. `-OidfPublicSeedArtifactDirectory` exists only for render-only test fixtures. This remains inside the existing deployment lock and verification lease; do not create a separate manual CA installation channel.
+5. Put the same exact artifact in the live OIDF runtime directory and use the same commit's `oidf-seed` image / `nazo_oauth_seed_oidf` binary to seed the database used by the public `auth.nazo.run` entrypoint. Do not seed only the `compose.oidf.local.yml` 9443 stack and then run official public tests.
+6. Verify the running deployment head and artifact/CA digests, then verify health, discovery, JWKS, mTLS aliases, certificate forwarding, and Angie configuration over the public issuer. Discovery `issuer` must be `https://auth.nazo.run`. Trust the validated CA chain from the exact-head artifact; do not replace it with a leaf-certificate fingerprint allowlist.
 7. Run the targeted `.github/workflows/oidf-conformance.yml` plan first. The targeted workflow disables the early-stop monitor by default so failed runs still upload diagnostic artifacts.
 8. Run `.github/workflows/oidf-conformance-full.yml` only after the targeted plan passes. Keep `OIDF_NO_PARALLEL=true` for the default full matrix unless deliberately testing runner concurrency. For concurrency validation, dispatch the same workflow with `runner_mode=parallel-isolated`; this runs the concurrency-safe plan set without `--no-parallel` while running logout and session-management in separate isolated matrix jobs with their own runner/browser environment.
-9. Preserve the final result index under `docs/conformance` before artifacts expire.
+9. Preserve the final result index under `docs/conformance` before artifacts expire, together with the deployed head, workflow run and plan IDs, artifact digest, CA-bundle digest, and final PR-check head.
 
 ## Operations Checklist
 

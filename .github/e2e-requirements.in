@@ -1,0 +1,8 @@
+aiosmtpd
+argon2-cffi
+cryptography
+psycopg[binary]
+pyjwt
+redis
+requests
+requests-toolbelt

@@ -5,6 +5,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
@@ -13,8 +21,12 @@ updates:
     open-pull-requests-limit: 2
     groups:
       github-actions:
+        applies-to: version-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
     ignore:
       - dependency-name: dtolnay/rust-toolchain
 
@@ -23,6 +35,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      docker-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: docker
     directory: /.github
@@ -30,8 +50,20 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
 
+  - package-ecosystem: docker
+    directory: /perf/keyset
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /perf/runner
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
   - package-ecosystem: pip
-    directory: /requirements
+    directory: /.github
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

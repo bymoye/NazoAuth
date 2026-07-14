@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 360
     env:
       CONFORMANCE_SERVER: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
-      OIDF_REF: ${{ vars.OIDF_CONFORMANCE_SUITE_REF || '33a724c7d809a6f9db05cbb513ff2a77cbac905e' }}
+      OIDF_REF: ${{ vars.OIDF_CONFORMANCE_SUITE_REF || 'dee9a25160e789f0f80517674693ef7989ab9fa1' }}
       PLAN_EXPRESSION: ${{ vars.OIDF_PLAN_EXPRESSION || '' }}
       EXPORT_RESULTS: ${{ vars.OIDF_EXPORT_RESULTS || 'false' }}
       VERBOSE: ${{ vars.OIDF_VERBOSE || 'true' }}
@@ -37,6 +37,7 @@ jobs:
           git -C oidf-conformance-suite fetch --depth 1 origin "$OIDF_REF"
           git -C oidf-conformance-suite checkout --detach FETCH_HEAD
           diff -u requirements/oidf-conformance.in oidf-conformance-suite/scripts/requirements.txt
+          python scripts/apply_oidf_runner_patch.py --suite-dir oidf-conformance-suite
 
       - name: Install official runner dependencies
         run: python -m pip install --require-hashes -r requirements/oidf-conformance.txt

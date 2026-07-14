@@ -1,0 +1,93 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "osvVulnerabilityAlerts": true,
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "Asia/Shanghai",
+  "rangeStrategy": "bump",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["dependencies", "security"],
+    "schedule": ["at any time"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the exact Rust stable pin as one reviewable change",
+      "managerFilePatterns": [
+        "/^rust-toolchain\\.toml$/",
+        "/^\\.github/workflows/[^/]+\\.yml$/"
+      ],
+      "matchStrings": [
+        "channel\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "uses:\\s*dtolnay/rust-toolchain@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "rust-version"
+    },
+    {
+      "customType": "regex",
+      "description": "Update pinned Rust supply-chain CLI versions",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.yml$/"],
+      "matchStrings": [
+        "(?<depName>cargo-(?:audit|deny|cyclonedx))@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "crate"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the digest-pinned Trivy scanner used by workflows",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.yml$/"],
+      "matchStrings": [
+        "docker\\.io/(?<depName>aquasec/trivy):(?<currentValue>\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Update pinned Python packages in the performance runner",
+      "managerFilePatterns": ["/^perf/runner/Containerfile$/"],
+      "matchStrings": [
+        "\"(?<depName>[A-Za-z0-9_-]+)(?:\\[[^\\]]+\\])?==(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "pypi"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["rust", "docker.io/library/rust"],
+      "groupName": "Rust stable toolchain",
+      "rangeStrategy": "pin"
+    },
+    {
+      "description": "Group compatible Cargo patch and minor updates",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "Cargo compatible updates"
+    },
+    {
+      "description": "Group GitHub Actions patch and minor updates",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "GitHub Actions compatible updates"
+    },
+    {
+      "description": "Group locked Python patch and minor updates",
+      "matchManagers": ["pip_requirements"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "Python compatible updates"
+    },
+    {
+      "description": "Require explicit review for major dependency updates",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}

@@ -6,10 +6,19 @@ on:
       - ".github/workflows/dependency-review.yml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - "crates/**/Cargo.toml"
       - "deny.toml"
       - "Containerfile"
       - ".github/e2e-runner.Containerfile"
+      - ".github/e2e-requirements.in"
+      - ".github/e2e-requirements.txt"
       - ".github/workflows/*.yml"
+      - ".github/dependabot.yml"
+      - "renovate.json"
+  schedule:
+    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -37,10 +46,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.97.0
 
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
+      - name: Install pinned cargo-audit
+        uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: cargo-audit@0.22.2
 
       - name: Audit Rust advisories
         run: cargo audit

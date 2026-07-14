@@ -22,12 +22,21 @@ The supply-chain job is independent from the Rust unit/integration gate.
 Dependency and image regressions fail before a deployment-shaped release is
 trusted.
 
+`dependency-review` also runs `cargo audit` on a weekly schedule, so a newly
+published advisory is evaluated even when the repository has no new commit.
+Dependabot and the single root `renovate.json` configuration cover Cargo,
+GitHub Actions, container/Compose inputs, locked Python inputs, the exact Rust
+stable pin, and the pinned security CLI versions. Renovate vulnerability
+alerts are not restricted to the normal weekly update window.
+
 ## Tagged Release Gates
 
 The `release-security` workflow runs for `v*` tags and manual dispatch:
 
 - builds the release binaries with the pinned Rust toolchain
+- reruns `cargo audit` and `cargo deny` for the exact tag
 - builds the container image
+- scans the exact exported release image with Trivy before signing
 - exports the container image as a release artifact
 - generates a CycloneDX Rust SBOM
 - signs the binaries, SBOM, and image archive with keyless Sigstore signing through GitHub OIDC

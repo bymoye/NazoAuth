@@ -14,6 +14,7 @@ import signal
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -107,10 +108,23 @@ OIDF_SENSITIVE_LOG_FIELDS = {
     "client_secret",
     "request_uri",
 }
-OIDF_ALLOWED_REVIEW_MODULES = {
-    "oidcc-prompt-login",
-    "oidcc-max-age-1",
-    "oidcc-ensure-registered-redirect-uri",
+OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG = {
+    OIDCC_BASIC_CONFIG_FILE: (
+        "oidcc-basic-certification-test-plan",
+        frozenset({
+            "oidcc-prompt-login",
+            "oidcc-max-age-1",
+            "oidcc-ensure-registered-redirect-uri",
+        }),
+    ),
+    OIDCC_DYNAMIC_CONFIG_FILE: (
+        "oidcc-basic-certification-test-plan",
+        frozenset({
+            "oidcc-prompt-login",
+            "oidcc-max-age-1",
+            "oidcc-ensure-registered-redirect-uri",
+        }),
+    ),
 }
 OIDF_CALLBACK_PATH_PATTERN = re.compile(r"/test/a/[^/]+/callback")
 OIDF_API_SSL_CONTEXT: ssl.SSLContext | None = None
@@ -168,8 +182,36 @@ def non_empty_file(path: str, label: str) -> str:
 
 
 def validate_config_file_name(file_name: str) -> None:
-    if Path(file_name).name != file_name:
+    if "/" in file_name or "\\" in file_name or Path(file_name).name != file_name:
         fail("--config-file-name must be a file name, not a path")
+    if Path(file_name).suffix.lower() != ".json":
+        fail("--config-file-name must use the .json extension")
+
+
+def atomic_write_json_file(path: Path, value: object) -> None:
+    payload = json.dumps(value, indent=2, sort_keys=True)
+    descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            text=True,
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            descriptor = -1
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def issuer_from_discovery_url(discovery_url: str) -> str | None:
@@ -907,7 +949,7 @@ def write_plan_configs(
             assert_only_auth_nazo_run_urls(parsed, file_name)
         validate_browser_automation(file_name, parsed)
         target = suite_scripts / file_name
-        target.write_text(json.dumps(parsed, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_json_file(target, parsed)
         aliases_by_config = {file_name: alias} if (alias := config_alias(parsed)) else {}
         return {file_name}, aliases_by_config
 
@@ -932,7 +974,7 @@ def write_plan_configs(
         if alias:
             aliases_by_config[config_name] = alias
         target = suite_scripts / config_name
-        target.write_text(json.dumps(config_value, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_json_file(target, config_value)
         written.add(config_name)
     return written, aliases_by_config
 
@@ -1080,11 +1122,39 @@ def module_name_without_variant(test_name: str) -> str:
     return test_name.split("[", 1)[0]
 
 
-def is_allowed_review_module(test_name: str) -> bool:
-    return module_name_without_variant(test_name) in OIDF_ALLOWED_REVIEW_MODULES
+def allowed_review_contexts_by_alias(
+    aliases_by_config: dict[str, str],
+) -> dict[str, tuple[str, frozenset[str]]]:
+    return {
+        alias: OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG[config_name]
+        for config_name, alias in aliases_by_config.items()
+        if config_name in OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG
+    }
 
 
-def oidf_module_failure(info: object) -> str | None:
+def is_allowed_review_module(
+    test_name: str,
+    alias: object,
+    plan_name: object,
+    allowed_reviews_by_alias: dict[str, tuple[str, frozenset[str]]],
+) -> bool:
+    if not isinstance(alias, str) or not isinstance(plan_name, str):
+        return False
+    allowed_context = allowed_reviews_by_alias.get(alias)
+    if allowed_context is None:
+        return False
+    allowed_plan_name, allowed_modules = allowed_context
+    return (
+        plan_name == allowed_plan_name
+        and module_name_without_variant(test_name) in allowed_modules
+    )
+
+
+def oidf_module_failure(
+    info: object,
+    allowed_reviews_by_alias: dict[str, tuple[str, frozenset[str]]] | None = None,
+    plan_name: str | None = None,
+) -> str | None:
     if not isinstance(info, dict):
         return None
 
@@ -1103,7 +1173,12 @@ def oidf_module_failure(info: object) -> str | None:
         return f"{test_name} {module_id} status {status}"
     if result in OIDF_BAD_FINAL_RESULTS:
         return f"{test_name} {module_id} result {result}"
-    if result == "REVIEW" and not is_allowed_review_module(test_name):
+    if result == "REVIEW" and not is_allowed_review_module(
+        test_name,
+        info.get("alias"),
+        plan_name,
+        allowed_reviews_by_alias or {},
+    ):
         return f"{test_name} {module_id} result REVIEW"
 
     return None
@@ -1127,9 +1202,7 @@ def oidf_info_failure_can_wait_for_final_result(info: object) -> bool:
     if result in OIDF_BAD_FINAL_RESULTS:
         return True
 
-    test_name_value = info.get("testName") or info.get("name") or ""
-    test_name = test_name_value if isinstance(test_name_value, str) else ""
-    return result == "REVIEW" and not is_allowed_review_module(test_name)
+    return result == "REVIEW"
 
 
 def oidf_log_failure(module_id: str, logs: object) -> str | None:
@@ -1148,26 +1221,6 @@ def oidf_log_failure(module_id: str, logs: object) -> str | None:
         msg_text = msg if isinstance(msg, str) and msg else "<no message>"
         return f"{module_id} log {result} at {src_text}: {msg_text[:300]}"
     return None
-
-
-def oidf_log_has_successful_completion(logs: object) -> bool:
-    if not isinstance(logs, list):
-        return False
-
-    has_success = False
-    for entry in logs:
-        if not isinstance(entry, dict):
-            continue
-
-        result = value_as_upper(entry.get("result"))
-        if result == "SUCCESS":
-            has_success = True
-
-        msg = entry.get("msg")
-        if result == "FINISHED" and isinstance(msg, str) and "completion" in msg:
-            return has_success
-
-    return False
 
 
 def oidf_log_context(logs: object, *, max_entries: int = 6) -> str:
@@ -1277,6 +1330,7 @@ def inspect_oidf_state(
     *,
     final: bool,
     ignored_plan_ids: set[str] | None = None,
+    allowed_reviews_by_alias: dict[str, tuple[str, frozenset[str]]] | None = None,
 ) -> str | None:
     ignored = ignored_plan_ids or set()
     plans = [
@@ -1288,12 +1342,22 @@ def inspect_oidf_state(
         return "OIDF monitor found no plan for current aliases" if final else None
 
     module_ids: set[str] = set()
+    module_plan_names: dict[str, str] = {}
     for plan in plans:
-        module_ids.update(module_ids_from_plan(plan))
+        plan_module_ids = module_ids_from_plan(plan)
+        module_ids.update(plan_module_ids)
+        plan_name = plan.get("planName")
+        if isinstance(plan_name, str):
+            for module_id in plan_module_ids:
+                existing_plan_name = module_plan_names.get(module_id)
+                if existing_plan_name is not None and existing_plan_name != plan_name:
+                    return f"{module_id} belongs to multiple OIDF plans"
+                module_plan_names[module_id] = plan_name
 
     if not module_ids:
         return "OIDF monitor found no module instances for current plan" if final else None
 
+    review_counts: dict[tuple[str, str, str], int] = {}
     for module_id in sorted(module_ids):
         status_code, info = oidf_api_request(
             "GET",
@@ -1303,7 +1367,31 @@ def inspect_oidf_state(
             expected_statuses={200, 404},
         )
         if status_code == 200 and info is not None:
-            failure = oidf_module_failure(info)
+            result = value_as_upper(info.get("result")) if isinstance(info, dict) else ""
+            if result == "REVIEW" and isinstance(info, dict):
+                alias = info.get("alias")
+                test_name_value = info.get("testName") or info.get("name") or "<unknown>"
+                test_name = (
+                    module_name_without_variant(test_name_value)
+                    if isinstance(test_name_value, str)
+                    else "<unknown>"
+                )
+                plan_name = module_plan_names.get(module_id)
+                if isinstance(alias, str) and isinstance(plan_name, str):
+                    review_key = (alias, plan_name, test_name)
+                    review_counts[review_key] = review_counts.get(review_key, 0) + 1
+                    if review_counts[review_key] > 1:
+                        return (
+                            f"{test_name} review baseline exceeded for {plan_name} "
+                            f"alias {alias}: "
+                            f"{review_counts[review_key]} instances"
+                        )
+
+            failure = oidf_module_failure(
+                info,
+                allowed_reviews_by_alias,
+                module_plan_names.get(module_id),
+            )
             if failure:
                 _, logs = oidf_api_request(
                     "GET",
@@ -1314,8 +1402,6 @@ def inspect_oidf_state(
                 )
                 if oidf_log_failure(module_id, logs):
                     return oidf_failure_with_log_context(module_id, failure, logs)
-                if oidf_log_has_successful_completion(logs):
-                    continue
                 if not final and oidf_info_failure_can_wait_for_final_result(info):
                     continue
                 return oidf_failure_with_log_context(module_id, failure, logs)
@@ -1385,12 +1471,14 @@ class OidfEarlyStopMonitor:
         aliases: set[str],
         interval_seconds: int,
         ignored_plan_ids: set[str],
+        allowed_reviews_by_alias: dict[str, tuple[str, frozenset[str]]],
     ) -> None:
         self.base_url = base_url
         self.token = token
         self.aliases = aliases
         self.interval_seconds = interval_seconds
         self.ignored_plan_ids = ignored_plan_ids
+        self.allowed_reviews_by_alias = allowed_reviews_by_alias
         self.stop_requested = threading.Event()
         self.failure_message: str | None = None
         self.consecutive_errors = 0
@@ -1407,6 +1495,7 @@ class OidfEarlyStopMonitor:
                     self.aliases,
                     final=False,
                     ignored_plan_ids=self.ignored_plan_ids,
+                    allowed_reviews_by_alias=self.allowed_reviews_by_alias,
                 )
                 self.consecutive_errors = 0
             except SystemExit as exc:
@@ -1734,6 +1823,7 @@ def run_official_runner(
     aliases: set[str],
     token: str | None,
     monitor_interval_seconds: int,
+    allowed_reviews_by_alias: dict[str, tuple[str, frozenset[str]]],
 ) -> int:
     if timeout_seconds <= 0:
         fail("--timeout-seconds must be greater than zero")
@@ -1764,6 +1854,7 @@ def run_official_runner(
             aliases,
             monitor_interval_seconds,
             ignored_plan_ids,
+            allowed_reviews_by_alias,
         )
         monitor_thread = threading.Thread(
             target=monitor.run,
@@ -1804,6 +1895,7 @@ def run_official_runner(
             aliases,
             final=exit_code == 0,
             ignored_plan_ids=ignored_plan_ids,
+            allowed_reviews_by_alias=allowed_reviews_by_alias,
         )
         if final_failure:
             print(f"OIDF final state check failed: {final_failure}", flush=True)
@@ -1831,6 +1923,44 @@ def terminate_runner(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
+def ensure_pinned_oidf_runner(suite_dir: Path) -> None:
+    patcher = Path(__file__).resolve().with_name("apply_oidf_runner_patch.py")
+    subprocess.run(
+        [sys.executable, str(patcher), "--suite-dir", str(suite_dir)],
+        check=True,
+    )
+
+
+def official_runner_command(suite_scripts: Path, runner: Path) -> list[str]:
+    bootstrap = (
+        "import runpy,sys,sysconfig;"
+        "paths=sysconfig.get_paths();"
+        "sys.path.extend(dict.fromkeys([paths['purelib'],paths['platlib']]));"
+        "suite_scripts=sys.argv.pop(1);runner=sys.argv.pop(1);"
+        "sys.path.insert(0,suite_scripts);sys.argv[0]=runner;"
+        "runpy.run_path(runner,run_name='__main__')"
+    )
+    return [
+        sys.executable,
+        "-I",
+        "-S",
+        "-B",
+        "-u",
+        "-c",
+        bootstrap,
+        str(suite_scripts),
+        str(runner),
+    ]
+
+
+def sanitized_runner_environment() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith("PYTHON")
+    }
+
+
 def main() -> int:
     global OIDF_API_SSL_CONTEXT
     args = parse_args()
@@ -1841,6 +1971,7 @@ def main() -> int:
     target_issuer = normalized_origin(args.target_issuer) if args.target_issuer.strip() else ""
 
     suite_dir = Path(args.suite_dir).resolve()
+    ensure_pinned_oidf_runner(suite_dir)
     suite_scripts = suite_dir / "scripts"
     runner = suite_scripts / "run-test-plan.py"
     if not runner.is_file():
@@ -1867,7 +1998,7 @@ def main() -> int:
         if config_name in selected_config_names
     }
 
-    env = os.environ.copy()
+    env = sanitized_runner_environment()
     env["CONFORMANCE_SERVER"] = args.conformance_server
     token = None if args.no_api_token else non_empty_env(args.token_env)
     if token is not None:
@@ -1881,7 +2012,7 @@ def main() -> int:
     if not args.list and not args.rerun:
         cleanup_existing_alias_plans(args.conformance_server, token, aliases)
 
-    command = [sys.executable, str(runner)]
+    command = official_runner_command(suite_scripts, runner)
     if args.list:
         command.append("--list")
     if args.no_parallel:
@@ -1921,6 +2052,7 @@ def main() -> int:
         monitor_aliases,
         token,
         args.monitor_interval_seconds,
+        allowed_review_contexts_by_alias(aliases_by_config),
     )
 
 

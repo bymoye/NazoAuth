@@ -1,31 +1,108 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
 import base64
 import hashlib
 import json
 import secrets
+import subprocess
 import time
 import urllib.parse
 import uuid
 from pathlib import Path
 
-import jwt
-import psycopg
-import redis
-import requests
-from argon2 import PasswordHasher
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
-from psycopg.types.json import Jsonb
-from requests_toolbelt import MultipartEncoder
-
 
 BASE_URL = "https://auth.nazo.run"
 REMOTE_BASE = Path("/opt/nazo-oauth")
 SECRETS_PATH = REMOTE_BASE / "secrets.json"
+EXPECTED_BACKEND_SHA = ""
+DEPLOYMENT_RECORD = REMOTE_BASE / "deployments" / "current.json"
 RUN_ID = f"live-full-{int(time.time())}-{secrets.token_hex(3)}"
 PASSWORD = f"{RUN_ID}-Passw0rd!"
 CSRF_COOKIE = "nazo_oauth_csrf"
 DEFAULT_AUDIENCE = "resource://default"
 OPENID_SCOPES = "openid profile email address phone offline_access"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Exercise the complete deployed NazoAuth HTTPS interface set."
+    )
+    parser.add_argument("--base-url", default="https://auth.nazo.run")
+    parser.add_argument("--secrets-path", default="/opt/nazo-oauth/secrets.json")
+    parser.add_argument("--expected-backend-sha", required=True)
+    return parser.parse_args(argv)
+
+
+def load_runtime_dependencies() -> None:
+    global Jsonb, MultipartEncoder, PasswordHasher
+    global ec, ed25519, jwt, psycopg, redis, requests, rsa
+
+    import jwt as jwt_module
+    import psycopg as psycopg_module
+    import redis as redis_module
+    import requests as requests_module
+    from argon2 import PasswordHasher as password_hasher
+    from cryptography.hazmat.primitives.asymmetric import ec as ec_module
+    from cryptography.hazmat.primitives.asymmetric import ed25519 as ed25519_module
+    from cryptography.hazmat.primitives.asymmetric import rsa as rsa_module
+    from psycopg.types.json import Jsonb as jsonb
+    from requests_toolbelt import MultipartEncoder as multipart_encoder
+
+    jwt = jwt_module
+    psycopg = psycopg_module
+    redis = redis_module
+    requests = requests_module
+    PasswordHasher = password_hasher
+    ec = ec_module
+    ed25519 = ed25519_module
+    rsa = rsa_module
+    Jsonb = jsonb
+    MultipartEncoder = multipart_encoder
+
+
+def main(argv: list[str] | None = None) -> None:
+    global BASE_URL, EXPECTED_BACKEND_SHA, SECRETS_PATH
+
+    args = parse_args(argv)
+    BASE_URL = args.base_url.rstrip("/")
+    SECRETS_PATH = Path(args.secrets_path)
+    EXPECTED_BACKEND_SHA = args.expected_backend_sha
+    load_runtime_dependencies()
+    run()
+
+
+def verify_deployed_backend(
+    expected_sha: str,
+    deployment_record: Path = DEPLOYMENT_RECORD,
+    command_runner=subprocess.run,
+) -> None:
+    if len(expected_sha) != 40 or any(character not in "0123456789abcdef" for character in expected_sha):
+        raise AssertionError("expected backend SHA must be a full lowercase Git SHA")
+    record = json.loads(deployment_record.read_text(encoding="utf-8"))
+    if record.get("status") != "deployment-success":
+        raise AssertionError(f"deployment record is not successful: {record.get('status')!r}")
+    if record.get("backend_commit") != expected_sha:
+        raise AssertionError("deployment record backend SHA does not match the expected candidate")
+
+    inspected = command_runner(
+        [
+            "podman",
+            "inspect",
+            "nazo-oauth-server",
+            "--format",
+            '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        raise AssertionError(f"cannot inspect deployed server revision: {inspected.stderr.strip()}")
+    if inspected.stdout.strip() != expected_sha:
+        raise AssertionError("running container revision does not match the expected candidate")
 
 
 def b64u(raw: bytes) -> str:
@@ -491,6 +568,7 @@ def request_object(client_id: str, jwk: dict, alg: str):
 
 
 def run():
+    verify_deployed_backend(EXPECTED_BACKEND_SHA)
     secrets_doc = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
     redis_client = redis.Redis(host="10.101.0.11", port=6379, db=0, decode_responses=True)
     with psycopg.connect(db_url(secrets_doc), autocommit=True) as conn:
@@ -1002,4 +1080,4 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    main()

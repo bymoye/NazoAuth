@@ -4,12 +4,12 @@
 
 # Nazo Auth Server
 
-[![code-quality](https://github.com/bymoye/NazoAuth/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/code-quality.yml)
-[![codeql](https://github.com/bymoye/NazoAuth/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/codeql.yml)
-[![dependency-review](https://github.com/bymoye/NazoAuth/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/dependency-review.yml)
-[![conformance-security](https://github.com/bymoye/NazoAuth/actions/workflows/conformance-security.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/conformance-security.yml)
-[![oidf-conformance-full](https://github.com/bymoye/NazoAuth/actions/workflows/oidf-conformance-full.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/oidf-conformance-full.yml)
-[![codecov](https://codecov.io/gh/bymoye/NazoAuth/branch/main/graph/badge.svg)](https://app.codecov.io/gh/bymoye/NazoAuth)
+[![code-quality](https://github.com/nazozero/NazoAuth/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/code-quality.yml)
+[![codeql](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml)
+[![dependency-review](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml)
+[![conformance-security](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml)
+[![oidf-conformance-full](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml)
+[![codecov](https://codecov.io/gh/nazozero/NazoAuth/branch/main/graph/badge.svg)](https://app.codecov.io/gh/nazozero/NazoAuth)
 
 [English](README.md) · [文档](#文档) · [快速启动](#快速启动) · [安全策略](SECURITY.md)
 
@@ -35,7 +35,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 
 | 信号 | 证据 |
 | --- | --- |
-| Rust 质量门禁 | `code-quality` 中的 `cargo fmt --check`、`cargo check --workspace --all-targets --all-features --locked`、`cargo clippy -D warnings`、迁移和 library tests。 |
+| Rust 质量门禁 | `code-quality` 中的 `cargo fmt --check`、`cargo check --workspace --all-targets --all-features --locked`、`cargo clippy -D warnings`、迁移和完整 workspace tests。 |
 | 静态安全分析 | CodeQL Rust analysis，启用 `security-extended` 和 `security-and-quality` queries。 |
 | 依赖策略 | GitHub dependency review、`cargo audit`、`cargo deny`，覆盖 advisories、bans、licenses 和 sources。 |
 | 运行时安全行为 | `conformance-security` 中的真实 HTTP E2E、load/race gate、Valkey outage injection。 |
@@ -93,8 +93,11 @@ OpenID Foundation：
 
 | 标准 | 实现 |
 | --- | --- |
-| SCIM 2.0 provisioning，包含 [RFC 9865](https://www.rfc-editor.org/rfc/rfc9865) / [RFC 9967](https://www.rfc-editor.org/rfc/rfc9967) 能力发现 | 默认 tenant 的 user provisioning；声明使用 index pagination，明确关闭 cursor pagination 和 SCIM Security Events |
+| SCIM 2.0 provisioning，包含 [RFC 9865](https://www.rfc-editor.org/rfc/rfc9865) / [RFC 9967](https://www.rfc-editor.org/rfc/rfc9967) 能力发现 | 默认 tenant 的 user provisioning；index pagination 仍为默认方法，forward cursor pagination 使用 10 分钟有效、绑定 actor/query 的不透明 cursor；RFC 9967 Security Events 仍关闭 |
 | WebAuthn | passkey 注册和登录 |
+
+新兴协议由 [M8 watchlist 治理审计](docs/conformance/2026-07-11-m8-watchlist-governance.md)
+跟踪。该记录完成产品与 conformance 准入门禁，不表示 deferred 候选项已经获得运行时支持。
 
 ## 认证
 
@@ -129,14 +132,15 @@ warning，因此不能作为 zero-SKIPPED 证据。
 - Runtime profile：`oauth2-baseline`、`fapi2-security`、`fapi2-message-signing-authz-request`、`fapi2-message-signing-jarm`、`fapi2-message-signing-introspection`。
 - 本地用户、资料、OAuth client、grant、access request、TOTP MFA、backup code、remembered MFA、WebAuthn/passkeys、SCIM provisioning。
 - 本地签名密钥生命周期，包含 prepublish、active、grace、retired 状态。也可以用 external-command signer 接 KMS/HSM。
-- Rust resource-server verifier，提供 Actix Web、Axum/Tower、tonic adapter。
+- 与 Web 框架无关的 Rust resource-server verifier，以及项目使用的 Actix
+  HTTP 集成；不再提供历史 Axum/Tower 和 tonic adapter。
 - 发布安全 workflow：CodeQL、dependency review、cargo audit、cargo deny、SBOM、Trivy image scanning、keyless signing、provenance attestation。
 
 ## 快速启动
 
 需要：
 
-- 兼容 Rust 2024 edition 的 Rust toolchain
+- `rust-toolchain.toml` 精确锁定的 Rust stable 版本
 - PostgreSQL 18 或兼容版本
 - Valkey 8 或兼容 Redis protocol 的服务
 - Docker 或 Podman
@@ -212,6 +216,7 @@ RUST_LOG: "info"
 | 主题 | 链接 |
 | --- | --- |
 | 文档索引 | [docs/README.md](docs/README.md) |
+| Workspace 架构 | [docs/project/architecture.md](docs/project/architecture.md) |
 | 配置 | [docs/operations/configuration.md](docs/operations/configuration.md) |
 | 部署 | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |
 | 英文部署文档 | [docs/operations/deployment.md](docs/operations/deployment.md) |
@@ -236,9 +241,9 @@ RUST_LOG: "info"
 
 ```sh
 cargo fmt --check
-cargo check
-cargo clippy -- -D warnings
-cargo test --locked
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
 ```
 
 HTTP 和并发检查：

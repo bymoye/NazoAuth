@@ -44,7 +44,7 @@ OAuth 2.1 draft / OIDC / FAPI 2.0 / FAPI-CIBA / CIBA 相关能力，并同时支
 | OAuth 安全基线 | RFC 9700 OAuth 2.0 Security BCP；OAuth 2.1 仍是 `draft-ietf-oauth-v2-1-15`。 | 以 RFC 9700 和 OAuth 2.1 草案方向作为默认安全约束；不得声明 OAuth 2.1 final RFC 合规。 |
 | FAPI 2.0 | FAPI 2.0 Security Profile Final；FAPI 2.0 Message Signing Final。 | 作为高价值 API 主线；Message Signing 选项单独 gating。 |
 | OIDC | Core、Discovery、DCR、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout、Session Management 等 OIDF 规范。 | 我们作为 OP 时只广告已实现能力；我们作为 RP 时通过 provider adapter 接入外部登录。 |
-| CIBA / FAPI-CIBA | OpenID Connect CIBA Core 1.0 为 Final；FAPI-CIBA 仍按官方 Draft-02 兼容 profile 处理。 | CIBA 默认关闭；FAPI-CIBA 做兼容 profile；`fapi2-ciba` 只表示内部强化 profile。 |
+| CIBA / FAPI-CIBA | OpenID Connect CIBA Core 1.0 为 Final；已实现的 FAPI-CIBA 仍是 ID1 / Draft-02 兼容 profile，当前 working draft 已为 `fapi-ciba-03`（2026-06-26）。 | CIBA 默认关闭；FAPI-CIBA 做 ID1 兼容 profile；`fapi2-ciba` 只表示内部强化 profile；采用 working draft 前必须单独做 delta 审计。 |
 | OpenID Federation | OpenID Federation 1.1 与 OpenID Federation for OpenID Connect 1.1 是当前规范线。 | 当前非目标；第三方登录不依赖 OpenID Federation 信任链。 |
 | Browser-based apps | OAuth 2.0 for Browser-Based Applications 仍是 draft。 | 默认偏向 BFF/same-site session；纯 SPA token storage 是产品/部署边界。 |
 | 新兴草案 | Attestation-Based Client Authentication、Transaction Tokens、Grant Management、OpenID4VCI/VP、HTTP message signatures 等。 | 进入 watchlist；没有明确产品需求、威胁模型、metadata gating 和测试前不实现。 |
@@ -147,11 +147,11 @@ rg -n "^- \[x\].*(部分完成|profile-scoped|外部边界|未实现)|^\s+- 状�
 
 预计涉及：
 
-- `src/bootstrap/routes.rs`
-- `src/config.rs`
-- `src/settings.rs`
-- `tests/in_source/src/bootstrap/tests/cors.rs`
-- `tests/in_source/src/http/authorization/tests/*`
+- `crates/authorization-server/src/bootstrap/routes.rs`
+- `crates/authorization-server/src/config.rs`
+- `crates/authorization-server/src/settings.rs`
+- `crates/authorization-server/tests/in_source/src/bootstrap/tests/cors.rs`
+- `crates/authorization-server/tests/in_source/src/http/authorization/tests/*`
 - `docs/operations/configuration.md`
 
 验收：
@@ -184,8 +184,8 @@ cargo test --locked authorization --lib
 
 | 子项 | 当前事实源 | M2 状态 |
 | --- | --- | --- |
-| FAPI2 Security Final | `fapi2-security` runtime profile 已强制 PAR、S256、confidential client、FAPI client auth、sender-constrained token、code TTL 与 PAR TTL；`tests/in_source/src/http/authorization/tests/par.rs`、`tests/in_source/src/http/token/tests/dispatch.rs` 和 `tests/in_source/src/http/tests/well_known.rs` 保持对应负向测试。 | 已由官方 `oidf-conformance-full.yml` run `28953799865` 在 18+2 `parallel-isolated` 矩阵中验证。 |
-| Signed request object | `fapi2-message-signing-authz-request` 独立 profile 要求 PAR 中 signed request object；`src/http/authorization/jar.rs` 与 PAR/JAR 测试覆盖 `aud`、`nbf`、`exp`、client 绑定和 replay 边界。 | profile-scoped；不并入 base `fapi2-security`。 |
+| FAPI2 Security Final | `fapi2-security` runtime profile 已强制 PAR、S256、confidential client、FAPI client auth、sender-constrained token、code TTL 与 PAR TTL；`crates/authorization-server/tests/in_source/src/http/authorization/tests/par.rs`、`crates/authorization-server/tests/in_source/src/http/token/tests/dispatch.rs` 和 `crates/authorization-server/tests/in_source/src/http/tests/well_known.rs` 保持对应负向测试。 | 已由官方 `oidf-conformance-full.yml` run `28953799865` 在 18+2 `parallel-isolated` 矩阵中验证。 |
+| Signed request object | `fapi2-message-signing-authz-request` 独立 profile 要求 PAR 中 signed request object；`crates/authorization-server/src/http/authorization/jar.rs` 与 PAR/JAR 测试覆盖 `aud`、`nbf`、`exp`、client 绑定和 replay 边界。 | profile-scoped；不并入 base `fapi2-security`。 |
 | JARM | `fapi2-message-signing-jarm` 独立 profile 继承 FAPI2 Security，并在 request 省略 `response_mode=jwt` 或显式使用默认 query mode 时仍强制签名授权响应；base `fapi2-security` 仍只在协商 `response_mode=jwt` 时签名，不强制全局 JARM。 | profile-scoped；不并入 base `fapi2-security`。 |
 | Signed / nested encrypted introspection | `fapi2-message-signing-introspection` 独立 profile 才发布 RFC 9701 signed introspection 与 JWE metadata；base `fapi2-security` 不发布这些字段。 | profile-scoped；不得在 base profile 中广告。 |
 | ID Token signing | OIDC ID Token 始终签名，metadata 来自活跃签名能力并保留 RS256 基线兼容。 | 属于 OIDC 基线能力，不作为额外 FAPI2 Message Signing profile 勾选。 |
@@ -193,13 +193,13 @@ cargo test --locked authorization --lib
 
 预计涉及：
 
-- `src/http/authorization/*`
-- `src/http/token/introspect.rs`
-- `src/http/well_known.rs`
-- `src/settings/profile.rs`
-- `tests/in_source/src/http/authorization/tests/*`
-- `tests/in_source/src/http/token/tests/introspect.rs`
-- `tests/in_source/src/http/tests/well_known.rs`
+- `crates/authorization-server/src/http/authorization/*`
+- `crates/authorization-server/src/http/token/introspect.rs`
+- `crates/authorization-server/src/http/well_known.rs`
+- `crates/authorization-server/src/settings/profile.rs`
+- `crates/authorization-server/tests/in_source/src/http/authorization/tests/*`
+- `crates/authorization-server/tests/in_source/src/http/token/tests/introspect.rs`
+- `crates/authorization-server/tests/in_source/src/http/tests/well_known.rs`
 
 验收：
 
@@ -226,10 +226,10 @@ CIBA 等 profile 明确注册、测试和运维。
 
 预计涉及：
 
-- `src/http/dynamic_client_registration.rs`
-- `src/http/admin/clients/create.rs`
-- `src/http/well_known.rs`
-- `tests/in_source/src/http/tests/dynamic_client_registration.rs`
+- `crates/authorization-server/src/http/dynamic_client_registration.rs`
+- `crates/authorization-server/src/http/admin/clients/create.rs`
+- `crates/authorization-server/src/http/well_known.rs`
+- `crates/authorization-server/tests/in_source/src/http/tests/dynamic_client_registration.rs`
 - `docs/operations/configuration.md`
 - `docs/protocol/profile-matrix.md`
 
@@ -256,11 +256,11 @@ baseline 和 FAPI2 默认链路。
 
 预计涉及：
 
-- `src/http/token/token_exchange.rs`
-- `src/http/token/jwt_bearer.rs`
-- `src/http/token/dispatch.rs`
-- `tests/in_source/src/http/token/tests/token_exchange.rs`
-- `tests/in_source/src/http/token/tests/jwt_bearer.rs`
+- `crates/authorization-server/src/http/token/token_exchange.rs`
+- `crates/authorization-server/src/http/token/jwt_bearer.rs`
+- `crates/authorization-server/src/http/token/dispatch.rs`
+- `crates/authorization-server/tests/in_source/src/http/token/tests/token_exchange.rs`
+- `crates/authorization-server/tests/in_source/src/http/token/tests/jwt_bearer.rs`
 
 验收：
 
@@ -306,12 +306,12 @@ Provider 分类：
 
 预计涉及：
 
-- `src/http/profile/*` 或新增 `src/http/external_login/*`
-- `src/settings.rs`
-- `src/settings/profile.rs`
-- `src/bootstrap/routes.rs`
-- `src/http/well_known.rs` 之外的 RP 配置文档；第三方登录不应进入 OP Discovery metadata
-- `tests/in_source/src/http/profile/tests/*` 或新增 `tests/in_source/src/http/external_login/tests/*`
+- `crates/authorization-server/src/http/profile/*` 或新增 `crates/authorization-server/src/http/external_login/*`
+- `crates/authorization-server/src/settings.rs`
+- `crates/authorization-server/src/settings/profile.rs`
+- `crates/authorization-server/src/bootstrap/routes.rs`
+- `crates/authorization-server/src/http/well_known.rs` 之外的 RP 配置文档；第三方登录不应进入 OP Discovery metadata
+- `crates/authorization-server/tests/in_source/src/http/profile/tests/*` 或新增 `crates/authorization-server/tests/in_source/src/http/external_login/tests/*`
 - `docs/operations/configuration.md`
 - `docs/protocol/profile-matrix.md`
 
@@ -343,12 +343,12 @@ cargo test --locked session --lib
 
 预计涉及：
 
-- `src/http/token/ciba.rs`
-- `src/http/token/dispatch.rs`
-- `src/http/well_known.rs`
-- `src/settings/profile.rs`
-- `tests/in_source/src/http/token/tests/ciba.rs`
-- `tests/in_source/src/http/tests/well_known.rs`
+- `crates/authorization-server/src/http/token/ciba.rs`
+- `crates/authorization-server/src/http/token/dispatch.rs`
+- `crates/authorization-server/src/http/well_known.rs`
+- `crates/authorization-server/src/settings/profile.rs`
+- `crates/authorization-server/tests/in_source/src/http/token/tests/ciba.rs`
+- `crates/authorization-server/tests/in_source/src/http/tests/well_known.rs`
 
 验收：
 
@@ -385,8 +385,8 @@ cargo test --locked well_known --lib
 候选项：
 
 - NI-014 FAPI / HTTP message signatures。
-- NI-015 RFC 9865 cursor pagination / RFC 9967 async SCIM or SCIM Security Events。
-- OAuth 2.0 for Browser-Based Applications draft 最终 RFC 发布后的审计。
+- NI-015 RFC 9865 cursor pagination / RFC 9967 SCIM Security Event Tokens 与异步完成事件。
+- OAuth 2.0 for Browser-Based Applications draft-27 预发布审计，以及最终 RFC 发布后的差异审计。
 - OAuth 2.0 Attestation-Based Client Authentication。
 - Transaction Tokens。
 - Grant Management。
@@ -394,12 +394,25 @@ cargo test --locked well_known --lib
 
 进入实现路线的前置条件：
 
-- [ ] **M8-01：产品需求明确**
+- [x] **M8-01：产品需求明确**
   - 必须说明谁会使用、接入方式、威胁模型、metadata 或配置面、失败场景和运维责任。
-- [ ] **M8-02：规范和 conformance 状态明确**
+- [x] **M8-02：规范和 conformance 状态明确**
   - 标准源、草案版本、OIDF/IETF 状态、conformance suite 覆盖和本地测试策略必须记录。
-- [ ] **M8-03：不会降低主线安全边界**
+- [x] **M8-03：不会降低主线安全边界**
   - 不能影响 `oauth2-oidc-baseline`、`fapi2-security`、`fapi2-message-signing-*`、CIBA 和 external provider login 的默认安全属性。
+
+M8 的完成表示三项进入实现路线的治理门禁已经审计并形成
+[`2026-07-11-m8-watchlist-governance.md`](../conformance/2026-07-11-m8-watchlist-governance.md)
+证据，不表示所有候选协议已经实现或通过认证。后续独立设计已完成 RFC 9865
+SCIM forward cursor pagination 的本地实现与负向测试；OpenID4VCI / OpenID4VP
+需要单独产品立项。Browser-Based Applications draft-27 已完成预发布安全审计，
+NazoAuthWeb 保持授权服务器同源前端与 server-managed session 边界（不是 BFF），第三方浏览器应用保持 public code + S256
+PKCE；最终 RFC 发布后仍必须执行差异审计。FAPI HTTP Signatures 也已作为第二个
+bounded candidate 完成 M8-01/02/03：仅在 `ENABLE_FAPI_HTTP_SIGNATURES=true`
+时约束 `/fapi/resource`，默认关闭、不发布 metadata，并以 2026-06-26 working
+draft、RFC 9421/RFC 9530 Rust 向量和真实 HTTP 正负矩阵作为本地证据。OIDF suite
+当前没有专用计划，因此不能表述为认证；草案或 Final Specification 更新时必须重新执行
+delta audit。其他候选项继续 deferred，直到各自证据记录中的 re-entry 条件满足。
 
 ## 当前状态摘要
 
@@ -409,7 +422,7 @@ cargo test --locked well_known --lib
 | --- | --- |
 | 已具备的 OP/AS 基线 | BP-001 到 BP-028 已作为当前基础能力维护；TP-001 到 TP-008 已作为精确测试包维护。 |
 | Public OP/AS 基线硬化 | M1 / BP-029 已完成；后续新增 endpoint 必须复用同等 CORS、cookie/session、CSRF、rate limit、日志脱敏和错误语义门禁。 |
-| 当前优先缺口 | M7 已完成；M8 watchlist 保持 deferred，尚未开始。 |
+| 当前优先缺口 | M8 治理门禁、RFC 9865 bounded SCIM cursor pagination 与 Browser-Based Applications draft-27 预发布审计已完成；Browser 最终 RFC 差异审计及其余候选项保持 deferred 或等待单独产品立项。 |
 | FAPI2 / Message Signing | M2 已完成；后续新增 FAPI / Message Signing 行为必须继续保持 profile-scoped metadata truth 与负向测试。 |
 | DCR / DCRM | M3 已完成；NI-004 / NI-005 以 default-closed DCR/DCRM、管理凭据轮换、非秘密审计事件和 onboarding 文档维护。 |
 | Token trust | M4 已完成；NI-003 是 bounded local Token Exchange，NI-006 是第三方 JWT bearer trust 设计完成且实现 deferred，外部 issuer trust 不属于当前默认能力。 |
@@ -417,7 +430,7 @@ cargo test --locked well_known --lib
 | 加密响应 | M7 已完成；UserInfo 支持 JSON、JWS、JWE 和 nested JWS/JWE，JARM 支持 per-client 签名与 nested JWE；OIDF signed UserInfo 模块及本地与官方 19+2 全矩阵已纳入验收。 |
 | 外部第三方登录 | M5 已完成为配置驱动的热插拔 provider registry；外部 OIDC、OAuth2 social、SAML gateway、非敏感 admin onboarding 和本地 session 边界已实现。 |
 | 非目标 | NI-010 OpenID Federation 当前不实现；第三方登录不依赖 OpenID Federation。 |
-| 可选未来项 | NI-014、NI-015 和 M8 watchlist 仍为 deferred，不属于当前实现范围。 |
+| 可选未来项 | M8 候选项已有逐项产品、规范/conformance 与安全边界结论；治理完成不代表运行时支持，具体决定见 2026-07-11 M8 watchlist 证据。 |
 
 ## 更新规则
 

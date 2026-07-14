@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/conformance-security.yml"
       - ".github/e2e-runner.Containerfile"
+      - ".github/e2e-requirements.in"
+      - ".github/e2e-requirements.txt"
       - "Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
@@ -13,6 +15,7 @@ on:
       - ".cargo/**"
       - "rust-toolchain"
       - "rust-toolchain.toml"
+      - "crates/**"
       - "src/**"
       - "tests/**"
       - "benches/**"
@@ -31,6 +34,8 @@ on:
     paths:
       - ".github/workflows/conformance-security.yml"
       - ".github/e2e-runner.Containerfile"
+      - ".github/e2e-requirements.in"
+      - ".github/e2e-requirements.txt"
       - "Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
@@ -38,6 +43,7 @@ on:
       - ".cargo/**"
       - "rust-toolchain"
       - "rust-toolchain.toml"
+      - "crates/**"
       - "src/**"
       - "tests/**"
       - "benches/**"
@@ -114,13 +120,20 @@ jobs:
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Check real HTTP source policy
+        run: |
+          python -m py_compile scripts/full_real_request_source_policy.py scripts/full_real_request_e2e.py
+          python scripts/full_real_request_e2e.py --source-policy-check
+          python scripts/test_full_real_request_e2e_source_policy.py
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
       - name: Prepare runtime directories
         run: mkdir -p runtime/ci/avatars runtime/ci/keys
+      - name: Verify compatibility contracts
+        run: python scripts/verify_static_contracts.py --check
       - name: Format
         run: cargo fmt --check
       - name: Check
@@ -129,41 +142,32 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run migrations
         run: cargo run --locked --bin nazo-oauth-migrate
-      - name: Test
-        run: cargo test --locked --workspace --all-features --lib
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
 
   supply-chain-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
-      - name: Install Rust supply-chain tools
-        run: |
-          set -euo pipefail
-          install_crate() {
-            local crate="$1"
-            for attempt in 1 2 3; do
-              if cargo install "$crate" --locked; then
-                return 0
-              fi
-              sleep $((attempt * 20))
-            done
-            cargo install "$crate" --locked
-          }
-          install_crate cargo-audit
-          install_crate cargo-deny
-          install_crate cargo-cyclonedx
+      - name: Install pinned Rust supply-chain tools
+        uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: |
+            cargo-audit@0.22.2
+            cargo-deny@0.20.2
+            cargo-cyclonedx@0.5.9
       - name: Audit Rust advisories
         run: cargo audit
       - name: Check dependency policy
         run: cargo deny check advisories bans licenses sources
       - name: Generate Rust SBOM
         run: |
-          cargo cyclonedx --format json --override-filename nazo-oauth-server.cdx
+          cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazo-oauth-server.cdx
           mkdir -p target
-          mv nazo-oauth-server.cdx.json target/nazo-oauth-server.cdx.json
+          mv crates/authorization-server/nazo-oauth-server.cdx.json target/nazo-oauth-server.cdx.json
       - uses: docker/setup-buildx-action@v4.2.0
       - name: Build service image
         uses: docker/build-push-action@v7.3.0
@@ -179,7 +183,7 @@ jobs:
           docker save nazo-oauth-supply-chain:${{ github.sha }} -o /tmp/nazo-oauth-supply-chain.tar
           docker run --rm \
             -v /tmp/nazo-oauth-supply-chain.tar:/image.tar:ro \
-            docker.io/aquasec/trivy@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436 image \
+            docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f image \
               --format table \
               --exit-code 1 \
               --severity CRITICAL,HIGH \
@@ -257,6 +261,8 @@ jobs:
           ENABLE_PAR_REQUEST_OBJECT: true
           ENABLE_AUTHORIZATION_DETAILS: true
           ENABLE_LEGACY_AUDIENCE_PARAM: true
+          ENABLE_FAPI_HTTP_SIGNATURES: false
+          FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS: 60
           SCIM_BEARER_TOKEN: "codecov-scim-secret"
           FEDERATION_PROVIDER_CONFIGS: >-
             [{"provider_id":"codecov-oidc","enabled":true,"display_name":"Codecov OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"codecov-oidc-client","client_secret":"codecov-oidc-secret","redirect_uri":"http://127.0.0.1:8000/auth/federation/codecov-oidc/callback","scopes":"openid email profile"}]
@@ -279,13 +285,15 @@ jobs:
           JWK_KEYS_DIR: "/var/lib/nazo_oauth/keys"
           RUST_LOG: "info"
           YAML
+          cp runtime/e2e/.env.yaml runtime/e2e/.env-signed.yaml
+          sed -i 's/ENABLE_FAPI_HTTP_SIGNATURES: false/ENABLE_FAPI_HTTP_SIGNATURES: true/' runtime/e2e/.env-signed.yaml
       - name: Start PostgreSQL and Valkey
         run: |
           docker network create nazo-oauth-e2e-net
           docker run -d --name nazo-oauth-e2e-postgres --network nazo-oauth-e2e-net -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=oauth postgres:18-alpine
           docker run -d --name nazo-oauth-e2e-valkey --network nazo-oauth-e2e-net valkey/valkey:8-alpine
           ready=false
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if docker run --rm --network nazo-oauth-e2e-net -e PGPASSWORD=postgres postgres:18-alpine \
               sh -lc 'pg_isready -h nazo-oauth-e2e-postgres -U postgres -d oauth && psql -h nazo-oauth-e2e-postgres -U postgres -d oauth -c "select 1" >/dev/null'
             then
@@ -303,7 +311,14 @@ jobs:
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
             nazo-oauth-e2e:latest nazo-oauth-migrate
           docker run -d --name nazo-oauth-e2e-server --network nazo-oauth-e2e-net \
+            -e NAZO_RUNTIME_INSTANCE_ID=e2e-primary \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
+            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
+            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            nazo-oauth-e2e:latest nazo-oauth-server
+          docker run -d --name nazo-oauth-e2e-server-signed --network nazo-oauth-e2e-net \
+            -e NAZO_RUNTIME_INSTANCE_ID=e2e-signed \
+            -v "$PWD/runtime/e2e/.env-signed.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
             nazo-oauth-e2e:latest nazo-oauth-server
@@ -312,6 +327,7 @@ jobs:
           docker run --rm --name nazo-oauth-e2e-runner --network nazo-oauth-e2e-net \
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
+            -e E2E_SIGNED_BASE_URL=http://nazo-oauth-e2e-server-signed:8000 \
             -e E2E_ISSUER_URL=http://127.0.0.1:8000 \
             nazo-oauth-e2e-runner:latest python scripts/full_real_request_e2e.py
       - name: Run load and race gate
@@ -332,5 +348,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f nazo-oauth-e2e-runner nazo-oauth-e2e-server nazo-oauth-e2e-postgres nazo-oauth-e2e-valkey 2>/dev/null || true
+          docker rm -f nazo-oauth-e2e-runner nazo-oauth-e2e-server nazo-oauth-e2e-server-signed nazo-oauth-e2e-postgres nazo-oauth-e2e-valkey 2>/dev/null || true
           docker network rm nazo-oauth-e2e-net 2>/dev/null || true

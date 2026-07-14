@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -1617,7 +1618,15 @@ def plan_manifest_for_expressions(
     }
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Prepare gitignored local files for Podman OIDF conformance runs."
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parse_args(argv)
     ensure_cert()
     ensure_mtls_certs()
     ensure_server_oidf_keyset()

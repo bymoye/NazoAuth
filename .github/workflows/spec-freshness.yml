@@ -1,0 +1,53 @@
+name: specification-freshness
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/spec-freshness.yml"
+      - ".github/workflows/oidf-conformance*.yml"
+      - ".github/workflows/oidf-public-seed-configs.yml"
+      - "requirements/spec-freshness.json"
+      - "scripts/check_spec_freshness.py"
+      - "tests/unit/test_spec_freshness.py"
+      - "tests/unit/test_oidf_workflows.py"
+      - "README.md"
+      - "docs/protocol/**"
+      - "docs/conformance/**"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Validate inventory and active pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Validate GitHub Actions workflows
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          .github/workflows/spec-freshness.yml
+          .github/workflows/oidf-conformance.yml
+          .github/workflows/oidf-conformance-full.yml
+          .github/workflows/oidf-public-seed-configs.yml
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.13"
+      - run: python -m unittest tests.unit.test_spec_freshness tests.unit.test_oidf_workflows
+      - run: python scripts/check_spec_freshness.py --offline
+
+  online:
+    name: Verify official primary sources
+    needs: offline
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.13"
+      - run: python scripts/check_spec_freshness.py

@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_runtime_module_state_events_actor_time;
+DROP INDEX IF EXISTS idx_runtime_module_state_events_module_time;
+DROP INDEX IF EXISTS idx_runtime_module_state_events_occurred_at;
+DROP INDEX IF EXISTS idx_runtime_module_instance_states_module_state;
+DROP INDEX IF EXISTS idx_runtime_module_instance_states_updated_at;
+DROP INDEX IF EXISTS idx_runtime_module_desired_states_updated_at;
+
+DROP TABLE IF EXISTS runtime_module_state_events;
+DROP TABLE IF EXISTS runtime_module_instance_states;
+DROP TABLE IF EXISTS runtime_module_desired_states;

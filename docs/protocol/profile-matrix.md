@@ -290,3 +290,41 @@ Required negative tests:
 - wrong response issuer/audience
 - stale or revoked token reported active
 - top-level token subject/expiry confusion in the signed response
+
+## M8 emerging-protocol watchlist boundary
+
+M8 is not an authorization-server runtime profile. Completing its governance
+tasks does not add a profile name, endpoint, grant, authentication method,
+token type, SCIM capability, credential role, or discovery field.
+
+The dated [M8 governance review](../conformance/2026-07-11-m8-watchlist-governance.md)
+defines the admission and isolation requirements for FAPI HTTP Signatures,
+RFC 9865/9967, browser-based application guidance, client attestation,
+Transaction Tokens, Grant Management, and OpenID4VC. Until a candidate's
+separate implementation and negative tests complete, all existing baseline,
+FAPI2, Message Signing, CIBA, SCIM, and external-provider profile behavior must
+be byte-for-byte unaffected by selecting any existing runtime profile.
+
+RFC 9865 is the first admitted M8 candidate. Its completed implementation is
+limited to SCIM `/Users` listing and `/ServiceProviderConfig`; it is not an
+OAuth authorization-server profile and cannot change any profile selection or
+OAuth/OIDC/FAPI metadata.
+
+The dated
+[Browser-Based Applications draft-27 audit](../conformance/2026-07-11-browser-based-applications-draft-27-audit.md)
+is also complete as security evidence, not as a runtime profile. NazoAuthWeb is the first-party
+same-origin authorization-server frontend with a server-managed session, not a BFF, and receives no OAuth tokens. A third-party
+browser-only application remains a public `oauth2-oidc-baseline` client using
+authorization code + S256 PKCE, exact redirects, and non-credentialed
+endpoint-specific CORS. The final RFC requires a separate delta audit before
+any final-standard claim.
+
+FAPI HTTP Signatures is the second bounded M8 implementation candidate. It is
+available only through `ENABLE_FAPI_HTTP_SIGNATURES=true` on `/fapi/resource`;
+it is not an authorization-server profile, emits no metadata, and leaves every
+existing profile unchanged while disabled. The implementation is pinned to the
+OIDF working draft built 2026-06-26 and the RFC 9421/RFC 9530 primitives listed
+in the [dated audit](fapi-http-signatures-draft-audit.md). No dedicated OIDF
+plan exists, so local Rust vectors and real-HTTP positive/negative coverage are
+evidence, not certification. A newer draft or Final Specification triggers a
+fresh delta audit before any version claim changes.

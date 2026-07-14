@@ -1,0 +1,80 @@
+[package]
+name = "nazo-oauth-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nazo-oauth-server"
+path = "src/main.rs"
+test = false
+
+[[bin]]
+name = "nazo-oauth-migrate"
+path = "src/bin/nazo_oauth_migrate.rs"
+test = false
+
+[[bin]]
+name = "nazo-oauth-keyctl"
+path = "src/bin/nazo_oauth_keyctl.rs"
+test = false
+
+[[bin]]
+name = "nazo_oauth_seed_oidf"
+path = "src/bin/nazo_oauth_seed_oidf.rs"
+
+[dependencies]
+actix-cors.workspace = true
+actix-multipart = "0.8.0"
+actix-web = { workspace = true, features = ["cookies"] }
+anyhow.workspace = true
+argon2.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+diesel = { workspace = true, features = ["postgres", "uuid", "chrono", "serde_json", "64-column-tables"] }
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+hmac.workspace = true
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
+lettre = { workspace = true, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
+nazo-auth.workspace = true
+nazo-http-signatures.workspace = true
+nazo-http-actix.workspace = true
+nazo-identity.workspace = true
+nazo-key-management.workspace = true
+nazo-postgres.workspace = true
+nazo-valkey.workspace = true
+nazo-resource-server.workspace = true
+nazo-runtime-modules.workspace = true
+openssl.workspace = true
+opentelemetry = "0.32.0"
+opentelemetry-appender-tracing = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["logs", "metrics", "rt-tokio", "trace"] }
+passkey-auth.workspace = true
+p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
+rand.workspace = true
+reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-opentelemetry = "0.33.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url.workspace = true
+urlencoding.workspace = true
+uuid = { workspace = true, features = ["v7", "serde"] }
+yaml_serde = "0.10.4"
+
+[dev-dependencies]
+diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
+diesel_migrations.workspace = true
+fred = { workspace = true, features = ["i-scripts"] }
+proptest.workspace = true
+nazo-key-management = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

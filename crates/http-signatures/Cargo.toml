@@ -1,0 +1,26 @@
+[package]
+name = "nazo-http-signatures"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+httpsig = "0.0.24"
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+serde_json.workspace = true
+sfv = "0.15.0"
+sha2.workspace = true
+subtle = "2.6.1"
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+openssl.workspace = true
+p256 = { workspace = true, features = ["ecdsa"] }
+proptest.workspace = true
+
+[lints]
+workspace = true

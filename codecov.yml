@@ -8,12 +8,12 @@ coverage:
         target: 100%
         threshold: 2%
         paths:
-          - "src/http/token/"
-          - "src/http/authorization/"
-          - "src/resource_server/"
-          - "src/support/oauth*"
-          - "src/support/security*"
-          - "src/support/uri_policy*"
+          - "crates/authorization-server/src/http/token/"
+          - "crates/authorization-server/src/http/authorization/"
+          - "crates/authorization-server/src/resource_server/"
+          - "crates/authorization-server/src/support/oauth*"
+          - "crates/authorization-server/src/support/security*"
+          - "crates/authorization-server/src/support/uri_policy*"
     patch:
       default:
         target: 90%
@@ -22,7 +22,7 @@ coverage:
 ignore:
   # Generated Diesel table declarations. Protocol and persistence behavior is
   # tested through repository/handler code, not by executing generated macros.
-  - "src/schema.rs"
+  - "crates/authorization-server/src/schema.rs"
   # Third-party macro expansions can appear in local llvm-cov LCOV output when
   # generic derive/test code is instantiated by this crate. They are dependency
   # implementation details, not project behavior.
@@ -30,49 +30,51 @@ ignore:
   # Diesel row projection structs and connection-pool glue. These files carry
   # no protocol, authorization, token, or persistence state-transition policy;
   # behavior is covered through repository, handler, and conformance tests.
-  - "src/domain/rows.rs"
-  - "src/db.rs"
+  - "crates/authorization-server/src/domain/rows.rs"
+  - "crates/authorization-server/src/db.rs"
   # Route table wiring only. Handler behavior remains covered in the owning
   # HTTP modules and integration tests.
   - "bootstrap/routes.rs"
-  - "src/bootstrap/routes.rs"
+  - "crates/authorization-server/src/bootstrap/routes.rs"
   # Observability exporter wiring. OAuth/OIDC/token/auth state machines are
   # covered elsewhere; telemetry endpoint/protocol validation is not part of
   # the security coverage target.
   - "bootstrap/observability.rs"
   - "bootstrap/mod.rs"
-  - "src/bootstrap/observability.rs"
+  - "crates/authorization-server/src/bootstrap/observability.rs"
   # Thin Valkey command wrappers. Business keys, replay semantics, and token
   # state transitions are tested in the calling protocol modules.
-  - "src/support/valkey.rs"
+  - "crates/authorization-server/src/support/valkey.rs"
   # Module aggregation re-exports only. No protocol, authorization, or token
   # policy; all covered in the owning sub-modules.
-  - "src/lib.rs"
-  - "src/domain/mod.rs"
-  - "src/domain/state.rs"
-  - "src/domain/keyset.rs"
-  - "src/http/mod.rs"
-  - "src/http/admin.rs"
-  - "src/http/admin/clients/mod.rs"
-  - "src/http/auth/mod.rs"
-  - "src/http/authorization/mod.rs"
-  - "src/http/profile.rs"
-  - "src/http/token.rs"
-  - "src/support/mod.rs"
+  - "crates/authorization-server/src/lib.rs"
+  - "crates/authorization-server/src/domain/mod.rs"
+  - "crates/authorization-server/src/domain/state.rs"
+  - "crates/authorization-server/src/domain/keyset.rs"
+  - "crates/authorization-server/src/http/mod.rs"
+  - "crates/authorization-server/src/http/admin.rs"
+  - "crates/authorization-server/src/http/admin/clients/mod.rs"
+  - "crates/authorization-server/src/http/auth/mod.rs"
+  - "crates/authorization-server/src/http/authorization/mod.rs"
+  - "crates/authorization-server/src/http/profile.rs"
+  - "crates/authorization-server/src/http/token.rs"
+  - "crates/authorization-server/src/support/mod.rs"
   # Thin binary/bootstrap wrappers with no protocol or security decisions.
   - "main.rs"
   - "bin/nazo_oauth_keyctl.rs"
   - "bin/nazo_oauth_migrate.rs"
   - "bin/nazo_oauth_seed_oidf.rs"
-  - "src/main.rs"
-  - "src/bin/nazo_oauth_keyctl.rs"
-  - "src/bin/nazo_oauth_migrate.rs"
-  # Local OIDF seed tool. Deterministic parsing/JWKS logic lives in src/oidf_seed
+  - "crates/authorization-server/src/main.rs"
+  - "crates/authorization-server/src/bin/nazo_oauth_keyctl.rs"
+  - "crates/authorization-server/src/bin/nazo_oauth_migrate.rs"
+  # Local OIDF seed tool. Deterministic parsing/JWKS logic lives in
+  # crates/authorization-server/src/oidf_seed
   # and remains covered; database seeding side effects are exercised by OIDF runs.
-  - "src/bin/nazo_oauth_seed_oidf.rs"
-  - "src/oidf_seed/**"
+  - "crates/authorization-server/src/bin/nazo_oauth_seed_oidf.rs"
+  - "crates/authorization-server/src/oidf_seed/**"
   # Test implementation files are excluded so coverage measures production code.
   - "tests/**"
+  - "crates/authorization-server/tests/**"
   - "benches/**"
   - "examples/**"
   - "migrations/**"

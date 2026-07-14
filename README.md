@@ -4,12 +4,12 @@
 
 # Nazo Auth Server
 
-[![code-quality](https://github.com/bymoye/NazoAuth/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/code-quality.yml)
-[![codeql](https://github.com/bymoye/NazoAuth/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/codeql.yml)
-[![dependency-review](https://github.com/bymoye/NazoAuth/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/dependency-review.yml)
-[![conformance-security](https://github.com/bymoye/NazoAuth/actions/workflows/conformance-security.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/conformance-security.yml)
-[![oidf-conformance-full](https://github.com/bymoye/NazoAuth/actions/workflows/oidf-conformance-full.yml/badge.svg?branch=main)](https://github.com/bymoye/NazoAuth/actions/workflows/oidf-conformance-full.yml)
-[![codecov](https://codecov.io/gh/bymoye/NazoAuth/branch/main/graph/badge.svg)](https://app.codecov.io/gh/bymoye/NazoAuth)
+[![code-quality](https://github.com/nazozero/NazoAuth/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/code-quality.yml)
+[![codeql](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml)
+[![dependency-review](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml)
+[![conformance-security](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml)
+[![oidf-conformance-full](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml)
+[![codecov](https://codecov.io/gh/nazozero/NazoAuth/branch/main/graph/badge.svg)](https://app.codecov.io/gh/nazozero/NazoAuth)
 
 [中文文档](README.zh-CN.md) · [Documentation](#documentation) · [Quick start](#quick-start) · [Security](SECURITY.md)
 
@@ -44,7 +44,7 @@ composite score:
 
 | Signal | Evidence |
 | --- | --- |
-| Rust quality gate | `cargo fmt --check`, `cargo check --workspace --all-targets --all-features --locked`, `cargo clippy -D warnings`, migrations, and library tests in `code-quality`. |
+| Rust quality gate | `cargo fmt --check`, `cargo check --workspace --all-targets --all-features --locked`, `cargo clippy -D warnings`, migrations, and the complete workspace test suite in `code-quality`. |
 | Static security analysis | CodeQL Rust analysis with `security-extended` and `security-and-quality` queries. |
 | Dependency policy | GitHub dependency review, `cargo audit`, and `cargo deny` over advisories, bans, licenses, and sources. |
 | Runtime security behavior | Real HTTP E2E, load/race gate, and Valkey outage injection in `conformance-security`. |
@@ -104,8 +104,13 @@ Other protocol surfaces:
 
 | Standard | Implementation |
 | --- | --- |
-| SCIM 2.0 provisioning with [RFC 9865](https://www.rfc-editor.org/rfc/rfc9865) / [RFC 9967](https://www.rfc-editor.org/rfc/rfc9967) capability discovery | default-tenant user provisioning; index pagination is advertised, cursor pagination and SCIM Security Events are explicitly disabled |
+| SCIM 2.0 provisioning with [RFC 9865](https://www.rfc-editor.org/rfc/rfc9865) / [RFC 9967](https://www.rfc-editor.org/rfc/rfc9967) capability discovery | default-tenant user provisioning; index pagination remains the default and forward cursor pagination uses opaque 10-minute actor/query-bound cursors; RFC 9967 Security Events remain disabled |
 | WebAuthn | passkey registration and login |
+
+Emerging protocols are tracked through the
+[M8 watchlist governance review](docs/conformance/2026-07-11-m8-watchlist-governance.md).
+That review records product and conformance entry gates; it does not claim
+runtime support for the deferred candidates.
 
 ## Certification
 
@@ -149,7 +154,8 @@ all 16 plans and 578 modules, and reported `0 failures` and `0 warnings`.
   backup codes, remembered MFA, WebAuthn/passkeys, and SCIM provisioning.
 - Local signing key lifecycle with prepublish, active, grace, and retired
   states. External-command signing is available for KMS/HSM integrations.
-- Rust resource-server verifier with Actix Web, Axum/Tower, and tonic adapters.
+- Framework-independent Rust resource-server verifier plus the project's Actix
+  HTTP integration. Historical Axum/Tower and tonic adapters are not shipped.
 - Release security workflows for CodeQL, dependency review, cargo audit,
   cargo deny, SBOM generation, Trivy image scanning, keyless signing, and
   provenance attestations.
@@ -158,7 +164,7 @@ all 16 plans and 578 modules, and reported `0 failures` and `0 warnings`.
 
 Requirements:
 
-- Rust toolchain compatible with edition 2024
+- The exact Rust stable version pinned by `rust-toolchain.toml`
 - PostgreSQL 18 or a compatible PostgreSQL server
 - Valkey 8 or a compatible Redis protocol server
 - Docker or Podman for the local integration stack
@@ -242,6 +248,7 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 | Topic | Link |
 | --- | --- |
 | Documentation index | [docs/README.md](docs/README.md) |
+| Workspace architecture | [docs/project/architecture.md](docs/project/architecture.md) |
 | Configuration | [docs/operations/configuration.md](docs/operations/configuration.md) |
 | Deployment | [docs/operations/deployment.md](docs/operations/deployment.md) |
 | Chinese deployment guide | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |
@@ -266,9 +273,9 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 
 ```sh
 cargo fmt --check
-cargo check
-cargo clippy -- -D warnings
-cargo test --locked
+cargo check --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
 ```
 
 HTTP and concurrency checks:

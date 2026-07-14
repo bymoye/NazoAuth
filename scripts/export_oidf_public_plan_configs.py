@@ -6,15 +6,25 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from collections.abc import Sequence
 from typing import Any
+
+from oidf_mtls_ca_bundle import (
+    BUNDLE_FILE_NAME,
+    MANIFEST_FILE_NAME,
+    build_artifact_manifest,
+    build_ca_bundle,
+)
 
 
 PRIVATE_JWK_FIELDS = {"d", "p", "q", "dp", "dq", "qi", "oth", "k"}
 SEED_NAZO_FIELDS = {
     "fapi_profile",
     "fapi_request_method",
+    "fapi_response_mode",
     "client_auth_type",
     "sender_constrain",
 }
@@ -56,9 +66,12 @@ def public_seed_client(value: Any) -> dict[str, Any] | None:
 
 
 def public_seed_mtls(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict) or "cert" not in value:
+    if not isinstance(value, dict) or "ca" not in value or "cert" not in value:
         return None
-    return {"cert": copy.deepcopy(value["cert"])}
+    return {
+        "ca": copy.deepcopy(value["ca"]),
+        "cert": copy.deepcopy(value["cert"]),
+    }
 
 
 def public_seed_nazo(value: Any) -> dict[str, Any] | None:
@@ -92,6 +105,7 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-json-file", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--source-commit", required=True)
     args = parser.parse_args(argv)
 
     rendered = read_json(args.config_json_file)
@@ -99,15 +113,37 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
     if not isinstance(configs, dict):
         raise SystemExit("rendered OIDF config must contain a configs object")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ca_bundle, _ = build_ca_bundle(configs)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
+    outputs: dict[str, bytes] = {}
     for file_name, config in configs.items():
         if Path(file_name).name != file_name or not file_name.endswith(".json"):
             raise SystemExit(f"invalid OIDF config file name: {file_name}")
         public_config = public_seed_config(config)
-        args.output_dir.joinpath(file_name).write_text(
-            json.dumps(public_config, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        outputs[file_name] = (
+            json.dumps(public_config, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+    outputs[BUNDLE_FILE_NAME] = ca_bundle
+    outputs[MANIFEST_FILE_NAME] = build_artifact_manifest(outputs, args.source_commit)
+
+    if args.output_dir.exists():
+        raise SystemExit(f"output directory already exists: {args.output_dir}")
+    args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            dir=args.output_dir.parent,
+            prefix=f".{args.output_dir.name}.",
         )
+    )
+    try:
+        for file_name, content in outputs.items():
+            staging.joinpath(file_name).write_bytes(content)
+        staging.replace(args.output_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     return 0
 

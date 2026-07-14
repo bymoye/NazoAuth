@@ -16,30 +16,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
+      - name: Install pinned Rust supply-chain tools
+        uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: |
+            cargo-audit@0.22.2
+            cargo-deny@0.20.2
+            cargo-cyclonedx@0.5.9
+      - name: Audit Rust advisories
+        run: cargo audit
+      - name: Check dependency policy
+        run: cargo deny check advisories bans licenses sources
       - name: Build release binaries
         run: cargo build --release --locked
-      - name: Install SBOM tool
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if cargo install cargo-cyclonedx --locked; then
-              exit 0
-            fi
-            sleep $((attempt * 20))
-          done
-          cargo install cargo-cyclonedx --locked
       - name: Generate Rust SBOM
         run: |
-          cargo cyclonedx --format json --override-filename nazo-oauth-server.cdx
+          cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazo-oauth-server.cdx
           mkdir -p target
-          mv nazo-oauth-server.cdx.json target/nazo-oauth-server.cdx.json
+          mv crates/authorization-server/nazo-oauth-server.cdx.json target/nazo-oauth-server.cdx.json
       - name: Build release image
         run: docker build -f Containerfile -t nazo-oauth-server:${{ github.sha }} .
       - name: Export release image
         run: docker save nazo-oauth-server:${{ github.sha }} -o target/nazo-oauth-server-image.tar
+      - name: Scan release image
+        run: |
+          docker run --rm \
+            -v "$PWD/target/nazo-oauth-server-image.tar:/image.tar:ro" \
+            docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f image \
+              --format table \
+              --exit-code 1 \
+              --severity CRITICAL,HIGH \
+              --ignore-unfixed \
+              --input /image.tar
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
       - name: Sign release artifacts

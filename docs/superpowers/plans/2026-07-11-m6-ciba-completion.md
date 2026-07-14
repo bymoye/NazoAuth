@@ -1,6 +1,8 @@
 # M6 CIBA / FAPI-CIBA Completion Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Historical implementation record. Repository locations must be discovered and
+> validated at execution time; this document does not authorize a specific tool
+> or local checkout path.
 
 **Goal:** Complete M6 by making every CIBA lifecycle transition atomic and fail-closed, shipping the authenticated confirmation page, preserving official FAPI-CIBA compatibility, and recording a fresh successful official OIDF run for the exact deployed implementation commit.
 
@@ -10,8 +12,8 @@
 
 ## Global Constraints
 
-- Backend repository: `F:\projects\nazo_oauth\oauth_backend_rust`; backend branch: `codex/m6-ciba-completion` from fetched `origin/main`.
-- Frontend repository: `F:\projects\nazo_oauth\NazoAuthWeb`; frontend branch: `codex/m6-ciba-completion` from fetched `origin/main`.
+- Backend repository: the verified NazoAuth checkout; backend branch: `codex/m6-ciba-completion` from fetched `origin/main`.
+- Frontend repository: the verified sibling NazoAuthWeb checkout; frontend branch: `codex/m6-ciba-completion` from fetched `origin/main`.
 - No new Rust crate, frontend package, state library, or test framework.
 - `expires_at` and `retention_expires_at` are immutable absolute Unix-second timestamps calculated exactly once at request creation.
 - Every successful premature poll adds exactly 5 seconds; a CAS conflict adds nothing until the reloaded transition commits.

@@ -1,0 +1,73 @@
+diff --git a/scripts/run-test-plan.py b/scripts/run-test-plan.py
+index 61a71fe..137f97a 100755
+--- a/scripts/run-test-plan.py
++++ b/scripts/run-test-plan.py
+@@ -20,6 +20,56 @@ from test_plan_parser import test_plan
+ # Track server restart detections across all test modules
+ restart_detections = []
+ 
++
++async def read_authoritative_terminal_info(
++    get_module_info,
++    module_id,
++    *,
++    timeout_seconds=30.0,
++    poll_interval_seconds=0.2,
++):
++    if timeout_seconds <= 0:
++        raise ValueError("timeout_seconds must be greater than zero")
++    if poll_interval_seconds < 0:
++        raise ValueError("poll_interval_seconds must not be negative")
++
++    deadline = time.monotonic() + timeout_seconds
++    last_status = None
++    while True:
++        remaining = deadline - time.monotonic()
++        if remaining <= 0:
++            raise TimeoutError(
++                f"OIDF module {module_id} did not expose terminal info within "
++                f"{timeout_seconds:g}s (last status: {last_status!r})"
++            )
++        try:
++            info = await asyncio.wait_for(get_module_info(module_id), timeout=remaining)
++        except asyncio.TimeoutError:
++            raise TimeoutError(
++                f"OIDF module {module_id} did not expose terminal info within "
++                f"{timeout_seconds:g}s (last status: {last_status!r})"
++            ) from None
++        if not isinstance(info, dict):
++            raise TypeError("OIDF module info must be a JSON object")
++
++        status = info.get("status")
++        last_status = status
++        if status == "INTERRUPTED":
++            raise RuntimeError(f"OIDF module {module_id} was interrupted")
++        if status == "FAILED":
++            raise RuntimeError(f"OIDF module {module_id} failed")
++        if status == "FINISHED" and info.get("result") is not None:
++            return info
++
++        remaining = deadline - time.monotonic()
++        if remaining <= 0:
++            raise TimeoutError(
++                f"OIDF module {module_id} did not expose terminal info within "
++                f"{timeout_seconds:g}s (last status: {last_status!r})"
++            )
++        await asyncio.sleep(min(poll_interval_seconds, remaining))
++
++
+ # Modules list here are deliberately not run, as they have known problems
+ # Can be overriden by using the 'selected_modules' mechanism, as is done to run the dcr happy path test in the OP against RP tests
+ ignored_modules = [
+@@ -390,7 +440,10 @@ async def run_test_module(moduledict, plan_id, test_info, test_time_taken, varia
+     if module_id != '':
+         test_time_taken[module_id] = time.time() - test_start_time
+         try:
+-            module_info['info'] = await conformance.get_module_info(module_id)
++            module_info['info'] = await read_authoritative_terminal_info(
++                conformance.get_module_info,
++                module_id,
++            )
+             module_info['logs'] = await conformance.get_test_log(module_id)
+         except Exception as cleanup_exc:
+             module_info['error'] = str(cleanup_exc)

@@ -36,7 +36,9 @@ docker run --rm --name nazo-oauth-codecov-runner \
 PowerShell equivalent:
 
 ```powershell
-Set-Location F:\projects\nazo_oauth\oauth_backend_rust
+$repo = git rev-parse --show-toplevel
+if ($LASTEXITCODE -ne 0) { throw "Run from a NazoAuth Git worktree" }
+Set-Location $repo
 docker network inspect nazo-oauth-codecov-net *> $null
 if ($LASTEXITCODE -ne 0) { docker network create nazo-oauth-codecov-net | Out-Null }
 docker rm -f nazo-oauth-codecov-postgres nazo-oauth-codecov-valkey 2>$null
@@ -59,10 +61,10 @@ docker run --rm --name nazo-oauth-codecov-runner `
 
 ## Known Failure Modes
 
-- Run the PowerShell command from `oauth_backend_rust`, not the monorepo root.
+- Run the PowerShell command from the resolved NazoAuth repository root.
   `${PWD}:/workspace` must mount the directory containing `Cargo.toml`. If in
-  doubt, replace `${PWD}` with an absolute path such as
-  `F:/projects/nazo_oauth/oauth_backend_rust`.
+  doubt, set `$repo = git rev-parse --show-toplevel` and mount
+  `${repo}:/workspace`; do not commit a workstation-specific absolute path.
 - Do not run the coverage runner container with the script defaults for database
   host access. Inside the runner, `127.0.0.1` points to the runner container, not
   the disposable PostgreSQL container. Set `CODECOV_DOCKER_NETWORK` so the script
@@ -128,7 +130,7 @@ variance:
 
 ```powershell
 docker run --rm --network nazo-oauth-codecov-net `
-  -v F:/projects/nazo_oauth/oauth_backend_rust:/workspace `
+  -v ${repo}:/workspace `
   -v nazo-oauth-cargo-registry:/usr/local/cargo/registry `
   -v nazo-oauth-cargo-git:/usr/local/cargo/git `
   -v nazo-oauth-codecov-target:/docker-target `
@@ -152,7 +154,7 @@ workspace just like the coverage flow:
 
 ```powershell
 docker run --rm --network nazo-oauth-codecov-net `
-  -v F:/projects/nazo_oauth/oauth_backend_rust:/host `
+  -v ${repo}:/host `
   -v nazo-oauth-cargo-registry:/usr/local/cargo/registry `
   -v nazo-oauth-cargo-git:/usr/local/cargo/git `
   -v nazo-oauth-codecov-target:/docker-target `

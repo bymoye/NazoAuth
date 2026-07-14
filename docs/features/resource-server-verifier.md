@@ -2,7 +2,10 @@
 
 ## Scope
 
-Resource servers use the public verifier API in `src/resource_server.rs`.
+Resource servers use the public verifier API in the `nazo-resource-server`
+crate. The server package keeps a compatibility re-export, but the verifier
+crate itself does not depend on the authorization server, identity, a Web
+framework, PostgreSQL, or Valkey.
 Authorization-server internals that skip audience validation for `/userinfo` or
 `/introspect` are not resource-server verification APIs.
 
@@ -26,7 +29,7 @@ The verifier returns structured errors such as `AudienceMismatch`, `MissingScope
 ## Core Usage
 
 ```rust
-use nazo_oauth_server::resource_server::{
+use nazo_resource_server::{
     ConfirmationPolicy, ResourceServerVerifier, ResourceServerVerifierConfig,
 };
 use serde_json::Value;
@@ -48,52 +51,17 @@ fn authorize(verifier: &ResourceServerVerifier, access_token: &str) {
 }
 ```
 
-## Framework Adapters
+## HTTP Integration Boundary
 
-The framework adapters use the same verifier and insert `VerifiedAccessToken` into request extensions only after issuer, audience, expiry, scope, token type, algorithm, key, and sender-constraint checks pass.
+`authorize_http_request` and `authorize_dpop_http_request` operate on the
+framework-independent `http::Request` type. They insert `VerifiedAccessToken`
+into request extensions only after issuer, audience, expiry, scope, token type,
+algorithm, key, and sender-constraint checks pass. Actix transport code belongs
+in `nazo-http-actix` or the server composition package and calls this core API;
+the core crate must not acquire an Actix dependency.
 
-Actix Web:
-
-```rust
-use actix_web::{get, web};
-use nazo_oauth_server::resource_server::{
-    ActixVerifiedAccessToken, ResourceServerVerifier,
-};
-
-#[get("/orders")]
-async fn orders(token: ActixVerifiedAccessToken) -> String {
-    token.0.subject
-}
-
-fn configure(cfg: &mut web::ServiceConfig, verifier: ResourceServerVerifier) {
-    cfg.app_data(web::Data::new(verifier)).service(orders);
-}
-```
-
-Tower and Axum:
-
-```rust
-use nazo_oauth_server::resource_server::{
-    ResourceServerVerifier, TowerResourceServerLayer,
-};
-
-fn layer(verifier: ResourceServerVerifier) -> TowerResourceServerLayer {
-    TowerResourceServerLayer::new(verifier)
-}
-```
-
-tonic:
-
-```rust
-use nazo_oauth_server::resource_server::{
-    authorize_tonic_request, ResourceServerVerifier,
-};
-
-fn guard<T>(verifier: &ResourceServerVerifier, request: &mut tonic::Request<T>) {
-    let claims = authorize_tonic_request(verifier, request).expect("gRPC token must be valid");
-    assert!(!claims.subject.is_empty());
-}
-```
+Historical Axum/Tower and tonic adapters have been deleted. They are not
+supported public surfaces and must not be restored as dormant feature flags.
 
 ## DPoP Boundary
 
@@ -114,7 +82,7 @@ fn guard<T>(verifier: &ResourceServerVerifier, request: &mut tonic::Request<T>) 
 For HTTP integrations, `authorize_dpop_http_request` reads the `Authorization: DPoP ...` and `DPoP` headers, verifies the proof, inserts both `VerifiedSenderConstraintProof` and `VerifiedAccessToken` into request extensions, and rejects invalid proof material before token binding is evaluated:
 
 ```rust
-use nazo_oauth_server::resource_server::{
+use nazo_resource_server::{
     authorize_dpop_http_request, DpopProofVerifier, DpopProofVerifierConfig,
     ResourceServerVerifier,
 };
@@ -158,9 +126,10 @@ JWT validation is the local fast path. Resource servers may fall back to token i
 
 Fallback must not override a local protocol invariant failure such as wrong issuer, wrong audience, wrong `typ`, unsupported algorithm, or sender-constraint mismatch.
 
-## Framework Adapter Contract
+## HTTP Integration Contract
 
-Actix Web, Axum/Tower, and tonic adapters all call the same core verifier and preserve these invariants:
+Every HTTP integration that calls the core verifier must preserve these
+invariants:
 
 - Reject query-string access tokens.
 - Reject requests that present multiple token transport methods.
