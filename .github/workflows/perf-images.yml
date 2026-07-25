@@ -33,7 +33,7 @@ jobs:
             containerfile: perf/keyset/Containerfile
             image: nazoauth-runtime-keyset:ci
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Build image
         run: docker build --pull --file "${{ matrix.containerfile }}" --tag "${{ matrix.image }}" .
