@@ -46,7 +46,7 @@ jobs:
           test -n "$TRUSTED_TARGET_ORIGIN"
           test "$TARGET_ORIGIN" = "$TRUSTED_TARGET_ORIGIN"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 

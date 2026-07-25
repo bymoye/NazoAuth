@@ -74,7 +74,7 @@ jobs:
           test -n "$TRUSTED_TARGET_ISSUER"
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -506,7 +506,7 @@ jobs:
           test -n "$TRUSTED_TARGET_ISSUER"
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
