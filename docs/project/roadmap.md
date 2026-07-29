@@ -94,16 +94,15 @@ The project separates three surfaces:
   introspection fallback guidance.
 - Policy and claims extension points run only after protocol invariants pass.
 
-## Outside Default Scope
+## Conditional or Excluded Scope
 
-The following capabilities are not part of the default authorization-server
-core and are not advertised in discovery metadata:
+Stable protocol handlers may be active together, but the following surfaces
+remain prerequisite-gated or intentionally bounded:
 
-- Dynamic Client Registration / RFC 7591 and Client Configuration Management
-  / RFC 7592 unless `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`; public
-  registration deployments should protect `/register` with an initial access
-  token.
-- Device Authorization Grant.
+- Dynamic Client Registration / RFC 7591 and RFC 7592 require a configured
+  initial access token and issue baseline client policy only.
+- Device Authorization Grant server support is active on new databases, while
+  client grant and cross-device authority remain explicit.
 - External-token, refresh-token, or ID-token Token Exchange profiles.
 - Request-level dynamic tenant or issuer routing.
 - RFC 9701 encrypted introspection responses outside the signed-introspection

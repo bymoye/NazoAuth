@@ -53,6 +53,12 @@ pub struct ConsentPayload {
     pub pushed_request_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed_request_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_authorization_response_required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_management_allowed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_code_ttl_seconds: Option<u64>,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }

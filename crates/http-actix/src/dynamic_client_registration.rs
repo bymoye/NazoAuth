@@ -420,12 +420,14 @@ pub async fn client_configuration_put(
         }
     };
     let issued_secret = prepared.issued_secret.clone();
+    let mut registration = prepared.registration.clone();
+    registration.security_policy = current.security_policy.clone();
     let updated = OAuthClient {
         id: current.id,
         tenant_id: current.tenant_id,
         realm_id: current.realm_id,
         organization_id: current.organization_id,
-        registration: prepared.registration.clone(),
+        registration,
         require_mtls_bound_tokens: prepared.require_mtls_bound_tokens,
         is_active: current.is_active,
     };

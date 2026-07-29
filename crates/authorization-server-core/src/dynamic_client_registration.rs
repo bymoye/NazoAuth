@@ -5,8 +5,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    ClientPresentationMetadata, CreateClientRequest, OAuthClient, PreparedClientRegistration,
-    parse_scope,
+    ClientPresentationMetadata, ClientSecurityPolicy, CreateClientRequest, OAuthClient,
+    PreparedClientRegistration, parse_scope,
 };
 
 pub type DynamicRegistrationFuture<'a, T> =
@@ -552,6 +552,7 @@ impl PreparedDynamicClientRegistration {
             authorization_signed_response_alg: self.authorization_signed_response_alg,
             authorization_encrypted_response_alg: self.authorization_encrypted_response_alg,
             authorization_encrypted_response_enc: self.authorization_encrypted_response_enc,
+            security_policy: ClientSecurityPolicy::default(),
         }
     }
 }

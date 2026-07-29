@@ -2006,6 +2006,7 @@ async fn authorization_response_redirect_emits_signed_jarm_response() {
             error: None,
             state: Some("state-123"),
             oidc_sid: None,
+            client_policy: None,
         },
         AuthorizationResponseProtection::default(),
     )
@@ -2053,6 +2054,7 @@ async fn authorization_response_redirect_jarm_profile_signs_without_response_mod
             error: None,
             state: Some("state-456"),
             oidc_sid: None,
+            client_policy: None,
         },
         AuthorizationResponseProtection::default(),
     )
@@ -2098,6 +2100,7 @@ async fn authorization_response_redirect_signs_then_encrypts_jarm_for_client_pol
             error: None,
             state: Some("encrypted-state"),
             oidc_sid: None,
+            client_policy: None,
         },
         AuthorizationResponseProtection {
             signing_alg: Some("RS256"),
@@ -2159,6 +2162,7 @@ async fn authorization_response_crypto_failure_never_falls_back_to_plain_query()
                 error: None,
                 state: Some("must-not-leak-state"),
                 oidc_sid: None,
+                client_policy: None,
             },
             protection,
         )

@@ -341,6 +341,11 @@ impl ParTestFixture {
             keyset: self.keyset.clone(),
         }
     }
+
+    fn without_module(mut self, module: nazo_runtime_modules::ModuleId) -> Self {
+        self.authorization = self.authorization.without_module(module);
+        self
+    }
 }
 
 struct LiveParFixture {
@@ -830,8 +835,10 @@ async fn par_rejects_malformed_or_ambiguous_authorization_parameters_before_clie
 
 #[actix_web::test]
 async fn par_rejects_disabled_request_object_before_client_lookup() {
+    let state = par_state_without_live_services()
+        .without_module(nazo_runtime_modules::ModuleId::RequestObjects);
     let response = par_after_rate_limit(
-        &par_state_without_live_services(),
+        &state,
         par_form_request(),
         Bytes::from_static(b"client_id=client-a&response_type=code&request=jwt"),
     )

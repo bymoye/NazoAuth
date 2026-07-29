@@ -25,7 +25,7 @@ use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
-use crate::settings::Settings;
+use crate::settings::{AuthorizationServerProfile, Settings};
 use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::HeaderValue;
@@ -89,7 +89,7 @@ pub(crate) struct CibaHttpConfig {
     automated_decision_token: Option<Box<str>>,
     ciba_fapi_profile: bool,
     ciba_fapi2_hardening: bool,
-    authorization_fapi2_hardening: bool,
+    authorization_server_profile: AuthorizationServerProfile,
 }
 
 impl From<&Settings> for CibaHttpConfig {
@@ -114,10 +114,7 @@ impl From<&Settings> for CibaHttpConfig {
                 .protocol
                 .ciba_security_profile
                 .requires_fapi2_hardening(),
-            authorization_fapi2_hardening: settings
-                .protocol
-                .authorization_server_profile
-                .requires_fapi2_security(),
+            authorization_server_profile: settings.protocol.authorization_server_profile,
         }
     }
 }
@@ -321,13 +318,6 @@ pub(crate) async fn backchannel_authentication(
             );
         }
     };
-    if !client_supports_grant(&client, CIBA_GRANT_TYPE) {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "unauthorized_client",
-            "该客户端未启用 CIBA 授权类型.",
-        );
-    }
     let auth_request = client_auth_request_facts(&req, &config.trusted_proxy_cidrs);
     let assertion = match authenticate_client_with_dependencies(
         &authorization_service,
@@ -353,6 +343,24 @@ pub(crate) async fn backchannel_authentication(
     .await
     {
         return token_management_auth_error(error);
+    }
+    if !client_supports_grant(&client, CIBA_GRANT_TYPE) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "该客户端未启用 CIBA 授权类型.",
+        );
+    }
+    if !config
+        .authorization_server_profile
+        .effective_client_policy(&client)
+        .allow_cross_device_flows
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "该客户端未授权使用跨设备流程.",
+        );
     }
     if let Err(response) = validate_ciba_token_request_profile(
         &config,
@@ -1092,7 +1100,11 @@ fn validate_ciba_token_request_profile(
     client: &ClientRow,
     auth_method: &str,
 ) -> Result<(), HttpResponse> {
-    let profile = if config.authorization_fapi2_hardening {
+    let profile = if config
+        .authorization_server_profile
+        .effective_client_policy(client)
+        .requires_fapi2_security()
+    {
         SecurityProfile::Fapi2Security
     } else {
         SecurityProfile::Baseline
@@ -1488,6 +1500,19 @@ pub(crate) async fn token_ciba(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
             "CIBA is not enabled.",
+            false,
+        );
+    }
+    if !issuance
+        .config
+        .authorization_server_profile()
+        .effective_client_policy(client)
+        .allow_cross_device_flows
+    {
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "This client is not authorized for cross-device flows.",
             false,
         );
     }

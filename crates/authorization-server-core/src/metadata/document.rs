@@ -66,6 +66,7 @@ const BASELINE_ACR_VALUE: &str = "1";
 /// Authorization-server profile choices that affect standard metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataAuthorizationServerProfile {
+    Composable,
     Oauth2Baseline,
     Fapi2Security,
     Fapi2MessageSigningAuthorizationRequest,
@@ -75,7 +76,7 @@ pub enum MetadataAuthorizationServerProfile {
 
 impl MetadataAuthorizationServerProfile {
     const fn requires_fapi2_security(self) -> bool {
-        !matches!(self, Self::Oauth2Baseline)
+        !matches!(self, Self::Composable | Self::Oauth2Baseline)
     }
 
     const fn requires_signed_authorization_request(self) -> bool {
@@ -87,7 +88,10 @@ impl MetadataAuthorizationServerProfile {
     }
 
     const fn requires_signed_introspection(self) -> bool {
-        matches!(self, Self::Fapi2MessageSigningIntrospection)
+        matches!(
+            self,
+            Self::Composable | Self::Fapi2MessageSigningIntrospection
+        )
     }
 }
 

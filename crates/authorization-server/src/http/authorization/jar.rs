@@ -67,5 +67,6 @@ fn signed_request_object_requires_integrity_protected_parameters(
         || context
             .config
             .profile
-            .requires_signed_authorization_request()
+            .effective_client_policy(client)
+            .require_signed_authorization_request
 }

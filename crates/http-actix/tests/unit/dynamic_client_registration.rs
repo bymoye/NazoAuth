@@ -201,6 +201,10 @@ impl DynamicRegistrationRequestGuard for FakeGuard {
 }
 
 fn endpoint(enabled: bool) -> DynamicRegistrationEndpoint {
+    endpoint_with_store(enabled, FakeStore::new())
+}
+
+fn endpoint_with_store(enabled: bool, store: FakeStore) -> DynamicRegistrationEndpoint {
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
             issuer: "https://issuer.example".to_owned(),
@@ -211,7 +215,7 @@ fn endpoint(enabled: bool) -> DynamicRegistrationEndpoint {
             client_ip_header_mode: ClientIpHeaderMode::None,
             trusted_proxy_cidrs: Vec::new(),
         },
-        Arc::new(FakeStore::new()),
+        Arc::new(store),
         Arc::new(FakeSecurity),
         DynamicRegistrationSecurityServices::new(
             Arc::new(FakeSecurity),
@@ -430,6 +434,55 @@ async fn registration_and_management_methods_keep_wire_contracts() {
 }
 
 #[actix_web::test]
+async fn client_configuration_update_preserves_server_managed_security_policy() {
+    let store = FakeStore::new();
+    {
+        let mut guard = store.client.lock().expect("client lock");
+        let current = guard.as_mut().expect("fixture client");
+        current
+            .security_policy
+            .as_mut()
+            .expect("explicit fixture policy")
+            .session_management = true;
+    }
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
+            .configure(configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &service,
+        test::TestRequest::put()
+            .uri("/register/client-test")
+            .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+            .set_json(json!({
+                "client_id": "client-test",
+                "client_secret": "current-secret",
+                "client_name": "Updated Client",
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored = store
+        .client
+        .lock()
+        .expect("client lock")
+        .clone()
+        .expect("updated client");
+    assert!(
+        stored
+            .security_policy
+            .as_ref()
+            .is_some_and(|policy| policy.session_management)
+    );
+}
+
+#[actix_web::test]
 async fn client_configuration_read_preserves_authenticated_registration_token() {
     let service = test::init_service(
         App::new()
@@ -537,6 +590,7 @@ fn client() -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
+            security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
         },
         require_mtls_bound_tokens: false,
         is_active: true,

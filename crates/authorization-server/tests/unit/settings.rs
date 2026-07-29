@@ -140,8 +140,8 @@ fn fapi_profiles_default_to_required_dpop_nonce_policy() {
             DpopNoncePolicy::Optional
         );
         assert!(
-            settings.protocol.require_pushed_authorization_requests,
-            "{profile} must inherit FAPI2 PAR enforcement"
+            !settings.protocol.require_pushed_authorization_requests,
+            "{profile} PAR enforcement is resolved per client"
         );
         assert!(
             settings
@@ -151,6 +151,15 @@ fn fapi_profiles_default_to_required_dpop_nonce_policy() {
             "{profile} must inherit FAPI2 Security controls"
         );
     }
+}
+
+#[test]
+fn explicit_global_par_requirement_remains_supported() {
+    let config =
+        ConfigSource::from_pairs_for_test([("REQUIRE_PUSHED_AUTHORIZATION_REQUESTS", "true")]);
+    let settings = Settings::from_config(&config).unwrap();
+
+    assert!(settings.protocol.require_pushed_authorization_requests);
 }
 
 #[test]

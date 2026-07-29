@@ -5,7 +5,9 @@ use nazo_http_actix::{MetadataEndpointConfig, MetadataSnapshot, MetadataSnapshot
 use nazo_key_management::{KeyManager, signing_algorithm_name};
 
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
-use crate::settings::{AuthorizationServerProfile, CibaSecurityProfile, Settings, SubjectType};
+#[cfg(test)]
+use crate::settings::AuthorizationServerProfile;
+use crate::settings::{CibaSecurityProfile, Settings, SubjectType};
 
 #[derive(Clone)]
 pub(crate) struct MetadataConfig {
@@ -44,23 +46,7 @@ impl From<&Settings> for MetadataConfig {
             issuer: endpoint.issuer.clone(),
             mtls_endpoint_base_url: endpoint.mtls_endpoint_base_url.clone(),
             mtls_enabled: !endpoint.trusted_proxy_cidrs.is_empty(),
-            authorization_server_profile: match protocol.authorization_server_profile {
-                AuthorizationServerProfile::Oauth2Baseline => {
-                    MetadataAuthorizationServerProfile::Oauth2Baseline
-                }
-                AuthorizationServerProfile::Fapi2Security => {
-                    MetadataAuthorizationServerProfile::Fapi2Security
-                }
-                AuthorizationServerProfile::Fapi2MessageSigningAuthzRequest => {
-                    MetadataAuthorizationServerProfile::Fapi2MessageSigningAuthorizationRequest
-                }
-                AuthorizationServerProfile::Fapi2MessageSigningJarm => {
-                    MetadataAuthorizationServerProfile::Fapi2MessageSigningJarm
-                }
-                AuthorizationServerProfile::Fapi2MessageSigningIntrospection => {
-                    MetadataAuthorizationServerProfile::Fapi2MessageSigningIntrospection
-                }
-            },
+            authorization_server_profile: MetadataAuthorizationServerProfile::Composable,
             ciba_security_profile: match protocol.ciba_security_profile {
                 CibaSecurityProfile::FapiCibaId1 => CibaMetadataProfile::FapiCiba,
                 CibaSecurityProfile::Fapi2Ciba => CibaMetadataProfile::Fapi2Ciba,
@@ -71,10 +57,7 @@ impl From<&Settings> for MetadataConfig {
             },
             pairwise_subject_enabled: protocol.pairwise_subject_secret.is_some(),
             protected_resource_identifier: protocol.protected_resource_identifier.to_owned(),
-            require_pushed_authorization_requests: protocol.require_pushed_authorization_requests
-                || protocol
-                    .authorization_server_profile
-                    .requires_fapi2_security(),
+            require_pushed_authorization_requests: protocol.require_pushed_authorization_requests,
         }
     }
 }

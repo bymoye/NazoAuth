@@ -31,6 +31,11 @@ impl AuthorizationTestFixture {
         )
     }
 
+    pub(crate) fn without_module(mut self, module: ModuleId) -> Self {
+        self.enabled_modules.remove(&module);
+        self
+    }
+
     pub(crate) fn rebind_storage(
         &self,
         database: nazo_postgres::DbPool,

@@ -99,16 +99,10 @@ async fn authorize_request_with_context(
     let mut pending_external_request_uri = None;
     if let Some(request_uri) = q.get("request_uri").cloned() {
         if !is_pushed_authorization_request_uri(&request_uri) {
-            if context.config.profile.requires_fapi2_security()
-                || !crate::http::authorization::accepts_module(
-                    context,
-                    nazo_runtime_modules::ModuleId::RequestObjects,
-                )
-                || !crate::http::authorization::accepts_module(
-                    context,
-                    nazo_runtime_modules::ModuleId::DynamicClientRegistration,
-                )
-            {
+            if !crate::http::authorization::accepts_module(
+                context,
+                nazo_runtime_modules::ModuleId::RequestObjects,
+            ) {
                 consumed_request_uri_error = Some("request_uri_not_supported");
             } else {
                 pending_external_request_uri = Some(request_uri);
@@ -135,12 +129,9 @@ async fn authorize_request_with_context(
                 {
                     consumed_request_uri_error = Some("invalid_request_uri");
                 } else {
-                    let outer_parameters_are_fapi_invalid =
-                        context.config.profile.requires_fapi2_security()
-                            && !outer_request_uri_parameters_are_fapi_compliant(q);
                     let outer_parameters_mismatch =
                         !outer_request_uri_parameters_match_pushed(q, &pushed.params);
-                    if outer_parameters_are_fapi_invalid || outer_parameters_mismatch {
+                    if outer_parameters_mismatch {
                         consumed_request_uri_error = Some("invalid_request");
                         *q = pushed.params;
                     } else {
@@ -224,6 +215,17 @@ async fn authorize_request_with_context(
             "该客户端未启用 authorization_code 授权类型.",
         );
     }
+    let client_policy = context.config.profile.effective_client_policy(&client);
+    if client_policy.requires_fapi2_security()
+        && used_pushed_authorization_request
+        && !outer_request_uri_parameters_are_fapi_compliant(&original_authorization_query)
+    {
+        consumed_request_uri_error = Some("invalid_request");
+    }
+    if client_policy.requires_fapi2_security() && pending_external_request_uri.is_some() {
+        consumed_request_uri_error = Some("request_uri_not_supported");
+        pending_external_request_uri = None;
+    }
     if let Some(request_uri) = pending_external_request_uri.as_deref() {
         if q.contains_key("request") || !client.request_uris.iter().any(|uri| uri == request_uri) {
             consumed_request_uri_error = Some("invalid_request_uri");
@@ -242,6 +244,7 @@ async fn authorize_request_with_context(
             consumed_request_uri_error = Some("request_uri_not_supported");
         }
     }
+    let direct_request_object_present = q.contains_key("request");
     let request_object_error = apply_request_object_with_context(context, q, &client)
         .await
         .err();
@@ -290,6 +293,17 @@ async fn authorize_request_with_context(
     if let Some(error) = consumed_request_uri_error {
         return authorization_oauth_error_redirect(context, &redirect_uri, error, q).await;
     }
+    if client_policy.requires_fapi2_security() && !used_pushed_authorization_request {
+        return authorization_oauth_error_redirect(context, &redirect_uri, "invalid_request", q)
+            .await;
+    }
+    if client_policy.require_signed_authorization_request
+        && !used_pushed_authorization_request
+        && !direct_request_object_present
+    {
+        return authorization_oauth_error_redirect(context, &redirect_uri, "invalid_request", q)
+            .await;
+    }
     if let Some(error_response) = request_object_error {
         if let Some(error) = oauth_json_error(&error_response) {
             return authorization_oauth_error_redirect(context, &redirect_uri, &error, q).await;
@@ -318,14 +332,12 @@ async fn authorize_request_with_context(
                 context,
                 nazo_runtime_modules::ModuleId::NativeSso,
             ),
-            form_post: !context.config.profile.requires_fapi2_security(),
+            form_post: !client_policy.requires_fapi2_security(),
         },
         AuthorizationProfilePolicy {
-            signed_authorization_response_required: context
-                .config
-                .profile
-                .requires_signed_authorization_response(),
-            pkce_required: context.config.profile.requires_fapi2_security()
+            signed_authorization_response_required: client_policy
+                .require_signed_authorization_response,
+            pkce_required: client_policy.requires_fapi2_security()
                 || client.require_dpop_bound_tokens
                 || client.require_mtls_bound_tokens
                 || dpop_jkt.is_some()
@@ -376,6 +388,16 @@ async fn authorize_request_with_context(
                     error: Some("login_required"),
                     state: q.get("state").map(String::as_str),
                     oidc_sid: None,
+                    client_policy: Some(AuthorizationResponseClientPolicy {
+                        signed_response_required: client_policy
+                            .require_signed_authorization_response,
+                        session_management_allowed: client_policy.session_management,
+                        ttl_seconds: if client_policy.requires_fapi2_security() {
+                            context.config.auth_code_ttl_seconds.min(60)
+                        } else {
+                            context.config.auth_code_ttl_seconds
+                        },
+                    }),
                 },
             )
             .await;
@@ -487,6 +509,11 @@ async fn authorize_request_with_context(
     }
     let now = Utc::now();
     let request_id = Uuid::now_v7().to_string();
+    let authorization_code_ttl_seconds = if client_policy.requires_fapi2_security() {
+        context.config.auth_code_ttl_seconds.min(60)
+    } else {
+        context.config.auth_code_ttl_seconds
+    };
     let payload = ConsentPayload {
         request_id: request_id.clone(),
         user_id: session.user.id(),
@@ -514,8 +541,13 @@ async fn authorize_request_with_context(
         mtls_x5t_s256,
         pushed_request_uri: pending_pushed_request_uri,
         pushed_request_digest: pending_pushed_request_digest,
+        signed_authorization_response_required: Some(
+            client_policy.require_signed_authorization_response,
+        ),
+        session_management_allowed: Some(client_policy.session_management),
+        authorization_code_ttl_seconds: Some(authorization_code_ttl_seconds),
         issued_at: now,
-        expires_at: now + Duration::seconds(context.config.auth_code_ttl_seconds as i64),
+        expires_at: now + Duration::seconds(authorization_code_ttl_seconds as i64),
     };
     if normalized.prompt.none {
         if !crate::domain::oidc_claims::user_claims_are_covered_by_scopes(
@@ -563,7 +595,7 @@ async fn authorize_request_with_context(
     }
     if let Err(error) = context
         .service
-        .store_consent(&request_id, &payload, context.config.auth_code_ttl_seconds)
+        .store_consent(&request_id, &payload, authorization_code_ttl_seconds)
         .await
     {
         tracing::warn!(%error, "failed to persist consent request");
@@ -599,15 +631,10 @@ fn runtime_authorization_capability_error(
     context: &AuthorizationRequestContext<'_>,
     parameters: &HashMap<String, String>,
 ) -> Option<HttpResponse> {
-    if (!crate::http::authorization::accepts_module(
+    if !crate::http::authorization::accepts_module(
         context,
         nazo_runtime_modules::ModuleId::RequestObjects,
-    ) || (!context.config.enable_request_object
-        && !context
-            .config
-            .profile
-            .requires_signed_authorization_request()))
-        && parameters.contains_key("request")
+    ) && parameters.contains_key("request")
     {
         return Some(oauth_error(
             StatusCode::BAD_REQUEST,
@@ -698,6 +725,7 @@ pub(crate) async fn authorization_oauth_error_redirect(
             error: Some(error),
             state: q.get("state").map(String::as_str),
             oidc_sid: None,
+            client_policy: None,
         },
     )
     .await
@@ -711,24 +739,63 @@ pub(crate) struct AuthorizationResponseRedirect<'a> {
     pub(crate) error: Option<&'a str>,
     pub(crate) state: Option<&'a str>,
     pub(crate) oidc_sid: Option<&'a str>,
+    pub(crate) client_policy: Option<AuthorizationResponseClientPolicy>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AuthorizationResponseClientPolicy {
+    pub(crate) signed_response_required: bool,
+    pub(crate) session_management_allowed: bool,
+    pub(crate) ttl_seconds: u64,
 }
 
 pub(crate) async fn authorization_response_redirect_with_context(
     context: &AuthorizationRequestContext<'_>,
     input: AuthorizationResponseRedirect<'_>,
 ) -> HttpResponse {
-    let signed_response_required = context
-        .config
-        .profile
-        .requires_signed_authorization_response();
+    let mut client = None;
+    let response_policy = if let Some(policy) = input.client_policy {
+        policy
+    } else {
+        client = if input.client_id.is_empty() {
+            None
+        } else {
+            match context.service.client_by_id(input.client_id).await {
+                Ok(Some(client)) if client.is_active => Some(client),
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(%error, client_id_hash = %blake3_hex(input.client_id), "failed to load authorization response client policy");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "authorization response policy is unavailable.",
+                    );
+                }
+            }
+        };
+        let client_policy = client.as_ref().map_or_else(
+            || context.config.profile.legacy_client_policy(),
+            |client| context.config.profile.effective_client_policy(client),
+        );
+        AuthorizationResponseClientPolicy {
+            signed_response_required: client_policy.require_signed_authorization_response,
+            session_management_allowed: client_policy.session_management,
+            ttl_seconds: if client_policy.requires_fapi2_security() {
+                context.config.auth_code_ttl_seconds.min(60)
+            } else {
+                context.config.auth_code_ttl_seconds
+            },
+        }
+    };
     let jarm_available = crate::http::authorization::permits_existing_module_transaction(
         context,
         nazo_runtime_modules::ModuleId::Jarm,
     );
-    let session_management_available = crate::http::authorization::accepts_module(
-        context,
-        nazo_runtime_modules::ModuleId::SessionManagement,
-    );
+    let session_management_available = response_policy.session_management_allowed
+        && crate::http::authorization::accepts_module(
+            context,
+            nazo_runtime_modules::ModuleId::SessionManagement,
+        );
     let plan = match plan_authorization_response(AuthorizationResponsePolicyInput {
         issuer: context.config.issuer.as_ref(),
         redirect_uri: input.redirect_uri,
@@ -737,8 +804,8 @@ pub(crate) async fn authorization_response_redirect_with_context(
         code: input.code,
         error: input.error,
         state: input.state,
-        ttl_seconds: context.config.auth_code_ttl_seconds as i64,
-        signed_response_required,
+        ttl_seconds: response_policy.ttl_seconds as i64,
+        signed_response_required: response_policy.signed_response_required,
         jarm_available,
         session_management_available,
     }) {
@@ -769,28 +836,38 @@ pub(crate) async fn authorization_response_redirect_with_context(
     };
     if matches!(plan, AuthorizationResponsePlan::Jarm(_)) {
         debug_assert!(jarm_available);
-        let client = match context.service.client_by_id(input.client_id).await {
-            Ok(Some(client)) if client.is_active => client,
-            Ok(_) => {
-                tracing::warn!(client_id_hash = %blake3_hex(input.client_id), "JARM client is missing or inactive");
-                return oauth_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "server_error",
-                    "authorization response protection failed.",
-                );
-            }
-            Err(error) => {
-                tracing::warn!(%error, client_id_hash = %blake3_hex(input.client_id), "failed to load JARM client response policy");
-                return oauth_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "server_error",
-                    "authorization response protection failed.",
-                );
-            }
+        let client = match client {
+            Some(client) => Some(client),
+            None if input.client_id.is_empty() => None,
+            None => match context.service.client_by_id(input.client_id).await {
+                Ok(Some(client)) if client.is_active => Some(client),
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(%error, client_id_hash = %blake3_hex(input.client_id), "failed to load JARM client");
+                    return oauth_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "authorization response protection failed.",
+                    );
+                }
+            },
+        };
+        let Some(client) = client else {
+            tracing::warn!(client_id_hash = %blake3_hex(input.client_id), "JARM client is missing or inactive");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "authorization response protection failed.",
+            );
         };
         let protection = AuthorizationResponseProtection::from(&client);
-        return authorization_response_redirect_with_protection_context(context, input, protection)
-            .await;
+        return authorization_response_redirect_with_protection_context(
+            context,
+            input,
+            protection,
+            response_policy.ttl_seconds as i64,
+        )
+        .await;
     }
     let (plain, form_post) = match plan {
         AuthorizationResponsePlan::Plain(plain) => (plain, false),
@@ -841,8 +918,10 @@ async fn authorization_response_redirect_with_protection_context(
     context: &AuthorizationRequestContext<'_>,
     input: AuthorizationResponseRedirect<'_>,
     protection: AuthorizationResponseProtection<'_>,
+    ttl_seconds: i64,
 ) -> HttpResponse {
-    let result = protected_authorization_response_jwt(context, &input, protection).await;
+    let result =
+        protected_authorization_response_jwt(context, &input, protection, ttl_seconds).await;
     authorization_response_jwt_result(input.redirect_uri, result)
 }
 
@@ -850,6 +929,7 @@ async fn protected_authorization_response_jwt(
     context: &AuthorizationRequestContext<'_>,
     input: &AuthorizationResponseRedirect<'_>,
     protection: AuthorizationResponseProtection<'_>,
+    ttl_seconds: i64,
 ) -> anyhow::Result<String> {
     let signed = context
         .service
@@ -859,7 +939,7 @@ async fn protected_authorization_response_jwt(
             code: input.code,
             error: input.error,
             state: input.state,
-            ttl: context.config.auth_code_ttl_seconds as i64,
+            ttl: ttl_seconds,
             signing_algorithm: protection.signing_alg,
         })
         .await

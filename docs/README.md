@@ -24,6 +24,7 @@ set can be scanned from one place.
 | OpenID Connect integration | [integration/openid-connect.md](integration/openid-connect.md) |
 | Chinese OpenID Connect integration | [integration/openid-connect.zh-CN.md](integration/openid-connect.zh-CN.md) |
 | Protocol and profile status | [protocol/profile-matrix.md](protocol/profile-matrix.md) |
+| Composable capability policy | [protocol/composable-capability-policy.md](protocol/composable-capability-policy.md) |
 | Certification and conformance evidence | [conformance/certification.md](conformance/certification.md) |
 | OIDF conformance evidence | [conformance/README.md](conformance/README.md) |
 | Performance benchmark overview | [performance/performance-capacity-curve.md](performance/performance-capacity-curve.md) |
@@ -84,6 +85,7 @@ set can be scanned from one place.
 
 | Document | Role |
 | --- | --- |
+| [protocol/composable-capability-policy.md](protocol/composable-capability-policy.md) | Server defaults, per-client authority, compatible policy composition, and upgrade semantics. |
 | [protocol/profile-matrix.md](protocol/profile-matrix.md) | Runtime profile capability matrix. |
 | [protocol/rfc-compliance-matrix.md](protocol/rfc-compliance-matrix.md) | OAuth, OAuth 2.1, OIDC, and FAPI best-practice matrix. |
 | [protocol/oauth2-1-self-audit.md](protocol/oauth2-1-self-audit.md) | OAuth 2.1 and best-practice self-audit. |

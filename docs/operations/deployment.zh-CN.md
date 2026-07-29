@@ -40,9 +40,11 @@ DATABASE_URL: "postgresql://<user>:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 CLIENT_SECRET_PEPPER: "<至少 32 字节且长期稳定的随机秘密>"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
+
+新部署不需要选择单一的全局授权服务器 profile；提升后的行为由运行时模块与
+显式的按客户端 `security_policy` 配置。
 
 该文件不得进入版本控制。`PUBLIC_BASE_URL` 必须是用户实际访问的 HTTPS origin，
 且不带结尾斜杠。`CLIENT_SECRET_PEPPER` 在重启和升级后必须保持不变。

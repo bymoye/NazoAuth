@@ -133,6 +133,7 @@ fn create_client_request(client_name: &str) -> CreateClientRequest {
         authorization_encrypted_response_enc: None,
         subject_type: None,
         sector_identifier_uri: None,
+        security_policy: nazo_auth::ClientSecurityPolicy::default(),
     }
 }
 
@@ -416,6 +417,7 @@ fn empty_patch() -> PatchClientRequest {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
+        security_policy: None,
         is_active: None,
         subject_type: None,
         sector_identifier_uri: None,

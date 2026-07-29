@@ -258,7 +258,11 @@ pub async fn run() -> anyhow::Result<()> {
         &valkey_connection,
     )));
     #[cfg(not(test))]
-    if settings.modules.enable_ciba {
+    if nazo_auth::module_admissible(
+        runtime_modules.registry.snapshot().as_ref(),
+        nazo_runtime_modules::ModuleId::Ciba,
+        nazo_auth::CapabilityAdmission::NewRequest,
+    ) {
         spawn_ciba_ping_delivery_worker(CibaPingDeliveryWorker::new(
             nazo_valkey::CibaStore::new(&valkey_connection),
             &settings.ciba.ciba_notification_private_origins,

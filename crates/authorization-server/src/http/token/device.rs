@@ -291,6 +291,17 @@ async fn device_authorization_with_admission(
     {
         return response;
     }
+    if !config
+        .authorization_server_profile
+        .effective_client_policy(&client)
+        .allow_cross_device_flows
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "该客户端未授权使用跨设备流程.",
+        );
+    }
     let payload =
         match device_authorization_request_payload(&config, &client, &form, module_admissible) {
             Ok(payload) => payload,

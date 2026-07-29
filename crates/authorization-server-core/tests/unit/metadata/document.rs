@@ -446,6 +446,39 @@ fn fapi_profiles_publish_only_the_selected_security_contract() {
 }
 
 #[test]
+fn composable_metadata_advertises_the_union_of_supported_client_policies() {
+    let metadata = authorization_server_metadata(
+        AuthorizationServerMetadataInput {
+            profile: MetadataAuthorizationServerProfile::Composable,
+            ..input()
+        },
+        &snapshot([ModuleId::Jarm, ModuleId::RequestObjects]),
+    );
+
+    assert_eq!(
+        metadata["response_modes_supported"],
+        json!(["query", "form_post", "jwt"])
+    );
+    assert_eq!(
+        metadata["token_endpoint_auth_methods_supported"],
+        json!([
+            "client_secret_basic",
+            "client_secret_post",
+            "private_key_jwt",
+            "none"
+        ])
+    );
+    assert_eq!(
+        metadata["request_object_signing_alg_values_supported"],
+        json!(["EdDSA", "RS256", "ES256", "PS256"])
+    );
+    assert_eq!(
+        metadata["introspection_signing_alg_values_supported"],
+        json!(["RS256"])
+    );
+}
+
+#[test]
 fn fapi_external_request_uri_is_not_advertised_and_other_configuration_is_preserved() {
     const ACTIVE_PS256: &[&str] = &["PS256"];
     const RESPONSE: &[&str] = &["PS256", "EdDSA"];

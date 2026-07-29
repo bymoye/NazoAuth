@@ -67,6 +67,7 @@ fn client(tenant: TenantContext) -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
+            security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
         },
         require_mtls_bound_tokens: false,
         is_active: true,
@@ -182,6 +183,7 @@ async fn dynamic_profile_metadata_round_trips_through_postgres() {
     assert_eq!(persisted.request_uris, client.request_uris);
     assert_eq!(persisted.initiate_login_uri, client.initiate_login_uri);
     assert_eq!(persisted.presentation, client.presentation);
+    assert_eq!(persisted.security_policy, client.security_policy);
     assert_eq!(
         persisted.backchannel_token_delivery_mode,
         client.backchannel_token_delivery_mode

@@ -340,6 +340,7 @@ fn registration(client_id: &str) -> ValidatedClientRegistration {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
+        security_policy: None,
     }
 }
 
@@ -384,6 +385,9 @@ fn consent(user_id: Uuid, request_uri: Option<&str>) -> ConsentPayload {
         mtls_x5t_s256: None,
         pushed_request_uri: request_uri.map(str::to_owned),
         pushed_request_digest: None,
+        signed_authorization_response_required: None,
+        session_management_allowed: None,
+        authorization_code_ttl_seconds: None,
         issued_at,
         expires_at: issued_at + Duration::minutes(10),
     }

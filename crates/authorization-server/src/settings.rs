@@ -258,9 +258,8 @@ impl Settings {
         if authorization_server_profile.requires_fapi2_security() && par_ttl_seconds >= 600 {
             bail!("PAR_TTL_SECONDS must be less than 600 for FAPI2 profiles");
         }
-        let require_pushed_authorization_requests = config
-            .bool("REQUIRE_PUSHED_AUTHORIZATION_REQUESTS", false)?
-            || authorization_server_profile.requires_fapi2_security();
+        let require_pushed_authorization_requests =
+            config.bool("REQUIRE_PUSHED_AUTHORIZATION_REQUESTS", false)?;
         let device_authorization_ttl_seconds =
             config.parse("DEVICE_AUTHORIZATION_TTL_SECONDS", 600)?;
         if device_authorization_ttl_seconds == 0 {

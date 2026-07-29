@@ -85,7 +85,11 @@ impl SessionManagementOperations for ServerSessionManagementOperations {
                     SessionManagementError::SessionLookupUnavailable
                 })?;
             Ok(client.is_some_and(|client| {
-                client_allows_origin(client.is_active, &client.redirect_uris, origin)
+                client
+                    .security_policy
+                    .as_ref()
+                    .is_none_or(|policy| policy.session_management)
+                    && client_allows_origin(client.is_active, &client.redirect_uris, origin)
             }))
         })
     }

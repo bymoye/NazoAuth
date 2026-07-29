@@ -69,6 +69,7 @@ fn create_request() -> CreateClientRequest {
         authorization_encrypted_response_enc: None,
         subject_type: None,
         sector_identifier_uri: None,
+        security_policy: nazo_auth::ClientSecurityPolicy::default(),
     }
 }
 
@@ -248,6 +249,69 @@ async fn prepare_client_insert_rejects_secret_auth_for_public_clients() {
             panic!("metadata validation failure must not be reported as server error: {other}")
         }
     }
+}
+
+#[actix_web::test]
+async fn prepare_client_insert_rejects_fapi_policy_without_sender_constraint() {
+    let mut payload = create_request();
+    payload.token_endpoint_auth_method = "tls_client_auth".to_owned();
+    payload.jwks = None;
+    payload.tls_client_auth_subject_dn = Some("CN=client.example".to_owned());
+    payload.security_policy.assurance = nazo_auth::ClientAssuranceLevel::Fapi2;
+
+    let err = prepare_client_insert_for_test(payload, None, "http://localhost:8000")
+        .await
+        .expect_err("FAPI clients must use a sender-constrained access-token profile");
+
+    match err {
+        InsertClientError::InvalidRequest(message) => assert!(
+            message.contains("sender-constrained"),
+            "error should identify the missing FAPI sender constraint: {message}"
+        ),
+        other => panic!("FAPI policy validation must be a client error: {other}"),
+    }
+}
+
+#[actix_web::test]
+async fn prepare_client_insert_accepts_composable_fapi_and_signing_policy() {
+    let mut payload = create_request();
+    payload.token_endpoint_auth_method = "tls_client_auth".to_owned();
+    payload.require_mtls_bound_tokens = true;
+    payload.tls_client_auth_subject_dn = Some("CN=client.example".to_owned());
+    payload.jwks = Some(json!({
+        "keys": [{
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode([0x42u8; 32]),
+            "alg": "EdDSA",
+            "use": "sig",
+            "kid": "authorization-request-signing"
+        }]
+    }));
+    payload.security_policy = nazo_auth::ClientSecurityPolicy {
+        assurance: nazo_auth::ClientAssuranceLevel::Fapi2,
+        require_signed_authorization_request: true,
+        require_signed_authorization_response: true,
+        require_signed_introspection_response: true,
+        session_management: true,
+        allow_cross_device_flows: true,
+        ..nazo_auth::ClientSecurityPolicy::default()
+    };
+
+    let prepared = prepare_client_insert_for_test(payload, None, "http://localhost:8000")
+        .await
+        .expect("independent compatible capabilities should be accepted together");
+
+    let policy = prepared
+        .security_policy
+        .as_ref()
+        .expect("new registrations materialize an explicit policy");
+    assert_eq!(policy.assurance, nazo_auth::ClientAssuranceLevel::Fapi2);
+    assert!(policy.require_signed_authorization_request);
+    assert!(policy.require_signed_authorization_response);
+    assert!(policy.require_signed_introspection_response);
+    assert!(policy.session_management);
+    assert!(policy.allow_cross_device_flows);
 }
 
 #[actix_web::test]

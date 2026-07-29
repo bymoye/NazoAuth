@@ -26,7 +26,7 @@ fn metadata_config_maps_only_the_focused_settings_boundary() {
             issuer: "https://issuer.example".to_owned(),
             mtls_endpoint_base_url: "https://mtls.issuer.example".to_owned(),
             mtls_enabled: true,
-            authorization_server_profile: MetadataAuthorizationServerProfile::Oauth2Baseline,
+            authorization_server_profile: MetadataAuthorizationServerProfile::Composable,
             ciba_profile: CibaMetadataProfile::FapiCiba,
             subject_type: MetadataSubjectType::Pairwise,
             pairwise_subject_enabled: true,
@@ -37,42 +37,25 @@ fn metadata_config_maps_only_the_focused_settings_boundary() {
 }
 
 #[test]
-fn metadata_config_maps_every_authorization_server_profile() {
+fn metadata_config_uses_composable_discovery_for_every_legacy_profile() {
     let cases = [
-        (
-            AuthorizationServerProfile::Oauth2Baseline,
-            MetadataAuthorizationServerProfile::Oauth2Baseline,
-            false,
-        ),
-        (
-            AuthorizationServerProfile::Fapi2Security,
-            MetadataAuthorizationServerProfile::Fapi2Security,
-            true,
-        ),
-        (
-            AuthorizationServerProfile::Fapi2MessageSigningAuthzRequest,
-            MetadataAuthorizationServerProfile::Fapi2MessageSigningAuthorizationRequest,
-            true,
-        ),
-        (
-            AuthorizationServerProfile::Fapi2MessageSigningJarm,
-            MetadataAuthorizationServerProfile::Fapi2MessageSigningJarm,
-            true,
-        ),
-        (
-            AuthorizationServerProfile::Fapi2MessageSigningIntrospection,
-            MetadataAuthorizationServerProfile::Fapi2MessageSigningIntrospection,
-            true,
-        ),
+        AuthorizationServerProfile::Oauth2Baseline,
+        AuthorizationServerProfile::Fapi2Security,
+        AuthorizationServerProfile::Fapi2MessageSigningAuthzRequest,
+        AuthorizationServerProfile::Fapi2MessageSigningJarm,
+        AuthorizationServerProfile::Fapi2MessageSigningIntrospection,
     ];
 
-    for (profile, expected, requires_par) in cases {
+    for profile in cases {
         let mut settings = settings();
         settings.protocol.authorization_server_profile = profile;
         settings.protocol.require_pushed_authorization_requests = false;
         let config = MetadataConfig::from(&settings);
-        assert_eq!(config.authorization_server_profile, expected);
-        assert_eq!(config.require_pushed_authorization_requests, requires_par);
+        assert_eq!(
+            config.authorization_server_profile,
+            MetadataAuthorizationServerProfile::Composable
+        );
+        assert!(!config.require_pushed_authorization_requests);
     }
 }
 

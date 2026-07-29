@@ -2,33 +2,30 @@
 
 ## Scope
 
-The default scope keeps ecosystem onboarding features outside the
-authorization-server core. The features expand the protocol attack surface and
-stay out of discovery metadata until implementation, tests, and deployment
-policy explicitly enable them.
+Ecosystem onboarding separates active server support from client authority.
+Stable protocol handlers may coexist, while provisioning surfaces, client
+grant allowlists, metadata, and versioned client policy remain explicit trust
+boundaries.
 
 ## Dynamic Client Registration
 
 ### Boundary
 
-RFC 7591 Dynamic Client Registration is implemented as a default-closed
-protocol surface.
+RFC 7591 Dynamic Client Registration is implemented as a
+prerequisite-gated protocol surface.
 
 - DCR changes client creation from an administrator-controlled action into a protocol surface exposed to external callers.
 - Redirect URI validation, inline JWKS, software statements, initial access tokens, and client metadata updates all become security-critical input paths.
 - The admin client API remains the default explicit onboarding path.
 - `/register` is mounted and `registration_endpoint` is advertised only when
-  `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`.
-- Enabling the endpoint requires
-  `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`; startup fails instead of
-  exposing anonymous registration. RFC 7591 deliberately leaves issuance of
-  this token to the deployment.
+  `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. RFC 7591
+  deliberately leaves issuance of this token to the deployment.
 - `software_statement` is not supported because no statement issuer or trust
   policy is configured. Remote `jwks_uri` is supported only through the shared
   HTTPS remote-document resolver with DNS rebinding, address-class,
   redirect, media-type, size, timeout, and cache controls.
 - RFC 7592 Client Configuration Management is available only for clients
-  created through DCR and only while `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`.
+  created through DCR while the DCR runtime module is active.
 - Successful DCR registration and RFC 7592 read/update/delete operations emit
   structured `client_lifecycle` audit events without recording client secrets
   or registration access tokens.
@@ -84,7 +81,7 @@ protocol surface.
 ### Boundary
 
 RFC 7592 Client Configuration Management is implemented as part of the
-default-closed DCR surface.
+initial-access-token-gated DCR surface.
 
 - DCRM inherits every DCR risk and adds update/delete authority over existing clients.
 - Client update is full-replacement PUT semantics, not partial PATCH. The
@@ -118,11 +115,11 @@ The runtime must keep discovery metadata aligned with these boundaries.
 
 | Profile | Registration fields | Client authentication | Metadata and enablement | Error semantics |
 | --- | --- | --- | --- | --- |
-| Baseline OIDC/OAuth client | `redirect_uris`, `response_types=["code"]`, `grant_types` limited to `authorization_code`, `refresh_token`, and `client_credentials` according to client type; `scope` limited to registered user/API scopes; optional inline `jwks` for key-based clients. | Public clients use `none` with S256 PKCE. Confidential baseline clients may use `client_secret_basic`, `client_secret_post`, `private_key_jwt`, mTLS methods, or sender-constrained token policy when registered. | `/register` and `registration_endpoint` appear only when `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`. Baseline discovery must not imply FAPI, CIBA, Device Grant, external token trust, or management APIs beyond RFC 7592 for DCR-created clients. | Metadata validation failures use RFC 7591 style `invalid_client_metadata` or `invalid_software_statement`; missing or wrong initial/registration access tokens use `invalid_token`; disabled endpoints return `404`. |
-| FAPI 2.0 Security client | Register through the admin API or a policy-controlled DCR flow that sets confidential client type, PAR requirement, S256 PKCE, exact redirect URI, sender-constrained access tokens, and FAPI-compatible client authentication. | `private_key_jwt` or mTLS. Client secret methods do not satisfy FAPI. DPoP or mTLS sender constraint is required for FAPI access tokens. | FAPI metadata is profile-scoped by `AUTHORIZATION_SERVER_PROFILE`; DCR-created clients do not automatically become FAPI clients. | Non-FAPI client auth, missing PAR, missing PKCE, wrong redirect URI, unsupported sender constraint, or wrong assertion audience fail at the relevant protocol boundary instead of being downgraded. |
-| FAPI 2.0 Message Signing client | Same as FAPI Security plus signed request-object, JARM, or signed/nested encrypted introspection metadata only for the selected message-signing profile. | `private_key_jwt` or mTLS, with registered signing keys and algorithm allowlists. | Message-signing discovery fields are advertised only by their matching runtime profile and usable key state. DCR cannot opt into JARM or signed introspection without policy approval. | Unsupported request-object/JARM/introspection metadata is rejected or ignored according to the endpoint contract; a client cannot force metadata advertisement by registration alone. |
-| CIBA client | Register `poll` or `ping` metadata only when CIBA is enabled. Ping requires an exact HTTPS notification endpoint and never carries tokens. | Confidential `private_key_jwt` or mTLS client authentication, signed backchannel requests, mTLS sender-constrained tokens for the FAPI-CIBA ID1 profile, and outbound Ping delivery with a TLS 1.2 minimum and TLS 1.3 support. | CIBA endpoints and grant metadata are absent unless `ENABLE_CIBA=true`; Push and `user_code` are rejected. The compatibility profile remains separate from internal `fapi2-ciba` hardening. | Invalid signatures/audiences/algorithms, polling violations, unsafe notification targets, TLS 1.1-or-older notification endpoints, redirects, expired `auth_req_id` values, and unbounded retries fail closed. |
-| Device Authorization Grant client | Register `urn:ietf:params:oauth:grant-type:device_code` explicitly; do not infer device capability from public client type. | Public or confidential according to client registration; token polling still enforces the client boundary and interval policy. | `device_authorization_endpoint` and `device_code` grant metadata appear only when `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`. | Pending requests return `authorization_pending`, excessive polling returns `slow_down`, denied or expired requests fail without revealing extra user-code state. |
+| Baseline OIDC/OAuth client | `redirect_uris`, `response_types=["code"]`, `grant_types` limited to `authorization_code`, `refresh_token`, and `client_credentials` according to client type; `scope` limited to registered user/API scopes; optional inline `jwks` for key-based clients. | Public clients use `none` with S256 PKCE. Confidential baseline clients may use `client_secret_basic`, `client_secret_post`, `private_key_jwt`, mTLS methods, or sender-constrained token policy when registered. | `/register` and `registration_endpoint` appear only when an initial access token is configured. DCR materializes the versioned baseline `security_policy`. | Metadata validation failures use RFC 7591 style `invalid_client_metadata` or `invalid_software_statement`; missing or wrong initial/registration access tokens use `invalid_token`; disabled endpoints return `404`. |
+| FAPI 2.0 Security client | Register through the admin API with `security_policy.assurance=fapi2`, confidential client type, exact redirect URI, sender-constrained access tokens, and FAPI-compatible client authentication. | `private_key_jwt` or mTLS. Client secret methods do not satisfy FAPI. DPoP or mTLS sender constraint is required for FAPI access tokens. | Composable discovery advertises server support; DCR-created clients do not automatically become FAPI clients. | Non-FAPI client auth, missing PAR, missing PKCE, wrong redirect URI, unsupported sender constraint, or wrong assertion audience fail at the relevant protocol boundary instead of being downgraded. |
+| FAPI 2.0 Message Signing client | Same as FAPI Security plus any compatible combination of `require_signed_authorization_request`, `require_signed_authorization_response`, and `require_signed_introspection_response`. | `private_key_jwt` or mTLS, with registered signing keys and algorithm allowlists. | Discovery advertises executable signing capabilities; client policy selects which are mandatory. DCR cannot opt into elevated policy. | Unsupported request-object/JARM/introspection metadata is rejected; signing failures never downgrade to an unprotected response. |
+| CIBA client | Register `poll` or `ping` metadata and grant plus `allow_cross_device_flows=true`. Ping requires an exact HTTPS notification endpoint and never carries tokens. | Confidential `private_key_jwt` or mTLS client authentication, signed backchannel requests, mTLS sender-constrained tokens for the FAPI-CIBA ID1 profile, and outbound Ping delivery with a TLS 1.2 minimum and TLS 1.3 support. | The CIBA runtime module is active by default on new databases; Push and `user_code` are rejected. The compatibility profile remains separate from internal `fapi2-ciba` hardening. | Invalid signatures/audiences/algorithms, polling violations, unsafe notification targets, TLS 1.1-or-older notification endpoints, redirects, expired `auth_req_id` values, and unbounded retries fail closed. |
+| Device Authorization Grant client | Register `urn:ietf:params:oauth:grant-type:device_code` and set `allow_cross_device_flows=true`; do not infer device capability from public client type. | Public or confidential according to client registration; token polling still enforces the client boundary and interval policy. | The Device runtime module is active by default on new databases and discovery reflects its active state. | Pending requests return `authorization_pending`, excessive polling returns `slow_down`, denied or expired requests fail without revealing extra user-code state. |
 | DCR / DCRM client lifecycle | DCR accepts bounded RFC 7591 metadata; DCRM uses `registration_client_uri`, `registration_access_token`, full replacement `PUT`, and `DELETE` deactivation for DCR-created clients only. | Registration requires the deployment initial access token. DCRM uses the bearer registration access token and, for secret clients, the matching current `client_secret` in update payloads. | DCR/DCRM routes exist only under the dynamic-registration feature gate. A read preserves its registration token while rotating a non-recoverable client secret; full replacement rotates both credentials. | Server-managed fields are immutable in `PUT`; stale or missing registration tokens return `invalid_token`; update/deletion failures do not leak whether an inactive or unknown client id exists. |
 
 ## Public applicant and approval control plane
@@ -182,10 +179,11 @@ audit.
 
 ### Boundary
 
-The Device Authorization Grant is implemented but outside the default scope. It
-fits CLI, TV, appliance, and constrained-input clients only when
-`ENABLE_DEVICE_AUTHORIZATION_GRANT=true` and the client registration explicitly
-allows `urn:ietf:params:oauth:grant-type:device_code`.
+The Device Authorization Grant server module is active by default on new
+databases. It fits CLI, TV, appliance, and constrained-input clients only when
+the client registration explicitly allows
+`urn:ietf:params:oauth:grant-type:device_code` and its policy sets
+`allow_cross_device_flows=true`.
 
 ### Activation Criteria
 
@@ -195,7 +193,7 @@ allows `urn:ietf:params:oauth:grant-type:device_code`.
 - Binding between the browser approval session, displayed client identity, requested scopes, `authorization_details`, resources, and the device code.
 - Phishing-resistant UI language and audit events for approved, denied, expired, and rate-limited flows.
 - Profile matrix changes for public versus confidential device clients.
-- Discovery metadata must remain absent unless `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`.
+- Discovery metadata must follow the immutable active runtime-module snapshot.
 
 ### Required Tests
 

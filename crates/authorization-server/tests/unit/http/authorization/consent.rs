@@ -79,6 +79,9 @@ fn consent_payload(user_id: Uuid) -> ConsentPayload {
         mtls_x5t_s256: Some("mtls-binding".to_owned()),
         pushed_request_uri: Some("urn:ietf:params:oauth:request_uri:par-1".to_owned()),
         pushed_request_digest: None,
+        signed_authorization_response_required: None,
+        session_management_allowed: None,
+        authorization_code_ttl_seconds: None,
         issued_at: Utc::now(),
         expires_at: Utc::now() + Duration::minutes(5),
     }

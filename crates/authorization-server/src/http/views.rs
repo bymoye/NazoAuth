@@ -87,6 +87,7 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
         .backchannel_authentication_request_signing_alg
         .clone();
     let backchannel_user_code_parameter = client.backchannel_user_code_parameter;
+    let security_policy = client.security_policy.clone();
     let mut value = json!({
         "client_id": client.client_id,
         "client_name": client.client_name,
@@ -148,6 +149,7 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
         "backchannel_user_code_parameter".to_owned(),
         json!(backchannel_user_code_parameter),
     );
+    object.insert("security_policy".to_owned(), json!(security_policy));
     value
 }
 

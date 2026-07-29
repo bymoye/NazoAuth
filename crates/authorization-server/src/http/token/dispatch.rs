@@ -408,15 +408,11 @@ pub(crate) async fn token_with_service(
         }
     }
 
-    if issuance_config
-        .authorization_server_profile()
-        .requires_fapi2_security()
-        && form.grant_type == "password"
-    {
+    if form.grant_type == "password" {
         return oauth_token_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
-            "FAPI2 profiles do not allow resource owner password credentials.",
+            "Resource owner password credentials are not supported.",
             false,
         );
     }
@@ -924,7 +920,10 @@ pub(crate) fn validate_token_request_profile_with_profile(
     client: &ClientRow,
     auth_method: &str,
 ) -> Result<(), HttpResponse> {
-    let profile = if server_profile.requires_fapi2_security() {
+    let profile = if server_profile
+        .effective_client_policy(client)
+        .requires_fapi2_security()
+    {
         SecurityProfile::Fapi2Security
     } else {
         SecurityProfile::Baseline

@@ -258,6 +258,7 @@ fn create_client_request() -> CreateClientRequest {
         authorization_encrypted_response_enc: None,
         subject_type: None,
         sector_identifier_uri: None,
+        security_policy: nazo_auth::ClientSecurityPolicy::default(),
     }
 }
 

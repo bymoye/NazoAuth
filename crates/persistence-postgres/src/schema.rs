@@ -236,6 +236,7 @@ diesel::table! {
         subject_type -> Text,
         sector_identifier_uri -> Nullable<Text>,
         sector_identifier_host -> Nullable<Text>,
+        security_policy -> Nullable<Jsonb>,
     }
 }
 

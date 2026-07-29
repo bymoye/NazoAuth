@@ -44,6 +44,7 @@ async fn authorization_response_redirect_with_protection(
         &dependencies.context(),
         input,
         protection,
+        60,
     )
     .await
 }

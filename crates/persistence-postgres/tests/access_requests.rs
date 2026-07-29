@@ -101,6 +101,7 @@ fn client(suffix: &str) -> ValidatedClientRegistration {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
+        security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
     }
 }
 

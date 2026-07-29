@@ -221,6 +221,7 @@ fn oauth_client(tenant: TenantContext, client_id: String) -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
+            security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
         },
         require_mtls_bound_tokens: false,
         is_active: true,

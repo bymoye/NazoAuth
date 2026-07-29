@@ -43,9 +43,12 @@ DATABASE_URL: "postgresql://<user>:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 CLIENT_SECRET_PEPPER: "<stable random secret of at least 32 bytes>"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
+
+New deployments do not need to select one global authorization-server
+profile. Configure elevated behavior through runtime modules and explicit
+per-client `security_policy`.
 
 Keep this file outside version control. `PUBLIC_BASE_URL` must be the exact
 HTTPS origin without a trailing slash. `CLIENT_SECRET_PEPPER` must remain

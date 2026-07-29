@@ -108,6 +108,7 @@ pub(super) fn validate_metadata_fixture(metadata: ClientMetadataFixture<'_>) -> 
         authorization_encrypted_response_enc: metadata
             .authorization_encrypted_response_enc
             .map(ToOwned::to_owned),
+        security_policy: crate::ClientSecurityPolicy::default(),
     };
     let crypto = MetadataTestCrypto;
     let response_signing_algorithms = metadata

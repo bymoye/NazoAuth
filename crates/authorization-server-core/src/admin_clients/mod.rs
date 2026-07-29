@@ -5,7 +5,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{ClientPresentationMetadata, OAuthClient, ValidatedClientRegistration};
+use crate::{
+    ClientPresentationMetadata, ClientProfile, ClientSecurityPolicy, OAuthClient, SecurityProfile,
+    SenderConstraintPolicy, ValidatedClientRegistration, validate_token_request_profile,
+};
 
 mod validation;
 
@@ -196,6 +199,8 @@ pub struct CreateClientRequest {
     pub authorization_encrypted_response_alg: Option<String>,
     #[serde(default)]
     pub authorization_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub security_policy: ClientSecurityPolicy,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -236,6 +241,7 @@ pub struct PatchClientRequest {
     pub authorization_signed_response_alg: Option<String>,
     pub authorization_encrypted_response_alg: Option<String>,
     pub authorization_encrypted_response_enc: Option<String>,
+    pub security_policy: Option<ClientSecurityPolicy>,
     pub is_active: Option<bool>,
 }
 
@@ -451,9 +457,25 @@ where
     S: SectorIdentifierResolverPort + ?Sized,
     C: AdminClientCryptoPort + ?Sized,
 {
+    request
+        .security_policy
+        .validate()
+        .map_err(|message| AdminClientError::InvalidRequest(message.to_owned()))?;
     validate_client_metadata(
         ClientMetadata::from_create(&request),
         &crypto.response_signing_algorithms(),
+        crypto,
+    )?;
+    validate_composable_security_policy(
+        &request.security_policy,
+        ClientSecurityPolicyContext {
+            client_type: &request.client_type,
+            authentication_method: &request.token_endpoint_auth_method,
+            require_dpop_bound_tokens: request.require_dpop_bound_tokens,
+            require_mtls_bound_tokens: request.require_mtls_bound_tokens,
+            jwks_uri: request.jwks_uri.as_deref(),
+            jwks: request.jwks.as_ref(),
+        },
         crypto,
     )?;
     let (issued_secret, client_secret_hash) = if request.client_type == "confidential"
@@ -543,6 +565,7 @@ where
             authorization_encrypted_response_enc: trim_optional_string(
                 request.authorization_encrypted_response_enc,
             ),
+            security_policy: Some(request.security_policy),
         },
         require_mtls_bound_tokens: request.require_mtls_bound_tokens,
         issued_secret,
@@ -562,6 +585,11 @@ where
     S: SectorIdentifierResolverPort + ?Sized,
     C: AdminClientCryptoPort + ?Sized,
 {
+    if let Some(security_policy) = request.security_policy.as_ref() {
+        security_policy
+            .validate()
+            .map_err(|message| AdminClientError::InvalidRequest(message.to_owned()))?;
+    }
     let redirect_uris_changed = request.redirect_uris.is_some();
     if let Some(value) = request.client_name {
         client.client_name = value;
@@ -665,6 +693,9 @@ where
     if let Some(value) = request.authorization_encrypted_response_enc {
         client.authorization_encrypted_response_enc = trim_optional_string(Some(value));
     }
+    if let Some(value) = request.security_policy {
+        client.security_policy = Some(value);
+    }
     if let Some(value) = request.is_active {
         client.is_active = value;
     }
@@ -731,7 +762,69 @@ where
         &crypto.response_signing_algorithms(),
         crypto,
     )?;
+    if let Some(effective_policy) = client.security_policy.as_ref() {
+        validate_composable_security_policy(
+            effective_policy,
+            ClientSecurityPolicyContext {
+                client_type: &client.client_type,
+                authentication_method: &client.token_endpoint_auth_method,
+                require_dpop_bound_tokens: client.require_dpop_bound_tokens,
+                require_mtls_bound_tokens: client.require_mtls_bound_tokens,
+                jwks_uri: client.jwks_uri.as_deref(),
+                jwks: client.jwks.as_ref(),
+            },
+            crypto,
+        )?;
+    }
     Ok(client)
+}
+
+#[derive(Clone, Copy)]
+struct ClientSecurityPolicyContext<'a> {
+    client_type: &'a str,
+    authentication_method: &'a str,
+    require_dpop_bound_tokens: bool,
+    require_mtls_bound_tokens: bool,
+    jwks_uri: Option<&'a str>,
+    jwks: Option<&'a Value>,
+}
+
+fn validate_composable_security_policy<C: AdminClientCryptoPort + ?Sized>(
+    policy: &ClientSecurityPolicy,
+    context: ClientSecurityPolicyContext<'_>,
+    crypto: &C,
+) -> Result<(), AdminClientError> {
+    if policy.requires_fapi2_security() {
+        let sender_constraint = match (
+            context.require_dpop_bound_tokens,
+            context.require_mtls_bound_tokens,
+        ) {
+            (false, false) => SenderConstraintPolicy::BearerAllowed,
+            (true, false) => SenderConstraintPolicy::DpopRequired,
+            (false, true) => SenderConstraintPolicy::MtlsRequired,
+            (true, true) => SenderConstraintPolicy::DpopOrMtls,
+        };
+        validate_token_request_profile(
+            SecurityProfile::Fapi2Security,
+            ClientProfile {
+                client_type: context.client_type,
+                authentication_method: context.authentication_method,
+                sender_constraint,
+            },
+        )
+        .map_err(|error| AdminClientError::InvalidRequest(error.description.to_owned()))?;
+    }
+    if policy.require_signed_authorization_request
+        && context.jwks_uri.is_none()
+        && !context
+            .jwks
+            .is_some_and(|jwks| crypto.contains_signing_key(jwks))
+    {
+        return Err(AdminClientError::InvalidRequest(
+            "signed authorization requests require a client signing key".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn pairwise_subject<S: SectorIdentifierResolverPort + ?Sized>(

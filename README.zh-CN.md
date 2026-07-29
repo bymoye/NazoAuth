@@ -99,9 +99,11 @@ PUBLIC_BASE_URL: "https://auth.example.com"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
+
+新部署使用可组合的服务端能力与显式的按客户端策略。
+`AUTHORIZATION_SERVER_PROFILE` 只作为未持久化客户端策略的旧客户端兼容预设。
 
 `PUBLIC_BASE_URL` 派生同域默认值：
 
@@ -126,11 +128,18 @@ RUST_LOG: "info"
 
 ## 默认边界
 
-以下能力不属于默认授权服务器表面；只有在实现、测试并显式启用后才会对外声明：
+新数据库会同时开启稳定且不冲突的服务端处理器，包括签名 Request Object、
+JARM、Device Grant、CIBA poll/ping、受限 Token Exchange 与 JWT Bearer
+Grant、SCIM、Front-Channel Logout 和 Session Management。服务端支持不等于
+客户端获权；grant allowlist、注册元数据、sender constraint 与版本化
+`security_policy` 仍然默认拒绝。
 
-- Dynamic Client Registration / RFC 7591 和 Client Configuration Management
-  / RFC 7592，除非 `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`；公开注册部署应使用 initial access token 保护 `/register`。
-- Device Authorization Grant / RFC 8628，除非 `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`。
+以下能力仍有前提或明确排除：
+
+- Dynamic Client Registration / RFC 7591 和 RFC 7592 需要配置非空
+  `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`。
+- OpenID4VCI、OpenID4VP、SCIM Security Events、Native SSO、RAR 与实验性
+  HTTP Signatures 需要各自完整的角色或部署前提。
 - 外部 token、refresh token 或 ID token 的 Token Exchange profile。
 - QQ、微信、Google、Microsoft、企业 SAML 等模块化第三方登录 provider；在 provider-specific adapter、配置 gate、账号绑定、E2E 和负向测试完成前仅属于路线图能力。
 - 请求级动态 tenant 或 issuer routing。
@@ -153,6 +162,7 @@ RUST_LOG: "info"
 | OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |
 | OAuth/OIDC/FAPI 未来路线图 | [docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md](docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md) |
 | Profile matrix | [docs/protocol/profile-matrix.md](docs/protocol/profile-matrix.md) |
+| 可组合能力策略 | [docs/protocol/composable-capability-policy.md](docs/protocol/composable-capability-policy.md) |
 | Ecosystem client onboarding | [docs/features/ecosystem-onboarding.md](docs/features/ecosystem-onboarding.md) |
 | Threat model | [docs/security/threat-model.md](docs/security/threat-model.md) |
 | 发布安全 | [docs/operations/release-security.md](docs/operations/release-security.md) |

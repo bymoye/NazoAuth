@@ -5,8 +5,8 @@ use crate::adapters::security::random_urlsafe_token;
 use crate::domain::{AuthorizationCodeState, CodePayload, ConsentPayload};
 use crate::http::authorization::AuthorizationRequestContext;
 use crate::http::authorization::request::{
-    AuthorizationResponseRedirect, PushedAuthorizationRequestConsumeError,
-    authorization_response_redirect_with_context,
+    AuthorizationResponseClientPolicy, AuthorizationResponseRedirect,
+    PushedAuthorizationRequestConsumeError, authorization_response_redirect_with_context,
     consume_pushed_authorization_request_with_context,
 };
 use actix_web::http::StatusCode;
@@ -53,6 +53,16 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
     req: &HttpRequest,
     payload: ConsentPayload,
 ) -> HttpResponse {
+    let legacy_policy = context.config.profile.legacy_client_policy();
+    let response_policy = AuthorizationResponseClientPolicy {
+        signed_response_required: payload
+            .signed_authorization_response_required
+            .unwrap_or(legacy_policy.require_signed_authorization_response),
+        session_management_allowed: payload.session_management_allowed.unwrap_or(true),
+        ttl_seconds: payload
+            .authorization_code_ttl_seconds
+            .unwrap_or(context.config.auth_code_ttl_seconds),
+    };
     if let Some(request_uri) = payload.pushed_request_uri.as_deref() {
         match consume_pushed_authorization_request_with_context(context, request_uri).await {
             Ok(()) => {}
@@ -67,6 +77,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
                         error: Some("invalid_request_uri"),
                         state: payload.state.as_deref(),
                         oidc_sid: None,
+                        client_policy: Some(response_policy),
                     },
                 )
                 .await;
@@ -83,6 +94,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
                         error: Some("server_error"),
                         state: payload.state.as_deref(),
                         oidc_sid: None,
+                        client_policy: Some(response_policy),
                     },
                 )
                 .await;
@@ -116,7 +128,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
         dpop_jkt: payload.dpop_jkt,
         mtls_x5t_s256: payload.mtls_x5t_s256,
         issued_at: now,
-        expires_at: now + Duration::seconds(context.config.auth_code_ttl_seconds as i64),
+        expires_at: now + Duration::seconds(response_policy.ttl_seconds as i64),
     };
     if let Err(error) = context
         .service
@@ -125,7 +137,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
             &AuthorizationCodeState::Pending {
                 payload: code_payload,
             },
-            context.config.auth_code_ttl_seconds,
+            response_policy.ttl_seconds,
         )
         .await
     {
@@ -161,6 +173,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
             error: None,
             state: payload.state.as_deref(),
             oidc_sid: oidc_sid.as_deref(),
+            client_policy: Some(response_policy),
         },
     )
     .await

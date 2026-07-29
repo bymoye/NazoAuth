@@ -237,6 +237,7 @@ fn client() -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
+            security_policy: None,
         },
         require_mtls_bound_tokens: false,
         is_active: true,

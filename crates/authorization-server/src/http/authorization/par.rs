@@ -204,15 +204,10 @@ async fn par_after_rate_limit_inner(
             "PAR 请求不能同时使用多种客户端认证方式.",
         );
     }
-    if (!crate::http::authorization::accepts_module(
+    if !crate::http::authorization::accepts_module(
         context,
         nazo_runtime_modules::ModuleId::RequestObjects,
-    ) || !context.config.enable_par_request_object)
-        && !context
-            .config
-            .profile
-            .requires_signed_request_object_at_par()
-        && params.contains_key("request")
+    ) && params.contains_key("request")
     {
         return oauth_error(
             StatusCode::BAD_REQUEST,
@@ -306,6 +301,12 @@ async fn par_after_rate_limit_inner(
             );
         }
     };
+    let client_policy = context.config.profile.effective_client_policy(&client);
+    let par_ttl_seconds = if client_policy.requires_fapi2_security() {
+        context.config.par_ttl_seconds.min(599)
+    } else {
+        context.config.par_ttl_seconds
+    };
     let auth_request = client_auth_request_facts(&req, &context.config.trusted_proxy_cidrs);
     let client_assertion = if let Some((attestation, proof)) = attestation_headers {
         if client.token_endpoint_auth_method != "attest_jwt_client_auth" {
@@ -394,11 +395,8 @@ async fn par_after_rate_limit_inner(
             require_dpop_bound_tokens: client.require_dpop_bound_tokens,
             require_mtls_bound_tokens: client.require_mtls_bound_tokens,
             require_request_object: client.require_par_request_object
-                || context
-                    .config
-                    .profile
-                    .requires_signed_authorization_request(),
-            fapi2_security: context.config.profile.requires_fapi2_security(),
+                || client_policy.require_signed_authorization_request,
+            fapi2_security: client_policy.requires_fapi2_security(),
         },
     ) {
         return par_admission_error(error);
@@ -424,7 +422,7 @@ async fn par_after_rate_limit_inner(
             client_type: &client.client_type,
             redirect_uris: &client.redirect_uris,
             allowed_audiences: &client.allowed_audiences,
-            fapi2_requires_explicit_redirect_uri: context.config.profile.requires_fapi2_security(),
+            fapi2_requires_explicit_redirect_uri: client_policy.requires_fapi2_security(),
         },
     ) {
         return par_admission_error(error);
@@ -481,15 +479,11 @@ async fn par_after_rate_limit_inner(
         dpop_jkt,
         mtls_x5t_s256,
         issued_at: now,
-        expires_at: now + Duration::seconds(context.config.par_ttl_seconds as i64),
+        expires_at: now + Duration::seconds(par_ttl_seconds as i64),
     };
     if let Err(error) = context
         .service
-        .store_par(
-            &request_uri,
-            &payload,
-            context.config.par_ttl_seconds.max(1),
-        )
+        .store_par(&request_uri, &payload, par_ttl_seconds.max(1))
         .await
     {
         tracing::warn!(%error, "failed to persist PAR payload");
@@ -503,7 +497,7 @@ async fn par_after_rate_limit_inner(
         StatusCode::CREATED,
         json!({
             "request_uri": request_uri,
-            "expires_in": context.config.par_ttl_seconds
+            "expires_in": par_ttl_seconds
         }),
     )
 }

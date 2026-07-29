@@ -87,6 +87,7 @@ fn shared_jwk_policy_rejects_private_material_and_ambiguous_key_ids() {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
+            security_policy: None,
         },
         require_mtls_bound_tokens: false,
         is_active: true,

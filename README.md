@@ -146,9 +146,12 @@ PUBLIC_BASE_URL: "https://auth.example.com"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
+
+New deployments use composable server capabilities and explicit per-client
+policy. `AUTHORIZATION_SERVER_PROFILE` is retained only as a compatibility
+preset for clients that predate stored client policy.
 
 `PUBLIC_BASE_URL` drives the same-origin defaults:
 
@@ -173,14 +176,20 @@ They are documented in [docs/operations/configuration.md](docs/operations/config
 
 ## Default boundaries
 
-The following capabilities are outside the default authorization-server surface
-and are not advertised unless implemented, tested, and explicitly enabled:
+Stable, non-conflicting server handlers are active together on new databases.
+This includes signed Request Objects, JARM, Device Grant, CIBA poll/ping, the
+bounded Token Exchange and JWT Bearer Grant profiles, SCIM, Front-Channel
+Logout, and Session Management. Server support does not grant a client access:
+grant allowlists, registered metadata, sender constraints, and the versioned
+per-client `security_policy` still fail closed.
+
+The following capabilities remain conditional or excluded:
 
 - Dynamic Client Registration / RFC 7591 and Client Configuration Management
-  / RFC 7592 unless `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`; public
-  registration deployments should protect `/register` with an initial access
-  token.
-- Device Authorization Grant / RFC 8628 unless `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`.
+  / RFC 7592 require a configured
+  `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`.
+- OpenID4VCI, OpenID4VP, SCIM Security Events, Native SSO, RAR, and experimental
+  HTTP Signatures require their complete role-specific prerequisites.
 - External-token, refresh-token, or ID-token Token Exchange profiles.
 - Modular third-party login providers such as QQ, WeChat, Google, Microsoft, or
   enterprise SAML; these are roadmap items until provider-specific adapters,
@@ -208,6 +217,7 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 | OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |
 | OAuth/OIDC/FAPI future roadmap | [docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md](docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md) |
 | Profile matrix | [docs/protocol/profile-matrix.md](docs/protocol/profile-matrix.md) |
+| Composable capability policy | [docs/protocol/composable-capability-policy.md](docs/protocol/composable-capability-policy.md) |
 | Ecosystem client onboarding | [docs/features/ecosystem-onboarding.md](docs/features/ecosystem-onboarding.md) |
 | Threat model | [docs/security/threat-model.md](docs/security/threat-model.md) |
 | Release security | [docs/operations/release-security.md](docs/operations/release-security.md) |

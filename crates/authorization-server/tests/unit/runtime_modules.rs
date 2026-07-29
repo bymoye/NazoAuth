@@ -9,13 +9,20 @@ fn instance_id_is_nonempty_and_storage_bounded() {
 }
 
 #[test]
-fn par_request_objects_enable_the_shared_request_object_capability() {
-    let mut settings =
+fn stable_dormant_capabilities_are_inherited_on() {
+    let settings =
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-    settings.modules.enable_request_object = false;
-    settings.modules.enable_par_request_object = true;
+    let inherited = inherited_enabled(&settings);
 
-    assert!(inherited_enabled(&settings).contains(&ModuleId::RequestObjects));
+    for module_id in [
+        ModuleId::DeviceAuthorization,
+        ModuleId::Ciba,
+        ModuleId::RequestObjects,
+        ModuleId::FrontchannelLogout,
+        ModuleId::SessionManagement,
+    ] {
+        assert!(inherited.contains(&module_id), "{module_id:?}");
+    }
 }
 
 #[test]
@@ -44,4 +51,41 @@ fn scim_security_events_are_default_closed_and_depend_on_scim() {
             max_duration: Duration::from_secs(604_800)
         }
     );
+}
+
+#[test]
+fn dynamic_registration_requires_a_provisioning_authority() {
+    let mut settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    assert!(!inherited_enabled(&settings).contains(&ModuleId::DynamicClientRegistration));
+
+    settings
+        .modules
+        .dynamic_client_registration_initial_access_token = Some("provisioning-token".to_owned());
+    assert!(inherited_enabled(&settings).contains(&ModuleId::DynamicClientRegistration));
+}
+
+#[test]
+fn native_sso_depends_on_token_exchange() {
+    let settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    let inherited = inherited_enabled(&settings);
+    let catalog = module_catalog(&settings, inherited).unwrap();
+
+    assert_eq!(
+        catalog.spec(ModuleId::NativeSso).unwrap().dependencies,
+        BTreeSet::from([ModuleId::TokenExchange])
+    );
+}
+
+#[test]
+fn legacy_defaults_remain_available_for_upgrade_materialization() {
+    let settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    let legacy = legacy_inherited_enabled(&settings);
+
+    assert!(!legacy.contains(&ModuleId::DeviceAuthorization));
+    assert!(!legacy.contains(&ModuleId::Ciba));
+    assert!(!legacy.contains(&ModuleId::RequestObjects));
+    assert!(!legacy.contains(&ModuleId::SessionManagement));
 }

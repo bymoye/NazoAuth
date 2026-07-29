@@ -35,7 +35,6 @@ DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 CLIENT_SECRET_PEPPER: "<random 32+ byte secret>"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
 
@@ -61,7 +60,7 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `100` | Maximum bounded wait for a password-verification slot before returning `temporarily_unavailable` |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
-| `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, or `fapi2-message-signing-introspection` |
+| `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
 | `ENABLE_FAPI_HTTP_SIGNATURES` | `false` | Experimental resource-only profile for the 2026-06-26 FAPI 2.0 HTTP Signatures working draft; when enabled, `/fapi/resource` requires a registered client JWK and RFC 9421 signature and signs every response |
 | `FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS` | `60` | Request signature age and replay-marker lifetime; accepted range is 1–300 seconds, with at most five seconds of future clock skew |
@@ -85,6 +84,31 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 
 Explicit overrides are retained for advanced deployments and backward
 compatibility. New deployments should prefer same-origin defaults.
+
+## Composable capability defaults
+
+New databases activate stable, non-conflicting server modules together.
+Client authority remains default-deny: a client still needs the appropriate
+grant allowlist, metadata, sender constraint, and versioned `security_policy`.
+Device Grant and CIBA therefore have active server support but new clients
+cannot use either until `allow_cross_device_flows=true` and the corresponding
+grant/metadata are assigned. Session Management similarly requires
+`session_management=true`.
+
+Dynamic Client Registration is active only when
+`DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. Experimental,
+draft, remote-trust, and role-specific modules remain conditional on their
+complete prerequisites.
+
+During the first upgrade to composable defaults, existing inherited module
+states are materialized as explicit rows using the old `ENABLE_*` settings.
+This avoids silently changing an existing deployment. After migration, runtime
+module administration is authoritative; the old stable-module flags are only
+migration inputs.
+
+See
+[Composable Capability Policy](../protocol/composable-capability-policy.md)
+for the server/client boundary, default matrix, policy JSON, and upgrade rules.
 
 ## Experimental FAPI HTTP signatures
 
@@ -145,9 +169,11 @@ is only appropriate for local loopback development.
 The following settings are still supported but should not be part of a quick
 deployment path. They are candidates for the administrator UI:
 
-- OAuth/OIDC feature gates: `ENABLE_REQUEST_OBJECT`,
-  `ENABLE_PAR_REQUEST_OBJECT`, `ENABLE_AUTHORIZATION_DETAILS`,
-  `ENABLE_DEVICE_AUTHORIZATION_GRANT`, `ENABLE_DYNAMIC_CLIENT_REGISTRATION`
+- OAuth/OIDC compatibility/migration gates: `ENABLE_REQUEST_OBJECT`,
+  `ENABLE_PAR_REQUEST_OBJECT`, `ENABLE_DEVICE_AUTHORIZATION_GRANT`,
+  `ENABLE_DYNAMIC_CLIENT_REGISTRATION`; new deployments use runtime-module
+  state and per-client policy
+- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`
 - protocol tuning: `DPOP_NONCE_POLICY`, `FAPI_RESOURCE_DPOP_NONCE_POLICY`, `REQUEST_OBJECT_JTI_POLICY`,
   `CIBA_SECURITY_PROFILE`, `REQUIRE_PUSHED_AUTHORIZATION_REQUESTS`,
   `PAR_TTL_SECONDS`,

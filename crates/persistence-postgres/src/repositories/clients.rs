@@ -5,9 +5,9 @@ use diesel::{
 };
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_auth::{
-    AdminClientFuture, AdminClientPortError, AdminClientRepositoryPort, LogoutClientRepositoryPort,
-    LogoutDependencyError, LogoutFuture, OAuthClient, RegisteredLogoutClient,
-    ValidatedClientRegistration,
+    AdminClientFuture, AdminClientPortError, AdminClientRepositoryPort, ClientSecurityPolicy,
+    LogoutClientRepositoryPort, LogoutDependencyError, LogoutFuture, OAuthClient,
+    RegisteredLogoutClient, ValidatedClientRegistration,
 };
 use nazo_identity::ports::RepositoryError;
 use serde_json::Value;
@@ -72,6 +72,7 @@ struct OAuthClientRecord {
     subject_type: String,
     sector_identifier_uri: Option<String>,
     sector_identifier_host: Option<String>,
+    security_policy: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -248,6 +249,10 @@ impl OAuthClientRepository {
                     .eq(&client.authorization_encrypted_response_alg),
                 oauth_clients::authorization_encrypted_response_enc
                     .eq(&client.authorization_encrypted_response_enc),
+                oauth_clients::security_policy.eq(client
+                    .security_policy
+                    .as_ref()
+                    .map(|policy| serde_json::json!(policy))),
                 oauth_clients::is_active.eq(client.is_active),
             ))
             .returning(OAuthClientRecord::as_returning())
@@ -350,6 +355,10 @@ impl OAuthClientRepository {
                 .eq(&client.authorization_encrypted_response_alg),
             oauth_clients::authorization_encrypted_response_enc
                 .eq(&client.authorization_encrypted_response_enc),
+            oauth_clients::security_policy.eq(client
+                .security_policy
+                .as_ref()
+                .map(|policy| serde_json::json!(policy))),
             oauth_clients::is_active.eq(client.is_active),
             oauth_clients::updated_at.eq(diesel::dsl::now),
         );
@@ -444,6 +453,10 @@ impl OAuthClientRepository {
             "backchannel_user_code_parameter".to_owned(),
             serde_json::json!(client.backchannel_user_code_parameter),
         );
+        metadata_object.insert(
+            "security_policy".to_owned(),
+            serde_json::json!(client.security_policy),
+        );
         let record = connection
             .transaction::<OAuthClientRecord, diesel::result::Error, _>(async move |connection| {
                 let changed = diesel::sql_query(
@@ -495,6 +508,7 @@ impl OAuthClientRepository {
                 authorization_signed_response_alg = $3->>'authorization_signed_response_alg',
                 authorization_encrypted_response_alg = $3->>'authorization_encrypted_response_alg',
                 authorization_encrypted_response_enc = $3->>'authorization_encrypted_response_enc',
+                security_policy = NULLIF($3->'security_policy', 'null'::jsonb),
                 updated_at = CURRENT_TIMESTAMP
             WHERE tenant_id = $1 AND id = $2 AND is_active = TRUE
               AND registration_access_token_blake3 = $6
@@ -789,10 +803,10 @@ pub(crate) async fn upsert_client_on_connection(
             backchannel_authentication_request_signing_alg, backchannel_user_code_parameter,
             frontchannel_logout_uri,
             frontchannel_logout_session_required, jwks,
-            authorization_signed_response_alg, is_active
+            authorization_signed_response_alg, security_policy, is_active
         ) VALUES (
             $1, $2, $3, $4, $5, 'confidential', $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, TRUE
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, TRUE
         )
         ON CONFLICT (tenant_id, client_id) DO UPDATE SET
             client_name = EXCLUDED.client_name,
@@ -819,6 +833,7 @@ pub(crate) async fn upsert_client_on_connection(
             frontchannel_logout_session_required = EXCLUDED.frontchannel_logout_session_required,
             jwks = EXCLUDED.jwks,
             authorization_signed_response_alg = EXCLUDED.authorization_signed_response_alg,
+            security_policy = EXCLUDED.security_policy,
             is_active = TRUE,
             updated_at = CURRENT_TIMESTAMP
         "#,
@@ -861,6 +876,12 @@ pub(crate) async fn upsert_client_on_connection(
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::Jsonb>, _>(&client.jwks)
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
         &client.authorization_signed_response_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Jsonb>, _>(
+        client
+            .security_policy
+            .as_ref()
+            .map(|policy| serde_json::json!(policy)),
     )
     .execute(connection)
     .await
@@ -1179,11 +1200,35 @@ impl OAuthClientRecord {
                 authorization_signed_response_alg: self.authorization_signed_response_alg,
                 authorization_encrypted_response_alg: self.authorization_encrypted_response_alg,
                 authorization_encrypted_response_enc: self.authorization_encrypted_response_enc,
+                security_policy: client_security_policy(self.security_policy)?,
             },
             require_mtls_bound_tokens: self.require_mtls_bound_tokens,
             is_active: self.is_active,
         })
     }
+}
+
+fn client_security_policy(
+    value: Option<Value>,
+) -> Result<Option<ClientSecurityPolicy>, RepositoryError> {
+    value
+        .map(|value| {
+            serde_json::from_value::<ClientSecurityPolicy>(value)
+                .map_err(|error| {
+                    RepositoryError::Unexpected(format!(
+                        "invalid OAuth client security_policy: {error}"
+                    ))
+                })
+                .and_then(|policy| {
+                    policy.validate().map_err(|error| {
+                        RepositoryError::Unexpected(format!(
+                            "invalid OAuth client security_policy: {error}"
+                        ))
+                    })?;
+                    Ok(policy)
+                })
+        })
+        .transpose()
 }
 
 fn string_array(value: Value, field: &str) -> Result<Vec<String>, RepositoryError> {

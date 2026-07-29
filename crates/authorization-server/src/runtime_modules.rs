@@ -85,9 +85,19 @@ pub(crate) struct RuntimeModules {
 
 impl RuntimeModules {
     pub(crate) async fn initialize(pool: DbPool, settings: &Settings) -> anyhow::Result<Self> {
+        let repository = Arc::new(RuntimeModuleRepository::new(pool));
+        let migration = repository
+            .migrate_composable_default_policy(&legacy_inherited_enabled(settings))
+            .await?;
+        tracing::info!(
+            previous_version = migration.previous_version,
+            current_version = migration.current_version,
+            materialized_inherited_rows = migration.materialized_inherited_rows,
+            initialized_empty_state = migration.initialized_empty_state,
+            "runtime module default policy is ready"
+        );
         let inherited_enabled = inherited_enabled(settings);
         let catalog = module_catalog(settings, inherited_enabled.clone())?;
-        let repository = Arc::new(RuntimeModuleRepository::new(pool));
         let lifecycle = Arc::new(ServerModuleLifecycle {
             repository: repository.clone(),
         });
@@ -250,6 +260,7 @@ fn module_catalog(
             [ModuleId::AuthorizationDetails, ModuleId::RequestObjects],
         )?
         .with_dependencies(ModuleId::Openid4vpVerifier, [ModuleId::RequestObjects])?
+        .with_dependencies(ModuleId::NativeSso, [ModuleId::TokenExchange])?
         .with_runtime_disable_blocked(runtime_disable_blocked);
     Ok(catalog)
 }
@@ -318,6 +329,53 @@ async fn seed_desired_states(
 }
 
 pub(crate) fn inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
+    let modules = &settings.modules;
+    let mut enabled = BTreeSet::from([
+        ModuleId::DeviceAuthorization,
+        ModuleId::TokenExchange,
+        ModuleId::JwtBearerGrant,
+        ModuleId::Ciba,
+        ModuleId::RequestObjects,
+        ModuleId::Jarm,
+        ModuleId::Scim,
+        ModuleId::FrontchannelLogout,
+        ModuleId::SessionManagement,
+    ]);
+    let prerequisite_ready = [
+        (
+            ModuleId::DynamicClientRegistration,
+            modules
+                .dynamic_client_registration_initial_access_token
+                .is_some(),
+        ),
+        (
+            ModuleId::AuthorizationDetails,
+            modules.enable_authorization_details,
+        ),
+        (
+            ModuleId::HttpMessageSignatures,
+            modules.enable_fapi_http_signatures,
+        ),
+        (
+            ModuleId::ScimSecurityEvents,
+            modules.enable_scim_security_events,
+        ),
+        (ModuleId::Openid4vciIssuer, modules.enable_openid4vci_issuer),
+        (
+            ModuleId::Openid4vpVerifier,
+            modules.enable_openid4vp_verifier,
+        ),
+        (ModuleId::NativeSso, modules.enable_native_sso),
+    ];
+    enabled.extend(
+        prerequisite_ready
+            .into_iter()
+            .filter_map(|(module_id, ready)| ready.then_some(module_id)),
+    );
+    enabled
+}
+
+fn legacy_inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
     let settings = &settings.modules;
     let mut enabled = BTreeSet::from([
         ModuleId::TokenExchange,
