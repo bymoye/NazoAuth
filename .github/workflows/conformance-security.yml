@@ -242,7 +242,7 @@ jobs:
             --image-ref nazo-oauth-e2e:latest \
             --image-digest "$image_digest" \
             --output runtime/e2e/operator
-          docker run --rm --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
+          docker run --rm -i --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
