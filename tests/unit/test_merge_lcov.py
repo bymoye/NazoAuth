@@ -1,6 +1,7 @@
 import importlib.util
 import random
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,25 @@ class MergeLcovTests(unittest.TestCase):
             merge_lcov.parse_lcov("SF:x.rs\nDA:1,1\n")
         with self.assertRaises(merge_lcov.LcovError):
             merge_lcov.parse_lcov("SF:x.rs\nXX:1\nend_of_record\n")
+
+    def test_source_root_collapses_absolute_and_relative_build_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "crates" / "service" / "src" / "lib.rs"
+            absolute = merge_lcov.parse_lcov(
+                f"SF:{source}\nDA:7,2\nLF:1\nLH:1\nend_of_record\n"
+            )
+            relative = merge_lcov.parse_lcov(
+                "SF:crates/service/src/lib.rs\nDA:7,3\nLF:1\nLH:1\nend_of_record\n"
+            )
+            merged: dict[str, merge_lcov.SourceRecord] = {}
+            for records in (absolute, relative):
+                for path, record in records.items():
+                    normalized = merge_lcov.normalize_source(path, root)
+                    merged.setdefault(normalized, merge_lcov.SourceRecord()).merge(record)
+
+            self.assertEqual(list(merged), ["crates/service/src/lib.rs"])
+            self.assertEqual(merged["crates/service/src/lib.rs"].lines[7][0], 5)
 
 
 if __name__ == "__main__":

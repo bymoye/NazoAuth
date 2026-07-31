@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -153,20 +154,50 @@ def render_lcov(records: dict[str, SourceRecord]) -> str:
     return "\n".join(output) + ("\n" if output else "")
 
 
-def merge_reports(paths: list[Path]) -> dict[str, SourceRecord]:
+def normalize_source(source: str, source_root: Path) -> str:
+    root = source_root.resolve()
+    candidate = Path(source)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError:
+        return candidate.as_posix()
+
+
+def merge_reports(paths: list[Path], source_root: Path) -> dict[str, SourceRecord]:
     merged: dict[str, SourceRecord] = {}
     for path in paths:
         for source, record in parse_lcov(path.read_text(encoding="utf-8")).items():
-            merged.setdefault(source, SourceRecord()).merge(record)
+            normalized = normalize_source(source, source_root)
+            merged.setdefault(normalized, SourceRecord()).merge(record)
     return merged
+
+
+def coverage_totals(records: dict[str, SourceRecord]) -> tuple[int, int]:
+    lines = sum(len(record.lines) for record in records.values())
+    hits = sum(
+        count > 0
+        for record in records.values()
+        for count, _checksum in record.lines.values()
+    )
+    return hits, lines
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("inputs", type=Path, nargs="+")
     args = parser.parse_args()
-    args.output.write_text(render_lcov(merge_reports(args.inputs)), encoding="utf-8")
+    merged = merge_reports(args.inputs, args.source_root)
+    hits, lines = coverage_totals(merged)
+    args.output.write_text(render_lcov(merged), encoding="utf-8")
+    print(
+        f"merged {len(args.inputs)} LCOV reports: {hits}/{lines} hit lines",
+        file=sys.stderr,
+    )
     return 0
 
 
