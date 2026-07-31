@@ -305,16 +305,23 @@ cargo test --locked --workspace --all-features --lib --bins --tests
 
 RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
 LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$RUST_HOST/bin"
-mapfile -t PROFRAWS < <(find "$COVERAGE_DIR" -name '*.profraw' -type f)
-if [[ "${#PROFRAWS[@]}" -eq 0 ]]; then
-  echo "No llvm-cov profile files were generated." >&2
+mapfile -t SERVER_PROFRAWS < <(
+  find "$COVERAGE_DIR" -type f \
+    \( -name 'server-*.profraw' -o -name 'signed-server-*.profraw' \)
+)
+mapfile -t TEST_PROFRAWS < <(find "$COVERAGE_DIR" -name 'cargo-*.profraw' -type f)
+if [[ "${#SERVER_PROFRAWS[@]}" -eq 0 || "${#TEST_PROFRAWS[@]}" -eq 0 ]]; then
+  echo "Both server and test llvm-cov profile files are required." >&2
   exit 1
 fi
-"$LLVM_TOOLS_DIR/llvm-profdata" merge -sparse "${PROFRAWS[@]}" -o "$COVERAGE_DIR/codecov.profdata"
+"$LLVM_TOOLS_DIR/llvm-profdata" merge -sparse "${SERVER_PROFRAWS[@]}" \
+  -o "$COVERAGE_DIR/server.profdata"
+"$LLVM_TOOLS_DIR/llvm-profdata" merge -sparse "${TEST_PROFRAWS[@]}" \
+  -o "$COVERAGE_DIR/tests.profdata"
 
-objects=("$BIN_DIR/nazoauth")
+test_objects=()
 while IFS= read -r object; do
-  objects+=("$object")
+  test_objects+=("$object")
 done < <(
   "$PYTHON_BIN" - "$TEST_OBJECT_MANIFEST" <<'PY'
 import json
@@ -339,13 +346,22 @@ for executable in sorted(executables):
 PY
 )
 
-if [[ ! -x "${objects[0]}" ]]; then
-  echo "Instrumented server binary was not found at ${objects[0]}." >&2
+if [[ ! -x "$BIN_DIR/nazoauth" ]]; then
+  echo "Instrumented server binary was not found at $BIN_DIR/nazoauth." >&2
+  exit 1
+fi
+if [[ "${#test_objects[@]}" -eq 0 ]]; then
+  echo "No instrumented test objects were found." >&2
   exit 1
 fi
 
-cov_args=(export --format=lcov --instr-profile "$COVERAGE_DIR/codecov.profdata" --ignore-filename-regex "$IGNORE_REGEX" "${objects[0]}")
-for object in "${objects[@]:1}"; do
-  cov_args+=(--object "$object")
+"$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
+  --instr-profile "$COVERAGE_DIR/server.profdata" \
+  --ignore-filename-regex "$IGNORE_REGEX" \
+  "$BIN_DIR/nazoauth" > lcov-e2e.info
+
+test_cov_args=(export --format=lcov --instr-profile "$COVERAGE_DIR/tests.profdata" --ignore-filename-regex "$IGNORE_REGEX" "${test_objects[0]}")
+for object in "${test_objects[@]:1}"; do
+  test_cov_args+=(--object "$object")
 done
-"$LLVM_TOOLS_DIR/llvm-cov" "${cov_args[@]}" > lcov.info
+"$LLVM_TOOLS_DIR/llvm-cov" "${test_cov_args[@]}" > lcov-tests.info
