@@ -321,6 +321,7 @@ impl ParTestFixture {
                 ),
             ),
             crate::runtime_modules::inherited_enabled(&settings),
+            keyset.clone(),
         );
         Self {
             authorization,

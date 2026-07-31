@@ -180,6 +180,7 @@ pub(crate) async fn fetch_sector_identifier_uris(
         return Err(SectorIdentifierError::BlockedHost);
     }
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())

@@ -47,6 +47,13 @@
 本矩阵中与当前 TP/PS 工作直接相关的覆盖点包括：
 
 - `OIDC Basic OP Dynamic Registration` 覆盖 RFC 7591 动态客户端注册和 `registration_endpoint` metadata。
+- OpenID Connect RP Metadata Choices 1.0 在 workflow 锁定的 suite revision
+  `dee9a25160e789f0f80517674693ef7989ab9fa1` 与官方 `master`
+  [`daf33d61b982d5d33d134b07e9a36f76176b3eff`](https://gitlab.com/openid/conformance-suite/-/commit/daf33d61b982d5d33d134b07e9a36f76176b3eff)
+  中都没有专项模块。Dynamic Registration plan 会测试相关单值元数据，但
+  不会提交 19 个 `*_values_supported` choices、验证交集选择，也不会检查
+  注册/读取响应不得回显 choices 数组。因此当前规范证据来自仓库 DCR
+  tests；OIDF 发布官方 plan 后必须把它加入矩阵。
 - 远程 `jwks_uri`、精确注册的外部 `request_uri`、签名 Request Object、签名 UserInfo 和展示元数据等动态注册扩展仍按现有安全边界实现；这些能力不构成 OIDF Dynamic OP 认证档案的支持声明。
 - `OIDC Form Post OP` 覆盖安全 HTML form-post 响应及浏览器提交。
 - `OIDC Third-Party Initiated Login OP` 覆盖 `initiate_login_uri` 注册元数据；该 OP profile 不新增 OP 侧发起端点。

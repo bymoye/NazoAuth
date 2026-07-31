@@ -35,6 +35,7 @@ pub(crate) struct AuthorizationEndpoint {
     sessions: Arc<AdminSessionHandles>,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     remote_client_documents: Arc<RemoteClientDocumentResolver>,
+    request_object_keys: nazo_key_management::KeyManager,
     credential_authorization_offers: Option<Arc<dyn AuthorizationOfferPort>>,
 }
 
@@ -45,6 +46,7 @@ impl AuthorizationEndpoint {
         sessions: Arc<AdminSessionHandles>,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
         remote_client_documents: Arc<RemoteClientDocumentResolver>,
+        request_object_keys: nazo_key_management::KeyManager,
         credential_authorization_offers: Option<Arc<dyn AuthorizationOfferPort>>,
     ) -> Self {
         Self {
@@ -53,6 +55,7 @@ impl AuthorizationEndpoint {
             sessions,
             runtime_modules,
             remote_client_documents,
+            request_object_keys,
             credential_authorization_offers,
         }
     }
@@ -64,6 +67,7 @@ impl AuthorizationEndpoint {
             sessions: &self.sessions,
             modules: self.runtime_modules.snapshot().as_ref().clone(),
             remote_client_documents: Some(&self.remote_client_documents),
+            request_object_keys: &self.request_object_keys,
             credential_authorization_offers: self.credential_authorization_offers.as_deref(),
         }
     }
@@ -75,6 +79,7 @@ pub(crate) struct AuthorizationRequestContext<'a> {
     pub(crate) sessions: &'a AdminSessionHandles,
     pub(crate) modules: ActiveModuleSnapshot,
     pub(crate) remote_client_documents: Option<&'a RemoteClientDocumentResolver>,
+    pub(crate) request_object_keys: &'a nazo_key_management::KeyManager,
     pub(crate) credential_authorization_offers: Option<&'a dyn AuthorizationOfferPort>,
 }
 
@@ -104,9 +109,7 @@ pub(crate) fn permits_existing_module_transaction(
 #[path = "../../../tests/support/http/authorization.rs"]
 pub(crate) mod test_support;
 
-pub(crate) use jar::{
-    apply_request_object_with_context, unverified_signed_request_object_client_id,
-};
+pub(crate) use jar::{apply_request_object_with_context, unverified_request_object_client_id};
 pub(crate) use par::is_pushed_authorization_request_uri;
 #[cfg(test)]
 #[path = "../../../tests/unit/http/authorization/boundary.rs"]

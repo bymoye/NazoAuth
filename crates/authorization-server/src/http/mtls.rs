@@ -1,13 +1,14 @@
 //! mTLS client certificate binding helpers.
 //!
 //! The application only trusts certificate data from configured trusted proxy
-//! peers after the proxy has verified the client certificate and forwarded
+//! peers. Deployments can use the standardized RFC 9440 `Client-Cert` field or
+//! the compatibility header contract that includes
 //! `X-SSL-Client-Verify: SUCCESS`.
 
 use crate::adapters::security::constant_time_eq;
 use crate::domain::ClientRow;
 
-use actix_web::HttpRequest;
+use actix_web::{HttpRequest, web::Data};
 
 use actix_web::http::header::HeaderMap;
 
@@ -52,27 +53,102 @@ const SAN_EMAIL_HEADERS: &[&str] = &[
     "x-forwarded-tls-client-cert-san-email",
     "x-ssl-client-san-email",
 ];
+const RFC9440_CLIENT_CERT_HEADER: &str = "client-cert";
 
 pub(crate) use nazo_http_actix::ClientCertificateFacts as MtlsClientCertificate;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MtlsCertificateSourceMode {
+    Disabled,
+    DirectTls,
+    Rfc9440,
+    LegacyVerifiedHeaders,
+}
+
+impl MtlsCertificateSourceMode {
+    pub(crate) fn from_config(value: Option<&str>, proxy_configured: bool) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None if proxy_configured => Ok(Self::LegacyVerifiedHeaders),
+            None => Ok(Self::Disabled),
+            Some("disabled") => Ok(Self::Disabled),
+            Some("direct-tls") => Ok(Self::DirectTls),
+            Some("rfc9440") => Ok(Self::Rfc9440),
+            Some("legacy-verified-headers") => Ok(Self::LegacyVerifiedHeaders),
+            Some(value) => anyhow::bail!(
+                "MTLS_CERTIFICATE_SOURCE must be disabled, direct-tls, rfc9440, or legacy-verified-headers; got {value}"
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MtlsCertificateSource {
+    mode: MtlsCertificateSourceMode,
+}
+
+impl MtlsCertificateSource {
+    pub(crate) fn new(mode: MtlsCertificateSourceMode) -> Self {
+        Self { mode }
+    }
+}
 
 pub(crate) fn request_mtls_thumbprint_from_trusted_proxy(
     req: &HttpRequest,
     trusted_proxy_cidrs: &[IpCidr],
 ) -> Option<String> {
-    if !request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) {
-        return None;
-    }
-    request_mtls_client_certificate_from_headers(req.headers())?.thumbprint
+    request_mtls_client_certificate_from_configured_source(req, trusted_proxy_cidrs)?.thumbprint
 }
 
 pub(crate) fn request_mtls_client_certificate_from_trusted_proxy(
     req: &HttpRequest,
     trusted_proxy_cidrs: &[IpCidr],
 ) -> Option<MtlsClientCertificate> {
-    if !request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) {
+    request_mtls_client_certificate_from_configured_source(req, trusted_proxy_cidrs)
+}
+
+fn request_mtls_client_certificate_from_configured_source(
+    req: &HttpRequest,
+    trusted_proxy_cidrs: &[IpCidr],
+) -> Option<MtlsClientCertificate> {
+    let mode = req
+        .app_data::<Data<MtlsCertificateSource>>()
+        .map(|source| source.mode)
+        // Focused unit tests without production app data retain the historical
+        // compatibility contract.
+        .unwrap_or(MtlsCertificateSourceMode::LegacyVerifiedHeaders);
+    match mode {
+        MtlsCertificateSourceMode::Disabled => None,
+        MtlsCertificateSourceMode::DirectTls => req.conn_data::<MtlsClientCertificate>().cloned(),
+        MtlsCertificateSourceMode::Rfc9440
+            if request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) =>
+        {
+            request_mtls_client_certificate_from_rfc9440(req.headers())
+        }
+        MtlsCertificateSourceMode::LegacyVerifiedHeaders
+            if request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) =>
+        {
+            request_mtls_client_certificate_from_headers(req.headers())
+        }
+        MtlsCertificateSourceMode::Rfc9440 | MtlsCertificateSourceMode::LegacyVerifiedHeaders => {
+            None
+        }
+    }
+}
+
+pub(crate) fn request_mtls_client_certificate_from_rfc9440(
+    headers: &HeaderMap,
+) -> Option<MtlsClientCertificate> {
+    let mut values = headers.get_all(RFC9440_CLIENT_CERT_HEADER);
+    let value = values.next()?.to_str().ok()?.trim();
+    if values.next().is_some() || value.len() < 3 {
         return None;
     }
-    request_mtls_client_certificate_from_headers(req.headers())
+    let encoded = value.strip_prefix(':')?.strip_suffix(':')?;
+    if encoded.is_empty() || encoded.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let der = STANDARD.decode(encoded).ok()?;
+    certificate_der_identity(&der)
 }
 
 pub(crate) fn request_mtls_client_certificate_from_headers(
@@ -128,10 +204,14 @@ pub(crate) fn certificate_pem_identity(value: &str) -> Option<MtlsClientCertific
         .filter(|ch| !ch.is_ascii_whitespace())
         .collect::<String>();
     let der = STANDARD.decode(body).ok()?;
-    let x509 = X509::from_der(&der).ok()?;
+    certificate_der_identity(&der)
+}
+
+pub(crate) fn certificate_der_identity(der: &[u8]) -> Option<MtlsClientCertificate> {
+    let x509 = X509::from_der(der).ok()?;
     x509_is_current(&x509)?;
     let mut certificate = MtlsClientCertificate {
-        thumbprint: Some(URL_SAFE_NO_PAD.encode(Sha256::digest(&der))),
+        thumbprint: Some(URL_SAFE_NO_PAD.encode(Sha256::digest(der))),
         subject_dn: Some(subject_name_to_dn(x509.subject_name())?),
         verified_certificate_expiry: true,
         ..MtlsClientCertificate::default()

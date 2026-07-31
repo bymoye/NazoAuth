@@ -65,6 +65,10 @@ pub struct DynamicRegistrationEndpointConfig {
     pub initial_access_token: Option<String>,
     pub client_ip_header_mode: ClientIpHeaderMode,
     pub trusted_proxy_cidrs: Vec<IpCidr>,
+    pub id_token_signing_algs: Vec<&'static str>,
+    pub response_signing_algs: Vec<&'static str>,
+    pub request_object_encryption_algs: Vec<&'static str>,
+    pub request_object_encryption_encs: Vec<&'static str>,
 }
 
 #[derive(Clone)]
@@ -258,6 +262,11 @@ pub async fn dynamic_client_registration(
         payload,
         DynamicRegistrationPolicy {
             default_audience: &endpoint.config.default_audience,
+            pairwise_subject_supported: endpoint.config.pairwise_subject_secret.is_some(),
+            id_token_signing_algs: &endpoint.config.id_token_signing_algs,
+            response_signing_algs: &endpoint.config.response_signing_algs,
+            request_object_encryption_algs: &endpoint.config.request_object_encryption_algs,
+            request_object_encryption_encs: &endpoint.config.request_object_encryption_encs,
         },
     ) {
         Ok(prepared) => prepared,
@@ -399,6 +408,11 @@ pub async fn client_configuration_put(
         payload,
         DynamicRegistrationPolicy {
             default_audience: &endpoint.config.default_audience,
+            pairwise_subject_supported: endpoint.config.pairwise_subject_secret.is_some(),
+            id_token_signing_algs: &endpoint.config.id_token_signing_algs,
+            response_signing_algs: &endpoint.config.response_signing_algs,
+            request_object_encryption_algs: &endpoint.config.request_object_encryption_algs,
+            request_object_encryption_encs: &endpoint.config.request_object_encryption_encs,
         },
     ) {
         Ok(registration) => registration,
@@ -915,6 +929,46 @@ fn dynamic_registration_response(
         body["tos_uri"] = json!(tos_uri);
     }
     for (field, value) in [
+        (
+            "id_token_signed_response_alg",
+            client.id_token_signed_response_alg.as_ref(),
+        ),
+        (
+            "id_token_encrypted_response_alg",
+            client.id_token_encrypted_response_alg.as_ref(),
+        ),
+        (
+            "id_token_encrypted_response_enc",
+            client.id_token_encrypted_response_enc.as_ref(),
+        ),
+        (
+            "request_object_signing_alg",
+            client.request_object_signing_alg.as_ref(),
+        ),
+        (
+            "request_object_encryption_alg",
+            client.request_object_encryption_alg.as_ref(),
+        ),
+        (
+            "request_object_encryption_enc",
+            client.request_object_encryption_enc.as_ref(),
+        ),
+        (
+            "token_endpoint_auth_signing_alg",
+            client.token_endpoint_auth_signing_alg.as_ref(),
+        ),
+        (
+            "introspection_signed_response_alg",
+            client.introspection_signed_response_alg.as_ref(),
+        ),
+        (
+            "introspection_encrypted_response_alg",
+            client.introspection_encrypted_response_alg.as_ref(),
+        ),
+        (
+            "introspection_encrypted_response_enc",
+            client.introspection_encrypted_response_enc.as_ref(),
+        ),
         (
             "userinfo_signed_response_alg",
             client.userinfo_signed_response_alg.as_ref(),

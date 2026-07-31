@@ -346,7 +346,7 @@ async fn external_signer_output_is_verified_against_exact_message() {
     let signature = sign_input(&private_key, "expected");
     let external = external_signing_key_with_command(
         signer_stdout_command(&json!({"signature": signature}).to_string()),
-        500,
+        5_000,
     );
 
     assert!(

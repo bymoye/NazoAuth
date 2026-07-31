@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::{
     ClientPresentationMetadata, ClientSecurityPolicy, CreateClientRequest, OAuthClient,
-    PreparedClientRegistration, parse_scope,
+    PreparedClientRegistration, SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+    SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS, SUPPORTED_CLIENT_JWT_SIGNING_ALGS, parse_scope,
 };
 
 pub type DynamicRegistrationFuture<'a, T> =
@@ -95,7 +96,11 @@ pub struct DynamicClientRegistrationRequest {
     #[serde(default)]
     pub token_endpoint_auth_method: Option<String>,
     #[serde(default)]
+    pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
+    #[serde(default)]
     pub subject_type: Option<String>,
+    #[serde(default)]
+    pub subject_types_supported: Option<Vec<String>>,
     #[serde(default)]
     pub sector_identifier_uri: Option<String>,
     #[serde(default)]
@@ -110,6 +115,8 @@ pub struct DynamicClientRegistrationRequest {
     pub backchannel_client_notification_endpoint: Option<String>,
     #[serde(default)]
     pub backchannel_authentication_request_signing_alg: Option<String>,
+    #[serde(default)]
+    pub backchannel_authentication_request_signing_alg_values_supported: Option<Vec<String>>,
     #[serde(default)]
     pub backchannel_user_code_parameter: Option<bool>,
     #[serde(default)]
@@ -135,17 +142,69 @@ pub struct DynamicClientRegistrationRequest {
     #[serde(default)]
     pub jwks: Option<Value>,
     #[serde(default)]
+    pub id_token_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub id_token_signing_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub id_token_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub id_token_encryption_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub id_token_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub id_token_encryption_enc_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub request_object_signing_alg: Option<String>,
+    #[serde(default)]
+    pub request_object_signing_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub request_object_encryption_alg: Option<String>,
+    #[serde(default)]
+    pub request_object_encryption_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub request_object_encryption_enc: Option<String>,
+    #[serde(default)]
+    pub request_object_encryption_enc_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    #[serde(default)]
+    pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
     pub userinfo_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub userinfo_signing_alg_values_supported: Option<Vec<String>>,
     #[serde(default)]
     pub userinfo_encrypted_response_alg: Option<String>,
     #[serde(default)]
+    pub userinfo_encryption_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
     pub userinfo_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub userinfo_encryption_enc_values_supported: Option<Vec<String>>,
     #[serde(default)]
     pub authorization_signed_response_alg: Option<String>,
     #[serde(default)]
+    pub authorization_signing_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
     pub authorization_encrypted_response_alg: Option<String>,
     #[serde(default)]
+    pub authorization_encryption_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
     pub authorization_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub authorization_encryption_enc_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub introspection_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub introspection_encryption_alg_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub introspection_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub introspection_encryption_enc_values_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub introspection_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub introspection_signing_alg_values_supported: Option<Vec<String>>,
     #[serde(default)]
     pub request_uris: Option<Vec<String>>,
     #[serde(default)]
@@ -163,6 +222,11 @@ pub struct DynamicClientRegistrationRequest {
 #[derive(Clone, Copy, Debug)]
 pub struct DynamicRegistrationPolicy<'a> {
     pub default_audience: &'a str,
+    pub pairwise_subject_supported: bool,
+    pub id_token_signing_algs: &'a [&'a str],
+    pub response_signing_algs: &'a [&'a str],
+    pub request_object_encryption_algs: &'a [&'a str],
+    pub request_object_encryption_encs: &'a [&'a str],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +263,16 @@ pub struct PreparedDynamicClientRegistration {
     pub request_uris: Vec<String>,
     pub initiate_login_uri: Option<String>,
     pub presentation: ClientPresentationMetadata,
+    pub id_token_signed_response_alg: Option<String>,
+    pub id_token_encrypted_response_alg: Option<String>,
+    pub id_token_encrypted_response_enc: Option<String>,
+    pub request_object_signing_alg: Option<String>,
+    pub request_object_encryption_alg: Option<String>,
+    pub request_object_encryption_enc: Option<String>,
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    pub introspection_signed_response_alg: Option<String>,
+    pub introspection_encrypted_response_alg: Option<String>,
+    pub introspection_encrypted_response_enc: Option<String>,
     pub userinfo_signed_response_alg: Option<String>,
     pub userinfo_encrypted_response_alg: Option<String>,
     pub userinfo_encrypted_response_enc: Option<String>,
@@ -229,9 +303,135 @@ impl DynamicRegistrationError {
 }
 
 pub fn prepare_dynamic_client_registration(
-    request: DynamicClientRegistrationRequest,
+    mut request: DynamicClientRegistrationRequest,
     policy: DynamicRegistrationPolicy<'_>,
 ) -> Result<PreparedDynamicClientRegistration, DynamicRegistrationError> {
+    let subject_types = if policy.pairwise_subject_supported {
+        &["public", "pairwise"][..]
+    } else {
+        &["public"][..]
+    };
+    request.subject_type = negotiate_metadata_choice(
+        "subject_type",
+        request.subject_type,
+        request.subject_types_supported,
+        subject_types,
+    )?;
+    request.token_endpoint_auth_method = negotiate_metadata_choice(
+        "token_endpoint_auth_method",
+        request.token_endpoint_auth_method,
+        request.token_endpoint_auth_methods_supported,
+        &[
+            "private_key_jwt",
+            "tls_client_auth",
+            "self_signed_tls_client_auth",
+            "client_secret_basic",
+            "client_secret_post",
+            "none",
+        ],
+    )?;
+    request.id_token_signed_response_alg = negotiate_metadata_choice(
+        "id_token_signed_response_alg",
+        request.id_token_signed_response_alg,
+        request.id_token_signing_alg_values_supported,
+        policy.id_token_signing_algs,
+    )?;
+    request.id_token_encrypted_response_alg = negotiate_metadata_choice(
+        "id_token_encrypted_response_alg",
+        request.id_token_encrypted_response_alg,
+        request.id_token_encryption_alg_values_supported,
+        SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+    )?;
+    request.id_token_encrypted_response_enc = negotiate_metadata_choice(
+        "id_token_encrypted_response_enc",
+        request.id_token_encrypted_response_enc,
+        request.id_token_encryption_enc_values_supported,
+        SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+    )?;
+    request.request_object_signing_alg = negotiate_metadata_choice(
+        "request_object_signing_alg",
+        request.request_object_signing_alg,
+        request.request_object_signing_alg_values_supported,
+        SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )?;
+    request.request_object_encryption_alg = negotiate_metadata_choice(
+        "request_object_encryption_alg",
+        request.request_object_encryption_alg,
+        request.request_object_encryption_alg_values_supported,
+        policy.request_object_encryption_algs,
+    )?;
+    request.request_object_encryption_enc = negotiate_metadata_choice(
+        "request_object_encryption_enc",
+        request.request_object_encryption_enc,
+        request.request_object_encryption_enc_values_supported,
+        policy.request_object_encryption_encs,
+    )?;
+    request.token_endpoint_auth_signing_alg = negotiate_metadata_choice(
+        "token_endpoint_auth_signing_alg",
+        request.token_endpoint_auth_signing_alg,
+        request.token_endpoint_auth_signing_alg_values_supported,
+        SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )?;
+    request.backchannel_authentication_request_signing_alg = negotiate_metadata_choice(
+        "backchannel_authentication_request_signing_alg",
+        request.backchannel_authentication_request_signing_alg,
+        request.backchannel_authentication_request_signing_alg_values_supported,
+        &["EdDSA", "ES256", "PS256"],
+    )?;
+    request.userinfo_signed_response_alg = negotiate_metadata_choice(
+        "userinfo_signed_response_alg",
+        request.userinfo_signed_response_alg,
+        request.userinfo_signing_alg_values_supported,
+        &["EdDSA", "RS256", "ES256", "PS256"],
+    )?;
+    request.userinfo_encrypted_response_alg = negotiate_metadata_choice(
+        "userinfo_encrypted_response_alg",
+        request.userinfo_encrypted_response_alg,
+        request.userinfo_encryption_alg_values_supported,
+        SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+    )?;
+    request.userinfo_encrypted_response_enc = negotiate_metadata_choice(
+        "userinfo_encrypted_response_enc",
+        request.userinfo_encrypted_response_enc,
+        request.userinfo_encryption_enc_values_supported,
+        SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+    )?;
+    request.authorization_signed_response_alg = negotiate_metadata_choice(
+        "authorization_signed_response_alg",
+        request.authorization_signed_response_alg,
+        request.authorization_signing_alg_values_supported,
+        &["EdDSA", "RS256", "ES256", "PS256"],
+    )?;
+    request.authorization_encrypted_response_alg = negotiate_metadata_choice(
+        "authorization_encrypted_response_alg",
+        request.authorization_encrypted_response_alg,
+        request.authorization_encryption_alg_values_supported,
+        SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+    )?;
+    request.authorization_encrypted_response_enc = negotiate_metadata_choice(
+        "authorization_encrypted_response_enc",
+        request.authorization_encrypted_response_enc,
+        request.authorization_encryption_enc_values_supported,
+        SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+    )?;
+    request.introspection_encrypted_response_alg = negotiate_metadata_choice(
+        "introspection_encrypted_response_alg",
+        request.introspection_encrypted_response_alg,
+        request.introspection_encryption_alg_values_supported,
+        SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+    )?;
+    request.introspection_encrypted_response_enc = negotiate_metadata_choice(
+        "introspection_encrypted_response_enc",
+        request.introspection_encrypted_response_enc,
+        request.introspection_encryption_enc_values_supported,
+        SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+    )?;
+    request.introspection_signed_response_alg = negotiate_metadata_choice(
+        "introspection_signed_response_alg",
+        request.introspection_signed_response_alg,
+        request.introspection_signing_alg_values_supported,
+        policy.response_signing_algs,
+    )?;
     if request.software_statement.is_some() {
         return Err(DynamicRegistrationError::new(
             "invalid_software_statement",
@@ -418,6 +618,16 @@ pub fn prepare_dynamic_client_registration(
         request_uris,
         initiate_login_uri,
         presentation,
+        id_token_signed_response_alg: request.id_token_signed_response_alg,
+        id_token_encrypted_response_alg: request.id_token_encrypted_response_alg,
+        id_token_encrypted_response_enc: request.id_token_encrypted_response_enc,
+        request_object_signing_alg: request.request_object_signing_alg,
+        request_object_encryption_alg: request.request_object_encryption_alg,
+        request_object_encryption_enc: request.request_object_encryption_enc,
+        token_endpoint_auth_signing_alg: request.token_endpoint_auth_signing_alg,
+        introspection_signed_response_alg: request.introspection_signed_response_alg,
+        introspection_encrypted_response_alg: request.introspection_encrypted_response_alg,
+        introspection_encrypted_response_enc: request.introspection_encrypted_response_enc,
         userinfo_signed_response_alg: request.userinfo_signed_response_alg,
         userinfo_encrypted_response_alg: request.userinfo_encrypted_response_alg,
         userinfo_encrypted_response_enc: request.userinfo_encrypted_response_enc,
@@ -544,8 +754,16 @@ impl PreparedDynamicClientRegistration {
             request_uris: self.request_uris,
             initiate_login_uri: self.initiate_login_uri,
             presentation: self.presentation,
-            introspection_encrypted_response_alg: None,
-            introspection_encrypted_response_enc: None,
+            id_token_signed_response_alg: self.id_token_signed_response_alg,
+            id_token_encrypted_response_alg: self.id_token_encrypted_response_alg,
+            id_token_encrypted_response_enc: self.id_token_encrypted_response_enc,
+            request_object_signing_alg: self.request_object_signing_alg,
+            request_object_encryption_alg: self.request_object_encryption_alg,
+            request_object_encryption_enc: self.request_object_encryption_enc,
+            token_endpoint_auth_signing_alg: self.token_endpoint_auth_signing_alg,
+            introspection_signed_response_alg: self.introspection_signed_response_alg,
+            introspection_encrypted_response_alg: self.introspection_encrypted_response_alg,
+            introspection_encrypted_response_enc: self.introspection_encrypted_response_enc,
             userinfo_signed_response_alg: self.userinfo_signed_response_alg,
             userinfo_encrypted_response_alg: self.userinfo_encrypted_response_alg,
             userinfo_encrypted_response_enc: self.userinfo_encrypted_response_enc,
@@ -555,6 +773,38 @@ impl PreparedDynamicClientRegistration {
             security_policy: ClientSecurityPolicy::default(),
         }
     }
+}
+
+fn negotiate_metadata_choice(
+    single_field: &str,
+    single: Option<String>,
+    choices: Option<Vec<String>>,
+    server_supported: &[&str],
+) -> Result<Option<String>, DynamicRegistrationError> {
+    let Some(choices) = choices else {
+        return Ok(single);
+    };
+    if choices.is_empty() || choices.iter().any(|value| value.trim().is_empty()) {
+        return Err(DynamicRegistrationError::invalid_client_metadata(format!(
+            "{single_field} choices must contain at least one non-empty value."
+        )));
+    }
+    if let Some(single) = single.as_deref()
+        && !choices.iter().any(|choice| choice == single)
+    {
+        return Err(DynamicRegistrationError::invalid_client_metadata(format!(
+            "{single_field} must be included in its values-supported choices."
+        )));
+    }
+    choices
+        .into_iter()
+        .find(|choice| server_supported.contains(&choice.as_str()))
+        .map(Some)
+        .ok_or_else(|| {
+            DynamicRegistrationError::invalid_client_metadata(format!(
+                "No supported {single_field} choice was provided."
+            ))
+        })
 }
 
 fn validate_https_metadata_uri(

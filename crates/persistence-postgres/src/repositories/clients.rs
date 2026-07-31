@@ -52,6 +52,14 @@ struct OAuthClientRecord {
     logo_uri: Option<String>,
     policy_uri: Option<String>,
     tos_uri: Option<String>,
+    id_token_signed_response_alg: Option<String>,
+    id_token_encrypted_response_alg: Option<String>,
+    id_token_encrypted_response_enc: Option<String>,
+    request_object_signing_alg: Option<String>,
+    request_object_encryption_alg: Option<String>,
+    request_object_encryption_enc: Option<String>,
+    token_endpoint_auth_signing_alg: Option<String>,
+    introspection_signed_response_alg: Option<String>,
     introspection_encrypted_response_alg: Option<String>,
     introspection_encrypted_response_enc: Option<String>,
     userinfo_signed_response_alg: Option<String>,
@@ -233,6 +241,21 @@ impl OAuthClientRepository {
                 oauth_clients::logo_uri.eq(&client.presentation.logo_uri),
                 oauth_clients::policy_uri.eq(&client.presentation.policy_uri),
                 oauth_clients::tos_uri.eq(&client.presentation.tos_uri),
+                oauth_clients::id_token_signed_response_alg
+                    .eq(&client.id_token_signed_response_alg),
+                oauth_clients::id_token_encrypted_response_alg
+                    .eq(&client.id_token_encrypted_response_alg),
+                oauth_clients::id_token_encrypted_response_enc
+                    .eq(&client.id_token_encrypted_response_enc),
+                oauth_clients::request_object_signing_alg.eq(&client.request_object_signing_alg),
+                oauth_clients::request_object_encryption_alg
+                    .eq(&client.request_object_encryption_alg),
+                oauth_clients::request_object_encryption_enc
+                    .eq(&client.request_object_encryption_enc),
+                oauth_clients::token_endpoint_auth_signing_alg
+                    .eq(&client.token_endpoint_auth_signing_alg),
+                oauth_clients::introspection_signed_response_alg
+                    .eq(&client.introspection_signed_response_alg),
                 oauth_clients::introspection_encrypted_response_alg
                     .eq(&client.introspection_encrypted_response_alg),
                 oauth_clients::introspection_encrypted_response_enc
@@ -340,6 +363,18 @@ impl OAuthClientRepository {
             oauth_clients::logo_uri.eq(&client.presentation.logo_uri),
             oauth_clients::policy_uri.eq(&client.presentation.policy_uri),
             oauth_clients::tos_uri.eq(&client.presentation.tos_uri),
+            oauth_clients::id_token_signed_response_alg.eq(&client.id_token_signed_response_alg),
+            oauth_clients::id_token_encrypted_response_alg
+                .eq(&client.id_token_encrypted_response_alg),
+            oauth_clients::id_token_encrypted_response_enc
+                .eq(&client.id_token_encrypted_response_enc),
+            oauth_clients::request_object_signing_alg.eq(&client.request_object_signing_alg),
+            oauth_clients::request_object_encryption_alg.eq(&client.request_object_encryption_alg),
+            oauth_clients::request_object_encryption_enc.eq(&client.request_object_encryption_enc),
+            oauth_clients::token_endpoint_auth_signing_alg
+                .eq(&client.token_endpoint_auth_signing_alg),
+            oauth_clients::introspection_signed_response_alg
+                .eq(&client.introspection_signed_response_alg),
             oauth_clients::introspection_encrypted_response_alg
                 .eq(&client.introspection_encrypted_response_alg),
             oauth_clients::introspection_encrypted_response_enc
@@ -437,6 +472,42 @@ impl OAuthClientRepository {
         let metadata_object = metadata
             .as_object_mut()
             .expect("client replacement metadata is always a JSON object");
+        for (field, value) in [
+            (
+                "id_token_signed_response_alg",
+                &client.id_token_signed_response_alg,
+            ),
+            (
+                "id_token_encrypted_response_alg",
+                &client.id_token_encrypted_response_alg,
+            ),
+            (
+                "id_token_encrypted_response_enc",
+                &client.id_token_encrypted_response_enc,
+            ),
+            (
+                "request_object_signing_alg",
+                &client.request_object_signing_alg,
+            ),
+            (
+                "request_object_encryption_alg",
+                &client.request_object_encryption_alg,
+            ),
+            (
+                "request_object_encryption_enc",
+                &client.request_object_encryption_enc,
+            ),
+            (
+                "token_endpoint_auth_signing_alg",
+                &client.token_endpoint_auth_signing_alg,
+            ),
+            (
+                "introspection_signed_response_alg",
+                &client.introspection_signed_response_alg,
+            ),
+        ] {
+            metadata_object.insert(field.to_owned(), serde_json::json!(value));
+        }
         metadata_object.insert(
             "backchannel_token_delivery_mode".to_owned(),
             serde_json::json!(client.backchannel_token_delivery_mode),
@@ -500,6 +571,14 @@ impl OAuthClientRepository {
                 logo_uri = $3->>'logo_uri',
                 policy_uri = $3->>'policy_uri',
                 tos_uri = $3->>'tos_uri',
+                id_token_signed_response_alg = $3->>'id_token_signed_response_alg',
+                id_token_encrypted_response_alg = $3->>'id_token_encrypted_response_alg',
+                id_token_encrypted_response_enc = $3->>'id_token_encrypted_response_enc',
+                request_object_signing_alg = $3->>'request_object_signing_alg',
+                request_object_encryption_alg = $3->>'request_object_encryption_alg',
+                request_object_encryption_enc = $3->>'request_object_encryption_enc',
+                token_endpoint_auth_signing_alg = $3->>'token_endpoint_auth_signing_alg',
+                introspection_signed_response_alg = $3->>'introspection_signed_response_alg',
                 introspection_encrypted_response_alg = $3->>'introspection_encrypted_response_alg',
                 introspection_encrypted_response_enc = $3->>'introspection_encrypted_response_enc',
                 userinfo_signed_response_alg = $3->>'userinfo_signed_response_alg',
@@ -803,10 +882,16 @@ pub(crate) async fn upsert_client_on_connection(
             backchannel_authentication_request_signing_alg, backchannel_user_code_parameter,
             frontchannel_logout_uri,
             frontchannel_logout_session_required, jwks,
-            authorization_signed_response_alg, security_policy, is_active
+            authorization_signed_response_alg,
+            id_token_signed_response_alg, id_token_encrypted_response_alg,
+            id_token_encrypted_response_enc, request_object_signing_alg,
+            request_object_encryption_alg, request_object_encryption_enc,
+            token_endpoint_auth_signing_alg, introspection_signed_response_alg,
+            security_policy, is_active
         ) VALUES (
             $1, $2, $3, $4, $5, 'confidential', $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, TRUE
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+            $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, TRUE
         )
         ON CONFLICT (tenant_id, client_id) DO UPDATE SET
             client_name = EXCLUDED.client_name,
@@ -833,6 +918,14 @@ pub(crate) async fn upsert_client_on_connection(
             frontchannel_logout_session_required = EXCLUDED.frontchannel_logout_session_required,
             jwks = EXCLUDED.jwks,
             authorization_signed_response_alg = EXCLUDED.authorization_signed_response_alg,
+            id_token_signed_response_alg = EXCLUDED.id_token_signed_response_alg,
+            id_token_encrypted_response_alg = EXCLUDED.id_token_encrypted_response_alg,
+            id_token_encrypted_response_enc = EXCLUDED.id_token_encrypted_response_enc,
+            request_object_signing_alg = EXCLUDED.request_object_signing_alg,
+            request_object_encryption_alg = EXCLUDED.request_object_encryption_alg,
+            request_object_encryption_enc = EXCLUDED.request_object_encryption_enc,
+            token_endpoint_auth_signing_alg = EXCLUDED.token_endpoint_auth_signing_alg,
+            introspection_signed_response_alg = EXCLUDED.introspection_signed_response_alg,
             security_policy = EXCLUDED.security_policy,
             is_active = TRUE,
             updated_at = CURRENT_TIMESTAMP
@@ -876,6 +969,30 @@ pub(crate) async fn upsert_client_on_connection(
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::Jsonb>, _>(&client.jwks)
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
         &client.authorization_signed_response_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.id_token_signed_response_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.id_token_encrypted_response_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.id_token_encrypted_response_enc,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.request_object_signing_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.request_object_encryption_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.request_object_encryption_enc,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.token_endpoint_auth_signing_alg,
+    )
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
+        &client.introspection_signed_response_alg,
     )
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::Jsonb>, _>(
         client
@@ -1192,6 +1309,14 @@ impl OAuthClientRecord {
                     policy_uri: self.policy_uri,
                     tos_uri: self.tos_uri,
                 },
+                id_token_signed_response_alg: self.id_token_signed_response_alg,
+                id_token_encrypted_response_alg: self.id_token_encrypted_response_alg,
+                id_token_encrypted_response_enc: self.id_token_encrypted_response_enc,
+                request_object_signing_alg: self.request_object_signing_alg,
+                request_object_encryption_alg: self.request_object_encryption_alg,
+                request_object_encryption_enc: self.request_object_encryption_enc,
+                token_endpoint_auth_signing_alg: self.token_endpoint_auth_signing_alg,
+                introspection_signed_response_alg: self.introspection_signed_response_alg,
                 introspection_encrypted_response_alg: self.introspection_encrypted_response_alg,
                 introspection_encrypted_response_enc: self.introspection_encrypted_response_enc,
                 userinfo_signed_response_alg: self.userinfo_signed_response_alg,

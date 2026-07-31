@@ -47,6 +47,16 @@ It predates the independent RP-Initiated and Back-Channel Logout jobs and is not
 The matrix covers the current TP/PS work through these paths:
 
 - `OIDC Basic OP Dynamic Registration` covers RFC 7591 dynamic client registration and `registration_endpoint` metadata.
+- OpenID Connect RP Metadata Choices 1.0 has no dedicated module in either
+  the workflow-pinned suite revision `dee9a25160e789f0f80517674693ef7989ab9fa1`
+  or official `master` at
+  [`daf33d61b982d5d33d134b07e9a36f76176b3eff`](https://gitlab.com/openid/conformance-suite/-/commit/daf33d61b982d5d33d134b07e9a36f76176b3eff).
+  The Dynamic Registration plan exercises related single-valued metadata, but
+  it does not submit the 19 `*_values_supported` choice inputs, validate
+  selection from their intersection, or check that choice arrays are absent
+  from registration/read responses. Repository DCR tests are therefore the
+  current evidence for this specification; an official plan must be added to
+  the matrix when OIDF publishes one.
 - Dynamic-registration extensions such as remote `jwks_uri`, exact registered external `request_uri`, signed Request Objects, signed UserInfo, and presentation metadata remain implemented behind their existing validation boundaries. They do not constitute a claim of the OIDF Dynamic OP certification profile.
 - `OIDC Form Post OP` covers the HTML form-post response transport, including no-store and browser submission behavior.
 - `OIDC Third-Party Initiated Login OP` covers `initiate_login_uri` metadata. This OP-side profile is registration metadata; it does not add an OP initiation endpoint.

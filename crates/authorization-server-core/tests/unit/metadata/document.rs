@@ -84,6 +84,10 @@ fn baseline_document_shape_is_locked() {
                 "response_modes_supported": ["query", "form_post", "jwt"],
                 "subject_types_supported": ["public"],
                 "id_token_signing_alg_values_supported": ["RS256"],
+                "id_token_encryption_alg_values_supported": [
+                    "RSA-OAEP-256", "ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A256KW"
+                ],
+                "id_token_encryption_enc_values_supported": ["A256GCM"],
                 "userinfo_signing_alg_values_supported": ["RS256"],
                 "userinfo_encryption_alg_values_supported": [
                     "RSA-OAEP-256", "ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A256KW"
@@ -114,6 +118,11 @@ fn baseline_document_shape_is_locked() {
                 "introspection_endpoint_auth_signing_alg_values_supported": [
                     "EdDSA", "RS256", "ES256", "PS256"
                 ],
+                "introspection_signing_alg_values_supported": ["RS256"],
+                "introspection_encryption_alg_values_supported": [
+                    "RSA-OAEP-256", "ECDH-ES", "ECDH-ES+A128KW", "ECDH-ES+A256KW"
+                ],
+                "introspection_encryption_enc_values_supported": ["A256GCM"],
                 "scopes_supported": [
                     "openid", "profile", "email", "address", "phone", "offline_access"
                 ],
@@ -414,7 +423,7 @@ fn fapi_profiles_publish_only_the_selected_security_contract() {
         ),
     ];
 
-    for (profile, response_modes, request_algs, signed_introspection) in cases {
+    for (profile, response_modes, request_algs, _signed_introspection) in cases {
         let metadata = authorization_server_metadata(
             AuthorizationServerMetadataInput {
                 profile,
@@ -435,7 +444,7 @@ fn fapi_profiles_publish_only_the_selected_security_contract() {
         );
         assert_eq!(
             metadata.get("introspection_signing_alg_values_supported"),
-            signed_introspection.then_some(&json!(["PS256"]))
+            Some(&json!(["PS256"]))
         );
         assert_eq!(
             metadata["token_endpoint_auth_methods_supported"],

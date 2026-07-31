@@ -100,6 +100,7 @@ impl RemoteClientDocumentResolver {
         }
 
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())

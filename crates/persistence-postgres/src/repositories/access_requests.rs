@@ -512,6 +512,20 @@ async fn insert_client(
             oauth_clients::tls_client_auth_san_ip.eq(json!(&prepared.tls_client_auth_san_ip)),
             oauth_clients::tls_client_auth_san_email.eq(json!(&prepared.tls_client_auth_san_email)),
             oauth_clients::jwks.eq(&prepared.jwks),
+            oauth_clients::id_token_signed_response_alg.eq(&prepared.id_token_signed_response_alg),
+            oauth_clients::id_token_encrypted_response_alg
+                .eq(&prepared.id_token_encrypted_response_alg),
+            oauth_clients::id_token_encrypted_response_enc
+                .eq(&prepared.id_token_encrypted_response_enc),
+            oauth_clients::request_object_signing_alg.eq(&prepared.request_object_signing_alg),
+            oauth_clients::request_object_encryption_alg
+                .eq(&prepared.request_object_encryption_alg),
+            oauth_clients::request_object_encryption_enc
+                .eq(&prepared.request_object_encryption_enc),
+            oauth_clients::token_endpoint_auth_signing_alg
+                .eq(&prepared.token_endpoint_auth_signing_alg),
+            oauth_clients::introspection_signed_response_alg
+                .eq(&prepared.introspection_signed_response_alg),
             oauth_clients::introspection_encrypted_response_alg
                 .eq(&prepared.introspection_encrypted_response_alg),
             oauth_clients::introspection_encrypted_response_enc

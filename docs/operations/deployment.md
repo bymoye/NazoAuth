@@ -18,10 +18,12 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Compose starts PostgreSQL and Valkey, runs `nazoauth migrate`, then starts
-`nazoauth server`. Open:
+Compose generates private PostgreSQL and Valkey credentials in a named volume,
+starts both services, and lets `nazoauth server` apply pending migrations before
+accepting traffic. Open:
 
-- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/ready` for dependency readiness
+- `http://127.0.0.1:8000/live` for process liveness
 - `http://127.0.0.1:8000/.well-known/openid-configuration`
 
 The first source build requires network access to download Rust dependencies.
@@ -31,6 +33,10 @@ The default is a loopback-only evaluation deployment. PostgreSQL, Valkey,
 signing keys, and avatars use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
+
+When the database has no administrator, the server log reports a time-bounded,
+single-use setup URL. Treat it as a password; it creates the first administrator
+without requiring SMTP.
 
 ## Public deployment
 
@@ -42,7 +48,6 @@ PUBLIC_BASE_URL: "https://auth.example.com"
 DATABASE_URL: "postgresql://<user>:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
-CLIENT_SECRET_PEPPER: "<stable random secret of at least 32 bytes>"
 RUST_LOG: "info"
 ```
 
@@ -51,12 +56,13 @@ profile. Configure elevated behavior through runtime modules and explicit
 per-client `security_policy`.
 
 Keep this file outside version control. `PUBLIC_BASE_URL` must be the exact
-HTTPS origin without a trailing slash. `CLIENT_SECRET_PEPPER` must remain
-stable across restarts.
-When using the bundled PostgreSQL service, keep `POSTGRES_DB`,
-`POSTGRES_USER`, and `POSTGRES_PASSWORD` consistent with `DATABASE_URL`;
-percent-encode the password inside the URL. Independently managed PostgreSQL
-and Valkey services are preferable for production.
+HTTPS origin without a trailing slash. When absent, `CLIENT_SECRET_PEPPER`,
+the DCR initial-access token, and the pairwise-subject secret when needed are
+generated under `DATA_DIR/secrets` and reused across restarts. Back up that
+directory with PostgreSQL. Missing or malformed persisted secrets fail startup
+rather than being replaced. The bundled PostgreSQL and Valkey credentials are
+owned by the Compose initialization service. Independently managed services
+remain supported for production.
 
 Start the same topology:
 
@@ -80,8 +86,8 @@ HTTPS address seen by clients.
 Activation requires all of these checks:
 
 1. `docker compose ps` shows PostgreSQL, Valkey, and `server` running;
-2. the one-shot `migrate` service exited successfully;
-3. `/health` returns HTTP 200;
+2. the server log confirms pending migrations completed;
+3. `/ready` returns HTTP 200;
 4. `/.well-known/openid-configuration` returns the configured issuer;
 5. the reverse proxy serves the same endpoints through the public HTTPS origin;
 6. signing-key and avatar volumes remain mounted after a service restart.
@@ -89,7 +95,6 @@ Activation requires all of these checks:
 Inspect failures with:
 
 ```sh
-docker compose logs migrate
 docker compose logs server
 ```
 
@@ -117,9 +122,10 @@ every production upgrade.
 The bundled topology is a single-node deployment. Before relying on it for
 production:
 
-- replace example database credentials;
+- back up Compose-generated database, Valkey, and application secrets or use an external secret manager;
 - define backup and restore procedures;
-- monitor PostgreSQL, Valkey, disk usage, and `/health`;
+- monitor PostgreSQL, Valkey, disk usage, and `/ready`; use `/live` only for
+  process restart decisions;
 - keep signing keys and avatars on durable storage;
 - use an external PostgreSQL/Valkey service or an orchestrator when HA is
   required;

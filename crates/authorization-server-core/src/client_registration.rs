@@ -125,6 +125,14 @@ pub struct ValidatedClientRegistration {
     /// Dynamically registered, display-only RP metadata. These URIs are never
     /// dereferenced by the authorization server.
     pub presentation: ClientPresentationMetadata,
+    pub id_token_signed_response_alg: Option<String>,
+    pub id_token_encrypted_response_alg: Option<String>,
+    pub id_token_encrypted_response_enc: Option<String>,
+    pub request_object_signing_alg: Option<String>,
+    pub request_object_encryption_alg: Option<String>,
+    pub request_object_encryption_enc: Option<String>,
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    pub introspection_signed_response_alg: Option<String>,
     pub introspection_encrypted_response_alg: Option<String>,
     pub introspection_encrypted_response_enc: Option<String>,
     pub userinfo_signed_response_alg: Option<String>,

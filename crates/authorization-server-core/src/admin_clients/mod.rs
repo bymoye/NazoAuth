@@ -66,11 +66,18 @@ pub trait SectorIdentifierResolverPort: Send + Sync {
 /// Cryptographic operations are isolated from protocol validation and use-case policy.
 pub trait AdminClientCryptoPort: Send + Sync {
     fn response_signing_algorithms(&self) -> Vec<String>;
+    fn id_token_signing_algorithms(&self) -> Vec<String> {
+        self.response_signing_algorithms()
+    }
     fn issue_client_secret(&self, pepper: &str) -> (String, String);
     fn validate_jwks(&self, jwks: &Value) -> Result<(), String>;
     fn validate_rfc4514_dn(&self, value: &str) -> Result<(), String>;
     fn matching_encryption_key_count(&self, jwks: &Value, algorithm: &str) -> usize;
     fn contains_signing_key(&self, jwks: &Value) -> bool;
+    fn contains_signing_key_for_algorithm(&self, jwks: &Value, algorithm: &str) -> bool {
+        let _ = algorithm;
+        self.contains_signing_key(jwks)
+    }
     fn valid_self_signed_mtls_jwks(&self, jwks: &Value) -> bool;
 }
 
@@ -184,6 +191,22 @@ pub struct CreateClientRequest {
     #[serde(default, skip_deserializing)]
     pub presentation: ClientPresentationMetadata,
     #[serde(default)]
+    pub id_token_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub id_token_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub id_token_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub request_object_signing_alg: Option<String>,
+    #[serde(default)]
+    pub request_object_encryption_alg: Option<String>,
+    #[serde(default)]
+    pub request_object_encryption_enc: Option<String>,
+    #[serde(default)]
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    #[serde(default)]
+    pub introspection_signed_response_alg: Option<String>,
+    #[serde(default)]
     pub introspection_encrypted_response_alg: Option<String>,
     #[serde(default)]
     pub introspection_encrypted_response_enc: Option<String>,
@@ -233,6 +256,14 @@ pub struct PatchClientRequest {
     pub tls_client_auth_san_ip: Option<Vec<String>>,
     pub tls_client_auth_san_email: Option<Vec<String>>,
     pub jwks: Option<Value>,
+    pub id_token_signed_response_alg: Option<String>,
+    pub id_token_encrypted_response_alg: Option<String>,
+    pub id_token_encrypted_response_enc: Option<String>,
+    pub request_object_signing_alg: Option<String>,
+    pub request_object_encryption_alg: Option<String>,
+    pub request_object_encryption_enc: Option<String>,
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    pub introspection_signed_response_alg: Option<String>,
     pub introspection_encrypted_response_alg: Option<String>,
     pub introspection_encrypted_response_enc: Option<String>,
     pub userinfo_signed_response_alg: Option<String>,
@@ -463,6 +494,7 @@ where
         .map_err(|message| AdminClientError::InvalidRequest(message.to_owned()))?;
     validate_client_metadata(
         ClientMetadata::from_create(&request),
+        &crypto.id_token_signing_algorithms(),
         &crypto.response_signing_algorithms(),
         crypto,
     )?;
@@ -541,6 +573,28 @@ where
             request_uris: trim_string_vec(request.request_uris),
             initiate_login_uri: trim_optional_string(request.initiate_login_uri),
             presentation: request.presentation,
+            id_token_signed_response_alg: trim_optional_string(
+                request.id_token_signed_response_alg,
+            ),
+            id_token_encrypted_response_alg: trim_optional_string(
+                request.id_token_encrypted_response_alg,
+            ),
+            id_token_encrypted_response_enc: trim_optional_string(
+                request.id_token_encrypted_response_enc,
+            ),
+            request_object_signing_alg: trim_optional_string(request.request_object_signing_alg),
+            request_object_encryption_alg: trim_optional_string(
+                request.request_object_encryption_alg,
+            ),
+            request_object_encryption_enc: trim_optional_string(
+                request.request_object_encryption_enc,
+            ),
+            token_endpoint_auth_signing_alg: trim_optional_string(
+                request.token_endpoint_auth_signing_alg,
+            ),
+            introspection_signed_response_alg: trim_optional_string(
+                request.introspection_signed_response_alg,
+            ),
             introspection_encrypted_response_alg: trim_optional_string(
                 request.introspection_encrypted_response_alg,
             ),
@@ -669,6 +723,30 @@ where
     if let Some(value) = request.jwks {
         client.jwks = Some(value);
     }
+    if let Some(value) = request.id_token_signed_response_alg {
+        client.id_token_signed_response_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.id_token_encrypted_response_alg {
+        client.id_token_encrypted_response_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.id_token_encrypted_response_enc {
+        client.id_token_encrypted_response_enc = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.request_object_signing_alg {
+        client.request_object_signing_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.request_object_encryption_alg {
+        client.request_object_encryption_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.request_object_encryption_enc {
+        client.request_object_encryption_enc = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.token_endpoint_auth_signing_alg {
+        client.token_endpoint_auth_signing_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.introspection_signed_response_alg {
+        client.introspection_signed_response_alg = trim_optional_string(Some(value));
+    }
     if let Some(value) = request.introspection_encrypted_response_alg {
         client.introspection_encrypted_response_alg = trim_optional_string(Some(value));
     }
@@ -759,6 +837,7 @@ where
 
     validate_client_metadata(
         ClientMetadata::from_client(&client),
+        &crypto.id_token_signing_algorithms(),
         &crypto.response_signing_algorithms(),
         crypto,
     )?;

@@ -4,9 +4,8 @@ use nazo_auth::{CibaMetadataProfile, MetadataAuthorizationServerProfile, Metadat
 use nazo_http_actix::{MetadataEndpointConfig, MetadataSnapshot, MetadataSnapshotSource};
 use nazo_key_management::{KeyManager, signing_algorithm_name};
 
+use crate::http::mtls::MtlsCertificateSourceMode;
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
-#[cfg(test)]
-use crate::settings::AuthorizationServerProfile;
 use crate::settings::{CibaSecurityProfile, Settings, SubjectType};
 
 #[derive(Clone)]
@@ -45,7 +44,7 @@ impl From<&Settings> for MetadataConfig {
         Self {
             issuer: endpoint.issuer.clone(),
             mtls_endpoint_base_url: endpoint.mtls_endpoint_base_url.clone(),
-            mtls_enabled: !endpoint.trusted_proxy_cidrs.is_empty(),
+            mtls_enabled: endpoint.mtls_certificate_source != MtlsCertificateSourceMode::Disabled,
             authorization_server_profile: MetadataAuthorizationServerProfile::Composable,
             ciba_security_profile: match protocol.ciba_security_profile {
                 CibaSecurityProfile::FapiCibaId1 => CibaMetadataProfile::FapiCiba,

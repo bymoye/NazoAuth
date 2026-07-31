@@ -10,6 +10,28 @@ use uuid::Uuid;
 
 use super::*;
 
+const RP_METADATA_CHOICE_FIELDS: &[&str] = &[
+    "subject_types_supported",
+    "id_token_signing_alg_values_supported",
+    "id_token_encryption_alg_values_supported",
+    "id_token_encryption_enc_values_supported",
+    "userinfo_signing_alg_values_supported",
+    "userinfo_encryption_alg_values_supported",
+    "userinfo_encryption_enc_values_supported",
+    "request_object_signing_alg_values_supported",
+    "request_object_encryption_alg_values_supported",
+    "request_object_encryption_enc_values_supported",
+    "token_endpoint_auth_methods_supported",
+    "token_endpoint_auth_signing_alg_values_supported",
+    "backchannel_authentication_request_signing_alg_values_supported",
+    "authorization_signing_alg_values_supported",
+    "authorization_encryption_alg_values_supported",
+    "authorization_encryption_enc_values_supported",
+    "introspection_signing_alg_values_supported",
+    "introspection_encryption_alg_values_supported",
+    "introspection_encryption_enc_values_supported",
+];
+
 #[derive(Clone)]
 struct FakeStore {
     client: Arc<Mutex<Option<OAuthClient>>>,
@@ -214,6 +236,10 @@ fn endpoint_with_store(enabled: bool, store: FakeStore) -> DynamicRegistrationEn
             initial_access_token: Some("initial-token".to_owned()),
             client_ip_header_mode: ClientIpHeaderMode::None,
             trusted_proxy_cidrs: Vec::new(),
+            id_token_signing_algs: vec!["RS256", "PS256"],
+            response_signing_algs: vec!["RS256", "PS256"],
+            request_object_encryption_algs: vec!["RSA-OAEP-256"],
+            request_object_encryption_encs: vec!["A256GCM"],
         },
         Arc::new(store),
         Arc::new(FakeSecurity),
@@ -345,12 +371,35 @@ async fn registration_and_management_methods_keep_wire_contracts() {
             .set_json(json!({
                 "client_name": "Registered Client",
                 "redirect_uris": ["https://client.example/callback"],
+                "grant_types": [
+                    "authorization_code",
+                    "urn:openid:params:grant-type:ciba"
+                ],
                 "jwks_uri": "https://client.example/jwks.json",
                 "request_uris": ["https://client.example/request.jwt"],
                 "initiate_login_uri": "https://client.example/login/initiate",
                 "logo_uri": "https://client.example/logo.svg",
                 "policy_uri": "https://client.example/privacy",
-                "tos_uri": "https://client.example/terms"
+                "tos_uri": "https://client.example/terms",
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["PS256", "RS256"],
+                "id_token_encryption_alg_values_supported": ["RSA-OAEP-256"],
+                "id_token_encryption_enc_values_supported": ["A256GCM"],
+                "userinfo_signing_alg_values_supported": ["PS256"],
+                "userinfo_encryption_alg_values_supported": ["ECDH-ES"],
+                "userinfo_encryption_enc_values_supported": ["A256GCM"],
+                "request_object_signing_alg_values_supported": ["PS256"],
+                "request_object_encryption_alg_values_supported": ["RSA-OAEP-256"],
+                "request_object_encryption_enc_values_supported": ["A256GCM"],
+                "token_endpoint_auth_methods_supported": ["private_key_jwt"],
+                "token_endpoint_auth_signing_alg_values_supported": ["PS256"],
+                "backchannel_authentication_request_signing_alg_values_supported": ["PS256"],
+                "authorization_signing_alg_values_supported": ["PS256"],
+                "authorization_encryption_alg_values_supported": ["ECDH-ES"],
+                "authorization_encryption_enc_values_supported": ["A256GCM"],
+                "introspection_signing_alg_values_supported": ["PS256"],
+                "introspection_encryption_alg_values_supported": ["ECDH-ES"],
+                "introspection_encryption_enc_values_supported": ["A256GCM"]
             }))
             .to_request(),
     )
@@ -363,7 +412,7 @@ async fn registration_and_management_methods_keep_wire_contracts() {
     let created: Value = test::read_body_json(created).await;
     let client_id = created["client_id"].as_str().expect("client id");
     assert_eq!(created["registration_access_token"], "registration-token");
-    assert_eq!(created["client_secret"], "issued-secret");
+    assert!(created.get("client_secret").is_none());
     assert_eq!(created["jwks_uri"], "https://client.example/jwks.json");
     assert!(created.get("jwks").is_none());
     assert_eq!(
@@ -377,6 +426,34 @@ async fn registration_and_management_methods_keep_wire_contracts() {
     assert_eq!(created["logo_uri"], "https://client.example/logo.svg");
     assert_eq!(created["policy_uri"], "https://client.example/privacy");
     assert_eq!(created["tos_uri"], "https://client.example/terms");
+    assert_eq!(created["subject_type"], "public");
+    assert_eq!(created["id_token_signed_response_alg"], "PS256");
+    assert_eq!(created["id_token_encrypted_response_alg"], "RSA-OAEP-256");
+    assert_eq!(created["id_token_encrypted_response_enc"], "A256GCM");
+    assert_eq!(created["userinfo_signed_response_alg"], "PS256");
+    assert_eq!(created["userinfo_encrypted_response_alg"], "ECDH-ES");
+    assert_eq!(created["userinfo_encrypted_response_enc"], "A256GCM");
+    assert_eq!(created["request_object_signing_alg"], "PS256");
+    assert_eq!(created["request_object_encryption_alg"], "RSA-OAEP-256");
+    assert_eq!(created["request_object_encryption_enc"], "A256GCM");
+    assert_eq!(created["token_endpoint_auth_method"], "private_key_jwt");
+    assert_eq!(created["token_endpoint_auth_signing_alg"], "PS256");
+    assert_eq!(
+        created["backchannel_authentication_request_signing_alg"],
+        "PS256"
+    );
+    assert_eq!(created["authorization_signed_response_alg"], "PS256");
+    assert_eq!(created["authorization_encrypted_response_alg"], "ECDH-ES");
+    assert_eq!(created["authorization_encrypted_response_enc"], "A256GCM");
+    assert_eq!(created["introspection_signed_response_alg"], "PS256");
+    assert_eq!(created["introspection_encrypted_response_alg"], "ECDH-ES");
+    assert_eq!(created["introspection_encrypted_response_enc"], "A256GCM");
+    for &choices in RP_METADATA_CHOICE_FIELDS {
+        assert!(
+            created.get(choices).is_none(),
+            "{choices} must be input-only"
+        );
+    }
     assert!(created["client_id_issued_at"].is_i64());
     assert_eq!(
         created["registration_client_uri"],
@@ -398,6 +475,38 @@ async fn registration_and_management_methods_keep_wire_contracts() {
     );
     let read: Value = test::read_body_json(read).await;
     assert_eq!(read["registration_access_token"], "registration-token");
+    for selected in [
+        "subject_type",
+        "id_token_signed_response_alg",
+        "id_token_encrypted_response_alg",
+        "id_token_encrypted_response_enc",
+        "userinfo_signed_response_alg",
+        "userinfo_encrypted_response_alg",
+        "userinfo_encrypted_response_enc",
+        "request_object_signing_alg",
+        "request_object_encryption_alg",
+        "request_object_encryption_enc",
+        "token_endpoint_auth_method",
+        "token_endpoint_auth_signing_alg",
+        "backchannel_authentication_request_signing_alg",
+        "authorization_signed_response_alg",
+        "authorization_encrypted_response_alg",
+        "authorization_encrypted_response_enc",
+        "introspection_signed_response_alg",
+        "introspection_encrypted_response_alg",
+        "introspection_encrypted_response_enc",
+    ] {
+        assert_eq!(
+            read[selected], created[selected],
+            "{selected} must round-trip"
+        );
+    }
+    for &choices in RP_METADATA_CHOICE_FIELDS {
+        assert!(
+            read.get(choices).is_none(),
+            "{choices} must remain input-only"
+        );
+    }
 
     let update = test::call_service(
         &service,
@@ -582,6 +691,14 @@ fn client() -> OAuthClient {
             request_uris: Vec::new(),
             initiate_login_uri: None,
             presentation: nazo_auth::ClientPresentationMetadata::default(),
+            id_token_signed_response_alg: None,
+            id_token_encrypted_response_alg: None,
+            id_token_encrypted_response_enc: None,
+            request_object_signing_alg: None,
+            request_object_encryption_alg: None,
+            request_object_encryption_enc: None,
+            token_endpoint_auth_signing_alg: None,
+            introspection_signed_response_alg: None,
             introspection_encrypted_response_alg: None,
             introspection_encrypted_response_enc: None,
             userinfo_signed_response_alg: None,

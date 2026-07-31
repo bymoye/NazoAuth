@@ -74,6 +74,7 @@ pub struct RequestObjectPolicy<'a> {
 pub struct RequestObjectVerificationInput<'a> {
     pub request_object: &'a str,
     pub client: &'a OAuthClient,
+    pub expected_signing_algorithm: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,7 +114,13 @@ pub fn verify_request_object(
     }
     let header = decode_header(input.request_object)
         .map_err(|_| RequestObjectVerificationError::InvalidAlgorithm)?;
-    if supported_client_jwt_algorithm_name(header.alg).is_none() {
+    let Some(algorithm_name) = supported_client_jwt_algorithm_name(header.alg) else {
+        return Err(RequestObjectVerificationError::InvalidAlgorithm);
+    };
+    if input
+        .expected_signing_algorithm
+        .is_some_and(|expected| expected != algorithm_name)
+    {
         return Err(RequestObjectVerificationError::InvalidAlgorithm);
     }
     let kid = header

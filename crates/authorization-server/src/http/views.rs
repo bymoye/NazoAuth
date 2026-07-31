@@ -133,6 +133,42 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
     let object = value
         .as_object_mut()
         .expect("client JSON construction always produces an object");
+    for (field, selected) in [
+        (
+            "id_token_signed_response_alg",
+            &client.id_token_signed_response_alg,
+        ),
+        (
+            "id_token_encrypted_response_alg",
+            &client.id_token_encrypted_response_alg,
+        ),
+        (
+            "id_token_encrypted_response_enc",
+            &client.id_token_encrypted_response_enc,
+        ),
+        (
+            "request_object_signing_alg",
+            &client.request_object_signing_alg,
+        ),
+        (
+            "request_object_encryption_alg",
+            &client.request_object_encryption_alg,
+        ),
+        (
+            "request_object_encryption_enc",
+            &client.request_object_encryption_enc,
+        ),
+        (
+            "token_endpoint_auth_signing_alg",
+            &client.token_endpoint_auth_signing_alg,
+        ),
+        (
+            "introspection_signed_response_alg",
+            &client.introspection_signed_response_alg,
+        ),
+    ] {
+        object.insert(field.to_owned(), json!(selected));
+    }
     object.insert(
         "backchannel_token_delivery_mode".to_owned(),
         json!(backchannel_token_delivery_mode),

@@ -170,6 +170,7 @@ async fn post_logout_token(
         anyhow::bail!("back-channel logout endpoint resolved to a blocked network");
     }
     let http = reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(StdDuration::from_secs(3))
         .timeout(StdDuration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())

@@ -1,0 +1,9 @@
+ALTER TABLE oauth_clients
+    DROP COLUMN introspection_signed_response_alg,
+    DROP COLUMN token_endpoint_auth_signing_alg,
+    DROP COLUMN request_object_encryption_enc,
+    DROP COLUMN request_object_encryption_alg,
+    DROP COLUMN request_object_signing_alg,
+    DROP COLUMN id_token_encrypted_response_enc,
+    DROP COLUMN id_token_encrypted_response_alg,
+    DROP COLUMN id_token_signed_response_alg;

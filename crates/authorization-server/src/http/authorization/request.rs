@@ -37,7 +37,7 @@ use uuid::Uuid;
 // 该端点只创建 consent 临时状态，不签发授权码。
 use super::{
     AuthorizationEndpoint, AuthorizationRequestContext, apply_request_object_with_context,
-    is_pushed_authorization_request_uri, unverified_signed_request_object_client_id,
+    is_pushed_authorization_request_uri,
 };
 use nazo_auth::issue_oidc_session_state;
 
@@ -170,7 +170,8 @@ async fn authorize_request_with_context(
 
     if !q.contains_key("client_id")
         && let Some(request_object) = q.get("request")
-        && let Some(client_id) = unverified_signed_request_object_client_id(request_object)
+        && let Some(client_id) =
+            super::unverified_request_object_client_id(context.request_object_keys, request_object)
     {
         q.insert("client_id".to_owned(), client_id);
     }

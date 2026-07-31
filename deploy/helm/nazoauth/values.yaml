@@ -1,0 +1,56 @@
+replicaCount: 1
+
+image:
+  repository: nazoauth
+  tag: latest
+  pullPolicy: IfNotPresent
+
+publicBaseUrl: "https://auth.example.com"
+
+service:
+  type: ClusterIP
+  port: 8000
+
+connections:
+  # Must contain database-url and valkey-url keys.
+  existingSecret: nazoauth-connections
+  databaseUrlKey: database-url
+  valkeyUrlKey: valkey-url
+
+appSecrets:
+  # Empty means that one replica generates and persists application secrets on
+  # the data PVC. Set this for multiple replicas.
+  existingSecret: ""
+  clientSecretPepperKey: client-secret-pepper
+  pairwiseSubjectSecretKey: pairwise-subject-secret
+  dynamicRegistrationTokenKey: dynamic-registration-initial-access-token
+
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""
+
+signing:
+  # An external command is the KMS/HSM boundary. The executable and its
+  # credentials must be mounted by extraVolumes/extraVolumeMounts.
+  externalCommand: ""
+
+mtls:
+  certificateSource: disabled
+  trustedProxyCidrs: ""
+
+podSecurityContext:
+  fsGroup: 65532
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources: {}
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

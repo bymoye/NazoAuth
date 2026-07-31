@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::KeyManager;
 
 const CLIENT_SECRET_HASH_VERSION: &str = "client-secret-v1";
-pub const SUPPORTED_CLIENT_JWT_SIGNING_ALGS: &[&str] = &["EdDSA", "RS256", "ES256", "PS256"];
+pub use nazo_auth::SUPPORTED_CLIENT_JWT_SIGNING_ALGS;
 
 /// Concrete client-registration crypto bound to the active signing key snapshot.
 #[derive(Clone)]
@@ -43,6 +43,15 @@ impl AdminClientCryptoPort for ClientRegistrationCrypto {
         self.keyset
             .snapshot()
             .response_signing_alg_values_supported()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn id_token_signing_algorithms(&self) -> Vec<String> {
+        self.keyset
+            .snapshot()
+            .id_token_signing_alg_values_supported()
             .into_iter()
             .map(ToOwned::to_owned)
             .collect()
@@ -68,6 +77,10 @@ impl AdminClientCryptoPort for ClientRegistrationCrypto {
 
     fn contains_signing_key(&self, jwks: &Value) -> bool {
         client_jwks_contains_signing_key(jwks)
+    }
+
+    fn contains_signing_key_for_algorithm(&self, jwks: &Value, algorithm: &str) -> bool {
+        client_jwks_contains_signing_key_for_algorithm(jwks, algorithm)
     }
 
     fn valid_self_signed_mtls_jwks(&self, jwks: &Value) -> bool {
@@ -107,6 +120,25 @@ pub fn client_jwks_contains_signing_key(jwks: &Value) -> bool {
                     return false;
                 };
                 public_key_use == "sig" && jwt_decoding_key_from_jwk(key, algorithm).is_some()
+            })
+        })
+}
+
+#[must_use]
+pub fn client_jwks_contains_signing_key_for_algorithm(jwks: &Value, expected: &str) -> bool {
+    jwks.get("keys")
+        .and_then(Value::as_array)
+        .is_some_and(|keys| {
+            keys.iter().any(|key| {
+                let public_key_use = key.get("use").and_then(Value::as_str).unwrap_or("sig");
+                let algorithm_name = key.get("alg").and_then(Value::as_str);
+                let Some(algorithm) = algorithm_name.and_then(client_jwt_algorithm_from_name)
+                else {
+                    return false;
+                };
+                public_key_use == "sig"
+                    && algorithm_name == Some(expected)
+                    && jwt_decoding_key_from_jwk(key, algorithm).is_some()
             })
         })
 }

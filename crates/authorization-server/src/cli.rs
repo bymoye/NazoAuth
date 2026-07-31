@@ -22,15 +22,16 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
 
 async fn run_server() -> anyhow::Result<()> {
     match crate::config::prepare_server_config()? {
-        ServerConfigPreparation::Ready => crate::bootstrap::run().await,
+        ServerConfigPreparation::Ready => {}
         ServerConfigPreparation::Created(path) => {
             eprintln!(
-                "Created initial configuration at {}.\nReview and edit it, then run `nazoauth server` again.",
+                "Created initial configuration at {}. Continuing with secure generated defaults.",
                 path.display()
             );
-            Ok(())
         }
     }
+    run_migrations().await?;
+    crate::bootstrap::run().await
 }
 
 async fn run_migrations() -> anyhow::Result<()> {

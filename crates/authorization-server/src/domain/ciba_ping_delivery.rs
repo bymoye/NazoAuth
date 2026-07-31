@@ -128,7 +128,7 @@ impl CibaPingDeliveryWorker {
         if !allow_private && addresses.iter().any(|address| is_blocked_ip(address.ip())) {
             anyhow::bail!("CIBA ping endpoint resolved to a blocked network");
         }
-        let client = apply_ciba_ping_tls_policy(reqwest::Client::builder())?
+        let client = apply_ciba_ping_tls_policy(reqwest::Client::builder().no_proxy())?
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())

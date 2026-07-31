@@ -16,6 +16,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    initial_admin_bootstrap (singleton) {
+        singleton -> Bool,
+        token_hash -> Varchar,
+        expires_at -> Timestamptz,
+        consumed_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     user_totp_credentials (id) {
         id -> Uuid, tenant_id -> Uuid, user_id -> Uuid, secret_base32 -> Varchar,
         label -> Varchar, confirmed_at -> Nullable<Timestamptz>, last_used_step -> Nullable<Int8>,
@@ -216,6 +227,14 @@ diesel::table! {
         logo_uri -> Nullable<Text>,
         policy_uri -> Nullable<Text>,
         tos_uri -> Nullable<Text>,
+        id_token_signed_response_alg -> Nullable<Varchar>,
+        id_token_encrypted_response_alg -> Nullable<Varchar>,
+        id_token_encrypted_response_enc -> Nullable<Varchar>,
+        request_object_signing_alg -> Nullable<Varchar>,
+        request_object_encryption_alg -> Nullable<Varchar>,
+        request_object_encryption_enc -> Nullable<Varchar>,
+        token_endpoint_auth_signing_alg -> Nullable<Varchar>,
+        introspection_signed_response_alg -> Nullable<Varchar>,
         introspection_encrypted_response_alg -> Nullable<Varchar>,
         introspection_encrypted_response_enc -> Nullable<Varchar>,
         userinfo_signed_response_alg -> Nullable<Varchar>,

@@ -8,6 +8,7 @@ impl ConfigSource {
                 .map(|(key, value)| (key.to_owned(), value.to_owned()))
                 .collect(),
             env_values: HashMap::new(),
+            generated_values: HashMap::new(),
         }
     }
 
@@ -18,6 +19,7 @@ impl ConfigSource {
         Self {
             file_values: values.into_iter().collect(),
             env_values: HashMap::new(),
+            generated_values: HashMap::new(),
         }
     }
 
@@ -112,7 +114,7 @@ fn dotenv_file_is_rejected() {
 }
 
 #[test]
-fn first_server_run_creates_the_reviewable_example_and_stops() {
+fn first_server_run_creates_the_local_configuration_once() {
     let path = temp_config_dir("first_server_run");
 
     let result = prepare_server_config_in(&path).unwrap();
@@ -197,6 +199,124 @@ fn missing_config_file_can_be_replaced_by_whitelisted_environment() {
 }
 
 #[test]
+fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() {
+    let path = temp_config_dir("generated_secrets");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nSUBJECT_TYPE: pairwise\n",
+    )
+    .unwrap();
+
+    let first = ConfigSource::load_from_dir(&path).unwrap();
+    let second = ConfigSource::load_from_dir(&path).unwrap();
+
+    for key in [
+        "CLIENT_SECRET_PEPPER",
+        "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
+        "PAIRWISE_SUBJECT_SECRET",
+    ] {
+        assert!(first.required_string(key).unwrap().len() >= 32);
+        assert_eq!(first.get(key), second.get(key));
+    }
+    let explicit = ConfigSource::load_from_dir_with_env(
+        &path,
+        [(
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "explicit-client-secret-pepper-value-123456".to_owned(),
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        explicit.required_string("CLIENT_SECRET_PEPPER").unwrap(),
+        "explicit-client-secret-pepper-value-123456"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn generated_secret_creation_is_concurrency_safe() {
+    let path = temp_config_dir("generated_secret_concurrency");
+    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+
+    let handles = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                ConfigSource::load_from_dir(path)
+                    .unwrap()
+                    .required_string("CLIENT_SECRET_PEPPER")
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let values = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(values.iter().all(|value| value == &values[0]));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn malformed_persisted_generated_secret_fails_closed() {
+    let path = temp_config_dir("malformed_generated_secret");
+    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    let secrets = path.join("state").join(GENERATED_SECRETS_DIR);
+    std::fs::create_dir_all(&secrets).unwrap();
+    std::fs::write(secrets.join("client-secret-pepper"), "short").unwrap();
+
+    let error = ConfigSource::load_from_dir(&path).unwrap_err();
+
+    assert!(error.to_string().contains("restore it from backup"));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn explicit_yaml_scalar_overrides_environment_secret_file_fallback() {
+    let path = temp_config_dir("secret_file_precedence");
+    let database_url_file = path.join("database-url");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATABASE_URL: postgresql://yaml.example/oauth\nDATA_DIR: state\n",
+    )
+    .unwrap();
+    std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
+
+    let source = ConfigSource::load_from_dir_with_env(
+        &path,
+        [(
+            "DATABASE_URL_FILE".to_owned(),
+            database_url_file.display().to_string(),
+        )],
+    )
+    .unwrap();
+
+    assert_eq!(database_url(&source), "postgresql://yaml.example/oauth");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn environment_secret_file_supplies_an_absent_scalar() {
+    let path = temp_config_dir("secret_file_fallback");
+    let database_url_file = path.join("database-url");
+    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
+
+    let source = ConfigSource::load_from_dir_with_env(
+        &path,
+        [(
+            "DATABASE_URL_FILE".to_owned(),
+            database_url_file.display().to_string(),
+        )],
+    )
+    .unwrap();
+
+    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn environment_overrides_yaml_by_allowlist() {
     let mut source = ConfigSource::default();
     source
@@ -257,6 +377,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CLIENT_DELIVERY_TTL_SECONDS",
             "CLIENT_IP_HEADER_MODE",
             "CLIENT_SECRET_PEPPER",
+            "CLIENT_SECRET_PEPPER_FILE",
             "CIBA_AUTOMATED_DECISION_TOKEN",
             "CIBA_AUTH_REQ_ID_TTL_SECONDS",
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
@@ -267,6 +388,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CORS_ALLOWED_ORIGINS",
             "CSRF_COOKIE_NAME",
             "DATABASE_URL",
+            "DATABASE_URL_FILE",
             "DATABASE_MAX_CONNECTIONS",
             "DATA_DIR",
             "DEFAULT_AUDIENCE",
@@ -274,6 +396,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "DEVICE_AUTHORIZATION_TTL_SECONDS",
             "DPOP_NONCE_POLICY",
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
+            "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
             "ENABLE_AUTHORIZATION_DETAILS",
             "ENABLE_CIBA",
             "ENABLE_DEVICE_AUTHORIZATION_GRANT",
@@ -312,6 +435,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS",
             "LOGIN_FAILURE_WINDOW_SECONDS",
             "MTLS_ENDPOINT_BASE_URL",
+            "MTLS_CERTIFICATE_SOURCE",
             "OPENID4VC_DATA_ENCRYPTION_KEY",
             "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON",
             "OPENID4VC_CLIENT_ATTESTATION_ISSUER",
@@ -331,6 +455,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "OTEL_EXPORTER_OTLP_PROTOCOL",
             "OTEL_EXPORTER_OTLP_TIMEOUT",
             "PAIRWISE_SUBJECT_SECRET",
+            "PAIRWISE_SUBJECT_SECRET_FILE",
             "PAR_TTL_SECONDS",
             "PASSKEY_RP_ID",
             "PASSKEY_RP_NAME",
@@ -357,9 +482,14 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "SUBJECT_TYPE",
             "TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS",
             "TOKEN_RATE_LIMIT_MAX_REQUESTS",
+            "TLS_BIND",
+            "TLS_CERTIFICATE_FILE",
+            "TLS_CLIENT_CA_FILE",
+            "TLS_PRIVATE_KEY_FILE",
             "TRUSTED_PROXY_CIDRS",
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_URL",
+            "VALKEY_URL_FILE",
         ]
     );
 }

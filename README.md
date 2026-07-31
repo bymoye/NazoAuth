@@ -114,27 +114,36 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Compose starts PostgreSQL, Valkey, runs migrations once, and starts NazoAuth.
+Compose generates private PostgreSQL and Valkey credentials, starts both
+services, runs pending migrations, and starts NazoAuth. There are no published
+default service passwords.
 Open `http://127.0.0.1:8000/health` or
 `http://127.0.0.1:8000/.well-known/openid-configuration`. Data, signing keys,
-and avatars use named volumes and survive `docker compose down`.
+generated application secrets, and avatars use named volumes and survive
+`docker compose down`.
 The first source build downloads Rust dependencies; later builds reuse the
 local container cache.
+
+On a database without an administrator, the server log reports a time-bounded
+one-time setup URL. Treat the URL as a password and use it to create the first
+administrator without configuring SMTP.
 
 For a custom or public issuer, create a private `.env.yaml` from the example
 and set `NAZOAUTH_CONFIG` to that file before starting Compose. See the
 [deployment guide](docs/operations/deployment.md) for TLS and production
 requirements.
 
-For a direct binary run, the first `server` invocation creates `.env.yaml` and
-exits so the generated configuration can be reviewed:
+For a direct binary run, `server` creates a local `.env.yaml` when absent,
+generates persistent application secrets, runs pending migrations, creates
+signing keys when needed, and continues starting:
 
 ```sh
 nazoauth server
 ```
 
-Edit the configuration, then run `nazoauth migrate` and `nazoauth server`.
-This prevents an accidental start with example secrets or the wrong issuer.
+Explicit YAML and environment values still take precedence. `nazoauth migrate`
+remains available for operators that separate schema changes from application
+rollout.
 
 ## Configuration
 
@@ -148,6 +157,11 @@ VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 RUST_LOG: "info"
 ```
+
+`CLIENT_SECRET_PEPPER`, the DCR initial-access token, and a pairwise-subject
+secret when required are generated under `DATA_DIR/secrets` if absent.
+Back up that directory with the database. A missing or malformed persisted
+secret fails startup instead of being silently replaced.
 
 New deployments use composable server capabilities and explicit per-client
 policy. `AUTHORIZATION_SERVER_PROFILE` is retained only as a compatibility

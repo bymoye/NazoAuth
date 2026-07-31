@@ -213,6 +213,14 @@ fn oauth_client(tenant: TenantContext, client_id: String) -> OAuthClient {
             request_uris: Vec::new(),
             initiate_login_uri: None,
             presentation: nazo_auth::ClientPresentationMetadata::default(),
+            id_token_signed_response_alg: Some("PS256".to_owned()),
+            id_token_encrypted_response_alg: None,
+            id_token_encrypted_response_enc: None,
+            request_object_signing_alg: Some("PS256".to_owned()),
+            request_object_encryption_alg: None,
+            request_object_encryption_enc: None,
+            token_endpoint_auth_signing_alg: Some("PS256".to_owned()),
+            introspection_signed_response_alg: Some("PS256".to_owned()),
             introspection_encrypted_response_alg: Some("RSA-OAEP".to_owned()),
             introspection_encrypted_response_enc: Some("A256GCM".to_owned()),
             userinfo_signed_response_alg: Some("ES256".to_owned()),
@@ -297,6 +305,22 @@ async fn seed_upsert_is_atomic_and_preserves_unmanaged_client_state() {
     assert_eq!(
         stored.introspection_encrypted_response_alg,
         original.introspection_encrypted_response_alg
+    );
+    assert_eq!(
+        stored.id_token_signed_response_alg,
+        original.id_token_signed_response_alg
+    );
+    assert_eq!(
+        stored.request_object_signing_alg,
+        original.request_object_signing_alg
+    );
+    assert_eq!(
+        stored.token_endpoint_auth_signing_alg,
+        original.token_endpoint_auth_signing_alg
+    );
+    assert_eq!(
+        stored.introspection_signed_response_alg,
+        original.introspection_signed_response_alg
     );
     let mut connection = get_conn(&pool).await.unwrap();
     #[derive(diesel::QueryableByName)]

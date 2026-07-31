@@ -161,16 +161,21 @@ impl TokenSignerPort for KeyManager {
     ) -> TokenFuture<'a, String> {
         Box::pin(async move {
             let snapshot = self.snapshot();
-            let mut header = jsonwebtoken::Header::new(snapshot.active_alg);
+            let algorithm = match input.signing_algorithm {
+                Some(name) => {
+                    signing_algorithm_from_name(name).ok_or(TokenPortError::Unexpected)?
+                }
+                None => snapshot.active_alg,
+            };
+            let mut header = jsonwebtoken::Header::new(algorithm);
             header.typ = Some("token-introspection+jwt".to_owned());
-            header.kid = Some(snapshot.active_kid.clone());
             let claims = serde_json::json!({
                 "iss": input.issuer,
                 "aud": input.audience,
                 "iat": Utc::now().timestamp(),
                 "token_introspection": input.body,
             });
-            self.encode_jwt(SigningPurpose::AccessToken, &header, &claims)
+            self.encode_jwt(SigningPurpose::Introspection, &header, &claims)
                 .await
                 .map_err(|_| TokenPortError::Unavailable)
         })
@@ -234,3 +239,7 @@ fn decoding_key(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/token.rs"]
+mod tests;

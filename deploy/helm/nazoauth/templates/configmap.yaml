@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nazoauth.fullname" . }}
+  labels:
+    {{- include "nazoauth.labels" . | nindent 4 }}
+data:
+  .env.yaml: |
+    BIND: "0.0.0.0:8000"
+    PUBLIC_BASE_URL: {{ .Values.publicBaseUrl | quote }}
+    DATA_DIR: "/var/lib/nazoauth"
+    RUST_LOG: "info"
+    {{- if .Values.signing.externalCommand }}
+    SIGNING_EXTERNAL_COMMAND: {{ .Values.signing.externalCommand | quote }}
+    {{- end }}
+    MTLS_CERTIFICATE_SOURCE: {{ .Values.mtls.certificateSource | quote }}
+    {{- if .Values.mtls.trustedProxyCidrs }}
+    TRUSTED_PROXY_CIDRS: {{ .Values.mtls.trustedProxyCidrs | quote }}
+    {{- end }}

@@ -86,6 +86,14 @@ pub(super) fn validate_metadata_fixture(metadata: ClientMetadataFixture<'_>) -> 
         request_uris: Vec::new(),
         initiate_login_uri: None,
         presentation: crate::ClientPresentationMetadata::default(),
+        id_token_signed_response_alg: None,
+        id_token_encrypted_response_alg: None,
+        id_token_encrypted_response_enc: None,
+        request_object_signing_alg: None,
+        request_object_encryption_alg: None,
+        request_object_encryption_enc: None,
+        token_endpoint_auth_signing_alg: None,
+        introspection_signed_response_alg: None,
         introspection_encrypted_response_alg: metadata
             .introspection_encrypted_response_alg
             .map(ToOwned::to_owned),
@@ -118,6 +126,7 @@ pub(super) fn validate_metadata_fixture(metadata: ClientMetadataFixture<'_>) -> 
         .collect::<Vec<_>>();
     validate_metadata(
         ValidatedMetadata::from_create(&request),
+        &response_signing_algorithms,
         &response_signing_algorithms,
         &crypto,
     )

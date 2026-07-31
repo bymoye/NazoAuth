@@ -1,16 +1,12 @@
 name: nazo-oauth
 
 services:
-  migrate:
-    build:
-      context: .
-      dockerfile: Containerfile
+  secrets-init:
+    image: docker.io/library/alpine:3.22
     volumes:
-      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
-    command: ["nazoauth", "migrate"]
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - runtime_secrets:/run/nazoauth-secrets
+      - ./deploy/compose/initialize-secrets.sh:/usr/local/libexec/nazoauth-initialize-secrets.sh:ro
+    command: ["/bin/sh", "/usr/local/libexec/nazoauth-initialize-secrets.sh"]
     networks:
       nazo_oauth_net:
 
@@ -21,15 +17,22 @@ services:
     restart: unless-stopped
     environment:
       DATA_DIR: /var/lib/nazo_oauth
+      DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
+      VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
     volumes:
       - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
       - keys_data:/var/lib/nazo_oauth/keys
       - avatars_data:/var/lib/nazo_oauth/avatars
+      - generated_secrets:/var/lib/nazo_oauth/secrets
+      - bootstrap_data:/var/lib/nazo_oauth/bootstrap
+      - runtime_secrets:/run/nazoauth-secrets:ro
     ports:
       - "127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"
     depends_on:
-      migrate:
+      secrets-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       valkey:
         condition: service_healthy
     networks:
@@ -40,11 +43,15 @@ services:
     image: docker.io/library/postgres:18
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-oauth}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: oauth
+      POSTGRES_USER: nazoauth
+      POSTGRES_PASSWORD_FILE: /run/nazoauth-secrets/postgres-password
     volumes:
       - postgres_data:/var/lib/postgresql
+      - runtime_secrets:/run/nazoauth-secrets:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -56,11 +63,29 @@ services:
   valkey:
     image: docker.io/valkey/valkey:8-alpine
     restart: unless-stopped
-    command: ["valkey-server", "--save", "60", "1", "--loglevel", "warning"]
+    command:
+      [
+        "valkey-server",
+        "--aclfile",
+        "/run/nazoauth-secrets/valkey.acl",
+        "--save",
+        "60",
+        "1",
+        "--loglevel",
+        "warning",
+      ]
     volumes:
       - valkey_data:/data
+      - runtime_secrets:/run/nazoauth-secrets:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "VALKEYCLI_AUTH=$$(cat /run/nazoauth-secrets/valkey-password) valkey-cli ping",
+        ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -72,6 +97,9 @@ volumes:
   valkey_data:
   keys_data:
   avatars_data:
+  bootstrap_data:
+  generated_secrets:
+  runtime_secrets:
 
 networks:
   nazo_oauth_net:

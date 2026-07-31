@@ -1,0 +1,9 @@
+NazoAuth is available inside the cluster at:
+  http://{{ include "nazoauth.fullname" . }}:{{ .Values.service.port }}
+
+Readiness:
+  /ready checks PostgreSQL and Valkey.
+  /live checks only the process.
+
+The chart does not guess public DNS certificates or external database facts.
+The referenced connection Secret must exist before the Pod starts.

@@ -5,6 +5,7 @@ mod authorization_flow;
 pub(crate) mod clients;
 mod federation;
 mod grants;
+mod initial_admin_bootstrap;
 mod mfa;
 mod mtls_trust;
 mod openid4vc;
@@ -22,6 +23,9 @@ pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::OAuthClientRepository;
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};
+pub use initial_admin_bootstrap::{
+    InitialAdminBootstrapRepository, InitialAdminBootstrapState, InitialAdminClaimOutcome,
+};
 pub use mfa::MfaRepository;
 pub use mtls_trust::MtlsTrustAnchorRepository;
 pub use openid4vc::{

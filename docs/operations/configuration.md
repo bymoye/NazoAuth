@@ -55,7 +55,7 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
 | `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string |
 | `DATA_DIR` | `runtime` | Base directory for persistent local files |
-| `CLIENT_SECRET_PEPPER` | development-only default for loopback issuers | Required for non-loopback issuers; use a random 32+ byte secret and keep it stable across restarts |
+| `CLIENT_SECRET_PEPPER` | generated under `DATA_DIR/secrets` | Explicit values override the persisted generated value; keep it stable and back it up with the database |
 | `PASSWORD_HASH_MAX_CONCURRENCY` | `8` | Maximum concurrent Argon2 password verifications per process; tune from CPU and memory capacity, not by lowering Argon2 cost |
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `100` | Maximum bounded wait for a password-verification slot before returning `temporarily_unavailable` |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
@@ -84,6 +84,13 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 
 Explicit overrides are retained for advanced deployments and backward
 compatibility. New deployments should prefer same-origin defaults.
+
+`JWK_KEYS_DIR` is persistent state, not a disposable cache. On first start,
+NazoAuth atomically creates both its signing keyset and a dedicated
+`request-object-encryption.pem` recipient key. Existing key directories are
+upgraded automatically when first loaded. Back up or mount this directory
+together with the database; replacing the recipient key makes already-issued
+encrypted Request Objects undecryptable.
 
 ## Composable capability defaults
 
@@ -222,7 +229,21 @@ loopback endpoints.
 - observability: `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
   `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_TIMEOUT`
 - proxy and client IP handling: `TRUSTED_PROXY_CIDRS`,
-  `CLIENT_IP_HEADER_MODE`
+  `CLIENT_IP_HEADER_MODE`, `MTLS_CERTIFICATE_SOURCE`
+
+`MTLS_CERTIFICATE_SOURCE` accepts `disabled`, `direct-tls`, `rfc9440`, or
+`legacy-verified-headers`. `rfc9440` consumes the singleton RFC 9440
+`Client-Cert` DER byte sequence. `legacy-verified-headers` requires
+`X-SSL-Client-Verify: SUCCESS` and the existing forwarded certificate fields.
+Both proxy modes require `TRUSTED_PROXY_CIDRS`; without a trusted proxy the
+default is `disabled`. When trusted proxy CIDRs are present and the source is
+omitted, the compatibility mode remains the default for existing deployments.
+
+`direct-tls` creates a separate client-certificate-required TLS listener. It
+requires `TLS_BIND`, `TLS_CERTIFICATE_FILE`, `TLS_PRIVATE_KEY_FILE`, and
+`TLS_CLIENT_CA_FILE`. The ordinary `BIND` listener remains available for the
+browser/public route behind a normal TLS terminator; route the RFC 8705 mTLS
+endpoint aliases to `TLS_BIND`.
 
 `EMAIL_SMTP_TLS` accepts only `starttls`, `implicit`, or `none`. The `none`
 mode is rejected unless the issuer is loopback HTTP and no SMTP credentials

@@ -1,0 +1,131 @@
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.appSecrets.existingSecret) }}
+{{- fail "replicaCount > 1 requires appSecrets.existingSecret so every replica uses identical application secrets" }}
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) .Values.persistence.enabled }}
+{{- fail "replicaCount > 1 cannot use the default ReadWriteOnce generated-secret PVC; provide shared storage through extraVolumes or disable persistence" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nazoauth.fullname" . }}
+  labels:
+    {{- include "nazoauth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "nazoauth.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "nazoauth.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: nazoauth
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["nazoauth", "server"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DATABASE_URL_FILE
+              value: /run/nazoauth-connections/database-url
+            - name: VALKEY_URL_FILE
+              value: /run/nazoauth-connections/valkey-url
+            {{- if .Values.appSecrets.existingSecret }}
+            - name: CLIENT_SECRET_PEPPER_FILE
+              value: /run/nazoauth-app-secrets/client-secret-pepper
+            - name: PAIRWISE_SUBJECT_SECRET_FILE
+              value: /run/nazoauth-app-secrets/pairwise-subject-secret
+            - name: DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE
+              value: /run/nazoauth-app-secrets/dynamic-registration-initial-access-token
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/.env.yaml
+              subPath: .env.yaml
+              readOnly: true
+            - name: connections
+              mountPath: /run/nazoauth-connections
+              readOnly: true
+            {{- if .Values.appSecrets.existingSecret }}
+            - name: app-secrets
+              mountPath: /run/nazoauth-app-secrets
+              readOnly: true
+            {{- end }}
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: /var/lib/nazoauth
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "nazoauth.fullname" . }}
+        - name: connections
+          secret:
+            secretName: {{ required "connections.existingSecret is required" .Values.connections.existingSecret }}
+            items:
+              - key: {{ .Values.connections.databaseUrlKey }}
+                path: database-url
+              - key: {{ .Values.connections.valkeyUrlKey }}
+                path: valkey-url
+        {{- if .Values.appSecrets.existingSecret }}
+        - name: app-secrets
+          secret:
+            secretName: {{ .Values.appSecrets.existingSecret }}
+            items:
+              - key: {{ .Values.appSecrets.clientSecretPepperKey }}
+                path: client-secret-pepper
+              - key: {{ .Values.appSecrets.pairwiseSubjectSecretKey }}
+                path: pairwise-subject-secret
+              - key: {{ .Values.appSecrets.dynamicRegistrationTokenKey }}
+                path: dynamic-registration-initial-access-token
+        {{- end }}
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "nazoauth.fullname" . }}-data
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

@@ -2,6 +2,7 @@ use nazo_auth::{CibaMetadataProfile, MetadataAuthorizationServerProfile, Metadat
 
 use super::*;
 use crate::config::ConfigSource;
+use crate::settings::AuthorizationServerProfile;
 use nazo_http_actix::IpCidr;
 
 fn settings() -> Settings {
@@ -15,6 +16,8 @@ fn metadata_config_maps_only_the_focused_settings_boundary() {
     settings.endpoint.mtls_endpoint_base_url = "https://mtls.issuer.example".to_owned();
     settings.endpoint.trusted_proxy_cidrs =
         vec![IpCidr::parse("192.0.2.0/24").expect("trusted proxy CIDR")];
+    settings.endpoint.mtls_certificate_source =
+        crate::http::mtls::MtlsCertificateSourceMode::Rfc9440;
     settings.protocol.subject_type = SubjectType::Pairwise;
     settings.protocol.pairwise_subject_secret = Some("a".repeat(32));
     settings.protocol.protected_resource_identifier = "https://resource.example".to_owned();

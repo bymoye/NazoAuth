@@ -8,6 +8,7 @@ use crate::{OAuthClient, rsa_public_key_components_are_safe};
 pub const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
     "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 pub const CLIENT_ASSERTION_MAX_TTL_SECONDS: i64 = 300;
+pub const SUPPORTED_CLIENT_JWT_SIGNING_ALGS: &[&str] = &["EdDSA", "RS256", "ES256", "PS256"];
 const CLIENT_ASSERTION_CLOCK_SKEW_SECONDS: i64 = 30;
 const MAX_CLIENT_ASSERTION_JTI_BYTES: usize = 128;
 
@@ -18,6 +19,7 @@ pub struct ClientAssertionVerificationInput<'a> {
     pub client: &'a OAuthClient,
     pub assertion: &'a str,
     pub now: i64,
+    pub expected_signing_algorithm: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,7 +125,13 @@ pub fn verify_private_key_jwt(
 ) -> Result<ValidatedClientAssertion, ClientAssertionValidationError> {
     let header =
         decode_header(input.assertion).map_err(|_| ClientAssertionValidationError::DecodeHeader)?;
-    if supported_client_jwt_algorithm(header.alg).is_none() {
+    let Some((algorithm_name, _)) = supported_client_jwt_algorithm(header.alg) else {
+        return Err(ClientAssertionValidationError::InvalidAlgorithm);
+    };
+    if input
+        .expected_signing_algorithm
+        .is_some_and(|expected| expected != algorithm_name)
+    {
         return Err(ClientAssertionValidationError::InvalidAlgorithm);
     }
     let (kid, decoding_key) = client_assertion_decoding_key(

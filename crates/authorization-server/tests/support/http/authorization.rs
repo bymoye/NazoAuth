@@ -5,6 +5,7 @@ pub(crate) struct AuthorizationTestFixture {
     config: AuthorizationHttpConfig,
     sessions: AdminSessionHandles,
     enabled_modules: std::collections::BTreeSet<ModuleId>,
+    request_object_keys: nazo_key_management::KeyManager,
 }
 
 impl AuthorizationTestFixture {
@@ -13,12 +14,14 @@ impl AuthorizationTestFixture {
         config: AuthorizationHttpConfig,
         sessions: AdminSessionHandles,
         enabled_modules: std::collections::BTreeSet<ModuleId>,
+        request_object_keys: nazo_key_management::KeyManager,
     ) -> Self {
         Self {
             service,
             config,
             sessions,
             enabled_modules,
+            request_object_keys,
         }
     }
 
@@ -28,6 +31,7 @@ impl AuthorizationTestFixture {
             &self.config,
             &self.sessions,
             self.enabled_modules.clone(),
+            &self.request_object_keys,
         )
     }
 
@@ -58,6 +62,7 @@ impl AuthorizationTestFixture {
                 self.sessions.http_config().clone(),
             ),
             self.enabled_modules.clone(),
+            self.request_object_keys.clone(),
         )
     }
 }
@@ -91,6 +96,7 @@ impl TestAuthorizationDependencies {
                     ),
                 ),
                 crate::runtime_modules::inherited_enabled(&state.settings),
+                state.keyset.clone(),
             ),
         }
     }
@@ -106,6 +112,7 @@ impl<'a> AuthorizationRequestContext<'a> {
         config: &'a AuthorizationHttpConfig,
         sessions: &'a AdminSessionHandles,
         enabled_modules: std::collections::BTreeSet<ModuleId>,
+        request_object_keys: &'a nazo_key_management::KeyManager,
     ) -> Self {
         Self {
             service,
@@ -117,6 +124,7 @@ impl<'a> AuthorizationRequestContext<'a> {
                 draining: std::collections::BTreeSet::new(),
             },
             remote_client_documents: None,
+            request_object_keys,
             credential_authorization_offers: None,
         }
     }

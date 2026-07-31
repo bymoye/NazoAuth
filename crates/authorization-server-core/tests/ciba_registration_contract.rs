@@ -5,6 +5,11 @@ use nazo_auth::{
 
 const POLICY: DynamicRegistrationPolicy<'_> = DynamicRegistrationPolicy {
     default_audience: "resource://default",
+    pairwise_subject_supported: true,
+    id_token_signing_algs: &["RS256", "PS256"],
+    response_signing_algs: &["RS256", "PS256"],
+    request_object_encryption_algs: &["RSA-OAEP-256"],
+    request_object_encryption_encs: &["A256GCM"],
 };
 
 fn ciba_request(mode: &str) -> DynamicClientRegistrationRequest {

@@ -46,6 +46,8 @@ pub(crate) struct LoadedKeyset {
     pub(crate) active_alg: jsonwebtoken::Algorithm,
     pub(crate) active_signing_key: ActiveSigningKey,
     pub(crate) verification_keys: Vec<StoredVerificationKey>,
+    pub(crate) request_object_decryption_key: Vec<u8>,
+    pub(crate) request_object_encryption_jwk: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +71,7 @@ pub struct KeySnapshot {
     pub verification_keys: Vec<VerificationKey>,
     pub(crate) id_token_signing_algorithms: Vec<jsonwebtoken::Algorithm>,
     pub(crate) response_signing_algorithms: Vec<jsonwebtoken::Algorithm>,
+    pub request_object_encryption_jwk: Value,
 }
 
 impl KeySnapshot {
@@ -116,7 +119,7 @@ impl KeySnapshot {
 
     #[must_use]
     pub fn jwks(&self) -> Value {
-        crate::jwks::public_jwks(&self.verification_keys)
+        crate::jwks::public_jwks(&self.verification_keys, &self.request_object_encryption_jwk)
     }
 }
 
@@ -366,7 +369,14 @@ impl KeyManager {
                     handle: KeyHandle::Local(material.private_pkcs8_der),
                 },
             }],
+            request_object_decryption_key: test_request_object_decryption_key()
+                .expect("test request object decryption key"),
+            request_object_encryption_jwk: Value::Null,
         };
+        let mut loaded = loaded;
+        loaded.request_object_encryption_jwk =
+            crate::store::request_object_encryption_jwk(&loaded.request_object_decryption_key)
+                .expect("test request object encryption JWK");
         let generation = KeyGeneration::new(loaded);
         Self {
             inner: Arc::new(KeyManagerInner {
@@ -406,6 +416,7 @@ impl KeyManager {
                 purposes: [
                     SigningPurpose::IdToken,
                     SigningPurpose::Jarm,
+                    SigningPurpose::Introspection,
                     SigningPurpose::Credential,
                     SigningPurpose::PresentationRequest,
                 ]
@@ -615,6 +626,9 @@ pub(crate) fn snapshot_from_loaded(loaded: &LoadedKeyset) -> KeySnapshot {
                 || loaded
                     .selected_key(SigningPurpose::Jarm, *algorithm)
                     .is_some()
+                || loaded
+                    .selected_key(SigningPurpose::Introspection, *algorithm)
+                    .is_some()
         })
         .collect();
     KeySnapshot {
@@ -635,7 +649,15 @@ pub(crate) fn snapshot_from_loaded(loaded: &LoadedKeyset) -> KeySnapshot {
             .collect(),
         id_token_signing_algorithms,
         response_signing_algorithms,
+        request_object_encryption_jwk: loaded.request_object_encryption_jwk.clone(),
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_request_object_decryption_key() -> anyhow::Result<Vec<u8>> {
+    use openssl::{pkey::PKey, rsa::Rsa};
+
+    Ok(PKey::from_rsa(Rsa::generate(2048)?)?.private_key_to_pem_pkcs8()?)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -644,6 +666,7 @@ fn all_signing_purposes() -> BTreeSet<SigningPurpose> {
         SigningPurpose::AccessToken,
         SigningPurpose::IdToken,
         SigningPurpose::Jarm,
+        SigningPurpose::Introspection,
         SigningPurpose::LogoutToken,
         SigningPurpose::HttpMessage,
         SigningPurpose::SecurityEvent,

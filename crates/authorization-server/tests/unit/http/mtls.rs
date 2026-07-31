@@ -92,6 +92,49 @@ fn test_private_key() -> PKey<Private> {
     PKey::from_rsa(Rsa::generate(2048).expect("test rsa key")).expect("test pkey")
 }
 
+#[test]
+fn rfc9440_client_cert_uses_single_der_byte_sequence() {
+    let certificate = test_certificate("rfc9440-client", -60, 60);
+    let headers = {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_static("client-cert"),
+            HeaderValue::from_str(&format!(":{}:", certificate.x5c)).unwrap(),
+        );
+        headers
+    };
+    let parsed =
+        request_mtls_client_certificate_from_rfc9440(&headers).expect("valid RFC 9440 certificate");
+    assert_eq!(
+        parsed.thumbprint.as_deref(),
+        Some(certificate.thumbprint.as_str())
+    );
+
+    let mut duplicate = headers;
+    duplicate.append(
+        header::HeaderName::from_static("client-cert"),
+        HeaderValue::from_static(":AA==:"),
+    );
+    assert!(request_mtls_client_certificate_from_rfc9440(&duplicate).is_none());
+}
+
+#[test]
+fn mtls_certificate_source_requires_explicit_supported_mode() {
+    assert_eq!(
+        MtlsCertificateSourceMode::from_config(None, false).unwrap(),
+        MtlsCertificateSourceMode::Disabled
+    );
+    assert_eq!(
+        MtlsCertificateSourceMode::from_config(Some("rfc9440"), true).unwrap(),
+        MtlsCertificateSourceMode::Rfc9440
+    );
+    assert_eq!(
+        MtlsCertificateSourceMode::from_config(Some("direct-tls"), false).unwrap(),
+        MtlsCertificateSourceMode::DirectTls
+    );
+    assert!(MtlsCertificateSourceMode::from_config(Some("direct"), true).is_err());
+}
+
 fn test_certificate(
     common_name: &str,
     not_before_offset: i64,

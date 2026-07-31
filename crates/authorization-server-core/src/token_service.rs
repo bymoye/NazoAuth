@@ -99,6 +99,7 @@ pub struct IntrospectionSignInput<'a> {
     pub issuer: &'a str,
     pub audience: &'a str,
     pub body: &'a Value,
+    pub signing_algorithm: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

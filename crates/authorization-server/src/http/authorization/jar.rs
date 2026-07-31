@@ -15,6 +15,17 @@ use crate::{domain::ClientRow, settings::RequestObjectJtiPolicy as ServerRequest
 pub(crate) use nazo_auth::unverified_signed_request_object_client_id;
 use nazo_http_actix::{request_object_policy_error, request_object_verification_error};
 
+pub(crate) fn unverified_request_object_client_id(
+    keys: &nazo_key_management::KeyManager,
+    request_object: &str,
+) -> Option<String> {
+    if request_object.split('.').count() == 5 {
+        let nested = keys.decrypt_request_object(request_object).ok()?;
+        return unverified_signed_request_object_client_id(&nested);
+    }
+    unverified_signed_request_object_client_id(request_object)
+}
+
 pub(crate) async fn apply_request_object_with_context(
     context: &AuthorizationRequestContext<'_>,
     outer: &mut HashMap<String, String>,
@@ -23,9 +34,32 @@ pub(crate) async fn apply_request_object_with_context(
     let Some(request_object) = outer.get("request") else {
         return Ok(());
     };
+    let decrypted;
+    let request_object = if request_object.split('.').count() == 5 {
+        if client.request_object_encryption_alg.as_deref() != Some("RSA-OAEP-256")
+            || client.request_object_encryption_enc.as_deref() != Some("A256GCM")
+        {
+            return Err(request_object_verification_error(
+                nazo_auth::RequestObjectVerificationError::InvalidAlgorithm,
+            ));
+        }
+        decrypted = context
+            .request_object_keys
+            .decrypt_request_object(request_object)
+            .map_err(|error| {
+                tracing::warn!(%error, "encrypted request object rejected");
+                request_object_verification_error(
+                    nazo_auth::RequestObjectVerificationError::InvalidSignature,
+                )
+            })?;
+        decrypted.as_str()
+    } else {
+        request_object.as_str()
+    };
     let verified = verify_request_object(RequestObjectVerificationInput {
         request_object,
         client,
+        expected_signing_algorithm: client.request_object_signing_alg.as_deref(),
     })
     .map_err(request_object_verification_error)?;
     let normalized = context

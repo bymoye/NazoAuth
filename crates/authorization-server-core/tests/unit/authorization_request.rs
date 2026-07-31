@@ -50,6 +50,14 @@ fn request_object_client(jwks: Value) -> OAuthClient {
             request_uris: Vec::new(),
             initiate_login_uri: None,
             presentation: crate::ClientPresentationMetadata::default(),
+            id_token_signed_response_alg: None,
+            id_token_encrypted_response_alg: None,
+            id_token_encrypted_response_enc: None,
+            request_object_signing_alg: None,
+            request_object_encryption_alg: None,
+            request_object_encryption_enc: None,
+            token_endpoint_auth_signing_alg: None,
+            introspection_signed_response_alg: None,
             introspection_encrypted_response_alg: None,
             introspection_encrypted_response_enc: None,
             userinfo_signed_response_alg: None,
@@ -168,6 +176,7 @@ fn signed_request_object_crypto_uses_strict_shared_client_jwk_policy() {
     let verified = verify_request_object(RequestObjectVerificationInput {
         request_object: &token,
         client: &client,
+        expected_signing_algorithm: None,
     })
     .expect("valid signed Request Object");
     assert_eq!(verified.claims.client_id, "client");
@@ -179,6 +188,7 @@ fn signed_request_object_crypto_uses_strict_shared_client_jwk_policy() {
         verify_request_object(RequestObjectVerificationInput {
             request_object: &token,
             client: &duplicate,
+            expected_signing_algorithm: None,
         }),
         Err(RequestObjectVerificationError::InvalidKey)
     );
@@ -196,11 +206,32 @@ fn signed_request_object_crypto_uses_strict_shared_client_jwk_policy() {
             verify_request_object(RequestObjectVerificationInput {
                 request_object: &token,
                 client: &client,
+                expected_signing_algorithm: None,
             }),
             Err(RequestObjectVerificationError::InvalidKey),
             "accepted invalid JWK member {member}"
         );
     }
+}
+
+#[test]
+fn registered_request_object_signing_algorithm_is_enforced() {
+    let now = 1_700_000_000;
+    let token = signed_request_object(
+        &signed_request_object_json(now),
+        json!({"alg": "EdDSA", "kid": "jar-key"}),
+    );
+    let mut client = request_object_client(json!({"keys": [request_object_public_jwk()]}));
+    client.request_object_signing_alg = Some("PS256".to_owned());
+
+    assert_eq!(
+        verify_request_object(RequestObjectVerificationInput {
+            request_object: &token,
+            client: &client,
+            expected_signing_algorithm: client.request_object_signing_alg.as_deref(),
+        }),
+        Err(RequestObjectVerificationError::InvalidAlgorithm)
+    );
 }
 
 #[test]
@@ -214,6 +245,7 @@ fn signed_request_object_crypto_defers_time_policy_to_injected_clock() {
     let verified = verify_request_object(RequestObjectVerificationInput {
         request_object: &token,
         client: &client,
+        expected_signing_algorithm: None,
     })
     .expect("signature verification must not use the process wall clock");
     assert!(
@@ -250,6 +282,7 @@ fn compact_shape_algorithm_key_and_signature_errors_remain_distinct() {
             verify_request_object(RequestObjectVerificationInput {
                 request_object,
                 client: &client,
+                expected_signing_algorithm: None,
             }),
             Err(expected)
         );
@@ -261,6 +294,7 @@ fn compact_shape_algorithm_key_and_signature_errors_remain_distinct() {
         verify_request_object(RequestObjectVerificationInput {
             request_object: &invalid_signature,
             client: &client,
+            expected_signing_algorithm: None,
         }),
         Err(RequestObjectVerificationError::InvalidSignature)
     );
@@ -284,6 +318,7 @@ fn unsigned_request_objects_are_rejected_for_every_client_profile() {
             verify_request_object(RequestObjectVerificationInput {
                 request_object: &unsigned,
                 client,
+                expected_signing_algorithm: None,
             }),
             Err(RequestObjectVerificationError::InvalidAlgorithm)
         );

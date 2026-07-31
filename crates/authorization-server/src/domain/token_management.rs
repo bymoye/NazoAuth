@@ -183,6 +183,7 @@ impl ServerTokenManagementOperations {
                 issuer: &self.config.issuer,
                 audience: &client.client_id,
                 body: &body,
+                signing_algorithm: client.introspection_signed_response_alg.as_deref(),
             })
             .await
             .map_err(|error| {

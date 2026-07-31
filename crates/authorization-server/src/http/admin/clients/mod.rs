@@ -2,6 +2,7 @@
 pub(crate) mod create;
 pub(crate) mod detail;
 pub(crate) mod list;
+pub(crate) mod templates;
 pub(crate) mod update;
 
 use crate::domain::sector_identifier::fetch_sector_identifier_uris;

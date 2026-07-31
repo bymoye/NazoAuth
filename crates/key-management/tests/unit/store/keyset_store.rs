@@ -40,6 +40,39 @@ async fn load_or_create_keyset_creates_keyset_when_no_keyset_exists() {
 }
 
 #[tokio::test]
+async fn concurrent_upgrade_loaders_share_one_complete_request_object_recipient_key() {
+    let keys_dir = temp_keys_dir("concurrent_request_object_key_upgrade");
+    tokio::fs::create_dir_all(&keys_dir).await.unwrap();
+    let settings = test_settings(keys_dir.clone());
+    create_new_keyset(&settings).await.unwrap();
+    tokio::fs::remove_file(keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE))
+        .await
+        .unwrap();
+    let keyset_path = keys_dir.join("keyset.json");
+
+    let (first, second) = tokio::join!(
+        try_load_keyset(&settings, &keyset_path),
+        try_load_keyset(&settings, &keyset_path)
+    );
+    let first = first.unwrap().expect("first loader");
+    let second = second.unwrap().expect("second loader");
+    let persisted = tokio::fs::read(keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE))
+        .await
+        .unwrap();
+    let _ = tokio::fs::remove_dir_all(&keys_dir).await;
+
+    assert_eq!(
+        first.request_object_decryption_key,
+        second.request_object_decryption_key
+    );
+    assert_eq!(first.request_object_decryption_key, persisted);
+    assert_eq!(
+        first.request_object_encryption_jwk,
+        second.request_object_encryption_jwk
+    );
+}
+
+#[tokio::test]
 async fn load_or_create_keyset_prepublishes_next_local_key_before_rotation_deadline() {
     let keys_dir = temp_keys_dir("automatic_prepublish");
     tokio::fs::create_dir_all(&keys_dir).await.unwrap();
@@ -571,7 +604,7 @@ async fn load_or_create_keyset_backfills_oidc_default_rs256_signing_key() {
     );
     assert!(
         keys.iter().any(|key| key["alg"] == "RS256"
-            && key["purposes"] == json!(["id_token", "jarm"])
+            && key["purposes"] == json!(["id_token", "jarm", "introspection"])
             && key["file"]
                 .as_str()
                 .is_some_and(|file| file.starts_with("rs256-"))
@@ -1278,6 +1311,12 @@ fn in_memory_manager(algorithm: jsonwebtoken::Algorithm) -> KeyManager {
     let material = generate_key_material(algorithm).unwrap();
     let public_jwk =
         public_jwk_from_private_der(&kid, algorithm, &material.private_pkcs8_der).unwrap();
+    let request_object_decryption_key = PKey::from_rsa(Rsa::generate(2048).unwrap())
+        .unwrap()
+        .private_key_to_pem_pkcs8()
+        .unwrap();
+    let request_object_encryption_jwk =
+        request_object_encryption_jwk(&request_object_decryption_key).unwrap();
     let loaded = LoadedKeyset {
         active_kid: kid.clone(),
         active_alg: algorithm,
@@ -1292,6 +1331,8 @@ fn in_memory_manager(algorithm: jsonwebtoken::Algorithm) -> KeyManager {
                 handle: KeyHandle::Local(material.private_pkcs8_der),
             },
         }],
+        request_object_decryption_key,
+        request_object_encryption_jwk,
     };
     KeyManager::from_loaded(test_settings(PathBuf::new()), loaded)
 }

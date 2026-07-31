@@ -6,13 +6,14 @@ mod lifecycle;
 mod local;
 mod model;
 mod mtls_trust;
+mod request_object_encryption;
 mod store;
 mod token;
 
 pub use client_registration::{
     ClientRegistrationCrypto, SUPPORTED_CLIENT_JWT_SIGNING_ALGS, client_jwks_contains_signing_key,
-    client_jwks_matching_encryption_key_count, rfc4514_dn_matches, validate_client_jwks,
-    validate_rfc4514_dn, validate_self_signed_mtls_jwks,
+    client_jwks_contains_signing_key_for_algorithm, client_jwks_matching_encryption_key_count,
+    rfc4514_dn_matches, validate_client_jwks, validate_rfc4514_dn, validate_self_signed_mtls_jwks,
 };
 #[cfg(feature = "test-support")]
 pub use model::TestSigningBehavior;

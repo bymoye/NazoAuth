@@ -14,6 +14,7 @@ use url::Url;
 
 use crate::adapters::security::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER;
 use crate::config::ConfigSource;
+use crate::http::mtls::MtlsCertificateSourceMode;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr, parse_trusted_proxy_cidrs};
 
 mod email;
@@ -58,6 +59,7 @@ pub(crate) struct EndpointSettings {
     pub(crate) cors_allowed_origins: Vec<String>,
     pub(crate) trusted_proxy_cidrs: Vec<IpCidr>,
     pub(crate) client_ip_header_mode: ClientIpHeaderMode,
+    pub(crate) mtls_certificate_source: MtlsCertificateSourceMode,
 }
 
 #[derive(Clone)]
@@ -93,6 +95,7 @@ pub(crate) struct SessionSettings {
 pub(crate) struct StorageSettings {
     pub(crate) avatar_max_bytes: usize,
     pub(crate) client_delivery_ttl_seconds: u64,
+    pub(crate) data_dir: PathBuf,
     pub(crate) avatar_storage_dir: PathBuf,
     pub(crate) scim_event_retention_seconds: u64,
 }
@@ -512,15 +515,34 @@ impl Settings {
         }
 
         Ok(Self {
-            endpoint: EndpointSettings {
-                issuer,
-                mtls_endpoint_base_url,
-                frontend_base_url,
-                cors_allowed_origins,
-                trusted_proxy_cidrs: parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?,
-                client_ip_header_mode: ClientIpHeaderMode::parse(
-                    &config.string("CLIENT_IP_HEADER_MODE", "none"),
-                )?,
+            endpoint: {
+                let trusted_proxy_cidrs =
+                    parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?;
+                let mtls_certificate_source = MtlsCertificateSourceMode::from_config(
+                    config.get("MTLS_CERTIFICATE_SOURCE").as_deref(),
+                    !trusted_proxy_cidrs.is_empty(),
+                )?;
+                if matches!(
+                    mtls_certificate_source,
+                    MtlsCertificateSourceMode::Rfc9440
+                        | MtlsCertificateSourceMode::LegacyVerifiedHeaders
+                ) && trusted_proxy_cidrs.is_empty()
+                {
+                    bail!(
+                        "MTLS_CERTIFICATE_SOURCE requires at least one TRUSTED_PROXY_CIDRS entry"
+                    );
+                }
+                EndpointSettings {
+                    issuer,
+                    mtls_endpoint_base_url,
+                    frontend_base_url,
+                    cors_allowed_origins,
+                    trusted_proxy_cidrs,
+                    client_ip_header_mode: ClientIpHeaderMode::parse(
+                        &config.string("CLIENT_IP_HEADER_MODE", "none"),
+                    )?,
+                    mtls_certificate_source,
+                }
             },
             protocol: ProtocolSettings {
                 default_audience: config.string("DEFAULT_AUDIENCE", "resource://default"),
@@ -575,6 +597,7 @@ impl Settings {
                     86_400,
                     "CLIENT_DELIVERY_TTL_SECONDS",
                 )?,
+                data_dir,
                 avatar_storage_dir,
                 scim_event_retention_seconds,
             },

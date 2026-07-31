@@ -136,6 +136,13 @@ fn id_token_signing_alg_uses_rs256_default_and_ps256_for_fapi_clients() {
         id_token_signing_alg_for_client(&par_request_object),
         jsonwebtoken::Algorithm::PS256
     );
+
+    let mut negotiated = par_request_object;
+    negotiated.id_token_signed_response_alg = Some("ES256".to_owned());
+    assert_eq!(
+        id_token_signing_alg_for_client(&negotiated),
+        jsonwebtoken::Algorithm::ES256
+    );
 }
 
 fn issue_state_with_invalid_signing_key() -> TestInfrastructure {

@@ -182,7 +182,7 @@ def check_toolchain_pins() -> None:
         containerfile,
     ):
         raise SystemExit("Containerfile runtime base image must be pinned by digest")
-    if "RUN cargo build --release --locked" not in containerfile:
+    if "cargo build --release --locked" not in containerfile:
         raise SystemExit("Containerfile release build must use Cargo.lock")
     if (
         "COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./"
@@ -514,7 +514,7 @@ def check_fapi_ciba_boundaries() -> None:
     if any(marker in delivery for marker in forbidden_test_markers):
         raise SystemExit("CIBA ping delivery tests must remain outside production source")
     required_delivery_guards = (
-        "apply_ciba_ping_tls_policy(reqwest::Client::builder())",
+        "apply_ciba_ping_tls_policy(reqwest::Client::builder().no_proxy())",
         "reqwest::redirect::Policy::none()",
         ".resolve_to_addrs(host, &addresses)",
         ".bearer_auth(&delivery.client_notification_token)",

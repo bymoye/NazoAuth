@@ -102,7 +102,8 @@ pub use claims::{
 pub use client::{ClientProfile, validate_token_request_profile};
 pub use client_assertion::{
     CLIENT_ASSERTION_MAX_TTL_SECONDS, CLIENT_ASSERTION_TYPE_JWT_BEARER,
-    ClientAssertionValidationError, ClientAssertionVerificationInput, ValidatedClientAssertion,
+    ClientAssertionValidationError, ClientAssertionVerificationInput,
+    SUPPORTED_CLIENT_JWT_SIGNING_ALGS, ValidatedClientAssertion,
     unverified_client_assertion_client_id, verify_private_key_jwt,
 };
 pub use client_authentication::{

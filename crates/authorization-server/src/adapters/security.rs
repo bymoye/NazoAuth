@@ -3,7 +3,7 @@
 use super::audit::{audit_event, audit_fields};
 use crate::domain::ClientRow;
 
-use crate::http::mtls::request_mtls_client_certificate_from_headers;
+use crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy;
 
 use actix_web::HttpRequest;
 use actix_web::http::header;
@@ -303,8 +303,8 @@ pub(crate) fn extract_client_credentials_with_trusted_proxies(
     {
         form_client_id
             .filter(|_| {
-                nazo_http_actix::request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs)
-                    && request_mtls_client_certificate_from_headers(req.headers()).is_some()
+                request_mtls_client_certificate_from_trusted_proxy(req, trusted_proxy_cidrs)
+                    .is_some()
             })
             .map(str::to_owned)
     } else {
@@ -341,6 +341,7 @@ fn verify_private_key_jwt_claims_with_issuer(
         client,
         assertion,
         now: Utc::now().timestamp(),
+        expected_signing_algorithm: client.token_endpoint_auth_signing_alg.as_deref(),
     })
     .map_err(|error| {
         log_client_assertion_rejection(endpoint_path, client, error.audit_reason());

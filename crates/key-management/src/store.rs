@@ -16,7 +16,7 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
 use nazo_auth::SigningPurpose;
-use openssl::rsa::Rsa;
+use openssl::{pkey::PKey, rsa::Rsa, sha::sha256};
 use p256::elliptic_curve::{Generate, pkcs8::EncodePrivateKey as EncodeEcPrivateKey};
 
 use serde_json::{Value, json};
@@ -30,6 +30,7 @@ use crate::model::{
 
 const OIDC_DEFAULT_ID_TOKEN_SIGNING_ALG: jsonwebtoken::Algorithm = jsonwebtoken::Algorithm::RS256;
 const FAPI_ID_TOKEN_SIGNING_ALG: jsonwebtoken::Algorithm = jsonwebtoken::Algorithm::PS256;
+const REQUEST_OBJECT_ENCRYPTION_KEY_FILE: &str = "request-object-encryption.pem";
 
 pub(crate) async fn load_or_create_keyset(settings: &KeySettings) -> anyhow::Result<LoadedKeyset> {
     tokio::fs::create_dir_all(&settings.keys_dir).await?;
@@ -136,6 +137,19 @@ pub(crate) async fn maintain_keyset_lifecycle(
             }
         }
     }
+    if let Some(keys) = payload.get_mut("keys").and_then(Value::as_array_mut) {
+        for entry in keys {
+            let Some(purposes) = entry.get_mut("purposes").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let protocol_response_key = purposes.iter().any(|value| value == "id_token")
+                && purposes.iter().any(|value| value == "jarm");
+            if protocol_response_key && !purposes.iter().any(|value| value == "introspection") {
+                purposes.push(json!("introspection"));
+                changed = true;
+            }
+        }
+    }
     if let Some(next_kid) = new_active_kid {
         payload["active_kid"] = json!(next_kid);
     }
@@ -216,7 +230,8 @@ async fn create_protocol_signing_key_entry(
     let mut entry = create_prepublished_local_key_entry(settings, alg, now).await?;
     entry["purposes"] = json!([
         SigningPurpose::IdToken.as_str(),
-        SigningPurpose::Jarm.as_str()
+        SigningPurpose::Jarm.as_str(),
+        SigningPurpose::Introspection.as_str()
     ]);
     Ok(entry)
 }
@@ -276,6 +291,10 @@ pub(crate) async fn try_load_keyset(
     };
     let payload = serde_json::from_str::<Value>(&raw)
         .with_context(|| format!("failed to parse {}", keyset_path.display()))?;
+    // A loaded keyset must be immediately usable for every advertised key
+    // capability. Existing installations predate the dedicated Request Object
+    // recipient key, so loading is also the atomic upgrade boundary.
+    ensure_request_object_encryption_key(settings).await?;
     let active_kid = payload
         .get("active_kid")
         .and_then(Value::as_str)
@@ -399,6 +418,9 @@ pub(crate) async fn try_load_keyset(
         });
     }
 
+    let request_object_decryption_key = load_request_object_decryption_key(settings).await?;
+    let request_object_encryption_jwk =
+        request_object_encryption_jwk(&request_object_decryption_key)?;
     Ok(Some(LoadedKeyset {
         active_kid: active_kid.to_owned(),
         active_alg: active_alg
@@ -406,6 +428,51 @@ pub(crate) async fn try_load_keyset(
         active_signing_key: active_signing_key
             .ok_or_else(|| anyhow!("keyset.json active_kid does not reference a live key"))?,
         verification_keys,
+        request_object_decryption_key,
+        request_object_encryption_jwk,
+    }))
+}
+
+async fn ensure_request_object_encryption_key(settings: &KeySettings) -> anyhow::Result<()> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    let key = PKey::from_rsa(Rsa::generate(3072)?)?;
+    let pem = String::from_utf8(key.private_key_to_pem_pkcs8()?)
+        .context("generated request object key was not PEM text")?;
+    write_private_key_pem_if_absent(&path, &pem).await
+}
+
+async fn load_request_object_decryption_key(settings: &KeySettings) -> anyhow::Result<Vec<u8>> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    let pem = tokio::fs::read(&path)
+        .await
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    PKey::private_key_from_pem(&pem)
+        .context("request object decryption key is not valid PKCS#8 PEM")?;
+    Ok(pem)
+}
+
+pub(crate) fn request_object_encryption_jwk(private_key_pem: &[u8]) -> anyhow::Result<Value> {
+    let key = PKey::private_key_from_pem(private_key_pem)?;
+    let rsa = key.rsa()?;
+    let public_der = key.public_key_to_der()?;
+    let kid = format!(
+        "request-object-{}",
+        URL_SAFE_NO_PAD.encode(&sha256(&public_der)[..12])
+    );
+    Ok(json!({
+        "kty": "RSA",
+        "use": "enc",
+        "alg": "RSA-OAEP-256",
+        "kid": kid,
+        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
+        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
     }))
 }
 
@@ -435,6 +502,7 @@ fn all_signing_purposes() -> BTreeSet<SigningPurpose> {
         SigningPurpose::AccessToken,
         SigningPurpose::IdToken,
         SigningPurpose::Jarm,
+        SigningPurpose::Introspection,
         SigningPurpose::LogoutToken,
         SigningPurpose::HttpMessage,
         SigningPurpose::SecurityEvent,
@@ -738,6 +806,52 @@ pub(crate) async fn write_json_atomic(path: &Path, value: &Value) -> anyhow::Res
 pub(crate) async fn write_private_key_pem_atomic(path: &Path, pem: &str) -> anyhow::Result<()> {
     write_file_atomic(path, pem.as_bytes()).await?;
     set_private_key_permissions(path).await
+}
+
+async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("target file must have a parent directory"))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let tmp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("private-key"),
+        Uuid::now_v7()
+    ));
+    let prepare_result = async {
+        tokio::fs::write(&tmp_path, pem.as_bytes()).await?;
+        set_private_key_permissions(&tmp_path).await
+    }
+    .await;
+    if let Err(error) = prepare_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error);
+    }
+    let link_result = tokio::fs::hard_link(&tmp_path, path).await;
+    let cleanup_result = tokio::fs::remove_file(&tmp_path).await;
+    match link_result {
+        Ok(()) => {
+            cleanup_result.with_context(|| {
+                format!(
+                    "failed to remove private-key temporary file {}",
+                    tmp_path.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let _ = cleanup_result;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = cleanup_result;
+            Err(error).with_context(|| {
+                format!("failed to atomically create private key {}", path.display())
+            })
+        }
+    }
 }
 
 async fn write_file_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {

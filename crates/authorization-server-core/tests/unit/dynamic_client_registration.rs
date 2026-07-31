@@ -5,6 +5,11 @@ use uuid::Uuid;
 
 const POLICY: DynamicRegistrationPolicy<'static> = DynamicRegistrationPolicy {
     default_audience: "https://api.example",
+    pairwise_subject_supported: true,
+    id_token_signing_algs: &["RS256", "PS256"],
+    response_signing_algs: &["RS256", "PS256"],
+    request_object_encryption_algs: &["RSA-OAEP-256"],
+    request_object_encryption_encs: &["A256GCM"],
 };
 
 #[test]
@@ -187,6 +192,175 @@ fn private_key_jwt_registration_enables_standard_oidc_token_endpoint_audience() 
     assert!(!client_secret_basic.allow_client_assertion_endpoint_audience);
 }
 
+#[test]
+fn rp_metadata_choices_select_supported_single_values_and_reject_inconsistency() {
+    let prepared = prepare_dynamic_client_registration(
+        DynamicClientRegistrationRequest {
+            redirect_uris: Some(vec!["https://client.example/cb".to_owned()]),
+            grant_types: Some(vec![
+                "authorization_code".to_owned(),
+                "urn:openid:params:grant-type:ciba".to_owned(),
+            ]),
+            token_endpoint_auth_method: Some("client_secret_post".to_owned()),
+            token_endpoint_auth_methods_supported: Some(vec![
+                "unsupported".to_owned(),
+                "private_key_jwt".to_owned(),
+                "client_secret_post".to_owned(),
+            ]),
+            subject_types_supported: Some(vec!["pairwise".to_owned(), "public".to_owned()]),
+            id_token_signing_alg_values_supported: Some(vec![
+                "EdDSA".to_owned(),
+                "PS256".to_owned(),
+            ]),
+            id_token_encryption_alg_values_supported: Some(vec!["RSA-OAEP-256".to_owned()]),
+            id_token_encryption_enc_values_supported: Some(vec!["A256GCM".to_owned()]),
+            request_object_signing_alg_values_supported: Some(vec![
+                "HS256".to_owned(),
+                "ES256".to_owned(),
+            ]),
+            request_object_encryption_alg_values_supported: Some(vec!["RSA-OAEP-256".to_owned()]),
+            request_object_encryption_enc_values_supported: Some(vec!["A256GCM".to_owned()]),
+            token_endpoint_auth_signing_alg_values_supported: Some(vec![
+                "HS256".to_owned(),
+                "PS256".to_owned(),
+            ]),
+            userinfo_signing_alg_values_supported: Some(vec![
+                "HS256".to_owned(),
+                "ES256".to_owned(),
+            ]),
+            userinfo_encryption_alg_values_supported: Some(vec![
+                "unsupported".to_owned(),
+                "ECDH-ES+A256KW".to_owned(),
+            ]),
+            userinfo_encryption_enc_values_supported: Some(vec!["A256GCM".to_owned()]),
+            backchannel_authentication_request_signing_alg_values_supported: Some(vec![
+                "RS256".to_owned(),
+                "PS256".to_owned(),
+            ]),
+            authorization_signing_alg_values_supported: Some(vec![
+                "HS256".to_owned(),
+                "EdDSA".to_owned(),
+            ]),
+            authorization_encryption_alg_values_supported: Some(vec![
+                "unsupported".to_owned(),
+                "ECDH-ES".to_owned(),
+            ]),
+            authorization_encryption_enc_values_supported: Some(vec!["A256GCM".to_owned()]),
+            introspection_encryption_alg_values_supported: Some(vec![
+                "unsupported".to_owned(),
+                "ECDH-ES".to_owned(),
+            ]),
+            introspection_encryption_enc_values_supported: Some(vec!["A256GCM".to_owned()]),
+            introspection_signing_alg_values_supported: Some(vec![
+                "EdDSA".to_owned(),
+                "RS256".to_owned(),
+            ]),
+            jwks: Some(serde_json::json!({"keys": []})),
+            ..Default::default()
+        },
+        POLICY,
+    )
+    .expect("supported choices");
+    assert_eq!(prepared.token_endpoint_auth_method, "private_key_jwt");
+    assert_eq!(prepared.subject_type.as_deref(), Some("pairwise"));
+    assert_eq!(
+        prepared.id_token_signed_response_alg.as_deref(),
+        Some("PS256")
+    );
+    assert_eq!(
+        prepared.id_token_encrypted_response_alg.as_deref(),
+        Some("RSA-OAEP-256")
+    );
+    assert_eq!(
+        prepared.id_token_encrypted_response_enc.as_deref(),
+        Some("A256GCM")
+    );
+    assert_eq!(
+        prepared.request_object_signing_alg.as_deref(),
+        Some("ES256")
+    );
+    assert_eq!(
+        prepared.request_object_encryption_alg.as_deref(),
+        Some("RSA-OAEP-256")
+    );
+    assert_eq!(
+        prepared.request_object_encryption_enc.as_deref(),
+        Some("A256GCM")
+    );
+    assert_eq!(
+        prepared.token_endpoint_auth_signing_alg.as_deref(),
+        Some("PS256")
+    );
+    assert_eq!(
+        prepared.introspection_signed_response_alg.as_deref(),
+        Some("RS256")
+    );
+    assert_eq!(
+        prepared.userinfo_signed_response_alg.as_deref(),
+        Some("ES256")
+    );
+    assert_eq!(
+        prepared.userinfo_encrypted_response_alg.as_deref(),
+        Some("ECDH-ES+A256KW")
+    );
+    assert_eq!(
+        prepared.userinfo_encrypted_response_enc.as_deref(),
+        Some("A256GCM")
+    );
+    assert_eq!(
+        prepared
+            .backchannel_authentication_request_signing_alg
+            .as_deref(),
+        Some("PS256")
+    );
+    assert_eq!(
+        prepared.authorization_signed_response_alg.as_deref(),
+        Some("EdDSA")
+    );
+    assert_eq!(
+        prepared.authorization_encrypted_response_alg.as_deref(),
+        Some("ECDH-ES")
+    );
+    assert_eq!(
+        prepared.authorization_encrypted_response_enc.as_deref(),
+        Some("A256GCM")
+    );
+    assert_eq!(
+        prepared.introspection_encrypted_response_alg.as_deref(),
+        Some("ECDH-ES")
+    );
+
+    let public_only = prepare_dynamic_client_registration(
+        DynamicClientRegistrationRequest {
+            redirect_uris: Some(vec!["https://client.example/cb".to_owned()]),
+            subject_types_supported: Some(vec!["pairwise".to_owned(), "public".to_owned()]),
+            ..Default::default()
+        },
+        DynamicRegistrationPolicy {
+            default_audience: "https://api.example",
+            pairwise_subject_supported: false,
+            id_token_signing_algs: &["RS256", "PS256"],
+            response_signing_algs: &["RS256", "PS256"],
+            request_object_encryption_algs: &["RSA-OAEP-256"],
+            request_object_encryption_encs: &["A256GCM"],
+        },
+    )
+    .expect("public is selected when pairwise subject state is unavailable");
+    assert_eq!(public_only.subject_type.as_deref(), Some("public"));
+
+    let error = prepare_dynamic_client_registration(
+        DynamicClientRegistrationRequest {
+            redirect_uris: Some(vec!["https://client.example/cb".to_owned()]),
+            subject_type: Some("public".to_owned()),
+            subject_types_supported: Some(vec!["pairwise".to_owned()]),
+            ..Default::default()
+        },
+        POLICY,
+    )
+    .expect_err("single value must be one of the declared choices");
+    assert_eq!(error.error, "invalid_client_metadata");
+}
+
 fn client() -> OAuthClient {
     OAuthClient {
         id: Uuid::now_v7(),
@@ -229,6 +403,14 @@ fn client() -> OAuthClient {
             request_uris: Vec::new(),
             initiate_login_uri: None,
             presentation: ClientPresentationMetadata::default(),
+            id_token_signed_response_alg: None,
+            id_token_encrypted_response_alg: None,
+            id_token_encrypted_response_enc: None,
+            request_object_signing_alg: None,
+            request_object_encryption_alg: None,
+            request_object_encryption_enc: None,
+            token_endpoint_auth_signing_alg: None,
+            introspection_signed_response_alg: None,
             introspection_encrypted_response_alg: None,
             introspection_encrypted_response_enc: None,
             userinfo_signed_response_alg: None,

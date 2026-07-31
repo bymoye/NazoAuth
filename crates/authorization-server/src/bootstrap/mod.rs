@@ -99,6 +99,7 @@ use nazo_http_actix::{
 };
 use nazo_openid4vc_http_actix::{CredentialIssuerEndpoint, PresentationEndpoint};
 use nazo_postgres::create_pool;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
 use tracing::Instrument;
 
 pub async fn run() -> anyhow::Result<()> {
@@ -141,6 +142,22 @@ pub async fn run() -> anyhow::Result<()> {
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
 
     let settings = Arc::new(Settings::from_config(&config)?);
+    let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
+        settings.endpoint.mtls_certificate_source,
+    ));
+    let readiness_dependencies =
+        web::Data::new(crate::http::well_known::ReadinessDependencies::new(
+            diesel_db.clone(),
+            valkey_connection.clone(),
+        ));
+    let initial_admin_bootstrap = web::Data::new(
+        crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint::initialize(
+            diesel_db.clone(),
+            &settings.storage.data_dir,
+            &settings.endpoint.issuer,
+        )
+        .await?,
+    );
     let remote_client_documents = Arc::new(
         crate::domain::remote_client_documents::RemoteClientDocumentResolver::new(
             &settings.modules.remote_client_document_private_origins,
@@ -512,6 +529,7 @@ pub async fn run() -> anyhow::Result<()> {
         admin_sessions.clone().into_inner(),
         runtime_modules.registry.clone(),
         remote_client_documents.clone(),
+        keyset.clone(),
         if settings.modules.enable_openid4vci_issuer {
             Some(Arc::new(nazo_postgres::Openid4vciRepository::new(
                 diesel_db.clone(),
@@ -811,9 +829,10 @@ pub async fn run() -> anyhow::Result<()> {
 
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
+    let direct_tls = direct_tls_listener(&config, &settings)?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let app = App::new()
             .wrap_fn(|req, service| {
                 let method = req.method().clone();
@@ -854,6 +873,9 @@ pub async fn run() -> anyhow::Result<()> {
         let app = app.app_data(token_management_endpoint.clone());
         let app = app.app_data(userinfo_endpoint.clone());
         let app = app
+            .app_data(mtls_certificate_source.clone())
+            .app_data(readiness_dependencies.clone())
+            .app_data(initial_admin_bootstrap.clone())
             .app_data(token_endpoint_handles.clone())
             .app_data(ciba_service.clone())
             .app_data(ciba_users.clone())
@@ -922,10 +944,58 @@ pub async fn run() -> anyhow::Result<()> {
         };
         app.configure(|cfg| routes::configure(cfg, &settings, perf_metrics_enabled))
     })
-    .bind(addr)?
-    .run()
-    .await?;
+    .on_connect(|io, extensions| {
+        let Some(stream) = io
+            .downcast_ref::<actix_tls::accept::openssl::TlsStream<actix_web::rt::net::TcpStream>>()
+        else {
+            return;
+        };
+        let Some(certificate) = stream.ssl().peer_certificate() else {
+            return;
+        };
+        let Ok(der) = certificate.to_der() else {
+            return;
+        };
+        if let Some(identity) = crate::http::mtls::certificate_der_identity(&der) {
+            extensions.insert(identity);
+        }
+    })
+    .bind(addr)?;
+    let server = if let Some((tls_addr, acceptor)) = direct_tls {
+        tracing::info!("nazo-oauth-server direct mTLS listener on {tls_addr}");
+        server.bind_openssl(tls_addr, acceptor)?
+    } else {
+        server
+    };
+    server.run().await?;
     Ok(())
+}
+
+fn direct_tls_listener(
+    config: &ConfigSource,
+    settings: &Settings,
+) -> anyhow::Result<Option<(SocketAddr, openssl::ssl::SslAcceptorBuilder)>> {
+    use crate::http::mtls::MtlsCertificateSourceMode;
+
+    if settings.endpoint.mtls_certificate_source != MtlsCertificateSourceMode::DirectTls {
+        return Ok(None);
+    }
+    let required = |key: &str| {
+        config
+            .optional_string(key)
+            .ok_or_else(|| anyhow::anyhow!("{key} is required for direct-tls mTLS"))
+    };
+    let bind: SocketAddr = required("TLS_BIND")?.parse()?;
+    let certificate = required("TLS_CERTIFICATE_FILE")?;
+    let private_key = required("TLS_PRIVATE_KEY_FILE")?;
+    let client_ca = required("TLS_CLIENT_CA_FILE")?;
+    let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())?;
+    acceptor.set_certificate_chain_file(certificate)?;
+    acceptor.set_private_key_file(private_key, SslFiletype::PEM)?;
+    acceptor.check_private_key()?;
+    acceptor.set_ca_file(client_ca)?;
+    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    Ok(Some((bind, acceptor)))
 }
 
 #[cfg(test)]

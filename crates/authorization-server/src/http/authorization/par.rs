@@ -1,7 +1,7 @@
 //! Pushed Authorization Request endpoint.
 use nazo_http_actix::{OAuthJsonErrorFields, json_response_status, oauth_error};
 
-use super::jar::{apply_request_object_with_context, unverified_signed_request_object_client_id};
+use super::jar::apply_request_object_with_context;
 use crate::adapters::security::extract_client_credentials_with_trusted_proxies;
 use crate::adapters::security::has_basic_authorization_scheme;
 use crate::adapters::security::random_urlsafe_token;
@@ -229,7 +229,8 @@ async fn par_after_rate_limit_inner(
 
     if !params.contains_key("client_id")
         && let Some(request_object) = params.get("request")
-        && let Some(client_id) = unverified_signed_request_object_client_id(request_object)
+        && let Some(client_id) =
+            super::unverified_request_object_client_id(context.request_object_keys, request_object)
     {
         params.insert("client_id".to_owned(), client_id);
     }
