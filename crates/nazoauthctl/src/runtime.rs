@@ -47,6 +47,15 @@ impl PreparedAppTask {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn command_arguments(&self) -> Vec<String> {
+        self.process
+            .arguments()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
+    }
 }
 
 pub(crate) struct Runtime<'a> {
@@ -126,6 +135,13 @@ impl<'a> Runtime<'a> {
                 .snapshot_paths
                 .first()
                 .context("application key state directory is unavailable")?;
+            let app_root = key_directory
+                .parent()
+                .context("application data root is unavailable")?;
+            let ui_releases = app_root
+                .parent()
+                .context("deployment data root is unavailable")?
+                .join("ui-releases");
             let mut command = Process::new("systemd-run")
                 .timeout(Duration::from_secs(300))
                 .current_dir(&self.config.runtime.working_directory)
@@ -147,6 +163,7 @@ impl<'a> Runtime<'a> {
                     "--property=NoNewPrivileges=yes",
                     "--property=PrivateTmp=yes",
                     "--property=PrivateDevices=yes",
+                    "--property=PrivateMounts=yes",
                     "--property=ProtectSystem=strict",
                     "--property=ProtectHome=yes",
                     "--property=ProtectKernelTunables=yes",
@@ -176,9 +193,10 @@ impl<'a> Runtime<'a> {
                     self.config.operator.controller_public_key.display()
                 ))
                 .arg(format!(
-                    "--setenv=NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE={}",
+                    "--property=LoadCredential=operator-receipt-key:{}",
                     self.config.operator.receipt_private_key.display()
                 ))
+                .arg("--setenv=NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=%d/operator-receipt-key")
                 .arg(format!(
                     "--setenv=NAZOAUTH_OPERATOR_STATE_DIRECTORY={}",
                     self.config.operator.state_directory.display()
@@ -205,7 +223,7 @@ impl<'a> Runtime<'a> {
                 command
                     .arg("--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6")
                     .arg(format!(
-                        "--property=ReadOnlyPaths={}",
+                        "--property=LoadCredential=migration-database-url:{}",
                         self.config
                             .dependencies
                             .migration_database_url_file
@@ -216,12 +234,13 @@ impl<'a> Runtime<'a> {
                         key_directory.display()
                     ))
                     .arg(format!(
-                        "--setenv=DATABASE_URL_FILE={}",
-                        self.config
-                            .dependencies
-                            .migration_database_url_file
-                            .display()
+                        "--property=InaccessiblePaths={} {} {} {}",
+                        app_root.join("avatars").display(),
+                        app_root.join("secrets").display(),
+                        app_root.join("bootstrap").display(),
+                        ui_releases.display()
                     ))
+                    .arg("--setenv=DATABASE_URL_FILE=%d/migration-database-url")
             } else {
                 let mut command = command
                     .arg("--property=RestrictAddressFamilies=AF_UNIX")
@@ -230,13 +249,17 @@ impl<'a> Runtime<'a> {
                         key_directory.display()
                     ))
                     .arg(format!(
-                        "--property=InaccessiblePaths={}",
+                        "--property=InaccessiblePaths={} {} {} {} {}",
                         self.config
                             .dependencies
                             .migration_database_url_file
                             .parent()
                             .context("dependency secret directory is unavailable")?
-                            .display()
+                            .display(),
+                        app_root.join("avatars").display(),
+                        app_root.join("secrets").display(),
+                        app_root.join("bootstrap").display(),
+                        ui_releases.display()
                     ));
                 if let Some(path) = public_jwk {
                     command = command

@@ -213,6 +213,27 @@ async fn call_ciba_token_for_test(
     .await
 }
 
+#[actix_web::test]
+async fn token_ciba_rejects_client_policy_before_state_access() {
+    let state = ciba_test_state();
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("ciba-kid", &key);
+    client.security_policy = Some(nazo_auth::ClientSecurityPolicy {
+        allow_cross_device_flows: false,
+        ..nazo_auth::ClientSecurityPolicy::default()
+    });
+
+    let response = call_ciba_token_for_test(&state, &client, "not-stored".to_owned()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("unauthorized_client")
+    );
+}
+
 fn ciba_private_key_jwt_client_with_alg(kid: &str, fixture: &ClientSigningFixture) -> ClientRow {
     let public_jwk = fixture.public_jwk(kid);
     client_row! {

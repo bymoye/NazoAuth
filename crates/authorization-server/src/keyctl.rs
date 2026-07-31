@@ -21,14 +21,22 @@ struct GenerateLocalKeyOptions {
 
 pub(crate) async fn operator_list() -> anyhow::Result<String> {
     let settings = load_settings()?;
+    list_with_settings(&settings).await
+}
+
+async fn list_with_settings(settings: &Settings) -> anyhow::Result<String> {
     let _ = nazo_key_management::KeyManager::list_keys(&settings.key_settings()).await?;
-    keyset_revision(&settings).await
+    keyset_revision(settings).await
 }
 
 pub(crate) async fn operator_validate() -> anyhow::Result<String> {
     let settings = load_settings()?;
+    validate_with_settings(&settings).await
+}
+
+async fn validate_with_settings(settings: &Settings) -> anyhow::Result<String> {
     nazo_key_management::KeyManager::validate(&settings.key_settings()).await?;
-    keyset_revision(&settings).await
+    keyset_revision(settings).await
 }
 
 pub(crate) async fn operator_generate_local(
@@ -37,6 +45,13 @@ pub(crate) async fn operator_generate_local(
 ) -> anyhow::Result<(String, String)> {
     let options = parse_generate_local(algorithm, purposes)?;
     let settings = load_settings()?;
+    generate_local_with_settings(&settings, options).await
+}
+
+async fn generate_local_with_settings(
+    settings: &Settings,
+    options: GenerateLocalKeyOptions,
+) -> anyhow::Result<(String, String)> {
     let key_settings = settings.key_settings();
     nazo_key_management::KeyManager::load_or_create(key_settings.clone()).await?;
     let kid = nazo_key_management::KeyManager::register_local(
@@ -47,7 +62,7 @@ pub(crate) async fn operator_generate_local(
         },
     )
     .await?;
-    Ok((kid, keyset_revision(&settings).await?))
+    Ok((kid, keyset_revision(settings).await?))
 }
 
 pub(crate) async fn operator_register_external(
@@ -59,17 +74,27 @@ pub(crate) async fn operator_register_external(
     let alg = signing_algorithm_from_name(algorithm)
         .ok_or_else(|| anyhow::anyhow!("unsupported signing alg {algorithm}"))?;
     let settings = load_settings()?;
+    register_external_with_settings(&settings, kid, alg, key_ref, public_jwk_file).await
+}
+
+async fn register_external_with_settings(
+    settings: &Settings,
+    kid: &str,
+    algorithm: jsonwebtoken::Algorithm,
+    key_ref: &str,
+    public_jwk_file: PathBuf,
+) -> anyhow::Result<String> {
     nazo_key_management::KeyManager::register_external(
         &settings.key_settings(),
         nazo_key_management::ExternalKeyRegistration {
             kid: kid.to_owned(),
-            algorithm: alg,
+            algorithm,
             key_ref: key_ref.to_owned(),
             public_jwk_file,
         },
     )
     .await?;
-    keyset_revision(&settings).await
+    keyset_revision(settings).await
 }
 
 fn parse_generate_local(

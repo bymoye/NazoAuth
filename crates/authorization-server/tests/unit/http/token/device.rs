@@ -5,7 +5,9 @@ use crate::domain::tenancy::DEFAULT_REALM_ID;
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 use crate::http::rate_limit::TokenManagementRequestLimiter;
 use crate::http::token::device_issuance::required_device_code;
-use crate::http::token::{TokenForm, device_config::DeviceHttpConfig};
+use crate::http::token::device_issuance::token_device_code_with_service;
+use crate::http::token::issue::{TokenIssuanceConfig, TokenIssuanceContext};
+use crate::http::token::{ServerTokenService, TokenForm, device_config::DeviceHttpConfig};
 use crate::settings::Settings;
 use crate::test_support::TestInfrastructure;
 use actix_web::test::TestRequest;
@@ -354,6 +356,45 @@ async fn device_authorization_endpoint_disabled_fails_before_client_lookup() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&response), "invalid_request");
+}
+
+#[actix_web::test]
+async fn device_token_rejects_client_policy_before_polling_state() {
+    let state = Data::new(state_with_settings(enabled_settings()));
+    let mut client = device_client();
+    client.security_policy = Some(nazo_auth::ClientSecurityPolicy {
+        allow_cross_device_flows: false,
+        ..nazo_auth::ClientSecurityPolicy::default()
+    });
+    let connection = state.valkey_connection();
+    let token_service = ServerTokenService::new(
+        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        state.keyset.clone(),
+    );
+    let issuance_config = TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = super::super::issue::test_support::test_authorization_service(&state);
+    let issuance = TokenIssuanceContext {
+        config: &issuance_config,
+        modules: &modules,
+        authorization: &authorization,
+    };
+    let form = device_token_form(Some("not-stored"));
+    let request = TestRequest::post().uri("/token").to_http_request();
+
+    let response = token_device_code_with_service(
+        &token_service,
+        &issuance,
+        &device_grant_service(&state),
+        &request,
+        &client,
+        &form,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "unauthorized_client");
 }
 
 #[test]

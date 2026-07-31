@@ -4,6 +4,7 @@ use super::*;
 use crate::{
     filesystem::PrivateTempDir,
     model::{Dependencies, Operator, Postgres, Runtime as RuntimeConfig, Ui, Valkey},
+    runtime::Runtime,
 };
 
 fn keypair(directory: &Path, name: &str, seed: u8) -> (String, PathBuf, PathBuf) {
@@ -131,6 +132,54 @@ fn task_parts() -> (
         },
         TaskOperation::KeysValidate,
     )
+}
+
+#[test]
+fn host_task_uses_transient_credentials_and_hides_unrelated_state() {
+    let work = PrivateTempDir::new("host-task-command").unwrap();
+    let mut config = config(&work);
+    let app = work.path().join("app");
+    let keys = app.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    config.runtime.snapshot_paths = vec![keys];
+    config.runtime.working_directory = work.path().join("config");
+    fs::create_dir(&config.runtime.working_directory).unwrap();
+    let dependency_secrets = config.runtime.working_directory.join("secrets");
+    fs::create_dir(&dependency_secrets).unwrap();
+    config.dependencies.migration_database_url_file =
+        dependency_secrets.join("database-migration-url");
+    fs::write(
+        &config.dependencies.migration_database_url_file,
+        "postgresql://migration.invalid/db",
+    )
+    .unwrap();
+    let binary = work.path().join("nazoauth");
+    fs::write(&binary, b"test binary").unwrap();
+
+    let prepared = Runtime::new(&config)
+        .prepare_app_task(
+            &binary.to_string_lossy(),
+            &TaskOperation::MigrateApply,
+            None,
+            b"{}",
+        )
+        .unwrap();
+    let arguments = prepared.command_arguments();
+    let joined = arguments.join("\n");
+
+    assert!(joined.contains("--property=PrivateMounts=yes"));
+    assert!(joined.contains("--property=LoadCredential=operator-receipt-key:"));
+    assert!(joined.contains("--property=LoadCredential=migration-database-url:"));
+    assert!(
+        joined.contains(
+            "--setenv=NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=%d/operator-receipt-key"
+        )
+    );
+    assert!(joined.contains("--setenv=DATABASE_URL_FILE=%d/migration-database-url"));
+    assert!(joined.contains(&app.join("avatars").display().to_string()));
+    assert!(joined.contains(&app.join("secrets").display().to_string()));
+    assert!(joined.contains(&app.join("bootstrap").display().to_string()));
+    assert!(!joined.contains("postgresql://migration.invalid/db"));
 }
 
 #[test]

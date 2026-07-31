@@ -59,6 +59,10 @@ pub(crate) async fn ready(dependencies: Data<ReadinessDependencies>) -> HttpResp
     if let Err(error) = valkey {
         tracing::warn!(%error, "readiness Valkey probe failed");
     }
+    readiness_response(postgresql_up, valkey_up)
+}
+
+fn readiness_response(postgresql_up: bool, valkey_up: bool) -> HttpResponse {
     let ready = postgresql_up && valkey_up;
     HttpResponse::build(if ready {
         StatusCode::OK
@@ -85,3 +89,7 @@ pub(crate) async fn captcha_config() -> Json<Value> {
         "registration_enabled": true
     }))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/http/well_known.rs"]
+mod tests;

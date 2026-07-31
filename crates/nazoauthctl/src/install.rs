@@ -150,7 +150,8 @@ pub(crate) fn start_managed_dependencies(config: &UpdateConfig) -> anyhow::Resul
         .dependencies
         .database_url_file
         .parent()
-        .context("dependency secret path has no parent")?;
+        .context("dependency secret path has no parent")?
+        .join("dependencies");
     ensure_dependency_container(
         engine,
         &config.postgres.container_name,
@@ -266,24 +267,35 @@ pub(crate) fn install_systemd(config: &UpdateConfig) -> anyhow::Result<()> {
     set_mode(operator_dir, 0o750)?;
     for entry in fs::read_dir(&secrets_dir)? {
         let path = entry?.path();
+        if path.file_name().is_some_and(|name| name == "dependencies") {
+            Process::new("chown")
+                .arg("root:root")
+                .arg(&path)
+                .run_quiet()?;
+            set_mode(&path, 0o700)?;
+            continue;
+        }
         Process::new("chown")
             .arg(format!("root:{}", config.runtime.service_user))
             .arg(&path)
             .run_quiet()?;
-        let dependency_readable = config.dependencies.mode == "managed"
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    matches!(name, "postgres-password" | "valkey-password" | "valkey.acl")
-                });
-        set_mode(&path, if dependency_readable { 0o444 } else { 0o440 })?;
+        let runtime_readable = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "database-url" | "valkey-url"));
+        if !runtime_readable {
+            Process::new("chown")
+                .arg("root:root")
+                .arg(&path)
+                .run_quiet()?;
+        }
+        set_mode(&path, if runtime_readable { 0o440 } else { 0o600 })?;
     }
     Process::new("chown")
-        .arg(format!("root:{}", config.runtime.service_user))
+        .arg("root:root")
         .arg(&config.operator.receipt_private_key)
         .run_quiet()?;
-    set_mode(&config.operator.receipt_private_key, 0o440)?;
+    set_mode(&config.operator.receipt_private_key, 0o600)?;
     if let Some(app_root) = config
         .runtime
         .snapshot_paths
@@ -314,8 +326,53 @@ pub(crate) fn install_systemd(config: &UpdateConfig) -> anyhow::Result<()> {
             );
         }
     }
-    let unit = format!(
-        "# Managed by nazoauthctl\n\
+    let app_root = config
+        .runtime
+        .snapshot_paths
+        .first()
+        .and_then(|path| path.parent())
+        .context("host runtime has no application data root")?;
+    let data_root = app_root
+        .parent()
+        .context("host runtime has no deployment data root")?;
+    let operator_dir = config
+        .operator
+        .controller_public_key
+        .parent()
+        .context("host runtime has no operator directory")?;
+    let unit = HostSystemdUnit {
+        user: &config.runtime.service_user,
+        working: &config.runtime.working_directory,
+        binary: &config.runtime.binary_path,
+        app_root,
+        ui_releases: &data_root.join("ui-releases"),
+        operator_state: &config.operator.state_directory,
+        operator_dir,
+        migration_url: &config.dependencies.migration_database_url_file,
+    }
+    .render();
+    atomic_write(&unit_path, unit.as_bytes(), 0o644)?;
+    Process::new("systemctl").arg("daemon-reload").run_quiet()?;
+    Process::new("systemctl")
+        .args(["enable", config.runtime.service_name.as_str()])
+        .run_quiet()
+}
+
+struct HostSystemdUnit<'a> {
+    user: &'a str,
+    working: &'a Path,
+    binary: &'a Path,
+    app_root: &'a Path,
+    ui_releases: &'a Path,
+    operator_state: &'a Path,
+    operator_dir: &'a Path,
+    migration_url: &'a Path,
+}
+
+impl HostSystemdUnit<'_> {
+    fn render(&self) -> String {
+        format!(
+            "# Managed by nazoauthctl\n\
          [Unit]\n\
          Description=NazoAuth authorization server\n\
          After=network-online.target\n\
@@ -340,25 +397,24 @@ pub(crate) fn install_systemd(config: &UpdateConfig) -> anyhow::Result<()> {
          LockPersonality=true\n\
          CapabilityBoundingSet=\n\
          AmbientCapabilities=\n\
-         ReadWritePaths={app_root}\n\n\
+         ReadWritePaths={keys} {avatars} {secrets} {bootstrap}\n\
+         ReadOnlyPaths={ui_releases}\n\
+         InaccessiblePaths={operator_state} {operator_dir} {migration_url}\n\n\
          [Install]\n\
          WantedBy=multi-user.target\n",
-        user = config.runtime.service_user,
-        working = config.runtime.working_directory.display(),
-        binary = config.runtime.binary_path.display(),
-        app_root = config
-            .runtime
-            .snapshot_paths
-            .first()
-            .and_then(|path| path.parent())
-            .context("host runtime has no application data root")?
-            .display(),
-    );
-    atomic_write(&unit_path, unit.as_bytes(), 0o644)?;
-    Process::new("systemctl").arg("daemon-reload").run_quiet()?;
-    Process::new("systemctl")
-        .args(["enable", config.runtime.service_name.as_str()])
-        .run_quiet()
+            user = self.user,
+            working = self.working.display(),
+            binary = self.binary.display(),
+            keys = self.app_root.join("keys").display(),
+            avatars = self.app_root.join("avatars").display(),
+            secrets = self.app_root.join("secrets").display(),
+            bootstrap = self.app_root.join("bootstrap").display(),
+            ui_releases = self.ui_releases.display(),
+            operator_state = self.operator_state.display(),
+            operator_dir = self.operator_dir.display(),
+            migration_url = self.migration_url.display(),
+        )
+    }
 }
 
 fn normalize_external_dependencies(options: &mut InstallOptions) -> anyhow::Result<()> {
@@ -465,9 +521,15 @@ fn select_runtime(options: &InstallOptions) -> anyhow::Result<(String, String)> 
         }
         return Ok((runtime.clone(), runtime));
     }
-    for command in ["systemctl", "systemd-run"] {
+    for command in ["systemctl", "systemd-run", "systemd"] {
         if !command_exists(command) {
             bail!("required command is missing: {command}");
+        }
+    }
+    if !test_mode() {
+        let version = parse_systemd_version(&Process::new("systemd").arg("--version").stdout()?)?;
+        if version < 247 {
+            bail!("host runtime requires systemd 247 or newer for transient credentials");
         }
     }
     if options.database_url.is_some() {
@@ -515,14 +577,16 @@ fn write_external_urls(secrets: &Path, options: &InstallOptions) -> anyhow::Resu
 }
 
 fn write_managed_secrets(secrets: &Path) -> anyhow::Result<String> {
-    let postgres = generate_secret(&secrets.join("postgres-password"))?;
-    let runtime_postgres = generate_secret(&secrets.join("postgres-runtime-password"))?;
-    let valkey = generate_secret(&secrets.join("valkey-password"))?;
+    let dependencies = secrets.join("dependencies");
+    create_directory(&dependencies, 0o700)?;
+    let postgres = generate_secret(&dependencies.join("postgres-password"))?;
+    let runtime_postgres = generate_secret(&dependencies.join("postgres-runtime-password"))?;
+    let valkey = generate_secret(&dependencies.join("valkey-password"))?;
     // Dependency containers use fixed internal UIDs unrelated to host groups.
-    // The parent directory remains root-owned 0750, and these bind mounts are
-    // read-only in their containers, so host users still cannot traverse to them.
-    set_mode(&secrets.join("postgres-password"), 0o444)?;
-    set_mode(&secrets.join("valkey-password"), 0o444)?;
+    // The dependency-only parent remains root-owned 0700, and these bind mounts
+    // are read-only in their containers, so runtime users cannot traverse to them.
+    set_mode(&dependencies.join("postgres-password"), 0o444)?;
+    set_mode(&dependencies.join("valkey-password"), 0o444)?;
     atomic_write(
         &secrets.join("database-url"),
         format!("postgresql://nazoauth_runtime:{runtime_postgres}@nazo-oauth-postgres:5432/oauth")
@@ -541,7 +605,7 @@ fn write_managed_secrets(secrets: &Path) -> anyhow::Result<String> {
         0o440,
     )?;
     atomic_write(
-        &secrets.join("valkey.acl"),
+        &dependencies.join("valkey.acl"),
         format!("user default on >{valkey} ~* &* +@all\n").as_bytes(),
         0o444,
     )?;
@@ -945,6 +1009,7 @@ fn configure_managed_database_roles(config: &UpdateConfig) -> anyhow::Result<()>
         .database_url_file
         .parent()
         .context("managed PostgreSQL secret directory is unavailable")?
+        .join("dependencies")
         .join("postgres-runtime-password");
     let password = fs::read_to_string(password_path)?;
     if password.is_empty()
@@ -1085,6 +1150,18 @@ fn validate_dependency_url(value: &str, schemes: &[&str], name: &str) -> anyhow:
     Ok(())
 }
 
+fn parse_systemd_version(output: &str) -> anyhow::Result<u32> {
+    let mut fields = output.lines().next().unwrap_or_default().split_whitespace();
+    if fields.next() != Some("systemd") {
+        bail!("systemd returned an invalid version banner");
+    }
+    fields
+        .next()
+        .context("systemd version is unavailable")?
+        .parse()
+        .context("systemd version is invalid")
+}
+
 fn create_directory(path: &Path, mode: u32) -> anyhow::Result<()> {
     fs::create_dir_all(path)
         .with_context(|| format!("failed to create directory {}", path.display()))?;
@@ -1123,3 +1200,7 @@ fn test_mode() -> bool {
     #[cfg(not(debug_assertions))]
     false
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/install.rs"]
+mod tests;

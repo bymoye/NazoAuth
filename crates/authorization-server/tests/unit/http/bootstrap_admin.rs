@@ -130,3 +130,103 @@ async fn error_body_and_consumed_token_cleanup_are_stable() {
     assert!(!token_path.exists());
     remove_consumed_token(&token_path);
 }
+
+#[test]
+fn repository_bootstrap_states_control_token_lifetime() {
+    let root = std::env::temp_dir().join(format!(
+        "nazoauth-bootstrap-state-test-{}",
+        rand::random::<u64>()
+    ));
+    fs::create_dir(&root).unwrap();
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    let ready_path = root.join("ready");
+    fs::write(&ready_path, "token").unwrap();
+    assert_eq!(
+        bootstrap_token_state(
+            nazo_postgres::InitialAdminBootstrapState::Ready { expires_at },
+            &ready_path,
+            "https://auth.example/",
+            "hash".to_owned(),
+        ),
+        Some("hash".to_owned())
+    );
+    assert!(ready_path.exists());
+
+    for (name, state) in [
+        ("closed", nazo_postgres::InitialAdminBootstrapState::Closed),
+        (
+            "owned",
+            nazo_postgres::InitialAdminBootstrapState::OwnedByAnotherInstance { expires_at },
+        ),
+    ] {
+        let path = root.join(name);
+        fs::write(&path, "token").unwrap();
+        assert_eq!(
+            bootstrap_token_state(state, &path, "https://auth.example", "hash".to_owned()),
+            None
+        );
+        assert!(!path.exists());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn repository_claim_outcomes_have_closed_http_transitions() {
+    let root = std::env::temp_dir().join(format!(
+        "nazoauth-bootstrap-outcome-test-{}",
+        rand::random::<u64>()
+    ));
+    fs::create_dir(&root).unwrap();
+
+    let created_path = root.join("created");
+    fs::write(&created_path, "token").unwrap();
+    let created = endpoint(Some("hash".to_owned()), created_path.clone());
+    let id = uuid::Uuid::now_v7();
+    let response = claim_outcome_response(
+        &created,
+        nazo_postgres::InitialAdminClaimOutcome::Created {
+            id,
+            email: "admin@example.com".to_owned(),
+        },
+    );
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+    assert_eq!(body["id"], id.to_string());
+    assert_eq!(body["role"], "admin");
+    assert!(created.expected_token_hash().is_none());
+    assert!(!created_path.exists());
+
+    for (name, outcome, status) in [
+        (
+            "closed",
+            nazo_postgres::InitialAdminClaimOutcome::Closed,
+            StatusCode::GONE,
+        ),
+        (
+            "expired",
+            nazo_postgres::InitialAdminClaimOutcome::InvalidOrExpired,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "conflict",
+            nazo_postgres::InitialAdminClaimOutcome::EmailConflict,
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        let path = root.join(name);
+        fs::write(&path, "token").unwrap();
+        let endpoint = endpoint(Some("hash".to_owned()), path.clone());
+        let response = claim_outcome_response(&endpoint, outcome);
+        assert_eq!(response.status(), status);
+        if status == StatusCode::GONE {
+            assert!(endpoint.expected_token_hash().is_none());
+            assert!(!path.exists());
+        } else {
+            assert!(endpoint.expected_token_hash().is_some());
+            assert!(path.exists());
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}

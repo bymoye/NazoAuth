@@ -3,7 +3,7 @@
 use crate::http::sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles};
 use actix_web::{HttpRequest, HttpResponse, web::Data};
 use nazo_http_actix::json_response;
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(crate) async fn admin_client_templates(
     admin_sessions: Data<AdminSessionHandles>,
@@ -12,7 +12,11 @@ pub(crate) async fn admin_client_templates(
     if let Err(response) = require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
         return response;
     }
-    json_response(json!({
+    json_response(client_templates_document())
+}
+
+fn client_templates_document() -> Value {
+    json!({
         "templates": [
             {
                 "id": "web",
@@ -75,5 +79,9 @@ pub(crate) async fn admin_client_templates(
                 }
             }
         ]
-    }))
+    })
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/http/admin/clients/templates.rs"]
+mod tests;
