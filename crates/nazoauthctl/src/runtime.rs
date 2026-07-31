@@ -9,12 +9,14 @@ use crate::{
     process::Process,
 };
 
+#[derive(Debug)]
 pub(crate) struct PreparedAppTask {
     process: Process,
     pub(crate) target: RuntimeTargetClaim,
     cleanup: TaskCleanup,
 }
 
+#[derive(Debug)]
 enum TaskCleanup {
     Container { engine: String, name: String },
     SystemdUnit(String),
@@ -46,15 +48,6 @@ impl PreparedAppTask {
                     .ok();
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn command_arguments(&self) -> Vec<String> {
-        self.process
-            .arguments()
-            .iter()
-            .map(|value| value.to_string_lossy().into_owned())
-            .collect()
     }
 }
 

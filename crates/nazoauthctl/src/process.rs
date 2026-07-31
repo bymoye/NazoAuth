@@ -63,11 +63,6 @@ impl Process {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn arguments(&self) -> &[OsString] {
-        &self.args
-    }
-
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         if !test_environment_passthrough() {

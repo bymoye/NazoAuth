@@ -164,8 +164,7 @@ fn host_task_uses_transient_credentials_and_hides_unrelated_state() {
             b"{}",
         )
         .unwrap();
-    let arguments = prepared.command_arguments();
-    let joined = arguments.join("\n");
+    let joined = format!("{prepared:?}").replace("\\\\", "\\");
 
     assert!(joined.contains("--property=PrivateMounts=yes"));
     assert!(joined.contains("--property=LoadCredential=operator-receipt-key:"));
