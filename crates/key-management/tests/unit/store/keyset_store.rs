@@ -394,7 +394,7 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
     let keys_dir = temp_keys_dir("automatic_fresh_candidate");
     tokio::fs::create_dir_all(&keys_dir).await.unwrap();
     let mut settings = test_settings(keys_dir.clone());
-    settings.rotation_interval = chrono::Duration::seconds(10);
+    settings.rotation_interval = chrono::Duration::seconds(120);
     // Keep the candidate unambiguously inside the prepublication window even
     // under coverage instrumentation, where parsing the generated RSA keys can
     // take several seconds before lifecycle maintenance observes the clock.
@@ -404,7 +404,7 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
         "active",
         "RS256",
         "active.pem",
-        Utc::now() - chrono::Duration::seconds(11),
+        Utc::now() - chrono::Duration::seconds(121),
     )
     .await;
     write_local_key_entry(
@@ -424,7 +424,7 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
                     "kid": "active",
                     "alg": "RS256",
                     "file": "active.pem",
-                    "created_at": timestamp(Utc::now() - chrono::Duration::seconds(11)),
+                    "created_at": timestamp(Utc::now() - chrono::Duration::seconds(121)),
                     "retire_at": null
                 },
                 {
