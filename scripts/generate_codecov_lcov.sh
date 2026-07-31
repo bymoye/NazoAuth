@@ -299,9 +299,9 @@ wait "$SERVER_PID" || true
 SERVER_PID=""
 
 TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"
-cargo test --locked --workspace --all-features --lib --tests \
+cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
-cargo test --locked --workspace --all-features --lib --tests
+cargo test --locked --workspace --all-features --lib --bins --tests
 
 RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
 LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$RUST_HOST/bin"
