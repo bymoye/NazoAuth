@@ -361,6 +361,54 @@ fn rp_metadata_choices_select_supported_single_values_and_reject_inconsistency()
     assert_eq!(error.error, "invalid_client_metadata");
 }
 
+#[test]
+fn every_rp_metadata_choice_fails_closed_when_no_server_value_is_supported() {
+    macro_rules! assert_unsupported_choices_are_rejected {
+        ($field:ident) => {{
+            let mut request = DynamicClientRegistrationRequest {
+                redirect_uris: Some(vec!["https://client.example/cb".to_owned()]),
+                ..Default::default()
+            };
+            request.$field = Some(vec!["unsupported".to_owned()]);
+            let error = prepare_dynamic_client_registration(request, POLICY)
+                .expect_err(concat!(stringify!($field), " must fail closed"));
+            assert_eq!(error.error, "invalid_client_metadata");
+            assert!(error.description.contains("No supported"));
+        }};
+    }
+
+    assert_unsupported_choices_are_rejected!(token_endpoint_auth_methods_supported);
+    assert_unsupported_choices_are_rejected!(id_token_signing_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(id_token_encryption_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(id_token_encryption_enc_values_supported);
+    assert_unsupported_choices_are_rejected!(request_object_signing_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(request_object_encryption_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(request_object_encryption_enc_values_supported);
+    assert_unsupported_choices_are_rejected!(token_endpoint_auth_signing_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(
+        backchannel_authentication_request_signing_alg_values_supported
+    );
+    assert_unsupported_choices_are_rejected!(userinfo_signing_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(userinfo_encryption_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(userinfo_encryption_enc_values_supported);
+    assert_unsupported_choices_are_rejected!(authorization_signing_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(authorization_encryption_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(authorization_encryption_enc_values_supported);
+    assert_unsupported_choices_are_rejected!(introspection_encryption_alg_values_supported);
+    assert_unsupported_choices_are_rejected!(introspection_encryption_enc_values_supported);
+    assert_unsupported_choices_are_rejected!(introspection_signing_alg_values_supported);
+}
+
+#[test]
+fn rp_metadata_choice_lists_reject_empty_values() {
+    for choices in [Vec::new(), vec![" ".to_owned()]] {
+        let error = negotiate_metadata_choice("subject_type", None, Some(choices), &["public"])
+            .expect_err("empty choice lists must fail closed");
+        assert_eq!(error.error, "invalid_client_metadata");
+        assert!(error.description.contains("non-empty"));
+    }
+}
+
 fn client() -> OAuthClient {
     OAuthClient {
         id: Uuid::now_v7(),

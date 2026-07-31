@@ -315,6 +315,21 @@ impl LiveAuthorizationFixture {
         .expect("test client sender constraint update should succeed");
     }
 
+    async fn set_client_security_policy(&self, client_id: &str, policy: Value) {
+        let mut conn = get_conn(&self.state.diesel_db)
+            .await
+            .expect("database connection");
+        sql_query(
+            "UPDATE oauth_clients SET security_policy = $1 WHERE tenant_id = $2 AND client_id = $3",
+        )
+        .bind::<Jsonb, _>(policy)
+        .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+        .bind::<Text, _>(client_id)
+        .execute(&mut conn)
+        .await
+        .expect("test client security policy update should succeed");
+    }
+
     async fn store_session(&self, user: &DatabaseUserFixture, sid: &str, auth_time: i64) {
         let payload = SessionPayload {
             user_id: user.id,
@@ -1017,6 +1032,199 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
     .await;
 
     assert_authorization_error_redirect(response, "invalid_request", Some("fapi-par-state"));
+}
+
+#[actix_web::test]
+async fn fapi_authorization_rejects_external_request_uri_and_direct_authorization() {
+    let Some(fixture) = LiveAuthorizationFixture::new().await else {
+        return;
+    };
+    let client_id = format!("authorize-fapi-direct-{}", Uuid::now_v7());
+    fixture
+        .insert_client(
+            &client_id,
+            vec!["https://client.example/callback"],
+            vec!["authorization_code"],
+            true,
+        )
+        .await;
+    let state =
+        fixture.state_with_authorization_server_profile(AuthorizationServerProfile::Fapi2Security);
+
+    let uri = format!(
+        "/authorize?client_id={}&request_uri=https%3A%2F%2Fclient.example%2Frequest.jwt&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code&state=external",
+        urlencoding::encode(&client_id),
+    );
+    let req = actix_web::test::TestRequest::get()
+        .uri(&uri)
+        .to_http_request();
+    let mut external = query(&[
+        ("client_id", client_id.as_str()),
+        ("request_uri", "https://client.example/request.jwt"),
+        ("redirect_uri", "https://client.example/callback"),
+        ("response_type", "code"),
+        ("state", "external"),
+    ]);
+    let response = authorize_request(state.clone(), req, &mut external).await;
+    assert_authorization_error_redirect(response, "request_uri_not_supported", Some("external"));
+
+    let uri = format!(
+        "/authorize?client_id={}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code&state=direct",
+        urlencoding::encode(&client_id),
+    );
+    let req = actix_web::test::TestRequest::get()
+        .uri(&uri)
+        .to_http_request();
+    let mut direct = query(&[
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", "https://client.example/callback"),
+        ("response_type", "code"),
+        ("state", "direct"),
+    ]);
+    let response = authorize_request(state, req, &mut direct).await;
+    assert_authorization_error_redirect(response, "invalid_request", Some("direct"));
+}
+
+#[actix_web::test]
+async fn composable_policy_requires_a_signed_authorization_request_without_fapi_assurance() {
+    let Some(fixture) = LiveAuthorizationFixture::new().await else {
+        return;
+    };
+    let client_id = format!("authorize-signed-policy-{}", Uuid::now_v7());
+    fixture
+        .insert_client(
+            &client_id,
+            vec!["https://client.example/callback"],
+            vec!["authorization_code"],
+            true,
+        )
+        .await;
+    fixture
+        .set_client_security_policy(
+            &client_id,
+            json!({
+                "version": 1,
+                "assurance": "baseline",
+                "require_signed_authorization_request": true
+            }),
+        )
+        .await;
+    let uri = format!(
+        "/authorize?client_id={}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code&state=unsigned",
+        urlencoding::encode(&client_id),
+    );
+    let req = actix_web::test::TestRequest::get()
+        .uri(&uri)
+        .to_http_request();
+    let mut q = query(&[
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", "https://client.example/callback"),
+        ("response_type", "code"),
+        ("state", "unsigned"),
+    ]);
+
+    let response = authorize_request(fixture.state.clone(), req, &mut q).await;
+
+    assert_authorization_error_redirect(response, "invalid_request", Some("unsigned"));
+}
+
+#[actix_web::test]
+async fn fapi_par_uses_the_bounded_authorization_transaction_ttl() {
+    let Some(fixture) = LiveAuthorizationFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let client_id = format!("authorize-fapi-ttl-{suffix}");
+    fixture
+        .insert_client(
+            &client_id,
+            vec!["https://client.example/callback"],
+            vec!["authorization_code"],
+            true,
+        )
+        .await;
+    let user = fixture.create_user(&suffix, "user", 0).await;
+    let sid = format!("sid-{suffix}");
+    fixture
+        .store_session(&user, &sid, Utc::now().timestamp())
+        .await;
+
+    let request_uri = format!("urn:ietf:params:oauth:request_uri:{}", Uuid::now_v7());
+    fixture
+        .store_pushed_request(
+            &request_uri,
+            &client_id,
+            query(&[
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", "https://client.example/callback"),
+                ("response_type", "code"),
+                ("code_challenge", VALID_CODE_CHALLENGE),
+                ("code_challenge_method", "S256"),
+                ("scope", "openid"),
+                ("state", "fapi-consent"),
+            ]),
+        )
+        .await;
+    let uri = format!(
+        "/authorize?client_id={}&request_uri={}",
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&request_uri),
+    );
+    let req = fixture.session_request(&sid, &uri);
+    let mut q = query(&[
+        ("client_id", client_id.as_str()),
+        ("request_uri", request_uri.as_str()),
+    ]);
+    let response = authorize_request(
+        fixture.state_with_authorization_server_profile(AuthorizationServerProfile::Fapi2Security),
+        req,
+        &mut q,
+    )
+    .await;
+    let location = authorization_location(&response);
+    assert_eq!(location.path(), "/consent");
+    let request_id = location
+        .query_pairs()
+        .find_map(|(key, value)| (key == "request_id").then_some(value.into_owned()))
+        .expect("FAPI authorization must persist a consent transaction");
+    let payload = fixture.stored_consent_payload(&request_id).await;
+    assert_eq!(payload.authorization_code_ttl_seconds, Some(60));
+
+    let prompt_none_uri = format!("urn:ietf:params:oauth:request_uri:{}", Uuid::now_v7());
+    fixture
+        .store_pushed_request(
+            &prompt_none_uri,
+            &client_id,
+            query(&[
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", "https://client.example/callback"),
+                ("response_type", "code"),
+                ("code_challenge", VALID_CODE_CHALLENGE),
+                ("code_challenge_method", "S256"),
+                ("prompt", "none"),
+                ("state", "fapi-login-required"),
+            ]),
+        )
+        .await;
+    let uri = format!(
+        "/authorize?client_id={}&request_uri={}",
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&prompt_none_uri),
+    );
+    let req = actix_web::test::TestRequest::get()
+        .uri(&uri)
+        .to_http_request();
+    let mut q = query(&[
+        ("client_id", client_id.as_str()),
+        ("request_uri", prompt_none_uri.as_str()),
+    ]);
+    let response = authorize_request(
+        fixture.state_with_authorization_server_profile(AuthorizationServerProfile::Fapi2Security),
+        req,
+        &mut q,
+    )
+    .await;
+    assert_authorization_error_redirect(response, "login_required", Some("fapi-login-required"));
 }
 
 #[actix_web::test]
@@ -2149,6 +2357,76 @@ async fn signed_response_with_precomputed_policy_still_requires_an_authoritative
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(response.headers().get(header::LOCATION).is_none());
+}
+
+#[actix_web::test]
+async fn signed_response_with_precomputed_policy_accepts_only_an_active_database_client() {
+    let Some(fixture) = LiveAuthorizationFixture::new().await else {
+        return;
+    };
+    let inactive_client = format!("inactive-jarm-{}", Uuid::now_v7());
+    fixture
+        .insert_client(
+            &inactive_client,
+            vec!["https://client.example/callback"],
+            vec!["authorization_code"],
+            false,
+        )
+        .await;
+    let policy = AuthorizationResponseClientPolicy {
+        signed_response_required: true,
+        session_management_allowed: false,
+        ttl_seconds: 60,
+    };
+    let response = authorization_response_redirect(
+        &fixture.state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback",
+            client_id: &inactive_client,
+            response_mode: Some("jwt"),
+            code: Some("must-not-leak"),
+            error: None,
+            state: Some("must-not-leak"),
+            oidc_sid: None,
+            client_policy: Some(policy),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.headers().get(header::LOCATION).is_none());
+
+    let active_client = format!("active-jarm-{}", Uuid::now_v7());
+    fixture
+        .insert_client(
+            &active_client,
+            vec!["https://client.example/callback"],
+            vec!["authorization_code"],
+            true,
+        )
+        .await;
+    let response = authorization_response_redirect(
+        &fixture.state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback",
+            client_id: &active_client,
+            response_mode: Some("jwt"),
+            code: Some("active-code"),
+            error: None,
+            state: Some("active-state"),
+            oidc_sid: None,
+            client_policy: Some(policy),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = authorization_location(&response);
+    let response_jwt = location
+        .query_pairs()
+        .find_map(|(key, value)| (key == "response").then_some(value.into_owned()))
+        .expect("active client must receive a signed JARM response");
+    let claims = decode_jarm_claims(&fixture.state, &response_jwt, &active_client);
+    assert_eq!(claims["code"], "active-code");
+    assert_eq!(claims["state"], "active-state");
 }
 
 #[actix_web::test]
