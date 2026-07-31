@@ -264,6 +264,7 @@ class FakeLifecycle:
                 "FAKE_BACKEND_COMMIT": self.backend_commit,
                 "FAKE_OLD_IMAGE": self.OLD_IMAGE,
                 "FAKE_ANGIE_CONFIG": bash_path(self.angie_config),
+                "FAKE_KEYS_PATH": bash_path(self.keys),
                 "MSYS": "winsymlinks:sys",
             }
         )
@@ -313,7 +314,12 @@ case "${1:-}" in
     args=("$@")
     if [[ " $* " == *" nazoauth migrate "* ]]; then
       count=0; [ ! -f "$state/migrations" ] || count="$(cat "$state/migrations")"
-      printf '%s\n' "$((count + 1))" >"$state/migrations"; exit 0
+      printf '%s\n' "$((count + 1))" >"$state/migrations"
+      if [ "${MUTATE_KEYS_ON_MIGRATE:-0}" = 1 ]; then
+        printf '%s\n' candidate-keyset >"$FAKE_KEYS_PATH/keyset.json"
+      fi
+      if [ "${FAIL_MIGRATE_AFTER_KEY_MUTATION:-0}" = 1 ]; then exit 1; fi
+      exit 0
     fi
     if [[ " $* " == *" pg_isready "* ]]; then exit 0; fi
     if [[ " $* " == *" nazoauth server "* ]]; then
@@ -950,6 +956,48 @@ bash "$1" deploy
             self.assertEqual((ui / "index.html").read_text(encoding="utf-8"), "old-ui")
             self.assertEqual((lifecycle.fake_state / "container-image").read_text().strip(), lifecycle.OLD_IMAGE)
             self.assertEqual((lifecycle.fake_state / "migrations").read_text().strip(), "1")
+            self.assertEqual(lifecycle.record_status(), "rolled-back")
+            self.assertFalse(lifecycle.state.exists())
+            self.assertFalse(lifecycle.script.exists())
+
+    def test_fake_lifecycle_rollback_restores_keys_mutated_by_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = FakeLifecycle(Path(directory), skip_migrate=False)
+            keyset = lifecycle.keys / "keyset.json"
+            keyset.write_text("previous-keyset\n", encoding="utf-8")
+
+            deployed = lifecycle.run("deploy", MUTATE_KEYS_ON_MIGRATE="1")
+            self.assertEqual(deployed.returncode, 0, deployed.stderr)
+            self.assertEqual(keyset.read_text(encoding="utf-8"), "candidate-keyset\n")
+
+            rolled_back = lifecycle.run("rollback")
+
+            self.assertEqual(rolled_back.returncode, 0, rolled_back.stderr)
+            self.assertEqual(keyset.read_text(encoding="utf-8"), "previous-keyset\n")
+            self.assertEqual(
+                (lifecycle.fake_state / "container-image").read_text().strip(),
+                lifecycle.OLD_IMAGE,
+            )
+            self.assertEqual(lifecycle.record_status(), "rolled-back")
+
+    def test_fake_lifecycle_failed_migration_restores_keys_before_old_image_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = FakeLifecycle(Path(directory), skip_migrate=False)
+            keyset = lifecycle.keys / "keyset.json"
+            keyset.write_text("previous-keyset\n", encoding="utf-8")
+
+            failed = lifecycle.run(
+                "deploy",
+                MUTATE_KEYS_ON_MIGRATE="1",
+                FAIL_MIGRATE_AFTER_KEY_MUTATION="1",
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(keyset.read_text(encoding="utf-8"), "previous-keyset\n")
+            self.assertEqual(
+                (lifecycle.fake_state / "container-image").read_text().strip(),
+                lifecycle.OLD_IMAGE,
+            )
             self.assertEqual(lifecycle.record_status(), "rolled-back")
             self.assertFalse(lifecycle.state.exists())
             self.assertFalse(lifecycle.script.exists())

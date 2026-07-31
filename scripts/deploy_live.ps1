@@ -578,6 +578,12 @@ LEASE_COMMITTED="`$STATE_FILE.lease-committed"
 LEASE_ROLLBACK="`$STATE_FILE.lease-rollback"
 LEASE_LOCK="`$DEPLOYMENTS/lease.lock"
 WATCHDOG_PID_FILE="`$STATE_FILE.watchdog-pid"
+KEYS_SNAPSHOT="`$STATE_FILE.keys-before.tar"
+KEYS_SNAPSHOT_DIGEST="`$STATE_FILE.keys-before.sha256"
+KEYS_PARENT="`$(dirname "`$KEYS_PATH")"
+KEYS_BASENAME="`$(basename "`$KEYS_PATH")"
+KEYS_RESTORE_DIR="`$KEYS_PARENT/.`$KEYS_BASENAME.restore-`$DEPLOYMENT_ID"
+KEYS_FAILED_DIR="`$KEYS_PARENT/.`$KEYS_BASENAME.failed-`$DEPLOYMENT_ID"
 
 run_server() {
   local selected_image="`$1"
@@ -654,6 +660,44 @@ require_sha256() {
     echo "SHA-256 mismatch for `$3" >&2
     return 1
   fi
+}
+
+create_keys_snapshot() {
+  local snapshot_temp digest_temp digest
+  snapshot_temp="`$KEYS_SNAPSHOT.tmp"
+  digest_temp="`$KEYS_SNAPSHOT_DIGEST.tmp"
+  rm -f "`$snapshot_temp" "`$digest_temp"
+  tar -C "`$KEYS_PATH" -cpf "`$snapshot_temp" .
+  chmod 0600 "`$snapshot_temp"
+  digest="`$(sha256_file "`$snapshot_temp")"
+  printf '%s\n' "`$digest" >"`$digest_temp"
+  chmod 0600 "`$digest_temp"
+  mv -f "`$snapshot_temp" "`$KEYS_SNAPSHOT"
+  mv -f "`$digest_temp" "`$KEYS_SNAPSHOT_DIGEST"
+  fsync_parent "`$KEYS_SNAPSHOT"
+}
+
+restore_keys_snapshot() {
+  local expected_digest actual_digest
+  test -f "`$KEYS_SNAPSHOT"
+  test ! -L "`$KEYS_SNAPSHOT"
+  test -f "`$KEYS_SNAPSHOT_DIGEST"
+  test ! -L "`$KEYS_SNAPSHOT_DIGEST"
+  expected_digest="`$(cat "`$KEYS_SNAPSHOT_DIGEST")"
+  [[ "`$expected_digest" =~ ^[0-9a-f]{64}`$ ]]
+  actual_digest="`$(sha256_file "`$KEYS_SNAPSHOT")"
+  test "`$actual_digest" = "`$expected_digest"
+  test -d "`$KEYS_PATH"
+  test ! -L "`$KEYS_PATH"
+  rm -rf "`$KEYS_RESTORE_DIR" "`$KEYS_FAILED_DIR"
+  install -d -m 0700 "`$KEYS_RESTORE_DIR"
+  tar -xpf "`$KEYS_SNAPSHOT" -C "`$KEYS_RESTORE_DIR"
+  mv -T "`$KEYS_PATH" "`$KEYS_FAILED_DIR"
+  if ! mv -T "`$KEYS_RESTORE_DIR" "`$KEYS_PATH"; then
+    mv -T "`$KEYS_FAILED_DIR" "`$KEYS_PATH" || true
+    return 1
+  fi
+  fsync_parent "`$KEYS_PATH"
 }
 
 secure_angie_config_sha256() {
@@ -777,16 +821,16 @@ save_state() {
     "`$previous_image_id" "`$previous_image_name" "`$previous_container_id" \
     "`$previous_ui_kind" "`$previous_ui_target" "`$legacy_ui_release" \
     "`$candidate_container_id" "`$previous_current_target" \
-    "`$candidate_started" "`$ui_switched" <<'PY'
+    "`$candidate_started" "`$ui_switched" "`$keys_mutation_possible" <<'PY'
 import json, os, sys
 keys = (
     "deployment_id", "previous_image_id", "previous_image_name",
     "previous_container_id", "previous_ui_kind", "previous_ui_target",
     "legacy_ui_release", "candidate_container_id", "previous_current_target",
-    "candidate_started", "ui_switched",
+    "candidate_started", "ui_switched", "keys_mutation_possible",
 )
 payload = dict(zip(keys, sys.argv[2:], strict=True))
-payload["schema"] = 3
+payload["schema"] = 4
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, sort_keys=True)
     handle.write("\n")
@@ -814,9 +858,9 @@ keys = {
     "schema", "deployment_id", "previous_image_id", "previous_image_name",
     "previous_container_id", "previous_ui_kind", "previous_ui_target",
     "legacy_ui_release", "candidate_container_id", "previous_current_target",
-    "candidate_started", "ui_switched",
+    "candidate_started", "ui_switched", "keys_mutation_possible",
 }
-if set(payload) != keys or payload.get("schema") != 3:
+if set(payload) != keys or payload.get("schema") != 4:
     raise SystemExit("invalid deployment state schema")
 if payload.get("deployment_id") != sys.argv[2]:
     raise SystemExit("deployment state owner mismatch")
@@ -825,7 +869,10 @@ for key in keys - {"schema"}:
         raise SystemExit(f"invalid deployment state field: {key}")
 if payload["previous_ui_kind"] not in {"missing", "symlink", "directory"}:
     raise SystemExit("invalid previous_ui_kind")
-if any(payload[key] not in {"0", "1"} for key in ("candidate_started", "ui_switched")):
+if any(
+    payload[key] not in {"0", "1"}
+    for key in ("candidate_started", "ui_switched", "keys_mutation_possible")
+):
     raise SystemExit("invalid deployment state flags")
 for key in sorted(keys - {"schema", "deployment_id"}):
     print(f"{key}={shlex.quote(payload[key])}")
@@ -842,7 +889,21 @@ load_state() {
 rollback() {
   load_state || { write_record "rollback-failed" || true; return 1; }
   local image_failed=0 ui_failed=0 pointer_failed=0 restored_image
-  if [ "`$candidate_started" = "1" ]; then
+  if [ "`$keys_mutation_possible" = "1" ]; then
+    if podman container exists "`$CONTAINER_NAME" && ! podman rm -f "`$CONTAINER_NAME" >/dev/null; then
+      image_failed=1
+    fi
+    if [ "`$image_failed" = "0" ] && ! restore_keys_snapshot; then
+      image_failed=1
+    fi
+    if [ "`$image_failed" = "0" ] && [ -n "`$previous_image_id" ]; then
+      if ! podman image exists "`$previous_image_id"; then
+        image_failed=1
+      elif ! run_server "`$previous_image_id"; then
+        image_failed=1
+      fi
+    fi
+  elif [ "`$candidate_started" = "1" ]; then
     if podman container exists "`$CONTAINER_NAME" && ! podman rm -f "`$CONTAINER_NAME" >/dev/null; then image_failed=1; fi
     if [ -n "`$previous_image_id" ]; then
       if ! podman image exists "`$previous_image_id"; then
@@ -918,14 +979,15 @@ rollback() {
     write_record "rollback-failed" || true
     return 1
   fi
+  rm -rf "`$KEYS_FAILED_DIR"
   write_record "rolled-back"
 }
 
 cleanup() {
   rm -f "`$REMOTE_ARCHIVE" "`$REMOTE_UI_ARCHIVE" "`$REMOTE_SCRIPT" "`$STATE_FILE" \
     "`$WATCHDOG_PID_FILE" "`$LEASE_PENDING" "`$LEASE_COMMITTED" "`$LEASE_ROLLBACK" \
-    "`$CURRENT_LINK_TEMP"
-  rm -rf "`$UI_RELEASE.tmp"
+    "`$CURRENT_LINK_TEMP" "`$KEYS_SNAPSHOT" "`$KEYS_SNAPSHOT_DIGEST"
+  rm -rf "`$UI_RELEASE.tmp" "`$KEYS_RESTORE_DIR" "`$KEYS_FAILED_DIR"
   if [ -f "`$ACTIVE_DEPLOYMENT/owner" ] && [ "`$(cat "`$ACTIVE_DEPLOYMENT/owner")" = "`$DEPLOYMENT_ID" ]; then
     rm -rf "`$ACTIVE_DEPLOYMENT"
   fi
@@ -988,6 +1050,7 @@ rollback_after_deploy_error() {
 deploy() {
   test -f "`$CONFIG_PATH"
   test -d "`$KEYS_PATH"
+  test ! -L "`$KEYS_PATH"
   test -d "`$AVATARS_PATH"
   test "`$(df -Pk "`$DEPLOYMENT_ROOT" | awk 'NR==2 {print `$4}')" -gt 1048576
   command -v flock >/dev/null
@@ -1047,10 +1110,12 @@ PY
   candidate_container_id=""
   candidate_started="0"
   ui_switched="0"
+  keys_mutation_possible="0"
   previous_current_target=""
   if [ -L "`$DEPLOYMENTS/current.json" ]; then
     previous_current_target="`$(readlink "`$DEPLOYMENTS/current.json")"
   fi
+  create_keys_snapshot
   save_state
   write_record "preflight"
   trap 'rollback_transaction' ERR
@@ -1092,6 +1157,8 @@ PY
   if [ -n "`$previous_image_id" ]; then podman image exists "`$previous_image_id"; fi
 
   if [ "`$SKIP_MIGRATE" != "1" ]; then
+    keys_mutation_possible="1"
+    save_state
     podman run --rm --name "`$CONTAINER_NAME-migrate-`$(date +%s)" \
       --network "`$NETWORK_NAME" \
       -v "`$CONFIG_PATH:/app/.env.yaml:ro" \
