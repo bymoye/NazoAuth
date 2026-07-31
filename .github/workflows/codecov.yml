@@ -80,6 +80,14 @@ jobs:
           CARGO_TARGET_DIR: target/codecov-coverage
         run: bash scripts/generate_codecov_lcov.sh
 
+      - name: Preserve normalized coverage evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-${{ github.sha }}
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
