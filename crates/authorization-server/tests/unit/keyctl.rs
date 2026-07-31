@@ -26,6 +26,24 @@ fn rejects_unsupported_algorithms() {
 }
 
 #[tokio::test]
+async fn public_operator_key_commands_reject_unsupported_algorithms_before_loading_secrets() {
+    let generate = operator_generate_local("none", &["credential".to_owned()])
+        .await
+        .unwrap_err();
+    assert_eq!(generate.to_string(), "unsupported signing alg none");
+
+    let register = operator_register_external(
+        "external",
+        "none",
+        "kms://key/1",
+        PathBuf::from("must-not-be-read.json"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(register.to_string(), "unsupported signing alg none");
+}
+
+#[tokio::test]
 async fn typed_operator_key_lifecycle_returns_content_revisions() {
     let directory = std::env::temp_dir().join(format!("nazoauth-keyctl-{}", uuid::Uuid::now_v7()));
     let config = ConfigSource::from_owned_pairs_for_test([(

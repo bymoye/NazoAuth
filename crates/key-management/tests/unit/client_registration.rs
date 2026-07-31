@@ -57,6 +57,31 @@ fn client_jwks_accept_supported_ecdh_encryption_keys() {
 }
 
 #[test]
+fn algorithm_specific_signing_key_selection_requires_matching_public_material() {
+    let signing = p256_signing_jwk("signing", "ES256");
+    let jwks = json!({"keys": [signing]});
+
+    assert!(client_jwks_contains_signing_key_for_algorithm(
+        &jwks, "ES256"
+    ));
+    assert!(!client_jwks_contains_signing_key_for_algorithm(
+        &jwks, "RS256"
+    ));
+    assert!(!client_jwks_contains_signing_key_for_algorithm(
+        &json!({"keys": [p256_encryption_jwk("enc", "ECDH-ES")]}),
+        "ECDH-ES"
+    ));
+    assert!(!client_jwks_contains_signing_key_for_algorithm(
+        &json!({"keys": [{"use": "sig", "alg": "none"}]}),
+        "none"
+    ));
+    assert!(!client_jwks_contains_signing_key_for_algorithm(
+        &json!({"not_keys": []}),
+        "ES256"
+    ));
+}
+
+#[test]
 fn client_jwks_reject_symmetric_jwe_keys() {
     let error = validate_client_jwks(&json!({
         "keys": [{
@@ -130,6 +155,20 @@ fn p256_encryption_jwk(kid: &str, alg: &str) -> Value {
     json!({
         "kid": kid,
         "use": "enc",
+        "alg": alg,
+        "kty": "EC",
+        "crv": "P-256",
+        "x": URL_SAFE_NO_PAD.encode(point.x().expect("P-256 x coordinate")),
+        "y": URL_SAFE_NO_PAD.encode(point.y().expect("P-256 y coordinate"))
+    })
+}
+
+fn p256_signing_jwk(kid: &str, alg: &str) -> Value {
+    let key = SecretKey::generate();
+    let point = key.public_key().to_sec1_point(false);
+    json!({
+        "kid": kid,
+        "use": "sig",
         "alg": alg,
         "kty": "EC",
         "crv": "P-256",

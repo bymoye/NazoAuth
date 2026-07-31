@@ -49,6 +49,15 @@ async fn authorization_response_redirect_with_protection(
     .await
 }
 
+async fn authorization_response_redirect(
+    state: &TestInfrastructure,
+    input: AuthorizationResponseRedirect<'_>,
+) -> HttpResponse {
+    let dependencies =
+        crate::http::authorization::test_support::TestAuthorizationDependencies::new(state);
+    authorization_response_redirect_with_context(&dependencies.context(), input).await
+}
+
 async fn consume_reauth_nonce(
     state: &TestInfrastructure,
     q: &mut HashMap<String, String>,

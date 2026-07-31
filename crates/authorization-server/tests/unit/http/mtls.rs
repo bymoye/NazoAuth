@@ -116,6 +116,15 @@ fn rfc9440_client_cert_uses_single_der_byte_sequence() {
         HeaderValue::from_static(":AA==:"),
     );
     assert!(request_mtls_client_certificate_from_rfc9440(&duplicate).is_none());
+
+    for malformed in ["::", ":AA AA:", "AA==", ":AA=="] {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::HeaderName::from_static("client-cert"),
+            HeaderValue::from_str(malformed).unwrap(),
+        );
+        assert!(request_mtls_client_certificate_from_rfc9440(&headers).is_none());
+    }
 }
 
 #[test]
@@ -132,7 +141,30 @@ fn mtls_certificate_source_requires_explicit_supported_mode() {
         MtlsCertificateSourceMode::from_config(Some("direct-tls"), false).unwrap(),
         MtlsCertificateSourceMode::DirectTls
     );
+    assert_eq!(
+        MtlsCertificateSourceMode::from_config(None, true).unwrap(),
+        MtlsCertificateSourceMode::LegacyVerifiedHeaders
+    );
+    assert_eq!(
+        MtlsCertificateSourceMode::from_config(Some("disabled"), true).unwrap(),
+        MtlsCertificateSourceMode::Disabled
+    );
+    assert_eq!(
+        MtlsCertificateSourceMode::from_config(Some("legacy-verified-headers"), true).unwrap(),
+        MtlsCertificateSourceMode::LegacyVerifiedHeaders
+    );
     assert!(MtlsCertificateSourceMode::from_config(Some("direct"), true).is_err());
+}
+
+#[test]
+fn disabled_certificate_source_cannot_fall_back_to_forwarded_headers() {
+    let disabled = TestRequest::default()
+        .app_data(Data::new(MtlsCertificateSource::new(
+            MtlsCertificateSourceMode::Disabled,
+        )))
+        .insert_header(("x-ssl-client-verify", "SUCCESS"))
+        .to_http_request();
+    assert!(request_mtls_client_certificate_from_configured_source(&disabled, &[]).is_none());
 }
 
 fn test_certificate(

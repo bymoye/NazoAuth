@@ -89,3 +89,29 @@ fn legacy_defaults_remain_available_for_upgrade_materialization() {
     assert!(!legacy.contains(&ModuleId::RequestObjects));
     assert!(!legacy.contains(&ModuleId::SessionManagement));
 }
+
+#[tokio::test]
+async fn initialization_reconciles_the_persisted_catalog_before_exposing_a_snapshot() {
+    let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .expect("runtime module schema should be current");
+    let pool = nazo_postgres::create_pool(database_url, 2).expect("database pool should build");
+    let settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+
+    let runtime = RuntimeModules::initialize(pool, &settings)
+        .await
+        .expect("persisted module policy should initialize");
+
+    assert!(!runtime.instance_id.trim().is_empty());
+    let snapshot = runtime.registry.snapshot();
+    for module_id in inherited_enabled(&settings) {
+        assert!(
+            snapshot.accepting.contains(&module_id) || snapshot.draining.contains(&module_id),
+            "{module_id:?} must be represented in the initialized snapshot"
+        );
+    }
+}

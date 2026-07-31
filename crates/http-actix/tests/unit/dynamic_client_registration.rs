@@ -267,6 +267,40 @@ fn configure(config: &mut web::ServiceConfig) {
 }
 
 #[actix_web::test]
+async fn bearer_credentials_are_closed_to_exact_non_empty_scheme_and_expected_token() {
+    assert!(!initial_access_token_authorized(
+        &FakeSecurity,
+        Some("Bearer initial-token"),
+        None,
+    ));
+    assert!(!initial_access_token_authorized(
+        &FakeSecurity,
+        None,
+        Some("initial-token"),
+    ));
+    assert!(!initial_access_token_authorized(
+        &FakeSecurity,
+        Some("Bearer   "),
+        Some("initial-token"),
+    ));
+    assert!(!initial_access_token_authorized(
+        &FakeSecurity,
+        Some("bearer initial-token"),
+        Some("initial-token"),
+    ));
+    assert!(initial_access_token_authorized(
+        &FakeSecurity,
+        Some("  Bearer initial-token  "),
+        Some("initial-token"),
+    ));
+
+    let request = test::TestRequest::default()
+        .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+        .to_http_request();
+    assert_eq!(bearer_token(&request), Some("registration-token"));
+}
+
+#[actix_web::test]
 async fn untrusted_peer_cannot_spoof_forwarded_source_ip() {
     let config = ClientIpConfig::new(
         &[IpCidr::parse("192.0.2.0/24").expect("network")],

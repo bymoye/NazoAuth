@@ -303,6 +303,16 @@ cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
 cargo test --locked --workspace --all-features --lib --bins --tests
 
+# Let cargo-llvm-cov resolve the complete workspace object graph as an
+# independent report. The explicit per-object exports below remain the
+# auditable fallback and also preserve the separate long-running server and
+# child-process profiles. Merging the reports by maximum counter prevents
+# double counting while ensuring integration-test copies of library code are
+# not lost to linker/object discovery differences.
+cargo llvm-cov report --locked --lcov \
+  --ignore-filename-regex "$IGNORE_REGEX" \
+  --output-path lcov-workspace-tests.info
+
 RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
 LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$RUST_HOST/bin"
 mapfile -t SERVER_PROFRAWS < <(
@@ -383,4 +393,4 @@ done
 "$PYTHON_BIN" scripts/merge_lcov.py \
   --source-root "$PWD" \
   --output lcov.info \
-  lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"
+  lcov-workspace-tests.info lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"

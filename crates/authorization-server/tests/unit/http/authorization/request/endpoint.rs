@@ -20,6 +20,7 @@ use std::time::Duration as StdDuration;
 use crate::adapters::security::jwt_decoding_key_from_jwk;
 use crate::config::ConfigSource;
 use crate::domain::{ConsentPayload, PushedAuthorizationRequest};
+use crate::http::authorization::unverified_request_object_client_id;
 use crate::settings::AuthorizationServerProfile;
 use crate::test_support::{ClientSigningFixture, client_signing_fixture};
 use nazo_postgres::{create_pool, get_conn};
@@ -84,6 +85,21 @@ fn unsigned_request_object(claims: Value) -> String {
     let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
     let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
     format!("{header}.{payload}.")
+}
+
+#[test]
+fn unverified_request_object_routing_extracts_only_parseable_signed_payloads() {
+    let state = endpoint_state(false);
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"routing-only"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(json!({"client_id": "routed-client"}).to_string());
+    let object = format!("{header}.{payload}.not-a-real-signature");
+
+    assert_eq!(
+        unverified_request_object_client_id(&state.keyset, &object).as_deref(),
+        Some("routed-client")
+    );
+    assert!(unverified_request_object_client_id(&state.keyset, "broken").is_none());
+    assert!(unverified_request_object_client_id(&state.keyset, "a.b.c.d.e").is_none());
 }
 
 fn signed_request_object(client_id: &str, fixture: &ClientSigningFixture) -> String {
@@ -792,6 +808,35 @@ async fn authorization_request_rejects_unsigned_request_object_without_client_id
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
     assert_eq!(body["error_description"], "Request failed.");
+}
+
+#[actix_web::test]
+async fn encrypted_request_object_requires_the_registered_closed_algorithm_pair() {
+    let Some(fixture) = LiveAuthorizationFixture::new().await else {
+        return;
+    };
+    let client_id = format!("authorize-encrypted-policy-{}", Uuid::now_v7());
+    fixture
+        .insert_client(
+            &client_id,
+            vec!["https://client.example/callback"],
+            vec!["authorization_code"],
+            true,
+        )
+        .await;
+    let req = actix_web::test::TestRequest::get()
+        .uri("/authorize")
+        .to_http_request();
+    let mut q = query(&[
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", "https://client.example/callback"),
+        ("response_type", "code"),
+        ("request", "a.b.c.d.e"),
+    ]);
+
+    let response = authorize_request(fixture.state.clone(), req, &mut q).await;
+
+    assert_authorization_error_redirect(response, "invalid_request", None);
 }
 
 #[actix_web::test]
@@ -2032,6 +2077,78 @@ async fn authorization_response_redirect_emits_signed_jarm_response() {
     assert_eq!(claims["aud"], "client-jarm");
     assert_eq!(claims["code"], "code-123");
     assert_eq!(claims["state"], "state-123");
+}
+
+#[actix_web::test]
+async fn authorization_response_policy_without_client_id_uses_the_legacy_plain_contract() {
+    let state = endpoint_state(false);
+
+    let response = authorization_response_redirect(
+        &state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback",
+            client_id: "",
+            response_mode: None,
+            code: None,
+            error: Some("login_required"),
+            state: Some("state-legacy"),
+            oidc_sid: None,
+            client_policy: None,
+        },
+    )
+    .await;
+
+    assert_authorization_error_redirect(response, "login_required", Some("state-legacy"));
+}
+
+#[actix_web::test]
+async fn authorization_response_policy_lookup_failure_never_emits_redirect_parameters() {
+    let state = endpoint_state(false);
+
+    let response = authorization_response_redirect(
+        &state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback",
+            client_id: "unavailable-client",
+            response_mode: None,
+            code: Some("must-not-leak"),
+            error: None,
+            state: Some("must-not-leak"),
+            oidc_sid: None,
+            client_policy: None,
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.headers().get(header::LOCATION).is_none());
+}
+
+#[actix_web::test]
+async fn signed_response_with_precomputed_policy_still_requires_an_authoritative_client() {
+    let state = endpoint_state(false);
+
+    let response = authorization_response_redirect(
+        &state,
+        AuthorizationResponseRedirect {
+            redirect_uri: "https://client.example/callback",
+            client_id: "unavailable-jarm-client",
+            response_mode: Some("jwt"),
+            code: Some("must-not-leak"),
+            error: None,
+            state: Some("must-not-leak"),
+            oidc_sid: None,
+            client_policy: Some(AuthorizationResponseClientPolicy {
+                signed_response_required: true,
+                session_management_allowed: false,
+                ttl_seconds: 60,
+            }),
+        },
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.headers().get(header::LOCATION).is_none());
 }
 
 #[actix_web::test]

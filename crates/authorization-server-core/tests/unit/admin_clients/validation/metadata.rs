@@ -41,6 +41,34 @@ fn metadata<'a>(
 }
 
 #[test]
+fn request_object_crypto_metadata_is_a_closed_supported_pair() {
+    assert!(super::validate_request_object_crypto_metadata(None, None, None).is_ok());
+    assert!(
+        super::validate_request_object_crypto_metadata(
+            Some("RS256"),
+            Some("RSA-OAEP-256"),
+            Some("A256GCM"),
+        )
+        .is_ok()
+    );
+    for (signing, algorithm, encryption, expected) in [
+        (Some("none"), None, None, "request_object_signing_alg"),
+        (None, None, Some("A256GCM"), "不能在未设置"),
+        (None, Some("RSA-OAEP-256"), None, "必须同时配置"),
+        (
+            None,
+            Some("RSA-OAEP"),
+            Some("A128GCM"),
+            "必须使用 RSA-OAEP-256 和 A256GCM",
+        ),
+    ] {
+        let error = super::validate_request_object_crypto_metadata(signing, algorithm, encryption)
+            .unwrap_err();
+        assert!(error.to_string().contains(expected));
+    }
+}
+
+#[test]
 fn client_metadata_rejects_removed_or_unsafe_grants() {
     let invalid_type = validate_metadata_fixture(metadata(
         "native",

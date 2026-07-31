@@ -119,6 +119,16 @@ fn response_limit_is_enforced_before_appending_an_oversized_chunk() {
 }
 
 #[test]
+fn response_chunks_are_appended_in_order_below_the_closed_limit() {
+    let mut body = b"first".to_vec();
+
+    append_response_chunk(&mut body, b"-second").unwrap();
+    append_response_chunk(&mut body, b"-third").unwrap();
+
+    assert_eq!(body, b"first-second-third");
+}
+
+#[test]
 fn block_localhost_domain() {
     assert!(is_blocked_host("localhost"));
 }
@@ -198,6 +208,18 @@ async fn fetch_reports_dns_resolution_failure_for_unresolvable_public_host() {
         .expect_err("unresolvable public host must fail at DNS resolution");
 
     assert!(matches!(err, SectorIdentifierError::DnsResolutionFailed));
+}
+
+#[actix_web::test]
+async fn fetch_pins_a_resolved_public_destination_and_fails_closed_on_transport_error() {
+    let err = fetch_sector_identifier_uris("https://192.0.0.9:1/sector.json")
+        .await
+        .expect_err("a closed public endpoint must not produce a document");
+
+    assert!(matches!(
+        err,
+        SectorIdentifierError::HttpError | SectorIdentifierError::Timeout
+    ));
 }
 
 #[test]

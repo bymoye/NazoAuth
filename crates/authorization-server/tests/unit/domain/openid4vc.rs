@@ -128,6 +128,60 @@ fn attestation_proof_accepts_missing_expiration() {
         .expect("exp is optional for an attestation proof");
 }
 
+#[tokio::test]
+async fn proof_port_accepts_one_attestation_set_and_returns_each_attested_public_key() {
+    let now = Utc::now();
+    let first_key = es256_test_key(27).0;
+    let second_key = es256_test_key(29).0;
+    let (validator, encoded, metadata) = key_attestation_fixture(json!({
+        "iat": now.timestamp(),
+        "nonce": "expected-nonce",
+        "exp": now.timestamp() + 300,
+        "attested_keys": [first_key.clone(), second_key.clone()],
+    }));
+    let proofs = Proofs(std::collections::BTreeMap::from([(
+        "attestation".to_owned(),
+        vec![Value::String(encoded)],
+    )]));
+
+    let validated = validator
+        .validate(
+            &proofs,
+            "https://issuer.example",
+            "expected-nonce",
+            &metadata,
+        )
+        .await
+        .expect("the attestation proof should validate");
+
+    assert_eq!(validated.len(), 2);
+    assert_eq!(validated[0].proof_type, "attestation");
+    assert_eq!(validated[0].holder_binding, json!({"jwk": first_key}));
+    assert_eq!(validated[1].holder_binding, json!({"jwk": second_key}));
+}
+
+#[test]
+fn key_attestation_rejects_expired_optional_expiration() {
+    let now = Utc::now();
+    let (validator, encoded, metadata) = key_attestation_fixture(json!({
+        "iat": now.timestamp(),
+        "nonce": "expected-nonce",
+        "exp": now.timestamp(),
+        "attested_keys": [es256_test_key(31).0],
+    }));
+
+    assert!(matches!(
+        validator.validate_key_attestation(
+            &encoded,
+            "expected-nonce",
+            &metadata,
+            now,
+            KeyAttestationContext::AttestationProof,
+        ),
+        Err(ProofError::InvalidKeyAttestation)
+    ));
+}
+
 #[test]
 fn jwt_proof_key_attestation_requires_expiration() {
     let now = Utc::now();

@@ -81,6 +81,44 @@ async fn lifecycle_prepublishes_then_activates_with_grace() {
 }
 
 #[tokio::test]
+async fn lifecycle_upgrades_legacy_protocol_response_keys_for_signed_introspection() {
+    let directory = std::env::temp_dir().join(format!(
+        "nazo-key-introspection-purpose-upgrade-{}",
+        Uuid::now_v7()
+    ));
+    let settings = settings(directory.clone());
+    create_new_keyset(&settings).await.unwrap();
+    let path = directory.join("keyset.json");
+    let mut payload: Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    payload["keys"][0]["created_at"] =
+        json!(timestamp(Utc::now() - chrono::Duration::seconds(2_000)));
+    write_json_atomic(&path, &payload).await.unwrap();
+    maintain_keyset_lifecycle(&settings, &path).await.unwrap();
+    let mut payload: Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    for key in payload["keys"].as_array_mut().unwrap() {
+        if let Some(purposes) = key.get_mut("purposes").and_then(Value::as_array_mut) {
+            purposes.retain(|purpose| purpose != "introspection");
+        }
+    }
+    write_json_atomic(&path, &payload).await.unwrap();
+
+    maintain_keyset_lifecycle(&settings, &path).await.unwrap();
+
+    let upgraded: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    for key in upgraded["keys"].as_array().unwrap() {
+        if let Some(purposes) = key["purposes"].as_array()
+            && purposes.iter().any(|purpose| purpose == "id_token")
+            && purposes.iter().any(|purpose| purpose == "jarm")
+        {
+            assert!(purposes.iter().any(|purpose| purpose == "introspection"));
+        }
+    }
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
 async fn key_manager_lists_persisted_key_states_without_server_schema_logic() {
     let directory = std::env::temp_dir().join(format!("nazo-key-list-{}", Uuid::now_v7()));
     let settings = settings(directory.clone());
@@ -139,11 +177,35 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
             kid: "external".to_owned(),
             algorithm: jsonwebtoken::Algorithm::RS256,
             key_ref: "kms://key/1".to_owned(),
-            public_jwk_file,
+            public_jwk_file: public_jwk_file.clone(),
         },
     )
     .await
     .unwrap();
+
+    crate::KeyManager::register_external(
+        &settings,
+        crate::ExternalKeyRegistration {
+            kid: "external".to_owned(),
+            algorithm: jsonwebtoken::Algorithm::RS256,
+            key_ref: "kms://key/1".to_owned(),
+            public_jwk_file: public_jwk_file.clone(),
+        },
+    )
+    .await
+    .expect("an exact retry must be idempotent");
+    let conflict = crate::KeyManager::register_external(
+        &settings,
+        crate::ExternalKeyRegistration {
+            kid: "external".to_owned(),
+            algorithm: jsonwebtoken::Algorithm::RS256,
+            key_ref: "kms://different-key".to_owned(),
+            public_jwk_file,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(conflict.to_string().contains("different material"));
 
     let payload: Value = serde_json::from_slice(
         &tokio::fs::read(directory.join("keyset.json"))
