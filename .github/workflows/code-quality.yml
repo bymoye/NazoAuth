@@ -127,6 +127,11 @@ jobs:
       - name: Clippy all targets
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      - name: Materialize the isolated CI schema through the persistence owner
+        run: >-
+          cargo test --locked -p nazo-postgres --test migrations
+          pending_migrations_create_all_runtime_module_state_tables
+
       - name: Test workspace with PostgreSQL and Valkey
         run: cargo test --workspace --all-features --locked
 
