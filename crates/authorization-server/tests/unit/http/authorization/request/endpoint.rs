@@ -1082,7 +1082,7 @@ async fn fapi_authorization_rejects_external_request_uri_and_direct_authorizatio
         ("state", "direct"),
     ]);
     let response = authorize_request(state, req, &mut direct).await;
-    assert_authorization_error_redirect(response, "invalid_request", Some("direct"));
+    assert_authorization_invalid_request(response).await;
 }
 
 #[actix_web::test]
