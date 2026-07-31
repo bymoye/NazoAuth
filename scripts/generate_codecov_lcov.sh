@@ -360,6 +360,15 @@ fi
   --ignore-filename-regex "$IGNORE_REGEX" \
   "$BIN_DIR/nazoauth" > lcov-e2e.info
 
+# Some integration tests deliberately execute the production binary as a child
+# process. Those profiles belong to the test run, not the long-lived E2E server
+# run, so export the same binary against tests.profdata as a distinct report.
+# The deterministic merger keeps the maximum counter for duplicate records.
+"$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
+  --instr-profile "$COVERAGE_DIR/tests.profdata" \
+  --ignore-filename-regex "$IGNORE_REGEX" \
+  "$BIN_DIR/nazoauth" > lcov-process-tests.info
+
 test_reports=()
 test_report_index=0
 for object in "${test_objects[@]}"; do
@@ -374,4 +383,4 @@ done
 "$PYTHON_BIN" scripts/merge_lcov.py \
   --source-root "$PWD" \
   --output lcov.info \
-  lcov-e2e.info "${test_reports[@]}"
+  lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"

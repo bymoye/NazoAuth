@@ -100,6 +100,39 @@ fn invalid_boolean_config_is_error() {
 }
 
 #[test]
+fn scalar_accessors_trim_values_and_apply_defaults_without_inventing_required_values() {
+    let mut source = ConfigSource::default();
+    source.file_values.insert(
+        "PUBLIC_BASE_URL".to_owned(),
+        "  https://auth.example  ".to_owned(),
+    );
+    source
+        .file_values
+        .insert("ISSUER".to_owned(), "   ".to_owned());
+    source
+        .file_values
+        .insert("SESSION_TTL_SECONDS".to_owned(), "42".to_owned());
+    source
+        .file_values
+        .insert("COOKIE_SECURE".to_owned(), "YES".to_owned());
+
+    assert_eq!(
+        source.required_string("PUBLIC_BASE_URL").unwrap(),
+        "https://auth.example"
+    );
+    assert!(source.optional_string("ISSUER").is_none());
+    assert_eq!(source.string("MISSING", "fallback"), "fallback");
+    assert_eq!(source.parse::<u64>("SESSION_TTL_SECONDS", 9).unwrap(), 42);
+    assert_eq!(source.parse::<u64>("MISSING", 9).unwrap(), 9);
+    assert!(source.bool("COOKIE_SECURE", false).unwrap());
+    assert!(!source.bool("MISSING", false).unwrap());
+    assert_eq!(
+        source.required_string("ISSUER").unwrap_err().to_string(),
+        "ISSUER is required"
+    );
+}
+
+#[test]
 fn dotenv_file_is_rejected() {
     let path = temp_config_dir("dotenv");
     std::fs::write(path.join(".env"), "BIND=127.0.0.1:8000\n").unwrap();
@@ -161,6 +194,27 @@ fn unknown_yaml_key_is_rejected_with_the_key_name() {
 
     let error = result.expect_err("unknown YAML keys must fail startup");
     assert!(error.to_string().contains("COOKIE_SECUR"));
+}
+
+#[test]
+fn yaml_document_must_be_a_mapping_with_non_empty_string_keys() {
+    let sequence = temp_config_dir("yaml_top_level_sequence");
+    std::fs::write(sequence.join(CONFIG_FILE), "- ISSUER\n").unwrap();
+    let error = ConfigSource::load_from_dir(&sequence).unwrap_err();
+    assert!(error.to_string().contains("top-level key/value mapping"));
+    let _ = std::fs::remove_dir_all(&sequence);
+
+    let numeric_key = temp_config_dir("yaml_numeric_key");
+    std::fs::write(numeric_key.join(CONFIG_FILE), "1: value\n").unwrap();
+    let error = ConfigSource::load_from_dir(&numeric_key).unwrap_err();
+    assert!(error.to_string().contains("non-string or empty key"));
+    let _ = std::fs::remove_dir_all(&numeric_key);
+
+    let empty_key = temp_config_dir("yaml_empty_key");
+    std::fs::write(empty_key.join(CONFIG_FILE), "'': value\n").unwrap();
+    let error = ConfigSource::load_from_dir(&empty_key).unwrap_err();
+    assert!(error.to_string().contains("non-string or empty key"));
+    let _ = std::fs::remove_dir_all(&empty_key);
 }
 
 #[test]
@@ -313,6 +367,99 @@ fn environment_secret_file_supplies_an_absent_scalar() {
     .unwrap();
 
     assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn yaml_secret_file_path_is_resolved_and_trimmed() {
+    let path = temp_config_dir("yaml_secret_file");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nDATABASE_URL_FILE: database-url\n",
+    )
+    .unwrap();
+    std::fs::write(
+        path.join("database-url"),
+        "  postgresql://file.example/oauth  \n",
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+
+    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn secret_file_inputs_fail_closed_for_empty_path_missing_file_and_empty_file() {
+    let empty_path = temp_config_dir("empty_secret_path");
+    std::fs::write(empty_path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    let error = ConfigSource::load_from_dir_with_env(
+        &empty_path,
+        [("DATABASE_URL_FILE".to_owned(), "   ".to_owned())],
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "DATABASE_URL_FILE must not be empty");
+    let _ = std::fs::remove_dir_all(&empty_path);
+
+    let missing = temp_config_dir("missing_secret_file");
+    std::fs::write(missing.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    let error = ConfigSource::load_from_dir_with_env(
+        &missing,
+        [("DATABASE_URL_FILE".to_owned(), "absent".to_owned())],
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("failed to read DATABASE_URL_FILE")
+    );
+    let _ = std::fs::remove_dir_all(&missing);
+
+    let empty = temp_config_dir("empty_secret_file");
+    std::fs::write(empty.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    std::fs::write(empty.join("database-url"), " \n").unwrap();
+    let error = ConfigSource::load_from_dir_with_env(
+        &empty,
+        [("DATABASE_URL_FILE".to_owned(), "database-url".to_owned())],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("points to an empty secret file"));
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+#[test]
+fn runtime_secret_helper_returns_the_stable_persisted_path_and_value() {
+    let path = temp_config_dir("runtime_secret_helper");
+    let (created_path, first) =
+        read_or_create_runtime_secret(&path, "nested/controller-key").unwrap();
+    let (same_path, second) =
+        read_or_create_runtime_secret(&path, "nested/controller-key").unwrap();
+
+    assert_eq!(created_path, path.join("nested/controller-key"));
+    assert_eq!(same_path, created_path);
+    assert_eq!(first, second);
+    assert!(first.len() >= 32);
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn generated_secret_creation_reports_an_invalid_parent_without_partial_state() {
+    let path = temp_config_dir("invalid_secret_parent");
+    let blocking_file = path.join("not-a-directory");
+    std::fs::write(&blocking_file, "blocking file").unwrap();
+
+    let error = read_or_create_generated_secret(&blocking_file.join("secret")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to create generated secret directory")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&blocking_file).unwrap(),
+        "blocking file"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 

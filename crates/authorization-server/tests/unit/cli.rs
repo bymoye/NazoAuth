@@ -23,6 +23,13 @@ fn help_is_available_without_starting_a_runtime() {
     assert_eq!(parse(&["nazoauth", "--help"]).unwrap(), Command::Help);
 }
 
+#[tokio::test]
+async fn public_help_command_completes_without_loading_runtime_configuration() {
+    run(["nazoauth".to_owned(), "help".to_owned()])
+        .await
+        .unwrap();
+}
+
 #[test]
 fn public_commands_reject_accidental_arguments() {
     assert_eq!(

@@ -112,6 +112,58 @@ async fn claim_rejects_closed_invalid_and_malformed_inputs_before_persistence() 
 }
 
 #[actix_web::test]
+async fn valid_claim_fails_closed_and_remains_retryable_when_persistence_is_unavailable() {
+    let token_path = std::env::temp_dir().join(format!(
+        "nazoauth-bootstrap-persistence-failure-{}",
+        rand::random::<u64>()
+    ));
+    fs::write(&token_path, "token").unwrap();
+    let endpoint = Data::new(endpoint(Some(hash_token("token")), token_path.clone()));
+
+    let response = claim_initial_admin(
+        endpoint.clone(),
+        Form(InitialAdminClaimRequest {
+            token: "token".to_owned(),
+            email: "Admin@Example.COM".to_owned(),
+            password: "correct horse battery staple".to_owned(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(endpoint.expected_token_hash(), Some(hash_token("token")));
+    assert!(token_path.exists());
+    fs::remove_file(token_path).unwrap();
+}
+
+#[actix_web::test]
+async fn initialization_persists_a_retryable_token_before_database_ownership_is_requested() {
+    let root = std::env::temp_dir().join(format!(
+        "nazoauth-bootstrap-initialize-failure-{}",
+        rand::random::<u64>()
+    ));
+    fs::create_dir(&root).unwrap();
+    let pool = nazo_postgres::create_pool(
+        "postgresql://unused:unused@127.0.0.1:1/unused?connect_timeout=1",
+        1,
+    )
+    .unwrap();
+
+    let error = match InitialAdminBootstrapEndpoint::initialize(pool, &root, "https://auth.example")
+        .await
+    {
+        Ok(_) => panic!("unavailable persistence must not initialize bootstrap ownership"),
+        Err(error) => error,
+    };
+
+    let token_path = root.join("bootstrap/initial-admin-token");
+    let token = fs::read_to_string(&token_path).unwrap();
+    assert!(token.trim().len() >= 32);
+    assert!(!error.to_string().contains(token.trim()));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
 async fn error_body_and_consumed_token_cleanup_are_stable() {
     let response = bootstrap_error(StatusCode::CONFLICT, "email_conflict");
     assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -129,6 +181,15 @@ async fn error_body_and_consumed_token_cleanup_are_stable() {
     remove_consumed_token(&token_path);
     assert!(!token_path.exists());
     remove_consumed_token(&token_path);
+
+    let directory_path = std::env::temp_dir().join(format!(
+        "nazoauth-consumed-token-directory-test-{}",
+        rand::random::<u64>()
+    ));
+    fs::create_dir(&directory_path).unwrap();
+    remove_consumed_token(&directory_path);
+    assert!(directory_path.is_dir());
+    fs::remove_dir(directory_path).unwrap();
 }
 
 #[test]
