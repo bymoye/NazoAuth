@@ -157,10 +157,11 @@ jobs:
           file: .github/e2e-runner.Containerfile
       - name: Prepare isolated runtime config
         run: |
-          mkdir -p runtime/e2e/keys runtime/e2e/avatars
+          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap
           python scripts/ensure_runtime_keyset.py --key-dir runtime/e2e/keys --active-alg RS256 --required-alg RS256 --required-alg PS256
           cat > runtime/e2e/.env.yaml <<'YAML'
           BIND: "0.0.0.0:8000"
+          DATA_DIR: "/var/lib/nazo_oauth"
           DATABASE_URL: "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth"
           VALKEY_URL: "redis://nazo-oauth-e2e-valkey:6379/0"
           VALKEY_COMMAND_TIMEOUT_MS: 1000
@@ -261,6 +262,8 @@ jobs:
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
             -e NAZO_RUNTIME_INSTANCE_ID=e2e-primary \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
+            -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
+            -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
             nazo-oauth-e2e:latest nazoauth server
@@ -268,9 +271,30 @@ jobs:
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
             -e NAZO_RUNTIME_INSTANCE_ID=e2e-signed \
             -v "$PWD/runtime/e2e/.env-signed.yaml:/app/.env.yaml:ro" \
+            -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
+            -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
             nazo-oauth-e2e:latest nazoauth server
+      - name: Require both non-root servers to become ready
+        run: |
+          ready=false
+          for _ in $(seq 1 60); do
+            if docker run --rm --network nazo-oauth-e2e-net \
+              nazo-oauth-e2e-runner:latest python -c \
+              'import urllib.request; urllib.request.urlopen("http://nazo-oauth-e2e-server:8000/health", timeout=2).read(); urllib.request.urlopen("http://nazo-oauth-e2e-server-signed:8000/health", timeout=2).read()'
+            then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "true" ]; then
+            docker inspect nazo-oauth-e2e-server nazo-oauth-e2e-server-signed
+            docker logs nazo-oauth-e2e-server || true
+            docker logs nazo-oauth-e2e-server-signed || true
+            exit 1
+          fi
       - name: Run RFC 9967 SCIM SET black-box matrix
         run: |
           docker run --rm --name nazo-oauth-rfc9967-runner --network nazo-oauth-e2e-net \

@@ -1203,6 +1203,25 @@ def check_conformance_provisioning_boundaries() -> None:
             raise SystemExit(f"operator black-box onboarding contract is missing: {marker}")
 
 
+def check_bootstrap_secret_log_boundary() -> None:
+    source = (
+        ROOT
+        / "crates"
+        / "authorization-server"
+        / "src"
+        / "http"
+        / "bootstrap_admin.rs"
+    ).read_text(encoding="utf-8")
+    for forbidden in (
+        'let setup_url = format!("{}/setup?token={token}"',
+        "tracing::warn!(%setup_url",
+    ):
+        if forbidden in source:
+            raise SystemExit("initial administrator bootstrap token enters tracing output")
+    if "read the root-owned token file through the operator workflow" not in source:
+        raise SystemExit("initial administrator bootstrap lacks a non-secret recovery hint")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-migrations", action="store_true")
@@ -1227,6 +1246,7 @@ def main() -> None:
         check_fapi_ciba_boundaries()
         check_openid4vc_boundaries()
         check_conformance_provisioning_boundaries()
+        check_bootstrap_secret_log_boundary()
 
 
 if __name__ == "__main__":

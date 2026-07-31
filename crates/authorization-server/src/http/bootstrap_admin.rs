@@ -58,12 +58,11 @@ impl InitialAdminBootstrapEndpoint {
                 None
             }
             nazo_postgres::InitialAdminBootstrapState::Ready { expires_at } => {
-                let setup_url = format!("{}/setup?token={token}", issuer.trim_end_matches('/'));
                 tracing::warn!(
-                    %setup_url,
+                    issuer = %issuer.trim_end_matches('/'),
                     %expires_at,
                     token_file = %token_path.display(),
-                    "initial administrator setup is required; the setup URL is a secret"
+                    "initial administrator setup is required; read the root-owned token file through the operator workflow"
                 );
                 Some(token_hash)
             }
