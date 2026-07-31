@@ -360,12 +360,18 @@ fi
   --ignore-filename-regex "$IGNORE_REGEX" \
   "$BIN_DIR/nazoauth" > lcov-e2e.info
 
-test_cov_args=(export --format=lcov --instr-profile "$COVERAGE_DIR/tests.profdata" --ignore-filename-regex "$IGNORE_REGEX" "${test_objects[0]}")
-for object in "${test_objects[@]:1}"; do
-  test_cov_args+=(--object "$object")
+test_reports=()
+test_report_index=0
+for object in "${test_objects[@]}"; do
+  test_report="$COVERAGE_DIR/test-object-${test_report_index}.lcov"
+  "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
+    --instr-profile "$COVERAGE_DIR/tests.profdata" \
+    --ignore-filename-regex "$IGNORE_REGEX" \
+    "$object" > "$test_report"
+  test_reports+=("$test_report")
+  test_report_index=$((test_report_index + 1))
 done
-"$LLVM_TOOLS_DIR/llvm-cov" "${test_cov_args[@]}" > lcov-tests.info
 "$PYTHON_BIN" scripts/merge_lcov.py \
   --source-root "$PWD" \
   --output lcov.info \
-  lcov-e2e.info lcov-tests.info
+  lcov-e2e.info "${test_reports[@]}"
