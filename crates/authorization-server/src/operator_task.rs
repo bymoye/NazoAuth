@@ -160,11 +160,20 @@ fn validate_embedded_identity(task: &TaskEnvelope) -> anyhow::Result<()> {
 }
 
 fn validate_config_manifest(task: &TaskEnvelope) -> anyhow::Result<()> {
-    let path = configured_path(
+    let manifest_path = configured_path(
         "NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE",
         CONFIG_MANIFEST_PATH,
     );
-    let bytes = fs::read(path).context("canonical config manifest is unavailable")?;
+    let server_config_path = configured_path("NAZOAUTH_SERVER_CONFIG_FILE", "/app/.env.yaml");
+    validate_config_manifest_at(task, &manifest_path, &server_config_path)
+}
+
+fn validate_config_manifest_at(
+    task: &TaskEnvelope,
+    manifest_path: &Path,
+    server_config_path: &Path,
+) -> anyhow::Result<()> {
+    let bytes = fs::read(manifest_path).context("canonical config manifest is unavailable")?;
     let manifest: nazo_operator_protocol::CanonicalConfigManifest =
         serde_json::from_slice(&bytes).context("canonical config manifest is invalid")?;
     let digest = nazo_operator_protocol::canonical_config_sha256(&manifest)?;
@@ -181,8 +190,7 @@ fn validate_config_manifest(task: &TaskEnvelope) -> anyhow::Result<()> {
     {
         bail!("canonical config manifest is not the closed task manifest");
     }
-    let server_config = configured_path("NAZOAUTH_SERVER_CONFIG_FILE", "/app/.env.yaml");
-    let actual: String = Sha256::digest(fs::read(server_config)?)
+    let actual: String = Sha256::digest(fs::read(server_config_path)?)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
@@ -286,6 +294,10 @@ fn verify_public_jwk(expected_sha256: &str) -> anyhow::Result<PathBuf> {
         "NAZOAUTH_OPERATOR_PUBLIC_JWK_FILE",
         EXTERNAL_PUBLIC_JWK_PATH,
     );
+    verify_public_jwk_at(expected_sha256, path)
+}
+
+fn verify_public_jwk_at(expected_sha256: &str, path: PathBuf) -> anyhow::Result<PathBuf> {
     let bytes = fs::read(&path).context("external public JWK was not mounted")?;
     let actual: String = Sha256::digest(bytes)
         .iter()

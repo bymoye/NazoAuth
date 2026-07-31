@@ -64,6 +64,7 @@ ignore:
   - "crates/authorization-server/src/main.rs"
   # Test implementation files are excluded so coverage measures production code.
   - "tests/**"
+  - "crates/**/tests/**"
   - "crates/authorization-server/tests/**"
   - "benches/**"
   - "examples/**"

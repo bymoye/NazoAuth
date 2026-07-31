@@ -210,3 +210,7 @@ fn html_escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('\'', "&#39;")
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/http/bootstrap_admin.rs"]
+mod tests;
