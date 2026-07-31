@@ -69,6 +69,9 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Verify deterministic LCOV union
+        run: python -m unittest tests.unit.test_merge_lcov
+
       - name: Generate coverage report
         shell: bash
         env:
