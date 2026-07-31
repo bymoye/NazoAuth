@@ -365,3 +365,4 @@ for object in "${test_objects[@]:1}"; do
   test_cov_args+=(--object "$object")
 done
 "$LLVM_TOOLS_DIR/llvm-cov" "${test_cov_args[@]}" > lcov-tests.info
+"$PYTHON_BIN" scripts/merge_lcov.py --output lcov.info lcov-e2e.info lcov-tests.info
