@@ -1,0 +1,514 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+CONFIG_PATH="${NAZOAUTH_UPDATE_CONFIG:-/etc/nazoauth/update.json}"
+COMMAND=""
+REQUESTED_VERSION=""
+WORK_DIR=""
+MUTATION_STARTED=0
+CANDIDATE_STARTED=0
+UI_SWITCHED=0
+PREVIOUS_IMAGE_ID=""
+PREVIOUS_IMAGE_NAME=""
+PREVIOUS_UI_TARGET=""
+BACKUP_DIR=""
+COSIGN_IMAGE="ghcr.io/sigstore/cosign/cosign@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00"
+
+die() {
+  printf 'nazoauthctl: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1"
+}
+
+safe_absolute_path() {
+  [[ "$1" == /* && "$1" != "/" && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
+}
+
+config_value() {
+  jq -er "$1 | strings" "$CONFIG_PATH"
+}
+
+validate_config_file() {
+  safe_absolute_path "$CONFIG_PATH" || die "config path must be an absolute non-root path"
+  [[ -f "$CONFIG_PATH" && ! -L "$CONFIG_PATH" ]] || die "config must be a regular file"
+  if [[ "${NAZOAUTHCTL_TESTING:-0}" != "1" ]]; then
+    [[ "$(id -u)" == "0" ]] || die "update operations must run as root"
+    [[ "$(stat -c %u "$CONFIG_PATH")" == "0" ]] || die "config must be root-owned"
+    local mode
+    mode="$(stat -c %a "$CONFIG_PATH")"
+    (( (8#$mode & 0022) == 0 )) || die "config must not be group/world-writable"
+  fi
+  jq -e '
+    .schema == 1
+    and .runtime.engine == "podman"
+    and (.runtime.mounts | type == "array" and length > 0)
+    and (.runtime.snapshot_paths | type == "array" and length > 0)
+    and (.runtime.environment | type == "object")
+  ' "$CONFIG_PATH" >/dev/null || die "unsupported update config schema"
+}
+
+load_config() {
+  REPOSITORY="$(config_value '.repository')"
+  UPDATER_INSTALL_PATH="$(config_value '.updater_install_path')"
+  BACKUP_ROOT="$(config_value '.backup_root')"
+  DEPLOYMENT_ROOT="$(config_value '.deployment_root')"
+  CONTAINER_NAME="$(config_value '.runtime.container_name')"
+  NETWORK_NAME="$(config_value '.runtime.network')"
+  IP_ADDRESS="$(config_value '.runtime.ip_address')"
+  HEALTH_URL="$(config_value '.runtime.health_url')"
+  READINESS_ATTEMPTS="$(jq -er '.runtime.readiness_attempts | numbers' "$CONFIG_PATH")"
+  READINESS_INTERVAL_SECONDS="$(
+    jq -er '.runtime.readiness_interval_seconds | numbers' "$CONFIG_PATH"
+  )"
+  PUBLIC_DISCOVERY_URL="$(config_value '.runtime.public_discovery_url')"
+  EXPECTED_ISSUER="$(config_value '.runtime.expected_issuer')"
+  POSTGRES_CONTAINER="$(config_value '.postgres.container_name')"
+  POSTGRES_DATABASE="$(config_value '.postgres.database')"
+  POSTGRES_USER="$(config_value '.postgres.user')"
+  POSTGRES_VALIDATION_IMAGE="$(config_value '.postgres.validation_image')"
+  VALKEY_CONTAINER="$(config_value '.valkey.container_name')"
+  VALKEY_RDB_PATH="$(config_value '.valkey.rdb_path')"
+  VALKEY_PASSWORD_FILE="$(jq -er '.valkey.password_file | strings' "$CONFIG_PATH")"
+  UI_PATH="$(config_value '.ui.active_path')"
+  UI_RELEASES="$(config_value '.ui.releases_root')"
+  for value in \
+    "$BACKUP_ROOT" "$DEPLOYMENT_ROOT" "$HEALTH_URL" "$PUBLIC_DISCOVERY_URL" \
+    "$UI_PATH" "$UI_RELEASES"; do
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "config contains a newline"
+  done
+  for path in \
+    "$UPDATER_INSTALL_PATH" "$BACKUP_ROOT" "$DEPLOYMENT_ROOT" \
+    "$UI_PATH" "$UI_RELEASES"; do
+    safe_absolute_path "$path" || die "unsafe configured path: $path"
+  done
+  [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+    die "repository must be owner/name"
+  [[ "$CONTAINER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
+    die "unsafe container name"
+  [[ "$NETWORK_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] ||
+    die "unsafe network name"
+  [[ "$IP_ADDRESS" =~ ^[0-9a-fA-F:.]+$ ]] || die "unsafe container IP"
+  [[ "$READINESS_ATTEMPTS" =~ ^[0-9]+$ && "$READINESS_ATTEMPTS" -ge 1 &&
+     "$READINESS_ATTEMPTS" -le 600 ]] || die "readiness_attempts must be 1..600"
+  [[ "$READINESS_INTERVAL_SECONDS" =~ ^[0-9]+$ &&
+     "$READINESS_INTERVAL_SECONDS" -le 30 ]] ||
+    die "readiness_interval_seconds must be 0..30"
+  [[ "$POSTGRES_DATABASE" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] ||
+    die "unsafe PostgreSQL database"
+  [[ "$POSTGRES_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] ||
+    die "unsafe PostgreSQL user"
+  [[ "$EXPECTED_ISSUER" =~ ^https://[^/?#[:space:]]+$ ]] ||
+    die "expected issuer must be an HTTPS origin"
+}
+
+build_runtime_arguments() {
+  MOUNT_ARGS=()
+  while IFS= read -r encoded; do
+    local source target mode
+    source="$(printf '%s' "$encoded" | base64 --decode | jq -er '.source | strings')"
+    target="$(printf '%s' "$encoded" | base64 --decode | jq -er '.target | strings')"
+    mode="$(printf '%s' "$encoded" | base64 --decode | jq -er '.mode | strings')"
+    safe_absolute_path "$source" || die "unsafe mount source: $source"
+    safe_absolute_path "$target" || die "unsafe mount target: $target"
+    [[ "$mode" == "ro" || "$mode" == "rw" ]] || die "mount mode must be ro or rw"
+    [[ -e "$source" && ! -L "$source" ]] || die "mount source is missing or a symlink: $source"
+    MOUNT_ARGS+=(-v "$source:$target:$mode")
+  done < <(jq -r '.runtime.mounts[] | @base64' "$CONFIG_PATH")
+
+  ENV_ARGS=()
+  while IFS= read -r encoded; do
+    local key value
+    key="$(printf '%s' "$encoded" | base64 --decode | jq -er '.key | strings')"
+    value="$(printf '%s' "$encoded" | base64 --decode | jq -er '.value | strings')"
+    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "unsafe environment key"
+    [[ "$value" != *$'\0'* && "$value" != *$'\n'* && "$value" != *$'\r'* ]] ||
+      die "environment values must be single-line"
+    ENV_ARGS+=(-e "$key=$value")
+  done < <(jq -r '.runtime.environment | to_entries[] | @base64' "$CONFIG_PATH")
+}
+
+resolve_version() {
+  if [[ -n "$REQUESTED_VERSION" ]]; then
+    RELEASE_VERSION="$REQUESTED_VERSION"
+  else
+    RELEASE_VERSION="$(
+      curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+        -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/$REPOSITORY/releases/latest" |
+        jq -er '.tag_name | strings'
+    )"
+  fi
+  [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] ||
+    die "release version is not an immutable semantic tag"
+}
+
+download() {
+  local name="$1"
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --output "$WORK_DIR/$name" \
+    "https://github.com/$REPOSITORY/releases/download/$RELEASE_VERSION/$name"
+}
+
+verify_blob() {
+  local bundle="$1" blob="$2" identity="$3"
+  if command -v cosign >/dev/null 2>&1; then
+    cosign verify-blob \
+      --bundle "$bundle" \
+      --certificate-identity "$identity" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      "$blob" >/dev/null
+  else
+    podman run --rm \
+      -v "$WORK_DIR:/work:ro" \
+      "$COSIGN_IMAGE" verify-blob \
+      --bundle "/work/$(basename "$bundle")" \
+      --certificate-identity "$identity" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      "/work/$(basename "$blob")" >/dev/null
+  fi
+}
+
+verify_manifest() {
+  download release-manifest.json
+  download release-manifest.json.bundle
+  local expected_identity
+  expected_identity="https://github.com/$REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_VERSION"
+  verify_blob \
+    "$WORK_DIR/release-manifest.json.bundle" \
+    "$WORK_DIR/release-manifest.json" \
+    "$expected_identity"
+  jq -e \
+    --arg version "$RELEASE_VERSION" \
+    --arg identity "$expected_identity" '
+      .schema == 1
+      and .version == $version
+      and .release_identity == $identity
+      and (.backend_commit | test("^[0-9a-f]{40}$"))
+      and (.frontend_commit | test("^[0-9a-f]{40}$"))
+      and (.image_ref | test("^localhost/nazo-oauth-server:v"))
+      and .rollback.database_compatible == true
+      and (.artifacts | keys == ["binary", "image", "sbom", "ui", "updater"])
+    ' "$WORK_DIR/release-manifest.json" >/dev/null ||
+    die "signed release manifest failed policy validation"
+  BACKEND_COMMIT="$(jq -er '.backend_commit' "$WORK_DIR/release-manifest.json")"
+  FRONTEND_COMMIT="$(jq -er '.frontend_commit' "$WORK_DIR/release-manifest.json")"
+  IMAGE_REF="$(jq -er '.image_ref' "$WORK_DIR/release-manifest.json")"
+}
+
+download_artifact() {
+  local key="$1" name digest size actual_size
+  name="$(jq -er --arg key "$key" '.artifacts[$key].name | strings' "$WORK_DIR/release-manifest.json")"
+  digest="$(jq -er --arg key "$key" '.artifacts[$key].sha256 | strings' "$WORK_DIR/release-manifest.json")"
+  size="$(jq -er --arg key "$key" '.artifacts[$key].size | numbers' "$WORK_DIR/release-manifest.json")"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "unsafe artifact name"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "invalid artifact digest"
+  download "$name"
+  printf '%s  %s\n' "$digest" "$WORK_DIR/$name" | sha256sum -c - >/dev/null
+  actual_size="$(stat -c %s "$WORK_DIR/$name")"
+  [[ "$actual_size" == "$size" ]] || die "artifact size mismatch: $name"
+  printf '%s\n' "$WORK_DIR/$name"
+}
+
+valkey_cli() {
+  if [[ -n "$VALKEY_PASSWORD_FILE" ]]; then
+    podman exec "$VALKEY_CONTAINER" \
+      sh -eu -c 'VALKEYCLI_AUTH="$(cat "$1")" exec valkey-cli "${@:2}"' \
+      _ "$VALKEY_PASSWORD_FILE" "$@"
+  else
+    podman exec "$VALKEY_CONTAINER" valkey-cli "$@"
+  fi
+}
+
+create_backup() {
+  local stamp
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  BACKUP_DIR="$BACKUP_ROOT/$stamp-before-$RELEASE_VERSION"
+  install -d -m 0700 "$BACKUP_DIR"
+  podman exec "$POSTGRES_CONTAINER" \
+    pg_dump --format=custom --no-owner --no-privileges \
+    -U "$POSTGRES_USER" "$POSTGRES_DATABASE" >"$BACKUP_DIR/postgresql.dump"
+  podman run --rm -v "$BACKUP_DIR:/backup:ro" "$POSTGRES_VALIDATION_IMAGE" \
+    pg_restore --list /backup/postgresql.dump >/dev/null
+
+  if [[ -n "$VALKEY_PASSWORD_FILE" ]]; then
+    safe_absolute_path "$VALKEY_PASSWORD_FILE" || die "unsafe Valkey password-file path"
+  fi
+  local last_save next_save attempt
+  last_save="$(valkey_cli LASTSAVE)"
+  valkey_cli BGSAVE >/dev/null
+  next_save="$last_save"
+  for attempt in {1..60}; do
+    next_save="$(valkey_cli LASTSAVE)"
+    if [[ "$next_save" =~ ^[0-9]+$ && "$next_save" -gt "$last_save" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  [[ "$next_save" -gt "$last_save" ]] || die "Valkey BGSAVE did not complete"
+  podman cp "$VALKEY_CONTAINER:$VALKEY_RDB_PATH" "$BACKUP_DIR/valkey-dump.rdb"
+
+  cp -- "$CONFIG_PATH" "$BACKUP_DIR/update-config.json"
+  local index=0 snapshot
+  while IFS= read -r snapshot; do
+    safe_absolute_path "$snapshot" || die "unsafe snapshot path"
+    [[ -d "$snapshot" && ! -L "$snapshot" ]] || die "snapshot path is not a real directory"
+    tar -C "$(dirname "$snapshot")" -cpf "$BACKUP_DIR/snapshot-$index.tar" "$(basename "$snapshot")"
+    printf '%s\n' "$snapshot" >"$BACKUP_DIR/snapshot-$index.path"
+    index=$((index + 1))
+  done < <(jq -er '.runtime.snapshot_paths[] | strings' "$CONFIG_PATH")
+  (cd "$BACKUP_DIR" && sha256sum ./* >SHA256SUMS && sha256sum -c SHA256SUMS >/dev/null)
+}
+
+restore_snapshots() {
+  local path_file snapshot index=0 parent failed
+  while path_file="$BACKUP_DIR/snapshot-$index.path"; [[ -f "$path_file" ]]; do
+    snapshot="$(cat "$path_file")"
+    safe_absolute_path "$snapshot" || return 1
+    parent="$(dirname "$snapshot")"
+    failed="$parent/.$(basename "$snapshot").failed-update-$$"
+    rm -rf -- "$failed"
+    mv -T "$snapshot" "$failed"
+    if ! tar -C "$parent" -xpf "$BACKUP_DIR/snapshot-$index.tar"; then
+      mv -T "$failed" "$snapshot" || true
+      return 1
+    fi
+    rm -rf -- "$failed"
+    index=$((index + 1))
+  done
+}
+
+start_server() {
+  local image="$1"
+  podman run -d --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
+    --network "$NETWORK_NAME" --ip "$IP_ADDRESS" \
+    "${ENV_ARGS[@]}" "${MOUNT_ARGS[@]}" \
+    "$image" nazoauth server >/dev/null
+}
+
+wait_ready() {
+  local attempt
+  for ((attempt = 1; attempt <= READINESS_ATTEMPTS; attempt++)); do
+    if curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$READINESS_INTERVAL_SECONDS"
+  done
+  return 1
+}
+
+verify_public() {
+  local discovery
+  discovery="$(curl --fail --silent --show-error --max-time 20 "$PUBLIC_DISCOVERY_URL")"
+  jq -e --arg issuer "$EXPECTED_ISSUER" '.issuer == $issuer' <<<"$discovery" >/dev/null
+}
+
+safe_extract_ui() {
+  local archive="$1" target="$2"
+  python3 - "$archive" "$target" <<'PY'
+import pathlib
+import tarfile
+import sys
+
+archive = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+target.mkdir(parents=True, exist_ok=False)
+root = target.resolve()
+with tarfile.open(archive, "r:gz") as handle:
+    for member in handle.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise SystemExit(f"UI archive contains a non-regular entry: {member.name}")
+        destination = (root / member.name).resolve()
+        if destination != root and root not in destination.parents:
+            raise SystemExit(f"UI archive escapes target: {member.name}")
+    handle.extractall(root, filter="data")
+if not (root / "index.html").is_file():
+    raise SystemExit("UI archive does not contain index.html")
+PY
+}
+
+write_record() {
+  local status="$1" record="$DEPLOYMENT_ROOT/$RELEASE_VERSION-$(date -u +%Y%m%dT%H%M%SZ).json"
+  local active_image
+  active_image="$(podman inspect "$CONTAINER_NAME" --format '{{.ImageName}}' 2>/dev/null || true)"
+  install -d -m 0755 "$DEPLOYMENT_ROOT"
+  jq -n \
+    --arg status "$status" \
+    --arg version "$RELEASE_VERSION" \
+    --arg backend_commit "$BACKEND_COMMIT" \
+    --arg frontend_commit "$FRONTEND_COMMIT" \
+    --arg target_image "$IMAGE_REF" \
+    --arg active_image "$active_image" \
+    --arg container_id "$(podman inspect "$CONTAINER_NAME" --format '{{.Id}}' 2>/dev/null || true)" \
+    --arg backup "$BACKUP_DIR" \
+    --argjson recorded_at "$(date +%s)" \
+    '{status:$status,version:$version,backend_commit:$backend_commit,
+      frontend_commit:$frontend_commit,target_image:$target_image,
+      active_image:$active_image,container_id:$container_id,
+      backup:$backup,recorded_at_unix:$recorded_at}' >"$record.tmp"
+  chmod 0600 "$record.tmp"
+  mv -f "$record.tmp" "$record"
+  ln -sfn "$record" "$DEPLOYMENT_ROOT/current-update.json.tmp"
+  mv -Tf "$DEPLOYMENT_ROOT/current-update.json.tmp" "$DEPLOYMENT_ROOT/current-update.json"
+}
+
+rollback_after_error() {
+  local status="$1"
+  local recovery_failed=0
+  trap - ERR
+  set +e
+  if [[ "$MUTATION_STARTED" == "1" ]]; then
+    podman rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || recovery_failed=1
+    restore_snapshots || recovery_failed=1
+    if [[ "$recovery_failed" == "0" && -n "$PREVIOUS_IMAGE_ID" ]]; then
+      start_server "$PREVIOUS_IMAGE_ID" || recovery_failed=1
+      if [[ "$recovery_failed" == "0" ]]; then
+        wait_ready || recovery_failed=1
+      fi
+    fi
+    if [[ "$UI_SWITCHED" == "1" && -n "$PREVIOUS_UI_TARGET" ]]; then
+      ln -sfn "$PREVIOUS_UI_TARGET" "$UI_PATH.rollback"
+      mv -Tf "$UI_PATH.rollback" "$UI_PATH" || recovery_failed=1
+    fi
+    if [[ "$recovery_failed" == "0" ]]; then
+      write_record rollback-after-update-failure || recovery_failed=1
+    else
+      write_record rollback-failed || true
+    fi
+  fi
+  printf 'nazoauthctl: update failed with status %s; recovery=%s; backup=%s\n' \
+    "$status" \
+    "$([[ "$recovery_failed" == "0" ]] && printf restored || printf failed)" \
+    "${BACKUP_DIR:-not-created}" >&2
+  exit "$status"
+}
+
+show_status() {
+  local image revision container_id
+  image="$(podman inspect "$CONTAINER_NAME" --format '{{.ImageName}}')"
+  revision="$(podman inspect "$CONTAINER_NAME" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  container_id="$(podman inspect "$CONTAINER_NAME" --format '{{.Id}}')"
+  jq -n \
+    --arg container "$CONTAINER_NAME" \
+    --arg container_id "$container_id" \
+    --arg image "$image" \
+    --arg revision "$revision" \
+    --arg health_url "$HEALTH_URL" \
+    '{container:$container,container_id:$container_id,image:$image,
+      revision:$revision,health_url:$health_url}'
+}
+
+perform_update() {
+  resolve_version
+  WORK_DIR="$(mktemp -d /tmp/nazoauth-update.XXXXXX)"
+  trap cleanup_work_dir EXIT
+  verify_manifest
+  local current_revision image_archive ui_archive updater
+  current_revision="$(podman inspect "$CONTAINER_NAME" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+  if [[ "$current_revision" == "$BACKEND_COMMIT" ]]; then
+    printf 'NazoAuth is already at %s (%s)\n' "$RELEASE_VERSION" "$BACKEND_COMMIT"
+    return 0
+  fi
+  if [[ "$COMMAND" == "check" ]]; then
+    printf 'update available: %s -> %s (%s)\n' "$current_revision" "$RELEASE_VERSION" "$BACKEND_COMMIT"
+    return 0
+  fi
+
+  image_archive="$(download_artifact image)"
+  ui_archive="$(download_artifact ui)"
+  updater="$(download_artifact updater)"
+  create_backup
+  build_runtime_arguments
+  PREVIOUS_IMAGE_ID="$(podman inspect "$CONTAINER_NAME" --format '{{.Image}}')"
+  PREVIOUS_IMAGE_NAME="$(podman inspect "$CONTAINER_NAME" --format '{{.ImageName}}')"
+  [[ -L "$UI_PATH" || ! -e "$UI_PATH" ]] ||
+    die "active UI path must be a symlink or absent"
+  if [[ -L "$UI_PATH" ]]; then PREVIOUS_UI_TARGET="$(readlink "$UI_PATH")"; fi
+
+  podman load -i "$image_archive" >/dev/null
+  [[ "$(podman image inspect "$IMAGE_REF" --format '{{index .Labels "org.opencontainers.image.revision"}}')" == "$BACKEND_COMMIT" ]] ||
+    die "loaded image revision does not match the signed manifest"
+
+  MUTATION_STARTED=1
+  trap 'rollback_after_error $?' ERR
+  podman run --rm --name "$CONTAINER_NAME-migrate-$$" \
+    --network "$NETWORK_NAME" \
+    "${ENV_ARGS[@]}" "${MOUNT_ARGS[@]}" \
+    "$IMAGE_REF" nazoauth migrate
+  podman rm -f "$CONTAINER_NAME" >/dev/null
+  start_server "$IMAGE_REF"
+  CANDIDATE_STARTED=1
+  wait_ready
+  verify_public
+
+  local ui_release="$UI_RELEASES/$FRONTEND_COMMIT"
+  rm -rf -- "$ui_release.tmp"
+  safe_extract_ui "$ui_archive" "$ui_release.tmp"
+  if [[ -d "$ui_release" ]]; then
+    diff -qr "$ui_release" "$ui_release.tmp" >/dev/null ||
+      die "existing UI release differs from the signed artifact"
+    rm -rf -- "$ui_release.tmp"
+  else
+    find "$ui_release.tmp" -type d -exec chmod 0755 {} +
+    find "$ui_release.tmp" -type f -exec chmod 0644 {} +
+    mv -T "$ui_release.tmp" "$ui_release"
+  fi
+  ln -sfn "$ui_release" "$UI_PATH.next"
+  mv -Tf "$UI_PATH.next" "$UI_PATH"
+  UI_SWITCHED=1
+  verify_public
+  install -m 0755 "$updater" "$UPDATER_INSTALL_PATH"
+  write_record deployment-success
+  trap - ERR
+  MUTATION_STARTED=0
+  printf 'NazoAuth updated to %s (%s)\n' "$RELEASE_VERSION" "$BACKEND_COMMIT"
+}
+
+cleanup_work_dir() {
+  if [[ -n "$WORK_DIR" && "$WORK_DIR" == /tmp/nazoauth-update.* &&
+        -d "$WORK_DIR" && ! -L "$WORK_DIR" ]]; then
+    rm -rf -- "$WORK_DIR"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  nazoauthctl [--config PATH] status
+  nazoauthctl [--config PATH] check [--to vMAJOR.MINOR.PATCH]
+  nazoauthctl [--config PATH] update [--to vMAJOR.MINOR.PATCH]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config) [[ $# -ge 2 ]] || die "--config requires a path"; CONFIG_PATH="$2"; shift 2 ;;
+    --to) [[ $# -ge 2 ]] || die "--to requires a version"; REQUESTED_VERSION="$2"; shift 2 ;;
+    status|check|update)
+      [[ -z "$COMMAND" ]] || die "only one command may be supplied"
+      COMMAND="$1"
+      shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[[ -n "$COMMAND" ]] || { usage >&2; exit 2; }
+
+for command in jq podman curl sha256sum tar stat base64 flock python3; do
+  require_command "$command"
+done
+validate_config_file
+load_config
+install -d -m 0755 "$BACKUP_ROOT" "$DEPLOYMENT_ROOT"
+exec 9>"$DEPLOYMENT_ROOT/update.lock"
+flock -n 9 || die "another update is already running"
+
+case "$COMMAND" in
+  status) show_status ;;
+  check|update) perform_update ;;
+esac

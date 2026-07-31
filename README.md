@@ -226,6 +226,8 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 | Configuration | [docs/operations/configuration.md](docs/operations/configuration.md) |
 | Deployment | [docs/operations/deployment.md](docs/operations/deployment.md) |
 | Chinese deployment guide | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |
+| One-click updates | [docs/operations/one-click-update.md](docs/operations/one-click-update.md) |
+| 一键升级 | [docs/operations/one-click-update.zh-CN.md](docs/operations/one-click-update.zh-CN.md) |
 | Conformance records | [docs/conformance](docs/conformance) |
 | Performance benchmarks | [docs/performance/performance-capacity-curve.md](docs/performance/performance-capacity-curve.md) |
 | OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |

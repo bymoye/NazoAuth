@@ -100,22 +100,23 @@ docker compose logs server
 
 ## Upgrade and rollback
 
-For an upgrade:
+For a released standalone Podman installation, the normal upgrade is:
 
 ```sh
-docker compose build --pull
-docker compose up -d
-docker compose ps
+sudo nazoauthctl update
 ```
 
-Compose runs migrations before replacing the server. Production releases
-should pin a reviewed image digest or exact source commit rather than an
-unbounded tag.
+This verifies the tag-specific Sigstore identity and immutable artifact
+digests, creates recovery backups, runs migrations, replaces the application,
+checks readiness and public Discovery, and automatically restores the previous
+application image and persistent application files if verification fails. See
+[One-click updates](one-click-update.md).
 
-Rollback the application by restoring the previous image or source revision
-and running `docker compose up -d` again. Database rollback is separate:
-migrations may be forward-only, so take and verify a PostgreSQL backup before
-every production upgrade.
+Source deployments may still use Compose during development. They are not the
+normal production update path. Database restoration remains separate because
+migrations may be forward-only; the updater therefore accepts automatic
+rollback only when the signed release declares the migration set compatible
+with restarting the previous application.
 
 ## Production boundaries
 

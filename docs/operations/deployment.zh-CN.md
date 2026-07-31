@@ -90,20 +90,19 @@ docker compose logs server
 
 ## 升级和回滚
 
-升级：
+正式发布的独立 Podman 安装使用一键升级：
 
 ```sh
-docker compose build --pull
-docker compose up -d
-docker compose ps
+sudo nazoauthctl update
 ```
 
-Compose 会先运行迁移，再替换服务。生产版本应固定到已审查的镜像 digest 或精确
-源码提交，不能依赖无边界 tag。
+该命令校验标签级 Sigstore 身份和不可变制品摘要，创建恢复备份，执行迁移，
+替换应用，检查 readiness 与公网 Discovery；验证失败时自动恢复旧应用镜像和
+应用持久目录。完整边界见[一键升级](one-click-update.zh-CN.md)。
 
-应用回滚时恢复上一个镜像或源码版本，再执行 `docker compose up -d`。数据库回滚
-是独立操作：迁移可能只能向前，因此每次生产升级前必须创建并验证 PostgreSQL
-备份。
+源码 Compose 仍可用于开发，但不再是生产环境的日常升级路径。数据库恢复保持
+独立，因为迁移可能是单向的；只有签名发布明确声明迁移集合可重新启动上一应用
+版本时，更新器才接受自动应用回滚。
 
 ## 生产边界
 

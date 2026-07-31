@@ -63,6 +63,8 @@ set can be scanned from one place.
 | [operations/configuration.md](operations/configuration.md) | Runtime configuration model and environment settings. |
 | [operations/deployment.md](operations/deployment.md) | English deployment guide. |
 | [operations/deployment.zh-CN.md](operations/deployment.zh-CN.md) | Chinese deployment guide. |
+| [operations/one-click-update.md](operations/one-click-update.md) | Signed one-click production updates. |
+| [operations/one-click-update.zh-CN.md](operations/one-click-update.zh-CN.md) | Chinese signed one-click update guide. |
 | [operations/fresh-production-activation.md](operations/fresh-production-activation.md) | Clean-data deployment and OIDF-gated production activation. |
 | [operations/fresh-production-activation.zh-CN.md](operations/fresh-production-activation.zh-CN.md) | Chinese clean-data deployment and OIDF-gated production activation. |
 | [operations/2026-07-23-fresh-production-activation.zh-CN.md](operations/2026-07-23-fresh-production-activation.zh-CN.md) | Evidence record for the 2026-07-23 clean-data production activation. |

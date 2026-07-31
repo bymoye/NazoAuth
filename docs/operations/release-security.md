@@ -36,14 +36,22 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
 - builds the release binaries with the pinned Rust toolchain
 - reruns `cargo audit` and `cargo deny` for the exact tag
 - builds the container image
+- builds the frontend from the exact commit in `release/frontend.lock`
 - scans the exact exported release image with Trivy before signing
-- exports the container image as a release artifact
+- exports the container image, frontend, updater, and release manifest
 - generates a CycloneDX Rust SBOM
-- signs the binaries, SBOM, and image archive with keyless Sigstore signing through GitHub OIDC
+- signs the binaries, SBOM, image archive, frontend, updater, and manifest with
+  keyless Sigstore signing through GitHub OIDC
 - uploads binaries, SBOM, image archive, and signature bundles as GitHub Actions artifacts
+- publishes tagged artifacts as persistent GitHub Release assets without
+  overwriting an existing asset
 - emits GitHub artifact provenance attestations for the binaries, SBOM, and image archive
 
-Downstream deployments consume artifacts from a successful tagged release workflow, or repeat the same checks in their own release pipeline.
+Standalone production deployments consume these assets through
+`nazoauthctl update`. The updater verifies the tag-specific workflow identity
+and signed manifest before parsing artifact names or changing runtime state.
+Custom deployment pipelines must enforce the same identity, digest, backup,
+and rollback-compatibility boundaries.
 
 ## Required Evidence
 

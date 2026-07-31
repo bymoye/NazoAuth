@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "repository": "nazozero/NazoAuth",
+  "updater_install_path": "/usr/local/sbin/nazoauthctl",
+  "backup_root": "/opt/nazo-oauth/backups",
+  "deployment_root": "/opt/nazo-oauth/deployments",
+  "runtime": {
+    "engine": "podman",
+    "container_name": "nazo-oauth-server",
+    "network": "nazo_oauth_net",
+    "ip_address": "10.101.0.20",
+    "health_url": "http://10.101.0.20:8000/ready",
+    "readiness_attempts": 60,
+    "readiness_interval_seconds": 1,
+    "public_discovery_url": "https://auth.example.com/.well-known/openid-configuration",
+    "expected_issuer": "https://auth.example.com",
+    "mounts": [
+      {
+        "source": "/opt/nazo-oauth/.env.yaml",
+        "target": "/app/.env.yaml",
+        "mode": "ro"
+      },
+      {
+        "source": "/opt/nazo-oauth/runtime/keys",
+        "target": "/var/lib/nazo_oauth/keys",
+        "mode": "rw"
+      },
+      {
+        "source": "/opt/nazo-oauth/runtime/avatars",
+        "target": "/var/lib/nazo_oauth/avatars",
+        "mode": "rw"
+      }
+    ],
+    "snapshot_paths": [
+      "/opt/nazo-oauth/runtime/keys"
+    ],
+    "environment": {}
+  },
+  "postgres": {
+    "container_name": "nazo-oauth-postgres",
+    "database": "oauth",
+    "user": "nazoauth",
+    "validation_image": "docker.io/library/postgres:18"
+  },
+  "valkey": {
+    "container_name": "nazo-oauth-valkey",
+    "rdb_path": "/data/dump.rdb",
+    "password_file": ""
+  },
+  "ui": {
+    "active_path": "/usr/local/angie/html/auth/ui",
+    "releases_root": "/usr/local/angie/html/auth-releases"
+  }
+}
