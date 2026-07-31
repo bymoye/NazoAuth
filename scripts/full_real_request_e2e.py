@@ -2114,7 +2114,16 @@ def run() -> None:
         admin = requests.Session()
 
         health = expect_status("GET /health", anonymous.get(f"{BASE_URL}/health", timeout=10), 200)
-        check("health_body", expect_json(health).get("status") == "正常")
+        health_body = expect_json(health)
+        check("health_body", health_body.get("status") == "ready")
+        check(
+            "health_dependencies",
+            health_body.get("checks")
+            == {
+                "postgresql": {"status": "up"},
+                "valkey": {"status": "up"},
+            },
+        )
 
         discovery = expect_json(
             expect_status(
