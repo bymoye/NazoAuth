@@ -162,9 +162,12 @@ fn pending_intent_reuses_jti_and_expired_uncommitted_intent_is_reissued() {
     expired.nbf = 1;
     expired.exp = 61;
     let key = read_signing_key(&config.operator.controller_private_key).unwrap();
-    fs::write(
+    atomic_write(
         &path,
-        sign_task(&expired, &config.operator.controller_key_id, &key).unwrap(),
+        sign_task(&expired, &config.operator.controller_key_id, &key)
+            .unwrap()
+            .as_bytes(),
+        0o400,
     )
     .unwrap();
     let (reissued, _, _) =
@@ -195,7 +198,7 @@ fn stale_audit_head_repairs_forward_but_tampering_fails_closed() {
     assert_eq!(repaired.sequence, 1);
     let mut compact = fs::read_to_string(&event).unwrap();
     compact.push('x');
-    fs::write(event, compact).unwrap();
+    atomic_write(&event, compact.as_bytes(), 0o400).unwrap();
     assert!(verify_audit(&config).is_err());
 }
 
