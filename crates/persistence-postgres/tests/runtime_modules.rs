@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use diesel::{QueryableByName, sql_query, sql_types::BigInt};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection as _};
 use nazo_postgres::{RuntimeModuleRepository, create_pool};
 use nazo_runtime_modules::{
     ActiveModuleSnapshot, CasOutcome, CatalogDurations, DesiredMode, DesiredRevisionGuard,
@@ -128,6 +128,11 @@ fn tagged_database_url(database_url: &str, application_name: &str) -> String {
     format!("{database_url}{separator}application_name={application_name}")
 }
 
+fn schema_database_url(base: &str, schema: &str) -> String {
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}options=-csearch_path%3D{schema}%2Cpublic")
+}
+
 async fn wait_for_lock_wait(connection: &mut AsyncPgConnection) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -161,6 +166,90 @@ async fn clear_module(database_url: &str, module_id: &str) {
             .await
             .expect("runtime module fixture should clear");
     }
+}
+
+#[tokio::test]
+async fn composable_default_policy_migration_materializes_legacy_and_missing_rows_once() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let schema = format!("runtime_policy_{}", Uuid::now_v7().simple());
+    let mut coordinator = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    coordinator
+        .batch_execute(&format!("CREATE SCHEMA \"{schema}\";"))
+        .await
+        .expect("isolated schema should create");
+    let isolated_url = schema_database_url(&database_url, &schema);
+    nazo_postgres::run_pending_migrations(&isolated_url)
+        .await
+        .expect("isolated schema migrations should apply");
+    let mut fixture = AsyncPgConnection::establish(&isolated_url)
+        .await
+        .expect("isolated fixture database should connect");
+    fixture
+        .batch_execute(
+            "INSERT INTO runtime_module_desired_states
+                 (module_id, desired_mode, revision, reason)
+             VALUES
+                 ('request_objects', 'inherit', 7, 'legacy inherited fixture'),
+                 ('jarm', 'enabled', 9, 'explicit legacy fixture');",
+        )
+        .await
+        .expect("legacy policy fixture should insert");
+
+    let repository = RuntimeModuleRepository::new(
+        create_pool(isolated_url.clone(), 4).expect("isolated pool should create"),
+    );
+    let legacy_enabled = BTreeSet::from([ModuleId::RequestObjects, ModuleId::DeviceAuthorization]);
+    let migration = repository
+        .migrate_composable_default_policy(&legacy_enabled)
+        .await
+        .expect("legacy policy should materialize");
+    assert_eq!(migration.previous_version, 1);
+    assert_eq!(migration.current_version, 2);
+    assert_eq!(
+        migration.materialized_inherited_rows,
+        ModuleId::ALL.len() - 1
+    );
+    assert!(!migration.initialized_empty_state);
+
+    let records = repository.read_all_desired().await.unwrap();
+    let record = |module_id| {
+        records
+            .iter()
+            .find(|record| record.module_id == module_id)
+            .expect("every module should be materialized")
+    };
+    assert_eq!(record(ModuleId::RequestObjects).mode, DesiredMode::Enabled);
+    assert_eq!(
+        record(ModuleId::RequestObjects).revision,
+        ModuleRevision::new(8)
+    );
+    assert_eq!(record(ModuleId::Jarm).mode, DesiredMode::Enabled);
+    assert_eq!(record(ModuleId::Jarm).revision, ModuleRevision::new(9));
+    assert_eq!(
+        record(ModuleId::DeviceAuthorization).mode,
+        DesiredMode::Enabled
+    );
+    assert_eq!(record(ModuleId::TokenExchange).mode, DesiredMode::Disabled);
+
+    let repeated = repository
+        .migrate_composable_default_policy(&BTreeSet::new())
+        .await
+        .expect("the policy migration should be idempotent");
+    assert_eq!(repeated.previous_version, 2);
+    assert_eq!(repeated.current_version, 2);
+    assert_eq!(repeated.materialized_inherited_rows, 0);
+    assert!(!repeated.initialized_empty_state);
+
+    drop(repository);
+    drop(fixture);
+    coordinator
+        .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE;"))
+        .await
+        .expect("isolated schema should drop");
 }
 
 #[tokio::test]
