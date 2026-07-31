@@ -254,9 +254,10 @@ keyset_path.write_text(json.dumps(keyset, indent=2) + "\n", encoding="utf-8")
 os.chmod(keyset_path, 0o600)
 PY
 export LLVM_PROFILE_FILE="$(profile_path 'cargo-%p-%m.profraw')"
+cargo test --locked -p nazo-postgres --test migrations \
+  pending_migrations_create_all_runtime_module_state_tables
 cargo build --locked --workspace --all-features --bin nazoauth
 
-LLVM_PROFILE_FILE="$(profile_path 'migrate-%p.profraw')" "$BIN_DIR/nazoauth" migrate
 LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
 SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
