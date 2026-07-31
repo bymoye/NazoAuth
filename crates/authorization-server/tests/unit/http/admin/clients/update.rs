@@ -477,6 +477,77 @@ async fn patch_preserves_unsubmitted_security_metadata() {
 }
 
 #[actix_web::test]
+async fn patch_can_explicitly_clear_every_optional_response_crypto_setting() {
+    let mut client = current_client();
+    client.id_token_signed_response_alg = Some("RS256".to_owned());
+    client.id_token_encrypted_response_alg = Some("RSA-OAEP-256".to_owned());
+    client.id_token_encrypted_response_enc = Some("A256GCM".to_owned());
+    client.request_object_signing_alg = Some("RS256".to_owned());
+    client.request_object_encryption_alg = Some("RSA-OAEP-256".to_owned());
+    client.request_object_encryption_enc = Some("A256GCM".to_owned());
+    client.token_endpoint_auth_signing_alg = Some("RS256".to_owned());
+    client.introspection_signed_response_alg = Some("RS256".to_owned());
+    client.introspection_encrypted_response_alg = Some("RSA-OAEP-256".to_owned());
+    client.introspection_encrypted_response_enc = Some("A256GCM".to_owned());
+    client.userinfo_signed_response_alg = Some("RS256".to_owned());
+    client.userinfo_encrypted_response_alg = Some("RSA-OAEP-256".to_owned());
+    client.userinfo_encrypted_response_enc = Some("A256GCM".to_owned());
+    client.authorization_signed_response_alg = Some("RS256".to_owned());
+    client.authorization_encrypted_response_alg = Some("RSA-OAEP-256".to_owned());
+    client.authorization_encrypted_response_enc = Some("A256GCM".to_owned());
+
+    let mut patch = empty_patch();
+    patch.id_token_signed_response_alg = Some(" ".to_owned());
+    patch.id_token_encrypted_response_alg = Some(" ".to_owned());
+    patch.id_token_encrypted_response_enc = Some(" ".to_owned());
+    patch.request_object_signing_alg = Some(" ".to_owned());
+    patch.request_object_encryption_alg = Some(" ".to_owned());
+    patch.request_object_encryption_enc = Some(" ".to_owned());
+    patch.token_endpoint_auth_signing_alg = Some(" ".to_owned());
+    patch.introspection_signed_response_alg = Some(" ".to_owned());
+    patch.introspection_encrypted_response_alg = Some(" ".to_owned());
+    patch.introspection_encrypted_response_enc = Some(" ".to_owned());
+    patch.userinfo_signed_response_alg = Some(" ".to_owned());
+    patch.userinfo_encrypted_response_alg = Some(" ".to_owned());
+    patch.userinfo_encrypted_response_enc = Some(" ".to_owned());
+    patch.authorization_signed_response_alg = Some(" ".to_owned());
+    patch.authorization_encrypted_response_alg = Some(" ".to_owned());
+    patch.authorization_encrypted_response_enc = Some(" ".to_owned());
+    patch.security_policy = Some(nazo_auth::ClientSecurityPolicy::default());
+
+    let prepared = prepare_client_patch(
+        &client,
+        patch,
+        None,
+        "http://localhost:8000",
+        nazo_key_management::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )
+    .await
+    .expect("explicit empty optional metadata should clear every setting");
+
+    assert!(prepared.id_token_signed_response_alg.is_none());
+    assert!(prepared.id_token_encrypted_response_alg.is_none());
+    assert!(prepared.id_token_encrypted_response_enc.is_none());
+    assert!(prepared.request_object_signing_alg.is_none());
+    assert!(prepared.request_object_encryption_alg.is_none());
+    assert!(prepared.request_object_encryption_enc.is_none());
+    assert!(prepared.token_endpoint_auth_signing_alg.is_none());
+    assert!(prepared.introspection_signed_response_alg.is_none());
+    assert!(prepared.introspection_encrypted_response_alg.is_none());
+    assert!(prepared.introspection_encrypted_response_enc.is_none());
+    assert!(prepared.userinfo_signed_response_alg.is_none());
+    assert!(prepared.userinfo_encrypted_response_alg.is_none());
+    assert!(prepared.userinfo_encrypted_response_enc.is_none());
+    assert!(prepared.authorization_signed_response_alg.is_none());
+    assert!(prepared.authorization_encrypted_response_alg.is_none());
+    assert!(prepared.authorization_encrypted_response_enc.is_none());
+    assert_eq!(
+        prepared.security_policy,
+        Some(nazo_auth::ClientSecurityPolicy::default())
+    );
+}
+
+#[actix_web::test]
 async fn patch_rejects_redirect_uri_with_surrounding_whitespace() {
     let mut patch = empty_patch();
     patch.redirect_uris = Some(vec![" https://client.example/callback ".to_owned()]);
