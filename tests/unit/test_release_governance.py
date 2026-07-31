@@ -36,13 +36,14 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn(".env.*", dockerignore)
         self.assertIn("!.env.yaml.example", dockerignore)
         final_stage = source.split("FROM runtime-base AS runtime", 1)[1].split(
-            "FROM runtime AS perf-runtime", 1
+            "\nFROM ", 1
         )[0]
         self.assertNotIn("scripts/", final_stage)
         self.assertNotIn("tests/", final_stage)
         self.assertNotIn("docs/", final_stage)
         self.assertNotIn("oidf", final_stage.lower())
         self.assertEqual(final_stage.count("/usr/local/bin/nazoauth"), 1)
+        self.assertNotIn("/usr/local/bin/nazoauthctl", final_stage)
         for retired_binary in (
             "nazo-oauth-server",
             "nazo-oauth-migrate",
@@ -50,7 +51,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ):
             self.assertNotIn(retired_binary, final_stage)
 
-    def test_public_quick_start_is_platform_neutral_compose(self) -> None:
+    def test_public_quick_start_is_platform_neutral_verified_controller(self) -> None:
         public_guides = [
             ROOT / "README.md",
             ROOT / "README.zh-CN.md",
@@ -71,8 +72,11 @@ class ReleaseGovernanceTests(unittest.TestCase):
 
         for path in (ROOT / "README.md", ROOT / "README.zh-CN.md"):
             source = path.read_text(encoding="utf-8")
-            self.assertIn("docker compose up -d --build", source)
-            self.assertIn("docker compose ps", source)
+            self.assertIn("nazoauthctl install --runtime auto", source)
+            self.assertIn("nazoauthctl doctor", source)
+            self.assertIn("compose.yml", source)
+            self.assertRegex(source.lower(), r"development|开发")
+            self.assertNotIn("docker compose up -d --build", source)
 
     def test_compose_quick_start_is_self_contained_and_project_scoped(self) -> None:
         source = (ROOT / "compose.yml").read_text(encoding="utf-8")
@@ -85,12 +89,17 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("ipv4_address:", source)
         self.assertNotIn("name: nazo_oauth_net", source)
 
-    def test_release_builds_once_and_publishes_one_executable(self) -> None:
-        manifest = (
+    def test_release_builds_one_application_and_one_lifecycle_executable(self) -> None:
+        server_manifest = (
             ROOT / "crates" / "authorization-server" / "Cargo.toml"
         ).read_text(encoding="utf-8")
-        self.assertEqual(manifest.count("[[bin]]"), 1)
-        self.assertIn('name = "nazoauth"', manifest)
+        ctl_manifest = (
+            ROOT / "crates" / "nazoauthctl" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(server_manifest.count("[[bin]]"), 1)
+        self.assertIn('name = "nazoauth"', server_manifest)
+        self.assertEqual(ctl_manifest.count("[[bin]]"), 1)
+        self.assertIn('name = "nazoauthctl"', ctl_manifest)
 
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
@@ -98,6 +107,10 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("cargo build --release", release)
         self.assertIn(
             'docker cp "$container_id:/usr/local/bin/nazoauth" target/release/nazoauth',
+            release,
+        )
+        self.assertIn(
+            'docker cp "$container_id:/usr/local/bin/nazoauthctl" target/nazoauthctl',
             release,
         )
         self.assertNotRegex(

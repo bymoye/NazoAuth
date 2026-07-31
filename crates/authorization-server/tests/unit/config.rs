@@ -317,6 +317,29 @@ fn environment_secret_file_supplies_an_absent_scalar() {
 }
 
 #[test]
+fn migration_config_does_not_materialize_unrelated_application_secrets() {
+    let path = temp_config_dir("migration_config_no_application_secrets");
+    let database_url_file = path.join("database-url");
+    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
+
+    let source = ConfigSource::load_from_dir_with_env_mode(
+        &path,
+        [(
+            "DATABASE_URL_FILE".to_owned(),
+            database_url_file.display().to_string(),
+        )],
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert!(!path.join("state").exists());
+    assert!(source.get("CLIENT_SECRET_PEPPER").is_none());
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn environment_overrides_yaml_by_allowlist() {
     let mut source = ConfigSource::default();
     source
@@ -487,6 +510,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TLS_CLIENT_CA_FILE",
             "TLS_PRIVATE_KEY_FILE",
             "TRUSTED_PROXY_CIDRS",
+            "UI_STATIC_DIR",
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_URL",
             "VALKEY_URL_FILE",

@@ -1,13 +1,17 @@
 # Release and conformance boundary
 
 Production artifacts contain the protocol implementation, migrations, and
-operator tools. They do not contain OIDF plan definitions, runner source,
+the independently signed `nazoauth` and `nazoauthctl` executables. They do not contain OIDF plan definitions, runner source,
 browser automation, expected-result registries, onboarding fixtures, test
 credentials, or conformance scripts.
 
-The runtime container contains only the `nazoauth` executable. Its `server`,
-`migrate`, and `keyctl` subcommands expose the product and operator entry
-points. OIDF tools stay in the source repository and interact with a deployed
+The long-running runtime container contains only the `nazoauth` executable.
+Its public `server` entry point cannot mutate schema; privileged work is accepted
+only by the closed, signed `operator-task` protocol. The host `nazoauthctl`
+verifies the actual OCI/host digest, prepares a least-privilege one-shot sandbox,
+and only then issues the 60-second task. Host deployments run the same verified
+binary as the service user. OIDF tools stay in
+the source repository and interact with a deployed
 issuer only through its public HTTPS protocol and normal public administration
 flows. Product code must not branch on suite aliases, plan names, callback
 paths, test headers, or a conformance build flag.

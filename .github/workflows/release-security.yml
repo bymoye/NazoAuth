@@ -63,9 +63,25 @@ jobs:
       - name: Generate Rust SBOM
         run: |
           cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazoauth.cdx
+          cargo cyclonedx --manifest-path crates/nazoauthctl/Cargo.toml --format json --override-filename nazoauthctl.cdx
           mkdir -p target
           mv crates/authorization-server/nazoauth.cdx.json target/nazoauth.cdx.json
+          mv crates/nazoauthctl/nazoauthctl.cdx.json target/nazoauthctl.cdx.json
       - uses: docker/setup-buildx-action@v4.2.0
+      - name: Build signed-binary export image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: Containerfile
+          target: release-export
+          tags: localhost/nazoauth-release-export:${{ steps.release.outputs.version }}
+          load: true
+          cache-from: type=gha,scope=nazo-oauth-service
+          cache-to: type=gha,mode=max,scope=nazo-oauth-service
+          build-args: |
+            NAZOAUTH_BUILD_RELEASE=${{ steps.release.outputs.version }}
+            NAZOAUTH_BUILD_REVISION=${{ github.sha }}
+            NAZOAUTH_BUILD_ID=github:${{ github.run_id }}:${{ github.run_attempt }}
       - name: Build release image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -80,15 +96,20 @@ jobs:
           load: true
           cache-from: type=gha,scope=nazo-oauth-service
           cache-to: type=gha,mode=max,scope=nazo-oauth-service
+          build-args: |
+            NAZOAUTH_BUILD_RELEASE=${{ steps.release.outputs.version }}
+            NAZOAUTH_BUILD_REVISION=${{ github.sha }}
+            NAZOAUTH_BUILD_ID=github:${{ github.run_id }}:${{ github.run_attempt }}
       - name: Export release binary and image
         run: |
           mkdir -p target/release
-          container_id="$(docker create localhost/nazo-oauth-server:${{ steps.release.outputs.version }})"
+          container_id="$(docker create localhost/nazoauth-release-export:${{ steps.release.outputs.version }})"
           docker cp "$container_id:/usr/local/bin/nazoauth" target/release/nazoauth
+          docker cp "$container_id:/usr/local/bin/nazoauthctl" target/nazoauthctl
           docker rm "$container_id"
+          cp scripts/install_nazoauthctl.sh target/install_nazoauthctl.sh
           docker save localhost/nazo-oauth-server:${{ steps.release.outputs.version }} \
             -o target/nazo-oauth-server-image.tar
-          install -m 0755 deploy/update/nazoauthctl target/nazoauthctl
       - name: Scan release images
         run: |
           for archive in target/nazo-oauth-server-image.tar; do
@@ -104,14 +125,21 @@ jobs:
       - name: Build immutable update manifest
         if: steps.release.outputs.tag_release == 'true'
         run: |
+          image_digest="$(docker image inspect \
+            localhost/nazo-oauth-server:${{ steps.release.outputs.version }} \
+            --format '{{.Id}}')"
           python3 scripts/build_release_manifest.py \
             --version "${{ steps.release.outputs.version }}" \
             --backend-commit "$GITHUB_SHA" \
+            --build-id "github:${{ github.run_id }}:${{ github.run_attempt }}" \
+            --image-digest "$image_digest" \
             --frontend-commit "${{ steps.release.outputs.frontend_commit }}" \
             --image target/nazo-oauth-server-image.tar \
             --ui target/nazoauth-ui.tar.gz \
             --binary target/release/nazoauth \
+            --bootstrap target/install_nazoauthctl.sh \
             --updater target/nazoauthctl \
+            --updater-sbom target/nazoauthctl.cdx.json \
             --sbom target/nazoauth.cdx.json \
             --policy release/update-policy.json \
             --output target/release-manifest.json
@@ -122,9 +150,11 @@ jobs:
           path: |
             target/release/nazoauth
             target/nazoauth.cdx.json
+            target/nazoauthctl.cdx.json
             target/nazo-oauth-server-image.tar
             target/nazoauth-ui.tar.gz
             target/nazoauthctl
+            target/install_nazoauthctl.sh
             target/release-manifest.json
           if-no-files-found: error
           retention-days: 1
@@ -150,9 +180,11 @@ jobs:
         run: |
           cosign sign-blob --yes --bundle target/release/nazoauth.bundle target/release/nazoauth
           cosign sign-blob --yes --bundle target/nazoauth.cdx.json.bundle target/nazoauth.cdx.json
+          cosign sign-blob --yes --bundle target/nazoauthctl.cdx.json.bundle target/nazoauthctl.cdx.json
           cosign sign-blob --yes --bundle target/nazo-oauth-server-image.tar.bundle target/nazo-oauth-server-image.tar
           cosign sign-blob --yes --bundle target/nazoauth-ui.tar.gz.bundle target/nazoauth-ui.tar.gz
           cosign sign-blob --yes --bundle target/nazoauthctl.bundle target/nazoauthctl
+          cosign sign-blob --yes --bundle target/install_nazoauthctl.sh.bundle target/install_nazoauthctl.sh
           if [[ -f target/release-manifest.json ]]; then
             cosign sign-blob --yes \
               --bundle target/release-manifest.json.bundle \
@@ -164,8 +196,10 @@ jobs:
           subject-path: |
             target/release/nazoauth
             target/nazoauth.cdx.json
+            target/nazoauthctl.cdx.json
             target/nazoauth-ui.tar.gz
             target/nazoauthctl
+            target/install_nazoauthctl.sh
       - name: Attest release image archive
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -189,12 +223,16 @@ jobs:
             target/release/nazoauth.bundle \
             target/nazoauth.cdx.json \
             target/nazoauth.cdx.json.bundle \
+            target/nazoauthctl.cdx.json \
+            target/nazoauthctl.cdx.json.bundle \
             target/nazo-oauth-server-image.tar \
             target/nazo-oauth-server-image.tar.bundle \
             target/nazoauth-ui.tar.gz \
             target/nazoauth-ui.tar.gz.bundle \
             target/nazoauthctl \
             target/nazoauthctl.bundle \
+            target/install_nazoauthctl.sh \
+            target/install_nazoauthctl.sh.bundle \
             target/release-manifest.json \
             target/release-manifest.json.bundle
       - name: Upload signed release artifacts
@@ -204,9 +242,11 @@ jobs:
           path: |
             target/release/nazoauth
             target/nazoauth.cdx.json
+            target/nazoauthctl.cdx.json
             target/nazo-oauth-server-image.tar
             target/nazoauth-ui.tar.gz
             target/nazoauthctl
+            target/install_nazoauthctl.sh
             target/release-manifest.json
             target/release/*.bundle
             target/*.bundle

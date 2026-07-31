@@ -1,6 +1,9 @@
 {
-  "schema": 1,
-  "database_rollback_compatible": true,
+  "schema": 2,
+  "artifact_rollback": true,
+  "schema_compatible": true,
+  "database_restore": "backup",
+  "irreversible_migration": false,
   "minimum_supported_version": "0.0.0",
   "migration_floor": "20260731000200",
   "rationale": "All migrations through the declared floor are additive for the immediately previous release. Change this declaration whenever an upgrade cannot safely restart the previous application image."

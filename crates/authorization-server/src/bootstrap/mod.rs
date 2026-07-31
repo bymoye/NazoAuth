@@ -24,9 +24,15 @@ pub(crate) use profile_services::{
 };
 pub(crate) use registration_services::{LocalRegistrationService, RegistrationSecretHasher};
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use actix_web::{App, HttpServer, dev::Service, middleware::from_fn, web};
+use actix_files::{Files, NamedFile};
+use actix_web::{
+    App, HttpResponse, HttpServer,
+    dev::{Service, ServiceRequest, ServiceResponse, fn_service},
+    middleware::from_fn,
+    web,
+};
 use anyhow::Context as _;
 
 use crate::adapters::email::{SmtpVerificationEmailDelivery, email_delivery_configured};
@@ -830,6 +836,18 @@ pub async fn run() -> anyhow::Result<()> {
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
     let direct_tls = direct_tls_listener(&config, &settings)?;
+    let ui_static_dir = config
+        .optional_string("UI_STATIC_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            let path = std::fs::canonicalize(&path)
+                .with_context(|| format!("failed to resolve UI_STATIC_DIR {}", path.display()))?;
+            if !path.join("index.html").is_file() {
+                anyhow::bail!("UI_STATIC_DIR must contain index.html: {}", path.display());
+            }
+            Ok::<_, anyhow::Error>(path)
+        })
+        .transpose()?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
     let server = HttpServer::new(move || {
@@ -942,6 +960,11 @@ pub async fn run() -> anyhow::Result<()> {
         } else {
             app
         };
+        let app = if let Some(path) = ui_static_dir.clone() {
+            app.service(ui_static_files(path))
+        } else {
+            app
+        };
         app.configure(|cfg| routes::configure(cfg, &settings, perf_metrics_enabled))
     })
     .on_connect(|io, extensions| {
@@ -969,6 +992,33 @@ pub async fn run() -> anyhow::Result<()> {
     };
     server.run().await?;
     Ok(())
+}
+
+fn ui_static_files(root: PathBuf) -> Files {
+    let index = root.join("index.html");
+    Files::new("/ui", root)
+        .index_file("index.html")
+        .disable_content_disposition()
+        .default_handler(fn_service(move |request: ServiceRequest| {
+            let index = index.clone();
+            async move {
+                let missing_asset = request
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|segment| segment.contains('.'));
+                let (request, _) = request.into_parts();
+                if missing_asset {
+                    return Ok(ServiceResponse::new(
+                        request,
+                        HttpResponse::NotFound().finish(),
+                    ));
+                }
+                let file = NamedFile::open_async(index).await?;
+                let response = file.into_response(&request);
+                Ok(ServiceResponse::new(request, response))
+            }
+        }))
 }
 
 fn direct_tls_listener(

@@ -3,10 +3,17 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
-## Unreleased
+## 0.1.0 - 2026-07-31
 
 ### Added
 
+- Added the independently signed Rust `nazoauthctl` lifecycle binary with
+  idempotent installation support for Podman, Docker,
+  and Linux systemd deployments, with generated or operator-supplied
+  PostgreSQL/Valkey connections, pre-migration backups, application-served
+  signed UI assets, transactional host/container updates and rollback, and
+  signed, replay-safe target-runtime delegation through the closed
+  `nazoauth operator-task` entry point.
 - Added RFC 9865 forward cursor pagination for SCIM user listing with index as
   the default, stateless AES-256-GCM actor/query-bound cursors, deterministic
   keyset traversal, exact pagination errors, and truthful capability metadata.

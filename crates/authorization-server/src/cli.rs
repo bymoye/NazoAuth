@@ -4,7 +4,7 @@ use anyhow::bail;
 
 use crate::config::{ConfigSource, ServerConfigPreparation, database_url};
 
-const USAGE: &str = "usage: nazoauth <server|migrate|keyctl> [options]";
+const USAGE: &str = "usage: nazoauth <server|operator-task>";
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     match Command::parse(args)? {
@@ -13,10 +13,7 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Server => run_server().await,
-        Command::Migrate => run_migrations().await,
-        Command::Keyctl(args) => {
-            crate::keyctl::run(std::iter::once("nazoauth keyctl".to_owned()).chain(args)).await
-        }
+        Command::OperatorTask => crate::operator_task::run().await,
     }
 }
 
@@ -30,12 +27,14 @@ async fn run_server() -> anyhow::Result<()> {
             );
         }
     }
-    run_migrations().await?;
     crate::bootstrap::run().await
 }
 
-async fn run_migrations() -> anyhow::Result<()> {
-    let config = ConfigSource::load()?;
+pub(crate) async fn run_migrations() -> anyhow::Result<()> {
+    // Migration ownership needs only the database secret. Materializing unrelated
+    // application secrets here would couple a least-privilege one-shot task to the
+    // long-running runtime's writable data directories.
+    let config = ConfigSource::load_without_generated_secrets()?;
     let database_url = database_url(&config);
     nazo_postgres::run_pending_migrations(&database_url).await?;
     nazo_postgres::cleanup_expired_security_state(&database_url).await?;
@@ -46,8 +45,7 @@ async fn run_migrations() -> anyhow::Result<()> {
 enum Command {
     Help,
     Server,
-    Migrate,
-    Keyctl(Vec<String>),
+    OperatorTask,
 }
 
 impl Command {
@@ -66,11 +64,10 @@ impl Command {
                 ensure_no_extra_args(args, "server")?;
                 Ok(Self::Server)
             }
-            "migrate" => {
-                ensure_no_extra_args(args, "migrate")?;
-                Ok(Self::Migrate)
+            "operator-task" => {
+                ensure_no_extra_args(args, "operator-task")?;
+                Ok(Self::OperatorTask)
             }
-            "keyctl" => Ok(Self::Keyctl(args.collect())),
             _ => bail!("unknown command {command}\n{USAGE}"),
         }
     }

@@ -12,6 +12,7 @@ test = false
 
 [dependencies]
 actix-cors.workspace = true
+actix-files.workspace = true
 actix-multipart = "0.8.0"
 actix-web = { workspace = true, features = ["cookies", "openssl"] }
 actix-tls = { workspace = true, features = ["accept", "openssl"] }
@@ -34,6 +35,7 @@ nazo-auth.workspace = true
 nazo-http-signatures.workspace = true
 nazo-http-actix.workspace = true
 nazo-openid4vc-http-actix.workspace = true
+nazo-operator-protocol.workspace = true
 nazo-openid4vci.workspace = true
 nazo-openid4vp.workspace = true
 nazo-digital-credentials.workspace = true

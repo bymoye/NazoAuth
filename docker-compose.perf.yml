@@ -77,7 +77,28 @@ services:
       target: perf-runtime
     volumes:
       - perf_runtime:/var/lib/nazo_oauth
-    command: ["sh", "-c", "nazoauth migrate && touch /tmp/migrate-ready && tail -f /dev/null"]
+    command:
+      - sh
+      - -euc
+      - |
+        ci_operator_task prepare \
+          --config /app/.env.yaml \
+          --output /tmp/operator \
+          --image-ref localhost/nazoauth-perf:development \
+          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
+        NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
+        NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
+        NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
+        NAZOAUTH_OPERATOR_STATE_DIRECTORY=/tmp/operator/state \
+        NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
+        NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
+          nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws
+        ci_operator_task verify \
+          --receipt /tmp/operator/receipt.jws \
+          --public-key /tmp/operator/receipt.pub \
+          --request-sha256 /tmp/operator/request.sha256
+        touch /tmp/migrate-ready
+        tail -f /dev/null
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/migrate-ready"]
       interval: 2s

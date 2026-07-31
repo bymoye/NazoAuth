@@ -1,81 +1,178 @@
-# One-click updates
+# One-click installation and updates
 
-`nazoauthctl` is the supported update path for a standalone Podman deployment.
-It consumes immutable tagged release assets; it does not clone source code or
-run Rust, Node.js, or Docker builds on the production host.
+`nazoauthctl` is the supported lifecycle entry point for standalone Linux
+deployments. It consumes immutable tagged release artifacts without cloning
+source or requiring Rust, Node.js, or an image build toolchain on the host.
+It is a Rust executable built and signed in the same release as `nazoauth`.
 
-After the initial installation has placed the root-owned configuration at
-`/etc/nazoauth/update.json`, the normal operator action is:
+## First installation
+
+First download `install_nazoauthctl.sh` and its `.bundle` from the same immutable
+GitHub Release, verify the exact tag workflow identity with Cosign, and only then
+run the verified local script. The script verifies the `nazoauthctl` bundle again
+before installing it; `curl | sh` is intentionally not documented as a trusted
+bootstrap path.
+
+`auto` selects an installed Podman runtime first and Docker second:
 
 ```sh
-sudo nazoauthctl update
+sudo nazoauthctl install --runtime auto
 ```
 
-Use `nazoauthctl check` to verify the newest release without changing runtime
-state, `nazoauthctl update --to v1.2.3` to pin an exact release, and
-`nazoauthctl status` to inspect the active image revision.
+Without a public URL, NazoAuth is published only at
+`http://127.0.0.1:8000`. The installer generates PostgreSQL, Valkey, and
+application secrets; creates persistent storage and configuration; installs
+the signed frontend; and verifies readiness, Discovery, and `/ui/`.
+
+The runtime can be selected explicitly:
+
+```sh
+sudo nazoauthctl install --runtime podman
+sudo nazoauthctl install --runtime docker
+sudo nazoauthctl install --runtime host
+```
+
+`host` installs the signed `nazoauth` binary as a systemd service. Unless
+external dependency URLs are supplied, an installed Podman or Docker runtime
+still manages PostgreSQL and Valkey. Current standalone artifacts support Linux
+x86_64. Host mode also executes the candidate's `--help` before changing the
+service so dynamic-link incompatibility fails before activation.
+
+DNS and certificate ownership cannot be inferred. When `--public-url` is an
+HTTPS origin, an existing TLS ingress must already forward that origin to the
+installation port. Installation succeeds only after public Discovery reports
+the exact issuer.
+
+### Existing PostgreSQL and Valkey
+
+Interactive entry avoids echoing credentials:
+
+```sh
+sudo nazoauthctl install --runtime host --external-dependencies
+```
+
+Automation supplies strict JSON through stdin or an already-open file
+descriptor; URLs are rejected in argv and ordinary environment variables:
+
+```sh
+secret-provider read nazoauth/dependencies | sudo nazoauthctl install \
+  --runtime host --external-dependencies --secrets-stdin
+```
+
+The JSON has exactly `database_url`, `migration_database_url`, and `valkey_url`.
+The runtime PostgreSQL role must not have DDL privileges; the independently
+supplied migration URL is exposed only to the one-shot migration task. The
+input is persisted only in root-managed secret files and is never copied into
+the topology, task envelope, logs, or audit records.
+
+External-dependency installation and every subsequent update must create a
+validated PostgreSQL custom-format dump and a Valkey RDB before migrations.
+A container-free host deployment therefore requires `cosign`, `pg_dump`,
+`pg_restore`, and `valkey-cli`.
+
+## Normal operations
+
+```sh
+sudo nazoauthctl status
+sudo nazoauthctl doctor
+sudo nazoauthctl check
+sudo nazoauthctl update --plan
+sudo nazoauthctl update --yes --to v1.2.3
+sudo nazoauthctl rollback --yes
+sudo nazoauthctl recover --yes
+sudo nazoauthctl migrate --yes
+sudo nazoauthctl keys list
+sudo nazoauthctl keys validate
+sudo nazoauthctl audit verify
+sudo nazoauthctl audit show [--request-id REQUEST_ID]
+sudo nazoauthctl identity rotate --yes
+sudo nazoauthctl break-glass recover-controller --reason lost --yes
+```
+
+The file-backed break-glass private key is independent from the controller and
+audit keys and is never mounted into an application or task container. Export
+an encrypted copy to offline escrow after installation. The current file-backed
+flow still requires the root-owned host copy; a future provider integration is
+required before removing it. File permissions do not protect it from host root.
+Every break-glass recovery signs the transition
+with the old recovery identity and atomically replaces controller, audit, and
+break-glass identities; archive the new recovery key before the next incident.
+
+`install` is idempotent and does not rebuild or upgrade an already ready
+managed installation. `check` is non-mutating; `update` selects the latest
+formal release; and `--to` pins an immutable version.
+
+Automation can rely on exit code `0` for success, `2` for rejected CLI usage,
+and `1` for any fail-closed lifecycle, trust, authorization, health, backup, or
+recovery failure. A nonzero result never authorizes continuing from the failed
+step in the clean-install acceptance procedure.
+
+`nazoauthctl` runs on the host, but application-aware work stays in the target
+runtime. For Docker or Podman it starts a one-shot container from the active or
+candidate image, attaches the deployment network, and mounts the same
+only the operation-specific configuration and state. It invokes the fixed
+`nazoauth operator-task` entry point and passes a 60-second Ed25519 JWS on
+stdin. JWS authenticates origin and integrity; it does not encrypt. Secret
+material therefore travels only through secure stdin/FD, a secret mount, or a
+secret provider, never argv, ordinary environment, logs, audit, or a persisted
+task envelope. For a host deployment, the same verified binary runs as the
+service user. The final signed receipt binds the controller-verified OCI/host
+digest to the application-verified embedded build identity; the application
+does not claim to prove its OCI digest.
 
 ## Trust and transaction boundary
 
-For a tagged release, `release-security` publishes:
+For each tag, `release-security` publishes the backend image, `nazoauth`,
+`nazoauthctl`, their SBOMs, the signed frontend, and a schema-3 manifest binding
+every artifact size and SHA-256 digest. Cosign verification requires the exact
+`release-security.yml@refs/tags/<version>` workflow identity before any
+artifact is trusted.
 
-- an immutable backend image archive;
-- the frontend artifact pinned by `release/frontend.lock`;
-- the unified `nazoauth` binary and CycloneDX SBOM;
-- `nazoauthctl`;
-- a release manifest containing every artifact size and SHA-256 digest;
-- keyless Sigstore bundles bound to the tag-specific GitHub Actions workflow
-  identity.
+Container modes can run the reviewed, OCI-digest-pinned Cosign image when a
+local executable is unavailable. A container-free host deployment requires a
+local Cosign executable.
 
-The updater first verifies the manifest with Cosign and the exact
-`release-security.yml@refs/tags/<version>` certificate identity. Only then does
-it parse artifact names and hashes. A floating image tag, an unsigned
-manifest, a different workflow identity, a digest mismatch, an unexpected
-image revision, or a release that does not declare database rollback
-compatibility fails closed.
+Installation and update transactions:
 
-If the host does not provide a `cosign` executable, the updater runs the
-official multi-architecture Cosign release image pinned by OCI digest. Updating
-that verifier digest is a reviewed source change, not a network-selected
-`latest` dependency.
+1. take an exclusive host lock;
+2. verify the signed manifest and required artifacts;
+3. prepare and verify the candidate, then stop the active application writer;
+4. create and validate PostgreSQL and Valkey backups and snapshot signing keys,
+   generated secrets, and bootstrap state;
+5. verify the image revision or execute the host binary;
+6. run migrations and start the candidate;
+7. atomically switch the signed frontend;
+8. verify readiness, Discovery, and `/ui/`;
+9. record the deployment and update `nazoauthctl` from the same release.
 
-The update transaction:
+`update --plan` separately reports artifact rollback, schema-compatible
+rollback, backup/PITR recovery, and an irreversible migration barrier. The
+controller never describes database recovery as automatic. It restores the
+previous artifact only when the signed policy says the resulting schema is
+compatible; `recover --yes` is the explicit verified-backup restoration path.
+For managed dependencies, the single managed application writer is stopped
+before both backups; restored Valkey state can still invalidate ephemeral
+sessions. For external dependencies, the operator must quiesce every other
+writer and own the declared backup/PITR procedure. `update --plan` reports this
+boundary instead of claiming cross-store transactional backup.
 
-1. takes an exclusive host lock;
-2. downloads and verifies the signed manifest and required artifacts;
-3. creates and validates a PostgreSQL custom-format backup;
-4. completes a Valkey `BGSAVE` and copies the resulting RDB;
-5. snapshots configured application-owned persistent paths;
-6. loads the exact image and verifies its revision label;
-7. runs migrations, replaces the application container, and waits for readiness;
-8. atomically switches the signed frontend release;
-9. verifies public Discovery and records the completed deployment;
-10. atomically refreshes the updater itself from the signed release.
+## Prerequisites and configuration
 
-If migration, startup, readiness, or public verification fails, the updater
-removes the candidate, restores the snapshotted application paths, restarts
-the previous image, and records the rollback. PostgreSQL restoration is not
-silently attempted: it is a separate recovery operation from the verified
-backup. Consequently, one-click updates accept only release manifests whose
-reviewed `release/update-policy.json` declares the migration set compatible
-with restarting the immediately previous application version.
+The baseline requires Linux x86_64, root, `curl`, and either local Cosign or a
+container engine that can run the pinned Cosign image. Container modes
+additionally require Podman or Docker. Pure host mode needs systemd with
+`systemd-run`; external PostgreSQL/Valkey dependencies also require `pg_dump`,
+`pg_restore`, and `valkey-cli`. Automatically managed PostgreSQL and Valkey
+images are pinned to reviewed multi-architecture OCI digests.
+Download `nazoauthctl` and its Sigstore bundle from the target GitHub Release,
+verify the exact tag workflow identity, and install it at
+`/usr/local/sbin/nazoauthctl`.
 
-## Configuration
+The installer generates root-owned, non-group/world-writable
+`/etc/nazoauth/update.json`. Existing hand-managed deployments can start from
+`deploy/update/update.example.json`; `install` will not take ownership of a
+configuration without its `managed_install` marker.
 
-Start from `deploy/update/update.example.json`. The file contains topology and
-path information, not a shell program. Keep it root-owned and not
-group/world-writable:
-
-```sh
-sudo install -d -m 0755 /etc/nazoauth
-sudo install -m 0600 deploy/update/update.example.json /etc/nazoauth/update.json
-sudo install -m 0755 deploy/update/nazoauthctl /usr/local/sbin/nazoauthctl
-```
-
-Review container names, database/user names, issuer, network/IP, mounts,
-snapshot paths, Valkey password-file location, and UI paths before the first
-update. `nazoauthctl check` is the non-mutating acceptance check.
-
-The updater intentionally does not apply releases on a timer by default.
-Authentication infrastructure should be upgraded by an explicit operator
-action or a separately reviewed maintenance automation.
+Automatic scheduled upgrades are disabled by default. Authentication
+infrastructure should be updated by an explicit operator action or separately
+reviewed maintenance-window automation.

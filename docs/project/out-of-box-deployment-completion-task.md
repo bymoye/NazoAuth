@@ -50,6 +50,45 @@ claims and require their corresponding live environments.
   certificate issued by the configured CA completed the handshake and reached
   `/live` with HTTP 200.
 
+## Standalone lifecycle completion
+
+The original task made first startup safe but still left production delivery
+outside the out-of-box contract. The lifecycle follow-up is now tracked here:
+
+1. [x] Add idempotent `nazoauthctl install` using the same signed release
+   manifest and immutable artifacts as updates.
+2. [x] Support Podman and Docker through one container-engine transaction.
+3. [x] Support a Linux x86_64 host systemd service with verified binary swaps
+   and rollback.
+4. [x] Generate managed PostgreSQL/Valkey credentials and storage by default.
+5. [x] Accept explicit PostgreSQL and Valkey URLs without creating managed
+   dependency containers.
+6. [x] Back up managed or external dependencies before initial migrations and
+   every update.
+7. [x] Serve the signed frontend from the application so `/ui/` works without
+   a separately installed static-file server.
+8. [x] Preserve the explicit DNS/TLS boundary and verify the public issuer when
+   an HTTPS origin is supplied.
+9. [x] Replace the prototype Bash controller with a separately signed Rust
+   `nazoauthctl` crate and SBOM while keeping the runtime image limited to
+   `nazoauth`.
+10. [x] Delegate migrations and key operations to `nazoauth` in a one-shot
+    target image with the deployment mounts/network, or to the target host
+    binary as the systemd service user.
+
+The native Rust controller's simulated Linux transaction matrix covers
+one-shot application-task delegation, Podman-compatible updates,
+Docker installation and updates, managed and external dependencies, host
+installation and binary updates, plus container and host rollback after failed
+health. It does not replace a tagged-release installation on each supported
+distribution or public DNS/TLS acceptance.
+
+A disposable real-Docker dependency smoke also started the reviewed
+PostgreSQL 18 and Valkey 8 images by exact multi-architecture digest, read
+file-mounted credentials and ACL policy, reached both readiness checks, ran a
+custom-format `pg_dump`, and completed Valkey `BGSAVE`. Its uniquely named
+containers, network, and volumes were removed afterward.
+
 The Helm chart was rendered and linted but was not scheduled on a Kubernetes
 cluster. The nginx preset was source-reviewed but not exercised against a live
 nginx process. Public DNS/ACME issuance remains an external deployment fact.

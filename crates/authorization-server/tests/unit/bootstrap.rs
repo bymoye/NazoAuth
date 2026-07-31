@@ -49,6 +49,53 @@ async fn security_headers_are_added_to_core_responses() {
 }
 
 #[actix_web::test]
+async fn bundled_ui_serves_assets_and_spa_routes_without_masking_missing_assets() {
+    let root = std::env::temp_dir().join(format!("nazoauth-ui-test-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(
+        root.join("index.html"),
+        "<!doctype html><title>NazoAuth</title>",
+    )
+    .unwrap();
+    std::fs::write(root.join("assets/app.js"), "console.log('nazoauth');").unwrap();
+
+    let app = actix_test::init_service(
+        App::new()
+            .wrap(from_fn(security_headers))
+            .service(ui_static_files(root.clone())),
+    )
+    .await;
+
+    for path in ["/ui/", "/ui/auth", "/ui/assets/app.js"] {
+        let response =
+            actix_test::call_service(&app, actix_test::TestRequest::get().uri(path).to_request())
+                .await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::OK, "{path}");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff"
+        );
+    }
+
+    let missing_asset = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::get()
+            .uri("/ui/assets/missing.js")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        missing_asset.status(),
+        actix_web::http::StatusCode::NOT_FOUND
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
 async fn check_session_iframe_is_frameable_by_relying_parties() {
     let app = actix_test::init_service(App::new().wrap(from_fn(security_headers)).route(
         "/check_session",

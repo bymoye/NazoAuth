@@ -146,7 +146,7 @@ docker run --rm --network nazo-oauth-codecov-net `
   -e CARGO_TERM_COLOR=never `
   -e RUST_TEST_THREADS=1 `
   nazo-oauth-codecov-runner:local `
-  bash -lc '. /usr/local/cargo/env && cargo run --locked --bin nazoauth -- migrate && cargo test --locked --workspace --all-features --lib --tests <test-filter> -- --nocapture'
+  bash -lc '. /usr/local/cargo/env && cargo test --locked -p nazo-postgres --test migrations -- --nocapture && cargo test --locked --workspace --all-features --lib --tests <test-filter> -- --nocapture'
 ```
 
 If another agent holds `/docker-target/check`, wait for it to finish. Using a
@@ -169,5 +169,5 @@ docker run --rm --network nazo-oauth-codecov-net `
   -e CARGO_TERM_COLOR=never `
   -e RUST_TEST_THREADS=1 `
   nazo-oauth-codecov-runner:local `
-  bash -lc 'set -euo pipefail; rm -rf /workspace-check; mkdir -p /workspace-check; git -C /host archive HEAD | tar -x -C /workspace-check; git -C /host diff | git -C /workspace-check apply; cp /workspace-check/.env.yaml.example /workspace-check/.env.yaml; cd /workspace-check; . /usr/local/cargo/env; cargo run --locked --bin nazoauth -- migrate; cargo test --locked --workspace --all-features --lib --tests <test-filter> -- --nocapture'
+  bash -lc 'set -euo pipefail; rm -rf /workspace-check; mkdir -p /workspace-check; git -C /host archive HEAD | tar -x -C /workspace-check; git -C /host diff | git -C /workspace-check apply; cp /workspace-check/.env.yaml.example /workspace-check/.env.yaml; cd /workspace-check; . /usr/local/cargo/env; cargo test --locked -p nazo-postgres --test migrations -- --nocapture; cargo test --locked --workspace --all-features --lib --tests <test-filter> -- --nocapture'
 ```

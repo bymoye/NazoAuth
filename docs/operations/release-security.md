@@ -38,17 +38,19 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
 - builds the container image
 - builds the frontend from the exact commit in `release/frontend.lock`
 - scans the exact exported release image with Trivy before signing
-- exports the container image, frontend, updater, and release manifest
-- generates a CycloneDX Rust SBOM
-- signs the binaries, SBOM, image archive, frontend, updater, and manifest with
+- exports the runtime container image, frontend, `nazoauth`, `nazoauthctl`, and
+  release manifest
+- generates separate CycloneDX SBOMs for both Rust binaries
+- signs the binaries, SBOMs, image archive, frontend, and manifest with
   keyless Sigstore signing through GitHub OIDC
-- uploads binaries, SBOM, image archive, and signature bundles as GitHub Actions artifacts
+- uploads binaries, SBOMs, image archive, and signature bundles as GitHub Actions artifacts
 - publishes tagged artifacts as persistent GitHub Release assets without
   overwriting an existing asset
-- emits GitHub artifact provenance attestations for the binaries, SBOM, and image archive
+- emits GitHub artifact provenance attestations for both binaries, both SBOMs,
+  and the image archive
 
 Standalone production deployments consume these assets through
-`nazoauthctl update`. The updater verifies the tag-specific workflow identity
+`nazoauthctl install` and `nazoauthctl update`. The lifecycle tool verifies the tag-specific workflow identity
 and signed manifest before parsing artifact names or changing runtime state.
 Custom deployment pipelines must enforce the same identity, digest, backup,
 and rollback-compatibility boundaries.
@@ -60,7 +62,7 @@ For each production release, preserve:
 - Git tag and commit SHA
 - `conformance-security` workflow URL and conclusion
 - `release-security` workflow URL and conclusion
-- SBOM artifact name and digest
+- both SBOM artifact names and digests
 - Trivy scan result
 - Sigstore certificate identity and issuer
 - GitHub artifact attestation URLs or bundle references

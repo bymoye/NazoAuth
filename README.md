@@ -107,43 +107,42 @@ composite score:
 
 ## Quick start
 
-The fastest path requires only Docker Compose:
+Install the signed `nazoauthctl` from an immutable GitHub Release using the
+[verified bootstrap procedure](docs/operations/one-click-update.md), then run:
 
 ```sh
-docker compose up -d --build
-docker compose ps
+sudo nazoauthctl install --runtime auto
+sudo nazoauthctl doctor
 ```
 
-Compose generates private PostgreSQL and Valkey credentials, starts both
-services, runs pending migrations, and starts NazoAuth. There are no published
-default service passwords.
+`auto` selects Podman first and Docker second. The controller generates private
+PostgreSQL and Valkey credentials, starts both services, runs a signed one-shot
+migration task, and starts NazoAuth. There are no published default passwords.
 Open `http://127.0.0.1:8000/health` or
 `http://127.0.0.1:8000/.well-known/openid-configuration`. Data, signing keys,
-generated application secrets, and avatars use named volumes and survive
-`docker compose down`.
-The first source build downloads Rust dependencies; later builds reuse the
-local container cache.
+generated application secrets, and avatars are persistent.
 
 On a database without an administrator, the server log reports a time-bounded
 one-time setup URL. Treat the URL as a password and use it to create the first
 administrator without configuring SMTP.
 
-For a custom or public issuer, create a private `.env.yaml` from the example
-and set `NAZOAUTH_CONFIG` to that file before starting Compose. See the
-[deployment guide](docs/operations/deployment.md) for TLS and production
-requirements.
+For a public issuer, pass `--public-url https://auth.example.com`; see the
+[deployment guide](docs/operations/deployment.md) for TLS ingress requirements.
+`compose.yml` remains a source-tree development sandbox and uses a development
+operator identity; it is not the production lifecycle boundary.
 
 For a direct binary run, `server` creates a local `.env.yaml` when absent,
-generates persistent application secrets, runs pending migrations, creates
-signing keys when needed, and continues starting:
+generates persistent application secrets, creates signing keys when needed,
+and continues starting. Schema changes are deliberately owned by the host-side
+controller and are never attempted by the managed server runtime:
 
 ```sh
 nazoauth server
 ```
 
-Explicit YAML and environment values still take precedence. `nazoauth migrate`
-remains available for operators that separate schema changes from application
-rollout.
+Explicit YAML and environment values still take precedence. Managed deployments
+run schema changes only through `sudo nazoauthctl migrate --yes`, which issues a
+short-lived signed task to the exact verified release target.
 
 ## Configuration
 

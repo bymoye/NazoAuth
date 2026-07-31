@@ -1,9 +1,9 @@
 # 部署指南
 
-NazoAuth 在所有受支持的操作平台上使用同一套 Docker Compose 接口。特定宿主机
-的发布脚本只是内部实现，不属于对外部署契约。
+NazoAuth 提供两条明确的部署契约：源码开发使用 Compose；独立 Linux 生产部署
+使用经过签名验证的 `nazoauthctl`，支持 Podman、Docker 和宿主机 systemd。
 
-## 快速开始
+## 源码树开发沙箱
 
 只需要：
 
@@ -17,8 +17,9 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务。
-`nazoauth server` 会在接受流量前执行待处理迁移，然后启动服务。可直接打开：
+Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务，并用
+短生命周期的开发 operator identity 通过同一个签名 `nazoauth operator-task` 入口执行
+迁移。该 identity 明确不是生产信任根。可直接打开：
 
 - `http://127.0.0.1:8000/ready`：依赖就绪探针
 - `http://127.0.0.1:8000/live`：进程存活探针
@@ -35,35 +36,19 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 
 ## 公开部署
 
-以 `.env.yaml.example` 为基础创建私有 `.env.yaml`，再通过 Compose 变量
-`NAZOAUTH_CONFIG` 选择该文件。至少修改：
-
-```yaml
-PUBLIC_BASE_URL: "https://auth.example.com"
-DATABASE_URL: "postgresql://<user>:<password>@postgres:5432/oauth"
-VALKEY_URL: "redis://valkey:6379/0"
-DATA_DIR: "/var/lib/nazo_oauth"
-RUST_LOG: "info"
-```
-
-新部署不需要选择单一的全局授权服务器 profile；提升后的行为由运行时模块与
-显式的按客户端 `security_policy` 配置。
-
-该文件不得进入版本控制。`PUBLIC_BASE_URL` 必须是用户实际访问的 HTTPS origin，
-且不带结尾斜杠。未显式提供的 `CLIENT_SECRET_PEPPER`、DCR 初始访问令牌以及
-pairwise 模式所需秘密会生成到 `DATA_DIR/secrets` 并跨重启复用。数据库备份必须
-同时包含该目录；目录丢失或内容损坏时服务会拒绝启动，而不是生成会破坏现有数据
-的新秘密。Compose 内置 PostgreSQL 和 Valkey 的凭据由初始化服务管理。生产环境
-仍可使用独立管理的 PostgreSQL 和 Valkey。
-
-仍然使用同一个启动命令：
+正式发布优先使用生命周期入口：
 
 ```sh
-docker compose up -d --build
-docker compose ps
+sudo nazoauthctl install \
+  --runtime auto \
+  --public-url https://auth.example.com
 ```
 
-Compose 只把 NazoAuth 发布到宿主机 loopback 的 `8000` 端口。可使用任意符合要求
+`auto` 优先使用 Podman，其次使用 Docker。已有 PostgreSQL/Valkey、宿主机安装、
+秘密生成和备份边界见[一键安装与升级](one-click-update.zh-CN.md)。
+
+`nazoauthctl` 自动生成私有服务配置、依赖凭据、deployment identity、签名 identity
+和恢复状态，并只把 NazoAuth 发布到选定的宿主机 loopback 端口。可使用任意符合要求
 的 TLS 反向代理，把公开 HTTPS 流量转发到 `http://127.0.0.1:8000`。
 `TRUSTED_PROXY_CIDRS` 只能包含受控代理地址；在代理正确清洗 forwarded headers
 之前，保持 `CLIENT_IP_HEADER_MODE=none`。
@@ -75,22 +60,23 @@ issuer；`PUBLIC_BASE_URL` 仍必须等于客户端看到的公开 HTTPS 地址�
 
 满足以下条件后才算启用：
 
-1. `docker compose ps` 显示 PostgreSQL、Valkey 和 `server` 正常运行；
-2. 服务日志确认待处理迁移执行成功；
+1. `sudo nazoauthctl status` 报告签名 Release 和双层 target identity；
+2. `sudo nazoauthctl doctor` 验证审计、readiness、target digest 和 runtime DDL 边界；
 3. `/ready` 返回 HTTP 200；
 4. `/.well-known/openid-configuration` 返回配置的 issuer；
 5. 反向代理通过公开 HTTPS origin 提供相同接口；
 6. 服务重启后签名密钥和头像卷仍保持挂载。
 
-失败时查看：
+查看脱敏后的部署与审计状态：
 
 ```sh
-docker compose logs server
+sudo nazoauthctl status
+sudo nazoauthctl audit show
 ```
 
 ## 升级和回滚
 
-正式发布的独立 Podman 安装使用一键升级：
+正式发布的独立安装使用同一个生命周期入口：
 
 ```sh
 sudo nazoauthctl update
@@ -98,7 +84,7 @@ sudo nazoauthctl update
 
 该命令校验标签级 Sigstore 身份和不可变制品摘要，创建恢复备份，执行迁移，
 替换应用，检查 readiness 与公网 Discovery；验证失败时自动恢复旧应用镜像和
-应用持久目录。完整边界见[一键升级](one-click-update.zh-CN.md)。
+应用持久目录。完整边界见[一键安装与升级](one-click-update.zh-CN.md)。
 
 源码 Compose 仍可用于开发，但不再是生产环境的日常升级路径。数据库恢复保持
 独立，因为迁移可能是单向的；只有签名发布明确声明迁移集合可重新启动上一应用

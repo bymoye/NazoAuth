@@ -159,6 +159,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "TLS_CLIENT_CA_FILE",
     "TLS_PRIVATE_KEY_FILE",
     "TRUSTED_PROXY_CIDRS",
+    "UI_STATIC_DIR",
     "VALKEY_COMMAND_TIMEOUT_MS",
     "VALKEY_URL",
     "VALKEY_URL_FILE",
@@ -214,9 +215,21 @@ impl ConfigSource {
         Self::load_from_dir_with_env(".", std::env::vars())
     }
 
+    pub(crate) fn load_without_generated_secrets() -> anyhow::Result<Self> {
+        Self::load_from_dir_with_env_mode(".", std::env::vars(), false)
+    }
+
     fn load_from_dir_with_env(
         path: impl AsRef<Path>,
         env: impl IntoIterator<Item = (String, String)>,
+    ) -> anyhow::Result<Self> {
+        Self::load_from_dir_with_env_mode(path, env, true)
+    }
+
+    fn load_from_dir_with_env_mode(
+        path: impl AsRef<Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+        materialize_generated_secrets: bool,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let dotenv_path = path.join(UNSUPPORTED_DOTENV_FILE);
@@ -231,7 +244,9 @@ impl ConfigSource {
         }
         source.merge_env(env)?;
         source.merge_secret_file_inputs(path)?;
-        source.merge_generated_secrets(path)?;
+        if materialize_generated_secrets {
+            source.merge_generated_secrets(path)?;
+        }
         Ok(source)
     }
 

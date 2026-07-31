@@ -63,22 +63,23 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 
 ## 快速开始
 
-最快的方式只需要 Docker Compose：
+先按[已验证的 bootstrap 流程](docs/operations/one-click-update.zh-CN.md)从不可变
+GitHub Release 安装签名的 `nazoauthctl`，然后执行：
 
 ```sh
-docker compose up -d --build
-docker compose ps
+sudo nazoauthctl install --runtime auto
+sudo nazoauthctl doctor
 ```
 
-Compose 会启动 PostgreSQL、Valkey，执行数据库迁移，然后启动 NazoAuth。可打开
+`auto` 优先选择 Podman，其次选择 Docker。控制器会生成 PostgreSQL、Valkey 和应用
+秘密，启动依赖，通过签名的一次性任务执行迁移，再启动 NazoAuth。可打开
 `http://127.0.0.1:8000/health` 或
 `http://127.0.0.1:8000/.well-known/openid-configuration`。数据、签名密钥和头像
-使用命名卷，执行 `docker compose down` 后仍会保留。
-首次源码构建需要下载 Rust 依赖；后续构建会复用本地容器缓存。
+会持久保存。
 
-默认配置仅用于 loopback 本地体验。公开部署时，以 `.env.yaml.example` 为基础
-创建私有配置，并通过 Compose 变量 `NAZOAUTH_CONFIG` 选择它；完整流程见
-[部署指南](docs/operations/deployment.zh-CN.md)。
+公开部署时传入 `--public-url https://auth.example.com`；TLS 入口要求见
+[部署指南](docs/operations/deployment.zh-CN.md)。`compose.yml` 仅保留为源码树开发沙箱，
+使用开发 operator identity，不是生产生命周期边界。
 
 直接运行二进制时，首次启动保护保持不变：
 
@@ -86,8 +87,9 @@ Compose 会启动 PostgreSQL、Valkey，执行数据库迁移，然后启动 Naz
 nazoauth server
 ```
 
-如果当前目录没有 `.env.yaml`，该命令只创建模板并退出。修改配置后再执行
-`nazoauth migrate` 和 `nazoauth server`，避免以示例秘密或错误 issuer 意外启动。
+如果当前目录没有 `.env.yaml`，该命令只创建模板并退出。修改配置后，通过正式的
+`nazoauthctl migrate --yes` 签发一次性任务，再执行 `nazoauth server`，避免以示例
+秘密、错误 issuer 或无审计的数据库权限意外启动。
 
 ## 配置
 

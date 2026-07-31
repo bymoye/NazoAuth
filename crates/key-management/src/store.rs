@@ -580,6 +580,19 @@ pub(crate) async fn register_external_key(
     } else {
         json!({"active_kid":registration.kid,"keys":[]})
     };
+    if let Some(existing) = keyset_keys(&keyset)?
+        .iter()
+        .find(|key| key.get("kid").and_then(Value::as_str) == Some(registration.kid.as_str()))
+    {
+        if existing.get("alg").and_then(Value::as_str) == Some(algorithm)
+            && existing.get("key_ref").and_then(Value::as_str)
+                == Some(registration.key_ref.as_str())
+            && existing.get("public_jwk") == Some(&public_jwk)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("external key kid already exists with different material");
+    }
     keyset_keys_mut(&mut keyset)?.push(json!({
         "kid":registration.kid,
         "alg":algorithm,
@@ -621,6 +634,13 @@ pub(crate) async fn register_local_key(
         let Some(existing) = key_entry_purposes(key)? else {
             continue;
         };
+        if existing == registration.purposes {
+            return key
+                .get("kid")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("purpose-scoped key is missing kid"));
+        }
         if existing
             .iter()
             .any(|purpose| registration.purposes.contains(purpose))

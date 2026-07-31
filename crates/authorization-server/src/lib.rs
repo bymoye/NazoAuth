@@ -11,7 +11,8 @@ pub mod cli;
 pub mod config;
 mod domain;
 mod http;
-pub mod keyctl;
+mod keyctl;
+mod operator_task;
 mod runtime_modules;
 #[cfg(test)]
 #[path = "../tests/support/schema.rs"]

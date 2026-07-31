@@ -818,7 +818,7 @@ def check_openid4vc_boundaries() -> None:
             raise SystemExit(f"OpenID4VC purpose-scoped rotation boundary is missing: {marker}")
     for doc_name in ("openid4vc-final-matrix.md", "openid4vc-final-matrix.zh-CN.md"):
         doc = (ROOT / "docs" / "conformance" / doc_name).read_text(encoding="utf-8")
-        if "generate-local --alg ES256 --purposes credential,presentation_request" not in doc:
+        if "nazoauthctl keys generate-local --alg ES256" not in doc:
             raise SystemExit(f"OpenID4VC purpose-scoped key procedure missing from {doc_name}")
         for statement in ("alpha", "not an OpenID Foundation certification claim") if doc_name.endswith(".md") and not doc_name.endswith("zh-CN.md") else ("alpha", "不能称为 OpenID Foundation 正式认证"):
             if statement not in doc:

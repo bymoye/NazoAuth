@@ -1,10 +1,10 @@
 # Deployment Guide
 
-NazoAuth uses the same Docker Compose interface on every supported operator
-platform. Host-specific release scripts are implementation details, not part of
-the public deployment contract.
+NazoAuth has two explicit deployment contracts: Compose for source-based
+development, and the signed `nazoauthctl` lifecycle for standalone Linux
+production on Podman, Docker, or a host systemd service.
 
-## Quick start
+## Source-tree development sandbox
 
 Requirements:
 
@@ -19,8 +19,10 @@ docker compose ps
 ```
 
 Compose generates private PostgreSQL and Valkey credentials in a named volume,
-starts both services, and lets `nazoauth server` apply pending migrations before
-accepting traffic. Open:
+starts both services, and uses a short-lived development operator identity to
+run the same signed `nazoauth operator-task` migration entry point before the
+server accepts traffic. This identity is deliberately not a production trust
+root. Open:
 
 - `http://127.0.0.1:8000/ready` for dependency readiness
 - `http://127.0.0.1:8000/live` for process liveness
@@ -40,38 +42,21 @@ without requiring SMTP.
 
 ## Public deployment
 
-Create a private `.env.yaml` from `.env.yaml.example` and select it through the
-`NAZOAUTH_CONFIG` Compose variable. At minimum, change:
-
-```yaml
-PUBLIC_BASE_URL: "https://auth.example.com"
-DATABASE_URL: "postgresql://<user>:<password>@postgres:5432/oauth"
-VALKEY_URL: "redis://valkey:6379/0"
-DATA_DIR: "/var/lib/nazo_oauth"
-RUST_LOG: "info"
-```
-
-New deployments do not need to select one global authorization-server
-profile. Configure elevated behavior through runtime modules and explicit
-per-client `security_policy`.
-
-Keep this file outside version control. `PUBLIC_BASE_URL` must be the exact
-HTTPS origin without a trailing slash. When absent, `CLIENT_SECRET_PEPPER`,
-the DCR initial-access token, and the pairwise-subject secret when needed are
-generated under `DATA_DIR/secrets` and reused across restarts. Back up that
-directory with PostgreSQL. Missing or malformed persisted secrets fail startup
-rather than being replaced. The bundled PostgreSQL and Valkey credentials are
-owned by the Compose initialization service. Independently managed services
-remain supported for production.
-
-Start the same topology:
+For a formal release, prefer the lifecycle entry point:
 
 ```sh
-docker compose up -d --build
-docker compose ps
+sudo nazoauthctl install \
+  --runtime auto \
+  --public-url https://auth.example.com
 ```
 
-Compose binds NazoAuth to host loopback port `8000`. Put any
+`auto` selects Podman first and Docker second. Existing PostgreSQL/Valkey,
+host installation, generated secrets, and backup boundaries are documented in
+[one-click installation and updates](one-click-update.md).
+
+`nazoauthctl` generates the private server configuration, dependency credentials,
+deployment identities, signing identities, and recovery state. It binds NazoAuth
+to the selected host loopback port. Put any
 standards-compliant TLS reverse proxy in front of
 `http://127.0.0.1:8000`. Configure `TRUSTED_PROXY_CIDRS` only for proxy
 addresses you control, and keep `CLIENT_IP_HEADER_MODE=none` until the proxy
@@ -85,22 +70,23 @@ HTTPS address seen by clients.
 
 Activation requires all of these checks:
 
-1. `docker compose ps` shows PostgreSQL, Valkey, and `server` running;
-2. the server log confirms pending migrations completed;
+1. `sudo nazoauthctl status` reports the signed Release and both target identities;
+2. `sudo nazoauthctl doctor` verifies audit, readiness, target digest, and the runtime DDL boundary;
 3. `/ready` returns HTTP 200;
 4. `/.well-known/openid-configuration` returns the configured issuer;
 5. the reverse proxy serves the same endpoints through the public HTTPS origin;
 6. signing-key and avatar volumes remain mounted after a service restart.
 
-Inspect failures with:
+Inspect the non-secret deployment state with:
 
 ```sh
-docker compose logs server
+sudo nazoauthctl status
+sudo nazoauthctl audit show
 ```
 
 ## Upgrade and rollback
 
-For a released standalone Podman installation, the normal upgrade is:
+For a released standalone installation, the normal upgrade is:
 
 ```sh
 sudo nazoauthctl update
@@ -110,7 +96,7 @@ This verifies the tag-specific Sigstore identity and immutable artifact
 digests, creates recovery backups, runs migrations, replaces the application,
 checks readiness and public Discovery, and automatically restores the previous
 application image and persistent application files if verification fails. See
-[One-click updates](one-click-update.md).
+[One-click installation and updates](one-click-update.md).
 
 Source deployments may still use Compose during development. They are not the
 normal production update path. Database restoration remains separate because

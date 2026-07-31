@@ -41,7 +41,8 @@ OpenID4VC 使用只允许 `credential` 与 `presentation_request` 两种用途�
 仓库生成的测试密钥，并通过现有原子密钥库生成：
 
 ```text
-nazoauth keyctl generate-local --alg ES256 --purposes credential,presentation_request
+sudo nazoauthctl keys generate-local --alg ES256 \
+  --purposes credential,presentation_request --yes
 ```
 
 持久化的 `purposes` 字段采用 fail-closed 校验。该专用密钥不会参与 OIDC 轮换，

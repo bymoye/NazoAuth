@@ -12,10 +12,9 @@ fn requires_an_explicit_command() {
 #[test]
 fn parses_all_product_commands() {
     assert_eq!(parse(&["nazoauth", "server"]).unwrap(), Command::Server);
-    assert_eq!(parse(&["nazoauth", "migrate"]).unwrap(), Command::Migrate);
     assert_eq!(
-        parse(&["nazoauth", "keyctl", "validate"]).unwrap(),
-        Command::Keyctl(vec!["validate".to_owned()])
+        parse(&["nazoauth", "operator-task"]).unwrap(),
+        Command::OperatorTask
     );
 }
 
@@ -25,7 +24,7 @@ fn help_is_available_without_starting_a_runtime() {
 }
 
 #[test]
-fn server_and_migrate_reject_accidental_arguments() {
+fn public_commands_reject_accidental_arguments() {
     assert_eq!(
         parse(&["nazoauth", "server", "--detach"])
             .unwrap_err()
@@ -33,11 +32,23 @@ fn server_and_migrate_reject_accidental_arguments() {
         "server does not accept argument --detach"
     );
     assert_eq!(
-        parse(&["nazoauth", "migrate", "now"])
+        parse(&["nazoauth", "operator-task", "now"])
             .unwrap_err()
             .to_string(),
-        "migrate does not accept argument now"
+        "operator-task does not accept argument now"
     );
+}
+
+#[test]
+fn legacy_mutation_commands_are_closed() {
+    for command in ["migrate", "keyctl"] {
+        assert!(
+            parse(&["nazoauth", command])
+                .unwrap_err()
+                .to_string()
+                .starts_with(&format!("unknown command {command}"))
+        );
+    }
 }
 
 #[test]

@@ -12,6 +12,7 @@ on:
       - "crates/**"
       - "src/**"
       - "tests/**"
+      - "fuzz/**"
       - "benches/**"
       - "examples/**/*.rs"
       - "examples/**/Cargo.toml"
@@ -29,6 +30,7 @@ on:
       - "crates/**"
       - "src/**"
       - "tests/**"
+      - "fuzz/**"
       - "benches/**"
       - "examples/**/*.rs"
       - "examples/**/Cargo.toml"
@@ -125,11 +127,25 @@ jobs:
       - name: Clippy all targets
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Run migrations
-        run: cargo run --locked --bin nazoauth -- migrate
-
       - name: Test workspace with PostgreSQL and Valkey
         run: cargo test --workspace --all-features --locked
+
+  operator-parser-fuzz:
+    name: Operator JWS parser fuzz gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      - name: Install pinned nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-07-31 --profile minimal
+          cargo +nightly-2026-07-31 install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Fuzz closed operator JWS parser
+        run: cargo +nightly-2026-07-31 fuzz run operator_jws_parser -- -max_total_time=60 -rss_limit_mb=512 -timeout=10
 
   python-quality:
     name: Python script syntax gate

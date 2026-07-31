@@ -53,7 +53,8 @@ OpenID4VC signing uses an ES256 local key scoped only to `credential` and
 `presentation_request`. It is generated through the existing atomic key store:
 
 ```text
-nazoauth keyctl generate-local --alg ES256 --purposes credential,presentation_request
+sudo nazoauthctl keys generate-local --alg ES256 \
+  --purposes credential,presentation_request --yes
 ```
 
 The persisted `purposes` field is fail-closed. A purpose-scoped key is excluded
