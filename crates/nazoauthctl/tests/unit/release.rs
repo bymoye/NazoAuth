@@ -1,4 +1,3 @@
-
 use super::{ReleaseTrustState, compare_versions, enforce_release_trust_state};
 use crate::model::{Artifact, DatabaseRestore, ReleaseManifest, Rollback};
 use nazo_operator_protocol::EmbeddedIdentity;
