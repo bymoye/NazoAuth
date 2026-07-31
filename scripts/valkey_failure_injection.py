@@ -33,9 +33,18 @@ def response_json(response: requests.Response) -> dict[str, object]:
 
 def main() -> int:
     health = requests.get(f"{BASE_URL}/health", timeout=5)
-    if health.status_code != 200:
+    health_payload = response_json(health)
+    if health.status_code != 503:
         fail("health_without_valkey", {"status": health.status_code, "body": health.text[:200]})
-    ok("health_without_valkey")
+    if health_payload != {
+        "status": "not_ready",
+        "checks": {
+            "postgresql": {"status": "up"},
+            "valkey": {"status": "down"},
+        },
+    }:
+        fail("health_without_valkey", health_payload)
+    ok("health_without_valkey", {"status": health.status_code, "body": health_payload})
 
     token = requests.post(
         f"{BASE_URL}/token",

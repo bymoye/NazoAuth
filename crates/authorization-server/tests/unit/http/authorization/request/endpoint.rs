@@ -640,7 +640,7 @@ async fn authorization_request_allows_server_issued_par_request_uri() {
 }
 
 #[actix_web::test]
-async fn authorization_request_redirects_non_par_request_uri_as_unsupported() {
+async fn authorization_request_rejects_unregistered_external_request_uri() {
     let Some(fixture) = LiveAuthorizationFixture::new().await else {
         return;
     };
@@ -672,7 +672,7 @@ async fn authorization_request_redirects_non_par_request_uri_as_unsupported() {
 
     assert_authorization_error_redirect(
         response,
-        "request_uri_not_supported",
+        "invalid_request_uri",
         Some("external-request-uri"),
     );
 }
