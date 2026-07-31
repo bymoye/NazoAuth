@@ -304,11 +304,17 @@ cargo test --locked --workspace --all-features --lib --bins --tests \
 cargo test --locked --workspace --all-features --lib --bins --tests
 
 # Let cargo-llvm-cov resolve the complete workspace object graph as an
-# independent report. The explicit per-object exports below remain the
-# auditable fallback and also preserve the separate long-running server and
-# child-process profiles. Merging the reports by maximum counter prevents
-# double counting while ensuring integration-test copies of library code are
-# not lost to linker/object discovery differences.
+# independent report. `show-env` deliberately points cargo-llvm-cov at the
+# Cargo target root so it can discover every instrumented object there, while
+# this script keeps raw profiles in a dedicated child directory. Expose those
+# same profiles at the target root with hard links: this preserves one set of
+# bytes, keeps the explicit per-object export below independent, and avoids
+# silently dropping integration-test copies of library code.
+while IFS= read -r -d '' profile; do
+  link="$CARGO_TARGET_DIR/workspace-$(basename "$profile")"
+  [[ ! -e "$link" ]]
+  ln "$profile" "$link"
+done < <(find "$COVERAGE_DIR" -maxdepth 1 -type f -name '*.profraw' -print0)
 cargo llvm-cov report --locked --lcov \
   --ignore-filename-regex "$IGNORE_REGEX" \
   --output-path lcov-workspace-tests.info
