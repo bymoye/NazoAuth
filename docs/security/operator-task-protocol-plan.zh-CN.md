@@ -177,7 +177,7 @@ Podman、SELinux/AppArmor、TPM/PKCS#11/HSM 和外部审计继续缩小该残余
 | `INV-02` | 应用只信任安装时登记且仍有效的控制器公钥；算法和 key ID 不得由请求降级。 |
 | `INV-03` | 请求必须绑定 deployment ID、协议版本、双层目标身份、版本化非秘密配置清单摘要、秘密 opaque revision/HMAC、精确 operation、`jti`、`iat`、`nbf`、`exp`。 |
 | `INV-04` | 应用任务入口不接受 shell、任意子命令字符串或未声明字段。 |
-| `INV-05` | ctl 生成或向 app/runtime 转交的私钥、密码、带凭据 URL、批准 token 和敏感 key ref 不出现在子进程 argv、普通环境、临时文件、inspect 或审计中；用户显式选择 direct secret argument 是有警告且不被继续转发的兼容例外。 |
+| `INV-05` | ctl 生成或向 app/runtime 转交的私钥、密码、带凭据 URL、批准 token 和敏感 key ref 不出现在子进程 argv、普通环境、临时文件、inspect 或审计中；公共 CLI 不提供 secret argv 兼容例外。 |
 | `INV-06` | 每个状态变更请求最多产生一次逻辑状态转换；重试返回已有结果或明确的 in-progress 状态。 |
 | `INV-07` | 每个操作只得到其声明的只读/可写路径、用户、capability、网络和地址族。 |
 | `INV-08` | 容器任务不发布端口，使用只读根文件系统、非 root 用户、`no-new-privileges` 和 `cap-drop=ALL`，例外必须逐项记录。 |
@@ -577,19 +577,20 @@ operation、risk class、目标 digest、配置摘要、容器 ID/宿主机二�
 
 ```text
 nazoauthctl install
-nazoauthctl status [--output human|json]
-nazoauthctl doctor [--output human|json]
+nazoauthctl status
+nazoauthctl doctor
 nazoauthctl update [--to VERSION] [--plan] [--yes]
-nazoauthctl rollback [--to VERSION] [--yes]
-nazoauthctl migrate [--plan] [--yes]
+nazoauthctl rollback [--yes]
+nazoauthctl recover [--yes]
+nazoauthctl migrate [--yes]
 nazoauthctl keys list
 nazoauthctl keys validate
-nazoauthctl keys generate --alg ES256 --purpose credential
+nazoauthctl keys generate-local --alg ES256 --purposes credential --yes
 nazoauthctl keys register-external ...
 nazoauthctl audit show [--request-id ID]
 nazoauthctl audit verify
-nazoauthctl identity status
-nazoauthctl identity rotate [--provider file|pkcs11|tpm]
+nazoauthctl identity rotate --yes
+nazoauthctl break-glass recover-controller --reason lost|stolen --yes
 ```
 
 当前语义含混的 `check` 应迁移为：
@@ -623,12 +624,10 @@ sudo nazoauthctl install --public-url https://auth.example.com
 - 启动服务、验证 readiness/Discovery；
 - 输出下一步和 request ID。
 
-用户可直接指定 PostgreSQL/Valkey URL、通过受控环境注入或使用无回显提示。公共 CLI 不要求
-用户管理 `url-file`；内部持久化为 root-only secret file 是实现细节。用于自动化且不希望
-秘密进入 argv 时，提供 stdin/secret-provider 输入。直接 URL 参数作为显式兼容入口时必须
-提示它可能被本机进程观察工具记录，并且 ctl 不得再把该值传给任何子进程；安全默认文档
-优先推荐无回显提示或 secret manager。最终秘密扫描分别验证默认安全路径和该兼容入口的
-“有警告、不转发、不记录”边界，不能把兼容入口描述成同等私密。
+用户通过无回显提示、安全 stdin/FD 或 secret provider 指定 PostgreSQL/Valkey URL。公共 CLI
+不要求用户管理 `url-file`；内部持久化为 root-only secret file 是实现细节。包含凭据的 URL
+参数和普通环境变量一律拒绝，不能以“兼容入口”为由进入 argv。最终秘密扫描必须覆盖默认
+交互路径和非交互安全输入路径。
 
 ### 15.3 交互与输出
 
@@ -636,30 +635,24 @@ sudo nazoauthctl install --public-url https://auth.example.com
 - 高风险确认明确说明 operation、deployment、target 和可恢复性；不显示秘密。
 - `--yes` 只跳过交互确认，不跳过签名、授权、防重放或审计。
 - 失败输出包含稳定错误码、request ID、是否已修改状态、是否自动回滚以及一条下一步命令。
-- human 输出和 JSON 输出严格分离；JSON 有 schema version，日志写 stderr，机器结果写 stdout。
-- `status` 和安全的 `doctor` 检查不要求 root；执行修复或读取受保护证据时再提升权限。
+- 面向自动化的 `status`、`update --plan` 和 `audit show` 输出封闭 JSON；面向操作员的
+  `doctor` 和 mutation 输出简短 human 结果，错误写 stderr。避免为没有第二种真实消费者的
+  命令增加空泛 `--output` 分支。
+- 受管部署的配置、制品 identity 和签名审计证据默认 root-only；文档统一用 `sudo` 执行
+  `status`/`doctor`，不为无权限摘要复制第二份可漂移状态。
 - 所有 mutation 支持幂等重试；中断后提示 `nazoauthctl audit show --request-id ...` 或继续命令。
 
 成功示例的目标形态：
 
 ```text
-$ sudo nazoauthctl keys generate --alg ES256 --purpose credential
-✓ deployment     production-cn-1
-✓ target         v1.4.0 (sha256:...)
-✓ authorized     controller-019f...
-✓ sandbox        keys.generate-local
-✓ completed      kid=credential-2026-07
-
-Request ID: 019f...
-Audit: sudo nazoauthctl audit show --request-id 019f...
+$ sudo nazoauthctl keys generate-local --alg ES256 --purposes credential --yes
+request_id=request-019f... receipt=/var/lib/nazoauth/audit/receipts/... result=KeyGenerated { ... }
 ```
 
 错误示例的目标形态：
 
 ```text
-✗ NAZO-OP-REPLAY: request 019f... was already completed; no operation was repeated.
-Existing result: kid=credential-2026-07
-Audit: sudo nazoauthctl audit show --request-id 019f...
+nazoauthctl: request identifier was already claimed by a different envelope
 ```
 
 ### 15.4 稳定退出码
@@ -667,16 +660,11 @@ Audit: sudo nazoauthctl audit show --request-id 019f...
 | Exit code | 类别 |
 | --- | --- |
 | `0` | 成功或幂等地得到已存在的成功结果 |
+| `1` | 配置、权限、信任、授权、运行时、健康、备份或恢复的 fail-closed 失败 |
 | `2` | CLI 用法/参数错误 |
-| `3` | 配置、权限或本地状态无效 |
-| `4` | 身份、批准或授权失败 |
-| `5` | 签名、目标、协议版本、防重放或审计验证失败 |
-| `6` | 外部依赖或运行时不可用 |
-| `7` | 应用任务已接受但执行失败 |
-| `8` | 生命周期提交失败但已成功回滚 |
-| `9` | 失败且自动回滚未完成，需要人工恢复 |
 
-退出码和 JSON error code 必须有契约测试；错误文案可以改进，但机器语义不能漂移。
+稳定的最小退出码避免 shell 自动化因内部错误分类重构而漂移；详细边界由脱敏错误、签名
+收据、request ID 和审计事件表达。退出码必须有契约测试。
 
 ## 16. 方案比较
 
@@ -707,7 +695,7 @@ Docker、Podman、host 的执行器不同，授权语义相同，长期控制漂
 | 内存 | 中性 | 仅短生命周期有界缓冲 | 增加常驻服务内存 |
 | 可靠性 | 变化小 | 无新服务依赖；需处理收据恢复 | 多一个服务和升级状态 |
 | 运维 | 最简单但控制易漂移 | 自动身份与 doctor 后可控 | 证书、socket、服务监控更复杂 |
-| 迁移 | 最低 | 中等，可分阶段双栈迁移 | 最高，回滚和兼容复杂 |
+| 迁移 | 最低 | 中等，同一事务内有界兼容窗口 | 最高，回滚和兼容复杂 |
 
 所有性能判断目前是源代码推导或假设，不是测量结果。验收必须记录 envelope 大小、任务启动
 时间、峰值 RSS 和失败恢复时间；由于该路径不在 OAuth 请求热路径，不设置未经测量的宣传性
@@ -748,7 +736,8 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
 - 新 ctl 不向未声明协议支持的旧应用发送签名任务。
 - 运行时切换发生在必要迁移、兼容判定与候选验证成功之后。
 - 收据永不因 rollback 删除，而是追加精确 rollback/recovery outcome。
-- 身份轮换在新旧 key overlap 期间可回滚；旧私钥在完成证据前不销毁。
+- 身份轮换采用原子单活动信任切换；切换后立即拒绝旧控制器签名，历史审计只通过归档公钥
+  验证，不设置双活动 overlap。break-glass 恢复同时轮换 controller、audit 和 recovery 身份。
 
 必须把四种恢复语义明确分开：
 
@@ -778,10 +767,10 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
 
 ### 18.2 私密性与隔离
 
-- [ ] 使用推荐的无回显/stdin/secret-provider 输入时，在真实 Docker、Podman 和 host/systemd
+- [ ] 使用推荐的无回显/stdin/FD/secret-provider 输入时，在真实 Docker、Podman 和 host/systemd
   运行中，`/proc/*/cmdline`、`/proc/*/environ`、`docker/podman inspect`、journal、ctl 日志和
-  审计导出均未出现测试 canary secrets；direct secret argument 另行验证有警告且不向子进程、
-  持久配置或审计继续传播。
+  审计导出均未出现测试 canary secrets；包含凭据的 argv 和普通环境输入必须在任何持久化或
+  子进程启动前被拒绝。
 - [ ] 每个 operation 的 mount/network/capability 快照与计划一致；keys 任务无法读取 avatars、
   UI、bootstrap，migration 无法读取 keys 或 Valkey secret。
 - [ ] forged signature、错误 kid/alg/typ/audience/deployment/target/config、expired/not-yet-valid、
@@ -811,10 +800,10 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
 
 - [ ] clean install 在 managed dependency 默认下不要求用户提供任何秘密或手工创建文件。
 - [ ] 用户只提供 public URL 即可完成生产形态安装；本地试用可零参数启动。
-- [ ] PostgreSQL/Valkey 自定义支持直接参数、受控环境、无回显提示和安全自动化输入；文档不
-  要求用户理解内部 `url-file`。
-- [ ] `status`、`doctor`、`update --plan`、`update`、`rollback`、`keys`、`audit` 的 human/JSON
-  行为、退出码和修复建议通过快照及端到端测试。
+- [ ] PostgreSQL/Valkey 自定义支持无回显提示、安全 stdin/FD 和真实 secret provider；拒绝
+  包含凭据的 argv/普通环境，且文档不要求用户理解内部 `url-file`。
+- [ ] `status`、`update --plan`、`audit show` 的封闭 JSON，以及 `doctor`、`update`、`rollback`、
+  `keys`、`audit verify` 的 human 行为、退出码和修复建议通过快照及端到端测试。
 - [ ] 更新和高风险操作始终输出目标、影响、回滚状态和 request ID；`--yes` 不绕过安全控制。
 - [ ] 一名不了解容器内部路径的用户仅依赖 `--help` 和错误建议即可完成 install、status、
   update、key validate 和 audit verify 的可用性走查；记录观察到的摩擦点和修正。

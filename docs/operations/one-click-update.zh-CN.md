@@ -10,6 +10,23 @@ Rust 二进制，与 `nazoauth` 在同一个发布中分别构建、签名和出
 Cosign 校验该标签的精确工作流身份，再执行已经验证的本地脚本。脚本安装前还会再次
 验证 `nazoauthctl` bundle；出于信任自举原因，正式文档不提供 `curl | sh` 路径。
 
+例如，先固定一个不可变 Release，校验 bootstrap 后再执行：
+
+```sh
+version=v1.2.3
+base="https://github.com/nazozero/NazoAuth/releases/download/$version"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output install_nazoauthctl.sh "$base/install_nazoauthctl.sh"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output install_nazoauthctl.sh.bundle "$base/install_nazoauthctl.sh.bundle"
+cosign verify-blob --bundle install_nazoauthctl.sh.bundle \
+  --certificate-identity \
+  "https://github.com/nazozero/NazoAuth/.github/workflows/release-security.yml@refs/tags/$version" \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  install_nazoauthctl.sh
+sudo sh ./install_nazoauthctl.sh --version "$version"
+```
+
 默认只需要选择运行方式。`auto` 优先使用已安装的 Podman，其次使用 Docker：
 
 ```sh

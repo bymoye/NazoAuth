@@ -13,6 +13,24 @@ run the verified local script. The script verifies the `nazoauthctl` bundle agai
 before installing it; `curl | sh` is intentionally not documented as a trusted
 bootstrap path.
 
+For example, pin one immutable release and verify the bootstrap before running
+it:
+
+```sh
+version=v1.2.3
+base="https://github.com/nazozero/NazoAuth/releases/download/$version"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output install_nazoauthctl.sh "$base/install_nazoauthctl.sh"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output install_nazoauthctl.sh.bundle "$base/install_nazoauthctl.sh.bundle"
+cosign verify-blob --bundle install_nazoauthctl.sh.bundle \
+  --certificate-identity \
+  "https://github.com/nazozero/NazoAuth/.github/workflows/release-security.yml@refs/tags/$version" \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  install_nazoauthctl.sh
+sudo sh ./install_nazoauthctl.sh --version "$version"
+```
+
 `auto` selects an installed Podman runtime first and Docker second:
 
 ```sh
@@ -109,8 +127,8 @@ step in the clean-install acceptance procedure.
 
 `nazoauthctl` runs on the host, but application-aware work stays in the target
 runtime. For Docker or Podman it starts a one-shot container from the active or
-candidate image, attaches the deployment network, and mounts the same
-only the operation-specific configuration and state. It invokes the fixed
+candidate image, attaches the deployment network, and mounts only the
+operation-specific configuration and state. It invokes the fixed
 `nazoauth operator-task` entry point and passes a 60-second Ed25519 JWS on
 stdin. JWS authenticates origin and integrity; it does not encrypt. Secret
 material therefore travels only through secure stdin/FD, a secret mount, or a

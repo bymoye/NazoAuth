@@ -182,7 +182,8 @@ OTP-000 基线与契约
   TaskEnvelope，并在退出后再次观察实际容器/二进制 identity。准备失败不得预签 envelope。
 - [ ] `OTP-305` JSON 输出只在 stdout 输出单个 versioned object；进度与诊断写 stderr；human
   输出稳定显示阶段、request ID、回滚状态和下一步。
-- [ ] `OTP-306` 实现计划书稳定退出码和稳定 machine error code 契约。
+- [ ] `OTP-306` 实现计划书最小稳定退出码契约；操作细节通过脱敏错误、request ID 和签名
+  审计表达，不复制一套会与真实状态漂移的通用 machine error taxonomy。
 - [ ] `OTP-307` `--yes` 只跳过交互确认，不能跳过签名、批准策略、防重放、备份或审计。
 - [ ] `OTP-308` 默认 file provider 的 status/doctor/audit 通过 `sudo` 读取 root-only 配置、信任和
   备份证据；未来只有真实 operator group/provider 能完整约束文件访问时才允许无 root，不能为
@@ -198,7 +199,8 @@ OTP-000 基线与契约
 - [ ] 使用推荐的无回显/stdin/secret-provider 输入时，`ps`、`/proc`、Docker/Podman inspect 和
   错误输出中找不到 canary secrets；direct secret argument 单独证明有警告且不向子进程、
   持久配置或审计继续传播。
-- [ ] human/JSON snapshot、exit code、TTY/非 TTY、SIGINT、timeout 和重复执行测试通过。
+- [ ] JSON 型 `status`/plan/audit 与 human 型 doctor/mutation snapshot、exit code、TTY/非 TTY、
+  SIGINT、timeout 和重复执行测试通过。
 - [ ] 对应 `INV-01`、`INV-04`、`INV-05`、`INV-09`、`INV-14`、`INV-17` 有证据。
 
 ## 8. OTP-400：nazoauth operator-task 验证和执行入口
@@ -305,7 +307,8 @@ OTP-000 基线与契约
   accepted/rejected/result 共享 request ID 和 request digest。
 - [ ] `OTP-703` 任何自由文本、stdout/stderr、env、URL、key ref、approval token 和私钥字段均
   无法通过类型或数据库 CHECK 进入永久审计。
-- [ ] `OTP-704` `nazoauthctl audit show` 提供 human/JSON 查询；默认不需要展示受保护文件内容。
+- [ ] `OTP-704` `nazoauthctl audit show` 提供封闭 JSON 查询，`audit verify` 提供简短 human
+  结论；默认不展示受保护文件内容。
 - [ ] `OTP-705` `nazoauthctl audit verify` 验证 hash chain、检查点签名、key rotation、导出和
   retention continuity，返回稳定 exit/error code。
 - [ ] `OTP-706` 定义可选 audit sink contract；先实现一个真实消费者再保留接口，避免空泛
@@ -408,8 +411,8 @@ OTP-000 基线与契约
   显式执行，read-only doctor 不偷偷改变状态。
 - [ ] `OTP-1004` install 默认自动生成所有本地秘密和身份；只要求用户提供无法推断的 public
   URL 或外部系统事实。
-- [ ] `OTP-1005` human output 简短稳定，JSON output versioned；敏感值、内部 stack/debug 和
-  原始命令不进入普通输出。
+- [ ] `OTP-1005` doctor/mutation 的 human output 简短稳定，status/plan/audit 的 JSON output
+  使用封闭字段；敏感值、内部 stack/debug 和原始命令不进入普通输出。
 - [ ] `OTP-1006` 为 install、status、doctor、update plan/update、rollback、migrate、keys、audit、
   identity 编写中英文操作文档和典型恢复路径。
 - [ ] `OTP-1007` 更新 `docs/README.md`、架构、威胁模型、security events、部署、one-click update、
@@ -515,7 +518,7 @@ sudo nazoauthctl audit show --request-id REQUEST_ID
 
 ```bash
 sudo nazoauthctl keys list
-sudo nazoauthctl keys generate --alg ES256 --purpose credential
+sudo nazoauthctl keys generate-local --alg ES256 --purposes credential --yes
 sudo nazoauthctl keys validate
 ```
 
