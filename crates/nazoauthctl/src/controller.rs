@@ -248,6 +248,7 @@ fn install_transaction(
             TaskOperation::MigrateApply,
             None,
         )?;
+        bootstrap_profile_keys(config, &release, candidate.to_string_lossy().as_ref())?;
         symlink_atomic(&candidate, &config.runtime.binary_path)?;
         Runtime::new(config).start_service()?;
     } else {
@@ -264,6 +265,7 @@ fn install_transaction(
             TaskOperation::MigrateApply,
             None,
         )?;
+        bootstrap_profile_keys(config, &release, &release.manifest.image_ref)?;
         if runtime.container_exists() {
             runtime.remove_container()?;
         }
@@ -303,6 +305,27 @@ fn install_transaction(
         release.manifest.version, release.manifest.backend_commit
     );
     Ok(())
+}
+
+fn bootstrap_profile_keys(
+    config: &UpdateConfig,
+    release: &VerifiedRelease,
+    target: &str,
+) -> anyhow::Result<()> {
+    if config.install_profile != "standards-full" {
+        return Ok(());
+    }
+    execute_release_task(
+        config,
+        release,
+        target,
+        TaskOperation::KeysGenerateLocal {
+            alg: "ES256".to_owned(),
+            purposes: vec!["credential".to_owned(), "presentation_request".to_owned()],
+        },
+        None,
+    )
+    .map(|_| ())
 }
 
 fn install_completion_path(config: &UpdateConfig) -> PathBuf {

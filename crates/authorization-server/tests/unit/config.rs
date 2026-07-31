@@ -477,12 +477,34 @@ fn migration_config_does_not_materialize_unrelated_application_secrets() {
             database_url_file.display().to_string(),
         )],
         false,
+        true,
     )
     .unwrap();
 
     assert_eq!(database_url(&source), "postgresql://file.example/oauth");
     assert!(!path.join("state").exists());
     assert!(source.get("CLIENT_SECRET_PEPPER").is_none());
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn metadata_only_config_does_not_read_secret_files_or_expose_secret_values() {
+    let path = temp_config_dir("metadata_config_no_secret_reads");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nDATABASE_URL_FILE: deliberately-absent\n",
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir_with_env_mode(&path, [], false, false).unwrap();
+
+    assert_eq!(
+        source.get("DATABASE_URL_FILE").as_deref(),
+        Some("deliberately-absent")
+    );
+    assert!(source.get("DATABASE_URL").is_none());
+    assert!(source.get("CLIENT_SECRET_PEPPER").is_none());
+    assert!(!path.join("state").exists());
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -549,6 +571,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CLIENT_SECRET_PEPPER",
             "CLIENT_SECRET_PEPPER_FILE",
             "CIBA_AUTOMATED_DECISION_TOKEN",
+            "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
             "CIBA_AUTH_REQ_ID_TTL_SECONDS",
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
             "CIBA_PING_TLS_TRUST_BUNDLE",
@@ -607,6 +630,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "MTLS_ENDPOINT_BASE_URL",
             "MTLS_CERTIFICATE_SOURCE",
             "OPENID4VC_DATA_ENCRYPTION_KEY",
+            "OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
             "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON",
             "OPENID4VC_CLIENT_ATTESTATION_ISSUER",
             "OPENID4VC_KEY_ATTESTATION_JWKS_JSON",
@@ -616,7 +640,9 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
             "OPENID4VCI_DEFERRED_CREDENTIAL_CONFIGURATIONS",
             "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+            "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN_FILE",
             "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+            "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN_FILE",
             "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
             "SIGNING_EXTERNAL_COMMAND",
             "SIGNING_EXTERNAL_TIMEOUT_MS",

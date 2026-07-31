@@ -61,6 +61,34 @@ HTTPS origin, an existing TLS ingress must already forward that origin to the
 installation port. Installation succeeds only after public Discovery reports
 the exact issuer.
 
+The default `baseline` profile is the safe general-purpose installation. The
+declared full OIDF certification matrix uses the explicit `standards-full` profile:
+
+```sh
+python3 scripts/build_oidf_full_install_profile.py \
+  --client-attestation-issuer https://suite.example \
+  --client-attestation-jwks /absolute/public-client-attestation.jwks \
+  --key-attestation-jwks /absolute/public-key-attestation.jwks \
+  --credential-configurations /absolute/credential-configurations.json \
+  --trust-anchors /absolute/suite-trust-anchors.pem \
+  --wallet-origin https://suite.example \
+  --ciba-origin https://suite.example \
+  --backchannel-logout-origin https://suite.example \
+  --output /absolute/oidf-full-profile.json
+sudo nazoauthctl install --runtime podman \
+  --public-url https://auth.example.com --profile standards-full \
+  --profile-material /absolute/oidf-full-profile.json
+```
+
+The material file is a closed, public-only trust/configuration document:
+private JWK members, private keys, non-HTTPS origins, unknown fields, symlinks,
+and relative paths are rejected. `nazoauthctl` generates the DCR, CIBA and
+OpenID4VC management/encryption secrets locally, persists them only in managed
+secret files, and creates the matching credential signing key and certificate
+through an authenticated one-shot application task before startup. External
+trust anchors and suite public keys are never guessed. `standards-full` therefore
+requires an explicit material file; the baseline never silently enables it.
+
 ### Existing PostgreSQL and Valkey
 
 Interactive entry avoids echoing credentials:

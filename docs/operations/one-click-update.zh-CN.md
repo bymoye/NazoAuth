@@ -59,6 +59,31 @@ sudo nazoauthctl install \
   --public-url https://auth.example.com
 ```
 
+默认 `baseline` 是面向通用部署的安全基线。项目正式声明的完整 OIDF 一致性矩阵必须
+显式选择 `standards-full`：
+
+```sh
+python3 scripts/build_oidf_full_install_profile.py \
+  --client-attestation-issuer https://suite.example \
+  --client-attestation-jwks /absolute/public-client-attestation.jwks \
+  --key-attestation-jwks /absolute/public-key-attestation.jwks \
+  --credential-configurations /absolute/credential-configurations.json \
+  --trust-anchors /absolute/suite-trust-anchors.pem \
+  --wallet-origin https://suite.example \
+  --ciba-origin https://suite.example \
+  --backchannel-logout-origin https://suite.example \
+  --output /absolute/oidf-full-profile.json
+sudo nazoauthctl install --runtime podman \
+  --public-url https://auth.example.com --profile standards-full \
+  --profile-material /absolute/oidf-full-profile.json
+```
+
+material 是字段封闭、只含公开信息的信任/配置文档；私有 JWK 成员、私钥、非 HTTPS
+origin、未知字段、符号链接和相对路径都会被拒绝。DCR、CIBA、OpenID4VC 管理/加密
+秘密由 `nazoauthctl` 在本机生成并且只落入受管 secret file；匹配的 credential 签名
+密钥和证书则在启动前通过已认证的一次性应用任务生成。外部 trust anchor 和套件公钥
+不能安全推断，所以 `standards-full` 必须显式提供 material，baseline 也不会静默启用它。
+
 ### 使用已有 PostgreSQL 和 Valkey
 
 用户配置的是 URL；root 管理的秘密文件只是安装器内部的安全落盘方式。交互输入

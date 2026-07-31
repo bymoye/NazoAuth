@@ -59,6 +59,8 @@ pub(crate) struct UpdateOptions {
 pub(crate) struct InstallOptions {
     pub(crate) runtime: String,
     pub(crate) public_url: String,
+    pub(crate) profile: String,
+    pub(crate) profile_material: Option<PathBuf>,
     pub(crate) data_root: PathBuf,
     pub(crate) port: u16,
     pub(crate) database_url: Option<String>,
@@ -302,6 +304,8 @@ fn parse_yes(values: Vec<String>, command: &str) -> anyhow::Result<bool> {
 fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
     let mut runtime = "auto".to_owned();
     let mut public_url = "http://127.0.0.1:8000".to_owned();
+    let mut profile = "baseline".to_owned();
+    let mut profile_material = None;
     let mut data_root = PathBuf::from("/var/lib/nazoauth");
     let mut port = 8000;
     let database_url = None;
@@ -331,6 +335,8 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
         match flag {
             "--runtime" => runtime = value,
             "--public-url" => public_url = value,
+            "--profile" => profile = value,
+            "--profile-material" => profile_material = Some(PathBuf::from(value)),
             "--data-root" => data_root = PathBuf::from(value),
             "--port" => {
                 port = value
@@ -354,9 +360,20 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
     if !matches!(runtime.as_str(), "auto" | "podman" | "docker" | "host") {
         bail!("--runtime must be auto, podman, docker, or host");
     }
+    if !matches!(profile.as_str(), "baseline" | "standards-full") {
+        bail!("--profile must be baseline or standards-full");
+    }
+    if profile == "standards-full" && profile_material.is_none() {
+        bail!("--profile standards-full requires --profile-material PATH");
+    }
+    if profile == "baseline" && profile_material.is_some() {
+        bail!("--profile-material is accepted only with --profile standards-full");
+    }
     Ok(InstallOptions {
         runtime,
         public_url,
+        profile,
+        profile_material,
         data_root,
         port,
         database_url,

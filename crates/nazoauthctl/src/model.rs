@@ -12,6 +12,8 @@ pub(crate) struct UpdateConfig {
     pub(crate) schema: u32,
     #[serde(default)]
     pub(crate) managed_install: bool,
+    #[serde(default = "baseline_install_profile")]
+    pub(crate) install_profile: String,
     pub(crate) repository: String,
     pub(crate) updater_install_path: PathBuf,
     pub(crate) backup_root: PathBuf,
@@ -23,6 +25,10 @@ pub(crate) struct UpdateConfig {
     pub(crate) postgres: Postgres,
     pub(crate) valkey: Valkey,
     pub(crate) ui: Ui,
+}
+
+fn baseline_install_profile() -> String {
+    "baseline".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -160,6 +166,9 @@ impl UpdateConfig {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         if self.schema != 2 {
             bail!("unsupported update config schema");
+        }
+        if !matches!(self.install_profile.as_str(), "baseline" | "standards-full") {
+            bail!("unsupported install profile {}", self.install_profile);
         }
         let repository_parts = self.repository.split('/').collect::<Vec<_>>();
         if repository_parts.len() != 2 || repository_parts.iter().any(|part| !safe_identifier(part))

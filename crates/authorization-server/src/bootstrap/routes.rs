@@ -37,7 +37,7 @@ use crate::http::admin::{
     openid4vc::{
         admin_delete_credential_dataset, admin_get_credential_dataset, admin_put_credential_dataset,
     },
-    users::{admin_patch_user, admin_users},
+    users::{admin_create_user, admin_patch_user, admin_users},
 };
 use crate::http::auth::{
     csrf::csrf,
@@ -294,6 +294,7 @@ pub(crate) fn configure(
             web::scope("/admin")
                 .wrap(cors::cors_admin(settings))
                 .route("/users", web::get().to(admin_users))
+                .route("/users", web::post().to(admin_create_user))
                 .route("/users/{user_id}", web::patch().to(admin_patch_user))
                 .route("/runtime-modules", web::get().to(admin_runtime_modules))
                 .route(

@@ -148,6 +148,18 @@ async fn invoke_admin_patch_user(
     admin_patch_user(admin_sessions, users, client_ip_config, req, path, payload).await
 }
 
+async fn invoke_admin_create_user(
+    state: Data<TestInfrastructure>,
+    req: HttpRequest,
+    payload: Json<CreateUserRequest>,
+) -> HttpResponse {
+    let (admin_sessions, _, client_ip_config) = admin_user_dependencies(&state);
+    let accounts: Data<dyn nazo_identity::ports::RegistrationAccountRepositoryPort> =
+        Data::from(Arc::new(UserRepository::new(state.diesel_db.clone()))
+            as Arc<dyn nazo_identity::ports::RegistrationAccountRepositoryPort>);
+    admin_create_user(admin_sessions, accounts, client_ip_config, req, payload).await
+}
+
 fn oauth_error_name(response: &HttpResponse) -> Option<String> {
     response
         .extensions()
@@ -403,6 +415,69 @@ async fn admin_patch_user_rejects_missing_csrf_before_auth_or_mutation() {
         oauth_error_name(&response).as_deref(),
         Some("invalid_request")
     );
+}
+
+#[actix_web::test]
+async fn admin_create_user_rejects_missing_csrf_before_hashing_or_mutation() {
+    let state = Data::new(test_state());
+    let req = actix_web::test::TestRequest::post()
+        .uri("/admin/users")
+        .cookie(Cookie::new(
+            state.settings.session.session_cookie_name.clone(),
+            "session-id",
+        ))
+        .to_http_request();
+
+    let response = invoke_admin_create_user(
+        state,
+        req,
+        Json(CreateUserRequest {
+            email: "new-user@example.com".to_owned(),
+            password: "not-used-password".to_owned(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        oauth_error_name(&response).as_deref(),
+        Some("invalid_request")
+    );
+}
+
+#[actix_web::test]
+async fn admin_create_user_uses_authenticated_tenant_and_returns_no_password_material() {
+    let Some(fixture) = LiveAdminUsersFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let admin = fixture
+        .create_user(&format!("{suffix}-admin"), "admin", 10)
+        .await;
+    let sid = format!("sid-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    let email = format!("provisioned-{suffix}@example.com");
+    fixture.store_session(&admin, &sid).await;
+
+    let response = invoke_admin_create_user(
+        fixture.state.clone(),
+        fixture.admin_post_request(&sid, &csrf, "/admin/users"),
+        Json(CreateUserRequest {
+            email: email.clone(),
+            password: format!("safe-test-password-{suffix}"),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("created user response should collect");
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["email"], email);
+    assert_eq!(body["role"], "user");
+    assert!(body.get("password").is_none());
+    assert!(body.get("password_hash").is_none());
 }
 
 #[actix_web::test]

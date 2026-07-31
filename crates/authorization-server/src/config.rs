@@ -29,10 +29,26 @@ const GENERATED_SECRET_BYTES: usize = 48;
 const GENERATED_SECRETS_DIR: &str = "secrets";
 const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
     ("CLIENT_SECRET_PEPPER", "CLIENT_SECRET_PEPPER_FILE"),
+    (
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
+    ),
     ("DATABASE_URL", "DATABASE_URL_FILE"),
     (
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
+    ),
+    (
+        "OPENID4VC_DATA_ENCRYPTION_KEY",
+        "OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
+    ),
+    (
+        "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+        "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN_FILE",
+    ),
+    (
+        "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+        "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN_FILE",
     ),
     ("PAIRWISE_SUBJECT_SECRET", "PAIRWISE_SUBJECT_SECRET_FILE"),
     ("VALKEY_URL", "VALKEY_URL_FILE"),
@@ -51,6 +67,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "CLIENT_SECRET_PEPPER",
     "CLIENT_SECRET_PEPPER_FILE",
     "CIBA_AUTOMATED_DECISION_TOKEN",
+    "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
     "CIBA_AUTH_REQ_ID_TTL_SECONDS",
     "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
     "CIBA_PING_TLS_TRUST_BUNDLE",
@@ -109,6 +126,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "MTLS_ENDPOINT_BASE_URL",
     "MTLS_CERTIFICATE_SOURCE",
     "OPENID4VC_DATA_ENCRYPTION_KEY",
+    "OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
     "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON",
     "OPENID4VC_CLIENT_ATTESTATION_ISSUER",
     "OPENID4VC_KEY_ATTESTATION_JWKS_JSON",
@@ -118,7 +136,9 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
     "OPENID4VCI_DEFERRED_CREDENTIAL_CONFIGURATIONS",
     "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+    "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN_FILE",
     "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+    "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN_FILE",
     "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
     "SIGNING_EXTERNAL_COMMAND",
     "SIGNING_EXTERNAL_TIMEOUT_MS",
@@ -216,20 +236,25 @@ impl ConfigSource {
     }
 
     pub(crate) fn load_without_generated_secrets() -> anyhow::Result<Self> {
-        Self::load_from_dir_with_env_mode(".", std::env::vars(), false)
+        Self::load_from_dir_with_env_mode(".", std::env::vars(), false, true)
+    }
+
+    pub(crate) fn load_without_secret_values() -> anyhow::Result<Self> {
+        Self::load_from_dir_with_env_mode(".", std::env::vars(), false, false)
     }
 
     fn load_from_dir_with_env(
         path: impl AsRef<Path>,
         env: impl IntoIterator<Item = (String, String)>,
     ) -> anyhow::Result<Self> {
-        Self::load_from_dir_with_env_mode(path, env, true)
+        Self::load_from_dir_with_env_mode(path, env, true, true)
     }
 
     fn load_from_dir_with_env_mode(
         path: impl AsRef<Path>,
         env: impl IntoIterator<Item = (String, String)>,
         materialize_generated_secrets: bool,
+        resolve_secret_files: bool,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let dotenv_path = path.join(UNSUPPORTED_DOTENV_FILE);
@@ -243,7 +268,9 @@ impl ConfigSource {
             source.merge_yaml_file(config_path)?;
         }
         source.merge_env(env)?;
-        source.merge_secret_file_inputs(path)?;
+        if resolve_secret_files {
+            source.merge_secret_file_inputs(path)?;
+        }
         if materialize_generated_secrets {
             source.merge_generated_secrets(path)?;
         }

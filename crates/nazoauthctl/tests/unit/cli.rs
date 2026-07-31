@@ -110,6 +110,10 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
         "host",
         "--public-url",
         "https://auth.example",
+        "--profile",
+        "standards-full",
+        "--profile-material",
+        "/srv/oidf-profile.json",
         "--data-root",
         "/srv/nazoauth",
         "--port",
@@ -128,6 +132,11 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
     };
     assert_eq!(options.runtime, "host");
     assert_eq!(options.public_url, "https://auth.example");
+    assert_eq!(options.profile, "standards-full");
+    assert_eq!(
+        options.profile_material,
+        Some(PathBuf::from("/srv/oidf-profile.json"))
+    );
     assert_eq!(options.data_root, PathBuf::from("/srv/nazoauth"));
     assert_eq!(options.port, 8443);
     assert_eq!(options.secret_fd, Some(9));
@@ -138,6 +147,13 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
         &["nazoauthctl", "install", "--port", "0"][..],
         &["nazoauthctl", "install", "--port", "text"][..],
         &["nazoauthctl", "install", "--secret-fd", "text"][..],
+        &["nazoauthctl", "install", "--profile", "standards-full"][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--profile-material",
+            "/tmp/material.json",
+        ][..],
         &["nazoauthctl", "install", "--public-url"][..],
         &["nazoauthctl", "install", "--unknown", "value"][..],
         &["nazoauthctl", "--config"][..],

@@ -638,6 +638,12 @@ pub async fn run() -> anyhow::Result<()> {
         Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()))
             as Arc<dyn nazo_identity::ports::AdminUserRepositoryPort>,
     );
+    let admin_user_registration: web::Data<
+        dyn nazo_identity::ports::RegistrationAccountRepositoryPort,
+    > = web::Data::from(
+        Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()))
+            as Arc<dyn nazo_identity::ports::RegistrationAccountRepositoryPort>,
+    );
     let admin_grants: web::Data<dyn nazo_auth::AdminGrantRepositoryPort> = web::Data::from(
         Arc::new(nazo_postgres::GrantRepository::new(diesel_db.clone()))
             as Arc<dyn nazo_auth::AdminGrantRepositoryPort>,
@@ -922,6 +928,7 @@ pub async fn run() -> anyhow::Result<()> {
             .app_data(profile_federation.clone())
             .app_data(resource_server_http_data.clone())
             .app_data(admin_users.clone())
+            .app_data(admin_user_registration.clone())
             .app_data(admin_grants.clone())
             .app_data(admin_access_requests.clone())
             .app_data(mtls_trust_anchors.clone())

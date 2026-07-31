@@ -474,36 +474,17 @@ impl Settings {
         let passkey = PasskeySettings::from_config(config, &issuer)?;
         let email = EmailSettings::from_config(config, &issuer)?;
         let federation = FederationSettings::from_config(config)?;
-        let signing_key_rotation_interval_seconds =
-            config.parse("SIGNING_KEY_ROTATION_INTERVAL_SECONDS", 7_776_000)?;
-        let signing_key_prepublish_seconds =
-            config.parse("SIGNING_KEY_PREPUBLISH_SECONDS", 86_400)?;
+        let task_key_settings = key_settings_from_config(config)?;
         let fapi_http_signature_max_age_seconds =
             config.parse("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS", 60)?;
         if !(1..=300).contains(&fapi_http_signature_max_age_seconds) {
             bail!("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS must be between 1 and 300");
         }
-        if signing_key_rotation_interval_seconds <= 0 {
-            bail!("SIGNING_KEY_ROTATION_INTERVAL_SECONDS must be positive");
-        }
-        if signing_key_prepublish_seconds <= 0 {
-            bail!("SIGNING_KEY_PREPUBLISH_SECONDS must be positive");
-        }
-        if signing_key_prepublish_seconds >= signing_key_rotation_interval_seconds {
-            bail!(
-                "SIGNING_KEY_PREPUBLISH_SECONDS must be less than SIGNING_KEY_ROTATION_INTERVAL_SECONDS"
-            );
-        }
-
         let data_dir = PathBuf::from(config.string("DATA_DIR", "runtime"));
         let avatar_storage_dir = config
             .optional_string("AVATAR_STORAGE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("avatars"));
-        let jwk_keys_dir = config
-            .optional_string("JWK_KEYS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("keys"));
         let scim_event_retention_seconds = positive_u64(
             config,
             "SCIM_EVENT_RETENTION_SECONDS",
@@ -609,13 +590,13 @@ impl Settings {
                 federation,
             },
             keys: KeyManagementSettings {
-                jwk_keys_dir,
-                signing_external_command: parse_signing_external_command(
-                    config.optional_string("SIGNING_EXTERNAL_COMMAND"),
-                ),
-                signing_external_timeout_ms: config.parse("SIGNING_EXTERNAL_TIMEOUT_MS", 2_000)?,
-                signing_key_rotation_interval_seconds,
-                signing_key_prepublish_seconds,
+                jwk_keys_dir: task_key_settings.keys_dir,
+                signing_external_command: task_key_settings.external_command,
+                signing_external_timeout_ms: task_key_settings.external_timeout.as_millis() as u64,
+                signing_key_rotation_interval_seconds: task_key_settings
+                    .rotation_interval
+                    .num_seconds(),
+                signing_key_prepublish_seconds: task_key_settings.prepublish_window.num_seconds(),
             },
             modules: ModuleSettings {
                 enable_request_object: config.bool("ENABLE_REQUEST_OBJECT", false)?,
@@ -807,6 +788,51 @@ fn parse_signing_external_command(value: Option<String>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+pub(crate) fn key_settings_from_config(
+    config: &ConfigSource,
+) -> anyhow::Result<nazo_key_management::KeySettings> {
+    let rotation_interval_seconds =
+        config.parse("SIGNING_KEY_ROTATION_INTERVAL_SECONDS", 7_776_000)?;
+    let prepublish_seconds = config.parse("SIGNING_KEY_PREPUBLISH_SECONDS", 86_400)?;
+    if rotation_interval_seconds <= 0 {
+        bail!("SIGNING_KEY_ROTATION_INTERVAL_SECONDS must be positive");
+    }
+    if prepublish_seconds <= 0 {
+        bail!("SIGNING_KEY_PREPUBLISH_SECONDS must be positive");
+    }
+    if prepublish_seconds >= rotation_interval_seconds {
+        bail!(
+            "SIGNING_KEY_PREPUBLISH_SECONDS must be less than SIGNING_KEY_ROTATION_INTERVAL_SECONDS"
+        );
+    }
+    let data_dir = PathBuf::from(config.string("DATA_DIR", "runtime"));
+    let access_token_ttl_seconds = positive_i64(
+        config,
+        "ACCESS_TOKEN_TTL_SECONDS",
+        300,
+        "ACCESS_TOKEN_TTL_SECONDS",
+    )?;
+    let id_token_ttl_seconds =
+        positive_i64(config, "ID_TOKEN_TTL_SECONDS", 600, "ID_TOKEN_TTL_SECONDS")?;
+    Ok(nazo_key_management::KeySettings {
+        keys_dir: config
+            .optional_string("JWK_KEYS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("keys")),
+        external_command: parse_signing_external_command(
+            config.optional_string("SIGNING_EXTERNAL_COMMAND"),
+        ),
+        external_timeout: std::time::Duration::from_millis(
+            config.parse("SIGNING_EXTERNAL_TIMEOUT_MS", 2_000)?,
+        ),
+        rotation_interval: chrono::Duration::seconds(rotation_interval_seconds),
+        prepublish_window: chrono::Duration::seconds(prepublish_seconds),
+        verification_grace: chrono::Duration::seconds(
+            access_token_ttl_seconds.max(id_token_ttl_seconds),
+        ),
+    })
 }
 
 fn default_protected_resource_identifier(issuer: &str) -> String {

@@ -34,7 +34,7 @@ fn print_help() {
         "nazoauthctl
 
 Usage:
-  nazoauthctl [--config PATH] install [options]
+  nazoauthctl [--config PATH] install [--runtime auto|podman|docker|host] [--public-url URL] [--profile baseline|standards-full] [--profile-material PATH] [options]
   nazoauthctl [--config PATH] status
   nazoauthctl [--config PATH] doctor
   nazoauthctl [--config PATH] check [--to VERSION]
