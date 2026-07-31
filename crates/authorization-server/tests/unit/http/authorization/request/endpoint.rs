@@ -836,7 +836,7 @@ async fn encrypted_request_object_requires_the_registered_closed_algorithm_pair(
 
     let response = authorize_request(fixture.state.clone(), req, &mut q).await;
 
-    assert_authorization_error_redirect(response, "invalid_request", None);
+    assert_authorization_error_redirect(response, "invalid_request_object", None);
 }
 
 #[actix_web::test]
