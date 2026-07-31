@@ -395,7 +395,10 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
     tokio::fs::create_dir_all(&keys_dir).await.unwrap();
     let mut settings = test_settings(keys_dir.clone());
     settings.rotation_interval = chrono::Duration::seconds(10);
-    settings.prepublish_window = chrono::Duration::seconds(3);
+    // Keep the candidate unambiguously inside the prepublication window even
+    // under coverage instrumentation, where parsing the generated RSA keys can
+    // take several seconds before lifecycle maintenance observes the clock.
+    settings.prepublish_window = chrono::Duration::seconds(60);
     write_local_key_entry(
         &keys_dir,
         "active",
