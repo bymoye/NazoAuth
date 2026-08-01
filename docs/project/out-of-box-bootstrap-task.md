@@ -92,6 +92,14 @@ or a second in-memory protocol state, neither of which is authoritative across c
 the database transaction therefore remains the only claim/replay decision point. Rate and resource
 limits at the public HTTP boundary remain the mitigation for a compromised bootstrap token.
 
+The controller's non-secret pending receipt is bound with the deployment secret revision rather
+than a controller private key, so normal identity rotation and break-glass recovery do not strand
+an outcome-unknown request. A successful pending state also binds the verified application user ID,
+the original token through HMAC, and a controller-owned database recovery epoch. Managed database
+recovery rotates that epoch before touching the database. If a token still exists during success
+recovery, ctl replays the request and requires the same application receipt before deleting it; a
+different token fails closed and is never deleted as though the old success still applied.
+
 ## Completion evidence
 
 - `cargo test --locked -p nazo-oauth-server --lib`: 1019 passed.

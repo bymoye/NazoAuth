@@ -230,6 +230,12 @@ fn write_bootstrap_fixture(
     use std::os::unix::fs::PermissionsExt as _;
 
     let directory = work.path().join("bootstrap");
+    fs::create_dir_all(config.operator.secret_revision_file.parent().unwrap()).unwrap();
+    fs::write(
+        &config.operator.secret_revision_file,
+        b"stable-deployment-bootstrap-binding",
+    )
+    .unwrap();
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
     let token_path = directory.join(BOOTSTRAP_TOKEN_FILE);
@@ -277,17 +283,20 @@ fn write_bootstrap_pending_fixture(
     request_id: &str,
     status: BootstrapAdminPendingStatus,
 ) {
-    fs::create_dir_all(config.operator.controller_private_key.parent().unwrap()).unwrap();
+    fs::create_dir_all(config.operator.secret_revision_file.parent().unwrap()).unwrap();
     fs::write(
-        &config.operator.controller_private_key,
-        b"controller-binding-key",
+        &config.operator.secret_revision_file,
+        b"stable-deployment-bootstrap-binding",
     )
     .unwrap();
     let pending = BootstrapAdminPending {
-        schema: 1,
+        schema: 2,
         request_id: request_id.to_owned(),
         email_hmac_sha256: bootstrap_email_hmac(config, email).unwrap(),
+        recovery_epoch: current_bootstrap_recovery_epoch(config).unwrap(),
         status,
+        claimed_user_id: None,
+        token_hmac_sha256: None,
     };
     fs::create_dir_all(&config.operator.state_directory).unwrap();
     atomic_write(
@@ -433,6 +442,142 @@ fn bootstrap_owner_policy_matches_real_container_and_host_runtime_identities() {
         .trim()
         .to_owned();
     assert_eq!(bootstrap_state_owner_uid(&config).unwrap(), actual_uid);
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_pending_binding_survives_controller_and_break_glass_key_rotation() {
+    let work = PrivateTempDir::new("nazoauth-bootstrap-rotation").unwrap();
+    let mut config = config(&work);
+    write_bootstrap_fixture(
+        &work,
+        &mut config,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",
+    );
+    write_bootstrap_pending_fixture(
+        &config,
+        "admin@example.com",
+        "bootstrap-admin-0123456789abcdef0123456789abcdef",
+        BootstrapAdminPendingStatus::Intent,
+    );
+    fs::write(
+        &config.operator.controller_private_key,
+        b"controller-before",
+    )
+    .unwrap();
+    fs::create_dir_all(config.operator.break_glass_private_key.parent().unwrap()).unwrap();
+    fs::write(
+        &config.operator.break_glass_private_key,
+        b"break-glass-before",
+    )
+    .unwrap();
+    let before = load_or_create_bootstrap_pending(&config, "admin@example.com").unwrap();
+
+    fs::write(&config.operator.controller_private_key, b"controller-after").unwrap();
+    fs::write(
+        &config.operator.break_glass_private_key,
+        b"break-glass-after",
+    )
+    .unwrap();
+    let after = load_or_create_bootstrap_pending(&config, "admin@example.com").unwrap();
+
+    assert_eq!(after.request_id, before.request_id);
+    assert_eq!(after.email_hmac_sha256, before.email_hmac_sha256);
+    assert_eq!(after.recovery_epoch, before.recovery_epoch);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_epoch_invalidates_succeeded_receipt_without_deleting_a_new_token() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let work = PrivateTempDir::new("nazoauth-bootstrap-recovery-epoch").unwrap();
+    let mut config = config(&work);
+    let old_token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let token_path = write_bootstrap_fixture(&work, &mut config, old_token);
+    write_active_release(&config, &manifest("v0.2.0", 'e')).unwrap();
+    install_audit_key(&config);
+    let old_request_id = "bootstrap-admin-0123456789abcdef0123456789abcdef";
+    write_bootstrap_pending_fixture(
+        &config,
+        "admin@example.com",
+        old_request_id,
+        BootstrapAdminPendingStatus::Intent,
+    );
+    let response = r#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","id":"550e8400-e29b-41d4-a716-446655440000","email":"admin@example.com","role":"admin","next":"/ui/auth"}"#;
+    let (curl, _, _, _) = write_fake_bootstrap_curl(&work, response);
+    let credentials = BootstrapAdminCredentials {
+        email: "admin@example.com".to_owned(),
+        password: "correct horse battery staple".to_owned(),
+    };
+    audited_bootstrap_admin(&config, &credentials, curl.as_os_str(), None).unwrap();
+    assert!(!token_path.exists());
+    let succeeded: BootstrapAdminPending =
+        serde_json::from_slice(&fs::read(bootstrap_pending_path(&config)).unwrap()).unwrap();
+    assert_eq!(succeeded.status, BootstrapAdminPendingStatus::Succeeded);
+
+    let next_epoch = rotate_bootstrap_recovery_epoch(&config).unwrap();
+    let new_token = "a".repeat(64);
+    fs::write(&token_path, &new_token).unwrap();
+    fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let replacement_credentials = BootstrapAdminCredentials {
+        email: "replacement@example.com".to_owned(),
+        password: "replacement horse battery staple".to_owned(),
+    };
+    let substituted = r#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","id":"550e8400-e29b-41d4-a716-446655440000","email":"replacement@example.com","role":"admin","next":"/ui/auth"}"#;
+    let (curl, _, _, _) = write_fake_bootstrap_curl(&work, substituted);
+    assert!(
+        audited_bootstrap_admin(&config, &replacement_credentials, curl.as_os_str(), None,)
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(&token_path).unwrap(), new_token);
+    let reset: BootstrapAdminPending =
+        serde_json::from_slice(&fs::read(bootstrap_pending_path(&config)).unwrap()).unwrap();
+    assert_eq!(reset.status, BootstrapAdminPendingStatus::Intent);
+    assert_ne!(reset.request_id, old_request_id);
+    assert_eq!(reset.recovery_epoch, next_epoch);
+    assert_eq!(
+        reset.email_hmac_sha256,
+        bootstrap_email_hmac(&config, "replacement@example.com").unwrap()
+    );
+    assert!(reset.claimed_user_id.is_none());
+    assert!(reset.token_hmac_sha256.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn succeeded_cleanup_replays_and_matches_the_application_receipt() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let work = PrivateTempDir::new("nazoauth-bootstrap-receipt-replay").unwrap();
+    let mut config = config(&work);
+    let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let token_path = write_bootstrap_fixture(&work, &mut config, token);
+    write_active_release(&config, &manifest("v0.2.0", 'e')).unwrap();
+    install_audit_key(&config);
+    let request_id = "bootstrap-admin-0123456789abcdef0123456789abcdef";
+    write_bootstrap_pending_fixture(
+        &config,
+        "admin@example.com",
+        request_id,
+        BootstrapAdminPendingStatus::Intent,
+    );
+    let response = r#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","id":"550e8400-e29b-41d4-a716-446655440000","email":"admin@example.com","role":"admin","next":"/ui/auth"}"#;
+    let (curl, _, _, _) = write_fake_bootstrap_curl(&work, response);
+    let credentials = BootstrapAdminCredentials {
+        email: "admin@example.com".to_owned(),
+        password: "correct horse battery staple".to_owned(),
+    };
+    audited_bootstrap_admin(&config, &credentials, curl.as_os_str(), None).unwrap();
+    fs::write(&token_path, token).unwrap();
+    fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (curl, _, _, _) = write_fake_bootstrap_curl(&work, response);
+    assert_eq!(
+        audited_bootstrap_admin(&config, &credentials, curl.as_os_str(), None).unwrap(),
+        request_id
+    );
+    assert!(!token_path.exists());
 }
 
 #[cfg(unix)]

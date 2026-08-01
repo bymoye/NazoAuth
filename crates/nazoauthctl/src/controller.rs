@@ -135,7 +135,16 @@ struct BootstrapAdminPending {
     schema: u32,
     request_id: String,
     email_hmac_sha256: String,
+    recovery_epoch: String,
     status: BootstrapAdminPendingStatus,
+    claimed_user_id: Option<String>,
+    token_hmac_sha256: Option<String>,
+}
+
+#[derive(Debug)]
+struct VerifiedBootstrapReceipt {
+    claimed_user_id: uuid::Uuid,
+    token_hmac_sha256: String,
 }
 
 #[derive(Debug)]
@@ -305,7 +314,36 @@ fn audited_bootstrap_admin(
             "single-use-database-claim",
         )?;
         let token_path = bootstrap_token_path(config, expected_owner_uid)?;
-        remove_file_durable(&token_path)?;
+        if token_path.exists() {
+            let token = read_bootstrap_token(&token_path, expected_owner_uid)?;
+            let expected_token_hmac = pending
+                .token_hmac_sha256
+                .as_deref()
+                .context("bootstrap-admin success state has no token binding")?;
+            if bootstrap_state_hmac(config, b"token-v1", token.as_bytes())? != expected_token_hmac {
+                bail!(
+                    "bootstrap token changed after the recorded success; a database recovery may have reopened initial administration"
+                );
+            }
+            let receipt = claim_bootstrap_admin(
+                config,
+                credentials,
+                &request_id,
+                curl_program,
+                expected_owner_uid,
+            )?;
+            let expected_user_id = pending
+                .claimed_user_id
+                .as_deref()
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .context("bootstrap-admin success state has no valid application receipt")?;
+            if receipt.claimed_user_id != expected_user_id
+                || receipt.token_hmac_sha256 != expected_token_hmac
+            {
+                bail!("bootstrap application receipt changed after the recorded success");
+            }
+            remove_file_durable(&token_path)?;
+        }
         return Ok(request_id);
     }
     match claim_bootstrap_admin(
@@ -315,7 +353,7 @@ fn audited_bootstrap_admin(
         curl_program,
         expected_owner_uid,
     ) {
-        Ok(()) => {
+        Ok(receipt) => {
             crate::operator::append_management_event_idempotent(
                 config,
                 &format!("{request_id}-succeeded"),
@@ -329,6 +367,8 @@ fn audited_bootstrap_admin(
                 )
             })?;
             pending.status = BootstrapAdminPendingStatus::Succeeded;
+            pending.claimed_user_id = Some(receipt.claimed_user_id.to_string());
+            pending.token_hmac_sha256 = Some(receipt.token_hmac_sha256);
             atomic_write(
                 &bootstrap_pending_path(config),
                 &serde_json::to_vec_pretty(&pending)?,
@@ -369,7 +409,7 @@ fn claim_bootstrap_admin(
     request_id: &str,
     curl_program: &std::ffi::OsStr,
     expected_owner_uid: Option<u32>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<VerifiedBootstrapReceipt> {
     let normalized_email = normalize_bootstrap_admin_email(&credentials.email)?;
     if !(12..=1024).contains(&credentials.password.chars().count()) {
         bail!("administrator password must contain between 12 and 1024 characters");
@@ -377,6 +417,7 @@ fn claim_bootstrap_admin(
 
     let token_path = bootstrap_token_path(config, expected_owner_uid)?;
     let token = read_bootstrap_token(&token_path, expected_owner_uid)?;
+    let token_hmac_sha256 = bootstrap_state_hmac(config, b"token-v1", token.as_bytes())?;
     let endpoint = bootstrap_admin_endpoint(&config.runtime.expected_issuer)?;
     let request = serde_json::to_vec(&BootstrapAdminRequest {
         request_id,
@@ -389,7 +430,7 @@ fn claim_bootstrap_admin(
     } else {
         "=http"
     };
-    let submission = (|| -> anyhow::Result<()> {
+    let submission = (|| -> anyhow::Result<uuid::Uuid> {
         let output = Process::new(curl_program)
             .args([
                 "--silent",
@@ -421,20 +462,23 @@ fn claim_bootstrap_admin(
         }
         let response: BootstrapAdminResponse = serde_json::from_str(body)
             .context("initial administrator endpoint returned an invalid response")?;
+        let claimed_user_id = uuid::Uuid::parse_str(&response.id)
+            .context("initial administrator response has an invalid user ID")?;
         if response.request_id != request_id
-            || uuid::Uuid::parse_str(&response.id).is_err()
             || response.email != normalized_email
             || response.role != "admin"
             || response.next != "/ui/auth"
         {
             bail!("initial administrator endpoint returned an unexpected response contract");
         }
-        Ok(())
+        Ok(claimed_user_id)
     })();
-    if let Err(error) = submission {
-        return Err(anyhow::Error::new(BootstrapOutcomeUnknown).context(error.to_string()));
-    }
-    Ok(())
+    let claimed_user_id = submission
+        .map_err(|error| anyhow::Error::new(BootstrapOutcomeUnknown).context(error.to_string()))?;
+    Ok(VerifiedBootstrapReceipt {
+        claimed_user_id,
+        token_hmac_sha256,
+    })
 }
 
 fn bootstrap_pending_path(config: &UpdateConfig) -> PathBuf {
@@ -444,12 +488,20 @@ fn bootstrap_pending_path(config: &UpdateConfig) -> PathBuf {
         .join("bootstrap-admin-pending.json")
 }
 
+fn bootstrap_recovery_epoch_path(config: &UpdateConfig) -> PathBuf {
+    config
+        .operator
+        .state_directory
+        .join("bootstrap-recovery-epoch")
+}
+
 fn load_or_create_bootstrap_pending(
     config: &UpdateConfig,
     normalized_email: &str,
 ) -> anyhow::Result<BootstrapAdminPending> {
     let path = bootstrap_pending_path(config);
     let email_hmac_sha256 = bootstrap_email_hmac(config, normalized_email)?;
+    let recovery_epoch = current_bootstrap_recovery_epoch(config)?;
     if path.exists() {
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -457,35 +509,68 @@ fn load_or_create_bootstrap_pending(
         }
         let pending: BootstrapAdminPending = serde_json::from_slice(&fs::read(&path)?)
             .context("bootstrap-admin pending state is invalid")?;
-        if pending.schema != 1
-            || !valid_bootstrap_request_id(&pending.request_id)
-            || pending.email_hmac_sha256 != email_hmac_sha256
-        {
+        if pending.schema != 2 || !valid_bootstrap_request_id(&pending.request_id) {
             bail!("bootstrap-admin pending state does not match this request");
         }
-        return Ok(pending);
+        if pending.recovery_epoch == recovery_epoch {
+            if pending.email_hmac_sha256 != email_hmac_sha256 {
+                bail!("bootstrap-admin pending state does not match this request");
+            }
+            let receipt_is_valid = match pending.status {
+                BootstrapAdminPendingStatus::Intent => {
+                    pending.claimed_user_id.is_none() && pending.token_hmac_sha256.is_none()
+                }
+                BootstrapAdminPendingStatus::Succeeded => {
+                    pending
+                        .claimed_user_id
+                        .as_deref()
+                        .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
+                        && pending
+                            .token_hmac_sha256
+                            .as_deref()
+                            .is_some_and(valid_lower_hex_sha256)
+                }
+            };
+            if !receipt_is_valid {
+                bail!("bootstrap-admin pending state has an invalid application receipt");
+            }
+            return Ok(pending);
+        }
     }
     fs::create_dir_all(&config.operator.state_directory)?;
     let pending = BootstrapAdminPending {
-        schema: 1,
+        schema: 2,
         request_id: format!("bootstrap-admin-{:032x}", rand::random::<u128>()),
         email_hmac_sha256,
+        recovery_epoch,
         status: BootstrapAdminPendingStatus::Intent,
+        claimed_user_id: None,
+        token_hmac_sha256: None,
     };
     atomic_write(&path, &serde_json::to_vec_pretty(&pending)?, 0o600)?;
     Ok(pending)
 }
 
 fn bootstrap_email_hmac(config: &UpdateConfig, email: &str) -> anyhow::Result<String> {
+    bootstrap_state_hmac(config, b"email-v2", email.as_bytes())
+}
+
+fn bootstrap_state_hmac(
+    config: &UpdateConfig,
+    domain: &[u8],
+    value: &[u8],
+) -> anyhow::Result<String> {
     use hmac::{Hmac, KeyInit as _, Mac as _};
     use sha2::Sha256;
 
-    let key = fs::read(&config.operator.controller_private_key)
-        .context("failed to read controller identity for bootstrap binding")?;
+    let key = fs::read(&config.operator.secret_revision_file)
+        .context("failed to read deployment secret revision for bootstrap binding")?;
     let mut hmac = Hmac::<Sha256>::new_from_slice(&key)
-        .context("controller identity cannot bind bootstrap state")?;
-    hmac.update(b"nazoauthctl-bootstrap-admin-email-v1\0");
-    hmac.update(email.as_bytes());
+        .context("deployment secret revision cannot bind bootstrap state")?;
+    hmac.update(b"nazoauthctl-bootstrap-admin-v2\0");
+    hmac.update(domain);
+    hmac.update(b"\0");
+    hmac.update(value);
     let bytes = hmac.finalize().into_bytes();
     let mut encoded = String::with_capacity(64);
     for byte in bytes {
@@ -493,6 +578,48 @@ fn bootstrap_email_hmac(config: &UpdateConfig, email: &str) -> anyhow::Result<St
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
     Ok(encoded)
+}
+
+fn valid_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_bootstrap_recovery_epoch(value: &str) -> bool {
+    value.len() == 41
+        && value.strip_prefix("recovery-").is_some_and(|suffix| {
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+}
+
+fn current_bootstrap_recovery_epoch(config: &UpdateConfig) -> anyhow::Result<String> {
+    let path = bootstrap_recovery_epoch_path(config);
+    if path.exists() {
+        let value = fs::read_to_string(&path)?;
+        if !valid_bootstrap_recovery_epoch(&value) {
+            bail!("bootstrap recovery epoch is invalid");
+        }
+        return Ok(value);
+    }
+    fs::create_dir_all(&config.operator.state_directory)?;
+    let value = format!("recovery-{:032x}", rand::random::<u128>());
+    atomic_write(&path, value.as_bytes(), 0o400)?;
+    Ok(value)
+}
+
+fn rotate_bootstrap_recovery_epoch(config: &UpdateConfig) -> anyhow::Result<String> {
+    fs::create_dir_all(&config.operator.state_directory)?;
+    let value = format!("recovery-{:032x}", rand::random::<u128>());
+    atomic_write(
+        &bootstrap_recovery_epoch_path(config),
+        value.as_bytes(),
+        0o400,
+    )?;
+    Ok(value)
 }
 
 fn valid_bootstrap_request_id(request_id: &str) -> bool {
@@ -1692,6 +1819,8 @@ fn recover_from_backup(config: &UpdateConfig) -> anyhow::Result<()> {
         &state.from_release.version,
         "database-backup",
     )?;
+    rotate_bootstrap_recovery_epoch(config)
+        .context("failed to invalidate bootstrap receipts before database recovery")?;
     let runtime = Runtime::new(config);
     if config.runtime.engine == "host" {
         runtime.stop_service()?;

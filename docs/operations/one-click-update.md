@@ -249,6 +249,13 @@ bootstrap receipt or application audit event. That conditional schema-downgrade
 barrier is distinct from artifact rollback and from explicit verified-backup
 database recovery; `update --plan` reports the signed migration floor and this
 boundary in the policy rationale.
+Before a managed database restore mutates PostgreSQL or Valkey, ctl durably
+rotates the bootstrap recovery epoch. This invalidates any locally cached
+successful initial-administrator receipt. After a restore, ctl therefore
+cannot treat an old success as current or delete a newly generated bootstrap
+token. If an external PITR changes database state without the managed recovery
+workflow, a changed runtime token is detected against its HMAC binding and the
+operation fails closed rather than claiming success.
 For managed dependencies, the single managed application writer is stopped
 before both backups; restored Valkey state can still invalidate ephemeral
 sessions. For external dependencies, the operator must quiesce every other

@@ -206,6 +206,10 @@ migration barrier。控制器绝不把数据库恢复描述为自动行为；只
 或应用审计证据时会明确拒绝删除证据。这个条件式 schema downgrade barrier 与制品回滚、
 显式已验证备份恢复是三个不同边界；`update --plan` 通过签名 migration floor 和 policy
 rationale 如实展示。
+受管数据库恢复在修改 PostgreSQL 或 Valkey 前，会先持久轮换 bootstrap recovery epoch，
+使本地缓存的初始管理员成功收据失效。因此恢复后不能把旧成功当成当前事实，也不能删除新生成
+的 bootstrap token。external PITR 如果绕过受管恢复流程改变了数据库状态，ctl 会通过
+runtime token 的 HMAC 绑定识别变化并 fail closed，不会伪报成功。
 managed 模式会先停止唯一的受管应用写入者，再依次生成两个备份；恢复 Valkey 仍可能令临时
 会话失效。external 模式只能停止本实例，部署者必须静止其他写入者并负责已声明的备份/PITR
 流程。`update --plan` 会输出这个边界，不会伪称两个数据系统具有跨存储事务快照。

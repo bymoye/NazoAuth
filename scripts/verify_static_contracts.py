@@ -1328,6 +1328,11 @@ def check_bootstrap_secret_log_boundary() -> None:
         '"bootstrap-admin-outcome-unknown"',
         "load_or_create_bootstrap_pending(config, &normalized_email)",
         "bootstrap_email_hmac(config, normalized_email)",
+        "current_bootstrap_recovery_epoch(config)?",
+        "rotate_bootstrap_recovery_epoch(config)",
+        'bootstrap_state_hmac(config, b"token-v1", token.as_bytes())',
+        "receipt.claimed_user_id",
+        "config.operator.secret_revision_file",
     ):
         if marker not in controller and marker not in cli:
             raise SystemExit(f"secure bootstrap-admin boundary is missing: {marker}")
