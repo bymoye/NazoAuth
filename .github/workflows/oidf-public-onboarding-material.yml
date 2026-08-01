@@ -15,6 +15,10 @@ on:
         description: HTTPS origin of the conformance suite that owns these clients
         required: true
         type: string
+      credential_holder_email_sha256:
+        description: SHA-256 commitment of the fresh deployment applicant email
+        required: true
+        type: string
   workflow_call:
     inputs:
       source_commit:
@@ -27,6 +31,10 @@ on:
         type: string
       suite_base_url:
         description: HTTPS origin of the conformance suite that owns these clients
+        required: true
+        type: string
+      credential_holder_email_sha256:
+        description: SHA-256 commitment of the fresh deployment applicant email
         required: true
         type: string
     secrets:
@@ -167,6 +175,7 @@ jobs:
             --source-commit "$SOURCE_COMMIT" \
             --target-issuer "$TARGET_ISSUER" \
             --suite-base-url "$SUITE_BASE_URL" \
+            --credential-holder-email-sha256 "${{ inputs.credential_holder_email_sha256 }}" \
             --onboarding-profile official
           python scripts/oidf_onboarding_bundle.py verify \
             --artifact-directory oidf-public-onboarding-material \

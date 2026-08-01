@@ -34,6 +34,11 @@ class OidfWorkflowTests(unittest.TestCase):
         self.assertIn("OPENID4VC_OIDF_BASE_CONFIG_JSON", workflow)
         self.assertIn("OPENID4VC_OIDF_DRIVER_CONFIG_JSON", workflow)
         self.assertIn("workflow_call:", workflow)
+        self.assertEqual(workflow.count("credential_holder_email_sha256:"), 2)
+        self.assertIn(
+            '--credential-holder-email-sha256 "${{ inputs.credential_holder_email_sha256 }}"',
+            workflow,
+        )
         for secret in (
             "OIDF_PLAN_CONFIG_AGE_IDENTITY",
             "OIDF_MTLS_MATERIAL_AGE_IDENTITY",
@@ -81,6 +86,10 @@ class OidfWorkflowTests(unittest.TestCase):
         self.assertIn("onboarding_material_only:", workflow)
         self.assertIn(
             "uses: ./.github/workflows/oidf-public-onboarding-material.yml",
+            workflow,
+        )
+        self.assertIn(
+            "credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}",
             workflow,
         )
         self.assertIn("secrets: inherit", workflow)

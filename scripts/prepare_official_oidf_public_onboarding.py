@@ -336,7 +336,11 @@ def prepare_oidc_clients(
 def load_configs(directory: Path) -> dict[str, object]:
     configs: dict[str, object] = {}
     for path in sorted(directory.glob("*.json")):
-        if path.name in {MANIFEST_FILE_NAME, OPENID4VC_AGGREGATE}:
+        if path.name in {
+            MANIFEST_FILE_NAME,
+            OPENID4VC_AGGREGATE,
+            "standards-full-profile.json",
+        }:
             continue
         if not (path.name.startswith("oidf-") or path.name.startswith("openid4vc-")):
             fail(f"unexpected configuration in official artifact: {path.name}")

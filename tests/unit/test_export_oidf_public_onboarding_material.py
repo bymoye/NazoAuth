@@ -201,6 +201,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
             output = root / "public"
             args = export_args(oauth, output)
             args[2:2] = ["--config-json-file", str(openid4vc)]
+            args.extend(["--credential-holder-email-sha256", "b" * 64])
             self.assertEqual(module.main_with_args_for_test(args), 0)
 
             bundle = json.loads(
@@ -212,9 +213,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
             self.assertEqual(config["vci"]["credential_configuration_id"], "pid")
             self.assertEqual(config["nazo"]["credential_dataset"]["given_name"], "Specimen")
             self.assertNotIn("d", config["client"]["jwks"]["keys"][0])
-            self.assertRegex(
-                bundle["credential_holder_email_sha256"], r"^[0-9a-f]{64}$"
-            )
+            self.assertEqual(bundle["credential_holder_email_sha256"], "b" * 64)
             manifest = json.loads(
                 (output / module.MANIFEST_FILE_NAME).read_text(encoding="utf-8")
             )
@@ -380,10 +379,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
         self.assertEqual(exported["mtls"]["ca"], mtls["ca"])
         self.assertNotIn("oidf_user_password", exported["nazo"])
         self.assertNotIn("oidf_user_email", exported["nazo"])
-        self.assertEqual(
-            exported["nazo"]["oidf_user_password_sha256"],
-            "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b",
-        )
+        self.assertNotIn("oidf_user_password_sha256", exported["nazo"])
         self.assertEqual(
             exported["nazo"]["oidf_user_email_sha256"],
             "a23fb0e9642ab8fe5d3bd3288247ae0bbfb0a49a36bd3f3aa9c713279f88cf80",
@@ -700,6 +696,18 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
         }
 
         self.assertEqual(module.public_onboarding_nazo(policy_inputs), policy_inputs)
+
+    def test_explicit_holder_commitment_replaces_stale_email_without_password_hash(self):
+        commitment = "a" * 64
+        exported = module.public_onboarding_nazo(
+            {
+                "oidf_user_email": "old@example.com",
+                "oidf_user_password": "guessable-password",
+            },
+            commitment,
+        )
+
+        self.assertEqual(exported, {"oidf_user_email_sha256": commitment})
 
     def test_real_fapi_matrix_template_preserves_onboarding_policy_fields(self):
         template = Path(__file__).resolve().parents[2] / "docs" / "conformance" / "oidf-plan-config-template.json"

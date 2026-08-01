@@ -24,6 +24,10 @@ on:
         required: false
         default: false
         type: boolean
+      credential_holder_email_sha256:
+        description: "SHA-256 commitment of the fresh deployment applicant email; required for onboarding material export."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -36,6 +40,7 @@ jobs:
       source_commit: ${{ inputs.deployed_sha }}
       target_issuer: ${{ inputs.target_issuer }}
       suite_base_url: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
+      credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}
     secrets: inherit
 
   oidf-conformance-full:

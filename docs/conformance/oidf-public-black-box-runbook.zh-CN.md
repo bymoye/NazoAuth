@@ -118,10 +118,14 @@ gh workflow run oidf-conformance-full.yml \
   --ref <精确分支> \
   -f deployed_sha=<已部署-sha> \
   -f target_issuer=https://issuer.example \
+  -f credential_holder_email_sha256=<全新申请人邮箱的-sha256> \
   -f onboarding_material_only=true
 ```
 
-该模式调用可复用的接入材料 workflow，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。进入第 3 步前，必须下载该 artifact，并按相同 source commit 完成校验。artifact 本身仍不具有生产权限：客户端创建和 CA 审批必须由不同身份通过公网控制面完成。
+该模式调用可复用的接入材料 workflow，在不暴露邮箱或密码哈希的前提下绑定全新申请人
+邮箱承诺，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。进入第 3 步前，
+必须下载该 artifact，并按相同 source commit 完成校验。artifact 本身仍不具有生产权限：
+客户端创建和 CA 审批必须由不同身份通过公网控制面完成。
 
 使用以下命令把已校验的官方 artifact 转换为生产申请，不得重新生成客户端、密钥或证书：
 

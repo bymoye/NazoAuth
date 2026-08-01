@@ -129,19 +129,24 @@ def public_onboarding_mtls(value: Any) -> dict[str, Any] | None:
     }
 
 
-def public_onboarding_nazo(value: Any) -> dict[str, Any] | None:
+def public_onboarding_nazo(
+    value: Any, credential_holder_email_sha256: str | None = None
+) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     result = {key: copy.deepcopy(value[key]) for key in ONBOARDING_NAZO_FIELDS if key in value}
-    for key in ("oidf_user_email", "oidf_user_password"):
-        if isinstance(value.get(key), str) and value[key]:
-            result[f"{key}_sha256"] = hashlib.sha256(
-                value[key].encode("utf-8")
-            ).hexdigest()
+    if credential_holder_email_sha256 is not None:
+        result["oidf_user_email_sha256"] = credential_holder_email_sha256
+    elif isinstance(value.get("oidf_user_email"), str) and value["oidf_user_email"]:
+        result["oidf_user_email_sha256"] = hashlib.sha256(
+            value["oidf_user_email"].encode("utf-8")
+        ).hexdigest()
     return result or None
 
 
-def public_onboarding_config(config: Any) -> dict[str, Any]:
+def public_onboarding_config(
+    config: Any, credential_holder_email_sha256: str | None = None
+) -> dict[str, Any]:
     if not isinstance(config, dict):
         return {}
     result: dict[str, Any] = {}
@@ -165,7 +170,9 @@ def public_onboarding_config(config: Any) -> dict[str, Any]:
         public_mtls = public_onboarding_mtls(config.get(key))
         if public_mtls is not None:
             result[key] = public_mtls
-    public_nazo = public_onboarding_nazo(config.get("nazo"))
+    public_nazo = public_onboarding_nazo(
+        config.get("nazo"), credential_holder_email_sha256
+    )
     if public_nazo is not None:
         result["nazo"] = public_nazo
     return result
@@ -180,12 +187,21 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--target-issuer", required=True)
     parser.add_argument("--suite-base-url", required=True)
+    parser.add_argument("--credential-holder-email-sha256")
     parser.add_argument(
         "--onboarding-profile",
         choices=("official", "operator-black-box"),
         required=True,
     )
     args = parser.parse_args(argv)
+    credential_holder_email_sha256 = args.credential_holder_email_sha256
+    if credential_holder_email_sha256 is not None and (
+        len(credential_holder_email_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in credential_holder_email_sha256)
+    ):
+        raise SystemExit(
+            "--credential-holder-email-sha256 must be a lowercase SHA-256 digest"
+        )
 
     configs: dict[str, Any] = {}
     for config_path in args.config_json_file:
@@ -209,7 +225,9 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
     for file_name, config in configs.items():
         if Path(file_name).name != file_name or not file_name.endswith(".json"):
             raise SystemExit(f"invalid OIDF config file name: {file_name}")
-        public_config = public_onboarding_config(config)
+        public_config = public_onboarding_config(
+            config, credential_holder_email_sha256
+        )
         public_nazo = public_config.get("nazo")
         if isinstance(public_nazo, dict) and isinstance(
             public_nazo.get("oidf_user_email_sha256"), str

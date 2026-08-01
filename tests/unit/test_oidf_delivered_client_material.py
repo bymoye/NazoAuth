@@ -21,6 +21,19 @@ def load(name: str):
 
 
 class OidfDeliveredClientMaterialTests(unittest.TestCase):
+    def test_official_loader_ignores_manifest_bound_install_profile(self):
+        module = load("prepare_official_oidf_public_onboarding.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "oidf-plan.json").write_text('{"alias":"plan"}', encoding="utf-8")
+            (root / "standards-full-profile.json").write_text(
+                '{"public":"install-material"}', encoding="utf-8"
+            )
+
+            configs = module.load_configs(root)
+
+        self.assertEqual(configs, {"oidf-plan.json": {"alias": "plan"}})
+
     def test_official_application_builder_derives_static_oidc_clients_from_artifact_fields(self):
         module = load("prepare_official_oidf_public_onboarding.py")
         common = {
