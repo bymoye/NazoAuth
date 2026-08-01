@@ -92,6 +92,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn('--security-opt no-new-privileges', scan)
         self.assertIn('-v "$layout:/image:ro"', scan)
         self.assertIn("--input /image", scan)
+        self.assertIn("for platform in linux/amd64 linux/arm64; do", scan)
+        self.assertIn('--platform "$platform"', scan)
         self.assertNotIn("--input /image.tar", scan)
         self.assertEqual(
             scan.count(

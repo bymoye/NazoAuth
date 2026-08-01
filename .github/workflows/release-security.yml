@@ -493,16 +493,19 @@ jobs:
           if not {("linux", "amd64"), ("linux", "arm64")}.issubset(image_platforms):
               raise SystemExit("OCI index does not contain both release platforms")
           PY
-          docker run --rm \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            -v "$layout:/image:ro" \
-            docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f image \
-              --format table \
-              --exit-code 1 \
-              --severity CRITICAL,HIGH \
-              --ignore-unfixed \
-              --input /image
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm \
+              --cap-drop ALL \
+              --security-opt no-new-privileges \
+              -v "$layout:/image:ro" \
+              docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f image \
+                --format table \
+                --exit-code 1 \
+                --severity CRITICAL,HIGH \
+                --ignore-unfixed \
+                --platform "$platform" \
+                --input /image
+          done
       - name: Record the closed OCI descriptor
         id: descriptor
         shell: bash
