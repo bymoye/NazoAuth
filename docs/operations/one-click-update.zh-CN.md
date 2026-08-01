@@ -60,23 +60,25 @@ sudo nazoauthctl install \
 ```
 
 默认 `baseline` 是面向通用部署的安全基线。项目正式声明的完整 OIDF 一致性矩阵必须
-显式选择 `standards-full`：
+显式选择 `standards-full`。正式 public onboarding workflow 会直接产出受 manifest
+绑定、可立即使用的 `standards-full-profile.json`，正常流程不需要手工拼装：
 
 ```sh
-python3 scripts/build_oidf_full_install_profile.py \
-  --client-attestation-issuer https://suite.example \
-  --client-attestation-jwks /absolute/public-client-attestation.jwks \
-  --key-attestation-jwks /absolute/public-key-attestation.jwks \
-  --credential-configurations /absolute/credential-configurations.json \
-  --trust-anchors /absolute/suite-trust-anchors.pem \
-  --wallet-origin https://suite.example \
-  --ciba-origin https://suite.example \
-  --backchannel-logout-origin https://suite.example \
-  --output /absolute/oidf-full-profile.json
+python3 scripts/oidf_onboarding_bundle.py verify \
+  --artifact-directory /absolute/oidf-public-onboarding-material \
+  --expected-source-commit "$source_commit" \
+  --expected-target-issuer https://auth.example.com \
+  --expected-suite-base-url https://suite.example \
+  --expected-onboarding-profile official
 sudo nazoauthctl install --runtime podman \
   --public-url https://auth.example.com --profile standards-full \
-  --profile-material /absolute/oidf-full-profile.json
+  --profile-material \
+  /absolute/oidf-public-onboarding-material/standards-full-profile.json
 ```
+
+workflow 先证明 `source_commit` 位于默认分支，再切换到该精确 commit 后生成所有材料；
+artifact manifest 同时绑定源码 commit、目标 issuer、套件 origin 和每个文件摘要。接入
+其他标准套件的高级用户仍可使用 `build_oidf_full_install_profile.py` 的显式输入模式。
 
 material 是字段封闭、只含公开信息的信任/配置文档；私有 JWK 成员、私钥、非 HTTPS
 origin、未知字段、符号链接和相对路径都会被拒绝。DCR、CIBA、OpenID4VC 管理/加密

@@ -62,23 +62,30 @@ installation port. Installation succeeds only after public Discovery reports
 the exact issuer.
 
 The default `baseline` profile is the safe general-purpose installation. The
-declared full OIDF certification matrix uses the explicit `standards-full` profile:
+declared full OIDF certification matrix uses the explicit `standards-full`
+profile. The official public onboarding workflow emits a manifest-bound,
+ready-to-use `standards-full-profile.json`, so the normal path needs no manual
+assembly:
 
 ```sh
-python3 scripts/build_oidf_full_install_profile.py \
-  --client-attestation-issuer https://suite.example \
-  --client-attestation-jwks /absolute/public-client-attestation.jwks \
-  --key-attestation-jwks /absolute/public-key-attestation.jwks \
-  --credential-configurations /absolute/credential-configurations.json \
-  --trust-anchors /absolute/suite-trust-anchors.pem \
-  --wallet-origin https://suite.example \
-  --ciba-origin https://suite.example \
-  --backchannel-logout-origin https://suite.example \
-  --output /absolute/oidf-full-profile.json
+python3 scripts/oidf_onboarding_bundle.py verify \
+  --artifact-directory /absolute/oidf-public-onboarding-material \
+  --expected-source-commit "$source_commit" \
+  --expected-target-issuer https://auth.example.com \
+  --expected-suite-base-url https://suite.example \
+  --expected-onboarding-profile official
 sudo nazoauthctl install --runtime podman \
   --public-url https://auth.example.com --profile standards-full \
-  --profile-material /absolute/oidf-full-profile.json
+  --profile-material \
+  /absolute/oidf-public-onboarding-material/standards-full-profile.json
 ```
+
+The workflow first proves that `source_commit` is on the default branch, then
+checks out that exact commit before rendering any material. The artifact
+manifest binds the source commit, target issuer, suite origin, and every file
+digest. Advanced operators may instead use
+`build_oidf_full_install_profile.py` in explicit-input mode when integrating a
+different standards suite.
 
 The material file is a closed, public-only trust/configuration document:
 private JWK members, private keys, non-HTTPS origins, unknown fields, symlinks,

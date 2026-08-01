@@ -22,10 +22,17 @@
 3. 从同一不可变 Release 安装已验证的 `nazoauthctl`，执行：
 
    ```sh
-   sudo nazoauthctl install --runtime auto --public-url https://auth.example.com --to vX.Y.Z
+   sudo nazoauthctl install --runtime auto --public-url https://auth.example.com \
+     --profile standards-full \
+     --profile-material /absolute/oidf-public-onboarding-material/standards-full-profile.json \
+     --to vX.Y.Z
    sudo nazoauthctl status
    sudo nazoauthctl doctor
    ```
+
+   使用正式 public onboarding workflow 针对该精确源码 commit、issuer 和套件 origin
+   生成并校验过的 `standards-full-profile.json`。它只含公开信任/配置材料，不来自被删除
+   的旧部署；全部安装秘密和匹配的本地签名身份都由正式安装流程重新生成。
 
 4. 只通过公开命令依次演练 `update --plan`、update、制品 rollback、显式 backup
    recovery、migrate、keys 查询/验证/变更、audit show/verify、正常 identity rotation、

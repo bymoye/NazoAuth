@@ -106,6 +106,8 @@ class OidfWorkflowTests(unittest.TestCase):
         self.assertIn(validation, workflow)
         self.assertIn('--source-commit "$SOURCE_COMMIT"', workflow)
         self.assertIn('--expected-source-commit "$SOURCE_COMMIT"', workflow)
+        self.assertIn('git checkout --detach "$SOURCE_COMMIT"', workflow)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"', workflow)
         self.assertIn("path: oidf-public-onboarding-material", workflow)
 
         conformance = (

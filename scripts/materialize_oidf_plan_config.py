@@ -364,10 +364,13 @@ def derive_fapi_ciba_matrix_configs(
 def bind_ciba_automated_decision_token(
     rendered: dict[str, Any], decision_token: str
 ) -> None:
+    token_alphabet = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
     if (
         not 32 <= len(decision_token) <= 1024
         or decision_token.strip() != decision_token
-        or any(character in decision_token for character in "&?#\r\n")
+        or not set(decision_token).issubset(token_alphabet)
     ):
         raise SystemExit(
             "CIBA automated decision token must contain 32 through 1024 URL-safe bytes"

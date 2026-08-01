@@ -482,6 +482,7 @@ def main() -> int:
             config["nazo"] = {
                 "openid4vc_role": "issuer",
                 "client_auth_type": client_auth_type,
+                "credential_format": format_name,
                 "credential_dataset": copy.deepcopy(
                     credential_datasets[format_name]
                 ),

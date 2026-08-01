@@ -70,6 +70,8 @@ jobs:
           set -euo pipefail
           git cat-file -e "$SOURCE_COMMIT^{commit}"
           git merge-base --is-ancestor "$SOURCE_COMMIT" "origin/${{ github.event.repository.default_branch }}"
+          git checkout --detach "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
       - name: Verify external targets are trusted
         run: |
