@@ -220,10 +220,25 @@ fn application_container_command_uses_hardening_and_secret_file_references() {
 
 #[cfg(unix)]
 fn write_executable(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::{io::Write as _, os::unix::fs::PermissionsExt as _};
 
-    fs::write(path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .unwrap();
+    file.write_all(format!("#!/bin/sh\nset -eu\n{body}\n").as_bytes())
+        .unwrap();
+    file.set_permissions(fs::Permissions::from_mode(0o700))
+        .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    fs::rename(&temporary, path).unwrap();
+    fs::File::open(path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
 }
 
 #[cfg(unix)]
