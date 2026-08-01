@@ -361,6 +361,45 @@ def derive_fapi_ciba_matrix_configs(
         nazo["sender_constrain"] = "mtls"
 
 
+def bind_ciba_automated_decision_token(
+    rendered: dict[str, Any], decision_token: str
+) -> None:
+    if (
+        not 32 <= len(decision_token) <= 1024
+        or decision_token.strip() != decision_token
+        or any(character in decision_token for character in "&?#\r\n")
+    ):
+        raise SystemExit(
+            "CIBA automated decision token must contain 32 through 1024 URL-safe bytes"
+        )
+    configs = rendered.get("configs")
+    if not isinstance(configs, dict):
+        raise SystemExit("OIDF config root must contain a configs object")
+    replaced = 0
+    marker = "decision_token="
+    for config in configs.values():
+        if not isinstance(config, dict):
+            continue
+        value = config.get("automated_ciba_approval_url")
+        if not isinstance(value, str):
+            continue
+        prefix, separator, remainder = value.partition(marker)
+        if not separator:
+            raise SystemExit(
+                "automated_ciba_approval_url must contain a decision_token parameter"
+            )
+        _, suffix_separator, suffix = remainder.partition("&")
+        config["automated_ciba_approval_url"] = (
+            prefix
+            + marker
+            + decision_token
+            + (suffix_separator + suffix if suffix_separator else "")
+        )
+        replaced += 1
+    if replaced == 0:
+        raise SystemExit("OIDF config contains no CIBA automated approval URL")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--template", required=True, type=Path)
@@ -410,6 +449,11 @@ def main() -> int:
             "issuer in all generated config URLs"
         ),
     )
+    parser.add_argument(
+        "--ciba-automated-decision-token-file",
+        type=Path,
+        help="root-managed file containing the current deployment CIBA decision token",
+    )
     args = parser.parse_args()
 
     template = read_json(args.template)
@@ -431,6 +475,11 @@ def main() -> int:
         if not isinstance(rendered, dict):
             raise SystemExit("OIDF rendered config must be a JSON object")
         derive_fapi_ciba_matrix_configs(rendered, args.ciba_notification_base_url)
+    if args.ciba_automated_decision_token_file is not None:
+        decision_token = args.ciba_automated_decision_token_file.read_text(
+            encoding="utf-8"
+        )
+        bind_ciba_automated_decision_token(rendered, decision_token)
     if args.mtls_material_file is not None:
         if not isinstance(rendered, dict):
             raise SystemExit("OIDF rendered config must be a JSON object")

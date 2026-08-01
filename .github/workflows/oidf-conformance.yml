@@ -106,12 +106,18 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
+          test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
+          printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
+          chmod 600 ciba-automated-decision-token
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
+            --ciba-automated-decision-token-file ciba-automated-decision-token \
             --output oidf-plan-configs.json
+          rm -f ciba-automated-decision-token
         env:
           OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
+          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
 
       - name: Run OIDF conformance plan
         run: |
