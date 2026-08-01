@@ -2669,7 +2669,7 @@ dependencies = [
  "arc-swap",
  "base64",
  "chrono",
- "der 0.7.10",
+ "der 0.8.1",
  "ed25519-dalek 3.0.0",
  "jsonwebtoken",
  "nazo-auth",
