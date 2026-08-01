@@ -55,6 +55,45 @@ fn golden_task_vector_is_stable_and_verifies() {
         task()
     );
     assert_eq!(compact_sha256(&compact).len(), 64);
+    assert_eq!(
+        protected_header(&compact).unwrap(),
+        ProtectedHeader {
+            alg: FixedAlgorithm::EdDSA,
+            kid: "controller-1".to_owned(),
+            typ: TASK_JWS_TYPE.to_owned(),
+        }
+    );
+}
+
+#[test]
+fn protected_header_rejects_untrusted_key_lookup_inputs() {
+    for header in [
+        serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "../../controller",
+            "typ": TASK_JWS_TYPE,
+        }),
+        serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "controller-1",
+            "typ": TASK_JWS_TYPE,
+            "jku": "https://attacker.example/jwks.json",
+        }),
+        serde_json::json!({
+            "alg": "none",
+            "kid": "controller-1",
+            "typ": TASK_JWS_TYPE,
+        }),
+    ] {
+        let compact = format!(
+            "{}.e30.AA",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap())
+        );
+        assert!(matches!(
+            protected_header(&compact),
+            Err(ProtocolError::Header)
+        ));
+    }
 }
 
 #[test]

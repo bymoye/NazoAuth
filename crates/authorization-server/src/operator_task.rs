@@ -31,6 +31,30 @@ struct TaskContext {
     receipt_key_id: String,
 }
 
+/// Durable, per-request lifecycle state.
+///
+/// `Executing` is deliberately a terminal state for retries unless a receipt
+/// has been published.  A process can die after the operation has made an
+/// external change but before it can attest that change.  There is no safe way
+/// to infer which side of that boundary it died on, so retrying would turn a
+/// crash into a duplicate privileged action.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "phase", rename_all = "kebab-case", deny_unknown_fields)]
+enum TaskLifecycle {
+    Prepared { request_sha256: String },
+    Executing { request_sha256: String },
+    Completed { request_sha256: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestClaim {
+    Created,
+    Current,
+    Legacy,
+}
+
+const REQUEST_CLAIM_PREFIX: &str = "nazoauth-operator-request-v1:";
+
 pub async fn run() -> anyhow::Result<()> {
     let mut compact = String::new();
     std::io::stdin()
@@ -60,36 +84,60 @@ pub async fn run() -> anyhow::Result<()> {
     validate_config_manifest(&task)?;
     let state = configured_path("NAZOAUTH_OPERATOR_STATE_DIRECTORY", STATE_DIRECTORY);
     fs::create_dir_all(&state)?;
+    ensure_real_state_directory(&state)?;
     let lock_path = state.join("task.lock");
+    if state_path_present(&lock_path)? {
+        regular_state_file_present(&lock_path, "operator task lock")?;
+    }
     let lock = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
         .open(lock_path)?;
+    regular_state_file_present(&state.join("task.lock"), "operator task lock")?;
     lock.lock()?;
 
     let request_sha256 = compact_sha256(compact);
-    let request_path = state.join(format!("{}.request.sha256", task.jti));
-    claim_request(&request_path, &request_sha256)?;
     let receipt_path = state.join(format!("{}.receipt.jws", task.jti));
-    if receipt_path.is_file() {
+    let request_path = state.join(format!("{}.request.sha256", task.jti));
+    let request_was_claimed = regular_state_file_present(&request_path, "operator request claim")?;
+    if !request_was_claimed {
+        // A versioned claim is published only after the envelope was accepted
+        // inside its authorization window.  Its durable presence therefore
+        // lets a restarted runtime finish a previously accepted Prepared task
+        // without treating expiry as permission to mint or execute a new task.
+        verify_task_window(&task, Utc::now().timestamp())
+            .context("operator task authorization failed")?;
+    }
+    let claim = claim_request(&request_path, &request_sha256)?;
+    if regular_state_file_present(&receipt_path, "operator task receipt")? {
         let prior = fs::read_to_string(receipt_path)?;
         print!("{prior}");
         return Ok(());
     }
-    verify_task_window(&task, Utc::now().timestamp())
-        .context("operator task authorization failed")?;
+
+    if state_path_present(&receipt_temporary_path(&receipt_path))? {
+        bail!("operator task receipt has an incomplete durable publication; refusing recovery");
+    }
+
+    ensure_current_claim(claim)?;
+    let lifecycle_path = state.join(format!("{}.lifecycle.json", task.jti));
+    let lifecycle = load_or_prepare_lifecycle(&lifecycle_path, &request_sha256)?;
+
+    mark_task_executing(&lifecycle_path, &lifecycle, &request_sha256)?;
+    pause_at_test_failpoint("after-executing")?;
 
     let started_at = Utc::now().timestamp();
     let outcome = execute(&task.operation).await;
+    pause_at_test_failpoint("after-operation")?;
     let completed_at = Utc::now().timestamp();
     let receipt = RuntimeReceipt {
         ver: nazo_operator_protocol::PROTOCOL_VERSION,
         iss: format!("runtime:{}", task.deployment_id),
         aud: task.iss.clone(),
         jti: task.jti.clone(),
-        request_sha256,
+        request_sha256: request_sha256.clone(),
         deployment_id: task.deployment_id.clone(),
         actor: task.actor.clone(),
         operation: operation_name(&task.operation).to_owned(),
@@ -105,6 +153,10 @@ pub async fn run() -> anyhow::Result<()> {
     ))?;
     let compact_receipt = sign_runtime_receipt(&receipt, &context.receipt_key_id, &receipt_key)?;
     write_receipt_atomic(&receipt_path, compact_receipt.as_bytes())?;
+    write_lifecycle_atomic(
+        &lifecycle_path,
+        &TaskLifecycle::Completed { request_sha256 },
+    )?;
     print!("{compact_receipt}");
     Ok(())
 }
@@ -232,7 +284,7 @@ pub(crate) fn embedded_identity() -> EmbeddedIdentity {
     }
 }
 
-fn claim_request(path: &Path, digest: &str) -> anyhow::Result<()> {
+fn claim_request(path: &Path, digest: &str) -> anyhow::Result<RequestClaim> {
     let parent = path
         .parent()
         .context("request claim has no state directory")?;
@@ -245,7 +297,7 @@ fn claim_request(path: &Path, digest: &str) -> anyhow::Result<()> {
         .write(true)
         .create_new(true)
         .open(&temporary)?;
-    file.write_all(digest.as_bytes())?;
+    file.write_all(format!("{REQUEST_CLAIM_PREFIX}{digest}\n").as_bytes())?;
     file.sync_all()?;
     drop(file);
 
@@ -257,17 +309,141 @@ fn claim_request(path: &Path, digest: &str) -> anyhow::Result<()> {
     match publish {
         Ok(()) => {
             sync_directory(parent)?;
-            Ok(())
+            Ok(RequestClaim::Created)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::read_to_string(path)?.trim() == digest {
-                Ok(())
+            let claim = fs::read_to_string(path)?;
+            if claim.trim() == format!("{REQUEST_CLAIM_PREFIX}{digest}") {
+                Ok(RequestClaim::Current)
+            } else if claim.trim() == digest {
+                Ok(RequestClaim::Legacy)
             } else {
                 bail!("request identifier was already claimed by a different envelope")
             }
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn load_or_prepare_lifecycle(path: &Path, request_sha256: &str) -> anyhow::Result<TaskLifecycle> {
+    if state_path_present(&lifecycle_temporary_path(path))? {
+        bail!("operator task lifecycle has an incomplete durable transition; refusing recovery");
+    }
+    if regular_state_file_present(path, "operator task lifecycle")? {
+        let lifecycle = read_lifecycle(path)?;
+        ensure_lifecycle_digest(&lifecycle, request_sha256)?;
+        return Ok(lifecycle);
+    }
+
+    let lifecycle = TaskLifecycle::Prepared {
+        request_sha256: request_sha256.to_owned(),
+    };
+    write_initial_lifecycle(path, &lifecycle)?;
+    Ok(lifecycle)
+}
+
+fn read_lifecycle(path: &Path) -> anyhow::Result<TaskLifecycle> {
+    serde_json::from_slice(&fs::read(path)?).context("operator task lifecycle is invalid")
+}
+
+fn ensure_lifecycle_digest(lifecycle: &TaskLifecycle, request_sha256: &str) -> anyhow::Result<()> {
+    let actual = match lifecycle {
+        TaskLifecycle::Prepared { request_sha256 }
+        | TaskLifecycle::Executing { request_sha256 }
+        | TaskLifecycle::Completed { request_sha256 } => request_sha256,
+    };
+    if actual == request_sha256 {
+        Ok(())
+    } else {
+        bail!("operator task lifecycle belongs to a different envelope")
+    }
+}
+
+fn ensure_current_claim(claim: RequestClaim) -> anyhow::Result<()> {
+    if claim == RequestClaim::Legacy {
+        bail!("legacy request claim has no runtime receipt; refusing unknown privileged outcome");
+    }
+    Ok(())
+}
+
+fn mark_task_executing(
+    path: &Path,
+    lifecycle: &TaskLifecycle,
+    request_sha256: &str,
+) -> anyhow::Result<()> {
+    ensure_lifecycle_digest(lifecycle, request_sha256)?;
+    match lifecycle {
+        TaskLifecycle::Prepared { .. } => write_lifecycle_atomic(
+            path,
+            &TaskLifecycle::Executing {
+                request_sha256: request_sha256.to_owned(),
+            },
+        ),
+        TaskLifecycle::Executing { .. } => bail!(
+            "operator task may have executed without a receipt; refusing to replay privileged action"
+        ),
+        TaskLifecycle::Completed { .. } => {
+            bail!("operator task completed without a receipt; refusing to replay privileged action")
+        }
+    }
+}
+
+fn write_initial_lifecycle(path: &Path, lifecycle: &TaskLifecycle) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .context("operator task lifecycle has no state directory")?;
+    let temporary = lifecycle_temporary_path(path);
+    if state_path_present(&temporary)? {
+        bail!("operator task lifecycle has an incomplete durable transition; refusing recovery");
+    }
+    let bytes = serde_json::to_vec(lifecycle)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    match fs::hard_link(&temporary, path) {
+        Ok(()) => {
+            fs::remove_file(&temporary)?;
+            sync_directory(parent)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // This temporary file was completely written by this process and
+            // has not crossed an execution boundary.  It is safe to remove;
+            // unlike a pre-existing temporary file, it cannot conceal a
+            // killed execution or receipt publication.
+            fs::remove_file(&temporary)?;
+            Err(error.into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_lifecycle_atomic(path: &Path, lifecycle: &TaskLifecycle) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .context("operator task lifecycle has no state directory")?;
+    let temporary = lifecycle_temporary_path(path);
+    if state_path_present(&temporary)? {
+        bail!("operator task lifecycle has an incomplete durable transition; refusing recovery");
+    }
+    let bytes = serde_json::to_vec(lifecycle)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, path)?;
+    sync_directory(parent)
+}
+
+fn lifecycle_temporary_path(path: &Path) -> PathBuf {
+    path.with_extension("lifecycle.json.tmp")
 }
 
 #[cfg(unix)]
@@ -282,9 +458,9 @@ fn sync_directory(_path: &Path) -> anyhow::Result<()> {
 }
 
 fn write_receipt_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let temporary = path.with_extension("receipt.jws.tmp");
-    if temporary.exists() {
-        fs::remove_file(&temporary)?;
+    let temporary = receipt_temporary_path(path);
+    if state_path_present(&temporary)? {
+        bail!("operator task receipt has an incomplete durable publication; refusing recovery");
     }
     let mut file = OpenOptions::new()
         .write(true)
@@ -292,8 +468,17 @@ fn write_receipt_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .open(&temporary)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    pause_at_test_failpoint("after-receipt-sync")?;
     fs::rename(temporary, path)?;
+    sync_directory(
+        path.parent()
+            .context("operator task receipt has no state directory")?,
+    )?;
     Ok(())
+}
+
+fn receipt_temporary_path(path: &Path) -> PathBuf {
+    path.with_extension("receipt.jws.tmp")
 }
 
 fn verify_public_jwk(expected_sha256: &str) -> anyhow::Result<PathBuf> {
@@ -351,6 +536,64 @@ fn configured_path(variable: &str, fallback: &str) -> PathBuf {
     env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(fallback))
+}
+
+fn regular_state_file_present(path: &Path, description: &str) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => bail!("{description} is not a regular non-symlink file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {description}")),
+    }
+}
+
+fn state_path_present(path: &Path) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn ensure_real_state_directory(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect operator state directory {}",
+            path.display()
+        )
+    })?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        bail!("operator state directory is not a real non-symlink directory")
+    }
+}
+
+#[cfg(debug_assertions)]
+fn pause_at_test_failpoint(name: &str) -> anyhow::Result<()> {
+    if env::var("NAZOAUTH_OPERATOR_TEST_FAILPOINT").ok().as_deref() != Some(name) {
+        return Ok(());
+    }
+    let marker = env::var_os("NAZOAUTH_OPERATOR_TEST_FAILPOINT_MARKER")
+        .map(PathBuf::from)
+        .context("operator test failpoint marker is unavailable")?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)?;
+    file.write_all(name.as_bytes())?;
+    file.sync_all()?;
+    if let Some(parent) = marker.parent() {
+        sync_directory(parent)?;
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn pause_at_test_failpoint(_name: &str) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

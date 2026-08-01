@@ -68,19 +68,136 @@ fn concurrent_replay_claims_are_idempotent_and_conflicts_are_rejected() {
 }
 
 #[test]
-fn retry_after_kill_window_reuses_claim_and_atomically_finishes_receipt() {
+fn lifecycle_refuses_to_replay_an_unknown_executing_task() {
     let directory = temporary_directory();
     let request = directory.join("request.sha256");
+    let lifecycle = directory.join("request.lifecycle.json");
     let receipt = directory.join("request.receipt.jws");
     let digest = "c".repeat(64);
-    claim_request(&request, &digest).unwrap();
-    claim_request(&request, &digest).unwrap();
-    fs::write(receipt.with_extension("receipt.jws.tmp"), b"partial").unwrap();
-    write_receipt_atomic(&receipt, b"complete.receipt.value").unwrap();
+
     assert_eq!(
-        fs::read_to_string(receipt).unwrap(),
-        "complete.receipt.value"
+        load_or_prepare_lifecycle(&lifecycle, &digest).unwrap(),
+        TaskLifecycle::Prepared {
+            request_sha256: digest.clone()
+        }
     );
+    assert_eq!(
+        claim_request(&request, &digest).unwrap(),
+        RequestClaim::Created
+    );
+    assert_eq!(
+        claim_request(&request, &digest).unwrap(),
+        RequestClaim::Current
+    );
+
+    write_lifecycle_atomic(
+        &lifecycle,
+        &TaskLifecycle::Executing {
+            request_sha256: digest.clone(),
+        },
+    )
+    .unwrap();
+    let restarted = load_or_prepare_lifecycle(&lifecycle, &digest).unwrap();
+    assert!(matches!(&restarted, TaskLifecycle::Executing { .. }));
+
+    // This models SIGKILL after the durable executing transition.  The
+    // missing receipt is not evidence that the operation did not happen.
+    assert!(!receipt.exists());
+    let error = mark_task_executing(&lifecycle, &restarted, &digest).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("may have executed without a receipt")
+    );
+    assert!(matches!(
+        read_lifecycle(&lifecycle).unwrap(),
+        TaskLifecycle::Executing { .. }
+    ));
+    fs::write(receipt_temporary_path(&receipt), b"partial").unwrap();
+    assert!(write_receipt_atomic(&receipt, b"complete.receipt.value").is_err());
+    assert!(receipt_temporary_path(&receipt).exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn lifecycle_claims_are_versioned_and_legacy_claims_fail_closed_without_a_receipt() {
+    let directory = temporary_directory();
+    let request = directory.join("request.sha256");
+    let lifecycle = directory.join("request.lifecycle.json");
+    let digest = "d".repeat(64);
+
+    fs::write(&request, &digest).unwrap();
+    assert_eq!(
+        load_or_prepare_lifecycle(&lifecycle, &digest).unwrap(),
+        TaskLifecycle::Prepared {
+            request_sha256: digest.clone()
+        }
+    );
+    let claim = claim_request(&request, &digest).unwrap();
+    assert_eq!(claim, RequestClaim::Legacy);
+    assert!(ensure_current_claim(claim).is_err());
+    assert!(!directory.join("request.receipt.jws").exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn incomplete_lifecycle_transition_is_never_deleted_or_recovered_implicitly() {
+    let directory = temporary_directory();
+    let lifecycle = directory.join("request.lifecycle.json");
+    let temporary = lifecycle_temporary_path(&lifecycle);
+    fs::write(&temporary, br#"{\"phase\":\"executing\"}"#).unwrap();
+
+    assert!(load_or_prepare_lifecycle(&lifecycle, &"e".repeat(64)).is_err());
+    assert!(temporary.exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_state_paths_reject_symlink_roots_files_and_temporaries() {
+    use std::os::unix::fs::symlink;
+
+    let directory = temporary_directory();
+    let real_state = directory.join("real-state");
+    fs::create_dir(&real_state).unwrap();
+    let linked_state = directory.join("linked-state");
+    symlink(&real_state, &linked_state).unwrap();
+    assert!(ensure_real_state_directory(&linked_state).is_err());
+
+    let external = directory.join("external.json");
+    fs::write(&external, b"{}").unwrap();
+    let lifecycle = real_state.join("request.lifecycle.json");
+    symlink(&external, &lifecycle).unwrap();
+    assert!(load_or_prepare_lifecycle(&lifecycle, &"e".repeat(64)).is_err());
+    fs::remove_file(&lifecycle).unwrap();
+
+    let temporary = lifecycle_temporary_path(&lifecycle);
+    symlink(directory.join("missing-target"), &temporary).unwrap();
+    assert!(load_or_prepare_lifecycle(&lifecycle, &"e".repeat(64)).is_err());
+    assert!(state_path_present(&temporary).unwrap());
+
+    let lock = real_state.join("task.lock");
+    symlink(&external, &lock).unwrap();
+    assert!(regular_state_file_present(&lock, "operator task lock").is_err());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn completed_lifecycle_without_its_receipt_is_also_non_replayable() {
+    let directory = temporary_directory();
+    let lifecycle = directory.join("request.lifecycle.json");
+    let digest = "f".repeat(64);
+    write_initial_lifecycle(
+        &lifecycle,
+        &TaskLifecycle::Completed {
+            request_sha256: digest.clone(),
+        },
+    )
+    .unwrap();
+
+    let completed = load_or_prepare_lifecycle(&lifecycle, &digest).unwrap();
+    let error = mark_task_executing(&lifecycle, &completed, &digest).unwrap_err();
+    assert!(error.to_string().contains("completed without a receipt"));
     fs::remove_dir_all(directory).unwrap();
 }
 

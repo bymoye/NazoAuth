@@ -167,6 +167,11 @@ pub(crate) fn execute(
     operation: TaskOperation,
     public_jwk: Option<&Path>,
 ) -> anyhow::Result<OperationResult> {
+    // A privileged operation is admissible only while the existing audit,
+    // intent and trust-transition state is verifiably intact.  Checking after
+    // the runtime side effect would be too late: the mutation could succeed
+    // even though ctl can no longer append a trustworthy receipt.
+    verify_audit(config).context("operator audit preflight failed")?;
     #[cfg(debug_assertions)]
     if std::env::var_os("NAZOAUTHCTL_TESTING").is_some() {
         return execute_test_task(config, target, operation);
@@ -213,6 +218,10 @@ pub(crate) fn execute(
     validate_runtime_receipt(&runtime_receipt, &task, &compact_task)?;
     runtime.verify_prepared_target(&prepared.target)?;
 
+    // Revalidate immediately before reading the head and appending.  The
+    // lifecycle lock excludes another ctl writer; this second check also
+    // catches out-of-band corruption during the runtime operation.
+    verify_audit(config).context("operator audit changed during task execution")?;
     let (sequence, previous) = audit_head(config)?;
     let final_receipt = FinalReceipt {
         ver: nazo_operator_protocol::PROTOCOL_VERSION,
@@ -273,7 +282,10 @@ fn load_or_issue_task(
     fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{fingerprint}.jws"));
     let now = Utc::now().timestamp();
-    if path.exists() {
+    if path_present(&path)? {
+        if !is_regular_non_symlink(&path)? {
+            bail!("persisted operator intent is not a regular non-symlink file");
+        }
         let compact = fs::read_to_string(&path)?;
         let header = protected_header(&compact)?;
         let task = verify_task_signature(
@@ -296,7 +308,23 @@ fn load_or_issue_task(
             .operator
             .state_directory
             .join(format!("{}.receipt.jws", task.jti));
-        if task.exp >= now || cached_receipt.is_file() {
+        let request_claim = config
+            .operator
+            .state_directory
+            .join(format!("{}.request.sha256", task.jti));
+        let lifecycle = config
+            .operator
+            .state_directory
+            .join(format!("{}.lifecycle.json", task.jti));
+        let receipt_temporary = cached_receipt.with_extension("receipt.jws.tmp");
+        let cached_receipt_present = path_present(&cached_receipt)?;
+        if cached_receipt_present && !is_regular_non_symlink(&cached_receipt)? {
+            bail!("cached runtime receipt is not a regular non-symlink file");
+        }
+        let runtime_has_observed_request = path_present(&request_claim)?
+            || path_present(&lifecycle)?
+            || path_present(&receipt_temporary)?;
+        if task.exp >= now || cached_receipt_present || runtime_has_observed_request {
             return Ok((task, compact, path));
         }
         fs::remove_file(&path)?;
@@ -330,7 +358,7 @@ fn existing_final_result(
 ) -> anyhow::Result<Option<OperationResult>> {
     let request_id = &task.jti;
     let directory = config.operator.audit_directory.join("receipts");
-    if !directory.exists() {
+    if !is_real_directory_or_missing(&directory, "audit receipt directory")? {
         return Ok(None);
     }
     let suffix = format!("-{request_id}.jws");
@@ -599,7 +627,11 @@ pub(crate) fn verify_audit(config: &UpdateConfig) -> anyhow::Result<()> {
 
 fn verify_audit_chain(config: &UpdateConfig) -> anyhow::Result<(u64, String)> {
     let receipts = config.operator.audit_directory.join("receipts");
-    if !receipts.exists() {
+    let head_path = config.operator.audit_directory.join("head.json");
+    if !is_real_directory_or_missing(&receipts, "audit receipt directory")? {
+        if path_present(&head_path)? {
+            bail!("audit receipt directory is missing while an audit head exists");
+        }
         verify_pending_intents(config)?;
         verify_management_events(config)?;
         verify_trust_transitions(config)?;
@@ -630,7 +662,6 @@ fn verify_audit_chain(config: &UpdateConfig) -> anyhow::Result<(u64, String)> {
         previous = compact_sha256(&compact);
         checkpoints.insert(sequence, previous.clone());
     }
-    let head_path = config.operator.audit_directory.join("head.json");
     let head = if head_path.exists() {
         Some(serde_json::from_slice::<AuditHead>(&fs::read(&head_path)?)?)
     } else {
@@ -691,7 +722,7 @@ fn audit_entries(
         }
     }
     let receipts = config.operator.audit_directory.join("receipts");
-    if receipts.exists() {
+    if is_real_directory_or_missing(&receipts, "audit receipt directory")? {
         let mut paths = fs::read_dir(&receipts)?.collect::<Result<Vec<_>, _>>()?;
         paths.sort_by_key(std::fs::DirEntry::file_name);
         for entry in paths {
@@ -712,7 +743,7 @@ fn audit_entries(
         }
     }
     let management = config.operator.audit_directory.join("management");
-    if management.exists() {
+    if is_real_directory_or_missing(&management, "management audit directory")? {
         let mut paths = fs::read_dir(&management)?.collect::<Result<Vec<_>, _>>()?;
         paths.sort_by_key(std::fs::DirEntry::file_name);
         for entry in paths {
@@ -890,7 +921,11 @@ pub(crate) fn load_management_event(
 
 fn verify_management_events(config: &UpdateConfig) -> anyhow::Result<()> {
     let directory = config.operator.audit_directory.join("management");
-    if !directory.exists() {
+    let head_path = config.operator.audit_directory.join("management-head.json");
+    if !is_real_directory_or_missing(&directory, "management audit directory")? {
+        if path_present(&head_path)? {
+            bail!("management audit directory is missing while a management audit head exists");
+        }
         return Ok(());
     }
     let mut paths = fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
@@ -919,7 +954,6 @@ fn verify_management_events(config: &UpdateConfig) -> anyhow::Result<()> {
         previous = compact_sha256(&compact);
         checkpoints.insert(sequence, previous.clone());
     }
-    let head_path = config.operator.audit_directory.join("management-head.json");
     let head = if head_path.exists() {
         Some(serde_json::from_slice::<AuditHead>(&fs::read(&head_path)?)?)
     } else {
@@ -1819,6 +1853,15 @@ fn remove_managed_regular_file(path: &Path) -> anyhow::Result<()> {
 fn path_present(path: &Path) -> anyhow::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn is_real_directory_or_missing(path: &Path, description: &str) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => bail!("{description} is not a real directory: {}", path.display()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
     }

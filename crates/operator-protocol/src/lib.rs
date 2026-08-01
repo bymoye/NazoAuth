@@ -403,21 +403,8 @@ pub fn compact_sha256(compact: &str) -> String {
 }
 
 pub fn protected_header(compact: &str) -> Result<ProtectedHeader, ProtocolError> {
-    if compact.len() > MAX_COMPACT_JWS_BYTES {
-        return Err(ProtocolError::TooLarge);
-    }
-    let mut segments = compact.split('.');
-    let protected = segments.next().ok_or(ProtocolError::SegmentCount)?;
-    let payload = segments.next().ok_or(ProtocolError::SegmentCount)?;
-    let signature = segments.next().ok_or(ProtocolError::SegmentCount)?;
-    if segments.next().is_some()
-        || protected.is_empty()
-        || payload.is_empty()
-        || signature.is_empty()
-    {
-        return Err(ProtocolError::SegmentCount);
-    }
-    decode_json(protected)
+    let (protected, _, _) = compact_segments(compact)?;
+    decode_protected_header(protected)
 }
 
 fn sign_compact<T: Serialize>(
@@ -426,7 +413,10 @@ fn sign_compact<T: Serialize>(
     expected_type: &str,
     key: &SigningKey,
 ) -> Result<String, ProtocolError> {
-    validate_identifier(key_id)?;
+    // The key id becomes a key-store path component for verifiers.  Keep the
+    // signing and pre-lookup parsing boundary identical so we never mint a
+    // token that a safe verifier cannot look up.
+    validate_file_identifier(key_id)?;
     let header = ProtectedHeader {
         alg: FixedAlgorithm::EdDSA,
         kid: key_id.to_owned(),
@@ -452,6 +442,23 @@ fn verify_compact<T: DeserializeOwned>(
     expected_type: &str,
     key: &VerifyingKey,
 ) -> Result<T, ProtocolError> {
+    validate_file_identifier(expected_key_id).map_err(|_| ProtocolError::Header)?;
+    let (protected, payload, signature) = compact_segments(compact)?;
+    let header = decode_protected_header(protected)?;
+    if header.kid != expected_key_id || header.typ != expected_type {
+        return Err(ProtocolError::Header);
+    }
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| ProtocolError::Base64)?;
+    let signature =
+        Signature::from_slice(&signature_bytes).map_err(|_| ProtocolError::Signature)?;
+    key.verify(format!("{protected}.{payload}").as_bytes(), &signature)
+        .map_err(|_| ProtocolError::Signature)?;
+    decode_json(payload)
+}
+
+fn compact_segments(compact: &str) -> Result<(&str, &str, &str), ProtocolError> {
     if compact.len() > MAX_COMPACT_JWS_BYTES {
         return Err(ProtocolError::TooLarge);
     }
@@ -466,21 +473,18 @@ fn verify_compact<T: DeserializeOwned>(
     {
         return Err(ProtocolError::SegmentCount);
     }
-    let header: ProtectedHeader = decode_json(protected)?;
+    Ok((protected, payload, signature))
+}
+
+fn decode_protected_header(protected: &str) -> Result<ProtectedHeader, ProtocolError> {
+    let header: ProtectedHeader = decode_json(protected).map_err(|_| ProtocolError::Header)?;
     if header.alg != FixedAlgorithm::EdDSA
-        || header.kid != expected_key_id
-        || header.typ != expected_type
+        || validate_file_identifier(&header.kid).is_err()
+        || validate_identifier(&header.typ).is_err()
     {
         return Err(ProtocolError::Header);
     }
-    let signature_bytes = URL_SAFE_NO_PAD
-        .decode(signature)
-        .map_err(|_| ProtocolError::Base64)?;
-    let signature =
-        Signature::from_slice(&signature_bytes).map_err(|_| ProtocolError::Signature)?;
-    key.verify(format!("{protected}.{payload}").as_bytes(), &signature)
-        .map_err(|_| ProtocolError::Signature)?;
-    decode_json(payload)
+    Ok(header)
 }
 
 fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {

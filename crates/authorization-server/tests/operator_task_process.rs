@@ -3,7 +3,9 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
+    thread,
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -12,7 +14,7 @@ use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
     Actor, ActorKind, CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, SecretBinding,
     TargetExpectation, TaskEnvelope, TaskOperation, TaskOutcome, canonical_config_sha256,
-    sign_task, verify_runtime_receipt,
+    compact_sha256, sign_task, verify_runtime_receipt,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -33,6 +35,29 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn run_operator_task(root: &Path, compact: &str) -> Output {
+    spawn_operator_task(root, compact)
+        .wait_with_output()
+        .unwrap()
+}
+
+fn spawn_operator_task(root: &Path, compact: &str) -> Child {
+    spawn_operator_task_inner(root, compact, None)
+}
+
+fn spawn_operator_task_at_failpoint(
+    root: &Path,
+    compact: &str,
+    failpoint: &str,
+    marker: &Path,
+) -> Child {
+    spawn_operator_task_inner(root, compact, Some((failpoint, marker)))
+}
+
+fn spawn_operator_task_inner(
+    root: &Path,
+    compact: &str,
+    failpoint: Option<(&str, &Path)>,
+) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nazoauth"));
     command
         .arg("operator-task")
@@ -59,6 +84,11 @@ fn run_operator_task(root: &Path, compact: &str) -> Output {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some((name, marker)) = failpoint {
+        command
+            .env("NAZOAUTH_OPERATOR_TEST_FAILPOINT", name)
+            .env("NAZOAUTH_OPERATOR_TEST_FAILPOINT_MARKER", marker);
+    }
     #[cfg(windows)]
     for name in ["PATH", "SystemRoot", "WINDIR"] {
         if let Some(value) = std::env::var_os(name) {
@@ -75,7 +105,20 @@ fn run_operator_task(root: &Path, compact: &str) -> Output {
         .unwrap()
         .write_all(compact.as_bytes())
         .unwrap();
-    child.wait_with_output().unwrap()
+    child
+}
+
+fn wait_for_marker(path: &Path) {
+    for _ in 0..500 {
+        if path.is_file() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "operator test failpoint was not reached: {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -171,18 +214,190 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         TaskOutcome::Failed { .. }
     ));
 
+    // The receipt is authoritative once published.  An interrupted later
+    // lifecycle bookkeeping write must not hide the signed result.
+    let stale_lifecycle_temporary =
+        root.join("state/request-process-test.lifecycle.lifecycle.json.tmp");
+    fs::write(&stale_lifecycle_temporary, b"partial").unwrap();
     let retry = run_operator_task(&root, &compact);
     assert!(retry.status.success());
     assert_eq!(retry.stdout, first_compact.as_bytes());
+    assert!(stale_lifecycle_temporary.exists());
+
+    // Two independently started runtimes use the durable file lock.  One
+    // produces the receipt; the other must observe that exact receipt rather
+    // than execute the signed operation a second time.
+    let mut concurrent = task.clone();
+    concurrent.jti = "request-concurrent-process-test".to_owned();
+    let concurrent_compact = sign_task(&concurrent, "controller-test", &controller).unwrap();
+    let first_concurrent = spawn_operator_task(&root, &concurrent_compact);
+    let second_concurrent = spawn_operator_task(&root, &concurrent_compact);
+    let first_concurrent = first_concurrent.wait_with_output().unwrap();
+    let second_concurrent = second_concurrent.wait_with_output().unwrap();
+    assert!(first_concurrent.status.success());
+    assert!(second_concurrent.status.success());
+    assert_eq!(first_concurrent.stdout, second_concurrent.stdout);
+    assert!(
+        verify_runtime_receipt(
+            std::str::from_utf8(&first_concurrent.stdout).unwrap(),
+            "receipt-test",
+            &receipt.verifying_key(),
+        )
+        .is_ok()
+    );
+
+    // Kill a real child after Executing was fsynced and before the operation
+    // begins.  Restart must conservatively preserve the unknown state and
+    // must not execute the envelope.
+    let mut killed_before_operation = task.clone();
+    killed_before_operation.jti = "request-killed-before-operation".to_owned();
+    let killed_before_operation_compact =
+        sign_task(&killed_before_operation, "controller-test", &controller).unwrap();
+    let executing_marker = root.join("after-executing.marker");
+    let mut killed = spawn_operator_task_at_failpoint(
+        &root,
+        &killed_before_operation_compact,
+        "after-executing",
+        &executing_marker,
+    );
+    wait_for_marker(&executing_marker);
+    killed.kill().unwrap();
+    assert!(!killed.wait().unwrap().success());
+    let restarted = run_operator_task(&root, &killed_before_operation_compact);
+    assert!(!restarted.status.success());
+    assert!(
+        String::from_utf8_lossy(&restarted.stderr).contains("may have executed without a receipt")
+    );
+    assert!(
+        !root
+            .join("state/request-killed-before-operation.receipt.jws")
+            .exists()
+    );
+
+    // Kill a second real child after the signed receipt temporary file was
+    // fsynced but before publication.  Restart must retain that evidence and
+    // refuse to replay the operation.
+    let mut killed_before_receipt_publish = task.clone();
+    killed_before_receipt_publish.jti = "request-killed-before-receipt-publish".to_owned();
+    let killed_before_receipt_compact = sign_task(
+        &killed_before_receipt_publish,
+        "controller-test",
+        &controller,
+    )
+    .unwrap();
+    let receipt_marker = root.join("after-receipt-sync.marker");
+    let mut killed = spawn_operator_task_at_failpoint(
+        &root,
+        &killed_before_receipt_compact,
+        "after-receipt-sync",
+        &receipt_marker,
+    );
+    wait_for_marker(&receipt_marker);
+    killed.kill().unwrap();
+    assert!(!killed.wait().unwrap().success());
+    let receipt_temporary =
+        root.join("state/request-killed-before-receipt-publish.receipt.receipt.jws.tmp");
+    assert!(receipt_temporary.is_file());
+    let restarted = run_operator_task(&root, &killed_before_receipt_compact);
+    assert!(!restarted.status.success());
+    assert!(String::from_utf8_lossy(&restarted.stderr).contains("incomplete durable publication"));
+    assert!(receipt_temporary.is_file());
+
+    // This is the restart boundary after a SIGKILL.  There is intentionally
+    // no receipt, but the durable executing state means the operation might
+    // already have made its change.  The restarted process must not invoke it.
+    let mut unknown = task.clone();
+    unknown.jti = "request-unknown-process-test".to_owned();
+    let unknown_compact = sign_task(&unknown, "controller-test", &controller).unwrap();
+    let unknown_digest = compact_sha256(&unknown_compact);
+    fs::write(
+        root.join("state/request-unknown-process-test.lifecycle.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "phase": "executing",
+            "request_sha256": &unknown_digest,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("state/request-unknown-process-test.request.sha256"),
+        format!("nazoauth-operator-request-v1:{unknown_digest}\n"),
+    )
+    .unwrap();
+    let unknown = run_operator_task(&root, &unknown_compact);
+    assert!(!unknown.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("may have executed without a receipt")
+    );
+    assert!(
+        !root
+            .join("state/request-unknown-process-test.receipt.jws")
+            .exists()
+    );
+    let unknown_retry = run_operator_task(&root, &unknown_compact);
+    assert!(!unknown_retry.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown_retry.stderr)
+            .contains("may have executed without a receipt")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("state/request-unknown-process-test.lifecycle.json")).unwrap(),
+        serde_json::to_string(&serde_json::json!({
+            "phase": "executing",
+            "request_sha256": &unknown_digest,
+        }))
+        .unwrap()
+    );
+
+    // This is the second SIGKILL boundary: a receipt temporary file can only
+    // exist after the operation returned.  It must remain on disk and reject
+    // recovery before the binary can invoke the operation again.
+    let mut partial = task.clone();
+    partial.jti = "request-partial-process-test".to_owned();
+    let partial_compact = sign_task(&partial, "controller-test", &controller).unwrap();
+    let partial_digest = compact_sha256(&partial_compact);
+    fs::write(
+        root.join("state/request-partial-process-test.lifecycle.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "phase": "executing",
+            "request_sha256": &partial_digest,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("state/request-partial-process-test.request.sha256"),
+        format!("nazoauth-operator-request-v1:{partial_digest}\n"),
+    )
+    .unwrap();
+    let partial_temporary = root.join("state/request-partial-process-test.receipt.receipt.jws.tmp");
+    fs::write(&partial_temporary, b"partial").unwrap();
+    let partial = run_operator_task(&root, &partial_compact);
+    assert!(!partial.status.success());
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("incomplete durable publication"));
+    assert!(partial_temporary.exists());
+    assert!(matches!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(root.join("state/request-partial-process-test.lifecycle.json")).unwrap()
+        )
+        .unwrap()["phase"],
+        serde_json::Value::String(ref phase) if phase == "executing"
+    ));
 
     let mut conflict = task.clone();
     conflict.actor.id = "uid:other".to_owned();
     let conflicting_compact = sign_task(&conflict, "controller-test", &controller).unwrap();
+    let lifecycle_before =
+        fs::read(root.join("state/request-process-test.lifecycle.json")).unwrap();
     let conflict = run_operator_task(&root, &conflicting_compact);
     assert!(!conflict.status.success());
     assert!(
         String::from_utf8_lossy(&conflict.stderr)
             .contains("request identifier was already claimed by a different envelope")
+    );
+    assert_eq!(
+        fs::read(root.join("state/request-process-test.lifecycle.json")).unwrap(),
+        lifecycle_before
     );
 
     let retired_controller = SigningKey::from_bytes(&[13; 32]);
@@ -194,6 +409,42 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
     assert!(
         String::from_utf8_lossy(&retired.stderr)
             .contains("nazoauth-operator-rejection=authorization")
+    );
+
+    // A versioned request claim is published only after the runtime has
+    // validated the original 60-second authorization window.  If the process
+    // is killed before it moves Prepared to Executing, a later restart may
+    // finish that already accepted task with the same JTI even after expiry.
+    let mut accepted = task.clone();
+    accepted.jti = "request-accepted-process-test".to_owned();
+    accepted.iat = 1;
+    accepted.nbf = 1;
+    accepted.exp = 61;
+    let accepted_compact = sign_task(&accepted, "controller-test", &controller).unwrap();
+    let accepted_digest = compact_sha256(&accepted_compact);
+    fs::write(
+        root.join("state/request-accepted-process-test.request.sha256"),
+        format!("nazoauth-operator-request-v1:{accepted_digest}\n"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("state/request-accepted-process-test.lifecycle.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "phase": "prepared",
+            "request_sha256": &accepted_digest,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let accepted = run_operator_task(&root, &accepted_compact);
+    assert!(accepted.status.success());
+    assert!(
+        verify_runtime_receipt(
+            std::str::from_utf8(&accepted.stdout).unwrap(),
+            "receipt-test",
+            &receipt.verifying_key(),
+        )
+        .is_ok()
     );
 
     let mut expired = task;
@@ -210,8 +461,14 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         String::from_utf8_lossy(&expired.stderr).contains("operator task authorization failed")
     );
     assert!(
-        root.join("state/request-expired-process-test.request.sha256")
-            .is_file()
+        !root
+            .join("state/request-expired-process-test.request.sha256")
+            .exists()
+    );
+    assert!(
+        !root
+            .join("state/request-expired-process-test.lifecycle.json")
+            .exists()
     );
     assert!(
         !root

@@ -209,7 +209,7 @@ fn host_task_uses_transient_credentials_and_hides_unrelated_state() {
 }
 
 #[test]
-fn pending_intent_reuses_jti_and_expired_uncommitted_intent_is_reissued() {
+fn pending_intent_reuses_jti_and_only_unobserved_expired_intent_is_reissued() {
     let work = PrivateTempDir::new("nazoauth-intent-test").unwrap();
     let config = config(&work);
     let (target, embedded, binding, operation) = task_parts();
@@ -245,9 +245,74 @@ fn pending_intent_reuses_jti_and_expired_uncommitted_intent_is_reissued() {
         0o400,
     )
     .unwrap();
-    let (reissued, _, _) =
-        load_or_issue_task(&config, target, embedded, binding, operation).unwrap();
+    let (reissued, _, _) = load_or_issue_task(
+        &config,
+        target.clone(),
+        embedded.clone(),
+        binding.clone(),
+        operation.clone(),
+    )
+    .unwrap();
     assert_ne!(reissued.jti, expired.jti);
+
+    let mut observed = reissued.clone();
+    observed.iat = 1;
+    observed.nbf = 1;
+    observed.exp = 61;
+    atomic_write(
+        &path,
+        sign_task(&observed, &config.operator.controller_key_id, &key)
+            .unwrap()
+            .as_bytes(),
+        0o400,
+    )
+    .unwrap();
+    fs::create_dir_all(&config.operator.state_directory).unwrap();
+    fs::write(
+        config
+            .operator
+            .state_directory
+            .join(format!("{}.request.sha256", observed.jti)),
+        b"runtime-observed",
+    )
+    .unwrap();
+    let (preserved, preserved_compact, _) =
+        load_or_issue_task(&config, target, embedded, binding, operation).unwrap();
+    assert_eq!(preserved.jti, observed.jti);
+    assert_eq!(
+        verify_task_signature(
+            &preserved_compact,
+            &config.operator.controller_key_id,
+            &key.verifying_key(),
+        )
+        .unwrap(),
+        observed
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn persisted_operator_intent_symlink_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    let work = PrivateTempDir::new("nazoauth-intent-symlink-test").unwrap();
+    let config = config(&work);
+    let (target, embedded, binding, operation) = task_parts();
+    let (_, compact, path) = load_or_issue_task(
+        &config,
+        target.clone(),
+        embedded.clone(),
+        binding.clone(),
+        operation.clone(),
+    )
+    .unwrap();
+    fs::remove_file(&path).unwrap();
+    let external = work.path().join("external-intent.jws");
+    fs::write(&external, compact).unwrap();
+    symlink(&external, &path).unwrap();
+
+    assert!(load_or_issue_task(&config, target, embedded, binding, operation).is_err());
+    assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
 }
 
 #[test]
@@ -275,6 +340,178 @@ fn stale_audit_head_repairs_forward_but_tampering_fails_closed() {
     compact.push('x');
     atomic_write(&event, compact.as_bytes(), 0o400).unwrap();
     assert!(verify_audit(&config).is_err());
+}
+
+#[test]
+fn missing_audit_directories_with_residual_heads_fail_closed() {
+    let work = PrivateTempDir::new("nazoauth-audit-truncation-test").unwrap();
+    let config = config(&work);
+    let receipts = config.operator.audit_directory.join("receipts");
+    fs::create_dir(&receipts).unwrap();
+    atomic_write(
+        &config.operator.audit_directory.join("head.json"),
+        &serde_json::to_vec(&AuditHead {
+            sequence: 1,
+            sha256: "a".repeat(64),
+        })
+        .unwrap(),
+        0o600,
+    )
+    .unwrap();
+    fs::remove_dir(&receipts).unwrap();
+    assert!(verify_audit(&config).is_err());
+
+    fs::remove_file(config.operator.audit_directory.join("head.json")).unwrap();
+    let management = config.operator.audit_directory.join("management");
+    fs::create_dir(&management).unwrap();
+    atomic_write(
+        &config.operator.audit_directory.join("management-head.json"),
+        &serde_json::to_vec(&AuditHead {
+            sequence: 1,
+            sha256: "b".repeat(64),
+        })
+        .unwrap(),
+        0o600,
+    )
+    .unwrap();
+    fs::remove_dir(&management).unwrap();
+    assert!(verify_audit(&config).is_err());
+}
+
+#[test]
+fn broken_audit_preflight_blocks_runtime_preparation() {
+    let work = PrivateTempDir::new("nazoauth-audit-preflight-test").unwrap();
+    let config = config(&work);
+    atomic_write(
+        &config.operator.audit_directory.join("head.json"),
+        &serde_json::to_vec(&AuditHead {
+            sequence: 1,
+            sha256: "a".repeat(64),
+        })
+        .unwrap(),
+        0o600,
+    )
+    .unwrap();
+    let expected = ExpectedReleaseTarget {
+        embedded: EmbeddedIdentity {
+            release: "v0.1.6".to_owned(),
+            revision: "f".repeat(40),
+            protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+            build_id: "build:audit-preflight".to_owned(),
+        },
+        image_digest: format!("sha256:{}", "d".repeat(64)),
+        binary_digest: "b".repeat(64),
+    };
+    let error = execute(
+        &config,
+        "/definitely/missing/nazoauth",
+        &expected,
+        TaskOperation::KeysValidate,
+        None,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("operator audit preflight failed"));
+    assert!(!config.operator.audit_directory.join("intents").exists());
+}
+
+#[test]
+fn audit_heads_without_receipt_directories_do_not_auto_heal() {
+    let work = PrivateTempDir::new("nazoauth-audit-head-residue-test").unwrap();
+    let config = config(&work);
+    atomic_write(
+        &config.operator.audit_directory.join("head.json"),
+        &serde_json::to_vec(&AuditHead {
+            sequence: 0,
+            sha256: "0".repeat(64),
+        })
+        .unwrap(),
+        0o600,
+    )
+    .unwrap();
+    assert!(verify_audit(&config).is_err());
+
+    fs::remove_file(config.operator.audit_directory.join("head.json")).unwrap();
+    atomic_write(
+        &config.operator.audit_directory.join("management-head.json"),
+        &serde_json::to_vec(&AuditHead {
+            sequence: 0,
+            sha256: "0".repeat(64),
+        })
+        .unwrap(),
+        0o600,
+    )
+    .unwrap();
+    assert!(verify_audit(&config).is_err());
+}
+
+#[test]
+fn truly_empty_audit_state_verifies_without_creating_heads() {
+    let work = PrivateTempDir::new("nazoauth-empty-audit-test").unwrap();
+    let config = config(&work);
+    verify_audit(&config).unwrap();
+    assert!(!config.operator.audit_directory.join("receipts").exists());
+    assert!(!config.operator.audit_directory.join("head.json").exists());
+    assert!(!config.operator.audit_directory.join("management").exists());
+    assert!(
+        !config
+            .operator
+            .audit_directory
+            .join("management-head.json")
+            .exists()
+    );
+}
+
+#[test]
+fn audit_directories_must_be_real_directories() {
+    let work = PrivateTempDir::new("nazoauth-audit-directory-type-test").unwrap();
+    let receipt_config = config(&work);
+    fs::write(
+        receipt_config.operator.audit_directory.join("receipts"),
+        b"not a directory",
+    )
+    .unwrap();
+    assert!(verify_audit(&receipt_config).is_err());
+
+    let work = PrivateTempDir::new("nazoauth-management-directory-type-test").unwrap();
+    let management_config = config(&work);
+    fs::write(
+        management_config
+            .operator
+            .audit_directory
+            .join("management"),
+        b"not a directory",
+    )
+    .unwrap();
+    assert!(verify_audit(&management_config).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_directory_symlinks_fail_closed() {
+    use std::os::unix::fs::symlink;
+
+    let work = PrivateTempDir::new("nazoauth-audit-valid-symlink-test").unwrap();
+    let receipt_config = config(&work);
+    let target = work.path().join("audit-receipt-target");
+    fs::create_dir(&target).unwrap();
+    symlink(
+        &target,
+        receipt_config.operator.audit_directory.join("receipts"),
+    )
+    .unwrap();
+    assert!(verify_audit(&receipt_config).is_err());
+
+    let work = PrivateTempDir::new("nazoauth-management-dangling-symlink-test").unwrap();
+    let management_config = config(&work);
+    symlink(
+        work.path().join("missing-management-target"),
+        management_config
+            .operator
+            .audit_directory
+            .join("management"),
+    )
+    .unwrap();
+    assert!(verify_audit(&management_config).is_err());
 }
 
 #[test]
