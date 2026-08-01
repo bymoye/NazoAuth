@@ -272,6 +272,68 @@ fn static_identity_files_are_idempotent_and_fail_closed_on_partial_state() {
 }
 
 #[test]
+fn identity_initialization_and_adoption_records_are_restart_closed() {
+    let work = PrivateTempDir::new("operator-identity-initialization").unwrap();
+    let operator = work.path().join("operator");
+    let recovery = work.path().join("recovery");
+    initialize_identity_generation(&operator, &recovery).unwrap();
+    initialize_identity_generation(&operator, &recovery).unwrap();
+    let active_file = operator.join("active-generation.json");
+    assert!(read_active_identity(&active_file).is_ok());
+
+    assert!(read_active_identity(&work.path().join("missing-active.json")).is_err());
+    let non_regular = work.path().join("non-regular-active");
+    fs::create_dir(&non_regular).unwrap();
+    assert!(read_active_identity(&non_regular).is_err());
+
+    let legacy_operator = work.path().join("legacy-operator");
+    fs::create_dir(&legacy_operator).unwrap();
+    fs::write(legacy_operator.join("controller.key"), b"ambiguous").unwrap();
+    assert!(
+        initialize_identity_generation(&legacy_operator, &work.path().join("legacy-recovery"))
+            .is_err()
+    );
+
+    let adoption_work = PrivateTempDir::new("operator-adoption-record").unwrap();
+    let config_path = adoption_work.path().join("update.json");
+    let mut config = config(&adoption_work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let layout = identity_layout(&config).unwrap();
+    let active = read_active_identity(&layout.active_file).unwrap();
+    let adoption_path = layout.operator_directory.join("legacy-adoption.json");
+    let mut adoption = LegacyAdoptionIntent {
+        schema: 2,
+        generation: active.generation.clone(),
+        controller_key_id: active.controller_key_id.clone(),
+        audit_key_id: active.audit_key_id.clone(),
+        break_glass_key_id: active.break_glass_key_id.clone(),
+    };
+    atomic_write(
+        &adoption_path,
+        &serde_json::to_vec_pretty(&adoption).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    assert!(recover_pending_rotation(&config_path, &mut config).is_err());
+
+    adoption.schema = 1;
+    atomic_write(
+        &adoption_path,
+        &serde_json::to_vec_pretty(&adoption).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    atomic_write(
+        &layout.operator_directory.join("rotation-intent.json"),
+        b"{}",
+        0o600,
+    )
+    .unwrap();
+    assert!(recover_pending_rotation(&config_path, &mut config).is_err());
+}
+
+#[test]
 fn legacy_generation_boundaries_accept_only_the_expected_regular_tree() {
     let work = PrivateTempDir::new("operator-generation-boundaries").unwrap();
     let missing = work.path().join("missing");
