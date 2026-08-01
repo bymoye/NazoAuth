@@ -1289,6 +1289,15 @@ fn public_command_dispatch_fails_closed_before_every_confirmed_mutation() {
             command,
         })
     };
+    let root_available = require_root().is_ok();
+    let assert_root_or_error = |result: anyhow::Result<()>, expected: &str| {
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(expected)
+                || (!root_available && error.contains("this command requires root")),
+            "{error}"
+        );
+    };
 
     for command in [
         Command::BootstrapAdmin(BootstrapAdminOptions {
@@ -1321,17 +1330,13 @@ fn public_command_dispatch_fails_closed_before_every_confirmed_mutation() {
         assert_eq!(fs::read(&config_path).unwrap(), config_before);
     }
 
-    assert!(
-        invoke(Command::RecoverUpdate { yes: false })
-            .unwrap_err()
-            .to_string()
-            .contains("no interrupted update")
+    assert_root_or_error(
+        invoke(Command::RecoverUpdate { yes: false }),
+        "no interrupted update",
     );
-    assert!(
-        invoke(Command::RecoverIdentity { yes: false })
-            .unwrap_err()
-            .to_string()
-            .contains("no interrupted identity")
+    assert_root_or_error(
+        invoke(Command::RecoverIdentity { yes: false }),
+        "no interrupted identity",
     );
     assert!(
         invoke(Command::Keys(KeysCommand::ExportOpenid4vcTrust {
@@ -1341,7 +1346,14 @@ fn public_command_dispatch_fails_closed_before_every_confirmed_mutation() {
     );
     invoke(Command::AuditVerify).unwrap();
     invoke(Command::AuditShow { request_id: None }).unwrap();
-    invoke(Command::BreakGlassControllerAvailability).unwrap();
+    if root_available {
+        invoke(Command::BreakGlassControllerAvailability).unwrap();
+    } else {
+        assert_root_or_error(
+            invoke(Command::BreakGlassControllerAvailability),
+            "controller availability",
+        );
+    }
 
     fs::create_dir_all(&config.deployment_root).unwrap();
     write_update_journal(&config, &journal(&config, UpdatePhase::Prepared)).unwrap();
@@ -1355,11 +1367,9 @@ fn public_command_dispatch_fails_closed_before_every_confirmed_mutation() {
         .join("generation-abandoned");
     fs::create_dir_all(&abandoned).unwrap();
     fs::write(abandoned.join("controller.key"), b"pending-secret").unwrap();
-    assert!(
-        invoke(Command::RecoverUpdate { yes: false })
-            .unwrap_err()
-            .to_string()
-            .contains("identity recovery is pending")
+    assert_root_or_error(
+        invoke(Command::RecoverUpdate { yes: false }),
+        "identity recovery is pending",
     );
     assert!(invoke(Command::RecoverIdentity { yes: false }).is_err());
     assert_eq!(fs::read(&config_path).unwrap(), config_before);

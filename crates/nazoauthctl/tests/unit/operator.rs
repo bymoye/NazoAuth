@@ -265,7 +265,9 @@ fn static_identity_files_are_idempotent_and_fail_closed_on_partial_state() {
     let inconsistent = work.path().join("inconsistent-receipt");
     fs::create_dir(&inconsistent).unwrap();
     ensure_static_identity_files(&inconsistent).unwrap();
-    fs::write(inconsistent.join("receipt.kid"), "receipt-wrong").unwrap();
+    let receipt_kid = inconsistent.join("receipt.kid");
+    crate::filesystem::set_mode(&receipt_kid, 0o600).unwrap();
+    fs::write(receipt_kid, "receipt-wrong").unwrap();
     assert!(ensure_static_identity_files(&inconsistent).is_err());
 }
 
