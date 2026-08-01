@@ -23,7 +23,7 @@ resolver = "3"
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.3"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/nazozero/NazoAuth"
@@ -57,21 +57,21 @@ mdoc-rs = { version = "0.2.0", default-features = false, features = ["issue"] }
 coset = "0.3.8"
 ciborium = "0.2.2"
 lettre = { version = "0.11.22", default-features = false }
-nazo-auth = { version = "0.1.4", path = "crates/authorization-server-core" }
-nazo-digital-credentials = { version = "0.1.4", path = "crates/digital-credentials" }
-nazo-http-actix = { version = "0.1.4", path = "crates/http-actix" }
-nazo-http-signatures = { version = "0.1.4", path = "crates/http-signatures" }
-nazo-identity = { version = "0.1.4", path = "crates/identity" }
-nazo-key-management = { version = "0.1.4", path = "crates/key-management" }
-nazo-openid4vci = { version = "0.1.4", path = "crates/openid4vci" }
-nazo-openid4vp = { version = "0.1.4", path = "crates/openid4vp" }
-nazo-openid4vc-http-actix = { version = "0.1.4", path = "crates/openid4vc-http-actix" }
-nazo-operator-protocol = { version = "0.1.4", path = "crates/operator-protocol" }
-nazo-postgres = { version = "0.1.4", path = "crates/persistence-postgres" }
-nazo-resource-server = { version = "0.1.4", path = "crates/resource-server" }
-nazo-runtime-modules = { version = "0.1.4", path = "crates/runtime-capabilities" }
-nazo-scim-events = { version = "0.1.4", path = "crates/scim-events" }
-nazo-valkey = { version = "0.1.4", path = "crates/state-store-valkey" }
+nazo-auth = { version = "0.1.3", path = "crates/authorization-server-core" }
+nazo-digital-credentials = { version = "0.1.3", path = "crates/digital-credentials" }
+nazo-http-actix = { version = "0.1.3", path = "crates/http-actix" }
+nazo-http-signatures = { version = "0.1.3", path = "crates/http-signatures" }
+nazo-identity = { version = "0.1.3", path = "crates/identity" }
+nazo-key-management = { version = "0.1.3", path = "crates/key-management" }
+nazo-openid4vci = { version = "0.1.3", path = "crates/openid4vci" }
+nazo-openid4vp = { version = "0.1.3", path = "crates/openid4vp" }
+nazo-openid4vc-http-actix = { version = "0.1.3", path = "crates/openid4vc-http-actix" }
+nazo-operator-protocol = { version = "0.1.3", path = "crates/operator-protocol" }
+nazo-postgres = { version = "0.1.3", path = "crates/persistence-postgres" }
+nazo-resource-server = { version = "0.1.3", path = "crates/resource-server" }
+nazo-runtime-modules = { version = "0.1.3", path = "crates/runtime-capabilities" }
+nazo-scim-events = { version = "0.1.3", path = "crates/scim-events" }
+nazo-valkey = { version = "0.1.3", path = "crates/state-store-valkey" }
 openssl = { version = "0.10.81", features = ["vendored"] }
 p256 = "0.14.0"
 passkey-auth = "0.1.3"
