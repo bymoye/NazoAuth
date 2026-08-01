@@ -9,12 +9,13 @@ WORKDIR /app
 RUN mkdir -p /usr/local/cargo \
     && printf '[registries.crates-io]\nprotocol = "sparse"\n' > /usr/local/cargo/config.toml \
     && apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libpq-dev \
+    && apt-get install -y --no-install-recommends make perl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./
 COPY crates ./crates
 COPY migrations ./migrations
+COPY release/frontend.json ./release/frontend.json
 
 FROM build-base AS product-builder
 
@@ -39,7 +40,7 @@ RUN --mount=type=cache,id=nazoauth-cargo-registry,target=/usr/local/cargo/regist
 FROM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS runtime-base
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libpq5 \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && groupadd --gid 10001 nazoauth \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin nazoauth \
     && rm -rf /var/lib/apt/lists/*

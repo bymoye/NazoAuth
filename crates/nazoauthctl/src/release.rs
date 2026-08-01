@@ -1,17 +1,19 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     filesystem::atomic_write,
     filesystem::{PrivateTempDir, sha256},
-    model::{Artifact, ReleaseManifest, semantic_tag},
+    model::{Artifact, ReleaseManifest, release_target, semantic_tag},
     process::{Process, command_exists},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +26,44 @@ struct ReleaseTrustState {
 }
 
 const COSIGN_IMAGE: &str = "ghcr.io/sigstore/cosign/cosign@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00";
+const RELEASE_PREDICATE: &str = "https://nazo.run/attestations/release-manifest/v1";
+const SIGSTORE_BUNDLE_MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
+const MAX_ATTESTATIONS: usize = 20;
+const ATTESTATION_PAGE_SIZE: usize = MAX_ATTESTATIONS + 1;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationResponse {
+    attestations: Vec<Attestation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Attestation {
+    #[serde(rename = "bundle_url")]
+    _bundle_url: String,
+    initiator: String,
+    repository_id: u64,
+    bundle: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InTotoStatement {
+    #[serde(rename = "_type")]
+    kind: String,
+    subject: Vec<InTotoSubject>,
+    #[serde(rename = "predicateType")]
+    predicate_type: String,
+    predicate: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InTotoSubject {
+    name: String,
+    digest: BTreeMap<String, String>,
+}
 
 pub(crate) struct VerifiedRelease {
     work: PrivateTempDir,
@@ -58,7 +98,7 @@ fn enforce_release_trust_state(
         ),
         std::cmp::Ordering::Equal => {
             if manifest.backend_commit != state.backend_commit
-                || manifest.image_oci_digest != state.image_oci_digest
+                || manifest.image_oci_digest() != state.image_oci_digest
                 || manifest.release_identity != state.release_identity
             {
                 bail!("immutable Release identity changed for an already trusted version");
@@ -77,7 +117,7 @@ pub(crate) fn commit_release_trust(
         schema: 1,
         version: manifest.version.clone(),
         backend_commit: manifest.backend_commit.clone(),
-        image_oci_digest: manifest.image_oci_digest.clone(),
+        image_oci_digest: manifest.image_oci_digest().to_owned(),
         release_identity: manifest.release_identity.clone(),
     };
     atomic_write(
@@ -105,28 +145,25 @@ impl VerifiedRelease {
     ) -> anyhow::Result<Self> {
         let version = resolve_version(repository, requested_version)?;
         let work = PrivateTempDir::new("nazoauth-release")?;
-        download(repository, &version, "release-manifest.json", work.path())?;
-        download(
-            repository,
-            &version,
-            "release-manifest.json.bundle",
-            work.path(),
-        )?;
+        let target = release_target().context("this platform has no official Release binary")?;
+        let suffix = if target.contains("windows") {
+            ".exe"
+        } else {
+            ""
+        };
+        let updater = format!("nazoauthctl-{target}{suffix}");
+        download(repository, &version, &updater, work.path())?;
         let identity = format!(
             "https://github.com/{repository}/.github/workflows/release-security.yml@refs/tags/{version}"
         );
-        verify_blob(
+        let manifest = verified_attested_manifest(
+            repository,
+            &version,
             work.path(),
-            "release-manifest.json.bundle",
-            "release-manifest.json",
+            &updater,
             &identity,
             container_engine,
         )?;
-        let manifest: ReleaseManifest = serde_json::from_slice(
-            &fs::read(work.path().join("release-manifest.json"))
-                .context("failed to read signed release manifest")?,
-        )
-        .context("signed release manifest is not valid JSON")?;
         manifest.validate(&version, &identity)?;
         Ok(Self { work, manifest })
     }
@@ -137,10 +174,13 @@ impl VerifiedRelease {
             .artifacts
             .get(key)
             .with_context(|| format!("release manifest does not contain {key}"))?;
+        if artifact.repository != repository {
+            bail!("release artifact repository does not match controller policy");
+        }
         let path = self.work.path().join(&artifact.name);
         if !path.exists() {
             download(
-                repository,
+                &artifact.repository,
                 &self.manifest.version,
                 &artifact.name,
                 self.work.path(),
@@ -149,6 +189,136 @@ impl VerifiedRelease {
         }
         Ok(path)
     }
+}
+
+fn verified_attested_manifest(
+    repository: &str,
+    version: &str,
+    work: &Path,
+    blob: &str,
+    identity: &str,
+    container_engine: Option<&str>,
+) -> anyhow::Result<ReleaseManifest> {
+    let digest = sha256(&work.join(blob))?;
+    let response = Process::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
+            "--max-time",
+            "30",
+            "--max-filesize",
+            "10485760",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "X-GitHub-Api-Version: 2022-11-28",
+            &format!(
+                "https://api.github.com/repos/{repository}/attestations/sha256%3A{digest}?per_page={ATTESTATION_PAGE_SIZE}&predicate_type={}",
+                urlencoding::encode(RELEASE_PREDICATE)
+            ),
+        ])
+        .stdout()?;
+    let response: AttestationResponse =
+        serde_json::from_str(&response).context("GitHub attestation response is invalid")?;
+    if response.attestations.is_empty() || response.attestations.len() > MAX_ATTESTATIONS {
+        bail!("GitHub returned no bounded Release attestation set");
+    }
+    let mut verified: Option<ReleaseManifest> = None;
+    for (index, attestation) in response.attestations.into_iter().enumerate() {
+        let bundle_name = format!("release-attestation-{index}.json");
+        if attestation.repository_id == 0 || attestation.initiator.trim().is_empty() {
+            bail!("GitHub returned invalid Release attestation metadata");
+        }
+        if attestation
+            .bundle
+            .get("mediaType")
+            .and_then(serde_json::Value::as_str)
+            != Some(SIGSTORE_BUNDLE_MEDIA_TYPE)
+        {
+            bail!("GitHub returned an unsupported Sigstore bundle");
+        }
+        atomic_write(
+            &work.join(&bundle_name),
+            &serde_json::to_vec(&attestation.bundle)?,
+            0o600,
+        )?;
+        let Some(candidate) = manifest_from_bundle(&attestation.bundle, blob, &digest)? else {
+            continue;
+        };
+        if candidate.version != version || candidate.release_identity != identity {
+            continue;
+        }
+        verify_blob_attestation(work, &bundle_name, blob, identity, container_engine)?;
+        candidate.validate(version, identity)?;
+        let updater = candidate
+            .artifacts
+            .get("updater")
+            .context("Release attestation has no updater")?;
+        if updater.name != blob
+            || updater.sha256 != digest
+            || updater.size != fs::metadata(work.join(blob))?.len()
+        {
+            bail!("Release attestation does not bind the downloaded updater");
+        }
+        accept_verified_manifest(&mut verified, candidate)?;
+    }
+    verified.context("no verified Release attestation matched the requested target")
+}
+
+fn accept_verified_manifest(
+    verified: &mut Option<ReleaseManifest>,
+    candidate: ReleaseManifest,
+) -> anyhow::Result<()> {
+    if let Some(existing) = verified {
+        if existing == &candidate {
+            return Ok(());
+        }
+        bail!("matching Release attestations contain conflicting predicates");
+    }
+    *verified = Some(candidate);
+    Ok(())
+}
+
+fn manifest_from_bundle(
+    bundle: &serde_json::Value,
+    blob: &str,
+    digest: &str,
+) -> anyhow::Result<Option<ReleaseManifest>> {
+    let payload = bundle
+        .get("dsseEnvelope")
+        .and_then(|envelope| envelope.get("payload"))
+        .and_then(serde_json::Value::as_str)
+        .context("Release attestation has no DSSE payload")?;
+    let statement: InTotoStatement = serde_json::from_slice(
+        &STANDARD
+            .decode(payload)
+            .context("Release attestation payload is not base64")?,
+    )
+    .context("Release attestation statement is invalid")?;
+    if statement.kind != "https://in-toto.io/Statement/v1"
+        || statement.predicate_type != RELEASE_PREDICATE
+    {
+        return Ok(None);
+    }
+    if !statement.subject.iter().any(|subject| {
+        subject.name == blob
+            && subject
+                .digest
+                .get("sha256")
+                .is_some_and(|subject_digest| subject_digest == digest)
+    }) {
+        bail!("Release attestation subject does not bind the downloaded updater");
+    }
+    let manifest = serde_json::from_value(statement.predicate)
+        .context("Release attestation predicate is not a closed manifest")?;
+    Ok(Some(manifest))
 }
 
 fn resolve_version(repository: &str, requested: Option<&str>) -> anyhow::Result<String> {
@@ -165,6 +335,8 @@ fn resolve_version(repository: &str, requested: Option<&str>) -> anyhow::Result<
             "--show-error",
             "--location",
             "--proto",
+            "=https",
+            "--proto-redir",
             "=https",
             "--tlsv1.2",
             "-H",
@@ -193,6 +365,8 @@ fn download(repository: &str, version: &str, name: &str, destination: &Path) -> 
             "--location",
             "--proto",
             "=https",
+            "--proto-redir",
+            "=https",
             "--tlsv1.2",
             "--output",
         ])
@@ -203,7 +377,7 @@ fn download(repository: &str, version: &str, name: &str, destination: &Path) -> 
         .run_quiet()
 }
 
-fn verify_blob(
+fn verify_blob_attestation(
     work: &Path,
     bundle: &str,
     blob: &str,
@@ -212,9 +386,11 @@ fn verify_blob(
 ) -> anyhow::Result<()> {
     if command_exists("cosign") {
         return Process::new("cosign")
-            .args(["verify-blob", "--bundle"])
+            .args(["verify-blob-attestation", "--bundle"])
             .arg(work.join(bundle))
             .args([
+                "--type",
+                RELEASE_PREDICATE,
                 "--certificate-identity",
                 identity,
                 "--certificate-oidc-issuer",
@@ -225,11 +401,13 @@ fn verify_blob(
     }
     let engine = container_engine.context("Cosign is required when no container engine exists")?;
     Process::new(engine)
-        .args(containerized_cosign_arguments(work, bundle, blob, identity))
+        .args(containerized_cosign_attestation_arguments(
+            work, bundle, blob, identity,
+        ))
         .run_quiet()
 }
 
-fn containerized_cosign_arguments(
+fn containerized_cosign_attestation_arguments(
     work: &Path,
     bundle: &str,
     blob: &str,
@@ -252,9 +430,11 @@ fn containerized_cosign_arguments(
         "-v".to_owned(),
         format!("{}:/work:ro", work.display()),
         COSIGN_IMAGE.to_owned(),
-        "verify-blob".to_owned(),
+        "verify-blob-attestation".to_owned(),
         "--bundle".to_owned(),
         format!("/work/{bundle}"),
+        "--type".to_owned(),
+        RELEASE_PREDICATE.to_owned(),
         "--certificate-identity".to_owned(),
         identity.to_owned(),
         "--certificate-oidc-issuer".to_owned(),

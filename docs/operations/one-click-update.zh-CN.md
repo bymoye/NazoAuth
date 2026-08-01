@@ -6,25 +6,28 @@ Rust 二进制，与 `nazoauth` 在同一个发布中分别构建、签名和出
 
 ## 首次安装
 
-先从同一个不可变 GitHub Release 下载 `install_nazoauthctl.sh` 及其 `.bundle`，用
-Cosign 校验该标签的精确工作流身份，再执行已经验证的本地脚本。脚本安装前还会再次
-验证 `nazoauthctl` bundle；出于信任自举原因，正式文档不提供 `curl | sh` 路径。
+公开 GitHub Release 只包含可执行文件。先下载与本机 target 对应的控制器，用自定义
+GitHub attestation 校验精确的标签工作流身份，再安装这个已经验证的文件。公开 Release
+不包含 shell 安装器或独立 bundle；出于信任自举原因，正式文档不提供 `curl | sh` 路径。
 
 例如，先固定一个不可变 Release，校验 bootstrap 后再执行：
 
 ```sh
 version=v1.2.3
-base="https://github.com/nazozero/NazoAuth/releases/download/$version"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output install_nazoauthctl.sh "$base/install_nazoauthctl.sh"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output install_nazoauthctl.sh.bundle "$base/install_nazoauthctl.sh.bundle"
-cosign verify-blob --bundle install_nazoauthctl.sh.bundle \
-  --certificate-identity \
-  "https://github.com/nazozero/NazoAuth/.github/workflows/release-security.yml@refs/tags/$version" \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  install_nazoauthctl.sh
-sudo sh ./install_nazoauthctl.sh --version "$version"
+case "$(uname -m)" in
+  x86_64) target=x86_64-unknown-linux-gnu ;;
+  aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
+  *) echo "unsupported Linux architecture" >&2; exit 1 ;;
+esac
+artifact="nazoauthctl-$target"
+gh release download "$version" --repo nazozero/NazoAuth --pattern "$artifact"
+gh attestation verify "$artifact" \
+  --repo nazozero/NazoAuth \
+  --predicate-type 'https://nazo.run/attestations/release-manifest/v1' \
+  --signer-workflow nazozero/NazoAuth/.github/workflows/release-security.yml \
+  --source-ref "refs/tags/$version" \
+  --deny-self-hosted-runners
+sudo install -o root -g root -m 0755 "$artifact" /usr/local/sbin/nazoauthctl
 ```
 
 默认只需要选择运行方式。`auto` 优先使用已安装的 Podman，其次使用 Docker：
@@ -46,9 +49,9 @@ sudo nazoauthctl install --runtime host
 ```
 
 `host` 把签名的 `nazoauth` 二进制安装成 systemd 服务。没有外部数据库时，它仍
-使用本机已有的 Podman 或 Docker 托管 PostgreSQL 和 Valkey。当前独立发布物只
-支持 Linux x86_64；宿主机模式还会实际执行候选二进制的 `--help`，动态链接不
-兼容时在修改服务前失败。
+使用本机已有的 Podman 或 Docker 托管 PostgreSQL 和 Valkey。独立发布物支持 Linux
+x86_64 和 Arm64；musl 发行版应选择对应的 musl target。宿主机模式还会实际执行
+候选二进制的 `--help`，动态链接不兼容时在修改服务前失败。
 
 安装器不会猜测 DNS 或证书归属。提供 HTTPS origin 时，DNS 和 TLS 入口必须已经
 把该 origin 转发到安装端口；安装只有在公网 Discovery 返回相同 issuer 后才成功：
@@ -150,11 +153,12 @@ embedded build identity；应用不伪称能自行证明 OCI digest。
 
 ## 信任与事务边界
 
-每个正式标签由 `release-security` 发布后端镜像、`nazoauth`、`nazoauthctl`、
-两份 SBOM、签名前端，以及包含全部制品大小和 SHA-256 的 schema-3 清单。控制器
-先用 Cosign 校验清单，
-证书身份必须精确匹配
-`release-security.yml@refs/tags/<version>`，然后才解析和下载制品。
+每个正式标签的 GitHub Release 只发布带平台后缀的 `nazoauth` 和 `nazoauthctl`
+可执行文件。每个 subject 的 schema 4 GitHub attestation 同时绑定两个二进制 digest、
+已签名多架构 OCI index、独立 attestation 的 NazoAuthWeb descriptor 和回滚边界。
+控制器必须先验证证书身份精确匹配
+`release-security.yml@refs/tags/<version>`，再解析封闭 predicate 和下载制品。SBOM、
+predicate、签名 bundle 和 OCI archive 只作为 CI evidence 保留，不进入 GitHub Release。
 
 容器模式在没有本地 Cosign 时，使用按 OCI digest 固定的官方多架构 Cosign
 镜像；完全不使用容器的宿主机模式必须预先安装 Cosign。
@@ -162,7 +166,7 @@ embedded build identity；应用不伪称能自行证明 OCI digest。
 安装和升级事务会：
 
 1. 获取主机排他锁；
-2. 验证签名清单及所需制品；
+2. 验证 subject attestation、封闭 manifest predicate 和所需制品；
 3. 准备并验证候选制品，然后停止当前应用写入者；
 4. 备份并校验 PostgreSQL 和 Valkey，同时快照签名密钥、生成秘密和初始化状态；
 5. 校验镜像 revision 或实际执行宿主机二进制；
@@ -180,13 +184,13 @@ managed 模式会先停止唯一的受管应用写入者，再依次生成两个
 
 ## 前置条件和配置
 
-基础条件是 Linux x86_64、root、`curl`，以及本地 Cosign 或能够运行固定 Cosign
-镜像的容器引擎。容器模式需要 Docker 或 Podman；纯宿主机模式需要 systemd（包括
-`systemd-run`）；外部 PostgreSQL/Valkey 还需要 `pg_dump`、`pg_restore` 和
-`valkey-cli`。自动部署的 PostgreSQL 和 Valkey 镜像固定到经过评审的多架构 OCI
-digest。纯宿主机任务通过 `systemd-run` transient sandbox 执行。正式执行前，应从目标 GitHub Release 下载
-`nazoauthctl` 及其 Sigstore bundle，并按该标签的精确工作流身份校验后安装到
-`/usr/local/sbin/nazoauthctl`。
+基础条件是 Linux x86_64 或 Arm64、root、`curl`、首次自举所需的 GitHub CLI，
+以及本地 Cosign 或能够运行固定 Cosign 镜像的容器引擎。容器模式需要 Docker 或
+Podman；纯宿主机模式需要 systemd（包括 `systemd-run`）；外部 PostgreSQL/Valkey
+还需要 `pg_dump`、`pg_restore` 和 `valkey-cli`。自动部署的 PostgreSQL 和 Valkey
+镜像固定到经过评审的多架构 OCI digest。纯宿主机任务通过 `systemd-run` transient
+sandbox 执行。正式执行前，应从目标 GitHub Release 下载 `nazoauthctl`，按上文校验
+其自定义 attestation，再安装到 `/usr/local/sbin/nazoauthctl`。
 
 安装器生成 root 所有、不可被组/其他用户写入的
 `/etc/nazoauth/update.json`。已有的手工部署可以从

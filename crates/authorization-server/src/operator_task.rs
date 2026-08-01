@@ -210,7 +210,7 @@ fn operation_name(operation: &TaskOperation) -> &'static str {
     }
 }
 
-fn embedded_identity() -> EmbeddedIdentity {
+pub(crate) fn embedded_identity() -> EmbeddedIdentity {
     EmbeddedIdentity {
         release: option_env!("NAZOAUTH_BUILD_RELEASE")
             .unwrap_or("development")

@@ -7,28 +7,31 @@ It is a Rust executable built and signed in the same release as `nazoauth`.
 
 ## First installation
 
-First download `install_nazoauthctl.sh` and its `.bundle` from the same immutable
-GitHub Release, verify the exact tag workflow identity with Cosign, and only then
-run the verified local script. The script verifies the `nazoauthctl` bundle again
-before installing it; `curl | sh` is intentionally not documented as a trusted
-bootstrap path.
+The public GitHub Release contains executables only. Download the controller for
+the local target, verify its custom GitHub attestation against the exact tag
+workflow identity, and then install that verified file. No shell installer or
+detached bundle is part of the public Release, and `curl | sh` is intentionally
+not a trusted bootstrap path.
 
 For example, pin one immutable release and verify the bootstrap before running
 it:
 
 ```sh
 version=v1.2.3
-base="https://github.com/nazozero/NazoAuth/releases/download/$version"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output install_nazoauthctl.sh "$base/install_nazoauthctl.sh"
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-  --output install_nazoauthctl.sh.bundle "$base/install_nazoauthctl.sh.bundle"
-cosign verify-blob --bundle install_nazoauthctl.sh.bundle \
-  --certificate-identity \
-  "https://github.com/nazozero/NazoAuth/.github/workflows/release-security.yml@refs/tags/$version" \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  install_nazoauthctl.sh
-sudo sh ./install_nazoauthctl.sh --version "$version"
+case "$(uname -m)" in
+  x86_64) target=x86_64-unknown-linux-gnu ;;
+  aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
+  *) echo "unsupported Linux architecture" >&2; exit 1 ;;
+esac
+artifact="nazoauthctl-$target"
+gh release download "$version" --repo nazozero/NazoAuth --pattern "$artifact"
+gh attestation verify "$artifact" \
+  --repo nazozero/NazoAuth \
+  --predicate-type 'https://nazo.run/attestations/release-manifest/v1' \
+  --signer-workflow nazozero/NazoAuth/.github/workflows/release-security.yml \
+  --source-ref "refs/tags/$version" \
+  --deny-self-hosted-runners
+sudo install -o root -g root -m 0755 "$artifact" /usr/local/sbin/nazoauthctl
 ```
 
 `auto` selects an installed Podman runtime first and Docker second:
@@ -52,9 +55,10 @@ sudo nazoauthctl install --runtime host
 
 `host` installs the signed `nazoauth` binary as a systemd service. Unless
 external dependency URLs are supplied, an installed Podman or Docker runtime
-still manages PostgreSQL and Valkey. Current standalone artifacts support Linux
-x86_64. Host mode also executes the candidate's `--help` before changing the
-service so dynamic-link incompatibility fails before activation.
+still manages PostgreSQL and Valkey. Host mode also executes the candidate's
+`--help` before changing the service so dynamic-link incompatibility fails
+before activation. Native executables are released for Linux x86-64 and Arm64;
+use the corresponding musl target on a musl-based distribution.
 
 DNS and certificate ownership cannot be inferred. When `--public-url` is an
 HTTPS origin, an existing TLS ingress must already forward that origin to the
@@ -175,11 +179,14 @@ does not claim to prove its OCI digest.
 
 ## Trust and transaction boundary
 
-For each tag, `release-security` publishes the backend image, `nazoauth`,
-`nazoauthctl`, their SBOMs, the signed frontend, and a schema-3 manifest binding
-every artifact size and SHA-256 digest. Cosign verification requires the exact
-`release-security.yml@refs/tags/<version>` workflow identity before any
-artifact is trusted.
+For each tag, `release-security` publishes only the platform-suffixed
+`nazoauth` and `nazoauthctl` executables as GitHub Release assets. Each subject
+has a schema-4 GitHub attestation binding both executable digests, the signed
+multi-platform OCI index, the independently attested NazoAuthWeb descriptor,
+and the rollback boundary. Verification requires the exact
+`release-security.yml@refs/tags/<version>` workflow identity before any subject
+or predicate is trusted. SBOMs, predicates, signature bundles, and OCI archives
+remain CI evidence rather than public Release assets.
 
 Container modes can run the reviewed, OCI-digest-pinned Cosign image when a
 local executable is unavailable. A container-free host deployment requires a
@@ -188,7 +195,7 @@ local Cosign executable.
 Installation and update transactions:
 
 1. take an exclusive host lock;
-2. verify the signed manifest and required artifacts;
+2. verify the subject attestation, closed manifest predicate, and required artifacts;
 3. prepare and verify the candidate, then stop the active application writer;
 4. create and validate PostgreSQL and Valkey backups and snapshot signing keys,
    generated secrets, and bootstrap state;
@@ -211,14 +218,14 @@ boundary instead of claiming cross-store transactional backup.
 
 ## Prerequisites and configuration
 
-The baseline requires Linux x86_64, root, `curl`, and either local Cosign or a
-container engine that can run the pinned Cosign image. Container modes
-additionally require Podman or Docker. Pure host mode needs systemd with
-`systemd-run`; external PostgreSQL/Valkey dependencies also require `pg_dump`,
-`pg_restore`, and `valkey-cli`. Automatically managed PostgreSQL and Valkey
-images are pinned to reviewed multi-architecture OCI digests.
-Download `nazoauthctl` and its Sigstore bundle from the target GitHub Release,
-verify the exact tag workflow identity, and install it at
+The baseline requires Linux x86-64 or Arm64, root, `curl`, GitHub CLI for the
+first bootstrap, and either local Cosign or a container engine that can run the
+pinned Cosign image. Container modes additionally require Podman or Docker.
+Pure host mode needs systemd with `systemd-run`; external PostgreSQL/Valkey
+dependencies also require `pg_dump`, `pg_restore`, and `valkey-cli`.
+Automatically managed PostgreSQL and Valkey images are pinned to reviewed
+multi-architecture OCI digests. Download `nazoauthctl` from the target GitHub
+Release, verify its custom attestation as shown above, and install it at
 `/usr/local/sbin/nazoauthctl`.
 
 The installer generates root-owned, non-group/world-writable

@@ -51,6 +51,19 @@ fn systemd_version_parser_is_closed() {
 }
 
 #[test]
+fn generated_install_paths_are_safe_for_yaml_systemd_and_container_mounts() {
+    validate_install_path(Path::new("/var/lib/nazoauth-0.2/app_data"), "data root").unwrap();
+    for path in [
+        "/var/lib/nazo auth",
+        "/var/lib/nazoauth\nINJECTED: true",
+        "/var/lib/nazoauth:other",
+        "/var/lib/nazoauth\"",
+    ] {
+        assert!(validate_install_path(Path::new(path), "data root").is_err());
+    }
+}
+
+#[test]
 fn host_service_unit_exposes_only_runtime_state() {
     let unit = HostSystemdUnit {
         user: "nazoauth",
@@ -60,6 +73,7 @@ fn host_service_unit_exposes_only_runtime_state() {
         ui_releases: Path::new("/var/lib/nazoauth/ui-releases"),
         operator_state: Path::new("/var/lib/nazoauth/app/operator-state"),
         operator_dir: Path::new("/etc/nazoauth/operator"),
+        recovery_dir: Path::new("/var/lib/nazoauth/recovery"),
         migration_url: Path::new("/etc/nazoauth/secrets/database-migration-url"),
     }
     .render()
@@ -67,11 +81,11 @@ fn host_service_unit_exposes_only_runtime_state() {
 
     assert!(unit.contains("User=nazoauth\nGroup=nazoauth"));
     assert!(unit.contains(
-        "ReadWritePaths=/var/lib/nazoauth/app/keys /var/lib/nazoauth/app/avatars /var/lib/nazoauth/app/secrets /var/lib/nazoauth/app/bootstrap"
+        "ReadWritePaths=/var/lib/nazoauth/app/keys /var/lib/nazoauth/app/avatars /var/lib/nazoauth/app/secrets /var/lib/nazoauth/app/bootstrap /var/lib/nazoauth/ui-releases"
     ));
-    assert!(unit.contains("ReadOnlyPaths=/var/lib/nazoauth/ui-releases"));
+    assert!(!unit.contains("ReadOnlyPaths=/var/lib/nazoauth/ui-releases"));
     assert!(unit.contains(
-        "InaccessiblePaths=/var/lib/nazoauth/app/operator-state /etc/nazoauth/operator /etc/nazoauth/secrets/database-migration-url"
+        "InaccessiblePaths=/var/lib/nazoauth/app/operator-state /etc/nazoauth/operator /var/lib/nazoauth/recovery /etc/nazoauth/secrets/database-migration-url"
     ));
     assert!(!unit.contains("ReadWritePaths=/var/lib/nazoauth/app\n"));
 }

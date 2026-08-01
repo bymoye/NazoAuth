@@ -14,9 +14,7 @@ use serde_json::json;
 use crate::{
     backup::Backup,
     cli::{Cli, Command, KeysCommand, UpdateOptions},
-    filesystem::{
-        atomic_write, copy_atomic, directory_digests, extract_ui, set_mode, symlink_atomic,
-    },
+    filesystem::{atomic_write, copy_atomic, remove_file_durable, set_mode, symlink_atomic},
     install::{self, PreparedInstall},
     model::{ReleaseManifest, UpdateConfig},
     operator::{self, ExpectedReleaseTarget},
@@ -25,7 +23,7 @@ use crate::{
     runtime::Runtime,
 };
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RollbackState {
     schema: u32,
@@ -34,6 +32,53 @@ struct RollbackState {
     previous_runtime: String,
     previous_ui: Option<PathBuf>,
     backup: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum UpdatePhase {
+    Prepared,
+    WriterStopping,
+    WriterStopped,
+    BackupCreating,
+    BackupCreated,
+    MigrationRunning,
+    MigrationApplied,
+    CandidateActivating,
+    CandidateActive,
+    UiActivating,
+    UiActive,
+    HealthChecking,
+    HealthVerified,
+    StateCommitting,
+    StateCommitted,
+    TrustCommitting,
+    TrustCommitted,
+    AuditCommitting,
+    AuditCommitted,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateJournal {
+    schema: u32,
+    transaction_id: String,
+    started_at: String,
+    phase: UpdatePhase,
+    from_release: ReleaseManifest,
+    to_release: ReleaseManifest,
+    previous_runtime: String,
+    previous_ui: Option<PathBuf>,
+    candidate_runtime: String,
+    candidate_ui: PathBuf,
+    staged_updater: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpdateRecoveryAction {
+    RestorePrevious,
+    ContinueForward,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -77,26 +122,26 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Rollback { yes } => {
             require_root()?;
+            let config = load_config(&cli.config)?;
             require_confirmation(
                 yes,
                 "rollback the application artifact without restoring the database",
             )?;
-            let config = load_config(&cli.config)?;
             public_rollback(&config)
         }
         Command::Recover { yes } => {
             require_root()?;
+            let config = load_config(&cli.config)?;
             require_confirmation(
                 yes,
                 "restore the declared database backup and previous application artifact",
             )?;
-            let config = load_config(&cli.config)?;
             recover_from_backup(&config)
         }
         Command::Migrate { yes } => {
             require_root()?;
-            require_confirmation(yes, "apply pending database migrations")?;
             let config = load_config(&cli.config)?;
+            require_confirmation(yes, "apply pending database migrations")?;
             app_command(&config, TaskOperation::MigrateApply, None)
         }
         Command::Keys(command) => {
@@ -141,14 +186,14 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::IdentityRotate { yes } => {
             require_root()?;
-            require_confirmation(yes, "rotate the controller identity")?;
             let config = load_config(&cli.config)?;
+            require_confirmation(yes, "rotate the controller identity")?;
             crate::operator::rotate_controller(&cli.config, &config, false, "normal")
         }
         Command::BreakGlassRecover { yes, reason } => {
             require_root()?;
-            require_confirmation(yes, "perform break-glass controller recovery")?;
             let config = load_config(&cli.config)?;
+            require_confirmation(yes, "perform break-glass controller recovery")?;
             crate::operator::rotate_controller(&cli.config, &config, true, &reason)
         }
     }
@@ -231,10 +276,7 @@ fn install_transaction(
     install::start_managed_dependencies(config)?;
     let release = VerifiedRelease::fetch(&config.repository, version, config.container_engine())?;
     enforce_release_trust(config, &release.manifest)?;
-    let ui_archive = release.artifact("ui", &config.repository)?;
     let updater = release.artifact("updater", &config.repository)?;
-    let ui_release = prepare_ui(config, &release, &ui_archive)?;
-    symlink_atomic(&ui_release, &config.ui.active_path)?;
     let _backup = Backup::create(config_path, config, &release.manifest.version)?;
 
     if config.runtime.engine == "host" {
@@ -252,24 +294,24 @@ fn install_transaction(
         symlink_atomic(&candidate, &config.runtime.binary_path)?;
         Runtime::new(config).start_service()?;
     } else {
-        let image = release.artifact("image", &config.repository)?;
         let runtime = Runtime::new(config);
-        runtime.load_image(&image)?;
-        if runtime.image_revision(&release.manifest.image_ref)? != release.manifest.backend_commit {
-            bail!("loaded image revision does not match signed manifest");
+        let image_ref = release.manifest.image_ref()?;
+        runtime.pull_image(&image_ref)?;
+        if runtime.image_revision(&image_ref)? != release.manifest.backend_commit {
+            bail!("pulled image revision does not match signed manifest");
         }
         execute_release_task(
             config,
             &release,
-            &release.manifest.image_ref,
+            &image_ref,
             TaskOperation::MigrateApply,
             None,
         )?;
-        bootstrap_profile_keys(config, &release, &release.manifest.image_ref)?;
+        bootstrap_profile_keys(config, &release, &image_ref)?;
         if runtime.container_exists() {
             runtime.remove_container()?;
         }
-        runtime.start_container(&release.manifest.image_ref)?;
+        runtime.start_container(&image_ref)?;
     }
     wait_ready(config)?;
     verify_public(config)?;
@@ -277,7 +319,7 @@ fn install_transaction(
     write_active_release(config, &release.manifest)?;
     commit_release_trust(config, &release.manifest)?;
     copy_atomic(&updater, &config.updater_install_path, 0o755)?;
-    write_record(config, &release, "install-success", None)?;
+    write_record(config, &release.manifest, "install-success", None)?;
     let management_event = crate::operator::append_management_event(
         config,
         "install",
@@ -303,6 +345,10 @@ fn install_transaction(
     println!(
         "NazoAuth installed at {} ({})",
         release.manifest.version, release.manifest.backend_commit
+    );
+    println!(
+        "Break-glass recovery key: {} (root-only; copy it to protected offline storage)",
+        config.operator.break_glass_private_key.display()
     );
     Ok(())
 }
@@ -403,134 +449,73 @@ fn update(config_path: &Path, config: &UpdateConfig, options: UpdateOptions) -> 
         recovery_boundary_name(release.manifest.rollback.database_restore),
     )?;
     let runtime_artifact = if config.runtime.engine == "host" {
-        release.artifact("binary", &config.repository)?
+        Some(release.artifact("binary", &config.repository)?)
     } else {
-        release.artifact("image", &config.repository)?
+        None
     };
-    let ui_archive = release.artifact("ui", &config.repository)?;
     let updater = release.artifact("updater", &config.repository)?;
-    let previous_ui = current_symlink(&config.ui.active_path)?;
     let previous_manifest = load_active_release(config)?;
+    let previous_ui = Some(
+        config
+            .ui
+            .releases_root
+            .join(&previous_manifest.frontend.artifact.sha256),
+    );
     let previous_runtime = if config.runtime.engine == "host" {
         std::fs::canonicalize(&config.runtime.binary_path)
             .context("failed to resolve previous host binary")?
             .to_string_lossy()
             .into_owned()
     } else {
-        runtime.active_image_id()?
+        previous_manifest.image_ref()?
     };
 
     let candidate = if config.runtime.engine == "host" {
-        install_host_candidate(config, &release, &runtime_artifact)?
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        runtime.load_image(&runtime_artifact)?;
-        if runtime.image_revision(&release.manifest.image_ref)? != release.manifest.backend_commit {
-            bail!("loaded image revision does not match signed manifest");
-        }
-        release.manifest.image_ref.clone()
-    };
-
-    stop_active_runtime(config, &runtime)?;
-    let backup = match Backup::create(config_path, config, &release.manifest.version) {
-        Ok(backup) => backup,
-        Err(error) => {
-            let restart = start_previous_runtime(config, &runtime, &previous_runtime);
-            crate::operator::append_management_event(
-                config,
-                "update-backup-failed",
-                &previous_manifest.version,
-                "previous-runtime-restored",
-            )?;
-            if let Err(restart_error) = restart {
-                bail!(
-                    "update backup failed before migration: {error:#}; previous runtime restart also failed: {restart_error:#}"
-                );
-            }
-            bail!(
-                "update backup failed before migration; previous runtime was restored: {error:#}"
-            );
-        }
-    };
-    let result = update_mutation(config, &release, &candidate, &ui_archive, &updater)
-        .and_then(|()| write_record(config, &release, "deployment-success", Some(backup.path())))
-        .and_then(|()| {
-            write_rollback_state(
-                config,
-                RollbackState {
-                    schema: 1,
-                    from_release: previous_manifest.clone(),
-                    to_release: release.manifest.clone(),
-                    previous_runtime: previous_runtime.clone(),
-                    previous_ui: previous_ui.clone(),
-                    backup: backup.path().to_owned(),
-                },
-            )
-        });
-    if let Err(error) = result {
-        if !release.manifest.rollback.artifact
-            || release.manifest.rollback.irreversible_migration
-            || !release.manifest.rollback.schema_compatible
-        {
-            write_record(
-                config,
-                &release,
-                "recovery-required-after-update-failure",
-                Some(backup.path()),
-            )
-            .ok();
-            crate::operator::append_management_event(
-                config,
-                "update-failed-recovery-required",
-                &release.manifest.version,
-                recovery_boundary_name(release.manifest.rollback.database_restore),
-            )?;
-            bail!(
-                "update failed across a schema rollback barrier: {error:#}; application artifact rollback is unsafe; database recovery boundary={:?}; backup={}",
-                release.manifest.rollback.database_restore,
-                backup.path().display()
-            );
-        }
-        let recovery = rollback(config, &previous_runtime, previous_ui.as_deref(), &backup);
-        write_active_release(config, &previous_manifest).ok();
-        write_record(
+        install_host_candidate(
             config,
             &release,
-            "rollback-after-update-failure",
-            Some(backup.path()),
-        )
-        .ok();
-        if let Err(recovery_error) = recovery {
-            crate::operator::append_management_event(
-                config,
-                "update-failed-rollback-failed",
-                &release.manifest.version,
-                "manual-recovery-required",
-            )?;
-            bail!(
-                "update failed: {error:#}; automatic recovery also failed: {recovery_error:#}; backup={}",
-                backup.path().display()
-            );
+            runtime_artifact
+                .as_deref()
+                .context("host Release has no binary artifact")?,
+        )?
+        .to_string_lossy()
+        .into_owned()
+    } else {
+        let image_ref = release.manifest.image_ref()?;
+        runtime.pull_image(&image_ref)?;
+        if runtime.image_revision(&image_ref)? != release.manifest.backend_commit {
+            bail!("pulled image revision does not match signed manifest");
         }
-        crate::operator::append_management_event(
-            config,
-            "update-failed-artifact-restored",
-            &previous_manifest.version,
-            "schema-compatible",
-        )?;
-        bail!(
-            "update failed and the previous runtime was restored: {error:#}; backup={}",
-            backup.path().display()
-        );
+        image_ref
+    };
+    let candidate_ui = config
+        .ui
+        .releases_root
+        .join(&release.manifest.frontend.artifact.sha256);
+    fs::create_dir_all(&config.deployment_root)?;
+    let staged_updater = config.deployment_root.join(format!(
+        "candidate-nazoauthctl-{}",
+        release.manifest.backend_commit
+    ));
+    copy_atomic(&updater, &staged_updater, 0o500)?;
+    let mut journal = UpdateJournal {
+        schema: 1,
+        transaction_id: format!("update-{}", encode_transaction_id()),
+        started_at: Utc::now().to_rfc3339(),
+        phase: UpdatePhase::Prepared,
+        from_release: previous_manifest,
+        to_release: release.manifest.clone(),
+        previous_runtime,
+        previous_ui,
+        candidate_runtime: candidate,
+        candidate_ui,
+        staged_updater,
+        backup: None,
+    };
+    write_update_journal(config, &journal)?;
+    if let Err(error) = advance_update_transaction(config_path, config, &mut journal) {
+        return handle_update_failure(config, &journal, error);
     }
-    commit_release_trust(config, &release.manifest)?;
-    crate::operator::append_management_event(
-        config,
-        "update",
-        &release.manifest.version,
-        recovery_boundary_name(release.manifest.rollback.database_restore),
-    )?;
     println!(
         "NazoAuth updated to {} ({})",
         release.manifest.version, release.manifest.backend_commit
@@ -538,40 +523,488 @@ fn update(config_path: &Path, config: &UpdateConfig, options: UpdateOptions) -> 
     Ok(())
 }
 
-fn update_mutation(
+fn advance_update_transaction(
+    config_path: &Path,
     config: &UpdateConfig,
-    release: &VerifiedRelease,
-    candidate: &str,
-    ui_archive: &Path,
-    updater: &Path,
+    journal: &mut UpdateJournal,
 ) -> anyhow::Result<()> {
     let runtime = Runtime::new(config);
-    execute_release_task(
-        config,
-        release,
-        candidate,
-        TaskOperation::MigrateApply,
-        None,
-    )?;
-    if config.runtime.engine == "host" {
-        symlink_atomic(Path::new(candidate), &config.runtime.binary_path)?;
-        runtime.start_service()?;
-    } else {
-        runtime.start_container(candidate)?;
+    let resuming_activated_target = journal.phase >= UpdatePhase::CandidateActive;
+    if resuming_activated_target {
+        activate_candidate(config, &runtime, journal)?;
     }
-    wait_ready(config)?;
-    verify_public(config)?;
+    if journal.phase >= UpdatePhase::UiActive && !target_ui_is_active(journal) {
+        bail!("candidate application did not retain its signed frontend cache");
+    }
+    if journal.phase >= UpdatePhase::HealthVerified {
+        wait_ready(config)?;
+        verify_public(config)?;
+        verify_ui(config)?;
+    }
+    if journal.phase < UpdatePhase::WriterStopped {
+        set_update_phase(config, journal, UpdatePhase::WriterStopping)?;
+        stop_active_runtime(config, &runtime)?;
+        set_update_phase(config, journal, UpdatePhase::WriterStopped)?;
+    }
+    if journal.phase < UpdatePhase::BackupCreated {
+        set_update_phase(config, journal, UpdatePhase::BackupCreating)?;
+        let backup = Backup::create(config_path, config, &journal.to_release.version)?;
+        journal.backup = Some(backup.path().to_owned());
+        set_update_phase(config, journal, UpdatePhase::BackupCreated)?;
+    }
+    if journal.phase < UpdatePhase::MigrationApplied {
+        set_update_phase(config, journal, UpdatePhase::MigrationRunning)?;
+        execute_manifest_task(
+            config,
+            &journal.to_release,
+            &journal.candidate_runtime,
+            TaskOperation::MigrateApply,
+            None,
+        )?;
+        install::grant_runtime_database(config)?;
+        set_update_phase(config, journal, UpdatePhase::MigrationApplied)?;
+    }
+    if journal.phase < UpdatePhase::CandidateActive {
+        set_update_phase(config, journal, UpdatePhase::CandidateActivating)?;
+        activate_candidate(config, &runtime, journal)?;
+        set_update_phase(config, journal, UpdatePhase::CandidateActive)?;
+    }
+    if journal.phase < UpdatePhase::UiActive {
+        set_update_phase(config, journal, UpdatePhase::UiActivating)?;
+        wait_ready(config)?;
+        verify_ui(config)?;
+        if !target_ui_is_active(journal) {
+            bail!("candidate application did not materialize its signed frontend cache");
+        }
+        set_update_phase(config, journal, UpdatePhase::UiActive)?;
+    }
+    if journal.phase < UpdatePhase::HealthVerified {
+        set_update_phase(config, journal, UpdatePhase::HealthChecking)?;
+        wait_ready(config)?;
+        verify_public(config)?;
+        verify_ui(config)?;
+        set_update_phase(config, journal, UpdatePhase::HealthVerified)?;
+    }
+    if journal.phase < UpdatePhase::StateCommitted {
+        set_update_phase(config, journal, UpdatePhase::StateCommitting)?;
+        let backup = journal_backup(config, journal)?;
+        write_active_release(config, &journal.to_release)?;
+        copy_atomic(&journal.staged_updater, &config.updater_install_path, 0o755)?;
+        write_rollback_state(
+            config,
+            RollbackState {
+                schema: 1,
+                from_release: journal.from_release.clone(),
+                to_release: journal.to_release.clone(),
+                previous_runtime: journal.previous_runtime.clone(),
+                previous_ui: journal.previous_ui.clone(),
+                backup: backup.path().to_owned(),
+            },
+        )?;
+        write_update_record(config, journal, "deployment-success", Some(backup.path()))?;
+        set_update_phase(config, journal, UpdatePhase::StateCommitted)?;
+    }
+    if journal.phase < UpdatePhase::TrustCommitted {
+        set_update_phase(config, journal, UpdatePhase::TrustCommitting)?;
+        commit_release_trust(config, &journal.to_release)?;
+        set_update_phase(config, journal, UpdatePhase::TrustCommitted)?;
+    }
+    if journal.phase < UpdatePhase::AuditCommitted {
+        set_update_phase(config, journal, UpdatePhase::AuditCommitting)?;
+        append_update_management_event(
+            config,
+            journal,
+            "completed",
+            "update",
+            &journal.to_release.version,
+            recovery_boundary_name(journal.to_release.rollback.database_restore),
+        )?;
+        set_update_phase(config, journal, UpdatePhase::AuditCommitted)?;
+    }
+    finish_update_journal(config, journal)
+}
 
-    let ui_release = prepare_ui(config, release, ui_archive)?;
-    symlink_atomic(&ui_release, &config.ui.active_path)?;
-    if config.ui.serve_from_application {
-        runtime.restart()?;
+fn update_journal_path(config: &UpdateConfig) -> PathBuf {
+    config.deployment_root.join("update-transaction.json")
+}
+
+fn write_update_journal(config: &UpdateConfig, journal: &UpdateJournal) -> anyhow::Result<()> {
+    validate_update_journal(config, journal)?;
+    atomic_write(
+        &update_journal_path(config),
+        &serde_json::to_vec_pretty(journal)?,
+        0o600,
+    )
+}
+
+fn set_update_phase(
+    config: &UpdateConfig,
+    journal: &mut UpdateJournal,
+    phase: UpdatePhase,
+) -> anyhow::Result<()> {
+    if phase < journal.phase {
+        bail!("update transaction phase cannot move backwards");
+    }
+    let previous = journal.phase;
+    journal.phase = phase;
+    if let Err(error) = write_update_journal(config, journal) {
+        journal.phase = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_update_journal(config: &UpdateConfig, journal: &UpdateJournal) -> anyhow::Result<()> {
+    if journal.schema != 1
+        || journal.transaction_id.is_empty()
+        || journal.transaction_id.len() > 96
+        || !journal
+            .transaction_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        || journal.started_at.is_empty()
+        || journal.started_at.len() > 64
+        || chrono::DateTime::parse_from_rfc3339(&journal.started_at).is_err()
+    {
+        bail!("update transaction journal header is invalid");
+    }
+    for manifest in [&journal.from_release, &journal.to_release] {
+        let identity = format!(
+            "https://github.com/{}/.github/workflows/release-security.yml@refs/tags/{}",
+            config.repository, manifest.version
+        );
+        manifest.validate(&manifest.version, &identity)?;
+    }
+    if journal.previous_runtime.is_empty() || journal.candidate_runtime.is_empty() {
+        bail!("update transaction journal contains an unsafe candidate path");
+    }
+    let expected_candidate_ui = config
+        .ui
+        .releases_root
+        .join(&journal.to_release.frontend.artifact.sha256);
+    let expected_updater = config.deployment_root.join(format!(
+        "candidate-nazoauthctl-{}",
+        journal.to_release.backend_commit
+    ));
+    if journal.candidate_ui != expected_candidate_ui || journal.staged_updater != expected_updater {
+        bail!("update transaction candidate artifacts do not match the signed Release");
+    }
+    if let Some(previous_ui) = &journal.previous_ui {
+        let expected_previous_ui = config
+            .ui
+            .releases_root
+            .join(&journal.from_release.frontend.artifact.sha256);
+        if previous_ui != &expected_previous_ui {
+            bail!("update transaction previous UI does not match the active Release");
+        }
+    }
+    if config.runtime.engine == "host" {
+        let expected_previous_runtime = config
+            .runtime
+            .binary_releases
+            .join(&journal.from_release.backend_commit)
+            .join("nazoauth");
+        let expected_candidate_runtime = config
+            .runtime
+            .binary_releases
+            .join(&journal.to_release.backend_commit)
+            .join("nazoauth");
+        if Path::new(&journal.previous_runtime) != expected_previous_runtime
+            || Path::new(&journal.candidate_runtime) != expected_candidate_runtime
+        {
+            bail!("update transaction host runtime does not match its signed Release");
+        }
+    } else if journal.candidate_runtime != journal.to_release.image_ref()?
+        || journal.previous_runtime != journal.from_release.image_ref()?
+    {
+        bail!("update transaction image runtime does not match its signed Release");
+    }
+    if let Some(backup) = &journal.backup
+        && !backup.starts_with(&config.backup_root)
+    {
+        bail!("update transaction backup is outside the backup root");
+    }
+    if journal.phase >= UpdatePhase::BackupCreated && journal.backup.is_none() {
+        bail!("update transaction lost its committed backup path");
+    }
+    Ok(())
+}
+
+fn load_update_journal(config: &UpdateConfig) -> anyhow::Result<Option<UpdateJournal>> {
+    let path = update_journal_path(config);
+    if !path.exists() {
+        return Ok(None);
+    }
+    if !path.is_file() || path.is_symlink() {
+        bail!("update transaction journal must be a regular non-symlink file");
+    }
+    let journal: UpdateJournal = serde_json::from_slice(&fs::read(&path)?)
+        .context("update transaction journal is invalid")?;
+    validate_update_journal(config, &journal)?;
+    Ok(Some(journal))
+}
+
+fn journal_backup(config: &UpdateConfig, journal: &UpdateJournal) -> anyhow::Result<Backup> {
+    Backup::open_existing(
+        config,
+        journal
+            .backup
+            .as_deref()
+            .context("update transaction has no verified backup")?,
+    )
+}
+
+fn target_is_active(config: &UpdateConfig, journal: &UpdateJournal) -> bool {
+    let runtime = Runtime::new(config);
+    if config.runtime.engine != "host" && !runtime.container_exists() {
+        return false;
+    }
+    runtime
+        .active_revision()
+        .is_ok_and(|revision| revision == journal.to_release.backend_commit)
+}
+
+fn recovery_action(journal: &UpdateJournal, target_is_active: bool) -> UpdateRecoveryAction {
+    if target_is_active || journal.phase >= UpdatePhase::CandidateActive {
+        return UpdateRecoveryAction::ContinueForward;
+    }
+    if journal.phase < UpdatePhase::MigrationRunning
+        || (journal.to_release.rollback.artifact
+            && journal.to_release.rollback.schema_compatible
+            && !journal.to_release.rollback.irreversible_migration)
+    {
+        UpdateRecoveryAction::RestorePrevious
+    } else {
+        UpdateRecoveryAction::ContinueForward
+    }
+}
+
+fn recover_pending_update(config_path: &Path, config: &UpdateConfig) -> anyhow::Result<()> {
+    let Some(mut journal) = load_update_journal(config)? else {
+        return Ok(());
+    };
+    eprintln!(
+        "nazoauthctl: recovering update transaction {} at phase {:?}",
+        journal.transaction_id, journal.phase
+    );
+    match recovery_action(&journal, target_is_active(config, &journal)) {
+        UpdateRecoveryAction::ContinueForward => {
+            advance_update_transaction(config_path, config, &mut journal)?;
+            eprintln!(
+                "nazoauthctl: update transaction {} completed at {}",
+                journal.transaction_id, journal.to_release.version
+            );
+        }
+        UpdateRecoveryAction::RestorePrevious => {
+            restore_previous_transaction(config, &journal)?;
+            append_update_management_event(
+                config,
+                &journal,
+                "artifact-restored",
+                "update-artifact-restored",
+                &journal.from_release.version,
+                "schema-compatible",
+            )?;
+            finish_update_journal(config, &journal)?;
+            eprintln!(
+                "nazoauthctl: interrupted update transaction {} restored {}",
+                journal.transaction_id, journal.from_release.version
+            );
+        }
+    }
+    Ok(())
+}
+
+fn restore_previous_transaction(
+    config: &UpdateConfig,
+    journal: &UpdateJournal,
+) -> anyhow::Result<()> {
+    if journal.phase >= UpdatePhase::MigrationRunning {
+        let backup = journal_backup(config, journal)?;
+        rollback(
+            config,
+            &journal.previous_runtime,
+            journal.previous_ui.as_deref(),
+            &backup,
+        )?;
+    } else {
+        let runtime = Runtime::new(config);
+        if config.runtime.engine == "host" {
+            runtime.stop_service().ok();
+        } else if runtime.container_exists() {
+            runtime.remove_container()?;
+        }
+        if config.runtime.engine == "host" {
+            symlink_atomic(
+                Path::new(&journal.previous_runtime),
+                &config.runtime.binary_path,
+            )?;
+            runtime.start_service()?;
+        } else {
+            runtime.start_container(&journal.previous_runtime)?;
+        }
         wait_ready(config)?;
     }
     verify_public(config)?;
     verify_ui(config)?;
-    write_active_release(config, &release.manifest)?;
-    copy_atomic(updater, &config.updater_install_path, 0o755)
+    write_active_release(config, &journal.from_release)
+}
+
+fn handle_update_failure(
+    config: &UpdateConfig,
+    journal: &UpdateJournal,
+    error: anyhow::Error,
+) -> anyhow::Result<()> {
+    if recovery_action(journal, target_is_active(config, journal))
+        == UpdateRecoveryAction::ContinueForward
+        && (!journal.to_release.rollback.schema_compatible
+            || journal.to_release.rollback.irreversible_migration)
+    {
+        write_record(
+            config,
+            &journal.to_release,
+            "recovery-required-after-update-failure",
+            journal.backup.as_deref(),
+        )
+        .ok();
+        append_update_management_event(
+            config,
+            journal,
+            "recovery-required",
+            "update-failed-recovery-required",
+            &journal.to_release.version,
+            recovery_boundary_name(journal.to_release.rollback.database_restore),
+        )?;
+        bail!(
+            "update failed across a schema rollback barrier at phase {:?}: {error:#}; retry any nazoauthctl command to continue the persisted transaction; database recovery boundary={:?}; backup={}",
+            journal.phase,
+            journal.to_release.rollback.database_restore,
+            journal.backup.as_deref().map_or_else(
+                || "unavailable".to_owned(),
+                |path| path.display().to_string()
+            )
+        );
+    }
+    let recovery = restore_previous_transaction(config, journal);
+    if let Err(recovery_error) = recovery {
+        append_update_management_event(
+            config,
+            journal,
+            "rollback-failed",
+            "update-failed-rollback-failed",
+            &journal.to_release.version,
+            "persisted-recovery-required",
+        )?;
+        bail!(
+            "update failed at phase {:?}: {error:#}; persisted recovery also failed: {recovery_error:#}; retry any nazoauthctl command",
+            journal.phase
+        );
+    }
+    append_update_management_event(
+        config,
+        journal,
+        "artifact-restored",
+        "update-artifact-restored",
+        &journal.from_release.version,
+        "schema-compatible",
+    )?;
+    finish_update_journal(config, journal)?;
+    bail!(
+        "update failed at phase {:?} and the previous runtime was restored: {error:#}",
+        journal.phase
+    )
+}
+
+fn activate_candidate(
+    config: &UpdateConfig,
+    runtime: &Runtime<'_>,
+    journal: &UpdateJournal,
+) -> anyhow::Result<()> {
+    if target_is_active(config, journal) {
+        if config.runtime.engine == "host" {
+            runtime.start_service()?;
+        } else {
+            runtime.restart()?;
+        }
+        return Ok(());
+    }
+    if config.runtime.engine == "host" {
+        runtime.stop_service().ok();
+        symlink_atomic(
+            Path::new(&journal.candidate_runtime),
+            &config.runtime.binary_path,
+        )?;
+        runtime.start_service()
+    } else {
+        if runtime.container_exists() {
+            runtime.remove_container()?;
+        }
+        runtime.start_container(&journal.candidate_runtime)
+    }
+}
+
+fn target_ui_is_active(journal: &UpdateJournal) -> bool {
+    fn regular_file(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+    }
+
+    if !matches!(
+        fs::symlink_metadata(&journal.candidate_ui),
+        Ok(metadata) if metadata.is_dir()
+    ) || !regular_file(&journal.candidate_ui.join("index.html"))
+    {
+        return false;
+    }
+    let marker = journal.candidate_ui.join(".nazoauth-ui.json");
+    if !regular_file(&marker) {
+        return false;
+    }
+    let Ok(actual) = fs::read(&marker).and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }) else {
+        return false;
+    };
+    actual
+        == json!({
+            "schema": 1,
+            "repository": journal.to_release.frontend.repository,
+            "version": journal.to_release.frontend.version,
+            "commit": journal.to_release.frontend.commit,
+            "release_identity": journal.to_release.frontend.release_identity,
+            "artifact": journal.to_release.frontend.artifact,
+        })
+}
+
+fn finish_update_journal(config: &UpdateConfig, journal: &UpdateJournal) -> anyhow::Result<()> {
+    remove_file_durable(&journal.staged_updater)?;
+    remove_file_durable(&update_journal_path(config))
+}
+
+fn append_update_management_event(
+    config: &UpdateConfig,
+    journal: &UpdateJournal,
+    event: &str,
+    operation: &str,
+    release: &str,
+    recovery_boundary: &str,
+) -> anyhow::Result<PathBuf> {
+    operator::append_management_event_idempotent(
+        config,
+        &format!("request-{}-{event}", journal.transaction_id),
+        operation,
+        release,
+        recovery_boundary,
+    )
+}
+
+fn encode_transaction_id() -> String {
+    use std::fmt::Write as _;
+    let mut value = String::with_capacity(32);
+    for byte in rand::random::<[u8; 16]>() {
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
 }
 
 fn stop_active_runtime(config: &UpdateConfig, runtime: &Runtime<'_>) -> anyhow::Result<()> {
@@ -581,18 +1014,6 @@ fn stop_active_runtime(config: &UpdateConfig, runtime: &Runtime<'_>) -> anyhow::
         runtime.remove_container()
     } else {
         bail!("active application container is unavailable")
-    }
-}
-
-fn start_previous_runtime(
-    config: &UpdateConfig,
-    runtime: &Runtime<'_>,
-    previous_runtime: &str,
-) -> anyhow::Result<()> {
-    if config.runtime.engine == "host" {
-        runtime.start_service()
-    } else {
-        runtime.start_container(previous_runtime)
     }
 }
 
@@ -608,9 +1029,7 @@ fn rollback(
     } else if runtime.container_exists() {
         runtime.remove_container().ok();
     }
-    if let Some(ui) = previous_ui {
-        symlink_atomic(ui, &config.ui.active_path)?;
-    }
+    let _ = previous_ui;
     backup.restore_snapshots()?;
     if config.runtime.engine == "host" {
         symlink_atomic(Path::new(previous_runtime), &config.runtime.binary_path)?;
@@ -699,9 +1118,6 @@ fn recover_from_backup(config: &UpdateConfig) -> anyhow::Result<()> {
     }
     backup.restore_databases(config)?;
     backup.restore_snapshots()?;
-    if let Some(ui) = state.previous_ui.as_deref() {
-        symlink_atomic(ui, &config.ui.active_path)?;
-    }
     install::grant_runtime_database(config)?;
     if config.runtime.engine == "host" {
         symlink_atomic(
@@ -741,7 +1157,7 @@ fn print_update_plan(
         "current_revision": current_revision,
         "target_version": target.version,
         "target_revision": target.backend_commit,
-        "target_oci_digest": target.image_oci_digest,
+        "target_oci_digest": target.image_oci_digest(),
         "artifact_rollback": target.rollback.artifact
             && target.rollback.schema_compatible
             && !target.rollback.irreversible_migration,
@@ -842,7 +1258,12 @@ fn expected_target(
     operator::expected_release_target(
         config,
         manifest.embedded.clone(),
-        manifest.image_oci_digest.clone(),
+        if config.runtime.engine == "host" {
+            manifest.image_oci_digest()
+        } else {
+            manifest.runtime_oci_digest()?
+        }
+        .to_owned(),
         manifest
             .artifacts
             .get("binary")
@@ -887,6 +1308,7 @@ fn load_config(path: &Path) -> anyhow::Result<UpdateConfig> {
         &fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
     )?;
     crate::operator::recover_pending_rotation(path, &mut config)?;
+    recover_pending_update(path, &config)?;
     Ok(config)
 }
 
@@ -913,28 +1335,36 @@ fn status(config: &UpdateConfig) -> anyhow::Result<()> {
     let runtime = Runtime::new(config);
     let revision = runtime.active_revision()?;
     let release = load_active_release(config)?;
-    let target = if config.runtime.engine == "host" {
-        json!({
+    let (target, runtime_name) = if config.runtime.engine == "host" {
+        let path = fs::canonicalize(&config.runtime.binary_path)?;
+        let target = json!({
             "kind": "host-binary",
-            "path": fs::canonicalize(&config.runtime.binary_path)?,
+            "path": path,
             "sha256": crate::filesystem::sha256(&config.runtime.binary_path)?,
-        })
+        });
+        (target, path.display().to_string())
     } else {
         let image = runtime.active_image()?;
         let image_digest = runtime.image_digest(&image)?;
-        json!({
-            "kind": "oci-image",
-            "image_ref": image,
-            "image_digest": image_digest,
-        })
+        (
+            json!({
+                "kind": "oci-image",
+                "image_ref": image,
+                "image_digest": image_digest,
+            }),
+            image,
+        )
     };
+    let actual_embedded = runtime.embedded_identity(&runtime_name)?;
+    let embedded_identity_matches_release = actual_embedded == release.embedded;
     let value = json!({
         "engine": config.runtime.engine,
         "revision": revision,
         "release": release.version,
         "release_identity": release.release_identity,
         "runtime_target": target,
-        "embedded_build_identity": release.embedded,
+        "embedded_build_identity": actual_embedded,
+        "embedded_identity_matches_release": embedded_identity_matches_release,
         "health_url": config.runtime.health_url,
         "ready": health_ready(config),
     });
@@ -960,6 +1390,13 @@ fn doctor(config: &UpdateConfig) -> anyhow::Result<()> {
         }
     };
     let expected = expected_target(config, &release)?;
+    let runtime_name = match &target {
+        nazo_operator_protocol::RuntimeTargetClaim::OciImage { image_ref, .. } => image_ref,
+        nazo_operator_protocol::RuntimeTargetClaim::HostBinary { path, .. } => path,
+    };
+    if runtime.embedded_identity(runtime_name)? != release.embedded {
+        bail!("doctor: runtime embedded build identity differs from the signed Release");
+    }
     match &target {
         nazo_operator_protocol::RuntimeTargetClaim::OciImage { image_digest, .. }
             if image_digest != &expected.image_digest =>
@@ -1042,9 +1479,6 @@ fn verify_public(config: &UpdateConfig) -> anyhow::Result<()> {
 }
 
 fn verify_ui(config: &UpdateConfig) -> anyhow::Result<()> {
-    if !config.ui.serve_from_application {
-        return Ok(());
-    }
     let url = format!(
         "{}/ui/",
         config.runtime.expected_issuer.trim_end_matches('/')
@@ -1062,43 +1496,6 @@ fn verify_ui(config: &UpdateConfig) -> anyhow::Result<()> {
             &url,
         ])
         .run_quiet()
-}
-
-fn prepare_ui(
-    config: &UpdateConfig,
-    release: &VerifiedRelease,
-    archive: &Path,
-) -> anyhow::Result<PathBuf> {
-    fs::create_dir_all(&config.ui.releases_root)?;
-    let target = config
-        .ui
-        .releases_root
-        .join(&release.manifest.frontend_commit);
-    let temporary = config.ui.releases_root.join(format!(
-        ".{}.tmp-{}",
-        release.manifest.frontend_commit,
-        std::process::id()
-    ));
-    if temporary.exists() {
-        bail!(
-            "stale UI release staging directory requires review: {}",
-            temporary.display()
-        );
-    }
-    fs::create_dir(&temporary)?;
-    extract_ui(archive, &temporary)?;
-    if target.exists() {
-        if directory_digests(&target)? != directory_digests(&temporary)? {
-            bail!(
-                "existing UI release differs from the signed artifact: {}",
-                target.display()
-            );
-        }
-        fs::remove_dir_all(&temporary)?;
-        return Ok(target);
-    }
-    fs::rename(&temporary, &target)?;
-    Ok(target)
 }
 
 fn install_host_candidate(
@@ -1131,22 +1528,9 @@ fn install_host_candidate(
     Ok(target)
 }
 
-fn current_symlink(path: &Path) -> anyhow::Result<Option<PathBuf>> {
-    if path.is_symlink() {
-        return Ok(Some(fs::read_link(path)?));
-    }
-    if path.exists() {
-        bail!(
-            "active path must be a symlink or absent: {}",
-            path.display()
-        );
-    }
-    Ok(None)
-}
-
 fn write_record(
     config: &UpdateConfig,
-    release: &VerifiedRelease,
+    release: &ReleaseManifest,
     status: &str,
     backup: Option<&Path>,
 ) -> anyhow::Result<()> {
@@ -1154,9 +1538,11 @@ fn write_record(
     let stamp = Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
     let value = json!({
         "status": status,
-        "version": release.manifest.version,
-        "backend_commit": release.manifest.backend_commit,
-        "frontend_commit": release.manifest.frontend_commit,
+        "version": release.version,
+        "backend_commit": release.backend_commit,
+        "frontend_commit": release.frontend_commit(),
+        "frontend_version": release.frontend.version,
+        "frontend_artifact_sha256": release.frontend.artifact.sha256,
         "engine": config.runtime.engine,
         "backup": backup.map(|path| path.display().to_string()),
         "recorded_at": Utc::now().to_rfc3339(),
@@ -1164,8 +1550,36 @@ fn write_record(
     atomic_write(
         &config
             .deployment_root
-            .join(format!("{}-{}.json", release.manifest.version, stamp)),
+            .join(format!("{}-{}.json", release.version, stamp)),
         &(serde_json::to_vec_pretty(&value)?),
+        0o600,
+    )
+}
+
+fn write_update_record(
+    config: &UpdateConfig,
+    journal: &UpdateJournal,
+    status: &str,
+    backup: Option<&Path>,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(&config.deployment_root)?;
+    let value = json!({
+        "status": status,
+        "transaction_id": journal.transaction_id,
+        "version": journal.to_release.version,
+        "backend_commit": journal.to_release.backend_commit,
+        "frontend_commit": journal.to_release.frontend_commit(),
+        "frontend_version": journal.to_release.frontend.version,
+        "frontend_artifact_sha256": journal.to_release.frontend.artifact.sha256,
+        "engine": config.runtime.engine,
+        "backup": backup.map(|path| path.display().to_string()),
+        "recorded_at": journal.started_at,
+    });
+    atomic_write(
+        &config
+            .deployment_root
+            .join(format!("update-{}.json", journal.transaction_id)),
+        &serde_json::to_vec_pretty(&value)?,
         0o600,
     )
 }
@@ -1206,3 +1620,7 @@ fn require_confirmation(yes: bool, action: &str) -> anyhow::Result<()> {
         bail!("operation cancelled")
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/controller.rs"]
+mod tests;

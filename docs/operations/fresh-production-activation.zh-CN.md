@@ -6,8 +6,9 @@
 
 ## 前置条件
 
-- 已审查 commit 已生成不可变标签 Release、精确 workflow identity 的 Sigstore bundle、
-  schema 3 Release manifest 和完整声明制品集。
+- 已审查 commit 已生成仅含平台二进制的不可变标签 Release、精确 workflow identity
+  的 schema 4 GitHub attestation，以及已签名的多架构 OCI index；其中绑定的
+  NazoAuthWeb descriptor 指向独立 attestation 的前端 Release。
 - 已精确盘点 NazoAuth 容器、volume、文件、反向代理引用、端口和远端本地 OIDF Suite
   状态；主机无关资源明确排除在操作范围外。
 - 需要保留时已备份旧 NazoAuth；全新安装演练不得复用该状态。

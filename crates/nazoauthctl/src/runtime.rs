@@ -85,13 +85,6 @@ impl<'a> Runtime<'a> {
         self.inspect_container(format)
     }
 
-    pub(crate) fn active_image_id(&self) -> anyhow::Result<String> {
-        if self.config.runtime.engine == "host" {
-            bail!("host runtime does not have an active image");
-        }
-        self.inspect_container("{{.Image}}")
-    }
-
     fn inspect_container(&self, format: &str) -> anyhow::Result<String> {
         let engine = self
             .config
@@ -418,14 +411,13 @@ impl<'a> Runtime<'a> {
             .run_quiet()
     }
 
-    pub(crate) fn load_image(&self, archive: &Path) -> anyhow::Result<()> {
+    pub(crate) fn pull_image(&self, image: &str) -> anyhow::Result<()> {
         Process::new(
             self.config
                 .container_engine()
                 .context("container engine is unavailable")?,
         )
-        .args(["load", "-i"])
-        .arg(archive)
+        .args(["pull", image])
         .run_quiet()
     }
 
@@ -447,24 +439,83 @@ impl<'a> Runtime<'a> {
     }
 
     pub(crate) fn image_digest(&self, image: &str) -> anyhow::Result<String> {
-        let digest = Process::new(
-            self.config
-                .container_engine()
-                .context("container engine is unavailable")?,
-        )
-        .args(["image", "inspect", image, "--format", "{{.Id}}"])
-        .stdout()?
-        .trim()
-        .to_owned();
-        let normalized = digest.strip_prefix("sha256:").unwrap_or(&digest);
+        let (_, expected_digest) = image
+            .rsplit_once('@')
+            .context("managed OCI image reference is not pinned by digest")?;
+        let normalized = expected_digest.strip_prefix("sha256:").unwrap_or("");
         if normalized.len() != 64
             || !normalized
                 .chars()
                 .all(|character| character.is_ascii_hexdigit())
         {
-            bail!("container engine returned an invalid image digest");
+            bail!("managed OCI image reference has an invalid digest");
         }
-        Ok(format!("sha256:{}", normalized.to_ascii_lowercase()))
+        let engine = self
+            .config
+            .container_engine()
+            .context("container engine is unavailable")?;
+        let repo_digests = Process::new(engine)
+            .args([
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{json .RepoDigests}}",
+            ])
+            .stdout()?;
+        let repo_digests = serde_json::from_str::<Vec<String>>(repo_digests.trim());
+        if repo_digests.is_ok_and(|values| {
+            values.iter().any(|value| {
+                value
+                    .rsplit_once('@')
+                    .is_some_and(|(_, digest)| digest == expected_digest)
+            })
+        }) {
+            return Ok(expected_digest.to_ascii_lowercase());
+        }
+        if self.config.runtime.engine == "podman" {
+            let digest = Process::new(engine)
+                .args(["image", "inspect", image, "--format", "{{.Digest}}"])
+                .stdout()?;
+            if digest.trim() == expected_digest {
+                return Ok(expected_digest.to_ascii_lowercase());
+            }
+        }
+        bail!("container engine did not retain the signed OCI digest")
+    }
+
+    pub(crate) fn embedded_identity(
+        &self,
+        image_or_binary: &str,
+    ) -> anyhow::Result<nazo_operator_protocol::EmbeddedIdentity> {
+        let output = if self.config.runtime.engine == "host" {
+            Process::new(image_or_binary)
+                .arg("build-identity")
+                .stdout()?
+        } else {
+            Process::new(
+                self.config
+                    .container_engine()
+                    .context("container engine is unavailable")?,
+            )
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--read-only",
+                "--pids-limit",
+                "32",
+            ])
+            .arg(image_or_binary)
+            .args(["nazoauth", "build-identity"])
+            .stdout()?
+        };
+        serde_json::from_str(&output).context("runtime embedded build identity is invalid")
     }
 
     pub(crate) fn verify_prepared_target(

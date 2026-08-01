@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
 import os
+import platform
 import runpy
 import shutil
 import subprocess
@@ -14,7 +16,42 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MANIFEST_BUILDER = ROOT / "scripts" / "build_release_manifest.py"
+MANIFEST_BUILDER = ROOT / "scripts" / "build_release_attestation.py"
+
+
+def host_release_target() -> str:
+    machine = platform.machine().lower()
+    architecture = "aarch64" if machine in {"aarch64", "arm64"} else "x86_64"
+    if sys.platform == "win32":
+        return f"{architecture}-pc-windows-msvc"
+    if sys.platform == "darwin":
+        return f"{architecture}-apple-darwin"
+    return f"{architecture}-unknown-linux-gnu"
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_fake_nazoauth(
+    path: Path, *, release: str, revision: str, build_id: str
+) -> None:
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"${1:-}\" in\n"
+        "  --help) printf 'nazoauth test binary\\n' ;;\n"
+        "  build-identity) printf '%s\\n' "
+        f"'{{\"release\":\"{release}\",\"revision\":\"{revision}\","
+        f"\"protocol\":1,\"build_id\":\"{build_id}\"}}' ;;\n"
+        "  migrate) mkdir -p \"$FAKE_KEYS\"; "
+        "printf 'candidate-keyset\\n' >\"$FAKE_KEYS/keyset.json\" ;;\n"
+        "  server) exit 0 ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    path.chmod(0o755)
 
 
 def updater() -> Path:
@@ -54,11 +91,18 @@ def bash_path(path: Path) -> str:
 class FakeUpdate:
     backend_commit = "b" * 40
     old_commit = "a" * 40
+    frontend_commit = "c" * 40
+    old_frontend_commit = "e" * 40
+    old_frontend_artifact_sha = "9" * 64
     old_image = "sha256:" + "1" * 64
+    oci_index = "sha256:" + "d" * 64
+    oci_amd64 = "sha256:" + "3" * 64
 
     def __init__(self, root: Path, *, engine: str = "podman") -> None:
         self.root = root
         self.engine = engine
+        self.target = host_release_target()
+        self.candidate_image = self.oci_amd64
         self.release = root / "release"
         self.release.mkdir()
         self.fake_state = root / "state"
@@ -75,22 +119,9 @@ class FakeUpdate:
         self.config_mount.write_text("server: {}\n", encoding="utf-8")
         self.ui_releases = root / "ui-releases"
         self.ui_releases.mkdir()
-        self.old_ui = self.ui_releases / "old"
+        self.old_ui = self.ui_releases / self.old_frontend_artifact_sha
         self.old_ui.mkdir()
         (self.old_ui / "index.html").write_text("old-ui\n", encoding="utf-8")
-        self.ui_path = root / "ui"
-        subprocess.run(
-            [
-                bash(),
-                "-lc",
-                'export MSYS=winsymlinks:sys; ln -s "$1" "$2"',
-                "_",
-                bash_path(self.old_ui),
-                bash_path(self.ui_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
         self._write_release()
         self._write_fake_commands()
         self.config = root / "update.json"
@@ -193,7 +224,6 @@ class FakeUpdate:
                         "password_file": "",
                     },
                     "ui": {
-                        "active_path": bash_path(self.ui_path),
                         "releases_root": bash_path(self.ui_releases),
                     },
                 }
@@ -205,8 +235,26 @@ class FakeUpdate:
         )
         active_release["version"] = "v0.9.0"
         active_release["backend_commit"] = self.old_commit
-        active_release["image_ref"] = "localhost/nazo-oauth-server:v0.9.0"
-        active_release["image_oci_digest"] = "sha256:" + "1" * 64
+        active_release["oci"]["index_digest"] = "sha256:" + "1" * 64
+        active_release["oci"]["platform_manifests"].update(
+            {
+                "linux/amd64": self.old_image,
+                "linux/arm64": "sha256:" + "2" * 64,
+            }
+        )
+        active_release["frontend"].update(
+            {
+                "version": "v0.1.0",
+                "commit": self.old_frontend_commit,
+                "release_identity": (
+                    "https://github.com/nazozero/NazoAuthWeb/"
+                    ".github/workflows/release.yml@refs/tags/v0.1.0"
+                ),
+            }
+        )
+        active_release["frontend"]["artifact"].update(
+            {"sha256": self.old_frontend_artifact_sha, "size": 7}
+        )
         active_release["release_identity"] = (
             "https://github.com/nazozero/NazoAuth/"
             ".github/workflows/release-security.yml@refs/tags/v0.9.0"
@@ -214,13 +262,21 @@ class FakeUpdate:
         active_release["embedded"].update(
             {"release": "v0.9.0", "revision": self.old_commit, "build_id": "github:122:1"}
         )
+        self.old_release_manifest = active_release
         (self.deployments / "active-release.json").write_text(
             json.dumps(active_release), encoding="utf-8"
+        )
+        (self.old_ui / ".nazoauth-ui.json").write_text(
+            json.dumps({"schema": 1, **active_release["frontend"]}),
+            encoding="utf-8",
         )
         for name, value in (
             ("revision", self.old_commit),
             ("image-id", self.old_image),
-            ("image-name", "localhost/nazo-oauth-server:v0.9.0"),
+            (
+                "image-name",
+                "ghcr.io/nazozero/nazoauth@" + "sha256:" + "1" * 64,
+            ),
             ("container-id", "old-container"),
             ("lastsave", "100"),
         ):
@@ -234,80 +290,145 @@ class FakeUpdate:
                 "FAKE_BACKEND_COMMIT": self.backend_commit,
                 "FAKE_OLD_COMMIT": self.old_commit,
                 "FAKE_OLD_IMAGE": self.old_image,
+                "FAKE_CANDIDATE_IMAGE": self.candidate_image,
+                "FAKE_OLD_IMAGE_REF": (
+                    "ghcr.io/nazozero/nazoauth@" + "sha256:" + "1" * 64
+                ),
+                "FAKE_CANDIDATE_IMAGE_REF": (
+                    "ghcr.io/nazozero/nazoauth@" + self.oci_amd64
+                ),
+                "FAKE_FRONTEND_DESCRIPTOR": bash_path(
+                    self.release / "frontend.json"
+                ),
+                "FAKE_UI_RELEASES": bash_path(self.ui_releases),
                 "NAZOAUTHCTL_TESTING": "1",
                 "MSYS": "winsymlinks:sys",
             }
         )
 
     def _write_release(self) -> None:
-        image = self.release / "nazo-oauth-server-image.tar"
-        image.write_text("image\n", encoding="utf-8")
-        binary = self.release / "nazoauth"
-        binary.write_text(
-            "#!/usr/bin/env bash\n"
-            "case \"${1:-}\" in\n"
-            "  --help) printf 'nazoauth test binary\\n' ;;\n"
-            "  server) exit 0 ;;\n"
-            "  *) exit 2 ;;\n"
-            "esac\n",
-            encoding="utf-8",
-            newline="\n",
+        target = self.target
+        suffix = ".exe" if "windows" in target else ""
+        binary = self.release / f"nazoauth-{target}{suffix}"
+        self.binary_artifact = binary
+        write_fake_nazoauth(
+            binary,
+            release="v1.0.0",
+            revision=self.backend_commit,
+            build_id="github:123:1",
         )
-        binary.chmod(0o755)
-        updater_artifact = self.release / "nazoauthctl"
+        updater_artifact = self.release / f"nazoauthctl-{target}{suffix}"
         shutil.copyfile(updater(), updater_artifact)
         updater_artifact.chmod(0o755)
-        bootstrap = self.release / "install_nazoauthctl.sh"
-        bootstrap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        updater_sbom = self.release / "nazoauthctl.cdx.json"
-        updater_sbom.write_text("{}\n", encoding="utf-8")
-        sbom = self.release / "nazoauth.cdx.json"
-        sbom.write_text("{}\n", encoding="utf-8")
         ui_source = self.root / "ui-source"
         ui_source.mkdir()
         (ui_source / "index.html").write_text("new-ui\n", encoding="utf-8")
-        ui = self.release / "nazoauth-ui.tar.gz"
+        ui = self.release / "nazoauth-web.tar.gz"
         with tarfile.open(ui, "w:gz") as archive:
             archive.add(ui_source / "index.html", arcname="index.html")
+        frontend = self.release / "frontend.json"
+        frontend.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "repository": "nazozero/NazoAuthWeb",
+                    "version": "v0.2.0",
+                    "commit": self.frontend_commit,
+                    "release_identity": (
+                        "https://github.com/nazozero/NazoAuthWeb/"
+                        ".github/workflows/release.yml@refs/tags/v0.2.0"
+                    ),
+                    "artifact": {
+                        "repository": "nazozero/NazoAuthWeb",
+                        "name": ui.name,
+                        "sha256": sha256(ui),
+                        "size": ui.stat().st_size,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        oci = self.release / "oci.json"
+        oci.write_text(
+            json.dumps(
+                {
+                    "repository": "ghcr.io/nazozero/nazoauth",
+                    "index_digest": self.oci_index,
+                    "platform_manifests": {
+                        "linux/amd64": self.oci_amd64,
+                        "linux/arm64": "sha256:" + "4" * 64,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest_path = self.release / "release-manifest.json"
         subprocess.run(
             [
                 sys.executable,
                 str(MANIFEST_BUILDER),
                 "--version",
                 "v1.0.0",
+                "--target",
+                target,
                 "--backend-commit",
                 self.backend_commit,
                 "--build-id",
                 "github:123:1",
-                "--image-digest",
-                "sha256:" + "d" * 64,
-                "--frontend-commit",
-                "c" * 40,
-                "--image",
-                str(image),
-                "--ui",
-                str(ui),
                 "--binary",
                 str(binary),
-                "--bootstrap",
-                str(bootstrap),
                 "--updater",
                 str(updater_artifact),
-                "--updater-sbom",
-                str(updater_sbom),
-                "--sbom",
-                str(sbom),
+                "--frontend",
+                str(frontend),
+                "--oci",
+                str(oci),
                 "--policy",
                 str(ROOT / "release" / "update-policy.json"),
                 "--output",
-                str(self.release / "release-manifest.json"),
+                str(manifest_path),
             ],
             check=True,
             capture_output=True,
             text=True,
         )
-        (self.release / "release-manifest.json.bundle").write_text(
-            "test-bundle\n", encoding="utf-8"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        statement = {
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [
+                {
+                    "name": updater_artifact.name,
+                    "digest": {"sha256": sha256(updater_artifact)},
+                }
+            ],
+            "predicateType": "https://nazo.run/attestations/release-manifest/v1",
+            "predicate": manifest,
+        }
+        bundle = {
+            "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "dsseEnvelope": {
+                "payload": base64.b64encode(
+                    json.dumps(statement, separators=(",", ":")).encode()
+                ).decode(),
+                "payloadType": "application/vnd.in-toto+json",
+                "signatures": [],
+            }
+        }
+        (self.release / "attestations.json").write_text(
+            json.dumps(
+                {
+                    "attestations": [
+                        {
+                            "bundle_url": "https://attestations.example/unused",
+                            "initiator": "github-actions",
+                            "repository_id": 1,
+                            "bundle": bundle,
+                        }
+                    ]
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
         )
 
     def _write_fake_commands(self) -> None:
@@ -317,11 +438,25 @@ class FakeUpdate:
 set -euo pipefail
 output=""
 args=("$@")
+printf '%q ' "$@" >>"$FAKE_STATE/curl-commands"
+printf '\n' >>"$FAKE_STATE/curl-commands"
 for ((i=0; i<${#args[@]}; i++)); do
   if [ "${args[$i]}" = --output ]; then output="${args[$((i+1))]}"; fi
 done
 url="${args[$((${#args[@]}-1))]}"
 if [[ "$url" == *"/releases/latest" ]]; then printf '%s\n' '{"tag_name":"v1.0.0"}'; exit 0; fi
+if [[ "$url" == *"/attestations/sha256%3A"* ]]; then
+  if [[ " $* " != *" X-GitHub-Api-Version: 2022-11-28 "* ]]; then
+    printf 'unexpected GitHub API version header: %q\n' "$*" >&2
+    exit 1
+  fi
+  if [[ "$url" != *"?per_page=21&predicate_type=https%3A%2F%2Fnazo.run%2Fattestations%2Frelease-manifest%2Fv1" ]]; then
+    printf 'unexpected attestation query: %s\n' "$url" >&2
+    exit 1
+  fi
+  cat "$FAKE_RELEASE/attestations.json"
+  exit 0
+fi
 if [[ "$url" == *"/releases/download/"* ]]; then
   cp -- "$FAKE_RELEASE/${url##*/}" "$output"
   exit 0
@@ -348,7 +483,25 @@ exit 22
             newline="\n",
         )
         cosign = self.fake_bin / "cosign"
-        cosign.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+        cosign.write_text(
+            r'''#!/usr/bin/env bash
+set -euo pipefail
+args=" $* "
+[[ "$args" == *" verify-blob-attestation "* ]]
+[[ "$args" == *" --type https://nazo.run/attestations/release-manifest/v1 "* ]]
+[[ "$args" == *" --certificate-identity https://github.com/nazozero/NazoAuth/.github/workflows/release-security.yml@refs/tags/v1.0.0 "* ]]
+[[ "$args" == *" --certificate-oidc-issuer https://token.actions.githubusercontent.com "* ]]
+bundle=""
+values=("$@")
+for ((i=0; i<${#values[@]}; i++)); do
+  if [ "${values[$i]}" = --bundle ]; then bundle="${values[$((i+1))]}"; fi
+done
+[ -s "$bundle" ]
+[[ "${values[-1]##*/}" == nazoauthctl-* ]]
+''',
+            encoding="utf-8",
+            newline="\n",
+        )
         pg_dump = self.fake_bin / "pg_dump"
         pg_dump.write_text(
             "#!/usr/bin/env bash\nprintf 'fake-external-postgresql-dump'\n",
@@ -388,6 +541,12 @@ case "${1:-}" in
       target="$(readlink -f "$NAZOAUTH_BINARY_INSTALL_PATH")"
       basename "$(dirname "$target")" >"$FAKE_STATE/revision"
     fi
+    if [ "$(cat "$FAKE_STATE/revision")" = "$FAKE_BACKEND_COMMIT" ]; then
+      artifact_sha="$(jq -r .artifact.sha256 "$FAKE_FRONTEND_DESCRIPTOR")"
+      mkdir -p "$FAKE_UI_RELEASES/$artifact_sha"
+      printf 'new-ui\n' >"$FAKE_UI_RELEASES/$artifact_sha/index.html"
+      cp -- "$FAKE_FRONTEND_DESCRIPTOR" "$FAKE_UI_RELEASES/$artifact_sha/.nazoauth-ui.json"
+    fi
     ;;
 esac
 exit 0
@@ -398,6 +557,12 @@ exit 0
         systemd_run = self.fake_bin / "systemd-run"
         systemd_run.write_text(
             "#!/usr/bin/env bash\nexit 0\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        systemd = self.fake_bin / "systemd"
+        systemd.write_text(
+            "#!/usr/bin/env bash\nprintf 'systemd 257\\n'\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -412,6 +577,8 @@ exit 0
             r'''#!/usr/bin/env bash
 set -euo pipefail
 state="$FAKE_STATE"
+printf '%q ' "$@" >>"$state/engine-commands"
+printf '\n' >>"$state/engine-commands"
 case "${1:-}" in
   inspect)
     args="$*"
@@ -425,9 +592,24 @@ case "${1:-}" in
     ;;
   image)
     [ "${2:-}" = inspect ]
-    cat "$state/candidate-revision"
+    if [[ " $* " == *" $FAKE_OLD_IMAGE_REF "* ]]; then
+      selected_ref="$FAKE_OLD_IMAGE_REF"
+      selected_digest="$FAKE_OLD_IMAGE"
+      selected_revision="$FAKE_OLD_COMMIT"
+    else
+      selected_ref="$FAKE_CANDIDATE_IMAGE_REF"
+      selected_digest="$FAKE_CANDIDATE_IMAGE"
+      selected_revision="$FAKE_BACKEND_COMMIT"
+    fi
+    if [[ " $* " == *" {{json .RepoDigests}} "* ]]; then
+      printf '["%s"]\n' "$selected_ref"
+    elif [[ " $* " == *" {{.Digest}} "* ]]; then
+      printf '%s\n' "$selected_digest"
+    else
+      printf '%s\n' "$selected_revision"
+    fi
     ;;
-  load)
+  pull)
     printf '%s\n' "$FAKE_BACKEND_COMMIT" >"$state/candidate-revision"
     ;;
   exec)
@@ -453,15 +635,32 @@ case "${1:-}" in
     if [[ " $* " == *" --name nazo-oauth-postgres "* ]] ||
        [[ " $* " == *" --name nazo-oauth-valkey "* ]]; then exit 0; fi
     if [[ " $* " == *" pg_restore --list "* ]]; then exit 0; fi
+    if [[ " $* " == *" nazoauth build-identity "* ]]; then
+      if [[ " $* " == *" $FAKE_OLD_IMAGE_REF "* ]]; then
+        printf '{"release":"v0.9.0","revision":"%s","protocol":1,"build_id":"github:122:1"}\n' "$FAKE_OLD_COMMIT"
+      else
+        printf '{"release":"v1.0.0","revision":"%s","protocol":1,"build_id":"github:123:1"}\n' "$FAKE_BACKEND_COMMIT"
+      fi
+      exit 0
+    fi
+    if [[ " $* " == *" nazoauth migrate "* ]]; then
+      mkdir -p "$FAKE_KEYS"
+      printf 'candidate-keyset\n' >"$FAKE_KEYS/keyset.json"
+      exit 0
+    fi
     if [[ " $* " == *" nazoauth server "* ]]; then
-      if [[ " $* " == *" $FAKE_OLD_IMAGE "* ]]; then
+      if [[ " $* " == *" $FAKE_OLD_IMAGE_REF "* ]]; then
         printf '%s\n' "$FAKE_OLD_COMMIT" >"$state/revision"
         printf '%s\n' "$FAKE_OLD_IMAGE" >"$state/image-id"
-        printf '%s\n' 'localhost/nazo-oauth-server:v0.9.0' >"$state/image-name"
+        printf '%s\n' "$FAKE_OLD_IMAGE_REF" >"$state/image-name"
       else
         printf '%s\n' "$FAKE_BACKEND_COMMIT" >"$state/revision"
-        printf '%s\n' 'sha256:2222' >"$state/image-id"
-        printf '%s\n' 'localhost/nazo-oauth-server:v1.0.0' >"$state/image-name"
+        printf '%s\n' "$FAKE_CANDIDATE_IMAGE" >"$state/image-id"
+        printf '%s\n' "$FAKE_CANDIDATE_IMAGE_REF" >"$state/image-name"
+        artifact_sha="$(jq -r .artifact.sha256 "$FAKE_FRONTEND_DESCRIPTOR")"
+        mkdir -p "$FAKE_UI_RELEASES/$artifact_sha"
+        printf 'new-ui\n' >"$FAKE_UI_RELEASES/$artifact_sha/index.html"
+        cp -- "$FAKE_FRONTEND_DESCRIPTOR" "$FAKE_UI_RELEASES/$artifact_sha/.nazoauth-ui.json"
       fi
       printf '%s\n' "container-$RANDOM" >"$state/container-id"
       exit 0
@@ -499,6 +698,7 @@ esac
             valkey_cli,
             systemctl,
             systemd_run,
+            systemd,
             fake_id,
             useradd,
             chown,
@@ -536,6 +736,7 @@ esac
         install_config = self.root / "install-config" / "update.json"
         install_config.parent.mkdir()
         environment["FAKE_KEYS"] = bash_path(managed_root / "app" / "keys")
+        environment["FAKE_UI_RELEASES"] = bash_path(managed_root / "ui-releases")
         environment["NAZOAUTHCTL_INSTALL_LOCK"] = bash_path(self.root / "install.lock")
         installed_updater = self.root / "fresh-installed" / "nazoauthctl"
         installed_updater.parent.mkdir()
@@ -607,7 +808,7 @@ class ReleaseUpdateTests(unittest.TestCase):
         self.assertNotIn("source \"$CONFIG_PATH\"", source)
         self.assertNotIn("eval ", source)
         self.assertNotIn("| bash", source)
-        self.assertIn("\"verify-blob\"", source)
+        self.assertIn("\"verify-blob-attestation\"", source)
         self.assertIn(
             "ghcr.io/sigstore/cosign/cosign@sha256:"
             "de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00",
@@ -628,15 +829,12 @@ class ReleaseUpdateTests(unittest.TestCase):
         bootstrap = (ROOT / "scripts" / "install_nazoauthctl.sh").read_text(
             encoding="utf-8"
         )
-        for hardened_argument in (
-            "--user 0:0",
-            "--cap-drop ALL",
-            "--read-only",
-            "--security-opt no-new-privileges",
-            "--pids-limit 64",
-            "--tmpfs /root/.sigstore:rw,noexec,nosuid,nodev,size=16m",
-        ):
-            self.assertIn(hardened_argument, bootstrap)
+        self.assertIn('artifact="nazoauthctl-$target"', bootstrap)
+        self.assertIn("gh attestation verify", bootstrap)
+        self.assertIn("--predicate-type", bootstrap)
+        self.assertIn("--source-ref", bootstrap)
+        self.assertIn("--deny-self-hosted-runners", bootstrap)
+        self.assertNotIn("nazoauthctl.bundle", bootstrap)
         for hardened_argument in (
             '"0:0"',
             '"--cap-drop"',
@@ -674,47 +872,67 @@ class ReleaseUpdateTests(unittest.TestCase):
     def test_manifest_is_deterministic_and_binds_all_update_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            artifacts = {}
-            for name in (
-                "image.tar",
-                "ui.tar.gz",
-                "nazoauth",
-                "nazoauthctl",
-                "install_nazoauthctl.sh",
-                "nazoauthctl-sbom.json",
-                "sbom.json",
-            ):
-                path = root / name
-                path.write_bytes((name + "\n").encode())
-                artifacts[name] = path
+            target = "x86_64-unknown-linux-gnu"
+            binary = root / f"nazoauth-{target}"
+            updater_artifact = root / f"nazoauthctl-{target}"
+            binary.write_bytes(b"server\n")
+            updater_artifact.write_bytes(b"controller\n")
+            frontend = root / "frontend.json"
+            frontend.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "repository": "nazozero/NazoAuthWeb",
+                        "version": "v0.2.0",
+                        "commit": "b" * 40,
+                        "release_identity": (
+                            "https://github.com/nazozero/NazoAuthWeb/"
+                            ".github/workflows/release.yml@refs/tags/v0.2.0"
+                        ),
+                        "artifact": {
+                            "repository": "nazozero/NazoAuthWeb",
+                            "name": "nazoauth-web.tar.gz",
+                            "sha256": "e" * 64,
+                            "size": 123,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            oci = root / "oci.json"
+            oci.write_text(
+                json.dumps(
+                    {
+                        "repository": "ghcr.io/nazozero/nazoauth",
+                        "index_digest": "sha256:" + "c" * 64,
+                        "platform_manifests": {
+                            "linux/amd64": "sha256:" + "d" * 64,
+                            "linux/arm64": "sha256:" + "f" * 64,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             output = root / "release-manifest.json"
             command = [
                 sys.executable,
                 str(MANIFEST_BUILDER),
                 "--version",
                 "v1.2.3",
+                "--target",
+                target,
                 "--backend-commit",
                 "a" * 40,
                 "--build-id",
                 "github:123:1",
-                "--image-digest",
-                "sha256:" + "c" * 64,
-                "--frontend-commit",
-                "b" * 40,
-                "--image",
-                str(artifacts["image.tar"]),
-                "--ui",
-                str(artifacts["ui.tar.gz"]),
                 "--binary",
-                str(artifacts["nazoauth"]),
-                "--bootstrap",
-                str(artifacts["install_nazoauthctl.sh"]),
+                str(binary),
                 "--updater",
-                str(artifacts["nazoauthctl"]),
-                "--updater-sbom",
-                str(artifacts["nazoauthctl-sbom.json"]),
-                "--sbom",
-                str(artifacts["sbom.json"]),
+                str(updater_artifact),
+                "--frontend",
+                str(frontend),
+                "--oci",
+                str(oci),
                 "--policy",
                 str(ROOT / "release" / "update-policy.json"),
                 "--output",
@@ -726,58 +944,51 @@ class ReleaseUpdateTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), first)
             manifest = json.loads(first)
 
-        self.assertEqual(manifest["schema"], 3)
+        self.assertEqual(manifest["schema"], 4)
         self.assertEqual(manifest["version"], "v1.2.3")
         self.assertEqual(
-            manifest["image_ref"],
-            "localhost/nazo-oauth-server:v1.2.3",
+            manifest["oci"]["index_digest"],
+            "sha256:" + "c" * 64,
         )
-        self.assertEqual(
-            set(manifest["artifacts"]),
-            {"image", "ui", "binary", "bootstrap", "updater", "updater_sbom", "sbom"},
-        )
+        self.assertEqual(set(manifest["artifacts"]), {"binary", "updater"})
         self.assertTrue(manifest["rollback"]["artifact"])
         self.assertTrue(manifest["rollback"]["schema_compatible"])
         self.assertEqual(manifest["rollback"]["database_restore"], "backup")
         self.assertFalse(manifest["rollback"]["irreversible_migration"])
-        self.assertEqual(manifest["image_oci_digest"], "sha256:" + "c" * 64)
+        self.assertEqual(manifest["target"], target)
         self.assertEqual(manifest["embedded"]["build_id"], "github:123:1")
         self.assertEqual(manifest["rollback"]["migration_floor"], "20260731000200")
-        self.assertEqual(len(manifest["artifacts"]["image"]["sha256"]), 64)
+        self.assertEqual(len(manifest["artifacts"]["binary"]["sha256"]), 64)
 
     def test_manifest_rejects_non_tag_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifact = root / "artifact"
             artifact.write_text("x", encoding="utf-8")
+            frontend = root / "frontend.json"
+            frontend.write_text("{}", encoding="utf-8")
+            oci = root / "oci.json"
+            oci.write_text("{}", encoding="utf-8")
             completed = subprocess.run(
                 [
                     sys.executable,
                     str(MANIFEST_BUILDER),
                     "--version",
                     "latest",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
                     "--backend-commit",
                     "a" * 40,
                     "--build-id",
                     "github:123:1",
-                    "--image-digest",
-                    "sha256:" + "c" * 64,
-                    "--frontend-commit",
-                    "b" * 40,
-                    "--image",
-                    str(artifact),
-                    "--ui",
-                    str(artifact),
                     "--binary",
-                    str(artifact),
-                    "--bootstrap",
                     str(artifact),
                     "--updater",
                     str(artifact),
-                    "--updater-sbom",
-                    str(artifact),
-                    "--sbom",
-                    str(artifact),
+                    "--frontend",
+                    str(frontend),
+                    "--oci",
+                    str(oci),
                     "--policy",
                     str(ROOT / "release" / "update-policy.json"),
                     "--output",
@@ -801,12 +1012,26 @@ class ReleaseUpdateTests(unittest.TestCase):
         source = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("release/frontend.lock", source)
-        self.assertIn("scripts/build_release_manifest.py", source)
-        self.assertIn("release-manifest.json.bundle", source)
+        self.assertIn("release/frontend.json", source)
+        self.assertIn("scripts/build_release_attestation.py", source)
+        self.assertIn("https://nazo.run/attestations/release-manifest/v1", source)
+        self.assertIn("existing OCI tag has a different digest", source)
+        self.assertIn("existing GitHub Release asset differs", source)
         self.assertIn("gh release upload", source)
         self.assertNotIn("gh release upload \"$GITHUB_REF_NAME\" --repo \"$GITHUB_REPOSITORY\" --clobber", source)
         self.assertIn("org.opencontainers.image.revision=${{ github.sha }}", source)
+
+    def test_attestation_lookup_uses_supported_api_and_detects_overflow(self) -> None:
+        source = (
+            ROOT / "crates" / "nazoauthctl" / "src" / "release.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"X-GitHub-Api-Version: 2022-11-28"', source)
+        self.assertIn("const MAX_ATTESTATIONS: usize = 20;", source)
+        self.assertIn(
+            "const ATTESTATION_PAGE_SIZE: usize = MAX_ATTESTATIONS + 1;", source
+        )
+        self.assertIn("per_page={ATTESTATION_PAGE_SIZE}", source)
+        self.assertNotIn("X-GitHub-Api-Version: 2026-03-10", source)
 
     @unittest.skipUnless(shutil.which("jq"), "requires jq")
     @unittest.skipUnless(os.name != "nt", "lifecycle controller targets Linux")
@@ -823,16 +1048,22 @@ class ReleaseUpdateTests(unittest.TestCase):
                 (update.keys / "keyset.json").read_text(encoding="utf-8"),
                 "candidate-keyset\n",
             )
-            linked = subprocess.run(
-                [bash(), "-lc", 'readlink "$1"', "_", bash_path(update.ui_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=update.env,
-            ).stdout.strip()
-            self.assertTrue(linked.endswith("c" * 40))
+            frontend = json.loads(
+                (update.release / "frontend.json").read_text(encoding="utf-8")
+            )
+            cached_ui = update.ui_releases / frontend["artifact"]["sha256"]
+            self.assertEqual(
+                (cached_ui / "index.html").read_text(encoding="utf-8"),
+                "new-ui\n",
+            )
+            self.assertEqual(
+                json.loads(
+                    (cached_ui / ".nazoauth-ui.json").read_text(encoding="utf-8")
+                ),
+                frontend,
+            )
             self.assertTrue(update.installed_updater.is_file())
-            records = list((update.root / "deployments").glob("v1.0.0-*.json"))
+            records = list((update.root / "deployments").glob("update-*.json"))
             self.assertEqual(len(records), 1)
             self.assertEqual(
                 json.loads(records[0].read_text())["status"],
@@ -842,6 +1073,17 @@ class ReleaseUpdateTests(unittest.TestCase):
             self.assertEqual(len(backups), 1)
             self.assertTrue((backups[0] / "postgresql.dump").is_file())
             self.assertTrue((backups[0] / "valkey-dump.rdb").is_file())
+            engine_commands = (update.fake_state / "engine-commands").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                f"pull ghcr.io/nazozero/nazoauth@{update.oci_amd64}",
+                engine_commands,
+            )
+            self.assertNotIn(
+                f"pull ghcr.io/nazozero/nazoauth@{update.oci_index}",
+                engine_commands,
+            )
 
     @unittest.skipUnless(shutil.which("jq"), "requires jq")
     @unittest.skipUnless(os.name != "nt", "lifecycle controller targets Linux")
@@ -955,6 +1197,9 @@ class ReleaseUpdateTests(unittest.TestCase):
             config["runtime"]["readiness_attempts"] = 2
             config["runtime"]["readiness_interval_seconds"] = 0
             config_path.write_text(json.dumps(config), encoding="utf-8")
+            (Path(config["deployment_root"]) / "active-release.json").write_text(
+                json.dumps(update.old_release_manifest), encoding="utf-8"
+            )
             binary_path = Path(config["runtime"]["binary_path"])
             old_release = (
                 Path(config["runtime"]["binary_releases"])
@@ -962,8 +1207,12 @@ class ReleaseUpdateTests(unittest.TestCase):
                 / "nazoauth"
             )
             old_release.parent.mkdir(parents=True)
-            shutil.copyfile(update.release / "nazoauth", old_release)
-            old_release.chmod(0o755)
+            write_fake_nazoauth(
+                old_release,
+                release="v0.9.0",
+                revision=update.old_commit,
+                build_id="github:122:1",
+            )
             binary_path.unlink()
             binary_path.symlink_to(old_release)
             (update.fake_state / "revision").write_text(
@@ -1008,6 +1257,9 @@ class ReleaseUpdateTests(unittest.TestCase):
             config["runtime"]["readiness_attempts"] = 2
             config["runtime"]["readiness_interval_seconds"] = 0
             config_path.write_text(json.dumps(config), encoding="utf-8")
+            (Path(config["deployment_root"]) / "active-release.json").write_text(
+                json.dumps(update.old_release_manifest), encoding="utf-8"
+            )
             binary_path = Path(config["runtime"]["binary_path"])
             old_release = (
                 Path(config["runtime"]["binary_releases"])
@@ -1015,8 +1267,12 @@ class ReleaseUpdateTests(unittest.TestCase):
                 / "nazoauth"
             )
             old_release.parent.mkdir(parents=True)
-            shutil.copyfile(update.release / "nazoauth", old_release)
-            old_release.chmod(0o755)
+            write_fake_nazoauth(
+                old_release,
+                release="v0.9.0",
+                revision=update.old_commit,
+                build_id="github:122:1",
+            )
             binary_path.unlink()
             binary_path.symlink_to(old_release)
             (update.fake_state / "revision").write_text(
@@ -1072,20 +1328,18 @@ class ReleaseUpdateTests(unittest.TestCase):
                 (update.keys / "keyset.json").read_text(encoding="utf-8"),
                 "previous-keyset\n",
             )
-            linked = subprocess.run(
-                [bash(), "-lc", 'readlink "$1"', "_", bash_path(update.ui_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=update.env,
-            ).stdout.strip()
-            self.assertEqual(linked, bash_path(update.old_ui))
-            records = list((update.root / "deployments").glob("v1.0.0-*.json"))
-            self.assertEqual(len(records), 1)
             self.assertEqual(
-                json.loads(records[0].read_text())["status"],
-                "rollback-after-update-failure",
+                (update.old_ui / "index.html").read_text(encoding="utf-8"),
+                "old-ui\n",
             )
+            self.assertTrue((update.old_ui / ".nazoauth-ui.json").is_file())
+            active = json.loads(
+                (update.deployments / "active-release.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(active["backend_commit"], update.old_commit)
+            self.assertTrue(list((update.audit / "management").glob("*.jws")))
 
     @unittest.skipUnless(shutil.which("jq"), "requires jq")
     @unittest.skipUnless(os.name != "nt", "lifecycle controller targets Linux")

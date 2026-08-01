@@ -87,9 +87,10 @@ sudo nazoauthctl doctor
 nazoauth server
 ```
 
-如果当前目录没有 `.env.yaml`，该命令只创建模板并退出。修改配置后，通过正式的
-`nazoauthctl migrate --yes` 签发一次性任务，再执行 `nazoauth server`，避免以示例
-秘密、错误 issuer 或无审计的数据库权限意外启动。
+如果当前目录没有 `.env.yaml`，该命令会创建最小配置，生成持久化应用秘密与签名密钥，
+然后使用安全默认值继续启动。显式 YAML 和环境配置仍然优先。受管部署的 schema 变更只由
+正式的 `nazoauthctl migrate --yes` 签名一次性任务执行，长期运行的应用身份不持有 DDL
+权限。
 
 ## 配置
 

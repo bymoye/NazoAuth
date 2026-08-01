@@ -4,7 +4,7 @@ use anyhow::bail;
 
 use crate::config::{ConfigSource, ServerConfigPreparation, database_url};
 
-const USAGE: &str = "usage: nazoauth <server|operator-task>";
+const USAGE: &str = "usage: nazoauth <server|operator-task|build-identity>";
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     match Command::parse(args)? {
@@ -14,6 +14,13 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
         }
         Command::Server => run_server().await,
         Command::OperatorTask => crate::operator_task::run().await,
+        Command::BuildIdentity => {
+            println!(
+                "{}",
+                serde_json::to_string(&crate::operator_task::embedded_identity())?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -46,6 +53,7 @@ enum Command {
     Help,
     Server,
     OperatorTask,
+    BuildIdentity,
 }
 
 impl Command {
@@ -67,6 +75,10 @@ impl Command {
             "operator-task" => {
                 ensure_no_extra_args(args, "operator-task")?;
                 Ok(Self::OperatorTask)
+            }
+            "build-identity" => {
+                ensure_no_extra_args(args, "build-identity")?;
+                Ok(Self::BuildIdentity)
             }
             _ => bail!("unknown command {command}\n{USAGE}"),
         }

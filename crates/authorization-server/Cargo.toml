@@ -24,6 +24,8 @@ blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 diesel = { workspace = true, features = ["postgres", "uuid", "chrono", "serde_json", "64-column-tables"] }
 ed25519-dalek.workspace = true
+flate2.workspace = true
+fs2.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
@@ -53,11 +55,14 @@ opentelemetry-otlp = { version = "0.32.0", default-features = false, features = 
 opentelemetry_sdk = { version = "0.32.1", features = ["logs", "metrics", "rt-tokio", "trace"] }
 passkey-auth.workspace = true
 p256 = { workspace = true, features = ["ecdh", "ecdsa", "pkcs8"] }
+pq-sys.workspace = true
 rand.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "rustls", "json", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+semver.workspace = true
 sha2.workspace = true
+tar.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 tracing-opentelemetry = "0.33.0"

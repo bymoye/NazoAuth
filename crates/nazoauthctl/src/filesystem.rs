@@ -1,14 +1,11 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
-use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
-use tar::Archive;
 
 pub(crate) struct PrivateTempDir {
     path: PathBuf,
@@ -64,6 +61,29 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Resu
         .with_context(|| format!("failed to persist {}", temporary.display()))?;
     fs::rename(&temporary, path)
         .with_context(|| format!("failed to activate {}", path.display()))?;
+    sync_parent(path)?;
+    Ok(())
+}
+
+pub(crate) fn remove_file_durable(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> anyhow::Result<()> {
+    let parent = path.parent().context("path has no parent directory")?;
+    File::open(parent)
+        .with_context(|| format!("failed to open {} for synchronization", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to synchronize {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -108,95 +128,6 @@ pub(crate) fn sha256(path: &Path) -> anyhow::Result<String> {
     Ok(hex(&digest.finalize()))
 }
 
-pub(crate) fn extract_ui(archive: &Path, destination: &Path) -> anyhow::Result<()> {
-    let file =
-        File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
-    for entry in archive.entries().context("failed to read UI archive")? {
-        let mut entry = entry.context("failed to read UI archive entry")?;
-        let entry_type = entry.header().entry_type();
-        if !(entry_type.is_file() || entry_type.is_dir()) {
-            bail!("UI archive may contain only regular files and directories");
-        }
-        let path = entry
-            .path()
-            .context("UI archive contains an invalid path")?;
-        if path.is_absolute()
-            || path.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            bail!("UI archive contains an unsafe path");
-        }
-        entry
-            .unpack_in(destination)
-            .context("failed to extract UI archive")?;
-    }
-    if !destination.join("index.html").is_file() {
-        bail!("UI archive does not contain index.html");
-    }
-    set_tree_modes(destination)?;
-    Ok(())
-}
-
-pub(crate) fn set_tree_modes(root: &Path) -> anyhow::Result<()> {
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("failed to read extracted UI {}", root.display()))?
-    {
-        let path = entry?.path();
-        if path.is_dir() {
-            set_mode(&path, 0o755)?;
-            set_tree_modes(&path)?;
-        } else if path.is_file() {
-            set_mode(&path, 0o644)?;
-        } else {
-            bail!("extracted UI contains a non-file entry");
-        }
-    }
-    set_mode(root, 0o755)
-}
-
-pub(crate) fn directory_digests(root: &Path) -> anyhow::Result<BTreeMap<PathBuf, String>> {
-    let mut output = BTreeMap::new();
-    collect_digests(root, root, &mut output)?;
-    Ok(output)
-}
-
-fn collect_digests(
-    root: &Path,
-    directory: &Path,
-    output: &mut BTreeMap<PathBuf, String>,
-) -> anyhow::Result<()> {
-    let mut entries = fs::read_dir(directory)
-        .with_context(|| format!("failed to read {}", directory.display()))?
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            bail!("release directory contains a symlink: {}", path.display());
-        }
-        if metadata.is_dir() {
-            collect_digests(root, &path, output)?;
-        } else if metadata.is_file() {
-            output.insert(
-                path.strip_prefix(root)
-                    .context("release path escaped its root")?
-                    .to_owned(),
-                sha256(&path)?,
-            );
-        } else {
-            bail!("release directory contains an unsupported entry");
-        }
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
 pub(crate) fn set_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
     let file = OpenOptions::new()
@@ -231,7 +162,8 @@ pub(crate) fn symlink_atomic(target: &Path, link: &Path) -> anyhow::Result<()> {
     }
     create_symlink(target, &next)?;
     fs::rename(&next, link)
-        .with_context(|| format!("failed to activate symlink {}", link.display()))
+        .with_context(|| format!("failed to activate symlink {}", link.display()))?;
+    sync_parent(link)
 }
 
 #[cfg(unix)]

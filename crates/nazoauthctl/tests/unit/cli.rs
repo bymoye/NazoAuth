@@ -102,6 +102,35 @@ fn parses_every_read_only_command_and_help_boundary() {
 }
 
 #[test]
+fn help_topics_follow_user_intent_even_with_an_explicit_config() {
+    let values = |parts: &[&str]| {
+        parts
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        help_topic(&values(&["nazoauthctl", "--help"])),
+        Some(HelpTopic::TopLevel)
+    );
+    assert_eq!(
+        help_topic(&values(&["nazoauthctl", "install", "--help"])),
+        Some(HelpTopic::Install)
+    );
+    assert_eq!(
+        help_topic(&values(&[
+            "nazoauthctl",
+            "--config",
+            "/tmp/update.json",
+            "update",
+            "--help",
+        ])),
+        Some(HelpTopic::Update)
+    );
+    assert_eq!(help_topic(&values(&["nazoauthctl", "status"])), None);
+}
+
+#[test]
 fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
     let command = parse(&[
         "nazoauthctl",

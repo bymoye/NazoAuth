@@ -1,0 +1,450 @@
+use std::{collections::BTreeMap, fs, path::PathBuf};
+
+use super::*;
+use crate::{
+    filesystem::PrivateTempDir,
+    model::{
+        Artifact, DatabaseRestore, Dependencies, FrontendRelease, OciRelease, Operator, Postgres,
+        Rollback, Runtime as RuntimeConfig, Ui, Valkey,
+    },
+};
+
+fn manifest(version: &str, revision: char) -> ReleaseManifest {
+    let target = crate::model::release_target().unwrap().to_owned();
+    let suffix = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let binary = Artifact {
+        repository: "nazozero/NazoAuth".to_owned(),
+        name: format!("nazoauth-{target}{suffix}"),
+        sha256: "a".repeat(64),
+        size: 1,
+    };
+    ReleaseManifest {
+        schema: 4,
+        version: version.to_owned(),
+        target: target.clone(),
+        backend_commit: revision.to_string().repeat(40),
+        release_identity: format!(
+            "https://github.com/nazozero/NazoAuth/.github/workflows/release-security.yml@refs/tags/{version}"
+        ),
+        embedded: nazo_operator_protocol::EmbeddedIdentity {
+            release: version.to_owned(),
+            revision: revision.to_string().repeat(40),
+            protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+            build_id: format!("build:{version}"),
+        },
+        artifacts: BTreeMap::from([
+            ("binary".to_owned(), binary),
+            (
+                "updater".to_owned(),
+                Artifact {
+                    repository: "nazozero/NazoAuth".to_owned(),
+                    name: format!("nazoauthctl-{target}{suffix}"),
+                    sha256: "e".repeat(64),
+                    size: 1,
+                },
+            ),
+        ]),
+        frontend: FrontendRelease {
+            repository: "nazozero/NazoAuthWeb".to_owned(),
+            version: "v0.2.0".to_owned(),
+            commit: "c".repeat(40),
+            release_identity: "https://github.com/nazozero/NazoAuthWeb/.github/workflows/release.yml@refs/tags/v0.2.0".to_owned(),
+            artifact: Artifact {
+                repository: "nazozero/NazoAuthWeb".to_owned(),
+                name: "nazoauth-web.tar.gz".to_owned(),
+                sha256: "f".repeat(64),
+                size: 1,
+            },
+        },
+        oci: OciRelease {
+            repository: "ghcr.io/nazozero/nazoauth".to_owned(),
+            index_digest: format!("sha256:{}", "d".repeat(64)),
+            platform_manifests: BTreeMap::from([
+                ("linux/amd64".to_owned(), format!("sha256:{}", "1".repeat(64))),
+                ("linux/arm64".to_owned(), format!("sha256:{}", "2".repeat(64))),
+            ]),
+        },
+        rollback: Rollback {
+            artifact: true,
+            schema_compatible: true,
+            database_restore: DatabaseRestore::Backup,
+            irreversible_migration: false,
+            minimum_supported_version: "0.0.0".to_owned(),
+            migration_floor: "20260731000200".to_owned(),
+            rationale: "additive migration".to_owned(),
+        },
+    }
+}
+
+fn config(work: &PrivateTempDir) -> UpdateConfig {
+    let absolute = |name: &str| work.path().join(name);
+    UpdateConfig {
+        schema: 2,
+        managed_install: true,
+        install_profile: "baseline".to_owned(),
+        repository: "nazozero/NazoAuth".to_owned(),
+        updater_install_path: absolute("installed-nazoauthctl"),
+        backup_root: absolute("backups"),
+        deployment_root: absolute("deployments"),
+        operator: Operator {
+            deployment_id: "deployment-test".to_owned(),
+            controller_key_id: "controller-test".to_owned(),
+            controller_private_key: absolute("operator/controller.key"),
+            controller_public_key: absolute("operator/controller.pub"),
+            receipt_key_id: "receipt-test".to_owned(),
+            receipt_private_key: absolute("operator/receipt.key"),
+            receipt_public_key: absolute("operator/receipt.pub"),
+            audit_key_id: "audit-test".to_owned(),
+            audit_private_key: absolute("operator/audit.key"),
+            audit_public_key: absolute("operator/audit.pub"),
+            break_glass_key_id: "break-glass-test".to_owned(),
+            break_glass_private_key: absolute("operator/break-glass.key"),
+            break_glass_public_key: absolute("operator/break-glass.pub"),
+            secret_revision_file: absolute("operator/secret-revision"),
+            state_directory: absolute("operator-state"),
+            audit_directory: absolute("audit"),
+            trust_state_file: absolute("operator/release-trust.json"),
+        },
+        dependencies: Dependencies::default(),
+        runtime: RuntimeConfig {
+            engine: "host".to_owned(),
+            dependency_engine: String::new(),
+            container_name: "nazoauth".to_owned(),
+            network: "nazoauth".to_owned(),
+            ip_address: String::new(),
+            publish_address: String::new(),
+            health_url: "http://127.0.0.1:8000/ready".to_owned(),
+            readiness_attempts: 1,
+            readiness_interval_seconds: 0,
+            public_discovery_url: "https://auth.example/.well-known/openid-configuration"
+                .to_owned(),
+            expected_issuer: "https://auth.example".to_owned(),
+            mounts: Vec::new(),
+            snapshot_paths: Vec::new(),
+            environment: BTreeMap::new(),
+            service_name: "nazoauth.service".to_owned(),
+            service_user: "nazoauth".to_owned(),
+            binary_path: absolute("nazoauth"),
+            binary_releases: absolute("releases"),
+            working_directory: work.path().to_owned(),
+        },
+        postgres: Postgres {
+            container_name: "postgres".to_owned(),
+            database: "oauth".to_owned(),
+            user: "migrator".to_owned(),
+            image: "postgres".to_owned(),
+            validation_image: "postgres".to_owned(),
+        },
+        valkey: Valkey {
+            container_name: "valkey".to_owned(),
+            image: "valkey".to_owned(),
+            rdb_path: "/data/dump.rdb".to_owned(),
+            password_file: PathBuf::new(),
+        },
+        ui: Ui {
+            releases_root: absolute("ui-releases"),
+        },
+    }
+}
+
+fn journal(config: &UpdateConfig, phase: UpdatePhase) -> UpdateJournal {
+    UpdateJournal {
+        schema: 1,
+        transaction_id: "update-test".to_owned(),
+        started_at: "2026-08-01T00:00:00Z".to_owned(),
+        phase,
+        from_release: manifest("v0.1.2", 'b'),
+        to_release: manifest("v0.2.0", 'e'),
+        previous_runtime: config
+            .runtime
+            .binary_releases
+            .join("b".repeat(40))
+            .join("nazoauth")
+            .display()
+            .to_string(),
+        previous_ui: Some(config.ui.releases_root.join("f".repeat(64))),
+        candidate_runtime: config
+            .runtime
+            .binary_releases
+            .join("e".repeat(40))
+            .join("nazoauth")
+            .display()
+            .to_string(),
+        candidate_ui: config.ui.releases_root.join("f".repeat(64)),
+        staged_updater: config
+            .deployment_root
+            .join(format!("candidate-nazoauthctl-{}", "e".repeat(40))),
+        backup: (phase >= UpdatePhase::BackupCreated)
+            .then(|| config.backup_root.join("v0.2.0-test")),
+    }
+}
+
+#[test]
+fn every_pre_migration_fault_window_restores_the_previous_runtime() {
+    let work = PrivateTempDir::new("nazoauth-update-phase").unwrap();
+    let config = config(&work);
+    for phase in [
+        UpdatePhase::Prepared,
+        UpdatePhase::WriterStopping,
+        UpdatePhase::WriterStopped,
+        UpdatePhase::BackupCreating,
+        UpdatePhase::BackupCreated,
+    ] {
+        assert_eq!(
+            recovery_action(&journal(&config, phase), false),
+            UpdateRecoveryAction::RestorePrevious,
+            "phase {phase:?}"
+        );
+    }
+}
+
+#[test]
+fn migration_faults_obey_the_signed_schema_boundary() {
+    let work = PrivateTempDir::new("nazoauth-update-migration").unwrap();
+    let config = config(&work);
+    let compatible = journal(&config, UpdatePhase::MigrationRunning);
+    assert_eq!(
+        recovery_action(&compatible, false),
+        UpdateRecoveryAction::RestorePrevious
+    );
+
+    let mut barrier = compatible;
+    barrier.to_release.rollback.schema_compatible = false;
+    barrier.to_release.rollback.irreversible_migration = true;
+    assert_eq!(
+        recovery_action(&barrier, false),
+        UpdateRecoveryAction::ContinueForward
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn container_target_binds_the_platform_manifest_not_the_index() {
+    let work = PrivateTempDir::new("nazoauth-platform-target").unwrap();
+    let mut config = config(&work);
+    config.runtime.engine = "docker".to_owned();
+    let manifest = manifest("v0.2.0", 'e');
+
+    assert_eq!(
+        manifest.image_ref().unwrap(),
+        format!("ghcr.io/nazozero/nazoauth@sha256:{}", "1".repeat(64))
+    );
+    assert_eq!(
+        expected_target(&config, &manifest).unwrap().image_digest,
+        format!("sha256:{}", "1".repeat(64))
+    );
+    assert_ne!(
+        manifest.runtime_oci_digest().unwrap(),
+        manifest.image_oci_digest()
+    );
+}
+
+#[test]
+fn an_activated_target_always_finishes_state_trust_and_audit_commit() {
+    let work = PrivateTempDir::new("nazoauth-update-active").unwrap();
+    let config = config(&work);
+    for phase in [
+        UpdatePhase::MigrationRunning,
+        UpdatePhase::MigrationApplied,
+        UpdatePhase::CandidateActivating,
+        UpdatePhase::CandidateActive,
+        UpdatePhase::UiActivating,
+        UpdatePhase::UiActive,
+        UpdatePhase::HealthChecking,
+        UpdatePhase::HealthVerified,
+        UpdatePhase::StateCommitting,
+        UpdatePhase::StateCommitted,
+        UpdatePhase::TrustCommitting,
+        UpdatePhase::TrustCommitted,
+        UpdatePhase::AuditCommitting,
+        UpdatePhase::AuditCommitted,
+    ] {
+        assert_eq!(
+            recovery_action(&journal(&config, phase), true),
+            UpdateRecoveryAction::ContinueForward,
+            "phase {phase:?}"
+        );
+    }
+}
+
+#[test]
+fn a_persisted_candidate_active_phase_finishes_even_if_runtime_inspection_is_unavailable() {
+    let work = PrivateTempDir::new("nazoauth-update-persisted-active").unwrap();
+    let config = config(&work);
+    for phase in [
+        UpdatePhase::CandidateActive,
+        UpdatePhase::UiActivating,
+        UpdatePhase::UiActive,
+        UpdatePhase::HealthChecking,
+        UpdatePhase::HealthVerified,
+        UpdatePhase::StateCommitting,
+        UpdatePhase::StateCommitted,
+        UpdatePhase::TrustCommitting,
+        UpdatePhase::TrustCommitted,
+        UpdatePhase::AuditCommitting,
+        UpdatePhase::AuditCommitted,
+    ] {
+        assert_eq!(
+            recovery_action(&journal(&config, phase), false),
+            UpdateRecoveryAction::ContinueForward,
+            "phase {phase:?}"
+        );
+    }
+}
+
+#[test]
+fn journal_is_durable_closed_and_monotonic() {
+    let work = PrivateTempDir::new("nazoauth-update-journal").unwrap();
+    let config = config(&work);
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    fs::create_dir_all(&config.backup_root).unwrap();
+    fs::create_dir_all(&config.ui.releases_root).unwrap();
+    fs::create_dir_all(&config.runtime.binary_releases).unwrap();
+    let mut value = journal(&config, UpdatePhase::Prepared);
+    write_update_journal(&config, &value).unwrap();
+    let loaded = load_update_journal(&config).unwrap().unwrap();
+    assert_eq!(loaded.phase, UpdatePhase::Prepared);
+    assert_eq!(loaded.transaction_id, "update-test");
+
+    set_update_phase(&config, &mut value, UpdatePhase::WriterStopping).unwrap();
+    assert_eq!(
+        load_update_journal(&config).unwrap().unwrap().phase,
+        UpdatePhase::WriterStopping
+    );
+    assert!(set_update_phase(&config, &mut value, UpdatePhase::Prepared).is_err());
+
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&fs::read(update_journal_path(&config)).unwrap()).unwrap();
+    document["unknown"] = serde_json::json!(true);
+    fs::write(
+        update_journal_path(&config),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    assert!(load_update_journal(&config).is_err());
+}
+
+#[test]
+fn every_external_fault_window_round_trips_the_last_durable_phase() {
+    let work = PrivateTempDir::new("nazoauth-update-fault-windows").unwrap();
+    let config = config(&work);
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    fs::create_dir_all(&config.backup_root).unwrap();
+    fs::create_dir_all(&config.ui.releases_root).unwrap();
+    fs::create_dir_all(&config.runtime.binary_releases).unwrap();
+    let mut value = journal(&config, UpdatePhase::Prepared);
+    write_update_journal(&config, &value).unwrap();
+
+    for phase in [
+        UpdatePhase::WriterStopping,
+        UpdatePhase::WriterStopped,
+        UpdatePhase::BackupCreating,
+        UpdatePhase::BackupCreated,
+        UpdatePhase::MigrationRunning,
+        UpdatePhase::MigrationApplied,
+        UpdatePhase::CandidateActivating,
+        UpdatePhase::CandidateActive,
+        UpdatePhase::UiActivating,
+        UpdatePhase::UiActive,
+        UpdatePhase::HealthChecking,
+        UpdatePhase::HealthVerified,
+        UpdatePhase::StateCommitting,
+        UpdatePhase::StateCommitted,
+        UpdatePhase::TrustCommitting,
+        UpdatePhase::TrustCommitted,
+        UpdatePhase::AuditCommitting,
+        UpdatePhase::AuditCommitted,
+    ] {
+        if phase == UpdatePhase::BackupCreated {
+            value.backup = Some(config.backup_root.join("v0.2.0-test"));
+        }
+        set_update_phase(&config, &mut value, phase).unwrap();
+        let restarted = load_update_journal(&config).unwrap().unwrap();
+        assert_eq!(restarted.phase, phase, "phase {phase:?}");
+        assert_eq!(restarted.transaction_id, value.transaction_id);
+        assert_eq!(restarted.previous_runtime, value.previous_runtime);
+        assert_eq!(restarted.candidate_runtime, value.candidate_runtime);
+        assert_eq!(restarted.backup, value.backup);
+    }
+}
+
+#[test]
+fn a_committed_backup_is_required_after_the_backup_phase() {
+    let work = PrivateTempDir::new("nazoauth-update-backup").unwrap();
+    let config = config(&work);
+    let mut value = journal(&config, UpdatePhase::MigrationRunning);
+    value.backup = None;
+    assert!(validate_update_journal(&config, &value).is_err());
+}
+
+#[test]
+fn journal_rejects_runtime_and_ui_paths_outside_managed_roots() {
+    let work = PrivateTempDir::new("nazoauth-update-paths").unwrap();
+    let config = config(&work);
+    let mut value = journal(&config, UpdatePhase::Prepared);
+    value.previous_runtime = work.path().join("outside-runtime").display().to_string();
+    assert!(validate_update_journal(&config, &value).is_err());
+
+    let mut value = journal(&config, UpdatePhase::Prepared);
+    value.previous_ui = Some(work.path().join("outside-ui"));
+    assert!(validate_update_journal(&config, &value).is_err());
+}
+
+#[test]
+fn update_deployment_record_is_idempotent_for_a_transaction() {
+    let work = PrivateTempDir::new("nazoauth-update-record").unwrap();
+    let config = config(&work);
+    let value = journal(&config, UpdatePhase::StateCommitting);
+    let backup = value.backup.as_deref().unwrap();
+
+    write_update_record(&config, &value, "deployment-success", Some(backup)).unwrap();
+    let path = config.deployment_root.join("update-update-test.json");
+    let first = fs::read(&path).unwrap();
+    write_update_record(&config, &value, "deployment-success", Some(backup)).unwrap();
+
+    assert_eq!(fs::read(&path).unwrap(), first);
+    assert_eq!(
+        fs::read_dir(&config.deployment_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() == "update-update-test.json")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn frontend_cache_marker_must_exactly_match_the_signed_release() {
+    let work = PrivateTempDir::new("nazoauth-frontend-marker").unwrap();
+    let config = config(&work);
+    let value = journal(&config, UpdatePhase::UiActivating);
+    fs::create_dir_all(&value.candidate_ui).unwrap();
+    fs::write(value.candidate_ui.join("index.html"), b"ui").unwrap();
+    let expected = serde_json::json!({
+        "schema": 1,
+        "repository": value.to_release.frontend.repository,
+        "version": value.to_release.frontend.version,
+        "commit": value.to_release.frontend.commit,
+        "release_identity": value.to_release.frontend.release_identity,
+        "artifact": value.to_release.frontend.artifact,
+    });
+    fs::write(
+        value.candidate_ui.join(".nazoauth-ui.json"),
+        serde_json::to_vec(&expected).unwrap(),
+    )
+    .unwrap();
+    assert!(target_ui_is_active(&value));
+
+    let mut changed = expected;
+    changed["unexpected"] = serde_json::json!(true);
+    fs::write(
+        value.candidate_ui.join(".nazoauth-ui.json"),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    assert!(!target_ui_is_active(&value));
+}

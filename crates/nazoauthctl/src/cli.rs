@@ -6,6 +6,43 @@ use crate::model::semantic_tag;
 
 pub(crate) const DEFAULT_CONFIG: &str = "/etc/nazoauth/update.json";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HelpTopic {
+    TopLevel,
+    Install,
+    Update,
+    Keys,
+    Audit,
+    Identity,
+    BreakGlass,
+}
+
+pub(crate) fn help_topic(args: &[String]) -> Option<HelpTopic> {
+    if !args
+        .iter()
+        .any(|value| matches!(value.as_str(), "-h" | "--help"))
+    {
+        return None;
+    }
+    let mut values = args.iter().skip(1);
+    let first = values.next()?;
+    let command = if first == "--config" {
+        values.next()?;
+        values.next().map(String::as_str)
+    } else {
+        Some(first.as_str())
+    };
+    Some(match command {
+        Some("install") => HelpTopic::Install,
+        Some("update" | "check" | "rollback" | "recover" | "migrate") => HelpTopic::Update,
+        Some("keys") => HelpTopic::Keys,
+        Some("audit") => HelpTopic::Audit,
+        Some("identity") => HelpTopic::Identity,
+        Some("break-glass") => HelpTopic::BreakGlass,
+        _ => HelpTopic::TopLevel,
+    })
+}
+
 #[derive(Debug)]
 pub(crate) struct Cli {
     pub(crate) config: PathBuf,

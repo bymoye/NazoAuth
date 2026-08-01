@@ -9,6 +9,7 @@ mod passkey_services;
 mod profile_services;
 mod registration_services;
 pub(crate) mod routes;
+mod ui_release;
 pub(crate) use authentication_services::{
     LocalAuthenticationService, LoginPasswordVerifier, TracingAuthenticationAudit,
 };
@@ -842,18 +843,7 @@ pub async fn run() -> anyhow::Result<()> {
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
     let direct_tls = direct_tls_listener(&config, &settings)?;
-    let ui_static_dir = config
-        .optional_string("UI_STATIC_DIR")
-        .map(PathBuf::from)
-        .map(|path| {
-            let path = std::fs::canonicalize(&path)
-                .with_context(|| format!("failed to resolve UI_STATIC_DIR {}", path.display()))?;
-            if !path.join("index.html").is_file() {
-                anyhow::bail!("UI_STATIC_DIR must contain index.html: {}", path.display());
-            }
-            Ok::<_, anyhow::Error>(path)
-        })
-        .transpose()?;
+    let ui_static_dir = ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
     let server = HttpServer::new(move || {

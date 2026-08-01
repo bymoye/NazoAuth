@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, fs};
 
+use serde_json::json;
+
 use super::*;
 use crate::{
     filesystem::PrivateTempDir,
@@ -100,9 +102,7 @@ fn config(work: &PrivateTempDir) -> UpdateConfig {
             password_file: PathBuf::new(),
         },
         ui: Ui {
-            active_path: work.path().join("ui"),
             releases_root: work.path().join("ui-releases"),
-            serve_from_application: false,
         },
     }
 }
@@ -249,6 +249,63 @@ fn stale_audit_head_repairs_forward_but_tampering_fails_closed() {
     compact.push('x');
     atomic_write(&event, compact.as_bytes(), 0o400).unwrap();
     assert!(verify_audit(&config).is_err());
+}
+
+#[test]
+fn audit_show_document_is_closed_json_without_verifier_presentation() {
+    let work = PrivateTempDir::new("nazoauth-audit-show-test").unwrap();
+    let config = config(&work);
+    let empty = serde_json::to_string(&audit_entries(&config, None).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&empty).unwrap(),
+        json!([])
+    );
+
+    append_management_event(&config, "install", "v1.0.0", "backup").unwrap();
+    let document = serde_json::to_string(&audit_entries(&config, None).unwrap()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&document).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+    assert_eq!(parsed[0]["kind"], json!("management-event"));
+}
+
+#[test]
+fn management_event_request_id_is_idempotent_and_content_bound() {
+    let work = PrivateTempDir::new("nazoauth-audit-idempotency-test").unwrap();
+    let config = config(&work);
+    let request_id = "update-0123456789abcdef0123456789abcdef-complete";
+    let first = append_management_event_idempotent(
+        &config,
+        request_id,
+        "update-completed",
+        "v0.2.0",
+        "schema-compatible",
+    )
+    .unwrap();
+    let retry = append_management_event_idempotent(
+        &config,
+        request_id,
+        "update-completed",
+        "v0.2.0",
+        "schema-compatible",
+    )
+    .unwrap();
+    assert_eq!(first, retry);
+    assert_eq!(
+        fs::read_dir(config.operator.audit_directory.join("management"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(
+        append_management_event_idempotent(
+            &config,
+            request_id,
+            "update-failed",
+            "v0.2.0",
+            "schema-compatible",
+        )
+        .is_err()
+    );
 }
 
 #[test]

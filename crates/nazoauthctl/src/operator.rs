@@ -460,7 +460,7 @@ pub(crate) fn expected_release_target(
 }
 
 fn audit_head(config: &UpdateConfig) -> anyhow::Result<(u64, String)> {
-    verify_audit(config)?;
+    verify_audit_chain(config)?;
     let path = config.operator.audit_directory.join("head.json");
     if !path.exists() {
         return Ok((1, "0".repeat(64)));
@@ -492,13 +492,22 @@ fn append_audit(
 }
 
 pub(crate) fn verify_audit(config: &UpdateConfig) -> anyhow::Result<()> {
+    let (sequence, head) = verify_audit_chain(config)?;
+    if sequence == 0 {
+        println!("audit: empty chain verified");
+    } else {
+        println!("audit: verified {sequence} signed checkpoints; head={head}");
+    }
+    Ok(())
+}
+
+fn verify_audit_chain(config: &UpdateConfig) -> anyhow::Result<(u64, String)> {
     let receipts = config.operator.audit_directory.join("receipts");
     if !receipts.exists() {
-        println!("audit: empty chain verified");
         verify_pending_intents(config)?;
         verify_management_events(config)?;
         verify_trust_transitions(config)?;
-        return Ok(());
+        return Ok((0, "0".repeat(64)));
     }
     let mut paths = fs::read_dir(&receipts)?.collect::<Result<Vec<_>, _>>()?;
     paths.sort_by_key(std::fs::DirEntry::file_name);
@@ -546,15 +555,23 @@ pub(crate) fn verify_audit(config: &UpdateConfig) -> anyhow::Result<()> {
             0o600,
         )?;
     }
-    println!("audit: verified {sequence} signed checkpoints; head={previous}");
     verify_pending_intents(config)?;
     verify_management_events(config)?;
     verify_trust_transitions(config)?;
-    Ok(())
+    Ok((sequence, previous))
 }
 
 pub(crate) fn show_audit(config: &UpdateConfig, request_id: Option<&str>) -> anyhow::Result<()> {
-    verify_audit(config)?;
+    let entries = audit_entries(config, request_id)?;
+    println!("{}", serde_json::to_string_pretty(&entries)?);
+    Ok(())
+}
+
+fn audit_entries(
+    config: &UpdateConfig,
+    request_id: Option<&str>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    verify_audit_chain(config)?;
     let mut entries = Vec::new();
     let intents = config.operator.audit_directory.join("intents");
     if intents.exists() {
@@ -640,8 +657,7 @@ pub(crate) fn show_audit(config: &UpdateConfig, request_id: Option<&str>) -> any
             }
         }
     }
-    println!("{}", serde_json::to_string_pretty(&entries)?);
-    Ok(())
+    Ok(entries)
 }
 
 fn verify_pending_intents(config: &UpdateConfig) -> anyhow::Result<()> {
@@ -676,9 +692,44 @@ pub(crate) fn append_management_event(
     release: &str,
     recovery_boundary: &str,
 ) -> anyhow::Result<PathBuf> {
-    verify_audit(config)?;
+    let request_id = format!("request-{}", encode_hex(&rand::random::<[u8; 16]>()));
+    append_management_event_idempotent(config, &request_id, operation, release, recovery_boundary)
+}
+
+pub(crate) fn append_management_event_idempotent(
+    config: &UpdateConfig,
+    request_id: &str,
+    operation: &str,
+    release: &str,
+    recovery_boundary: &str,
+) -> anyhow::Result<PathBuf> {
+    verify_audit_chain(config)?;
     let directory = config.operator.audit_directory.join("management");
     fs::create_dir_all(&directory)?;
+    let suffix = format!("-{request_id}.jws");
+    let existing = fs::read_dir(&directory)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry.file_name().to_string_lossy().ends_with(&suffix)
+        })
+        .collect::<Vec<_>>();
+    if existing.len() > 1 {
+        bail!("management audit request id is not unique");
+    }
+    if let Some(entry) = existing.first() {
+        let file_name = entry.file_name();
+        let event = load_management_event(config, &file_name.to_string_lossy())?;
+        if event.request_id != request_id
+            || event.operation != operation
+            || event.release != release
+            || event.recovery_boundary != recovery_boundary
+        {
+            bail!("management audit request id was reused with different content");
+        }
+        return Ok(entry.path());
+    }
     let head_path = config.operator.audit_directory.join("management-head.json");
     let (sequence, previous) = if head_path.exists() {
         let head: AuditHead = serde_json::from_slice(&fs::read(&head_path)?)?;
@@ -686,13 +737,12 @@ pub(crate) fn append_management_event(
     } else {
         (1, "0".repeat(64))
     };
-    let request_id = format!("request-{}", encode_hex(&rand::random::<[u8; 16]>()));
     let event = ManagementAuditEvent {
         ver: nazo_operator_protocol::PROTOCOL_VERSION,
         deployment_id: config.operator.deployment_id.clone(),
         sequence,
         previous_sha256: previous,
-        request_id: request_id.clone(),
+        request_id: request_id.to_owned(),
         issued_at: Utc::now().timestamp(),
         actor: Actor {
             kind: ActorKind::LocalRoot,
@@ -721,7 +771,7 @@ pub(crate) fn load_management_event(
     config: &UpdateConfig,
     file_name: &str,
 ) -> anyhow::Result<ManagementAuditEvent> {
-    verify_audit(config)?;
+    verify_audit_chain(config)?;
     let candidate = Path::new(file_name);
     if candidate.components().count() != 1 || candidate.file_name().is_none() {
         bail!("management audit event must be a plain file name");
@@ -927,7 +977,10 @@ pub(crate) fn rotate_controller(
     let staged_public = operator_directory.join("controller.next.pub");
     let staged_audit_private = operator_directory.join("audit.next.key");
     let staged_audit_public = operator_directory.join("audit.next.pub");
-    let staged_break_glass_private = operator_directory.join("break-glass.next.key");
+    let staged_break_glass_private = config
+        .operator
+        .break_glass_private_key
+        .with_file_name("break-glass.next.key");
     let staged_break_glass_public = operator_directory.join("break-glass.next.pub");
     let transitions = config.operator.audit_directory.join("trust-transitions");
     fs::create_dir_all(&transitions)?;
@@ -1077,7 +1130,10 @@ pub(crate) fn recover_pending_rotation(
             directory.join("controller.next.pub"),
             directory.join("audit.next.key"),
             directory.join("audit.next.pub"),
-            directory.join("break-glass.next.key"),
+            config
+                .operator
+                .break_glass_private_key
+                .with_file_name("break-glass.next.key"),
             directory.join("break-glass.next.pub"),
         ] {
             if path.exists() {
@@ -1135,7 +1191,10 @@ pub(crate) fn recover_pending_rotation(
     let staged_public = directory.join("controller.next.pub");
     let staged_audit_private = directory.join("audit.next.key");
     let staged_audit_public = directory.join("audit.next.pub");
-    let staged_break_glass_private = directory.join("break-glass.next.key");
+    let staged_break_glass_private = config
+        .operator
+        .break_glass_private_key
+        .with_file_name("break-glass.next.key");
     let staged_break_glass_public = directory.join("break-glass.next.pub");
     let trusted = directory.join("trusted-controllers");
     fs::create_dir_all(&trusted)?;

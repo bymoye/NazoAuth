@@ -149,10 +149,7 @@ pub(crate) struct Valkey {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ui {
-    pub(crate) active_path: PathBuf,
     pub(crate) releases_root: PathBuf,
-    #[serde(default)]
-    pub(crate) serve_from_application: bool,
 }
 
 impl UpdateConfig {
@@ -195,7 +192,6 @@ impl UpdateConfig {
             &self.updater_install_path,
             &self.backup_root,
             &self.deployment_root,
-            &self.ui.active_path,
             &self.ui.releases_root,
             &self.operator.controller_private_key,
             &self.operator.controller_public_key,
@@ -314,30 +310,49 @@ fn safe_protocol_identifier(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || ".:_/@+-".contains(character))
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseManifest {
     pub(crate) schema: u32,
     pub(crate) version: String,
+    pub(crate) target: String,
     pub(crate) backend_commit: String,
-    pub(crate) frontend_commit: String,
-    pub(crate) image_ref: String,
     pub(crate) release_identity: String,
-    pub(crate) image_oci_digest: String,
     pub(crate) embedded: nazo_operator_protocol::EmbeddedIdentity,
     pub(crate) artifacts: BTreeMap<String, Artifact>,
+    pub(crate) frontend: FrontendRelease,
+    pub(crate) oci: OciRelease,
     pub(crate) rollback: Rollback,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Artifact {
+    pub(crate) repository: String,
     pub(crate) name: String,
     pub(crate) sha256: String,
     pub(crate) size: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FrontendRelease {
+    pub(crate) repository: String,
+    pub(crate) version: String,
+    pub(crate) commit: String,
+    pub(crate) release_identity: String,
+    pub(crate) artifact: Artifact,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OciRelease {
+    pub(crate) repository: String,
+    pub(crate) index_digest: String,
+    pub(crate) platform_manifests: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Rollback {
     pub(crate) artifact: bool,
@@ -359,18 +374,16 @@ pub(crate) enum DatabaseRestore {
 
 impl ReleaseManifest {
     pub(crate) fn validate(&self, version: &str, expected_identity: &str) -> anyhow::Result<()> {
-        if self.schema != 3
+        let target = release_target().context("this platform has no official Release target")?;
+        if self.schema != 4
             || self.version != version
+            || self.target != target
             || self.release_identity != expected_identity
             || self.embedded.release != self.version
             || self.embedded.revision != self.backend_commit
             || self.embedded.protocol != nazo_operator_protocol::PROTOCOL_VERSION
             || !safe_protocol_identifier(&self.embedded.build_id)
-            || !self.image_oci_digest.starts_with("sha256:")
-            || !is_lower_hex(&self.image_oci_digest[7..], 64)
             || !is_lower_hex(&self.backend_commit, 40)
-            || !is_lower_hex(&self.frontend_commit, 40)
-            || !self.image_ref.starts_with("localhost/nazo-oauth-server:v")
         {
             bail!("signed release manifest failed policy validation");
         }
@@ -390,28 +403,135 @@ impl ReleaseManifest {
         if self.rollback.schema_compatible && !self.rollback.artifact {
             bail!("schema-compatible rollback requires a retained artifact");
         }
-        let expected = BTreeSet::from([
-            "binary".to_owned(),
-            "bootstrap".to_owned(),
-            "image".to_owned(),
-            "sbom".to_owned(),
-            "ui".to_owned(),
-            "updater".to_owned(),
-            "updater_sbom".to_owned(),
-        ]);
+        let expected = BTreeSet::from(["binary".to_owned(), "updater".to_owned()]);
         if self.artifacts.keys().cloned().collect::<BTreeSet<_>>() != expected {
             bail!("signed release manifest has an unexpected artifact set");
         }
+        let executable_suffix = if self.target.contains("windows") {
+            ".exe"
+        } else {
+            ""
+        };
+        let expected_binary = format!("nazoauth-{}{executable_suffix}", self.target);
+        let expected_updater = format!("nazoauthctl-{}{executable_suffix}", self.target);
+        if self.artifacts["binary"].name != expected_binary
+            || self.artifacts["updater"].name != expected_updater
+        {
+            bail!("signed release manifest artifact does not match its target");
+        }
         for artifact in self.artifacts.values() {
             if artifact.size == 0
+                || artifact.repository != "nazozero/NazoAuth"
                 || !safe_artifact_name(&artifact.name)
                 || !is_lower_hex(&artifact.sha256, 64)
             {
                 bail!("signed release manifest contains an invalid artifact");
             }
         }
+        self.validate_frontend()?;
+        self.validate_oci()?;
         Ok(())
     }
+
+    pub(crate) fn image_ref(&self) -> anyhow::Result<String> {
+        Ok(format!(
+            "{}@{}",
+            self.oci.repository,
+            self.runtime_oci_digest()?
+        ))
+    }
+
+    pub(crate) fn image_oci_digest(&self) -> &str {
+        &self.oci.index_digest
+    }
+
+    pub(crate) fn runtime_oci_digest(&self) -> anyhow::Result<&str> {
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "linux/amd64",
+            ("linux", "aarch64") => "linux/arm64",
+            _ => bail!("managed OCI runtime is supported only on Linux x86-64 and Arm64"),
+        };
+        self.oci
+            .platform_manifests
+            .get(platform)
+            .map(String::as_str)
+            .context("signed Release has no manifest for this OCI platform")
+    }
+
+    pub(crate) fn frontend_commit(&self) -> &str {
+        &self.frontend.commit
+    }
+
+    fn validate_frontend(&self) -> anyhow::Result<()> {
+        let frontend = &self.frontend;
+        let expected_identity = format!(
+            "https://github.com/{}/.github/workflows/release.yml@refs/tags/{}",
+            frontend.repository, frontend.version
+        );
+        if frontend.repository != "nazozero/NazoAuthWeb"
+            || !semantic_tag(&frontend.version)
+            || !is_lower_hex(&frontend.commit, 40)
+            || frontend.release_identity != expected_identity
+            || frontend.artifact.repository != frontend.repository
+            || frontend.artifact.name != "nazoauth-web.tar.gz"
+            || frontend.artifact.size == 0
+            || frontend.artifact.size > 64 * 1024 * 1024
+            || !is_lower_hex(&frontend.artifact.sha256, 64)
+        {
+            bail!("signed release manifest contains an invalid frontend release");
+        }
+        Ok(())
+    }
+
+    fn validate_oci(&self) -> anyhow::Result<()> {
+        let expected_platforms =
+            BTreeSet::from(["linux/amd64".to_owned(), "linux/arm64".to_owned()]);
+        if self.oci.repository != "ghcr.io/nazozero/nazoauth"
+            || !oci_digest(&self.oci.index_digest)
+            || self
+                .oci
+                .platform_manifests
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != expected_platforms
+            || self
+                .oci
+                .platform_manifests
+                .values()
+                .any(|digest| !oci_digest(digest))
+        {
+            bail!("signed release manifest contains an invalid OCI index");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn release_target() -> Option<&'static str> {
+    let target_env = if cfg!(target_env = "musl") {
+        "musl"
+    } else if cfg!(target_env = "msvc") {
+        "msvc"
+    } else {
+        ""
+    };
+    match (std::env::consts::ARCH, std::env::consts::OS, target_env) {
+        ("x86_64", "linux", "musl") => Some("x86_64-unknown-linux-musl"),
+        ("aarch64", "linux", "musl") => Some("aarch64-unknown-linux-musl"),
+        ("x86_64", "linux", _) => Some("x86_64-unknown-linux-gnu"),
+        ("aarch64", "linux", _) => Some("aarch64-unknown-linux-gnu"),
+        ("x86_64", "windows", _) => Some("x86_64-pc-windows-msvc"),
+        ("aarch64", "windows", _) => Some("aarch64-pc-windows-msvc"),
+        ("x86_64", "macos", _) => Some("x86_64-apple-darwin"),
+        ("aarch64", "macos", _) => Some("aarch64-apple-darwin"),
+        _ => None,
+    }
+}
+
+fn oci_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| is_lower_hex(digest, 64))
 }
 
 pub(crate) fn semantic_tag(value: &str) -> bool {

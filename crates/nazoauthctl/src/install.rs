@@ -46,6 +46,8 @@ pub(crate) fn prepare(
     require_root()?;
     safe_absolute(config_path)?;
     safe_absolute(&options.data_root)?;
+    validate_install_path(config_path, "configuration path")?;
+    validate_install_path(&options.data_root, "data root")?;
     validate_public_url(&options.public_url)?;
     normalize_external_dependencies(&mut options)?;
     let (runtime_engine, dependency_engine) = select_runtime(&options)?;
@@ -88,8 +90,10 @@ pub(crate) fn prepare(
     }
     let operator_dir = config_dir.join("operator");
     create_directory(&operator_dir, 0o700)?;
+    let recovery_dir = options.data_root.join("recovery");
+    create_directory(&recovery_dir, 0o700)?;
     create_directory(&options.data_root.join("audit"), 0o700)?;
-    write_operator_identities(&operator_dir)?;
+    write_operator_identities(&operator_dir, &recovery_dir)?;
     let profile = write_install_profile(config_dir, &app_root, &options)?;
 
     let dependency_mode = if options.database_url.is_some() {
@@ -136,6 +140,16 @@ fn configure_runtime_permissions(config: &UpdateConfig) -> anyhow::Result<()> {
     Process::new("chown")
         .args(["-R", "10001:10001"])
         .arg(app_root)
+        .run_quiet()?;
+    let ui_cache = config
+        .runtime
+        .mounts
+        .iter()
+        .find(|mount| mount.target == Path::new("/var/lib/nazo_oauth/ui-releases"))
+        .context("UI cache mount is unavailable")?;
+    Process::new("chown")
+        .args(["-R", "10001:10001"])
+        .arg(&ui_cache.source)
         .run_quiet()?;
     let config_file = config
         .runtime
@@ -351,6 +365,18 @@ pub(crate) fn install_systemd(config: &UpdateConfig) -> anyhow::Result<()> {
             ))
             .arg(app_root)
             .run_quiet()?;
+        let ui_releases = app_root
+            .parent()
+            .context("deployment data root is unavailable")?
+            .join("ui-releases");
+        Process::new("chown")
+            .arg("-R")
+            .arg(format!(
+                "{}:{}",
+                config.runtime.service_user, config.runtime.service_user
+            ))
+            .arg(ui_releases)
+            .run_quiet()?;
     }
     let unit_dir = env::var_os("NAZOAUTH_SYSTEMD_UNIT_DIR")
         .map(PathBuf::from)
@@ -389,6 +415,11 @@ pub(crate) fn install_systemd(config: &UpdateConfig) -> anyhow::Result<()> {
         ui_releases: &data_root.join("ui-releases"),
         operator_state: &config.operator.state_directory,
         operator_dir,
+        recovery_dir: config
+            .operator
+            .break_glass_private_key
+            .parent()
+            .context("host runtime has no recovery directory")?,
         migration_url: &config.dependencies.migration_database_url_file,
     }
     .render();
@@ -407,6 +438,7 @@ struct HostSystemdUnit<'a> {
     ui_releases: &'a Path,
     operator_state: &'a Path,
     operator_dir: &'a Path,
+    recovery_dir: &'a Path,
     migration_url: &'a Path,
 }
 
@@ -438,9 +470,8 @@ impl HostSystemdUnit<'_> {
          LockPersonality=true\n\
          CapabilityBoundingSet=\n\
          AmbientCapabilities=\n\
-         ReadWritePaths={keys} {avatars} {secrets} {bootstrap}\n\
-         ReadOnlyPaths={ui_releases}\n\
-         InaccessiblePaths={operator_state} {operator_dir} {migration_url}\n\n\
+         ReadWritePaths={keys} {avatars} {secrets} {bootstrap} {ui_releases}\n\
+         InaccessiblePaths={operator_state} {operator_dir} {recovery_dir} {migration_url}\n\n\
          [Install]\n\
          WantedBy=multi-user.target\n",
             user = self.user,
@@ -453,6 +484,7 @@ impl HostSystemdUnit<'_> {
             ui_releases = self.ui_releases.display(),
             operator_state = self.operator_state.display(),
             operator_dir = self.operator_dir.display(),
+            recovery_dir = self.recovery_dir.display(),
             migration_url = self.migration_url.display(),
         )
     }
@@ -675,7 +707,7 @@ fn write_server_config(
         (
             format!("127.0.0.1:{}", options.port),
             data_root.join("app").display().to_string(),
-            data_root.join("ui-releases/current").display().to_string(),
+            data_root.join("ui-releases").display().to_string(),
             format!(
                 "DATABASE_URL_FILE: \"{}\"\nVALKEY_URL_FILE: \"{}\"\n",
                 config_dir.join("secrets/database-url").display(),
@@ -686,7 +718,7 @@ fn write_server_config(
         (
             "0.0.0.0:8000".to_owned(),
             "/var/lib/nazo_oauth".to_owned(),
-            "/var/lib/nazo_oauth/ui-releases/current".to_owned(),
+            "/var/lib/nazo_oauth/ui-releases".to_owned(),
             String::new(),
         )
     };
@@ -706,7 +738,7 @@ fn write_server_config(
          PUBLIC_BASE_URL: \"{public_url}\"\n\
          DATABASE_MAX_CONNECTIONS: 32\n\
          DATA_DIR: \"{data_dir}\"\n\
-         UI_STATIC_DIR: \"{ui_dir}\"\n\
+         UI_CACHE_DIR: \"{ui_dir}\"\n\
          RUST_LOG: \"info\"\n\
          {dependency_files}{profile}",
         public_url = options.public_url,
@@ -988,7 +1020,7 @@ fn build_config(
             mount(
                 options.data_root.join("ui-releases"),
                 "/var/lib/nazo_oauth/ui-releases",
-                "ro,Z",
+                "rw,Z",
             ),
             mount(
                 secrets.join("database-url"),
@@ -1108,9 +1140,7 @@ fn build_config(
             password_file: valkey_password_file,
         },
         ui: Ui {
-            active_path: options.data_root.join("ui-releases/current"),
             releases_root: options.data_root.join("ui-releases"),
-            serve_from_application: true,
         },
     };
     config.validate()?;
@@ -1136,7 +1166,7 @@ fn operator_config(config_dir: &Path, data_root: &Path) -> anyhow::Result<Operat
         audit_private_key: directory.join("audit.key"),
         audit_public_key: directory.join("audit.pub"),
         break_glass_key_id,
-        break_glass_private_key: directory.join("break-glass.key"),
+        break_glass_private_key: data_root.join("recovery/break-glass.key"),
         break_glass_public_key: directory.join("break-glass.pub"),
         secret_revision_file: directory.join("secret-revision"),
         state_directory: data_root.join("app/operator-state"),
@@ -1145,7 +1175,7 @@ fn operator_config(config_dir: &Path, data_root: &Path) -> anyhow::Result<Operat
     })
 }
 
-fn write_operator_identities(directory: &Path) -> anyhow::Result<()> {
+fn write_operator_identities(directory: &Path, recovery_directory: &Path) -> anyhow::Result<()> {
     let deployment_path = directory.join("deployment-id");
     if !deployment_path.exists() {
         atomic_write(
@@ -1162,10 +1192,41 @@ fn write_operator_identities(directory: &Path) -> anyhow::Result<()> {
             0o400,
         )?;
     }
-    for name in ["controller", "receipt", "audit", "break-glass"] {
+    for name in ["controller", "receipt", "audit"] {
         write_operator_keypair(directory, name)?;
     }
+    write_break_glass_keypair(directory, recovery_directory)?;
     Ok(())
+}
+
+fn write_break_glass_keypair(directory: &Path, recovery_directory: &Path) -> anyhow::Result<()> {
+    let private_path = recovery_directory.join("break-glass.key");
+    let public_path = directory.join("break-glass.pub");
+    let kid_path = directory.join("break-glass.kid");
+    if private_path.exists() || public_path.exists() || kid_path.exists() {
+        if private_path.is_file() && public_path.is_file() && kid_path.is_file() {
+            return Ok(());
+        }
+        bail!("incomplete break-glass recovery identity requires review");
+    }
+    let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let public = signing.verifying_key().to_bytes();
+    let digest = encode_hex(&Sha256::digest(public));
+    atomic_write(
+        &private_path,
+        URL_SAFE_NO_PAD.encode(signing.to_bytes()).as_bytes(),
+        0o400,
+    )?;
+    atomic_write(
+        &public_path,
+        URL_SAFE_NO_PAD.encode(public).as_bytes(),
+        0o444,
+    )?;
+    atomic_write(
+        &kid_path,
+        format!("break-glass-{}", &digest[..16]).as_bytes(),
+        0o444,
+    )
 }
 
 fn write_operator_keypair(directory: &Path, name: &str) -> anyhow::Result<()> {
@@ -1441,6 +1502,19 @@ fn validate_public_url(value: &str) -> anyhow::Result<()> {
         || url.fragment().is_some()
     {
         bail!("--public-url must be an absolute HTTP(S) origin");
+    }
+    Ok(())
+}
+
+fn validate_install_path(path: &Path, label: &str) -> anyhow::Result<()> {
+    let value = path
+        .to_str()
+        .with_context(|| format!("{label} must be valid UTF-8"))?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'.'))
+    {
+        bail!("{label} contains characters that cannot be represented safely in runtime config");
     }
     Ok(())
 }

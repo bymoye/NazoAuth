@@ -104,19 +104,91 @@ class ReleaseGovernanceTests(unittest.TestCase):
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("cargo build --release", release)
-        self.assertIn(
-            'docker cp "$container_id:/usr/local/bin/nazoauth" target/release/nazoauth',
-            release,
-        )
-        self.assertIn(
-            'docker cp "$container_id:/usr/local/bin/nazoauthctl" target/nazoauthctl',
-            release,
-        )
+        self.assertIn("cargo build --release --locked --target ${{ matrix.target }}", release)
+        self.assertIn("--package nazo-oauth-server --bin nazoauth", release)
+        self.assertIn("--package nazoauthctl --bin nazoauthctl", release)
+        self.assertIn("nazoauth-${{ matrix.target }}", release)
+        self.assertIn("nazoauthctl-${{ matrix.target }}", release)
         self.assertNotRegex(
             release,
             r"target/release/nazo-oauth-(?:server|migrate|keyctl)",
         )
+
+    def test_release_matrix_is_native_smoked_and_binary_only(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        targets = {
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        }
+        for target in targets:
+            self.assertGreaterEqual(release.count(f"target: {target}"), 1, target)
+        for runner in (
+            "ubuntu-24.04",
+            "ubuntu-24.04-arm",
+            "windows-2025",
+            "windows-11-arm",
+            "macos-15-intel",
+            "macos-15",
+        ):
+            self.assertIn(f"runner: {runner}", release)
+        self.assertIn("cargo test --locked --package nazoauthctl --all-targets", release)
+        self.assertIn("& $server build-identity | ConvertFrom-Json", release)
+        self.assertIn("Verify Linux single-file native dependency boundary", release)
+        self.assertIn("Bind musl builds to the native musl compiler", release)
+        self.assertIn('echo "$cc_variable=musl-gcc"', release)
+        self.assertIn('echo "$linker_variable=musl-gcc"', release)
+        self.assertIn("platforms: linux/amd64,linux/arm64", release)
+        self.assertIn("Publish the exact scanned OCI index without rebuilding", release)
+        self.assertIn(
+            "msvc_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            release,
+        )
+        self.assertIn(
+            "msvc_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+            release,
+        )
+        self.assertIn(
+            '$installation = & $vswhere -latest -products * -requires $component -property installationPath',
+            release,
+        )
+        self.assertIn(
+            'Get-ChildItem -LiteralPath "$env:MSVC_INSTALLATION\\VC\\Tools\\MSVC"',
+            release,
+        )
+        self.assertEqual(release.count("Microsoft.VisualStudio.Component.VC.Tools.ARM64"), 1)
+        action_refs = re.findall(r"uses:\s+[^\s@]+@([^\s#]+)", release)
+        self.assertTrue(action_refs)
+        for action_ref in action_refs:
+            self.assertRegex(action_ref, r"^[0-9a-f]{40}$")
+
+        publish = release.split("name: Publish immutable binary-only GitHub Release assets", 1)[1]
+        self.assertIn("target/release-binaries/*", publish)
+        for forbidden in (".tar", ".json", ".bundle", "SBOM", "install_nazoauthctl"):
+            self.assertNotIn(forbidden, publish)
+
+    def test_each_release_binary_gets_the_closed_custom_attestation(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            release.count("uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"),
+            2,
+        )
+        self.assertEqual(
+            release.count("predicate-type: https://nazo.run/attestations/release-manifest/v1"),
+            2,
+        )
+        self.assertIn("scripts/build_release_attestation.py", release)
+        self.assertIn("--frontend release/frontend.json", release)
+        self.assertIn("--oci target/release-evidence/oci/descriptor.json", release)
 
     def test_conformance_workflow_does_not_repeat_the_rust_quality_gate(self) -> None:
         quality = (
