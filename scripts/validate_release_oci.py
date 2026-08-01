@@ -277,6 +277,7 @@ def _manifest(
     *,
     platform: str,
     attestation: bool,
+    attested_image_digest: str | None = None,
 ) -> None:
     manifest = _closed_object(
         layout.json_blob(descriptor["digest"], name),
@@ -326,10 +327,31 @@ def _manifest(
         if (
             statement["_type"] != "https://in-toto.io/Statement/v0.1"
             or statement["predicateType"] != predicate_type
-            or statement["subject"] != []
             or not isinstance(statement["predicate"], dict)
         ):
             _fail(f"{name}.layers[{position}] is not the expected in-toto statement")
+        subjects = statement["subject"]
+        if (
+            attested_image_digest is None
+            or not isinstance(subjects, list)
+            or len(subjects) != 1
+        ):
+            _fail(f"{name}.layers[{position}] must bind one image-manifest subject")
+        subject = _closed_object(
+            subjects[0],
+            {"name", "digest"},
+            {"name", "digest"},
+            f"{name}.layers[{position}] subject",
+        )
+        _bounded_string(subject["name"], f"{name}.layers[{position}] subject.name", 4096)
+        digest = _closed_object(
+            subject["digest"],
+            {"sha256"},
+            {"sha256"},
+            f"{name}.layers[{position}] subject.digest",
+        )
+        if digest["sha256"] != attested_image_digest.removeprefix("sha256:"):
+            _fail(f"{name}.layers[{position}] subject does not bind its image manifest")
         predicates.add(predicate_type)
     if attestation and predicates != ATTESTATION_PREDICATES:
         _fail(f"{name} must bind exactly the configured SBOM and provenance predicates")
@@ -410,6 +432,7 @@ def validate_layout(root: Path, expected_index_digest: str, repository: str) -> 
             f"OCI {platform} image manifest",
             platform=platform,
             attestation=False,
+            attested_image_digest=None,
         )
         _manifest(
             layout,
@@ -417,6 +440,7 @@ def validate_layout(root: Path, expected_index_digest: str, repository: str) -> 
             f"OCI {platform} BuildKit attestation manifest",
             platform="unknown/unknown",
             attestation=True,
+            attested_image_digest=descriptor["digest"],
         )
     layout.close()
     return {
