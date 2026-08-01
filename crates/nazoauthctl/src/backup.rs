@@ -7,6 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+
+const AUTHENTICATED_VALKEY_COMMAND: &str =
+    "password_file=\"$1\"; shift; cat \"$password_file\" | valkey-cli --askpass \"$@\"";
 use chrono::Utc;
 use tar::{Archive, Builder};
 
@@ -400,10 +403,14 @@ fn valkey(config: &UpdateConfig, arguments: &[&str]) -> anyhow::Result<String> {
             "sh",
             "-eu",
             "-c",
-            "cat \"$1\" | valkey-cli --askpass \"$@\"",
+            AUTHENTICATED_VALKEY_COMMAND,
             "_",
         ])
         .arg(&config.valkey.password_file);
     command = command.args(arguments);
     command.stdout()
 }
+
+#[cfg(all(test, unix))]
+#[path = "../tests/unit/backup.rs"]
+mod tests;
