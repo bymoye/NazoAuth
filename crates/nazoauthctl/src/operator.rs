@@ -137,7 +137,7 @@ enum RetirementProbeAuditEvidence {
 /// then makes every subsequent controller signing read fail closed.
 enum ControllerSigningAccess {
     Available,
-    ForbiddenForRehearsal(SigningKey),
+    ForbiddenForRehearsal(Box<SigningKey>),
     Unavailable,
 }
 
@@ -145,7 +145,7 @@ impl ControllerSigningAccess {
     fn controller_for_retirement_probe(&self, path: &Path) -> anyhow::Result<Option<SigningKey>> {
         match self {
             Self::Available => Ok(Some(read_signing_key(path)?)),
-            Self::ForbiddenForRehearsal(key) => Ok(Some(key.clone())),
+            Self::ForbiddenForRehearsal(key) => Ok(Some(key.as_ref().clone())),
             Self::Unavailable => Ok(None),
         }
     }
@@ -2099,7 +2099,7 @@ pub(crate) fn rehearse_controller_loss(
         config,
         true,
         "simulated-unavailable",
-        ControllerSigningAccess::ForbiddenForRehearsal(probe_key),
+        ControllerSigningAccess::ForbiddenForRehearsal(Box::new(probe_key)),
     )
 }
 

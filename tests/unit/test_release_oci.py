@@ -142,7 +142,9 @@ class OciFixture:
             ) == previous_digest:
                 annotations["vnd.docker.reference.digest"] = replacement_digest
 
-    def mismatch_attestation_subject(self, architecture: str) -> None:
+    def mismatch_attestation_subject(
+        self, architecture: str, subject_position: int = 0
+    ) -> None:
         image_digest = self.images[architecture]
         descriptor = next(
             item
@@ -152,9 +154,29 @@ class OciFixture:
         manifest = json.loads(self.blobs[descriptor["digest"]])
         layer = manifest["layers"][0]
         statement = json.loads(self.blobs[layer["digest"]])
-        statement["subject"][0]["digest"]["sha256"] = "0" * 64
+        statement["subject"][subject_position]["digest"]["sha256"] = "0" * 64
         layer["digest"], layer["size"] = self.blob(statement)
         descriptor["digest"], descriptor["size"] = self.blob(manifest)
+
+    def add_attestation_subject_alias(self, architecture: str) -> None:
+        image_digest = self.images[architecture]
+        descriptor = next(
+            item
+            for item in self.release_descriptors
+            if item.get("annotations", {}).get("vnd.docker.reference.digest") == image_digest
+        )
+        previous_manifest_digest = descriptor["digest"]
+        manifest = json.loads(self.blobs[previous_manifest_digest])
+        for layer in manifest["layers"]:
+            previous_layer_digest = layer["digest"]
+            statement = json.loads(self.blobs[previous_layer_digest])
+            alias = json.loads(json.dumps(statement["subject"][0]))
+            alias["name"] += "&alias=release"
+            statement["subject"].append(alias)
+            layer["digest"], layer["size"] = self.blob(statement)
+            del self.blobs[previous_layer_digest]
+        descriptor["digest"], descriptor["size"] = self.blob(manifest)
+        del self.blobs[previous_manifest_digest]
 
     def write(
         self,
@@ -336,6 +358,34 @@ class ReleaseOciTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 validator.OciValidationError,
                 "subject does not bind its image manifest",
+            ):
+                self.validate(archive, expected, root)
+
+    def test_accepts_multiple_names_only_when_every_subject_binds_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "candidate.oci.tar"
+            fixture = OciFixture()
+            fixture.add_attestation_subject_alias("amd64")
+            expected = fixture.write(archive)
+
+            descriptor = self.validate(archive, expected, root)
+
+            self.assertEqual(
+                descriptor["platform_manifests"]["linux/amd64"],
+                fixture.images["amd64"],
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "candidate.oci.tar"
+            fixture = OciFixture()
+            fixture.add_attestation_subject_alias("amd64")
+            fixture.mismatch_attestation_subject("amd64", subject_position=1)
+            expected = fixture.write(archive)
+            with self.assertRaisesRegex(
+                validator.OciValidationError,
+                "subject does not bind its image manifest at position 1",
             ):
                 self.validate(archive, expected, root)
 

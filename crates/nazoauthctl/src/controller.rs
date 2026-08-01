@@ -161,7 +161,7 @@ impl std::error::Error for BootstrapOutcomeUnknown {}
 
 pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Install(options) => install(cli.config, options),
+        Command::Install(options) => install(cli.config, *options),
         Command::Status => {
             let config = load_config(&cli.config)?;
             status(&config)

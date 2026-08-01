@@ -341,24 +341,31 @@ def _manifest(
         if (
             attested_image_digest is None
             or not isinstance(subjects, list)
-            or len(subjects) != 1
+            or not subjects
         ):
-            _fail(f"{name}.layers[{position}] must bind one image-manifest subject")
-        subject = _closed_object(
-            subjects[0],
-            {"name", "digest"},
-            {"name", "digest"},
-            f"{name}.layers[{position}] subject",
-        )
-        _bounded_string(subject["name"], f"{name}.layers[{position}] subject.name", 4096)
-        digest = _closed_object(
-            subject["digest"],
-            {"sha256"},
-            {"sha256"},
-            f"{name}.layers[{position}] subject.digest",
-        )
-        if digest["sha256"] != attested_image_digest.removeprefix("sha256:"):
-            _fail(f"{name}.layers[{position}] subject does not bind its image manifest")
+            _fail(f"{name}.layers[{position}] must bind image-manifest subjects")
+        # BuildKit may emit more than one name for the same output.  Names are
+        # aliases only: every declared subject must bind the referenced image.
+        for subject_position, value in enumerate(subjects):
+            subject_name = f"{name}.layers[{position}] subjects[{subject_position}]"
+            subject = _closed_object(
+                value,
+                {"name", "digest"},
+                {"name", "digest"},
+                subject_name,
+            )
+            _bounded_string(subject["name"], f"{subject_name}.name", 4096)
+            digest = _closed_object(
+                subject["digest"],
+                {"sha256"},
+                {"sha256"},
+                f"{subject_name}.digest",
+            )
+            if digest["sha256"] != attested_image_digest.removeprefix("sha256:"):
+                _fail(
+                    f"{name}.layers[{position}] subject does not bind its image manifest "
+                    f"at position {subject_position}"
+                )
         predicates.add(predicate_type)
     if attestation and predicates != ATTESTATION_PREDICATES:
         _fail(f"{name} must bind exactly the configured SBOM and provenance predicates")

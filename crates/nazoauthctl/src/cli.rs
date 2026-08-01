@@ -54,7 +54,7 @@ pub(crate) struct Cli {
 }
 
 pub(crate) enum Command {
-    Install(InstallOptions),
+    Install(Box<InstallOptions>),
     BootstrapAdmin(BootstrapAdminOptions),
     Status,
     Doctor,
@@ -165,7 +165,7 @@ impl Cli {
         let command = values.first().cloned().context("a command is required")?;
         values.remove(0);
         let command = match command.as_str() {
-            "install" => Command::Install(parse_install(values)?),
+            "install" => Command::Install(Box::new(parse_install(values)?)),
             "bootstrap-admin" => Command::BootstrapAdmin(parse_bootstrap_admin(values)?),
             "status" => {
                 no_arguments(&values, "status")?;
