@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::*;
 use crate::{
@@ -181,6 +185,76 @@ fn journal(config: &UpdateConfig, phase: UpdatePhase) -> UpdateJournal {
         backup: (phase >= UpdatePhase::BackupCreated)
             .then(|| config.backup_root.join("v0.2.0-test")),
     }
+}
+
+const OPENID4VC_TEST_LEAF: &str = "-----BEGIN CERTIFICATE-----\nMIIFWzCCBEOgAwIBAgISAyBIAwu7NBD5CTxX8suDCMgFMA0GCSqGSIb3DQEBCwUA\nMEoxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MSMwIQYDVQQD\nExpMZXQncyBFbmNyeXB0IEF1dGhvcml0eSBYMzAeFw0xOTA3MTIxMTEyMzBaFw0x\nOTEwMTAxMTEyMzBaMB0xGzAZBgNVBAMTEmxpc3RzLmZvci1vdXIuaW5mbzCCASIw\nDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMVoti34X46DaI2nX24C+aZ2Ofkm\nhKbidiXiRTon1MLSMGl1oNW9MyRyYYCzP4j6DNKChJnr8ZnVShh2oZD+yHWP9lpn\nXMGkbsUxejRMU9hnaAB50pXRIDAzavkVFCguFlJ8nKkv/Y1Avlw7tc2aZOd3lOZB\nEr8gJ8mRDGqqsNU+Z12I6slEstzGMpsq6AewCVw4lMjdWWgugzUrxQTRAsG87on6\ngOiQH2cMODN3L7Fq4KOLQIjb3/luQhAQhpdKmEGFLin3c+f5or3thCDuwwDtOU1l\nZf+8t9S8pZPLrZrIs6H2xjXqCRuUY7iRNbO18Ukc6rlDYhBj9LT+cpmBbHECAwEA\nAaOCAmYwggJiMA4GA1UdDwEB/wQEAwIFoDAdBgNVHSUEFjAUBggrBgEFBQcDAQYI\nKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAdBgNVHQ4EFgQUJj2pvRtl3GloH3He6FX1\nds3X0VEwHwYDVR0jBBgwFoAUqEpqYwR93brm0Tm3pkVl7/Oo7KEwbwYIKwYBBQUH\nAQEEYzBhMC4GCCsGAQUFBzABhiJodHRwOi8vb2NzcC5pbnQteDMubGV0c2VuY3J5\ncHQub3JnMC8GCCsGAQUFBzAChiNodHRwOi8vY2VydC5pbnQteDMubGV0c2VuY3J5\ncHQub3JnLzAdBgNVHREEFjAUghJsaXN0cy5mb3Itb3VyLmluZm8wTAYDVR0gBEUw\nQzAIBgZngQwBAgEwNwYLKwYBBAGC3xMBAQEwKDAmBggrBgEFBQcCARYaaHR0cDov\nL2Nwcy5sZXRzZW5jcnlwdC5vcmcwggEDBgorBgEEAdZ5AgQCBIH0BIHxAO8AdgAp\nPFGWVMg5ZbqqUPxYB9S3b79Yeily3KTDDPTlRUf0eAAAAWvmGV7yAAAEAwBHMEUC\nICQL2Sm14aCMLxX9a9RbySgyBfichMRdbu6QA2Mbrl4eAiEA1vgJ7snqUWCgoqEE\n3SEfK3ioMopzWBsPvG6LdCuCMRAAdQBvU3asMfAxGdiZAKRRFf93FRwR2QLBACkG\njbIImjfZEwAAAWvmGV9oAAAEAwBGMEQCIExGqw3Lo0nSCyUuTRf92FgGASwWYji5\nUGnXuYnpJrAvAiBw8AWVag8fzZ4ogAhY9EFRNdLrUcBjStipL888vyuxKzANBgkq\nhkiG9w0BAQsFAAOCAQEAF8BBLDvSWZg57B6aDtzfUTSGetCYs3k0vJqCJlL+Pz7/\nUruCSsojQzp5R6jvvgYQ83MaIdwe2mgt+OCQB5v7ylctyBzBmYIw9nPnxEC7HlcJ\nL2K/k5ZjJFRnv4kV1Si8+TIpEAV0ksf39KGKemG8kGi4GXV1v03zSv0p8aCarpuo\nSKBJ4qlB0CvmS2MqV4KnzO0O2h0c/ZQ4jg7l53eiN7VPdRMMO1DRw+MaW6I/hEZp\n+oZQ7hhKXgKUBvF4IGwyrfyIZ8AeWKG4IP98COgyRbz7qtrAVevRKCM0ZC2t04A2\nFcix40FKEeiE093Aj3cweMYxNLPgwgQP8Xu3kA5QEw==\n-----END CERTIFICATE-----\n";
+
+const OPENID4VC_TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIC5DCCAcygAwIBAgIULPew9IlvsTLtEgLZKaBAbHMWN6kwDQYJKoZIhvcNAQEL\nBQAwEjEQMA4GA1UEAwwHdGVzdC1jYTAeFw0yNjA4MDExMTQ0MjNaFw0yNjA4MDIx\nMTQ0MjNaMBIxEDAOBgNVBAMMB3Rlc3QtY2EwggEiMA0GCSqGSIb3DQEBAQUAA4IB\nDwAwggEKAoIBAQDdFDwuha9KOic60ADk6zfGqrLTu4cXMVqs21lSP9mRrrNMfxpx\nVHw3flH8dxwVKGEr7ekAtnyceSApK/zmfnzaR9yrAyRtxIpWnSK1mMG01s4GKEsV\nFDeQPWZoEeHTMN6OfJ0PIzjNYIU060Ek2Yv0PPwEscjLZYyDaMtIQyEmPo3HB2/K\nGGMXzPN4uyvGOvKhX9hj7+Mpazfiz7uiX5U0ddeUkKm0pmLL3CrRtrq9sEZhRaVp\nYqJd4t7rnMSe3Xvrq6t+RFvlKrWj8hRe902vqGdglIqiNllRH6x7HJbhf2iixVDM\nrS6K2MgtnCi5Eb6zL9TC+5bW7aSXc3bS95qZAgMBAAGjMjAwMB0GA1UdDgQWBBS9\nUVt3endltN1shOipGpPp4CJNkjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEB\nCwUAA4IBAQA4m2pWKEmz2YssnnyuZL7FHEVjlsDj0i8jGxHPUDbkeS0XLNCiY4NA\nPKZTjA9WJrcvgNcPaCC3GvWMRXLwNdUNjv4dF5VvscH9A3jo3HXl0Ht2zV7+g/lA\nCPSgIh58j6Tvduvl0TfplYnYFkKHq5+wjffZio5fqZ5heqxnREoJGTKtmUr0xJYj\nF3jUGLrX0QSqVaWloAbxR082dOJMHDcYosw0V/8cUuaHCWv2/wnH+RELG5tK59QS\nNgHe7Cd3DspxYA3jVdDINdFM10mklS8Di0twdoeAsrxyWYTR84RV5A/tHe1Zuxfb\n6P3fmVV6Dhj+M+skGJHFtiEap366e847\n-----END CERTIFICATE-----\n";
+
+#[test]
+fn openid4vc_trust_export_keeps_only_the_ca_certificate() {
+    let anchors = extract_openid4vc_trust_anchors(
+        format!("{OPENID4VC_TEST_LEAF}{OPENID4VC_TEST_CA}").as_bytes(),
+    )
+    .unwrap();
+    let anchors = String::from_utf8(anchors).unwrap();
+    assert_eq!(anchors.matches("-----BEGIN CERTIFICATE-----").count(), 1);
+    assert!(!anchors.contains("lists.for-our.info"));
+    let (_, pem) = x509_parser::pem::parse_x509_pem(anchors.as_bytes()).unwrap();
+    let (_, certificate) = x509_parser::parse_x509_certificate(&pem.contents).unwrap();
+    assert!(certificate.is_ca());
+    assert!(extract_openid4vc_trust_anchors(OPENID4VC_TEST_CA.as_bytes()).is_err());
+    assert!(
+        extract_openid4vc_trust_anchors(
+            format!("{OPENID4VC_TEST_CA}{OPENID4VC_TEST_LEAF}").as_bytes()
+        )
+        .is_err()
+    );
+    assert!(extract_openid4vc_trust_anchors(b"-----BEGIN PRIVATE KEY-----\nno\n").is_err());
+    let oversized = vec![b' '; MAX_OPENID4VC_CERTIFICATE_BUNDLE_BYTES + 1];
+    assert!(extract_openid4vc_trust_anchors(&oversized).is_err());
+}
+
+#[test]
+fn openid4vc_trust_export_destination_is_absolute_regular_and_atomic() {
+    let work = PrivateTempDir::new("openid4vc-trust-export-output").unwrap();
+    let output = work.path().join("request-object-trust.pem");
+    safe_export_destination(&output).unwrap();
+    atomic_write(&output, b"old", 0o644).unwrap();
+    safe_export_destination(&output).unwrap();
+    atomic_write(&output, b"new", 0o644).unwrap();
+    assert_eq!(fs::read(&output).unwrap(), b"new");
+    assert!(safe_export_destination(Path::new("relative.pem")).is_err());
+    let directory = work.path().join("directory");
+    fs::create_dir(&directory).unwrap();
+    assert!(safe_export_destination(&directory).is_err());
+    #[cfg(unix)]
+    {
+        let target = work.path().join("target.pem");
+        fs::write(&target, b"target").unwrap();
+        let link = work.path().join("link.pem");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(safe_export_destination(&link).is_err());
+    }
+}
+
+#[test]
+fn openid4vc_trust_export_uses_only_the_managed_key_directory() {
+    let work = PrivateTempDir::new("openid4vc-trust-export-managed-path").unwrap();
+    let mut value = config(&work);
+    value.install_profile = "standards-full".to_owned();
+    let keys = work.path().join("app/keys");
+    fs::create_dir_all(&keys).unwrap();
+    value.runtime.snapshot_paths = vec![keys.clone()];
+    assert_eq!(
+        managed_openid4vc_bundle_path(&value).unwrap(),
+        keys.join(OPENID4VC_CERTIFICATE_BUNDLE)
+    );
+    value
+        .runtime
+        .snapshot_paths
+        .push(work.path().join("other/keys"));
+    assert!(managed_openid4vc_bundle_path(&value).is_err());
 }
 
 #[test]

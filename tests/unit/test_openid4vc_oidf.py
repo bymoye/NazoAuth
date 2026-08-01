@@ -1,9 +1,11 @@
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -626,7 +628,7 @@ class Openid4vcOidfTests(unittest.TestCase):
 
         process = Process()
         with (
-            patch.object(module.subprocess, "Popen", return_value=process),
+            patch.object(module.subprocess, "Popen", return_value=process) as popen,
             patch.object(module.os, "killpg", create=True) as killpg,
             self.assertRaises(KeyboardInterrupt),
         ):
@@ -634,6 +636,26 @@ class Openid4vcOidfTests(unittest.TestCase):
 
         killpg.assert_called_once_with(process.pid, module.signal.SIGTERM)
         self.assertEqual(process.waits, 2)
+        self.assertIs(popen.call_args.kwargs["stdout"], module.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
+
+    def test_openid4vc_wrapper_suppresses_child_output_when_delivering_suite_token(self):
+        module = load("run_openid4vc_conformance.py")
+        process = Mock()
+        process.wait.return_value = 0
+
+        with patch.object(module.subprocess, "Popen", return_value=process) as popen:
+            self.assertEqual(
+                module.run_runner_invocations(
+                    [["--suite-dir", "suite"]],
+                    suite_token="private-suite-token",
+                ),
+                0,
+            )
+
+        self.assertEqual(len(popen.call_args.kwargs["pass_fds"]), 1)
+        self.assertIs(popen.call_args.kwargs["stdout"], module.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
 
     def test_official_openid4vc_workflow_uses_bounded_groups(self):
         workflow = (ROOT / ".github" / "workflows" / "openid4vc-conformance.yml").read_text(
@@ -708,8 +730,31 @@ class Openid4vcOidfTests(unittest.TestCase):
                 "018f0000-0000-7000-8000-000000000001",
             ),
         ):
-            with self.subTest(code=code, location=location), self.assertRaises(RuntimeError):
-                handler.redirect_request(request, None, code, "redirect", {}, location)
+            with self.subTest(code=code, location=location), self.assertRaises(RuntimeError) as raised:
+                handler.redirect_request(
+                    request,
+                    None,
+                    code,
+                    "redirect",
+                    {},
+                    f"{location}?code=redirect-secret-canary",
+                )
+            self.assertNotIn("redirect-secret-canary", str(raised.exception))
+
+    def test_driver_retry_log_never_renders_exception_details(self):
+        module = load("run_openid4vc_conformance.py")
+        stop = module.threading.Event()
+        driver = module.Openid4vcDriver({"poll_interval_seconds": 1}, stop)
+
+        def fail_once():
+            stop.set()
+            raise RuntimeError("credential_offer=driver-secret-canary")
+
+        output = io.StringIO()
+        with patch.object(driver, "drive_once", side_effect=fail_once), contextlib.redirect_stdout(output):
+            driver.run()
+        self.assertIn("RuntimeError", output.getvalue())
+        self.assertNotIn("driver-secret-canary", output.getvalue())
 
     def test_suite_callbacks_are_exact_public_origin_and_never_rewritten(self):
         module = load("run_openid4vc_conformance.py")

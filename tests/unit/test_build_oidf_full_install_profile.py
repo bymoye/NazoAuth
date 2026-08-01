@@ -19,7 +19,6 @@ class OidfFullInstallProfileTests(unittest.TestCase):
                 "keys": [{"kty": "OKP", "crv": "Ed25519", "x": "x2"}]
             },
         }
-        anchor = "-----BEGIN CERTIFICATE-----\nanchor\n-----END CERTIFICATE-----\n"
         return {
             "configs": {
                 "renamed-sd-config.json": {
@@ -33,7 +32,12 @@ class OidfFullInstallProfileTests(unittest.TestCase):
                     "nazo": {"credential_format": "mdoc"},
                 },
                 "renamed-vp-config.json": {
-                    "client": {"request_object_trust_anchor_pem": anchor},
+                    "client": {
+                        "request_object_trust_anchor_pem": (
+                            "-----BEGIN CERTIFICATE-----\nsource-only-anchor\n"
+                            "-----END CERTIFICATE-----\n"
+                        )
+                    },
                 },
             }
         }
@@ -103,6 +107,7 @@ class OidfFullInstallProfileTests(unittest.TestCase):
             configurations["org.iso.18013.5.1.mDL"]["doctype"],
             "org.iso.18013.5.1.mDL",
         )
+        self.assertNotIn("trust_anchors_pem", document)
 
     def test_onboarding_profile_rejects_private_jwk_and_implicit_format(self) -> None:
         for mutation, message in (

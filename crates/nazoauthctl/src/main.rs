@@ -64,7 +64,7 @@ Commands:
   rollback      Roll back the application artifact within the declared schema boundary
   recover       Resume or safely unwind an interrupted update
   migrate       Run the signed migration operation
-  keys          List, validate, generate, or register signing keys
+  keys          List, validate, export OpenID4VC trust, generate, or register signing keys
   audit         Show or verify the management audit chain
   identity      Rotate controller and audit identities
   break-glass   Recover after controller-key loss or suspected theft
@@ -86,9 +86,15 @@ Options:
   --external-dependencies             Use operator-owned PostgreSQL and Valkey
   --secrets-stdin                     Read the three dependency URLs as strict JSON from stdin
   --secret-fd FD                      Read the same JSON from an already-open FD (Linux)
+  --profile-secrets-stdin             Read standards-full profile bearer secrets as strict JSON from stdin
+  --profile-secret-fd FD              Read the same profile JSON from an already-open FD (Linux)
 
 With managed dependencies, identities and secrets are generated automatically.
 External JSON keys: database_url, migration_database_url, valkey_url.
+Profile JSON keys: dynamic_registration_initial_access_token,
+ciba_automated_decision_token, openid4vci_management_token,
+openid4vp_management_token. Profile secret input is accepted only for standards-full.
+The two stdin modes are mutually exclusive; use separate inherited FDs when both inputs are needed.
 Secret values are rejected in argv and ordinary environment variables."
         }
         cli::HelpTopic::BootstrapAdmin => {
@@ -120,9 +126,15 @@ audit, or rollback protection."
             "Usage:
   nazoauthctl [--config PATH] keys list
   nazoauthctl [--config PATH] keys validate
+  nazoauthctl [--config PATH] keys export-openid4vc-trust --output ABSOLUTE_PATH
   nazoauthctl [--config PATH] keys generate-local --alg ALG --purposes CSV --yes
   nazoauthctl [--config PATH] keys register-external --kid KID --alg ALG \
-    --key-ref REF --public-jwk PATH --yes"
+    --key-ref REF --public-jwk PATH --yes
+
+`keys export-openid4vc-trust` is available only for standards-full managed installs.
+It verifies the managed atomic OpenID4VC bundle and writes only its CA:TRUE trust
+anchor(s) to a regular absolute destination using an fsync+rename transition. It
+never exports a leaf certificate or private key."
         }
         cli::HelpTopic::Audit => {
             "Usage:

@@ -106,7 +106,9 @@ def read_operator_credentials(args: argparse.Namespace) -> dict[str, str]:
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        raise OnboardingError(f"unexpected redirect from control-plane request: {code} {newurl}")
+        raise OnboardingError(
+            f"unexpected redirect from control-plane request: HTTP {code}"
+        )
 
 
 def canonical_https_origin(value: str, *, label: str) -> str:
@@ -259,7 +261,9 @@ class ControlPlaneSession:
                 error.read(MAX_RESPONSE_BYTES + 1)
                 raise OnboardingHttpError(method, path, error.code) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise OnboardingError(f"{method} {path} failed: {error}") from error
+            raise OnboardingError(
+                f"{method} {path} failed: {type(error).__name__}"
+            ) from error
         with response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
             if len(body) > MAX_RESPONSE_BYTES:

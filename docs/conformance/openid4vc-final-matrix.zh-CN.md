@@ -47,8 +47,12 @@ sudo nazoauthctl keys generate-local --alg ES256 \
 
 持久化的 `purposes` 字段采用 fail-closed 校验。该专用密钥不会参与 OIDC 轮换，
 也不能签 Access Token、ID Token、JARM、Logout Token、HTTP Message 或 Security
-Event。配置的 OpenID4VC 叶证书必须与这把专用密钥精确匹配，并能链接到配置的
-信任锚；否则服务拒绝启动。运维不得手工编辑 `keyset.json`。
+Event。`standards-full` 首次安装时，经过认证的 key task 会只在内存中创建本地 CA，
+为与此专用密钥精确匹配、且 DNS SAN 为当前 issuer hostname 的叶证书签名；然后原子
+替换一个“叶证书+CA”PEM bundle。两个 certificate 设置都指向该 bundle，运行时只将
+其中 `CA:TRUE` 的证书作为 trust anchor。CA 私钥绝不持久化，onboarding material
+也不能替换这一条本地信任边界。链、锚、DNS SAN 或密钥绑定无效时服务拒绝
+启动。运维不得手工编辑 `keyset.json`。
 
 OIDF Conformance Suite 固定到 v5.2.0 commit
 `dee9a25160e789f0f80517674693ef7989ab9fa1`，运行四个上游计划：

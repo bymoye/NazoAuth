@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use crate::{
-    cli::InstallOptions,
+    cli::{InstallOptions, StandardsProfileSecrets},
     filesystem::{atomic_write, generate_secret, set_mode},
     model::{
         Dependencies, Mount, Operator, Postgres, Runtime, Ui, UpdateConfig, Valkey, safe_absolute,
@@ -32,6 +32,9 @@ const STANDARDS_PROFILE_SECRET_NAMES: &[&str] = &[
     "openid4vci-management-token",
     "openid4vp-management-token",
 ];
+const MAX_PROFILE_SECRET_INPUT_BYTES: u64 = 32 * 1024;
+const MIN_PROFILE_SECRET_VALUE_BYTES: usize = 32;
+const MAX_PROFILE_SECRET_VALUE_BYTES: usize = 4096;
 
 pub(crate) struct PreparedInstall {
     pub(crate) config: UpdateConfig,
@@ -50,6 +53,7 @@ pub(crate) fn prepare(
     validate_install_path(&options.data_root, "data root")?;
     validate_public_url(&options.public_url)?;
     normalize_external_dependencies(&mut options)?;
+    normalize_profile_secrets(&mut options)?;
     let (runtime_engine, dependency_engine) = select_runtime(&options)?;
     let trusted_proxy_cidr = if options.profile == "standards-full" {
         if runtime_engine == "host" {
@@ -94,7 +98,7 @@ pub(crate) fn prepare(
     create_directory(&recovery_dir, 0o700)?;
     create_directory(&options.data_root.join("audit"), 0o700)?;
     write_operator_identities(&operator_dir, &recovery_dir)?;
-    let profile = write_install_profile(config_dir, &app_root, &options)?;
+    let profile = write_install_profile(config_dir, &options)?;
 
     let dependency_mode = if options.database_url.is_some() {
         write_external_urls(&secrets_dir, &options)?
@@ -546,6 +550,40 @@ fn normalize_external_dependencies(options: &mut InstallOptions) -> anyhow::Resu
     Ok(())
 }
 
+fn normalize_profile_secrets(options: &mut InstallOptions) -> anyhow::Result<()> {
+    if options.profile != "standards-full"
+        && (options.profile_secrets_stdin || options.profile_secret_fd.is_some())
+    {
+        bail!("secure profile secret input requires --profile standards-full");
+    }
+    if options.profile_secrets_stdin && options.profile_secret_fd.is_some() {
+        bail!("choose exactly one of --profile-secrets-stdin or --profile-secret-fd");
+    }
+    if options.secrets_stdin && options.profile_secrets_stdin {
+        bail!(
+            "--secrets-stdin and --profile-secrets-stdin both consume stdin; use separate FDs instead"
+        );
+    }
+    if options.secret_fd.is_some() && options.secret_fd == options.profile_secret_fd {
+        bail!("--secret-fd and --profile-secret-fd must use different FDs");
+    }
+    if options.profile_secrets_stdin {
+        read_profile_secrets(options, std::io::stdin().lock())?;
+    } else if options.profile_secret_fd.is_some() {
+        #[cfg(unix)]
+        {
+            let fd = options
+                .profile_secret_fd
+                .context("profile secret FD is unavailable")?;
+            let file = fs::File::open(format!("/proc/self/fd/{fd}"))?;
+            read_profile_secrets(options, file)?;
+        }
+        #[cfg(not(unix))]
+        bail!("--profile-secret-fd requires Linux");
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExternalDependencySecrets {
@@ -571,6 +609,56 @@ fn read_external_dependency_secrets(
     options.database_url = Some(secrets.database_url);
     options.migration_database_url = Some(secrets.migration_database_url);
     options.valkey_url = Some(secrets.valkey_url);
+    Ok(())
+}
+
+fn read_profile_secrets(
+    options: &mut InstallOptions,
+    mut source: impl std::io::Read,
+) -> anyhow::Result<()> {
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    source
+        .by_ref()
+        .take(MAX_PROFILE_SECRET_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PROFILE_SECRET_INPUT_BYTES {
+        bail!("profile secret input exceeds 32 KiB");
+    }
+    let input: StandardsProfileSecrets =
+        serde_json::from_slice(&bytes).context("profile secret input must be strict JSON")?;
+    for (name, value) in [
+        (
+            "dynamic_registration_initial_access_token",
+            &input.dynamic_registration_initial_access_token,
+        ),
+        (
+            "ciba_automated_decision_token",
+            &input.ciba_automated_decision_token,
+        ),
+        (
+            "openid4vci_management_token",
+            &input.openid4vci_management_token,
+        ),
+        (
+            "openid4vp_management_token",
+            &input.openid4vp_management_token,
+        ),
+    ] {
+        validate_profile_secret_value(name, value)?;
+    }
+    options.profile_secrets = Some(input);
+    Ok(())
+}
+
+fn validate_profile_secret_value(name: &str, value: &str) -> anyhow::Result<()> {
+    let length = value.len();
+    if !(MIN_PROFILE_SECRET_VALUE_BYTES..=MAX_PROFILE_SECRET_VALUE_BYTES).contains(&length)
+        || value.contains(['\n', '\r', '\0'])
+    {
+        bail!(
+            "{name} must be between {MIN_PROFILE_SECRET_VALUE_BYTES} and {MAX_PROFILE_SECRET_VALUE_BYTES} bytes and contain no CR, LF, or NUL"
+        );
+    }
     Ok(())
 }
 
@@ -764,12 +852,10 @@ struct StandardsFullProfileMaterial {
     wallet_authorization_origins: Vec<String>,
     ciba_notification_private_origins: Vec<String>,
     backchannel_logout_private_origins: Vec<String>,
-    trust_anchors_pem: String,
 }
 
 fn write_install_profile(
     config_dir: &Path,
-    app_root: &Path,
     options: &InstallOptions,
 ) -> anyhow::Result<Option<String>> {
     if options.profile == "baseline" {
@@ -825,30 +911,28 @@ fn write_install_profile(
             validate_https_origin(origin, &format!("{name} origin"))?;
         }
     }
-    for (name, pem) in [("trust anchors", &material.trust_anchors_pem)] {
-        if !pem.contains("-----BEGIN CERTIFICATE-----")
-            || !pem.contains("-----END CERTIFICATE-----")
-            || pem.contains("PRIVATE KEY")
-        {
-            bail!("{name} must contain certificates and no private key material");
-        }
-    }
-
-    let keys = app_root.join("keys");
-    atomic_write(
-        &keys.join("openid4vc-trust-anchors.pem"),
-        material.trust_anchors_pem.as_bytes(),
-        0o440,
-    )?;
     let secrets = config_dir.join("secrets");
-    for name in [
-        "dynamic-registration-token",
-        "ciba-decision-token",
-        "openid4vci-management-token",
-        "openid4vp-management-token",
-    ] {
-        generate_secret(&secrets.join(name))?;
-    }
+    let provided = options.profile_secrets.as_ref();
+    write_or_verify_profile_secret(
+        &secrets.join("dynamic-registration-token"),
+        "dynamic_registration_initial_access_token",
+        provided.map(|secrets| secrets.dynamic_registration_initial_access_token.as_str()),
+    )?;
+    write_or_verify_profile_secret(
+        &secrets.join("ciba-decision-token"),
+        "ciba_automated_decision_token",
+        provided.map(|secrets| secrets.ciba_automated_decision_token.as_str()),
+    )?;
+    write_or_verify_profile_secret(
+        &secrets.join("openid4vci-management-token"),
+        "openid4vci_management_token",
+        provided.map(|secrets| secrets.openid4vci_management_token.as_str()),
+    )?;
+    write_or_verify_profile_secret(
+        &secrets.join("openid4vp-management-token"),
+        "openid4vp_management_token",
+        provided.map(|secrets| secrets.openid4vp_management_token.as_str()),
+    )?;
     let encryption_key_path = secrets.join("openid4vc-data-encryption-key");
     if !encryption_key_path.exists() {
         let value = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
@@ -888,8 +972,8 @@ fn write_install_profile(
         "OPENID4VC_DATA_ENCRYPTION_KEY_FILE: \"${PROFILE_SECRET_ROOT}/openid4vc-data-encryption-key\"".to_owned(),
         "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN_FILE: \"${PROFILE_SECRET_ROOT}/openid4vci-management-token\"".to_owned(),
         "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN_FILE: \"${PROFILE_SECRET_ROOT}/openid4vp-management-token\"".to_owned(),
-        "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE: \"${PROFILE_APP_ROOT}/keys/openid4vc-signing-chain.pem\"".to_owned(),
-        "OPENID4VC_TRUST_ANCHORS_FILE: \"${PROFILE_APP_ROOT}/keys/openid4vc-trust-anchors.pem\"".to_owned(),
+        "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE: \"${PROFILE_APP_ROOT}/keys/openid4vc-certificate-bundle.pem\"".to_owned(),
+        "OPENID4VC_TRUST_ANCHORS_FILE: \"${PROFILE_APP_ROOT}/keys/openid4vc-certificate-bundle.pem\"".to_owned(),
         format!(
             "OPENID4VC_CLIENT_ATTESTATION_ISSUER: {}",
             scalar(&material.client_attestation_issuer)
@@ -920,6 +1004,39 @@ fn write_install_profile(
         ),
     ];
     Ok(Some(format!("{}\n", lines.join("\n"))))
+}
+
+fn write_or_verify_profile_secret(
+    path: &Path,
+    name: &str,
+    provided: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(value) = provided {
+        validate_profile_secret_value(name, value)?;
+        if path.exists() {
+            let metadata = fs::symlink_metadata(path)
+                .with_context(|| format!("failed to inspect persisted profile secret {name}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("persisted profile secret {name} is not a regular file");
+            }
+            let persisted = zeroize::Zeroizing::new(
+                fs::read_to_string(path)
+                    .with_context(|| format!("failed to read persisted profile secret {name}"))?,
+            );
+            validate_profile_secret_value(name, &persisted)?;
+            if persisted.as_str() != value {
+                bail!(
+                    "provided profile secret {name} does not match the persisted installation state"
+                );
+            }
+        } else {
+            atomic_write(path, value.as_bytes(), 0o440)?;
+        }
+        return Ok(());
+    }
+
+    let generated_or_persisted = zeroize::Zeroizing::new(generate_secret(path)?);
+    validate_profile_secret_value(name, &generated_or_persisted)
 }
 
 fn validate_https_origin(value: &str, label: &str) -> anyhow::Result<()> {

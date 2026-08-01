@@ -59,9 +59,14 @@ sudo nazoauthctl keys generate-local --alg ES256 \
 
 The persisted `purposes` field is fail-closed. A purpose-scoped key is excluded
 from OIDC rotation and cannot sign access tokens, ID Tokens, JARM, logout
-tokens, HTTP messages or security events. The configured OpenID4VC leaf
-certificate must match this exact scoped key and chain to the configured trust
-anchors; startup fails otherwise. Operators must not edit `keyset.json`
+tokens, HTTP messages or security events. On a `standards-full` first install,
+the authenticated key task creates an in-memory local CA and signs a leaf that
+matches this exact scoped key and carries the current issuer hostname as a DNS
+SAN. It atomically replaces one leaf-plus-CA PEM bundle; both certificate
+settings reference it and the runtime accepts only its CA certificates as
+trust anchors. The CA private key is never persisted and onboarding material
+cannot replace that local trust boundary. Startup fails if the chain, anchor,
+DNS SAN, or key binding is invalid. Operators must not edit `keyset.json`
 manually.
 
 ## OIDF suite coverage

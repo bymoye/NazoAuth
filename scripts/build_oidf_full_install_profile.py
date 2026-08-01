@@ -54,20 +54,6 @@ def public_jwks(path: Path, label: str) -> dict[str, Any]:
     return validate_public_jwks(json_object(path, label), label)
 
 
-def certificate_bundle(path: Path) -> str:
-    try:
-        value = read_bounded(path).decode("ascii")
-    except UnicodeDecodeError as error:
-        raise ProfileError("trust anchors must be ASCII PEM") from error
-    if (
-        "-----BEGIN CERTIFICATE-----" not in value
-        or "-----END CERTIFICATE-----" not in value
-        or "PRIVATE KEY" in value
-    ):
-        raise ProfileError("trust anchors must contain certificates and no private key")
-    return value
-
-
 def origin(value: str, label: str) -> str:
     parsed = urllib.parse.urlsplit(value)
     if (
@@ -136,15 +122,10 @@ def document_from_onboarding_artifact(
     if set(trust) != {"issuer", "attester_jwks", "key_attestation_jwks"}:
         raise ProfileError("client attestation trust object has unknown or missing fields")
     issuer = origin(trust["issuer"], "client attestation issuer")
-    anchors = []
     identifiers: dict[str, set[str]] = {"dc+sd-jwt": set(), "mso_mdoc": set()}
     for filename, value in configs.items():
         if not isinstance(filename, str) or not isinstance(value, dict):
             raise ProfileError("OpenID4VC onboarding configs must be named objects")
-        for field in ("client", "client2"):
-            client = value.get(field)
-            if isinstance(client, dict) and "request_object_trust_anchor_pem" in client:
-                anchors.append(client["request_object_trust_anchor_pem"])
         vci = value.get("vci")
         identifier = vci.get("credential_configuration_id") if isinstance(vci, dict) else None
         if isinstance(identifier, str) and identifier:
@@ -159,14 +140,6 @@ def document_from_onboarding_artifact(
                     f"{filename} must explicitly declare a supported nazo.credential_format"
                 )
             identifiers[format_name].add(identifier)
-    anchor = one_canonical(anchors, "request-object trust anchor")
-    if (
-        not isinstance(anchor, str)
-        or "-----BEGIN CERTIFICATE-----" not in anchor
-        or "-----END CERTIFICATE-----" not in anchor
-        or "PRIVATE KEY" in anchor
-    ):
-        raise ProfileError("request-object trust anchor must be certificate-only PEM")
     credential_configurations: dict[str, Any] = {}
     for format_name, candidates in identifiers.items():
         if len(candidates) != 1:
@@ -190,7 +163,6 @@ def document_from_onboarding_artifact(
         "wallet_authorization_origins": [suite],
         "ciba_notification_private_origins": [suite],
         "backchannel_logout_private_origins": [suite],
-        "trust_anchors_pem": anchor,
     }
 
 
@@ -227,7 +199,6 @@ def main() -> int:
     parser.add_argument("--client-attestation-jwks", type=Path)
     parser.add_argument("--key-attestation-jwks", type=Path)
     parser.add_argument("--credential-configurations", type=Path)
-    parser.add_argument("--trust-anchors", type=Path)
     parser.add_argument("--wallet-origin", action="append")
     parser.add_argument("--ciba-origin", action="append")
     parser.add_argument("--backchannel-logout-origin", action="append")
@@ -239,7 +210,6 @@ def main() -> int:
         args.client_attestation_jwks,
         args.key_attestation_jwks,
         args.credential_configurations,
-        args.trust_anchors,
         args.wallet_origin,
         args.ciba_origin,
         args.backchannel_logout_origin,
@@ -253,7 +223,7 @@ def main() -> int:
     else:
         if args.suite_origin is not None or any(value is None for value in explicit):
             raise ProfileError(
-                "explicit mode requires issuer, both JWKS, credential configurations, trust anchors and all three origin inputs"
+                "explicit mode requires issuer, both JWKS, credential configurations and all three origin inputs"
             )
         issuer = origin(args.client_attestation_issuer, "client attestation issuer")
         document = {
@@ -277,7 +247,6 @@ def main() -> int:
                 origin(value, "back-channel logout origin")
                 for value in args.backchannel_logout_origin
             ],
-            "trust_anchors_pem": certificate_bundle(args.trust_anchors),
         }
     write_atomic(args.output, document)
     return 0

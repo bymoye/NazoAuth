@@ -121,7 +121,7 @@ class RunOidfConformanceTests(unittest.TestCase):
 
         process = Process()
         with (
-            mock.patch.object(module.subprocess, "Popen", return_value=process),
+            mock.patch.object(module.subprocess, "Popen", return_value=process) as popen,
             mock.patch.object(module, "terminate_runner") as terminate,
             self.assertRaises(KeyboardInterrupt),
         ):
@@ -142,6 +142,8 @@ class RunOidfConformanceTests(unittest.TestCase):
             )
 
         terminate.assert_called_once_with(process)
+        self.assertIs(popen.call_args.kwargs["stdout"], module.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
 
     def test_callback_completion_waits_have_a_thirty_second_floor(self):
         module = load_runner_module()

@@ -2320,6 +2320,8 @@ def run_official_runner(
         cwd=suite_scripts,
         env=env,
         pass_fds=(() if token_fd is None else (token_fd,)),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
     monitor: OidfEarlyStopMonitor | None = None

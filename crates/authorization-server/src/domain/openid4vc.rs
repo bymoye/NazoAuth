@@ -52,10 +52,16 @@ impl Openid4vcCredentialCrypto {
             .first()
             .ok_or_else(|| anyhow::anyhow!("OpenID4VC signing certificate chain is empty"))?;
         let leaf_der = leaf.to_der()?;
-        let trust_anchors = X509::stack_from_pem(trust_anchors_pem)?
-            .into_iter()
-            .map(|certificate| certificate.to_der())
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut trust_anchors = Vec::new();
+        for certificate in X509::stack_from_pem(trust_anchors_pem)? {
+            let der = certificate.to_der()?;
+            let (_, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
+                anyhow::anyhow!("failed to parse OpenID4VC trust certificate: {error}")
+            })?;
+            if parsed.is_ca() {
+                trust_anchors.push(der);
+            }
+        }
         if trust_anchors.is_empty() {
             anyhow::bail!("OpenID4VC trust anchor set must not be empty");
         }

@@ -35,6 +35,7 @@ from oidf_secret_input import (  # noqa: E402
     read_secret_value,
     sanitized_environment,
 )
+from run_public_oidf_conformance import secret_pipe  # noqa: E402
 from apply_public_conformance_onboarding import (  # noqa: E402
     ControlPlaneSession,
     OnboardingError,
@@ -171,7 +172,9 @@ def request_json(method: str, url: str, token: str, payload: object | None = Non
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        raise RuntimeError(f"unexpected redirect while delivering conformance input: {code} {newurl}")
+        raise RuntimeError(
+            f"unexpected redirect while delivering conformance input: HTTP {code}"
+        )
 
 
 class ExactRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -185,7 +188,7 @@ class ExactRedirectHandler(urllib.request.HTTPRedirectHandler):
             resolved, label="wallet redirect URL"
         ) != self.expected_url:
             raise RuntimeError(
-                f"unexpected redirect while delivering conformance input: {code} {resolved}"
+                f"unexpected redirect while delivering conformance input: HTTP {code}"
             )
         return super().redirect_request(req, fp, code, msg, headers, resolved)
 
@@ -320,7 +323,10 @@ class Openid4vcDriver:
             try:
                 self.drive_once()
             except Exception as exc:  # runner monitor remains authoritative
-                print(f"OpenID4VC driver retryable error: {type(exc).__name__}: {exc}", flush=True)
+                print(
+                    f"OpenID4VC driver retryable error: {type(exc).__name__}",
+                    flush=True,
+                )
             if self.stop.wait(interval):
                 break
 
@@ -482,7 +488,7 @@ class Openid4vcDriver:
         print(f"OpenID4VC driver initiated presentation for {module_id}", flush=True)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver-config-json-file", required=True)
     parser.add_argument(
@@ -502,20 +508,30 @@ def parse_args() -> argparse.Namespace:
             "strict diagnostic runs against a patched conformance suite"
         ),
     )
-    parser.add_argument(
+    operator_credentials = parser.add_mutually_exclusive_group(required=True)
+    operator_credentials.add_argument(
         "--operator-credentials-file",
         type=Path,
-        required=True,
         help="POSIX non-symlink mode-0600 admin credential document",
     )
-    parser.add_argument(
+    operator_credentials.add_argument(
+        "--operator-credentials-fd",
+        type=int,
+        help="read admin credentials from an inherited descriptor >= 3",
+    )
+    suite_token = parser.add_mutually_exclusive_group(required=True)
+    suite_token.add_argument(
         "--suite-token-file",
         type=Path,
-        required=True,
         help="POSIX non-symlink mode-0600 suite bearer token file",
     )
+    suite_token.add_argument(
+        "--suite-token-fd",
+        type=int,
+        help="read the suite token from an inherited descriptor >= 3",
+    )
     parser.add_argument("runner_args", nargs=argparse.REMAINDER)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def option_value(arguments: list[str], option: str) -> str | None:
@@ -751,36 +767,61 @@ def terminate_runner_process(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def run_runner_invocations(invocations: list[list[str]]) -> int:
+def run_runner_invocations(
+    invocations: list[list[str]],
+    *,
+    suite_token: str | None = None,
+) -> int:
     for index, runner_args in enumerate(invocations, start=1):
         print(f"OpenID4VC official runner group {index}/{len(invocations)}", flush=True)
         command = [sys.executable, str(Path(__file__).with_name("run_oidf_conformance.py")), *runner_args]
-        process = subprocess.Popen(
-            command,
-            env=sanitized_environment(),
-            start_new_session=True,
-        )
-        previous_sigterm = signal.getsignal(signal.SIGTERM)
-
-        def interrupt_runner(_signum, _frame) -> None:  # noqa: ANN001
-            raise InterruptedError("OpenID4VC wrapper received SIGTERM")
-
-        signal.signal(signal.SIGTERM, interrupt_runner)
-        try:
-            try:
-                returncode = process.wait()
-            except BaseException:
-                terminate_runner_process(process)
-                raise
-        finally:
-            signal.signal(signal.SIGTERM, previous_sigterm)
+        if suite_token is not None:
+            if "--token-file" in runner_args or "--token-fd" in runner_args:
+                fail("suite token delivery is controlled by the OpenID4VC wrapper")
+            with secret_pipe(suite_token) as descriptor:
+                command.extend(["--token-fd", str(descriptor)])
+                process = subprocess.Popen(
+                    command,
+                    env=sanitized_environment(),
+                    pass_fds=(descriptor,),
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                returncode = wait_for_runner(process)
+        else:
+            process = subprocess.Popen(
+                command,
+                env=sanitized_environment(),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            returncode = wait_for_runner(process)
         if returncode != 0:
             return returncode
     return 0
 
 
-def main() -> int:
-    args = parse_args()
+def wait_for_runner(process: subprocess.Popen[bytes]) -> int:
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def interrupt_runner(_signum, _frame) -> None:  # noqa: ANN001
+        raise InterruptedError("OpenID4VC wrapper received SIGTERM")
+
+    signal.signal(signal.SIGTERM, interrupt_runner)
+    try:
+        try:
+            return process.wait()
+        except BaseException:
+            terminate_runner_process(process)
+            raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     runner_args = args.runner_args[1:] if args.runner_args[:1] == ["--"] else args.runner_args
     if not runner_args:
         fail("arguments for run_oidf_conformance.py are required after --")
@@ -790,12 +831,17 @@ def main() -> int:
     credentials = read_secret_document(
         argparse.Namespace(
             secrets_stdin=False,
-            secret_fd=None,
+            secret_fd=args.operator_credentials_fd,
             secret_file=args.operator_credentials_file,
         ),
         required_fields=("admin_email", "admin_password"),
     )
-    suite_token = read_secret_value(path=args.suite_token_file)
+    suite_token = read_secret_value(
+        descriptor=args.suite_token_fd
+        if args.suite_token_fd is not None
+        else None,
+        path=args.suite_token_file,
+    )
     if not isinstance(config, dict):
         fail("OpenID4VC driver config must be a JSON object")
     config["conformance_token"] = suite_token
@@ -823,8 +869,8 @@ def main() -> int:
         if args.plan_group_size:
             with tempfile.TemporaryDirectory(prefix="openid4vc-oidf-groups-") as directory:
                 invocations = grouped_runner_args(runner_args, args.plan_group_size, Path(directory))
-                return run_runner_invocations(invocations)
-        return run_runner_invocations([runner_args])
+                return run_runner_invocations(invocations, suite_token=suite_token)
+        return run_runner_invocations([runner_args], suite_token=suite_token)
     finally:
         stop.set()
         thread.join(timeout=5)

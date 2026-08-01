@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install_nazoauthctl.sh"
 REPOSITORY = "nazozero/NazoAuth"
-VERSION = "v0.1.2"
+VERSION = "v0.1.4"
 TARGET = "x86_64-unknown-linux-gnu"
 ARTIFACT = f"nazoauthctl-{TARGET}"
 UPDATER = b"#!/bin/sh\nexit 0\n"
@@ -113,7 +113,7 @@ def manifest() -> dict[str, object]:
             "schema_compatible": True,
             "database_restore": "backup",
             "irreversible_migration": False,
-            "minimum_supported_version": "0.1.2",
+            "minimum_supported_version": "0.1.4",
             "migration_floor": "20260729000000",
             "rationale": "test fixture",
         },

@@ -15,15 +15,9 @@ from oidf_secret_input import read_private_text, read_secret_document
 FIELDS = ("applicant_email", "applicant_password")
 
 
-def apply(config_path: Path, credentials_path: Path) -> None:
-    credentials = read_secret_document(
-        argparse.Namespace(
-            secrets_stdin=False,
-            secret_fd=None,
-            secret_file=credentials_path,
-        ),
-        required_fields=FIELDS,
-    )
+def apply_credentials(config_path: Path, credentials: dict[str, str]) -> None:
+    if set(credentials) != set(FIELDS) or any(not credentials[field] for field in FIELDS):
+        raise RuntimeError("browser credentials must contain exactly non-empty applicant_email and applicant_password")
     try:
         document = json.loads(read_private_text(config_path))
     except (OSError, json.JSONDecodeError) as error:
@@ -51,6 +45,18 @@ def apply(config_path: Path, credentials_path: Path) -> None:
         os.replace(temporary, config_path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def apply(config_path: Path, credentials_path: Path) -> None:
+    credentials = read_secret_document(
+        argparse.Namespace(
+            secrets_stdin=False,
+            secret_fd=None,
+            secret_file=credentials_path,
+        ),
+        required_fields=FIELDS,
+    )
+    apply_credentials(config_path, credentials)
 
 
 def main() -> int:

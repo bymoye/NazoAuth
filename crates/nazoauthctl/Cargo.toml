@@ -27,6 +27,8 @@ url.workspace = true
 urlencoding.workspace = true
 uuid.workspace = true
 wait-timeout.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

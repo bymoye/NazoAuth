@@ -133,10 +133,37 @@ The material file is a closed, public-only trust/configuration document:
 private JWK members, private keys, non-HTTPS origins, unknown fields, symlinks,
 and relative paths are rejected. `nazoauthctl` generates the DCR, CIBA and
 OpenID4VC management/encryption secrets locally, persists them only in managed
-secret files, and creates the matching credential signing key and certificate
-through an authenticated one-shot application task before startup. External
-trust anchors and suite public keys are never guessed. `standards-full` therefore
-requires an explicit material file; the baseline never silently enables it.
+secret files, and creates the matching credential signing key and PKI through
+an authenticated one-shot application task before startup. The task creates an
+in-memory local CA, signs a DNS-SAN leaf for the current HTTPS issuer hostname,
+and atomically replaces one leaf-plus-CA PEM bundle. Both OpenID4VC certificate
+settings reference that same bundle; the runtime treats only its CA certificates
+as trust anchors. The CA private key is never persisted. The onboarding material
+cannot supply that request-object trust anchor. Suite public keys are never guessed.
+`standards-full` therefore requires an explicit material file; the baseline
+never silently enables it.
+
+By default, the four standards-full bearer tokens are generated locally. An
+automation operator may instead provide exact values without putting them in
+argv, ordinary environment, profile material, configuration, audit records, or
+task envelopes. The accepted JSON is closed: it contains only
+`dynamic_registration_initial_access_token`, `ciba_automated_decision_token`,
+`openid4vci_management_token`, and `openid4vp_management_token`. Every value
+must be 32–4096 bytes and contain no CR, LF, or NUL. Use a separate inherited
+descriptor when dependency URLs are also supplied; both `--secrets-stdin` and
+`--profile-secrets-stdin` cannot consume one stdin stream:
+
+```sh
+secret-provider read nazoauth/standards-full-profile | \
+  sudo nazoauthctl install --runtime podman --public-url https://auth.example.com \
+    --profile standards-full --profile-material /absolute/standards-full-profile.json \
+    --profile-secrets-stdin
+```
+
+On a retry, supplied values must match already-persisted values exactly. This
+prevents a failed installation retry from silently rotating live protocol
+credentials. When no override is supplied, the same root-only secret mount is
+populated with locally generated values.
 
 ### Existing PostgreSQL and Valkey
 
@@ -178,6 +205,7 @@ sudo nazoauthctl recover --yes
 sudo nazoauthctl migrate --yes
 sudo nazoauthctl keys list
 sudo nazoauthctl keys validate
+sudo nazoauthctl keys export-openid4vc-trust --output /etc/nazoauth/public/vp-request-object-anchor.pem
 sudo nazoauthctl audit verify
 sudo nazoauthctl audit show [--request-id REQUEST_ID]
 sudo nazoauthctl identity rotate --yes
@@ -214,6 +242,14 @@ task envelope. For a host deployment, the same verified binary runs as the
 service user. The final signed receipt binds the controller-verified OCI/host
 digest to the application-verified embedded build identity; the application
 does not claim to prove its OCI digest.
+
+For a standards-full install, `keys export-openid4vc-trust` is the supported
+public handoff for a local OIDF OpenID4VP runner. It verifies the active managed
+leaf-plus-CA bundle, accepts only exactly one non-CA leaf and one `CA:TRUE`
+certificate, and atomically writes only the CA certificate to an absolute path.
+The destination parent must already be a real directory; an existing output
+must be a regular non-symlink file. The leaf and every private key are rejected,
+and the export attempt is recorded in the signed management audit chain.
 
 ## Trust and transaction boundary
 

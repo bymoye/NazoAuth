@@ -45,13 +45,11 @@ pub(crate) fn help_topic(args: &[String]) -> Option<HelpTopic> {
     })
 }
 
-#[derive(Debug)]
 pub(crate) struct Cli {
     pub(crate) config: PathBuf,
     pub(crate) command: Command,
 }
 
-#[derive(Debug)]
 pub(crate) enum Command {
     Install(InstallOptions),
     BootstrapAdmin(BootstrapAdminOptions),
@@ -73,6 +71,9 @@ pub(crate) enum Command {
 pub(crate) enum KeysCommand {
     List,
     Validate,
+    ExportOpenid4vcTrust {
+        output: PathBuf,
+    },
     GenerateLocal {
         alg: String,
         purposes: Vec<String>,
@@ -95,7 +96,6 @@ pub(crate) struct UpdateOptions {
     pub(crate) accept_migration_barrier: bool,
 }
 
-#[derive(Debug)]
 pub(crate) struct InstallOptions {
     pub(crate) runtime: String,
     pub(crate) public_url: String,
@@ -109,7 +109,22 @@ pub(crate) struct InstallOptions {
     pub(crate) external_dependencies: bool,
     pub(crate) secrets_stdin: bool,
     pub(crate) secret_fd: Option<u32>,
+    pub(crate) profile_secrets_stdin: bool,
+    pub(crate) profile_secret_fd: Option<u32>,
+    pub(crate) profile_secrets: Option<StandardsProfileSecrets>,
     pub(crate) version: Option<String>,
+}
+
+/// Profile-scoped bearer secrets. This deliberately has no `Debug` implementation,
+/// and its owned values are zeroized on drop: command parsing and error paths must
+/// never render its contents or retain avoidable plaintext copies.
+#[derive(serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StandardsProfileSecrets {
+    pub(crate) dynamic_registration_initial_access_token: String,
+    pub(crate) ciba_automated_decision_token: String,
+    pub(crate) openid4vci_management_token: String,
+    pub(crate) openid4vp_management_token: String,
 }
 
 #[derive(Debug)]
@@ -257,6 +272,12 @@ fn parse_keys(values: Vec<String>) -> anyhow::Result<KeysCommand> {
     match command.as_str() {
         "list" if values.is_empty() => Ok(KeysCommand::List),
         "validate" if values.is_empty() => Ok(KeysCommand::Validate),
+        "export-openid4vc-trust" => {
+            let values = parse_named_options(values, &["--output"])?;
+            Ok(KeysCommand::ExportOpenid4vcTrust {
+                output: PathBuf::from(&values["--output"]),
+            })
+        }
         "generate-local" => {
             let (values, yes) = take_yes(values)?;
             let values = parse_named_options(values, &["--alg", "--purposes"])?;
@@ -379,6 +400,8 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
     let mut external_dependencies = false;
     let mut secrets_stdin = false;
     let mut secret_fd = None;
+    let mut profile_secrets_stdin = false;
+    let mut profile_secret_fd = None;
     let mut version = None;
     let mut index = 0;
     while index < values.len() {
@@ -389,7 +412,18 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
             continue;
         }
         if flag == "--secrets-stdin" {
+            if secrets_stdin {
+                bail!("--secrets-stdin may be supplied only once");
+            }
             secrets_stdin = true;
+            index += 1;
+            continue;
+        }
+        if flag == "--profile-secrets-stdin" {
+            if profile_secrets_stdin {
+                bail!("--profile-secrets-stdin may be supplied only once");
+            }
+            profile_secrets_stdin = true;
             index += 1;
             continue;
         }
@@ -412,7 +446,16 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
                 }
             }
             "--secret-fd" => {
-                secret_fd = Some(value.parse().context("--secret-fd must be an integer")?);
+                if secret_fd.is_some() {
+                    bail!("--secret-fd may be supplied only once");
+                }
+                secret_fd = Some(parse_secret_fd(&value, "--secret-fd")?);
+            }
+            "--profile-secret-fd" => {
+                if profile_secret_fd.is_some() {
+                    bail!("--profile-secret-fd may be supplied only once");
+                }
+                profile_secret_fd = Some(parse_secret_fd(&value, "--profile-secret-fd")?);
             }
             "--to" => {
                 validate_version(&value)?;
@@ -434,6 +477,9 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
     if profile == "baseline" && profile_material.is_some() {
         bail!("--profile-material is accepted only with --profile standards-full");
     }
+    if profile != "standards-full" && (profile_secrets_stdin || profile_secret_fd.is_some()) {
+        bail!("secure profile secret input requires --profile standards-full");
+    }
     Ok(InstallOptions {
         runtime,
         public_url,
@@ -447,8 +493,21 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
         external_dependencies,
         secrets_stdin,
         secret_fd,
+        profile_secrets_stdin,
+        profile_secret_fd,
+        profile_secrets: None,
         version,
     })
+}
+
+fn parse_secret_fd(value: &str, flag: &str) -> anyhow::Result<u32> {
+    let fd: u32 = value
+        .parse()
+        .with_context(|| format!("{flag} must be an integer >= 3"))?;
+    if fd < 3 {
+        bail!("{flag} must be an integer >= 3");
+    }
+    Ok(fd)
 }
 
 fn parse_version_option(values: Vec<String>) -> anyhow::Result<Option<String>> {

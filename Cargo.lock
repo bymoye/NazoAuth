@@ -2765,6 +2765,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "x509-parser",
  "yaml_serde",
 ]
 
@@ -2941,6 +2942,8 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wait-timeout",
+ "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

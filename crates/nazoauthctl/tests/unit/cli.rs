@@ -26,6 +26,7 @@ fn parses_container_install_with_secure_dependency_input() {
     assert!(options.external_dependencies);
     assert!(options.secrets_stdin);
     assert!(options.database_url.is_none());
+    assert!(options.profile_secrets.is_none());
 }
 
 #[test]
@@ -204,6 +205,8 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
         "--external-dependencies",
         "--secret-fd",
         "9",
+        "--profile-secret-fd",
+        "10",
         "--to",
         "v1.2.3",
     ])
@@ -223,6 +226,7 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
     assert_eq!(options.data_root, PathBuf::from("/srv/nazoauth"));
     assert_eq!(options.port, 8443);
     assert_eq!(options.secret_fd, Some(9));
+    assert_eq!(options.profile_secret_fd, Some(10));
     assert_eq!(options.version.as_deref(), Some("v1.2.3"));
 
     for arguments in [
@@ -230,6 +234,17 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
         &["nazoauthctl", "install", "--port", "0"][..],
         &["nazoauthctl", "install", "--port", "text"][..],
         &["nazoauthctl", "install", "--secret-fd", "text"][..],
+        &["nazoauthctl", "install", "--secret-fd", "0"][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--profile",
+            "standards-full",
+            "--profile-material",
+            "/tmp/material.json",
+            "--profile-secret-fd",
+            "2",
+        ][..],
         &["nazoauthctl", "install", "--profile", "standards-full"][..],
         &[
             "nazoauthctl",
@@ -291,6 +306,22 @@ fn parses_update_and_recovery_authorization_without_weakening_plan_mode() {
             .unwrap()
             .command,
         Command::Rollback { yes: true }
+    ));
+
+    let command = parse(&[
+        "nazoauthctl",
+        "keys",
+        "export-openid4vc-trust",
+        "--output",
+        "/run/nazoauth/oidf-request-object-trust.pem",
+    ])
+    .unwrap()
+    .unwrap()
+    .command;
+    assert!(matches!(
+        command,
+        Command::Keys(KeysCommand::ExportOpenid4vcTrust { output })
+            if output == std::path::Path::new("/run/nazoauth/oidf-request-object-trust.pem")
     ));
     assert!(matches!(
         parse(&["nazoauthctl", "recover", "--yes"])
@@ -395,6 +426,15 @@ fn parses_key_mutations_identity_rotation_and_break_glass() {
             "ES256",
             "--alg",
             "ES256",
+        ][..],
+        &[
+            "nazoauthctl",
+            "keys",
+            "export-openid4vc-trust",
+            "--output",
+            "/tmp/a",
+            "--output",
+            "/tmp/b",
         ][..],
         &["nazoauthctl", "keys", "unknown"][..],
         &["nazoauthctl", "identity", "rotate", "extra"][..],

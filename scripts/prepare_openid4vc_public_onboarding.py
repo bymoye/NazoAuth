@@ -237,6 +237,61 @@ def plan_manifest(expressions: list[str], configs: dict[str, object]) -> dict[st
     }
 
 
+def prepare_onboarding_bundle(
+    *,
+    plan_configs: Path,
+    plan_set: Path,
+    target_issuer: str,
+    suite_base_url: str,
+    applicant_email: str,
+    output_dir: Path,
+) -> None:
+    """Write the private, public-control-plane onboarding inputs.
+
+    Keeping this operation callable separates secret transport from the
+    deterministic client-policy construction.  CLI callers may obtain the
+    applicant address from their own safe source; callers must not need to
+    reimplement the four-wallet aggregation logic.
+    """
+    output = output_dir
+    target_origin = public_https_origin(target_issuer, label="target_issuer")
+    suite_origin = public_https_origin(suite_base_url, label="suite_base_url")
+    if target_origin == suite_origin:
+        fail("the target issuer and conformance suite must use different origins")
+    normalized_email = applicant_email.strip()
+    if "@" not in normalized_email or any(character.isspace() for character in normalized_email):
+        fail("applicant_email must be a non-empty email address")
+
+    plan_document = read_json(plan_configs)
+    configs = plan_document.get("configs") if isinstance(plan_document, dict) else None
+    expressions = read_json(plan_set)
+    if not isinstance(configs, dict):
+        fail("plan_configs must contain a configs object")
+    if not isinstance(expressions, list) or not all(
+        isinstance(expression, str) and expression.strip() for expression in expressions
+    ):
+        fail("plan_set must contain a non-empty array of plan expressions")
+
+    write_private_json(
+        output / "oidf-onboarding-manifest.json",
+        {
+            "schema": 1,
+            "target_issuer": target_origin,
+            "suite_base_url": suite_origin,
+            "applicant_email": normalized_email,
+            "clients": prepare_clients(
+                configs,
+                target_origin=target_origin,
+                suite_origin=suite_origin,
+            ),
+        },
+    )
+    write_private_json(
+        output / "openid4vc-plan-set-manifest.json",
+        plan_manifest(expressions, configs),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan-configs", type=Path, required=True)
@@ -250,42 +305,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    target_origin = public_https_origin(args.target_issuer, label="--target-issuer")
-    suite_origin = public_https_origin(args.suite_base_url, label="--suite-base-url")
-    if target_origin == suite_origin:
-        fail("the target issuer and conformance suite must use different origins")
-    applicant_email = args.applicant_email.strip()
-    if "@" not in applicant_email or any(character.isspace() for character in applicant_email):
-        fail("--applicant-email must be a non-empty email address")
-
-    plan_document = read_json(args.plan_configs)
-    configs = plan_document.get("configs") if isinstance(plan_document, dict) else None
-    expressions = read_json(args.plan_set)
-    if not isinstance(configs, dict):
-        fail("--plan-configs must contain a configs object")
-    if not isinstance(expressions, list) or not all(
-        isinstance(expression, str) and expression.strip() for expression in expressions
-    ):
-        fail("--plan-set must contain a non-empty array of plan expressions")
-
-    output = args.output_dir
-    write_private_json(
-        output / "oidf-onboarding-manifest.json",
-        {
-            "schema": 1,
-            "target_issuer": target_origin,
-            "suite_base_url": suite_origin,
-            "applicant_email": applicant_email,
-            "clients": prepare_clients(
-                configs,
-                target_origin=target_origin,
-                suite_origin=suite_origin,
-            ),
-        },
-    )
-    write_private_json(
-        output / "openid4vc-plan-set-manifest.json",
-        plan_manifest(expressions, configs),
+    prepare_onboarding_bundle(
+        plan_configs=args.plan_configs,
+        plan_set=args.plan_set,
+        target_issuer=args.target_issuer,
+        suite_base_url=args.suite_base_url,
+        applicant_email=args.applicant_email,
+        output_dir=args.output_dir,
     )
     return 0
 

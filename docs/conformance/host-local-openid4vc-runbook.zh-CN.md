@@ -1,0 +1,75 @@
+# Hostinger 本地 OpenID4VC 黑盒矩阵
+
+此流程在运行 NazoAuth 和本地 OIDF Conformance Suite 的同一台 Hostinger 主机上执行。它只使用公开 NazoAuth 控制面、公开发行方端点和 Suite HTTP API；不读取 PostgreSQL、Valkey、运行时文件或内部管理入口。
+
+## 能力与信任边界
+
+`run_host_local_openid4vc_conformance.py` 只负责 `materialize_openid4vc_oidf_config.matrix_cases()` 中固定的 **17 个** OpenID4VC Final/HAIP plans：创建一个专用非管理员 subject，写入有界 credential dataset，并通过普通申请、审批和一次性凭据交付创建恰好四个 namespaced wallet client。
+
+这 17 个计划使用 `private_key_jwt` 或 client attestation 加 DPoP，不覆盖 RFC 8705 mTLS。因此 runner 强制四个 onboarding record 的 `mtls_trust_anchor_pem` 都是 `null`，绝不修改 ingress proxy client-CA。真实 mTLS client trust 和 proxy 的事务性安装/恢复属于独立的 27-plan OIDC/FAPI/CIBA runner。最终报告可以汇总两份独立、无凭据 evidence 为 **44 plans**，但两条路径不得混用信任边界。
+
+VP request-object trust anchor 是 NazoAuth 验证 verifier request-object 签名链使用的公开证书，通过 `--request-object-trust-anchor-pem` 传入。该文件必须是常规、非 symlink、最多 1 MiB 的 ASCII PEM 证书文件，且不得含私钥。它不是 ingress client-CA，不得安装到反向代理。
+
+对 standards-full 的受管安装，矩阵开始前只能通过正式控制面生成此公开文件。该命令从活动的
+原子 OpenID4VC bundle 导出 `CA:TRUE` certificate，绝不导出 leaf 或任何私钥：
+
+```bash
+install -d -m 0755 /etc/nazoauth/public
+nazoauthctl keys export-openid4vc-trust \
+  --output /etc/nazoauth/public/vp-request-object-anchor.pem
+```
+
+## 秘密输入
+
+runner 只从非交互 stdin 或已继承 FD 接受一个严格 UTF-8 JSON 对象；拒绝秘密文件、argv 和环境变量：
+
+```json
+{
+  "applicant_email": "...",
+  "applicant_password": "...",
+  "admin_email": "...",
+  "admin_password": "...",
+  "suite_token": "...",
+  "issuer_management_token": "...",
+  "verifier_management_token": "..."
+}
+```
+
+刻意不提供 OpenID4VC base 或 driver configuration 字段。完成 release、Suite、网络和输出边界验证后，runner 在新的 `0700` material directory 内为**本次运行**生成彼此唯一的 P-256 wallet、client-attestation、key-attestation 与 credential-signing key，以及短期 run-local CA 和 leaf `x5c` 证书；随后按已固定的 Suite 配置形状构建四类固定配置，绑定新建 subject ID、management token 与公开 request-object trust anchor，并验证四个 public onboarding JWKS 与生成的私有 Suite 配置逐一精确对应。不接受仓库、历史、共享或调用者提供的任何私钥。
+
+material directory 与所有生成的私有配置均为 `0600`，并在 `finally` 中删除（包括更早的 setup 步骤失败时）。每次官方 runner 只通过新的继承 FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation/key-attestation/credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
+
+## Hostinger 命令
+
+使用与部署 release identity 一致的干净 checkout，以及精确 revision 的干净本地 Suite checkout。不得添加 filter、临时 expected skip、`--disable-ssl-verify` 或未固定 revision。
+
+```bash
+umask 077
+run_id="oid4vc-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+work_dir="/var/lib/nazoauth/conformance/${run_id}/private"
+export_dir="/var/lib/nazoauth/conformance/${run_id}/evidence"
+
+secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_local_openid4vc_conformance.py \
+  --secrets-stdin \
+  --deployed-sha "$DEPLOYED_SOURCE_SHA" \
+  --runner-sha "$DEPLOYED_SOURCE_SHA" \
+  --target-issuer https://auth.nazo.run \
+  --conformance-server https://oauth-test.nazo.run \
+  --suite-dir /opt/nazo-oauth/conformance/operator-suite \
+  --suite-revision 946451d1ce29965c9ab7aee05f5003552233160e \
+  --work-dir "$work_dir" \
+  --export-dir "$export_dir" \
+  --run-namespace "$run_id" \
+  --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
+  --plan-group-size 4 \
+  --timeout-seconds 4800 \
+  --monitor-interval-seconds 10
+```
+
+`secret_provider_for_this_host` 由运营者维护，只能把这一份文档写到 stdout，不得记录内容、导出到环境变量或写入 shell history。FD 方式等价：传入 `--secret-fd N` 并确保 `N >= 3` 被 Python 继承。
+
+## 完成与失败
+
+开始前会验证 runner/deployed commit 都干净且精确、本地 Suite revision 干净且精确、Suite API 的认证边界、17 个唯一 alias 及固定 registry/expected-record。官方 runner 完成后还会再次完整检查 Suite state。
+
+`finally` 删除生成的 Suite config 和专用 dataset，再经同一公开控制面停用四个 client；此 runner 不创建 mTLS trust request。随后将 Suite archive 归约为 `evidence-manifest.json`，并写入无凭据的 `host-local-openid4vc-receipt.json`。清理、Suite 洁净性或终态检查有错误即整个操作失败；不得通过数据库或内部入口修复状态。

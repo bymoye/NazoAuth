@@ -17,6 +17,9 @@ fn install_options(data_root: PathBuf) -> InstallOptions {
         external_dependencies: false,
         secrets_stdin: false,
         secret_fd: None,
+        profile_secrets_stdin: false,
+        profile_secret_fd: None,
+        profile_secrets: None,
         version: Some("v0.2.0".to_owned()),
     }
 }
@@ -143,11 +146,8 @@ fn host_service_unit_exposes_only_runtime_state() {
 fn oidf_profile_material_generates_only_file_references_for_secrets() {
     let work = PrivateTempDir::new("oidf-install-profile").unwrap();
     let config = work.path().join("config");
-    let app = work.path().join("app");
     fs::create_dir(&config).unwrap();
     fs::create_dir(config.join("secrets")).unwrap();
-    fs::create_dir(&app).unwrap();
-    fs::create_dir(app.join("keys")).unwrap();
     let material = work.path().join("profile.json");
     fs::write(
         &material,
@@ -158,8 +158,7 @@ fn oidf_profile_material_generates_only_file_references_for_secrets() {
             "credential_configurations": {"example":{"format":"dc+sd-jwt","scope":"example"}},
             "wallet_authorization_origins": ["https://suite.example"],
             "ciba_notification_private_origins": ["https://suite.example"],
-            "backchannel_logout_private_origins": ["https://suite.example"],
-            "trust_anchors_pem": "-----BEGIN CERTIFICATE-----\nY2E=\n-----END CERTIFICATE-----\n"
+            "backchannel_logout_private_origins": ["https://suite.example"]
         }))
         .unwrap(),
     )
@@ -177,21 +176,198 @@ fn oidf_profile_material_generates_only_file_references_for_secrets() {
         external_dependencies: false,
         secrets_stdin: false,
         secret_fd: None,
+        profile_secrets_stdin: false,
+        profile_secret_fd: None,
+        profile_secrets: None,
         version: Some("v1.2.3".to_owned()),
     };
 
-    let rendered = write_install_profile(&config, &app, &options)
-        .unwrap()
-        .unwrap();
+    let rendered = write_install_profile(&config, &options).unwrap().unwrap();
 
     for name in STANDARDS_PROFILE_SECRET_NAMES {
         let value = fs::read_to_string(config.join("secrets").join(name)).unwrap();
+        if *name != "openid4vc-data-encryption-key" {
+            assert!(value.len() >= MIN_PROFILE_SECRET_VALUE_BYTES);
+        }
         assert!(!rendered.contains(&value));
         assert!(rendered.contains(&format!("${{PROFILE_SECRET_ROOT}}/{name}")));
     }
     assert!(rendered.contains("ENABLE_OPENID4VCI_ISSUER: true"));
     assert!(rendered.contains("ENABLE_OPENID4VP_VERIFIER: true"));
+    assert_eq!(
+        rendered.matches("openid4vc-certificate-bundle.pem").count(),
+        2
+    );
     assert!(!rendered.contains("PRIVATE KEY"));
+}
+
+#[test]
+fn oidf_profile_secret_override_is_strict_private_and_resumable() {
+    let work = PrivateTempDir::new("oidf-install-profile-secret-override").unwrap();
+    let config = work.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::create_dir(config.join("secrets")).unwrap();
+    let material = work.path().join("profile.json");
+    fs::write(
+        &material,
+        serde_json::to_vec(&serde_json::json!({
+            "client_attestation_issuer": "https://attester.example/",
+            "client_attestation_jwks": {"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y"}]},
+            "key_attestation_jwks": {"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y"}]},
+            "credential_configurations": {"example":{"format":"dc+sd-jwt","scope":"example"}},
+            "wallet_authorization_origins": ["https://suite.example"],
+            "ciba_notification_private_origins": ["https://suite.example"],
+            "backchannel_logout_private_origins": ["https://suite.example"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let canary = "x".repeat(32);
+    let mut options = install_options(work.path().join("data"));
+    options.profile = "standards-full".to_owned();
+    options.profile_material = Some(material);
+    options.profile_secrets = Some(StandardsProfileSecrets {
+        dynamic_registration_initial_access_token: format!("dynamic-{canary}"),
+        ciba_automated_decision_token: format!("ciba-{canary}"),
+        openid4vci_management_token: format!("issuer-{canary}"),
+        openid4vp_management_token: format!("verifier-{canary}"),
+    });
+
+    let rendered = write_install_profile(&config, &options).unwrap().unwrap();
+    assert!(!rendered.contains(&canary));
+    assert_eq!(
+        fs::read_to_string(config.join("secrets/dynamic-registration-token")).unwrap(),
+        format!("dynamic-{canary}")
+    );
+    assert_eq!(
+        fs::read_to_string(config.join("secrets/openid4vp-management-token")).unwrap(),
+        format!("verifier-{canary}")
+    );
+    assert!(write_install_profile(&config, &options).is_ok());
+
+    let mut mismatched = install_options(work.path().join("data"));
+    mismatched.profile = "standards-full".to_owned();
+    mismatched.profile_material = options.profile_material.clone();
+    mismatched.profile_secrets = Some(StandardsProfileSecrets {
+        dynamic_registration_initial_access_token: "other-secret-value-that-is-at-least-32"
+            .to_owned(),
+        ciba_automated_decision_token: format!("ciba-{canary}"),
+        openid4vci_management_token: format!("issuer-{canary}"),
+        openid4vp_management_token: format!("verifier-{canary}"),
+    });
+    let error = write_install_profile(&config, &mismatched).unwrap_err();
+    assert!(!format!("{error:#}").contains(&canary));
+}
+
+#[test]
+fn profile_secret_input_is_closed_bounded_and_never_echoed() {
+    let work = PrivateTempDir::new("profile-secret-input").unwrap();
+    let canary = "profile-secret-canary-that-is-long-enough";
+    let valid = serde_json::json!({
+        "dynamic_registration_initial_access_token": canary,
+        "ciba_automated_decision_token": canary,
+        "openid4vci_management_token": canary,
+        "openid4vp_management_token": canary,
+    });
+    let mut options = install_options(work.path().join("data"));
+    options.profile = "standards-full".to_owned();
+    read_profile_secrets(
+        &mut options,
+        std::io::Cursor::new(serde_json::to_vec(&valid).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        options
+            .profile_secrets
+            .as_ref()
+            .unwrap()
+            .openid4vci_management_token,
+        canary
+    );
+
+    for invalid in [
+        br#"{"dynamic_registration_initial_access_token":"profile-secret-canary-that-is-long-enough","ciba_automated_decision_token":"profile-secret-canary-that-is-long-enough","openid4vci_management_token":"profile-secret-canary-that-is-long-enough","openid4vp_management_token":"profile-secret-canary-that-is-long-enough","unexpected":"profile-secret-canary-that-is-long-enough"}"#.as_slice(),
+        br#"{"dynamic_registration_initial_access_token":"short","ciba_automated_decision_token":"profile-secret-canary-that-is-long-enough","openid4vci_management_token":"profile-secret-canary-that-is-long-enough","openid4vp_management_token":"profile-secret-canary-that-is-long-enough"}"#.as_slice(),
+        br#"{"dynamic_registration_initial_access_token":"profile-secret-canary-that-is-long-enough\n","ciba_automated_decision_token":"profile-secret-canary-that-is-long-enough","openid4vci_management_token":"profile-secret-canary-that-is-long-enough","openid4vp_management_token":"profile-secret-canary-that-is-long-enough"}"#.as_slice(),
+    ] {
+        let mut options = install_options(work.path().join("invalid-data"));
+        let error = read_profile_secrets(&mut options, std::io::Cursor::new(invalid)).unwrap_err();
+        assert!(!format!("{error:#}").contains("profile-secret-canary"));
+        assert!(options.profile_secrets.is_none());
+    }
+
+    let mut oversized = install_options(work.path().join("oversized-data"));
+    let error = read_profile_secrets(
+        &mut oversized,
+        std::io::Cursor::new(vec![b' '; 32 * 1024 + 1]),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "profile secret input exceeds 32 KiB");
+}
+
+#[test]
+fn profile_secret_channels_fail_closed_without_consuming_ambiguous_stdin() {
+    let work = PrivateTempDir::new("profile-secret-channels").unwrap();
+    let mut stdin_conflict = install_options(work.path().join("stdin-conflict"));
+    stdin_conflict.profile = "standards-full".to_owned();
+    stdin_conflict.secrets_stdin = true;
+    stdin_conflict.profile_secrets_stdin = true;
+    assert_eq!(
+        normalize_profile_secrets(&mut stdin_conflict)
+            .unwrap_err()
+            .to_string(),
+        "--secrets-stdin and --profile-secrets-stdin both consume stdin; use separate FDs instead"
+    );
+
+    let mut fd_conflict = install_options(work.path().join("fd-conflict"));
+    fd_conflict.profile = "standards-full".to_owned();
+    fd_conflict.secret_fd = Some(7);
+    fd_conflict.profile_secret_fd = Some(7);
+    assert_eq!(
+        normalize_profile_secrets(&mut fd_conflict)
+            .unwrap_err()
+            .to_string(),
+        "--secret-fd and --profile-secret-fd must use different FDs"
+    );
+
+    let mut baseline = install_options(work.path().join("baseline"));
+    baseline.profile_secrets_stdin = true;
+    assert_eq!(
+        normalize_profile_secrets(&mut baseline)
+            .unwrap_err()
+            .to_string(),
+        "secure profile secret input requires --profile standards-full"
+    );
+}
+
+#[test]
+fn oidf_profile_rejects_legacy_external_openid4vc_trust_anchors() {
+    let work = PrivateTempDir::new("oidf-install-profile-legacy-anchor").unwrap();
+    let config = work.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::create_dir(config.join("secrets")).unwrap();
+    let material = work.path().join("profile.json");
+    fs::write(
+        &material,
+        serde_json::to_vec(&serde_json::json!({
+            "client_attestation_issuer": "https://attester.example/",
+            "client_attestation_jwks": {"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y"}]},
+            "key_attestation_jwks": {"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y"}]},
+            "credential_configurations": {"example":{"format":"dc+sd-jwt","scope":"example"}},
+            "wallet_authorization_origins": ["https://suite.example"],
+            "ciba_notification_private_origins": ["https://suite.example"],
+            "backchannel_logout_private_origins": ["https://suite.example"],
+            "trust_anchors_pem": "-----BEGIN CERTIFICATE-----\\nlegacy\\n-----END CERTIFICATE-----\\n"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut options = install_options(work.path().join("data"));
+    options.profile = "standards-full".to_owned();
+    options.profile_material = Some(material);
+
+    let error = write_install_profile(&config, &options).unwrap_err();
+    assert!(error.to_string().contains("strict JSON"));
 }
 
 #[test]

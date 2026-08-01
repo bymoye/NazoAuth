@@ -103,17 +103,26 @@ async fn typed_operator_key_lifecycle_returns_content_revisions() {
 }
 
 #[tokio::test]
-async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate() {
+async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate_chain() {
     let directory = std::env::temp_dir().join(format!(
         "nazoauth-keyctl-certificate-{}",
         uuid::Uuid::now_v7()
     ));
-    let certificate = directory.join("openid4vc-signing-chain.pem");
+    let certificate = directory.join("openid4vc-certificate-bundle.pem");
+    let anchors = certificate.clone();
     let config = ConfigSource::from_owned_pairs_for_test([
         ("JWK_KEYS_DIR".to_owned(), directory.display().to_string()),
         (
             "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE".to_owned(),
             certificate.display().to_string(),
+        ),
+        (
+            "OPENID4VC_TRUST_ANCHORS_FILE".to_owned(),
+            anchors.display().to_string(),
+        ),
+        (
+            "PUBLIC_BASE_URL".to_owned(),
+            "https://auth.example".to_owned(),
         ),
     ]);
     let key_settings = key_settings_from_config(&config).unwrap();
@@ -126,12 +135,37 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate() {
         &["credential".to_owned(), "presentation_request".to_owned()],
     )
     .unwrap();
+    let paths = Openid4vcCertificatePaths {
+        chain: certificate.clone(),
+        anchors: anchors.clone(),
+        hostname: "auth.example".to_owned(),
+    };
     let (kid, first_revision) =
-        generate_local_with_key_settings(&key_settings, Some(&certificate), options)
+        generate_local_with_key_settings(&key_settings, Some(&paths), options)
             .await
             .unwrap();
     let first_certificate = tokio::fs::read(&certificate).await.unwrap();
-    assert!(X509::from_pem(&first_certificate).is_ok());
+    let certificates = X509::stack_from_pem(&first_certificate).unwrap();
+    assert_eq!(certificates.len(), 2);
+    assert_ne!(
+        certificates[0].to_der().unwrap(),
+        certificates[1].to_der().unwrap()
+    );
+    assert!(!is_ca_certificate(&certificates[0]).unwrap());
+    assert!(is_ca_certificate(&certificates[1]).unwrap());
+    let subject_alt_names = certificates[0].subject_alt_names().unwrap();
+    assert_eq!(subject_alt_names.len(), 1);
+    assert_eq!(subject_alt_names[0].dnsname(), Some("auth.example"));
+    assert!(
+        certificates[1]
+            .verify(&certificates[1].public_key().unwrap())
+            .unwrap()
+    );
+    assert!(
+        certificates[0]
+            .verify(&certificates[1].public_key().unwrap())
+            .unwrap()
+    );
 
     let options = parse_generate_local(
         "ES256",
@@ -139,7 +173,7 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate() {
     )
     .unwrap();
     let (same_kid, same_revision) =
-        generate_local_with_key_settings(&key_settings, Some(&certificate), options)
+        generate_local_with_key_settings(&key_settings, Some(&paths), options)
             .await
             .unwrap();
     assert_eq!(same_kid, kid);
@@ -147,6 +181,30 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate() {
     assert_eq!(
         tokio::fs::read(&certificate).await.unwrap(),
         first_certificate
+    );
+    assert_eq!(tokio::fs::read(&anchors).await.unwrap(), first_certificate);
+
+    tokio::fs::write(&certificate, b"not-a-certificate")
+        .await
+        .unwrap();
+    let options = parse_generate_local(
+        "ES256",
+        &["credential".to_owned(), "presentation_request".to_owned()],
+    )
+    .unwrap();
+    let (repaired_kid, repaired_revision) =
+        generate_local_with_key_settings(&key_settings, Some(&paths), options)
+            .await
+            .unwrap();
+    assert_eq!(repaired_kid, kid);
+    assert_eq!(repaired_revision, first_revision);
+    assert_ne!(
+        tokio::fs::read(&certificate).await.unwrap(),
+        b"not-a-certificate"
+    );
+    assert_eq!(
+        tokio::fs::read(&anchors).await.unwrap(),
+        tokio::fs::read(&certificate).await.unwrap()
     );
 
     tokio::fs::remove_dir_all(directory).await.unwrap();
