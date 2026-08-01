@@ -194,21 +194,28 @@ When the official runner configuration is stored in the repository's encrypted
 material, export it without creating suite plans:
 
 ```sh
-gh workflow run oidf-conformance-full.yml \
+run_url="$(gh workflow run oidf-conformance-full.yml \
   --ref <workflow-definition-ref> \
   -f release_tag=<exact-release-tag> \
   -f deployed_sha=<deployed-sha> \
   -f target_issuer=https://issuer.example \
   -f credential_holder_email_sha256=<sha256-of-fresh-applicant-email> \
-  -f onboarding_material_only=true
+  -f onboarding_material_only=true)"
+run_id="${run_url##*/}"
+test -n "$run_id"
+gh run watch "$run_id" --exit-status
+gh run download "$run_id" \
+  --name oidf-public-onboarding-material \
+  --dir runtime/official-onboarding
 ```
 
 This mode calls the reusable onboarding-material workflow, binds the exact
 Release tag to the deployed source commit, and binds the fresh
 applicant email commitment without exposing the email or a password hash,
 validates the bundle, and uploads the private artifact. Both conformance jobs
-are skipped. Download and
-verify that artifact at the same source commit before step 3. The artifact still
+are skipped. Capturing the dispatch URL binds the download to that exact run;
+do not select the newest run by branch or workflow name. Verify the downloaded
+artifact at the same source commit before step 3. The artifact still
 has no production authority: client creation and CA approval remain separate
 applicant and administrator operations through the public control plane.
 
