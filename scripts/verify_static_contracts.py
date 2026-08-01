@@ -267,7 +267,7 @@ def check_workspace_package_metadata() -> None:
     for member in workspace_manifest["workspace"]["members"]:
         manifest_path = ROOT / member / "Cargo.toml"
         package = tomllib.loads(manifest_path.read_text(encoding="utf-8"))["package"]
-        for field in ("edition", "license", "repository"):
+        for field in ("version", "edition", "license", "repository"):
             if package.get(field) != {"workspace": True}:
                 raise SystemExit(
                     f"{manifest_path.relative_to(ROOT)} must inherit package.{field} "
