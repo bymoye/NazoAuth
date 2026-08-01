@@ -161,10 +161,11 @@ fn private_ui_tree_and_archive_fail_closed_without_index() {
 
     let root = std::env::temp_dir().join(format!("nazoauth-ui-{}", uuid::Uuid::now_v7()));
     fs::create_dir(&root).unwrap();
-    let private = root.join("tree/nested/asset.js");
+    let tree = root.join("tree");
+    let private = tree.join("nested/asset.js");
     fs::create_dir_all(private.parent().unwrap()).unwrap();
     write_private(&private, b"asset").unwrap();
-    make_tree_read_only(&root.join("tree")).unwrap();
+    make_tree_read_only(&tree).unwrap();
     assert_eq!(fs::read(&private).unwrap(), b"asset");
 
     let archive_path = root.join("missing-index.tar.gz");
@@ -186,13 +187,21 @@ fn private_ui_tree_and_archive_fail_closed_without_index() {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(root.join("tree"), fs::Permissions::from_mode(0o700)).unwrap();
+        for (path, mode) in [
+            (private.as_path(), 0o600),
+            (private.parent().unwrap(), 0o700),
+            (tree.as_path(), 0o700),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
     }
     #[cfg(windows)]
     {
-        let mut permissions = fs::metadata(root.join("tree")).unwrap().permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(root.join("tree"), permissions).unwrap();
+        for path in [private.as_path(), private.parent().unwrap(), tree.as_path()] {
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions).unwrap();
+        }
     }
     fs::remove_dir_all(root).unwrap();
 }
