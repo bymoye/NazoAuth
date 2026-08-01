@@ -1,8 +1,12 @@
-use super::{ReleaseTrustState, compare_versions, enforce_release_trust_state};
+use super::{
+    COSIGN_IMAGE, ReleaseTrustState, compare_versions, containerized_cosign_arguments,
+    enforce_release_trust_state,
+};
 use crate::model::{Artifact, DatabaseRestore, ReleaseManifest, Rollback};
 use nazo_operator_protocol::EmbeddedIdentity;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 fn manifest(version: &str) -> ReleaseManifest {
     let artifact = Artifact {
@@ -87,4 +91,44 @@ fn trust_state_rejects_downgrade_and_same_version_identity_substitution() {
     assert!(enforce_release_trust_state(&trusted, &substituted).is_err());
 
     assert!(enforce_release_trust_state(&trusted, &manifest("v2.0.1")).is_ok());
+}
+
+#[test]
+fn containerized_cosign_policy_can_read_private_staging_without_host_privileges() {
+    let args = containerized_cosign_arguments(
+        Path::new("/private/release"),
+        "manifest.bundle",
+        "manifest.json",
+        "https://example.test/release-workflow@refs/tags/v1.0.0",
+    );
+
+    assert_eq!(
+        args,
+        vec![
+            "run",
+            "--rm",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--tmpfs",
+            "/root/.sigstore:rw,noexec,nosuid,nodev,size=16m",
+            "-v",
+            "/private/release:/work:ro",
+            COSIGN_IMAGE,
+            "verify-blob",
+            "--bundle",
+            "/work/manifest.bundle",
+            "--certificate-identity",
+            "https://example.test/release-workflow@refs/tags/v1.0.0",
+            "--certificate-oidc-issuer",
+            "https://token.actions.githubusercontent.com",
+            "/work/manifest.json",
+        ]
+    );
 }

@@ -225,35 +225,42 @@ fn verify_blob(
     }
     let engine = container_engine.context("Cosign is required when no container engine exists")?;
     Process::new(engine)
-        .args([
-            "run",
-            "--rm",
-            "--user",
-            "0:0",
-            "--cap-drop",
-            "ALL",
-            "--read-only",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "64",
-            "--tmpfs",
-            "/root/.sigstore:rw,noexec,nosuid,nodev,size=16m",
-            "-v",
-        ])
-        .arg(format!("{}:/work:ro", work.display()))
-        .arg(COSIGN_IMAGE)
-        .args([
-            "verify-blob",
-            "--bundle",
-            &format!("/work/{bundle}"),
-            "--certificate-identity",
-            identity,
-            "--certificate-oidc-issuer",
-            "https://token.actions.githubusercontent.com",
-            &format!("/work/{blob}"),
-        ])
+        .args(containerized_cosign_arguments(work, bundle, blob, identity))
         .run_quiet()
+}
+
+fn containerized_cosign_arguments(
+    work: &Path,
+    bundle: &str,
+    blob: &str,
+    identity: &str,
+) -> Vec<String> {
+    vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "--user".to_owned(),
+        "0:0".to_owned(),
+        "--cap-drop".to_owned(),
+        "ALL".to_owned(),
+        "--read-only".to_owned(),
+        "--security-opt".to_owned(),
+        "no-new-privileges".to_owned(),
+        "--pids-limit".to_owned(),
+        "64".to_owned(),
+        "--tmpfs".to_owned(),
+        "/root/.sigstore:rw,noexec,nosuid,nodev,size=16m".to_owned(),
+        "-v".to_owned(),
+        format!("{}:/work:ro", work.display()),
+        COSIGN_IMAGE.to_owned(),
+        "verify-blob".to_owned(),
+        "--bundle".to_owned(),
+        format!("/work/{bundle}"),
+        "--certificate-identity".to_owned(),
+        identity.to_owned(),
+        "--certificate-oidc-issuer".to_owned(),
+        "https://token.actions.githubusercontent.com".to_owned(),
+        format!("/work/{blob}"),
+    ]
 }
 
 fn verify_artifact(path: &Path, artifact: &Artifact) -> anyhow::Result<()> {
