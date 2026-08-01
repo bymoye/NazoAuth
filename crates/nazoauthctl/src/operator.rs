@@ -1917,16 +1917,15 @@ where
     F: FnOnce(&str) -> anyhow::Result<RetirementProbeExecution>,
 {
     let Some(probe) = rotation.retirement_probe.as_deref() else {
-        let evidence = encode_retirement_probe_audit_evidence(
-            &RetirementProbeAuditEvidence::NotIssued {
+        let evidence =
+            encode_retirement_probe_audit_evidence(&RetirementProbeAuditEvidence::NotIssued {
                 schema: 1,
                 previous_controller_key_id: rotation.previous_controller_key_id.clone(),
                 previous_controller_public_sha256: rotation
                     .previous_controller_public_sha256
                     .clone(),
                 reason: "controller-private-unavailable".to_owned(),
-            },
-        )?;
+            })?;
         append_management_event(config, "controller-retirement-probe", release, &evidence)?;
         println!(
             "retired controller probe not issued: previous={} previous_public_sha256={} release={} category=controller-private-unavailable",

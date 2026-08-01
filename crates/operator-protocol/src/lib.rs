@@ -627,9 +627,9 @@ fn validate_management_event(event: &ManagementAuditEvent) -> Result<(), Protoco
 fn validate_audit_boundary(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty()
         || value.len() > 4096
-        || !value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || ".:_/@+_-".contains(character)
-        })
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".:_/@+_-".contains(character))
     {
         return Err(ProtocolError::Policy("invalid audit recovery boundary"));
     }
