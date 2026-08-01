@@ -265,13 +265,87 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
             require_root()?;
             let config = load_config(&cli.config)?;
             require_confirmation(yes, "rotate the controller identity")?;
-            crate::operator::rotate_controller(&cli.config, &config, false, "normal")
+            let rotation = crate::operator::rotate_controller(&cli.config, &config, false, "normal")?;
+            let current = load_config(&cli.config)?;
+            let release = load_active_release(&current)?;
+            let expected = expected_target(&current, &release)?;
+            crate::operator::verify_retired_controller_probe(
+                &current,
+                &rotation,
+                &release.version,
+                &expected,
+            )
+        }
+        Command::BreakGlassControllerAvailability => {
+            require_root()?;
+            let config = load_config(&cli.config)?;
+            let available = crate::operator::report_controller_availability(&config)?;
+            let release = load_active_release(&config)?;
+            crate::operator::append_management_event(
+                &config,
+                "break-glass-controller-availability",
+                &release.version,
+                if available {
+                    "file-provider-available:copied-key-status-not-provable"
+                } else {
+                    "file-provider-unavailable:copied-key-status-not-provable"
+                },
+            )
+        }
+        Command::BreakGlassRehearseControllerLoss { yes } => {
+            require_root()?;
+            let config = load_config(&cli.config)?;
+            require_confirmation(yes, "rehearse controller-key loss with a simulated unavailable file provider")?;
+            let rotation = crate::operator::rehearse_controller_loss(&cli.config, &config)?;
+            let current = load_config(&cli.config)?;
+            let release = load_active_release(&current)?;
+            crate::operator::append_management_event(
+                &current,
+                "break-glass-controller-loss-rehearsal",
+                &release.version,
+                "simulated-unavailable:file-provider-only:copied-key-status-not-provable",
+            )?;
+            let expected = expected_target(&current, &release)?;
+            crate::operator::verify_retired_controller_probe(
+                &current,
+                &rotation,
+                &release.version,
+                &expected,
+            )
         }
         Command::BreakGlassRecover { yes, reason } => {
             require_root()?;
             let config = load_config(&cli.config)?;
             require_confirmation(yes, "perform break-glass controller recovery")?;
-            crate::operator::rotate_controller(&cli.config, &config, true, &reason)
+            let rotation = crate::operator::recover_controller_without_controller_key(
+                &cli.config,
+                &config,
+                &reason,
+            )?;
+            let current = load_config(&cli.config)?;
+            let release = load_active_release(&current)?;
+            if reason == "lost" {
+                crate::operator::append_management_event(
+                    &current,
+                    "break-glass-loss-assumption",
+                    &release.version,
+                    "file-provider-unavailability-not-proven",
+                )?;
+            } else {
+                crate::operator::append_management_event(
+                    &current,
+                    "break-glass-stolen-assumption",
+                    &release.version,
+                    "copied-key-risk-assumed:file-provider-cannot-prove-non-copy",
+                )?;
+            }
+            let expected = expected_target(&current, &release)?;
+            crate::operator::verify_retired_controller_probe(
+                &current,
+                &rotation,
+                &release.version,
+                &expected,
+            )
         }
     }
 }
@@ -1072,13 +1146,11 @@ fn validate_same_file(_before: &fs::Metadata, _opened: &fs::Metadata) -> anyhow:
     Ok(())
 }
 
-pub(crate) fn acquire_lock(install: bool) -> anyhow::Result<File> {
-    let override_name = if install {
-        "NAZOAUTHCTL_INSTALL_LOCK"
-    } else {
-        "NAZOAUTHCTL_LOCK"
-    };
-    let path = std::env::var_os(override_name)
+pub(crate) fn acquire_lock() -> anyhow::Result<File> {
+    // Installation, update, identity rotation and break-glass recovery mutate
+    // one lifecycle state machine and therefore must share one lock even when
+    // a test or operator overrides its location.
+    let path = std::env::var_os("NAZOAUTHCTL_LOCK")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/run/lock/nazoauthctl.lock"));
     if let Some(parent) = path.parent() {

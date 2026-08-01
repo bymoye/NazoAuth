@@ -30,8 +30,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let result = controller::acquire_lock(matches!(cli.command, cli::Command::Install(_)))
-        .and_then(|_lock| controller::run(cli));
+    let result = controller::acquire_lock().and_then(|_lock| controller::run(cli));
     if let Err(error) = result {
         eprintln!("nazoauthctl: {error:#}");
         std::process::exit(1);
@@ -155,9 +154,16 @@ after the transition commits."
         cli::HelpTopic::BreakGlass => {
             "Usage:
   nazoauthctl [--config PATH] break-glass recover-controller --reason lost|stolen --yes
+  nazoauthctl [--config PATH] break-glass controller-availability
+  nazoauthctl [--config PATH] break-glass rehearse-controller-loss --yes
 
 This requires the separately stored recovery private key and rotates controller,
-audit, and break-glass identities in one audited transition."
+audit, and break-glass identities in one audited transition. `controller-availability`
+reports only whether this file provider can currently use the active controller key;
+it does not claim to prove a key was not copied. `rehearse-controller-loss` performs
+the real recovery transition while forbidding controller signing reads after its
+in-memory probe key is prepared; it proves simulated provider unavailability, not
+physical key loss or non-copy."
         }
     }
 }

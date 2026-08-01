@@ -7,7 +7,7 @@ post-change suite regressions. GitHub Actions artifacts expire; these files keep
 run metadata, plan IDs, artifact digests when available, and tested commit SHAs
 in the repository.
 
-## Current Evidence
+## Versioned evidence index
 
 - Certification and conformance entry point: [Certification and conformance evidence](certification.md)
 - Required public black-box run process: [OIDF public black-box conformance runbook](oidf-public-black-box-runbook.md)
@@ -26,9 +26,9 @@ in the repository.
 - Latest M8 official-suite source coverage scan: [2026-07-11 OIDF v5.2.0 coverage](2026-07-11-m8-oidf-v5.2.0-coverage.md)
 - Project-owned RFC 9967 regression scope: [RFC 9967 SCIM SET black-box matrix](rfc9967-scim-set-matrix.md)
 - Latest OpenID4VC Final / HAIP alpha regression: [2026-07-16 OpenID4VC Final / HAIP OIDF results](2026-07-16-openid4vc-final-oidf-results.md)
-- Current public black-box full evidence: [2026-07-20 final automated OIDF results](2026-07-20-final-automated-oidf-results.md)
+- Historical public black-box full baseline: [2026-07-20 final automated OIDF results](2026-07-20-final-automated-oidf-results.md)
 
-The latest recorded public black-box evidence is the 2026-07-20 final run set.
+The latest retained historical public black-box baseline is the 2026-07-20 final run set.
 The final production revision is
 `0a747b42228962e562af012638297c56e3af5505`; GitHub Actions runs
 [`29705159845`](https://github.com/nazozero/NazoAuth/actions/runs/29705159845)
@@ -36,13 +36,14 @@ and [`29700527789`](https://github.com/nazozero/NazoAuth/actions/runs/2970052778
 both succeeded. The operator public suite completed 25 OIDC/FAPI/FAPI-CIBA
 plans and 17 OpenID4VC Final/HAIP plans. Public documents sanitize the actual
 issuer as `https://issuer.example`. Raw suite ZIPs are not committable evidence;
-the current record accepts only credential-free manifests produced by the
+that historical record accepts only credential-free manifests produced by the
 automation, pinned suite/source revisions, run/job URLs, and exact
 expected-result contracts.
 
 Archived diagnostic records remain useful for debugging regressions, but they
-are not current conformance evidence. Current conformance evidence is the public
-black-box run set above.
+are not current conformance evidence. The `25 + 17 = 42` baseline above also
+does not satisfy the current `27 + 17 = 44` release gate; a new exact-release
+record becomes current only after that entire host-local matrix completes.
 
 The archived diagnostic full-matrix regression record is the 2026-07-01 TP/PS run
 against `https://issuer.example` at runtime commit `31e8f9f`. It used the

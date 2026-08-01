@@ -47,6 +47,15 @@ pub(crate) struct Operator {
     pub(crate) break_glass_key_id: String,
     pub(crate) break_glass_private_key: PathBuf,
     pub(crate) break_glass_public_key: PathBuf,
+    /// The single durable authority for the active controller/audit/recovery
+    /// generation.  Older installations do not have it; ctl adopts their
+    /// complete legacy keyset before doing any new rotation.
+    #[serde(default)]
+    pub(crate) active_identity_file: PathBuf,
+    #[serde(default)]
+    pub(crate) identity_generations_directory: PathBuf,
+    #[serde(default)]
+    pub(crate) recovery_generations_directory: PathBuf,
     pub(crate) secret_revision_file: PathBuf,
     pub(crate) state_directory: PathBuf,
     pub(crate) audit_directory: PathBuf,
@@ -207,6 +216,15 @@ impl UpdateConfig {
             &self.operator.trust_state_file,
         ] {
             safe_absolute(path)?;
+        }
+        for path in [
+            &self.operator.active_identity_file,
+            &self.operator.identity_generations_directory,
+            &self.operator.recovery_generations_directory,
+        ] {
+            if !path.as_os_str().is_empty() {
+                safe_absolute(path)?;
+            }
         }
         for identifier in [
             &self.operator.deployment_id,

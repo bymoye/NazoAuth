@@ -4,7 +4,7 @@
 
 本目录保存 OpenID Foundation Conformance Suite 的长期证据索引。GitHub Actions artifact 会过期，因此仓库内记录保留 run metadata、plan ID、artifact digest 和被测试 commit SHA。
 
-## 当前证据
+## 版本化证据索引
 
 - 认证与一致性入口：[认证与一致性证据](certification.zh-CN.md)
 - 必须遵守的公网黑盒运行流程：[OIDF 公网黑盒一致性测试流程](oidf-public-black-box-runbook.zh-CN.md)
@@ -22,13 +22,15 @@
 - 最新 M8 新兴协议治理与覆盖检查：[2026-07-11 M8 watchlist governance](2026-07-11-m8-watchlist-governance.md)
 - 项目自有 RFC 9967 回归范围：[RFC 9967 SCIM SET 黑盒矩阵](rfc9967-scim-set-matrix.md)
 - 最新 OpenID4VC Final / HAIP alpha 回归：[2026-07-16 OpenID4VC Final / HAIP OIDF results](2026-07-16-openid4vc-final-oidf-results.md)
-- 当前公网黑盒完整证据：[2026-07-20 自动化 OIDF 最终结果](2026-07-20-final-automated-oidf-results.zh-CN.md)
+- 历史公网黑盒完整基线：[2026-07-20 自动化 OIDF 最终结果](2026-07-20-final-automated-oidf-results.zh-CN.md)
 
-`2026-06-09` full matrix 是当前官方认证证据，针对 `https://issuer.example` 执行，覆盖 OIDC Basic、OIDC Config、FAPI2 Security Profile Final、FAPI2 Message Signing Final、mTLS、DPoP、`private_key_jwt`、client credentials 变体。结果为全计划完成，`0 failures`，`0 warnings`。
+`2026-06-09` full matrix 是已发布 OIDF 认证列表对应的历史认证证据，针对 `https://issuer.example` 执行，覆盖 OIDC Basic、OIDC Config、FAPI2 Security Profile Final、FAPI2 Message Signing Final、mTLS、DPoP、`private_key_jwt`、client credentials 变体。结果为全计划完成，`0 failures`，`0 warnings`。
 
-最新记录的公网黑盒 OIDF 证据是 2026-07-20 最终运行组。最终生产 revision 为 `0a747b42228962e562af012638297c56e3af5505`；GitHub Actions runs [`29705159845`](https://github.com/nazozero/NazoAuth/actions/runs/29705159845) 和 [`29700527789`](https://github.com/nazozero/NazoAuth/actions/runs/29700527789) 均成功。操作者公网套件完成 25 个 OIDC/FAPI/FAPI-CIBA plan 和 17 个 OpenID4VC Final/HAIP plan。公开文档将实际 issuer 脱敏为 `https://issuer.example`。原始套件 ZIP 不属于可提交证据；当前记录只接受由自动化生成的无凭据 manifest、固定 suite/source revision、run/job URL 和精确 expected-result 契约。
+最近保留的历史公网黑盒 OIDF 基线是 2026-07-20 最终运行组。最终生产 revision 为 `0a747b42228962e562af012638297c56e3af5505`；GitHub Actions runs [`29705159845`](https://github.com/nazozero/NazoAuth/actions/runs/29705159845) 和 [`29700527789`](https://github.com/nazozero/NazoAuth/actions/runs/29700527789) 均成功。操作者公网套件完成 25 个 OIDC/FAPI/FAPI-CIBA plan 和 17 个 OpenID4VC Final/HAIP plan。公开文档将实际 issuer 脱敏为 `https://issuer.example`。原始套件 ZIP 不属于可提交证据；该历史记录只接受由自动化生成的无凭据 manifest、固定 suite/source revision、run/job URL 和精确 expected-result 契约。
 
-已归档的诊断记录仍可用于调试回归，但不是当前一致性证据。当前一致性证据以上面的公网黑盒运行组为准。
+已归档的诊断记录仍可用于调试回归，但不是当前一致性证据。上面的 `25 + 17 = 42`
+历史基线同样不满足当前 `27 + 17 = 44` Release 门禁；只有完整 host-local 矩阵针对精确
+Release 全部完成后，新记录才可标为当前证据。
 
 已归档诊断 full-matrix 回归记录是 2026-07-01 TP/PS 运行，测试对象为 `https://issuer.example`，runtime commit 为 `31e8f9f`。该运行使用仓库原有 16-plan 完整矩阵，导出 16 个 plan archives，共执行 578 个测试模块，结果为 `0 failures`、`0 warnings`。
 

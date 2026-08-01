@@ -64,6 +64,8 @@ pub(crate) enum Command {
     AuditVerify,
     AuditShow { request_id: Option<String> },
     IdentityRotate { yes: bool },
+    BreakGlassControllerAvailability,
+    BreakGlassRehearseControllerLoss { yes: bool },
     BreakGlassRecover { yes: bool, reason: String },
 }
 
@@ -205,6 +207,25 @@ impl Cli {
                 values.remove(0);
                 Command::IdentityRotate {
                     yes: parse_yes(values, "identity rotate")?,
+                }
+            }
+            "break-glass"
+                if values
+                    .first()
+                    .is_some_and(|value| value == "controller-availability") =>
+            {
+                values.remove(0);
+                no_arguments(&values, "break-glass controller-availability")?;
+                Command::BreakGlassControllerAvailability
+            }
+            "break-glass"
+                if values
+                    .first()
+                    .is_some_and(|value| value == "rehearse-controller-loss") =>
+            {
+                values.remove(0);
+                Command::BreakGlassRehearseControllerLoss {
+                    yes: parse_yes(values, "break-glass controller-loss rehearsal")?,
                 }
             }
             "break-glass"

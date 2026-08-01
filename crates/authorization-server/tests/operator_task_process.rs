@@ -185,6 +185,17 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
             .contains("request identifier was already claimed by a different envelope")
     );
 
+    let retired_controller = SigningKey::from_bytes(&[13; 32]);
+    let retired = run_operator_task(
+        &root,
+        &sign_task(&task, "controller-test", &retired_controller).unwrap(),
+    );
+    assert!(!retired.status.success());
+    assert!(
+        String::from_utf8_lossy(&retired.stderr)
+            .contains("nazoauth-operator-rejection=authorization")
+    );
+
     let mut expired = task;
     expired.jti = "request-expired-process-test".to_owned();
     expired.iat = 1;

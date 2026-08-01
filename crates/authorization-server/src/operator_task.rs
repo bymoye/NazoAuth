@@ -47,8 +47,15 @@ pub async fn run() -> anyhow::Result<()> {
         "NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE",
         CONTROLLER_PUBLIC_KEY_PATH,
     ))?;
-    let task = verify_task_signature(compact, &context.controller_key_id, &controller_key)
-        .context("operator task authorization failed")?;
+    let task = match verify_task_signature(compact, &context.controller_key_id, &controller_key) {
+        Ok(task) => task,
+        Err(error) => {
+            // A closed, non-secret classification for the ctl retirement probe.
+            // Do not include key material, envelope content, or parser detail.
+            eprintln!("nazoauth-operator-rejection=authorization");
+            return Err(error).context("operator task authorization failed");
+        }
+    };
     validate_embedded_identity(&task)?;
     validate_config_manifest(&task)?;
     let state = configured_path("NAZOAUTH_OPERATOR_STATE_DIRECTORY", STATE_DIRECTORY);

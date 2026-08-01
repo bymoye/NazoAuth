@@ -8,9 +8,12 @@ kubectl create secret generic nazoauth-connections \
   --from-literal=valkey-url='redis://...'
 helm upgrade --install nazoauth ./deploy/helm/nazoauth \
   --set image.repository=registry.example/nazoauth \
-  --set image.tag=0.1.0 \
+  --set image.tag=vX.Y.Z \
   --set publicBaseUrl=https://auth.example.com
 ```
+
+Replace `vX.Y.Z` with an immutable published Release tag. Production GitOps
+should pin the verified platform image digest rather than follow a mutable tag.
 
 With one replica, NazoAuth generates application secrets and signing keys into
 the persistent data volume. Multiple replicas are rejected unless

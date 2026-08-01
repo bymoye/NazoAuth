@@ -54,6 +54,8 @@ struct AuditHead {
 #[serde(deny_unknown_fields)]
 struct RotationIntent {
     schema: u32,
+    #[serde(default)]
+    next_generation: String,
     previous_key_id: String,
     next_key_id: String,
     previous_audit_key_id: String,
@@ -62,6 +64,100 @@ struct RotationIntent {
     next_break_glass_key_id: String,
     transition_file: String,
     compact_transition: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyAdoptionIntent {
+    schema: u32,
+    generation: String,
+    controller_key_id: String,
+    audit_key_id: String,
+    break_glass_key_id: String,
+}
+
+/// A generation is immutable before it becomes active.  The one small active
+/// record is the only commit point that selects controller, audit and recovery
+/// material together; it deliberately contains no secret bytes or paths.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActiveIdentity {
+    schema: u32,
+    pub(crate) generation: String,
+    pub(crate) controller_key_id: String,
+    pub(crate) audit_key_id: String,
+    pub(crate) break_glass_key_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct IdentityLayout {
+    operator_directory: PathBuf,
+    active_file: PathBuf,
+    generations: PathBuf,
+    recovery_generations: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RotationResult {
+    pub(crate) previous_controller_key_id: String,
+    pub(crate) previous_controller_public_sha256: String,
+    retirement_probe: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetirementProbeExecution {
+    /// Verified by nazoauthctl and the runtime adapter; the application does
+    /// not and cannot attest its containing OCI image digest by itself.
+    controller_verified_target: RuntimeTargetClaim,
+    application_reported_embedded_identity: EmbeddedIdentity,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
+enum RetirementProbeAuditEvidence {
+    RuntimeAuthorizationRejected {
+        schema: u32,
+        previous_controller_key_id: String,
+        active_controller_key_id: String,
+        probe_sha256: String,
+        controller_verified_target: RuntimeTargetClaim,
+        application_reported_embedded_identity: EmbeddedIdentity,
+    },
+    NotIssued {
+        schema: u32,
+        previous_controller_key_id: String,
+        previous_controller_public_sha256: String,
+        reason: String,
+    },
+}
+
+/// The recovery path must remain usable when the active controller private key
+/// is genuinely unavailable.  A rehearsal carries a copy only in memory,
+/// then makes every subsequent controller signing read fail closed.
+enum ControllerSigningAccess {
+    Available,
+    ForbiddenForRehearsal(SigningKey),
+    Unavailable,
+}
+
+impl ControllerSigningAccess {
+    fn controller_for_retirement_probe(&self, path: &Path) -> anyhow::Result<Option<SigningKey>> {
+        match self {
+            Self::Available => Ok(Some(read_signing_key(path)?)),
+            Self::ForbiddenForRehearsal(key) => Ok(Some(key.clone())),
+            Self::Unavailable => Ok(None),
+        }
+    }
+
+    fn controller_for_normal_rotation(&self, path: &Path) -> anyhow::Result<SigningKey> {
+        match self {
+            Self::Available => read_signing_key(path),
+            Self::ForbiddenForRehearsal(_) | Self::Unavailable => {
+                bail!("controller signing access is forbidden for this recovery operation")
+            }
+        }
+    }
 }
 
 pub(crate) fn execute(
@@ -816,6 +912,9 @@ fn verify_management_events(config: &UpdateConfig) -> anyhow::Result<()> {
         {
             bail!("management audit chain is discontinuous");
         }
+        if event.operation == "controller-retirement-probe" {
+            validate_retirement_probe_audit_evidence(&event.recovery_boundary)?;
+        }
         sequence = event.sequence;
         previous = compact_sha256(&compact);
         checkpoints.insert(sequence, previous.clone());
@@ -842,6 +941,68 @@ fn verify_management_events(config: &UpdateConfig) -> anyhow::Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn validate_retirement_probe_audit_evidence(value: &str) -> anyhow::Result<()> {
+    let evidence: RetirementProbeAuditEvidence = serde_json::from_str(value)
+        .context("controller retirement probe evidence is not strict JSON")?;
+    match evidence {
+        RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
+            schema,
+            previous_controller_key_id,
+            active_controller_key_id,
+            probe_sha256,
+            controller_verified_target,
+            application_reported_embedded_identity,
+        } => {
+            if schema != 1
+                || !safe_identity_component(&previous_controller_key_id)
+                || !safe_identity_component(&active_controller_key_id)
+                || !valid_sha256(&probe_sha256)
+                || application_reported_embedded_identity.protocol
+                    != nazo_operator_protocol::PROTOCOL_VERSION
+                || application_reported_embedded_identity.release.is_empty()
+                || application_reported_embedded_identity.revision.is_empty()
+                || application_reported_embedded_identity.build_id.is_empty()
+            {
+                bail!("controller retirement probe evidence is invalid")
+            }
+            match controller_verified_target {
+                RuntimeTargetClaim::OciImage {
+                    image_ref,
+                    image_digest,
+                } if !image_ref.is_empty()
+                    && image_digest
+                        .strip_prefix("sha256:")
+                        .is_some_and(valid_sha256) => {}
+                RuntimeTargetClaim::HostBinary { path, sha256 }
+                    if Path::new(&path).is_absolute() && valid_sha256(&sha256) => {}
+                _ => bail!("controller retirement probe target evidence is invalid"),
+            }
+        }
+        RetirementProbeAuditEvidence::NotIssued {
+            schema,
+            previous_controller_key_id,
+            previous_controller_public_sha256,
+            reason,
+        } => {
+            if schema != 1
+                || !safe_identity_component(&previous_controller_key_id)
+                || !valid_sha256(&previous_controller_public_sha256)
+                || reason != "controller-private-unavailable"
+            {
+                bail!("controller retirement probe non-issuance evidence is invalid")
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn verify_trust_transitions(config: &UpdateConfig) -> anyhow::Result<()> {
@@ -909,7 +1070,850 @@ fn verify_trust_transitions(config: &UpdateConfig) -> anyhow::Result<()> {
             transition.next_break_glass_key_id,
         ));
     }
+    if let Some((controller, audit, break_glass)) = expected_previous
+        && (controller != config.operator.controller_key_id
+            || audit != config.operator.audit_key_id
+            || break_glass != config.operator.break_glass_key_id)
+    {
+        bail!("controller trust transition chain does not terminate at the active identity");
+    }
     Ok(())
+}
+
+pub(crate) fn initialize_identity_generation(
+    operator_directory: &Path,
+    recovery_directory: &Path,
+) -> anyhow::Result<()> {
+    let active_file = operator_directory.join("active-generation.json");
+    let layout = IdentityLayout {
+        operator_directory: operator_directory.to_owned(),
+        active_file: active_file.clone(),
+        generations: operator_directory.join("generations"),
+        recovery_generations: recovery_directory.join("generations"),
+    };
+    if path_present(&active_file)? {
+        ensure_static_identity_files(operator_directory)?;
+        let active = read_active_identity(&active_file)?;
+        validate_generation(&layout, &active)?;
+        return Ok(());
+    }
+    for legacy in [
+        operator_directory.join("controller.key"),
+        operator_directory.join("controller.pub"),
+        operator_directory.join("audit.key"),
+        operator_directory.join("audit.pub"),
+        recovery_directory.join("break-glass.key"),
+        operator_directory.join("break-glass.pub"),
+    ] {
+        if path_present(&legacy)? {
+            bail!("legacy operator identity exists without an active generation; refuse ambiguous fresh install")
+        }
+    }
+    create_private_directory(operator_directory)?;
+    create_private_directory(recovery_directory)?;
+    repair_uncommitted_receipt_identity(operator_directory)?;
+    ensure_static_identity_files(operator_directory)?;
+    retire_generation_private_material(&layout.generations, None, &["controller.key", "audit.key"])?;
+    retire_generation_private_material(
+        &layout.recovery_generations,
+        None,
+        &["break-glass.key"],
+    )?;
+    let controller = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let audit = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let break_glass = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let active = new_active_identity(&controller, &audit, &break_glass);
+    write_generation(&layout, &active, &controller, &audit, &break_glass)?;
+    write_active_identity(&layout, &active)
+}
+
+fn repair_uncommitted_receipt_identity(directory: &Path) -> anyhow::Result<()> {
+    let paths = [
+        directory.join("receipt.key"),
+        directory.join("receipt.pub"),
+        directory.join("receipt.kid"),
+    ];
+    let present = paths
+        .iter()
+        .map(|path| path_present(path))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    if present == 0 || present == paths.len() {
+        return Ok(())
+    }
+    for path in paths {
+        remove_managed_regular_file(&path)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn read_active_identity(path: &Path) -> anyhow::Result<ActiveIdentity> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect active identity record {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("active identity record must be a regular non-symlink file")
+    }
+    let active: ActiveIdentity = serde_json::from_slice(&fs::read(path)?)?;
+    validate_active_identity(&active)?;
+    Ok(active)
+}
+
+fn identity_layout(config: &UpdateConfig) -> anyhow::Result<IdentityLayout> {
+    let active_file = if config.operator.active_identity_file.as_os_str().is_empty() {
+        config
+            .operator
+            .controller_private_key
+            .parent()
+            .context("operator directory is unavailable")?
+            .join("active-generation.json")
+    } else {
+        config.operator.active_identity_file.clone()
+    };
+    let operator_directory = active_file
+        .parent()
+        .context("active identity record has no operator directory")?
+        .to_owned();
+    let recovery_directory = config
+        .operator
+        .break_glass_private_key
+        .parent()
+        .context("recovery private key has no parent directory")?;
+    Ok(IdentityLayout {
+        generations: if config.operator.identity_generations_directory.as_os_str().is_empty() {
+            operator_directory.join("generations")
+        } else {
+            config.operator.identity_generations_directory.clone()
+        },
+        recovery_generations: if config
+            .operator
+            .recovery_generations_directory
+            .as_os_str()
+            .is_empty()
+        {
+            recovery_directory.join("generations")
+        } else {
+            config.operator.recovery_generations_directory.clone()
+        },
+        operator_directory,
+        active_file,
+    })
+}
+
+fn create_private_directory(path: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    crate::filesystem::set_mode(path, 0o700)
+}
+
+fn ensure_static_identity_files(directory: &Path) -> anyhow::Result<()> {
+    for (name, private_mode) in [("deployment-id", 0o400), ("secret-revision", 0o400)] {
+        let path = directory.join(name);
+        if !path_present(&path)? {
+            let value = if name == "deployment-id" {
+                format!("deployment-{}", encode_hex(&rand::random::<[u8; 16]>()))
+            } else {
+                format!("secret-{}", encode_hex(&rand::random::<[u8; 16]>()))
+            };
+            atomic_write(&path, value.as_bytes(), private_mode)?;
+        } else if !is_regular_non_symlink(&path)? || read_single_line(&path)?.len() > 128 {
+            bail!("static operator identity file is invalid: {}", path.display())
+        }
+    }
+    let private = directory.join("receipt.key");
+    let public = directory.join("receipt.pub");
+    let kid = directory.join("receipt.kid");
+    if path_present(&private)? || path_present(&public)? || path_present(&kid)? {
+        if !(is_regular_non_symlink(&private)?
+            && is_regular_non_symlink(&public)?
+            && is_regular_non_symlink(&kid)?)
+        {
+            bail!("incomplete receipt identity requires review")
+        }
+        let verifying = read_verifying_key(&public)?;
+        let expected_kid = format!(
+            "receipt-{}",
+            &encode_hex(&Sha256::digest(verifying.to_bytes()))[..16]
+        );
+        if read_signing_key(&private)?.verifying_key() != verifying
+            || read_single_line(&kid)? != expected_kid
+        {
+            bail!("receipt identity is inconsistent")
+        }
+        return Ok(());
+    }
+    let key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let public_bytes = key.verifying_key().to_bytes();
+    let digest = encode_hex(&Sha256::digest(public_bytes));
+    atomic_write(&private, URL_SAFE_NO_PAD.encode(key.to_bytes()).as_bytes(), 0o400)?;
+    atomic_write(&public, URL_SAFE_NO_PAD.encode(public_bytes).as_bytes(), 0o444)?;
+    atomic_write(&kid, format!("receipt-{}", &digest[..16]).as_bytes(), 0o444)
+}
+
+fn new_active_identity(
+    controller: &SigningKey,
+    audit: &SigningKey,
+    break_glass: &SigningKey,
+) -> ActiveIdentity {
+    let controller_digest = encode_hex(&Sha256::digest(controller.verifying_key().to_bytes()));
+    let audit_digest = encode_hex(&Sha256::digest(audit.verifying_key().to_bytes()));
+    let break_glass_digest = encode_hex(&Sha256::digest(break_glass.verifying_key().to_bytes()));
+    ActiveIdentity {
+        schema: 1,
+        generation: format!("generation-{}", &controller_digest[..24]),
+        controller_key_id: format!("controller-{}", &controller_digest[..16]),
+        audit_key_id: format!("audit-{}", &audit_digest[..16]),
+        break_glass_key_id: format!("break-glass-{}", &break_glass_digest[..16]),
+    }
+}
+
+fn validate_active_identity(active: &ActiveIdentity) -> anyhow::Result<()> {
+    if active.schema != 1
+        || !safe_identity_component(&active.generation)
+        || !safe_identity_component(&active.controller_key_id)
+        || !safe_identity_component(&active.audit_key_id)
+        || !safe_identity_component(&active.break_glass_key_id)
+    {
+        bail!("active identity record is invalid")
+    }
+    Ok(())
+}
+
+fn safe_identity_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+}
+
+fn generation_paths(layout: &IdentityLayout, active: &ActiveIdentity) -> (PathBuf, PathBuf) {
+    (
+        layout.generations.join(&active.generation),
+        layout.recovery_generations.join(&active.generation),
+    )
+}
+
+fn write_generation(
+    layout: &IdentityLayout,
+    active: &ActiveIdentity,
+    controller: &SigningKey,
+    audit: &SigningKey,
+    break_glass: &SigningKey,
+) -> anyhow::Result<()> {
+    validate_active_identity(active)?;
+    let (generation, recovery_generation) = generation_paths(layout, active);
+    if path_present(&generation)? || path_present(&recovery_generation)? {
+        bail!("identity generation already exists")
+    }
+    create_private_directory(&generation)?;
+    create_private_directory(&recovery_generation)?;
+    atomic_write(
+        &generation.join("controller.key"),
+        URL_SAFE_NO_PAD.encode(controller.to_bytes()).as_bytes(),
+        0o400,
+    )?;
+    atomic_write(
+        &generation.join("controller.pub"),
+        URL_SAFE_NO_PAD.encode(controller.verifying_key().to_bytes()).as_bytes(),
+        0o444,
+    )?;
+    atomic_write(
+        &generation.join("audit.key"),
+        URL_SAFE_NO_PAD.encode(audit.to_bytes()).as_bytes(),
+        0o400,
+    )?;
+    atomic_write(
+        &generation.join("audit.pub"),
+        URL_SAFE_NO_PAD.encode(audit.verifying_key().to_bytes()).as_bytes(),
+        0o444,
+    )?;
+    atomic_write(
+        &recovery_generation.join("break-glass.key"),
+        URL_SAFE_NO_PAD.encode(break_glass.to_bytes()).as_bytes(),
+        0o400,
+    )?;
+    atomic_write(
+        &generation.join("break-glass.pub"),
+        URL_SAFE_NO_PAD.encode(break_glass.verifying_key().to_bytes()).as_bytes(),
+        0o444,
+    )?;
+    validate_generation(layout, active)
+}
+
+fn validate_generation(layout: &IdentityLayout, active: &ActiveIdentity) -> anyhow::Result<()> {
+    let (generation, recovery_generation) = generation_paths(layout, active);
+    let controller_public = read_verifying_key(&generation.join("controller.pub"))?;
+    let audit_public = read_verifying_key(&generation.join("audit.pub"))?;
+    let break_glass_public = read_verifying_key(&generation.join("break-glass.pub"))?;
+    if read_signing_key(&generation.join("controller.key"))?.verifying_key() != controller_public
+        || read_signing_key(&generation.join("audit.key"))?.verifying_key() != audit_public
+        || read_signing_key(&recovery_generation.join("break-glass.key"))?.verifying_key()
+            != break_glass_public
+        || active.controller_key_id
+            != format!(
+                "controller-{}",
+                &encode_hex(&Sha256::digest(controller_public.to_bytes()))[..16]
+            )
+        || active.audit_key_id
+            != format!(
+                "audit-{}",
+                &encode_hex(&Sha256::digest(audit_public.to_bytes()))[..16]
+            )
+        || active.break_glass_key_id
+            != format!(
+                "break-glass-{}",
+                &encode_hex(&Sha256::digest(break_glass_public.to_bytes()))[..16]
+            )
+    {
+        bail!("identity generation key material is inconsistent")
+    }
+    Ok(())
+}
+
+/// Recovery needs the public controller identity plus the independently held
+/// break-glass signer.  Requiring the very private key that is being recovered
+/// would make a real loss unrecoverable.
+fn validate_generation_for_break_glass_recovery(
+    layout: &IdentityLayout,
+    active: &ActiveIdentity,
+) -> anyhow::Result<()> {
+    let (generation, recovery_generation) = generation_paths(layout, active);
+    let controller_public = read_verifying_key(&generation.join("controller.pub"))?;
+    let audit_public = read_verifying_key(&generation.join("audit.pub"))?;
+    let break_glass_public = read_verifying_key(&generation.join("break-glass.pub"))?;
+    if read_signing_key(&generation.join("audit.key"))?.verifying_key() != audit_public
+        || read_signing_key(&recovery_generation.join("break-glass.key"))?.verifying_key()
+            != break_glass_public
+        || active.controller_key_id
+            != format!(
+                "controller-{}",
+                &encode_hex(&Sha256::digest(controller_public.to_bytes()))[..16]
+            )
+        || active.audit_key_id
+            != format!(
+                "audit-{}",
+                &encode_hex(&Sha256::digest(audit_public.to_bytes()))[..16]
+            )
+        || active.break_glass_key_id
+            != format!(
+                "break-glass-{}",
+                &encode_hex(&Sha256::digest(break_glass_public.to_bytes()))[..16]
+            )
+    {
+        bail!("identity generation recovery material is inconsistent")
+    }
+    Ok(())
+}
+
+fn write_active_identity(layout: &IdentityLayout, active: &ActiveIdentity) -> anyhow::Result<()> {
+    validate_generation(layout, active)?;
+    atomic_write(&layout.active_file, &serde_json::to_vec_pretty(active)?, 0o600)
+}
+
+fn apply_active_identity(config: &mut UpdateConfig, layout: &IdentityLayout, active: &ActiveIdentity) {
+    let (generation, recovery_generation) = generation_paths(layout, active);
+    config.operator.controller_key_id = active.controller_key_id.clone();
+    config.operator.controller_private_key = generation.join("controller.key");
+    config.operator.controller_public_key = generation.join("controller.pub");
+    config.operator.audit_key_id = active.audit_key_id.clone();
+    config.operator.audit_private_key = generation.join("audit.key");
+    config.operator.audit_public_key = generation.join("audit.pub");
+    config.operator.break_glass_key_id = active.break_glass_key_id.clone();
+    config.operator.break_glass_private_key = recovery_generation.join("break-glass.key");
+    config.operator.break_glass_public_key = generation.join("break-glass.pub");
+    config.operator.active_identity_file = layout.active_file.clone();
+    config.operator.identity_generations_directory = layout.generations.clone();
+    config.operator.recovery_generations_directory = layout.recovery_generations.clone();
+}
+
+fn adopt_legacy_identity(
+    config_path: &Path,
+    config: &mut UpdateConfig,
+    layout: &IdentityLayout,
+) -> anyhow::Result<()> {
+    let controller = read_signing_key(&config.operator.controller_private_key)?;
+    let controller_public = read_verifying_key(&config.operator.controller_public_key)?;
+    let audit = read_signing_key(&config.operator.audit_private_key)?;
+    let audit_public = read_verifying_key(&config.operator.audit_public_key)?;
+    let break_glass = read_signing_key(&config.operator.break_glass_private_key)?;
+    let break_glass_public = read_verifying_key(&config.operator.break_glass_public_key)?;
+    if controller.verifying_key() != controller_public
+        || audit.verifying_key() != audit_public
+        || break_glass.verifying_key() != break_glass_public
+    {
+        bail!("legacy operator identity is inconsistent; refuse automatic adoption")
+    }
+    let active = ActiveIdentity {
+        schema: 1,
+        generation: format!("legacy-{}", config.operator.controller_key_id),
+        controller_key_id: config.operator.controller_key_id.clone(),
+        audit_key_id: config.operator.audit_key_id.clone(),
+        break_glass_key_id: config.operator.break_glass_key_id.clone(),
+    };
+    validate_active_identity(&active)?;
+    let intent_path = layout.operator_directory.join("legacy-adoption.json");
+    let intent = LegacyAdoptionIntent {
+        schema: 1,
+        generation: active.generation.clone(),
+        controller_key_id: active.controller_key_id.clone(),
+        audit_key_id: active.audit_key_id.clone(),
+        break_glass_key_id: active.break_glass_key_id.clone(),
+    };
+    refuse_ambiguous_legacy_adoption(config, layout, &intent_path, &intent)?;
+    if !path_present(&intent_path)? {
+        atomic_write(&intent_path, &serde_json::to_vec_pretty(&intent)?, 0o600)?;
+    }
+    if path_present(&generation_paths(layout, &active).0)?
+        || path_present(&generation_paths(layout, &active).1)?
+    {
+        match validate_generation(layout, &active) {
+            Ok(()) => {
+                let (generation, recovery_generation) = generation_paths(layout, &active);
+                if read_signing_key(&generation.join("controller.key"))?.to_bytes()
+                    != controller.to_bytes()
+                    || read_signing_key(&generation.join("audit.key"))?.to_bytes()
+                        != audit.to_bytes()
+                    || read_signing_key(&recovery_generation.join("break-glass.key"))?.to_bytes()
+                        != break_glass.to_bytes()
+                {
+                    bail!("staged legacy adoption conflicts with configured identity")
+                }
+            }
+            Err(_) => {
+                remove_uncommitted_generation(layout, &active)?;
+                write_generation(layout, &active, &controller, &audit, &break_glass)?;
+            }
+        }
+    } else {
+        write_generation(layout, &active, &controller, &audit, &break_glass)?;
+    }
+    write_active_identity(layout, &active)?;
+    apply_active_identity(config, layout, &active);
+    atomic_write(config_path, &serde_json::to_vec_pretty(config)?, 0o600)?;
+    crate::filesystem::remove_file_durable(&intent_path)
+}
+
+fn refuse_ambiguous_legacy_adoption(
+    config: &UpdateConfig,
+    layout: &IdentityLayout,
+    intent_path: &Path,
+    expected: &LegacyAdoptionIntent,
+) -> anyhow::Result<()> {
+    if path_present(&layout.operator_directory.join("rotation-intent.json"))?
+        || directory_has_entries(&config.operator.audit_directory.join("trust-transitions"))?
+    {
+        bail!("legacy identity cannot be adopted from an ambiguous rotation state")
+    }
+    if path_present(intent_path)? {
+        let actual: LegacyAdoptionIntent = serde_json::from_slice(&fs::read(intent_path)?)?;
+        if actual.schema != expected.schema
+            || actual.generation != expected.generation
+            || actual.controller_key_id != expected.controller_key_id
+            || actual.audit_key_id != expected.audit_key_id
+            || actual.break_glass_key_id != expected.break_glass_key_id
+        {
+            bail!("legacy identity adoption intent conflicts with configured identity")
+        }
+        ensure_only_expected_generation(&layout.generations, &expected.generation)?;
+        ensure_only_expected_generation(&layout.recovery_generations, &expected.generation)?;
+        return Ok(())
+    }
+    if directory_has_entries(&layout.generations)?
+        || directory_has_entries(&layout.recovery_generations)?
+    {
+        bail!("legacy identity exists with uncommitted generation state")
+    }
+    Ok(())
+}
+
+fn directory_has_entries(path: &Path) -> anyhow::Result<bool> {
+    if !path_present(path)? {
+        return Ok(false)
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("managed identity path must be a regular non-symlink directory")
+    }
+    Ok(fs::read_dir(path)?.next().transpose()?.is_some())
+}
+
+fn ensure_only_expected_generation(directory: &Path, expected: &str) -> anyhow::Result<()> {
+    if !path_present(directory)? {
+        return Ok(())
+    }
+    let metadata = fs::symlink_metadata(directory)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("managed identity path must be a regular non-symlink directory")
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_name().to_str() != Some(expected) || !entry.file_type()?.is_dir() {
+            bail!("legacy adoption contains an unexpected identity generation")
+        }
+    }
+    Ok(())
+}
+
+fn remove_uncommitted_generation(
+    layout: &IdentityLayout,
+    active: &ActiveIdentity,
+) -> anyhow::Result<()> {
+    let (generation, recovery_generation) = generation_paths(layout, active);
+    remove_allowlisted_generation_directory(
+        &generation,
+        &["controller.key", "controller.pub", "audit.key", "audit.pub", "break-glass.pub"],
+    )?;
+    remove_allowlisted_generation_directory(&recovery_generation, &["break-glass.key"])
+}
+
+fn remove_allowlisted_generation_directory(path: &Path, allowed: &[&str]) -> anyhow::Result<()> {
+    if !path_present(path)? {
+        return Ok(())
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("uncommitted identity generation is not a regular directory")
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("uncommitted identity entry is not UTF-8"))?;
+        if !allowed.contains(&name.as_str()) || !entry.file_type()?.is_file() {
+            bail!("uncommitted identity generation contains an unexpected entry")
+        }
+        remove_managed_regular_file(&entry.path())?;
+    }
+    fs::remove_dir(path).with_context(|| format!("failed to remove {}", path.display()))
+}
+
+fn archive_public_key(path: &Path, source: &Path) -> anyhow::Result<()> {
+    if path_present(path)? {
+        if fs::read(path)? != fs::read(source)? {
+            bail!("historical trust public key conflicts with staged generation")
+        }
+        return Ok(());
+    }
+    atomic_write(path, fs::read(source)?.as_slice(), 0o444)
+}
+
+fn archive_generation_publics(
+    layout: &IdentityLayout,
+    active: &ActiveIdentity,
+) -> anyhow::Result<()> {
+    let (generation, _) = generation_paths(layout, active);
+    archive_public_key(
+        &layout
+            .operator_directory
+            .join("trusted-controllers")
+            .join(format!("{}.pub", active.controller_key_id)),
+        &generation.join("controller.pub"),
+    )?;
+    archive_public_key(
+        &layout
+            .operator_directory
+            .join("trusted-audit")
+            .join(format!("{}.pub", active.audit_key_id)),
+        &generation.join("audit.pub"),
+    )?;
+    archive_public_key(
+        &layout
+            .operator_directory
+            .join("trusted-break-glass")
+            .join(format!("{}.pub", active.break_glass_key_id)),
+        &generation.join("break-glass.pub"),
+    )
+}
+
+fn verify_rotation_intent(
+    config: &UpdateConfig,
+    active: &ActiveIdentity,
+    next: &ActiveIdentity,
+    intent: &RotationIntent,
+) -> anyhow::Result<()> {
+    let active_is_previous = active.controller_key_id == intent.previous_key_id
+        && active.audit_key_id == intent.previous_audit_key_id
+        && active.break_glass_key_id == intent.previous_break_glass_key_id;
+    let active_is_next = active.controller_key_id == next.controller_key_id
+        && active.audit_key_id == next.audit_key_id
+        && active.break_glass_key_id == next.break_glass_key_id;
+    if !active_is_previous && !active_is_next {
+        bail!("controller rotation intent does not connect to the active generation")
+    }
+    let header = protected_header(&intent.compact_transition)?;
+    let key = if header.kid == intent.previous_key_id {
+        if active_is_previous {
+            read_verifying_key(&config.operator.controller_public_key)?
+        } else {
+            trusted_controller_key(config, &header.kid)?
+        }
+    } else if header.kid == intent.previous_break_glass_key_id {
+        if active_is_previous {
+            read_verifying_key(&config.operator.break_glass_public_key)?
+        } else {
+            trusted_break_glass_key(config, &header.kid)?
+        }
+    } else {
+        bail!("controller rotation intent signer is not active controller or break-glass identity")
+    };
+    let transition = verify_trust_transition(&intent.compact_transition, &header.kid, &key)?;
+    if transition.deployment_id != config.operator.deployment_id
+        || transition.previous_key_id != intent.previous_key_id
+        || transition.next_key_id != next.controller_key_id
+        || transition.previous_audit_key_id != intent.previous_audit_key_id
+        || transition.next_audit_key_id != next.audit_key_id
+        || transition.previous_break_glass_key_id != intent.previous_break_glass_key_id
+        || transition.next_break_glass_key_id != next.break_glass_key_id
+    {
+        bail!("controller rotation intent transition does not bind the staged generation")
+    }
+    match transition.authorization {
+        TransitionAuthorization::Controller if header.kid == intent.previous_key_id => Ok(()),
+        TransitionAuthorization::BreakGlass
+            if header.kid == intent.previous_break_glass_key_id =>
+        {
+            Ok(())
+        }
+        _ => bail!("controller rotation intent authorization does not match its signer"),
+    }
+}
+
+fn retire_non_active_private_material(
+    layout: &IdentityLayout,
+    active: &ActiveIdentity,
+) -> anyhow::Result<()> {
+    retire_generation_private_material(
+        &layout.generations,
+        Some(&active.generation),
+        &["controller.key", "audit.key"],
+    )?;
+    retire_generation_private_material(
+        &layout.recovery_generations,
+        Some(&active.generation),
+        &["break-glass.key"],
+    )?;
+    for legacy in [
+        layout.operator_directory.join("controller.key"),
+        layout.operator_directory.join("audit.key"),
+        layout
+            .recovery_generations
+            .parent()
+            .context("recovery generation directory has no parent")?
+            .join("break-glass.key"),
+    ] {
+        if path_present(&legacy)? {
+            remove_managed_regular_file(&legacy)?;
+        }
+    }
+    Ok(())
+}
+
+fn retire_generation_private_material(
+    directory: &Path,
+    active_generation: Option<&str>,
+    private_names: &[&str],
+) -> anyhow::Result<()> {
+    if !path_present(directory)? {
+        return Ok(())
+    }
+    let metadata = fs::symlink_metadata(directory)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("identity generations path must be a regular non-symlink directory")
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("identity generation name is not UTF-8"))?;
+        if !safe_identity_component(&name) || !entry.file_type()?.is_dir() {
+            bail!("identity generations directory contains an unsafe entry")
+        }
+        if active_generation == Some(name.as_str()) {
+            continue;
+        }
+        for private_name in private_names {
+            remove_managed_regular_file(&entry.path().join(private_name))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_managed_regular_file(path: &Path) -> anyhow::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("managed identity path is not a regular non-symlink file: {}", path.display())
+    }
+    crate::filesystem::remove_file_durable(path)
+}
+
+fn path_present(path: &Path) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn is_regular_non_symlink(path: &Path) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn retirement_probe(config: &UpdateConfig, old_key: &SigningKey) -> anyhow::Result<String> {
+    let now = Utc::now().timestamp();
+    let task = TaskEnvelope {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        iss: format!("controller:{}", config.operator.deployment_id),
+        aud: format!("runtime:{}", config.operator.deployment_id),
+        jti: format!("probe-{}", encode_hex(&rand::random::<[u8; 16]>())),
+        iat: now,
+        nbf: now,
+        exp: now + nazo_operator_protocol::MAX_TASK_LIFETIME_SECONDS,
+        deployment_id: config.operator.deployment_id.clone(),
+        actor: Actor {
+            kind: ActorKind::LocalRoot,
+            id: "uid:0".to_owned(),
+        },
+        target: nazo_operator_protocol::TargetExpectation::HostBinary {
+            path: "/nazoauth-retirement-probe".to_owned(),
+            sha256: "0".repeat(64),
+        },
+        embedded: EmbeddedIdentity {
+            release: "retirement-probe".to_owned(),
+            revision: "retirement-probe".to_owned(),
+            protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+            build_id: "retirement-probe".to_owned(),
+        },
+        config: ConfigBinding {
+            manifest_version: nazo_operator_protocol::CONFIG_MANIFEST_VERSION,
+            config_sha256: "0".repeat(64),
+            secret_binding: SecretBinding::OpaqueRevision {
+                revision: "retirement-probe".to_owned(),
+            },
+        },
+        operation: TaskOperation::KeysValidate,
+    };
+    Ok(sign_task(
+        &task,
+        &config.operator.controller_key_id,
+        old_key,
+    )?)
+}
+
+pub(crate) fn verify_retired_controller_probe(
+    config: &UpdateConfig,
+    rotation: &RotationResult,
+    release: &str,
+    expected: &ExpectedReleaseTarget,
+) -> anyhow::Result<()> {
+    verify_retired_controller_probe_with(config, rotation, release, |probe| {
+        let operation = TaskOperation::KeysValidate;
+        let manifest = canonical_manifest(config, &operation)?;
+        let manifest_bytes = serde_json::to_vec(&manifest)?;
+        let runtime = Runtime::new(config);
+        let target = if config.runtime.engine == "host" {
+            config.runtime.binary_path.to_string_lossy().into_owned()
+        } else {
+            runtime.active_image()?
+        };
+        // This must create and execute the same constrained application task
+        // used by public key validation.  A local verifier alone cannot
+        // establish the runtime mount/context boundary.
+        let prepared = runtime.prepare_app_task(&target, &operation, None, &manifest_bytes)?;
+        verify_target_expectation(&prepared.target, expected)?;
+        let embedded = runtime.embedded_identity(&target)?;
+        if embedded != expected.embedded {
+            bail!("runtime embedded build identity does not match the active signed Release")
+        }
+        prepared.expect_authorization_rejection(probe)?;
+        runtime.verify_prepared_target(&prepared.target)?;
+        Ok(RetirementProbeExecution {
+            controller_verified_target: prepared.target.clone(),
+            application_reported_embedded_identity: embedded,
+        })
+    })
+}
+
+fn verify_retired_controller_probe_with<F>(
+    config: &UpdateConfig,
+    rotation: &RotationResult,
+    release: &str,
+    runtime_rejection: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(&str) -> anyhow::Result<RetirementProbeExecution>,
+{
+    let Some(probe) = rotation.retirement_probe.as_deref() else {
+        let evidence = serde_json::to_string(&RetirementProbeAuditEvidence::NotIssued {
+            schema: 1,
+            previous_controller_key_id: rotation.previous_controller_key_id.clone(),
+            previous_controller_public_sha256: rotation
+                .previous_controller_public_sha256
+                .clone(),
+            reason: "controller-private-unavailable".to_owned(),
+        })?;
+        append_management_event(
+            config,
+            "controller-retirement-probe",
+            release,
+            &evidence,
+        )?;
+        println!(
+            "retired controller probe not issued: previous={} previous_public_sha256={} release={} category=controller-private-unavailable",
+            rotation.previous_controller_key_id, rotation.previous_controller_public_sha256, release
+        );
+        return Ok(());
+    };
+    let execution = runtime_rejection(probe)?;
+    let probe_digest = compact_sha256(probe);
+    let evidence = serde_json::to_string(
+        &RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
+            schema: 1,
+            previous_controller_key_id: rotation.previous_controller_key_id.clone(),
+            active_controller_key_id: config.operator.controller_key_id.clone(),
+            probe_sha256: probe_digest,
+            controller_verified_target: execution.controller_verified_target,
+            application_reported_embedded_identity: execution
+                .application_reported_embedded_identity,
+        },
+    )?;
+    append_management_event(
+        config,
+        "controller-retirement-probe",
+        release,
+        &evidence,
+    )?;
+    println!(
+        "retired controller probe rejected: previous={} previous_public_sha256={} release={}",
+        rotation.previous_controller_key_id, rotation.previous_controller_public_sha256, release
+    );
+    Ok(())
+}
+
+/// File-provider truthfulness boundary: this observes only the key available to
+/// the current root process.  It cannot prove that an attacker did not copy it.
+pub(crate) fn report_controller_availability(config: &UpdateConfig) -> anyhow::Result<bool> {
+    let available = read_signing_key(&config.operator.controller_private_key)
+        .ok()
+        .is_some_and(|key| {
+            read_verifying_key(&config.operator.controller_public_key)
+                .is_ok_and(|public| key.verifying_key() == public)
+        });
+    println!(
+        "controller-key-availability={}; provider=file; copied-key-status=not-provable",
+        if available { "available" } else { "unavailable" }
+    );
+    Ok(available)
 }
 
 pub(crate) fn rotate_controller(
@@ -917,32 +1921,72 @@ pub(crate) fn rotate_controller(
     config: &UpdateConfig,
     break_glass: bool,
     reason: &str,
-) -> anyhow::Result<()> {
-    let operator_directory = config
-        .operator
-        .controller_private_key
-        .parent()
-        .context("operator directory is unavailable")?;
-    let new_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-    let new_public = new_key.verifying_key().to_bytes();
-    let new_digest = encode_hex(&Sha256::digest(new_public));
-    let new_key_id = format!("controller-{}", &new_digest[..16]);
-    let new_audit_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-    let new_audit_public = new_audit_key.verifying_key().to_bytes();
-    let new_audit_digest = encode_hex(&Sha256::digest(new_audit_public));
-    let new_audit_key_id = format!("audit-{}", &new_audit_digest[..16]);
-    let current_break_glass_public = read_verifying_key(&config.operator.break_glass_public_key)?;
-    let mut next_break_glass_key_id = config.operator.break_glass_key_id.clone();
-    let mut next_break_glass_public = current_break_glass_public.to_bytes();
-    let mut next_break_glass_private = None;
+) -> anyhow::Result<RotationResult> {
+    rotate_controller_with_access(
+        config_path,
+        config,
+        break_glass,
+        reason,
+        ControllerSigningAccess::Available,
+    )
+}
+
+/// This is an actual recovery transition under a simulated unavailable file
+/// provider.  The active controller private key is loaded only before the
+/// guard is established, solely to construct the post-transition rejection
+/// probe; the rotation itself cannot read it.
+pub(crate) fn rehearse_controller_loss(
+    config_path: &Path,
+    config: &UpdateConfig,
+) -> anyhow::Result<RotationResult> {
+    let probe_key = read_signing_key(&config.operator.controller_private_key)?;
+    rotate_controller_with_access(
+        config_path,
+        config,
+        true,
+        "simulated-unavailable",
+        ControllerSigningAccess::ForbiddenForRehearsal(probe_key),
+    )
+}
+
+pub(crate) fn recover_controller_without_controller_key(
+    config_path: &Path,
+    config: &UpdateConfig,
+    reason: &str,
+) -> anyhow::Result<RotationResult> {
+    rotate_controller_with_access(
+        config_path,
+        config,
+        true,
+        reason,
+        ControllerSigningAccess::Unavailable,
+    )
+}
+
+fn rotate_controller_with_access(
+    config_path: &Path,
+    config: &UpdateConfig,
+    break_glass: bool,
+    reason: &str,
+    controller_access: ControllerSigningAccess,
+) -> anyhow::Result<RotationResult> {
+    let layout = identity_layout(config)?;
+    let current = read_active_identity(&layout.active_file)?;
     if break_glass {
-        let replacement = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        next_break_glass_public = replacement.verifying_key().to_bytes();
-        let digest = encode_hex(&Sha256::digest(next_break_glass_public));
-        next_break_glass_key_id = format!("break-glass-{}", &digest[..16]);
-        next_break_glass_private = Some(replacement);
+        validate_generation_for_break_glass_recovery(&layout, &current)?;
+    } else {
+        validate_generation(&layout, &current)?;
     }
-    let next_break_glass_digest = encode_hex(&Sha256::digest(next_break_glass_public));
+    let old_controller_public = read_verifying_key(&config.operator.controller_public_key)?;
+    let old_controller_digest = encode_hex(&Sha256::digest(old_controller_public.to_bytes()));
+    let probe = controller_access
+        .controller_for_retirement_probe(&config.operator.controller_private_key)?
+        .map(|key| retirement_probe(config, &key))
+        .transpose()?;
+    let new_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let new_audit_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let next_break_glass = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let next = new_active_identity(&new_key, &new_audit_key, &next_break_glass);
     let (authorization, signer_id, signer) = if break_glass {
         (
             TransitionAuthorization::BreakGlass,
@@ -953,7 +1997,7 @@ pub(crate) fn rotate_controller(
         (
             TransitionAuthorization::Controller,
             config.operator.controller_key_id.as_str(),
-            read_signing_key(&config.operator.controller_private_key)?,
+            controller_access.controller_for_normal_rotation(&config.operator.controller_private_key)?,
         )
     };
     let transition = ControllerTrustTransition {
@@ -962,332 +2006,154 @@ pub(crate) fn rotate_controller(
         issued_at: Utc::now().timestamp(),
         authorization,
         previous_key_id: config.operator.controller_key_id.clone(),
-        next_key_id: new_key_id.clone(),
-        next_public_key_sha256: new_digest,
+        next_key_id: next.controller_key_id.clone(),
+        next_public_key_sha256: encode_hex(&Sha256::digest(new_key.verifying_key().to_bytes())),
         previous_audit_key_id: config.operator.audit_key_id.clone(),
-        next_audit_key_id: new_audit_key_id.clone(),
-        next_audit_public_key_sha256: new_audit_digest,
+        next_audit_key_id: next.audit_key_id.clone(),
+        next_audit_public_key_sha256: encode_hex(&Sha256::digest(new_audit_key.verifying_key().to_bytes())),
         previous_break_glass_key_id: config.operator.break_glass_key_id.clone(),
-        next_break_glass_key_id: next_break_glass_key_id.clone(),
-        next_break_glass_public_key_sha256: next_break_glass_digest,
+        next_break_glass_key_id: next.break_glass_key_id.clone(),
+        next_break_glass_public_key_sha256: encode_hex(&Sha256::digest(next_break_glass.verifying_key().to_bytes())),
         reason: reason.to_owned(),
     };
     let compact = sign_trust_transition(&transition, signer_id, &signer)?;
-    let staged_private = operator_directory.join("controller.next.key");
-    let staged_public = operator_directory.join("controller.next.pub");
-    let staged_audit_private = operator_directory.join("audit.next.key");
-    let staged_audit_public = operator_directory.join("audit.next.pub");
-    let staged_break_glass_private = config
-        .operator
-        .break_glass_private_key
-        .with_file_name("break-glass.next.key");
-    let staged_break_glass_public = operator_directory.join("break-glass.next.pub");
     let transitions = config.operator.audit_directory.join("trust-transitions");
     fs::create_dir_all(&transitions)?;
     let transition_file = format!(
         "{}-{}-to-{}.jws",
         Utc::now().format("%Y%m%dT%H%M%S%.6fZ"),
         config.operator.controller_key_id,
-        new_key_id
+        next.controller_key_id
     );
     let transition_path = transitions.join(&transition_file);
+    write_generation(&layout, &next, &new_key, &new_audit_key, &next_break_glass)?;
+    archive_generation_publics(&layout, &current)?;
+    archive_generation_publics(&layout, &next)?;
     atomic_write(
-        &staged_private,
-        URL_SAFE_NO_PAD.encode(new_key.to_bytes()).as_bytes(),
-        0o400,
-    )?;
-    atomic_write(
-        &staged_public,
-        URL_SAFE_NO_PAD.encode(new_public).as_bytes(),
-        0o444,
-    )?;
-    atomic_write(
-        &staged_audit_private,
-        URL_SAFE_NO_PAD.encode(new_audit_key.to_bytes()).as_bytes(),
-        0o400,
-    )?;
-    atomic_write(
-        &staged_audit_public,
-        URL_SAFE_NO_PAD.encode(new_audit_public).as_bytes(),
-        0o444,
-    )?;
-    if let Some(replacement) = &next_break_glass_private {
-        atomic_write(
-            &staged_break_glass_private,
-            URL_SAFE_NO_PAD.encode(replacement.to_bytes()).as_bytes(),
-            0o400,
-        )?;
-        atomic_write(
-            &staged_break_glass_public,
-            URL_SAFE_NO_PAD.encode(next_break_glass_public).as_bytes(),
-            0o444,
-        )?;
-    }
-    atomic_write(
-        &operator_directory.join("rotation-intent.json"),
+        &layout.operator_directory.join("rotation-intent.json"),
         &serde_json::to_vec_pretty(&RotationIntent {
             schema: 1,
+            next_generation: next.generation.clone(),
             previous_key_id: config.operator.controller_key_id.clone(),
-            next_key_id: new_key_id.clone(),
+            next_key_id: next.controller_key_id.clone(),
             previous_audit_key_id: config.operator.audit_key_id.clone(),
-            next_audit_key_id: new_audit_key_id.clone(),
+            next_audit_key_id: next.audit_key_id.clone(),
             previous_break_glass_key_id: config.operator.break_glass_key_id.clone(),
-            next_break_glass_key_id: next_break_glass_key_id.clone(),
+            next_break_glass_key_id: next.break_glass_key_id.clone(),
             transition_file,
             compact_transition: compact.clone(),
         })?,
         0o600,
     )?;
     atomic_write(&transition_path, compact.as_bytes(), 0o400)?;
-    let trusted = operator_directory.join("trusted-controllers");
-    fs::create_dir_all(&trusted)?;
-    atomic_write(
-        &trusted.join(format!("{}.pub", config.operator.controller_key_id)),
-        fs::read(&config.operator.controller_public_key)?.as_slice(),
-        0o444,
-    )?;
-    let trusted_audit = operator_directory.join("trusted-audit");
-    fs::create_dir_all(&trusted_audit)?;
-    atomic_write(
-        &trusted_audit.join(format!("{}.pub", config.operator.audit_key_id)),
-        fs::read(&config.operator.audit_public_key)?.as_slice(),
-        0o444,
-    )?;
-    if break_glass {
-        let trusted_break_glass = operator_directory.join("trusted-break-glass");
-        fs::create_dir_all(&trusted_break_glass)?;
-        atomic_write(
-            &trusted_break_glass.join(format!("{}.pub", config.operator.break_glass_key_id)),
-            fs::read(&config.operator.break_glass_public_key)?.as_slice(),
-            0o444,
-        )?;
-    }
-    fs::rename(&staged_private, &config.operator.controller_private_key)?;
-    fs::rename(&staged_public, &config.operator.controller_public_key)?;
-    fs::rename(&staged_audit_private, &config.operator.audit_private_key)?;
-    fs::rename(&staged_audit_public, &config.operator.audit_public_key)?;
-    if break_glass {
-        fs::rename(
-            &staged_break_glass_private,
-            &config.operator.break_glass_private_key,
-        )?;
-        fs::rename(
-            &staged_break_glass_public,
-            &config.operator.break_glass_public_key,
-        )?;
-    }
-    atomic_write(
-        &operator_directory.join("controller.kid"),
-        new_key_id.as_bytes(),
-        0o444,
-    )?;
-    atomic_write(
-        &operator_directory.join("audit.kid"),
-        new_audit_key_id.as_bytes(),
-        0o444,
-    )?;
-    atomic_write(
-        &operator_directory.join("break-glass.kid"),
-        next_break_glass_key_id.as_bytes(),
-        0o444,
-    )?;
     let mut next_config = config.clone();
-    next_config.operator.controller_key_id = new_key_id.clone();
-    next_config.operator.audit_key_id = new_audit_key_id.clone();
-    next_config.operator.break_glass_key_id = next_break_glass_key_id.clone();
+    write_active_identity(&layout, &next)?;
+    apply_active_identity(&mut next_config, &layout, &next);
     atomic_write(
         config_path,
         &serde_json::to_vec_pretty(&next_config)?,
         0o600,
     )?;
-    fs::remove_file(operator_directory.join("rotation-intent.json"))?;
+    fs::remove_file(layout.operator_directory.join("rotation-intent.json"))?;
+    retire_non_active_private_material(&layout, &next)?;
     println!(
         "controller/audit identity rotated: previous={} next={} previous_audit={} next_audit={} previous_break_glass={} next_break_glass={} authorization={authorization:?} transition={}",
         config.operator.controller_key_id,
-        new_key_id,
+        next.controller_key_id,
         config.operator.audit_key_id,
-        new_audit_key_id,
+        next.audit_key_id,
         config.operator.break_glass_key_id,
-        next_break_glass_key_id,
+        next.break_glass_key_id,
         transition_path.display()
     );
-    Ok(())
+    Ok(RotationResult {
+        previous_controller_key_id: current.controller_key_id,
+        previous_controller_public_sha256: old_controller_digest,
+        retirement_probe: probe,
+    })
 }
 
 pub(crate) fn recover_pending_rotation(
     config_path: &Path,
     config: &mut UpdateConfig,
 ) -> anyhow::Result<()> {
-    let directory = config
-        .operator
-        .controller_private_key
-        .parent()
-        .context("operator directory is unavailable")?;
-    let intent_path = directory.join("rotation-intent.json");
-    if !intent_path.exists() {
-        for path in [
-            directory.join("controller.next.key"),
-            directory.join("controller.next.pub"),
-            directory.join("audit.next.key"),
-            directory.join("audit.next.pub"),
-            config
-                .operator
-                .break_glass_private_key
-                .with_file_name("break-glass.next.key"),
-            directory.join("break-glass.next.pub"),
-        ] {
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
-        }
-        return Ok(());
+    let layout = identity_layout(config)?;
+    if !path_present(&layout.active_file)? {
+        adopt_legacy_identity(config_path, config, &layout)?;
     }
-    let intent: RotationIntent = serde_json::from_slice(&fs::read(&intent_path)?)?;
-    if intent.transition_file.is_empty()
-        || intent.transition_file.starts_with('.')
-        || intent.transition_file.contains(['/', '\\'])
-    {
-        bail!("controller rotation intent has an unsafe transition path");
-    }
-    if intent.schema != 1 {
-        bail!("unsupported controller rotation intent");
-    }
-    let transitions = config.operator.audit_directory.join("trust-transitions");
-    fs::create_dir_all(&transitions)?;
-    let transition_path = transitions.join(&intent.transition_file);
-    if !transition_path.exists() {
-        atomic_write(
-            &transition_path,
-            intent.compact_transition.as_bytes(),
-            0o400,
-        )?;
-    }
-    if intent.next_key_id == config.operator.controller_key_id
-        && intent.next_audit_key_id == config.operator.audit_key_id
-        && intent.next_break_glass_key_id == config.operator.break_glass_key_id
-    {
-        let private = read_signing_key(&config.operator.controller_private_key)?;
-        let public = read_verifying_key(&config.operator.controller_public_key)?;
-        let audit_private = read_signing_key(&config.operator.audit_private_key)?;
-        let audit_public = read_verifying_key(&config.operator.audit_public_key)?;
-        let break_glass_private = read_signing_key(&config.operator.break_glass_private_key)?;
-        let break_glass_public = read_verifying_key(&config.operator.break_glass_public_key)?;
-        if private.verifying_key() != public
-            || audit_private.verifying_key() != audit_public
-            || break_glass_private.verifying_key() != break_glass_public
+    let mut active = read_active_identity(&layout.active_file)?;
+    validate_generation_for_break_glass_recovery(&layout, &active)?;
+    let config_before_repair = serde_json::to_vec(config)?;
+    apply_active_identity(config, &layout, &active);
+    let adoption_path = layout.operator_directory.join("legacy-adoption.json");
+    let adoption_pending = if path_present(&adoption_path)? {
+        let adoption: LegacyAdoptionIntent =
+            serde_json::from_slice(&fs::read(&adoption_path)?)?;
+        if adoption.schema != 1
+            || adoption.generation != active.generation
+            || adoption.controller_key_id != active.controller_key_id
+            || adoption.audit_key_id != active.audit_key_id
+            || adoption.break_glass_key_id != active.break_glass_key_id
         {
-            bail!("activated identity rotation has inconsistent key material");
+            bail!("legacy identity adoption intent conflicts with the active generation")
         }
-        fs::remove_file(intent_path)?;
-        return Ok(());
+        true
+    } else {
+        false
+    };
+    let intent_path = layout.operator_directory.join("rotation-intent.json");
+    if adoption_pending && path_present(&intent_path)? {
+        bail!("legacy adoption and controller rotation cannot be pending together")
     }
-    if intent.previous_key_id != config.operator.controller_key_id
-        || intent.previous_audit_key_id != config.operator.audit_key_id
-        || intent.previous_break_glass_key_id != config.operator.break_glass_key_id
-    {
-        bail!("controller rotation intent does not match the active trust state");
-    }
-    let staged_private = directory.join("controller.next.key");
-    let staged_public = directory.join("controller.next.pub");
-    let staged_audit_private = directory.join("audit.next.key");
-    let staged_audit_public = directory.join("audit.next.pub");
-    let staged_break_glass_private = config
-        .operator
-        .break_glass_private_key
-        .with_file_name("break-glass.next.key");
-    let staged_break_glass_public = directory.join("break-glass.next.pub");
-    let trusted = directory.join("trusted-controllers");
-    fs::create_dir_all(&trusted)?;
-    let archived = trusted.join(format!("{}.pub", intent.previous_key_id));
-    if !archived.exists() {
-        atomic_write(
-            &archived,
-            fs::read(&config.operator.controller_public_key)?.as_slice(),
-            0o444,
-        )?;
-    }
-    let trusted_audit = directory.join("trusted-audit");
-    fs::create_dir_all(&trusted_audit)?;
-    let archived_audit = trusted_audit.join(format!("{}.pub", intent.previous_audit_key_id));
-    if !archived_audit.exists() {
-        atomic_write(
-            &archived_audit,
-            fs::read(&config.operator.audit_public_key)?.as_slice(),
-            0o444,
-        )?;
-    }
-    if intent.next_break_glass_key_id != intent.previous_break_glass_key_id {
-        let trusted_break_glass = directory.join("trusted-break-glass");
-        fs::create_dir_all(&trusted_break_glass)?;
-        let archived_break_glass =
-            trusted_break_glass.join(format!("{}.pub", intent.previous_break_glass_key_id));
-        if !archived_break_glass.exists() {
-            atomic_write(
-                &archived_break_glass,
-                fs::read(&config.operator.break_glass_public_key)?.as_slice(),
-                0o444,
+    if path_present(&intent_path)? {
+        let intent: RotationIntent = serde_json::from_slice(&fs::read(&intent_path)?)?;
+        if intent.schema != 1
+            || !safe_identity_component(&intent.next_generation)
+            || intent.transition_file.is_empty()
+            || intent.transition_file.starts_with('.')
+            || intent.transition_file.contains(['/', '\\'])
+        {
+            bail!("controller rotation intent is invalid")
+        }
+        let next = ActiveIdentity {
+            schema: 1,
+            generation: intent.next_generation,
+            controller_key_id: intent.next_key_id,
+            audit_key_id: intent.next_audit_key_id,
+            break_glass_key_id: intent.next_break_glass_key_id,
+        };
+        validate_generation(&layout, &next)?;
+        verify_rotation_intent(config, &active, &next, &intent)?;
+        archive_generation_publics(&layout, &active)?;
+        archive_generation_publics(&layout, &next)?;
+        let transition_path = config
+            .operator
+            .audit_directory
+            .join("trust-transitions")
+            .join(&intent.transition_file);
+        if !path_present(&transition_path)? {
+            fs::create_dir_all(
+                transition_path
+                    .parent()
+                    .context("rotation transition path has no parent")?,
             )?;
+            atomic_write(&transition_path, intent.compact_transition.as_bytes(), 0o400)?;
         }
+        if active.generation != next.generation {
+            write_active_identity(&layout, &next)?;
+            active = next;
+        }
+        apply_active_identity(config, &layout, &active);
+        atomic_write(config_path, &serde_json::to_vec_pretty(config)?, 0o600)?;
+        fs::remove_file(&intent_path)?;
     }
-    if staged_private.exists() {
-        fs::rename(&staged_private, &config.operator.controller_private_key)?;
+    retire_non_active_private_material(&layout, &active)?;
+    if serde_json::to_vec(config)? != config_before_repair {
+        atomic_write(config_path, &serde_json::to_vec_pretty(config)?, 0o600)?;
     }
-    if staged_public.exists() {
-        fs::rename(&staged_public, &config.operator.controller_public_key)?;
+    if adoption_pending {
+        crate::filesystem::remove_file_durable(&adoption_path)?;
     }
-    if staged_audit_private.exists() {
-        fs::rename(&staged_audit_private, &config.operator.audit_private_key)?;
-    }
-    if staged_audit_public.exists() {
-        fs::rename(&staged_audit_public, &config.operator.audit_public_key)?;
-    }
-    if staged_break_glass_private.exists() {
-        fs::rename(
-            &staged_break_glass_private,
-            &config.operator.break_glass_private_key,
-        )?;
-    }
-    if staged_break_glass_public.exists() {
-        fs::rename(
-            &staged_break_glass_public,
-            &config.operator.break_glass_public_key,
-        )?;
-    }
-    let private = read_signing_key(&config.operator.controller_private_key)?;
-    let public = read_verifying_key(&config.operator.controller_public_key)?;
-    if private.verifying_key() != public {
-        bail!("interrupted controller rotation cannot be recovered safely");
-    }
-    let audit_private = read_signing_key(&config.operator.audit_private_key)?;
-    let audit_public = read_verifying_key(&config.operator.audit_public_key)?;
-    if audit_private.verifying_key() != audit_public {
-        bail!("interrupted audit rotation cannot be recovered safely");
-    }
-    let break_glass_private = read_signing_key(&config.operator.break_glass_private_key)?;
-    let break_glass_public = read_verifying_key(&config.operator.break_glass_public_key)?;
-    if break_glass_private.verifying_key() != break_glass_public {
-        bail!("interrupted break-glass rotation cannot be recovered safely");
-    }
-    atomic_write(
-        &directory.join("controller.kid"),
-        intent.next_key_id.as_bytes(),
-        0o444,
-    )?;
-    atomic_write(
-        &directory.join("audit.kid"),
-        intent.next_audit_key_id.as_bytes(),
-        0o444,
-    )?;
-    atomic_write(
-        &directory.join("break-glass.kid"),
-        intent.next_break_glass_key_id.as_bytes(),
-        0o444,
-    )?;
-    config.operator.controller_key_id = intent.next_key_id;
-    config.operator.audit_key_id = intent.next_audit_key_id;
-    config.operator.break_glass_key_id = intent.next_break_glass_key_id;
-    atomic_write(config_path, &serde_json::to_vec_pretty(config)?, 0o600)?;
-    fs::remove_file(intent_path)?;
     Ok(())
 }
 
@@ -1295,12 +2161,7 @@ fn trusted_controller_key(config: &UpdateConfig, key_id: &str) -> anyhow::Result
     if key_id == config.operator.controller_key_id {
         return read_verifying_key(&config.operator.controller_public_key);
     }
-    let directory = config
-        .operator
-        .controller_public_key
-        .parent()
-        .context("operator directory is unavailable")?
-        .join("trusted-controllers");
+    let directory = identity_layout(config)?.operator_directory.join("trusted-controllers");
     read_verifying_key(&directory.join(format!("{key_id}.pub")))
 }
 
@@ -1308,12 +2169,7 @@ fn trusted_audit_key(config: &UpdateConfig, key_id: &str) -> anyhow::Result<Veri
     if key_id == config.operator.audit_key_id {
         return read_verifying_key(&config.operator.audit_public_key);
     }
-    let directory = config
-        .operator
-        .audit_public_key
-        .parent()
-        .context("operator directory is unavailable")?
-        .join("trusted-audit");
+    let directory = identity_layout(config)?.operator_directory.join("trusted-audit");
     read_verifying_key(&directory.join(format!("{key_id}.pub")))
 }
 
@@ -1321,12 +2177,7 @@ fn trusted_break_glass_key(config: &UpdateConfig, key_id: &str) -> anyhow::Resul
     if key_id == config.operator.break_glass_key_id {
         return read_verifying_key(&config.operator.break_glass_public_key);
     }
-    let directory = config
-        .operator
-        .break_glass_public_key
-        .parent()
-        .context("operator directory is unavailable")?
-        .join("trusted-break-glass");
+    let directory = identity_layout(config)?.operator_directory.join("trusted-break-glass");
     read_verifying_key(&directory.join(format!("{key_id}.pub")))
 }
 

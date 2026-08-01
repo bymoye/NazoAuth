@@ -401,6 +401,25 @@ fn parses_key_mutations_identity_rotation_and_break_glass() {
         Command::IdentityRotate { yes: true }
     ));
     assert!(matches!(
+        parse(&["nazoauthctl", "break-glass", "controller-availability"])
+            .unwrap()
+            .unwrap()
+            .command,
+        Command::BreakGlassControllerAvailability
+    ));
+    assert!(matches!(
+        parse(&[
+            "nazoauthctl",
+            "break-glass",
+            "rehearse-controller-loss",
+            "--yes",
+        ])
+        .unwrap()
+        .unwrap()
+        .command,
+        Command::BreakGlassRehearseControllerLoss { yes: true }
+    ));
+    assert!(matches!(
         parse(&[
             "nazoauthctl",
             "break-glass",

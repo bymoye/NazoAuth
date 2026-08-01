@@ -67,7 +67,14 @@ class OciFixture:
             statement = {
                 "_type": "https://in-toto.io/Statement/v0.1",
                 "predicateType": predicate_type,
-                "subject": [],
+                "subject": [
+                    {
+                        "name": f"pkg:docker/{REPOSITORY}?platform=linux/{architecture}",
+                        "digest": {
+                            "sha256": image["digest"].removeprefix("sha256:")
+                        },
+                    }
+                ],
                 "predicate": {"fixture": architecture},
             }
             attestation_layers.append(
@@ -131,6 +138,20 @@ class OciFixture:
                 "vnd.docker.reference.digest"
             ) == previous_digest:
                 annotations["vnd.docker.reference.digest"] = replacement_digest
+
+    def mismatch_attestation_subject(self, architecture: str) -> None:
+        image_digest = self.images[architecture]
+        descriptor = next(
+            item
+            for item in self.release_descriptors
+            if item.get("annotations", {}).get("vnd.docker.reference.digest") == image_digest
+        )
+        manifest = json.loads(self.blobs[descriptor["digest"]])
+        layer = manifest["layers"][0]
+        statement = json.loads(self.blobs[layer["digest"]])
+        statement["subject"][0]["digest"]["sha256"] = "0" * 64
+        layer["digest"], layer["size"] = self.blob(statement)
+        descriptor["digest"], descriptor["size"] = self.blob(manifest)
 
     def write(
         self,
@@ -284,6 +305,20 @@ class ReleaseOciTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 validator.OciValidationError,
                 "config document does not match its index platform",
+            ):
+                self.validate(archive, expected, root)
+
+    def test_rejects_attestation_subject_for_another_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "candidate.oci.tar"
+            fixture = OciFixture()
+            fixture.mismatch_attestation_subject("amd64")
+            expected = fixture.write(archive)
+
+            with self.assertRaisesRegex(
+                validator.OciValidationError,
+                "subject does not bind its image manifest",
             ):
                 self.validate(archive, expected, root)
 

@@ -61,7 +61,7 @@ The normal first-install and upgrade interface remains
    raw `nazoauth migrate`/`keyctl` paths are rejected; intent/receipt retries are
    idempotent and signed audit/trust chains verify.
 6. Run the remote host-local OIDF Conformance Suite against this exact public
-   instance for the complete currently declared plan/variant matrix. Sampling,
+   instance for all `27 + 17 = 44` fixed plans and every declared variant. Sampling,
    capability reduction, verdict changes, and unsupported expected skips are
    forbidden.
 

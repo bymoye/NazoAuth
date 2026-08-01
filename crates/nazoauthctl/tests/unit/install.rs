@@ -40,21 +40,6 @@ fn public_origin_rejects_embedded_credentials() {
     }
 }
 
-#[cfg(unix)]
-fn write_operator_ids(config_dir: &Path) {
-    let operator = config_dir.join("operator");
-    fs::create_dir_all(&operator).unwrap();
-    for (name, value) in [
-        ("deployment-id", "deployment-test"),
-        ("controller.kid", "controller-test"),
-        ("receipt.kid", "receipt-test"),
-        ("audit.kid", "audit-test"),
-        ("break-glass.kid", "break-glass-test"),
-    ] {
-        fs::write(operator.join(name), value).unwrap();
-    }
-}
-
 #[test]
 fn managed_dependency_credentials_are_outside_runtime_secret_directory() {
     let work = PrivateTempDir::new("managed-secret-boundaries").unwrap();
@@ -542,8 +527,12 @@ fn external_urls_are_persisted_only_as_private_secret_files() {
 fn generated_container_config_exposes_secret_files_but_not_secret_values() {
     let work = PrivateTempDir::new("container-config-boundary").unwrap();
     let config_dir = work.path().join("config");
-    write_operator_ids(&config_dir);
     let mut options = install_options(work.path().join("data"));
+    initialize_identity_generation(
+        &config_dir.join("operator"),
+        &options.data_root.join("recovery"),
+    )
+    .unwrap();
     options.profile = "standards-full".to_owned();
     let config_path = config_dir.join("update.json");
     let config = build_config(&config_path, &options, "podman", "podman", "external").unwrap();

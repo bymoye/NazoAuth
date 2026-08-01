@@ -151,6 +151,32 @@ impl Process {
             .with_context(|| format!("{} produced non-UTF-8 output", self.display_name()))
     }
 
+    /// Returns only a closed classification.  Diagnostic output is deliberately
+    /// consumed in-process and is never propagated to the caller, logs, or
+    /// audit chain because it may contain deployment details.
+    pub(crate) fn stdin_authorization_rejected(&self, input: &[u8]) -> anyhow::Result<bool> {
+        let mut command = self.command();
+        command
+            .stdin(Stdio::piped())
+            // `collect_output` drains both pipes to avoid deadlock. The bytes
+            // are discarded below and never cross the process boundary.
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = &self.current_dir {
+            command.current_dir(path);
+        }
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to execute {}", self.display_name()))?;
+        let output = self.collect_output(child, Some(input))?;
+        if output.status.success() {
+            return Ok(false);
+        }
+        Ok(String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .any(|line| line.trim() == "nazoauth-operator-rejection=authorization"))
+    }
+
     pub(crate) fn stdout_file(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)
             .with_context(|| format!("failed to create command output {}", path.display()))?;

@@ -19,7 +19,8 @@ fn keypair(directory: &Path, name: &str, seed: u8) -> (String, PathBuf, PathBuf)
         URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes()),
     )
     .unwrap();
-    (format!("{name}-test"), private, public)
+    let digest = encode_hex(&Sha256::digest(key.verifying_key().to_bytes()));
+    (format!("{name}-{}", &digest[..16]), private, public)
 }
 
 fn config(work: &PrivateTempDir) -> UpdateConfig {
@@ -60,6 +61,9 @@ fn config(work: &PrivateTempDir) -> UpdateConfig {
             break_glass_key_id,
             break_glass_private_key,
             break_glass_public_key,
+            active_identity_file: operator.join("active-generation.json"),
+            identity_generations_directory: operator.join("generations"),
+            recovery_generations_directory: work.path().join("recovery/generations"),
             secret_revision_file,
             state_directory: state,
             audit_directory: audit,
@@ -105,6 +109,28 @@ fn config(work: &PrivateTempDir) -> UpdateConfig {
             releases_root: work.path().join("ui-releases"),
         },
     }
+}
+
+fn test_runtime_rejects_retired_controller(
+    config: &UpdateConfig,
+    probe: &str,
+) -> anyhow::Result<RetirementProbeExecution> {
+    let current = read_verifying_key(&config.operator.controller_public_key)?;
+    if verify_task_signature(probe, &config.operator.controller_key_id, &current).is_ok() {
+        anyhow::bail!("test runtime accepted retired controller")
+    }
+    Ok(RetirementProbeExecution {
+        controller_verified_target: RuntimeTargetClaim::HostBinary {
+            path: "/opt/nazoauth".to_owned(),
+            sha256: "a".repeat(64),
+        },
+        application_reported_embedded_identity: EmbeddedIdentity {
+            release: "v0.1.5".to_owned(),
+            revision: "b".repeat(40),
+            protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+            build_id: "build:test".to_owned(),
+        },
+    })
 }
 
 fn task_parts() -> (
@@ -312,8 +338,9 @@ fn management_event_request_id_is_idempotent_and_content_bound() {
 fn controller_and_audit_rotation_chain_survives_normal_and_break_glass_recovery() {
     let work = PrivateTempDir::new("nazoauth-rotation-test").unwrap();
     let config_path = work.path().join("update.json");
-    let config = config(&work);
+    let mut config = config(&work);
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
     append_management_event(&config, "install", "v1.0.0", "backup").unwrap();
     let first_controller = config.operator.controller_key_id.clone();
     let first_audit = config.operator.audit_key_id.clone();
@@ -322,14 +349,14 @@ fn controller_and_audit_rotation_chain_survives_normal_and_break_glass_recovery(
     let rotated: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     assert_ne!(rotated.operator.controller_key_id, first_controller);
     assert_ne!(rotated.operator.audit_key_id, first_audit);
-    assert_eq!(rotated.operator.break_glass_key_id, first_break_glass);
+    assert_ne!(rotated.operator.break_glass_key_id, first_break_glass);
     append_management_event(&rotated, "identity-rotated", "v1.0.0", "normal").unwrap();
     verify_audit(&rotated).unwrap();
 
     let second_controller = rotated.operator.controller_key_id.clone();
     let second_audit = rotated.operator.audit_key_id.clone();
     let second_break_glass = rotated.operator.break_glass_key_id.clone();
-    rotate_controller(&config_path, &rotated, true, "stolen").unwrap();
+    recover_controller_without_controller_key(&config_path, &rotated, "stolen").unwrap();
     let mut recovered: UpdateConfig =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     assert_ne!(recovered.operator.controller_key_id, second_controller);
@@ -350,6 +377,15 @@ fn controller_and_audit_rotation_chain_survives_normal_and_break_glass_recovery(
     let last = transitions.last().unwrap();
     let intent = RotationIntent {
         schema: 1,
+        next_generation: recovered
+            .operator
+            .controller_private_key
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
         previous_key_id: second_controller,
         next_key_id: recovered.operator.controller_key_id.clone(),
         previous_audit_key_id: second_audit,
@@ -359,11 +395,9 @@ fn controller_and_audit_rotation_chain_survives_normal_and_break_glass_recovery(
         transition_file: last.file_name().to_string_lossy().into_owned(),
         compact_transition: fs::read_to_string(last.path()).unwrap(),
     };
-    let intent_path = recovered
-        .operator
-        .controller_private_key
-        .parent()
+    let intent_path = identity_layout(&recovered)
         .unwrap()
+        .operator_directory
         .join("rotation-intent.json");
     fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut recovered).unwrap();
@@ -660,64 +694,249 @@ fn duplicate_management_request_ids_fail_before_untrusted_files_are_parsed() {
 }
 
 #[test]
-fn interrupted_rotation_activates_staged_controller_audit_and_break_glass_keys() {
+fn interrupted_rotation_activates_one_complete_staged_generation() {
     let work = PrivateTempDir::new("nazoauth-staged-rotation-test").unwrap();
     let config_path = work.path().join("update.json");
     let mut config = config(&work);
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let directory = config
-        .operator
-        .controller_private_key
-        .parent()
-        .unwrap()
-        .to_owned();
-    let write_staged = |private: &Path, public: &Path, seed: u8| {
-        let key = SigningKey::from_bytes(&[seed; 32]);
-        fs::write(private, URL_SAFE_NO_PAD.encode(key.to_bytes())).unwrap();
-        fs::write(
-            public,
-            URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes()),
-        )
-        .unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let layout = identity_layout(&config).unwrap();
+    let controller = SigningKey::from_bytes(&[5; 32]);
+    let audit = SigningKey::from_bytes(&[6; 32]);
+    let break_glass = SigningKey::from_bytes(&[7; 32]);
+    let next = new_active_identity(&controller, &audit, &break_glass);
+    write_generation(&layout, &next, &controller, &audit, &break_glass).unwrap();
+    let transition = ControllerTrustTransition {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        deployment_id: config.operator.deployment_id.clone(),
+        issued_at: Utc::now().timestamp(),
+        authorization: TransitionAuthorization::Controller,
+        previous_key_id: config.operator.controller_key_id.clone(),
+        next_key_id: next.controller_key_id.clone(),
+        next_public_key_sha256: encode_hex(&Sha256::digest(controller.verifying_key().to_bytes())),
+        previous_audit_key_id: config.operator.audit_key_id.clone(),
+        next_audit_key_id: next.audit_key_id.clone(),
+        next_audit_public_key_sha256: encode_hex(&Sha256::digest(audit.verifying_key().to_bytes())),
+        previous_break_glass_key_id: config.operator.break_glass_key_id.clone(),
+        next_break_glass_key_id: next.break_glass_key_id.clone(),
+        next_break_glass_public_key_sha256: encode_hex(&Sha256::digest(
+            break_glass.verifying_key().to_bytes(),
+        )),
+        reason: "normal".to_owned(),
     };
-    write_staged(
-        &directory.join("controller.next.key"),
-        &directory.join("controller.next.pub"),
-        5,
-    );
-    write_staged(
-        &directory.join("audit.next.key"),
-        &directory.join("audit.next.pub"),
-        6,
-    );
-    write_staged(
-        &config
-            .operator
-            .break_glass_private_key
-            .with_file_name("break-glass.next.key"),
-        &directory.join("break-glass.next.pub"),
-        7,
-    );
+    let current_controller = read_signing_key(&config.operator.controller_private_key).unwrap();
+    let compact_transition = sign_trust_transition(
+        &transition,
+        &config.operator.controller_key_id,
+        &current_controller,
+    )
+    .unwrap();
     let intent = RotationIntent {
         schema: 1,
+        next_generation: next.generation.clone(),
         previous_key_id: config.operator.controller_key_id.clone(),
-        next_key_id: "controller-next".to_owned(),
+        next_key_id: next.controller_key_id.clone(),
         previous_audit_key_id: config.operator.audit_key_id.clone(),
-        next_audit_key_id: "audit-next".to_owned(),
+        next_audit_key_id: next.audit_key_id.clone(),
         previous_break_glass_key_id: config.operator.break_glass_key_id.clone(),
-        next_break_glass_key_id: "break-glass-next".to_owned(),
+        next_break_glass_key_id: next.break_glass_key_id.clone(),
         transition_file: "staged-transition.jws".to_owned(),
-        compact_transition: "staged-transition".to_owned(),
+        compact_transition,
     };
     fs::write(
-        directory.join("rotation-intent.json"),
+        layout.operator_directory.join("rotation-intent.json"),
         serde_json::to_vec(&intent).unwrap(),
     )
     .unwrap();
 
     recover_pending_rotation(&config_path, &mut config).unwrap();
-    assert_eq!(config.operator.controller_key_id, "controller-next");
-    assert_eq!(config.operator.audit_key_id, "audit-next");
-    assert_eq!(config.operator.break_glass_key_id, "break-glass-next");
-    assert!(!directory.join("rotation-intent.json").exists());
+    assert_eq!(config.operator.controller_key_id, next.controller_key_id);
+    assert_eq!(config.operator.audit_key_id, next.audit_key_id);
+    assert_eq!(config.operator.break_glass_key_id, next.break_glass_key_id);
+    assert!(!layout.operator_directory.join("rotation-intent.json").exists());
+}
+
+#[test]
+fn retired_controller_probe_is_rejected_and_audited_after_rotation() {
+    let work = PrivateTempDir::new("nazoauth-retirement-probe-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let rotation = rotate_controller(&config_path, &config, false, "normal").unwrap();
+    let mut current: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut current).unwrap();
+    verify_retired_controller_probe_with(&current, &rotation, "v0.1.5", |probe| {
+        test_runtime_rejects_retired_controller(&current, probe)
+    })
+    .unwrap();
+    verify_audit(&current).unwrap();
+    let entries = audit_entries(&current, None).unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry["kind"] == json!("management-event")
+            && entry["event"]["operation"] == json!("controller-retirement-probe")
+    }));
+}
+
+#[test]
+fn controller_loss_rehearsal_rotates_with_controller_signing_forbidden_and_probes_retirement() {
+    let work = PrivateTempDir::new("nazoauth-controller-loss-rehearsal-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let previous = config.operator.controller_key_id.clone();
+
+    let rotation = rehearse_controller_loss(&config_path, &config).unwrap();
+    let mut current: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut current).unwrap();
+    assert_ne!(current.operator.controller_key_id, previous);
+    assert!(rotation.retirement_probe.is_some());
+    verify_retired_controller_probe_with(&current, &rotation, "v0.1.5", |probe| {
+        test_runtime_rejects_retired_controller(&current, probe)
+    })
+    .unwrap();
+    verify_audit(&current).unwrap();
+}
+
+#[test]
+fn controller_loss_recovery_does_not_require_the_controller_private_key() {
+    let work = PrivateTempDir::new("nazoauth-controller-loss-recovery-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    fs::remove_file(&config.operator.controller_private_key).unwrap();
+
+    let rotation = recover_controller_without_controller_key(&config_path, &config, "lost").unwrap();
+    assert!(rotation.retirement_probe.is_none());
+    let mut current: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut current).unwrap();
+    verify_retired_controller_probe_with(&current, &rotation, "v0.1.5", |probe| {
+        test_runtime_rejects_retired_controller(&current, probe)
+    })
+    .unwrap();
+    verify_audit(&current).unwrap();
+}
+
+#[test]
+fn active_pointer_recovers_a_stale_config_without_multiple_active_private_generations() {
+    let work = PrivateTempDir::new("nazoauth-active-pointer-recovery-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let layout = identity_layout(&config).unwrap();
+    let previous_generation = read_active_identity(&layout.active_file).unwrap().generation;
+    let controller = SigningKey::from_bytes(&[21; 32]);
+    let audit = SigningKey::from_bytes(&[22; 32]);
+    let break_glass = SigningKey::from_bytes(&[23; 32]);
+    let next = new_active_identity(&controller, &audit, &break_glass);
+    write_generation(&layout, &next, &controller, &audit, &break_glass).unwrap();
+    write_active_identity(&layout, &next).unwrap();
+
+    // This models SIGKILL after the sole active-pointer commit and before the
+    // compatibility mirror in update.json is rewritten.
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    assert_eq!(config.operator.controller_key_id, next.controller_key_id);
+    assert_eq!(config.operator.audit_key_id, next.audit_key_id);
+    assert_eq!(config.operator.break_glass_key_id, next.break_glass_key_id);
+    assert!(
+        !layout
+            .generations
+            .join(&previous_generation)
+            .join("controller.key")
+            .exists()
+    );
+    assert!(
+        !layout
+            .recovery_generations
+            .join(&previous_generation)
+            .join("break-glass.key")
+            .exists()
+    );
+}
+
+#[test]
+fn restart_discards_uncommitted_partial_generation_without_touching_active_identity() {
+    let work = PrivateTempDir::new("nazoauth-partial-generation-recovery-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let layout = identity_layout(&config).unwrap();
+    let abandoned = layout.generations.join("generation-abandoned");
+    fs::create_dir_all(&abandoned).unwrap();
+    fs::write(abandoned.join("controller.key"), b"partial").unwrap();
+    let active_before = read_active_identity(&layout.active_file).unwrap();
+
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+
+    assert_eq!(read_active_identity(&layout.active_file).unwrap().generation, active_before.generation);
+    assert!(!abandoned.join("controller.key").exists());
+}
+
+#[test]
+fn fresh_identity_initialization_retires_precommit_private_material() {
+    let work = PrivateTempDir::new("nazoauth-fresh-identity-kill-window-test").unwrap();
+    let operator = work.path().join("operator");
+    let recovery = work.path().join("recovery");
+    let abandoned = operator.join("generations/generation-abandoned");
+    let abandoned_recovery = recovery.join("generations/generation-abandoned");
+    fs::create_dir_all(&abandoned).unwrap();
+    fs::create_dir_all(&abandoned_recovery).unwrap();
+    fs::write(abandoned.join("controller.key"), b"partial").unwrap();
+    fs::write(abandoned_recovery.join("break-glass.key"), b"partial").unwrap();
+    fs::write(operator.join("receipt.key"), b"partial").unwrap();
+
+    initialize_identity_generation(&operator, &recovery).unwrap();
+
+    let layout = IdentityLayout {
+        operator_directory: operator.clone(),
+        active_file: operator.join("active-generation.json"),
+        generations: operator.join("generations"),
+        recovery_generations: recovery.join("generations"),
+    };
+    let active = read_active_identity(&layout.active_file).unwrap();
+    validate_generation(&layout, &active).unwrap();
+    assert!(!abandoned.join("controller.key").exists());
+    assert!(!abandoned_recovery.join("break-glass.key").exists());
+    assert!(operator.join("receipt.key").is_file());
+}
+
+#[test]
+fn missing_active_pointer_with_rotation_history_fails_closed() {
+    let work = PrivateTempDir::new("nazoauth-missing-active-pointer-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    rotate_controller(&config_path, &config, false, "normal").unwrap();
+    let mut current: UpdateConfig =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    fs::remove_file(&current.operator.active_identity_file).unwrap();
+
+    let error = recover_pending_rotation(&config_path, &mut current).unwrap_err();
+    assert!(error.to_string().contains("ambiguous rotation state"));
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_cleanup_refuses_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let work = PrivateTempDir::new("nazoauth-generation-symlink-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    let layout = identity_layout(&config).unwrap();
+    let outside = work.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("controller.key"), b"must-survive").unwrap();
+    symlink(&outside, layout.generations.join("generation-escape")).unwrap();
+
+    let error = recover_pending_rotation(&config_path, &mut config).unwrap_err();
+    assert!(error.to_string().contains("unsafe entry"));
+    assert_eq!(fs::read(outside.join("controller.key")).unwrap(), b"must-survive");
 }

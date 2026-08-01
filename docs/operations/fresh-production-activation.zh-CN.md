@@ -47,8 +47,9 @@
    managed runtime PostgreSQL 无 DDL；argv、普通 env、inspect、journal、日志、审计和
    持久 envelope 均无秘密；raw `nazoauth migrate`/`keyctl` 被拒绝；intent/receipt 重试
    幂等，签名审计链和 trust transition 可验证。
-6. 使用远端主机本地 OIDF Conformance Suite，对该实例运行项目当前声明的完整
-   plan/variant 矩阵。禁止抽样、关闭能力、修改判定或增加无规范依据的 expected skip。
+6. 使用远端主机本地 OIDF Conformance Suite，对该实例运行固定的
+   `27 + 17 = 44` 个 plan 及项目当前声明的全部 variant。禁止抽样、关闭能力、修改判定或
+   增加无规范依据的 expected skip。
 
 任一步报错、超时、需要人工修复、直接改内部状态、扩大权限、绕过安全控制、证据不完整
 或 OIDF 失败，都使本次尝试无效。修复代码并发布新的不可变 Release 后，必须再次删除

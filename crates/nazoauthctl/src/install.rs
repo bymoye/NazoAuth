@@ -9,8 +9,6 @@ use std::{
 
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::SigningKey;
-use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use crate::{
@@ -19,6 +17,7 @@ use crate::{
     model::{
         Dependencies, Mount, Operator, Postgres, Runtime, Ui, UpdateConfig, Valkey, safe_absolute,
     },
+    operator,
     process::{Process, command_exists},
     secret_provider::PostgresProvider,
 };
@@ -97,7 +96,7 @@ pub(crate) fn prepare(
     let recovery_dir = options.data_root.join("recovery");
     create_directory(&recovery_dir, 0o700)?;
     create_directory(&options.data_root.join("audit"), 0o700)?;
-    write_operator_identities(&operator_dir, &recovery_dir)?;
+    operator::initialize_identity_generation(&operator_dir, &recovery_dir)?;
     let profile = write_install_profile(config_dir, &options)?;
 
     let dependency_mode = if options.database_url.is_some() {
@@ -1267,110 +1266,32 @@ fn build_config(
 fn operator_config(config_dir: &Path, data_root: &Path) -> anyhow::Result<Operator> {
     let directory = config_dir.join("operator");
     let deployment_id = fs::read_to_string(directory.join("deployment-id"))?;
-    let controller_key_id = fs::read_to_string(directory.join("controller.kid"))?;
+    let active = operator::read_active_identity(&directory.join("active-generation.json"))?;
     let receipt_key_id = fs::read_to_string(directory.join("receipt.kid"))?;
-    let audit_key_id = fs::read_to_string(directory.join("audit.kid"))?;
-    let break_glass_key_id = fs::read_to_string(directory.join("break-glass.kid"))?;
+    let generation = directory.join("generations").join(&active.generation);
+    let recovery_generation = data_root.join("recovery/generations").join(&active.generation);
     Ok(Operator {
         deployment_id,
-        controller_key_id,
-        controller_private_key: directory.join("controller.key"),
-        controller_public_key: directory.join("controller.pub"),
+        controller_key_id: active.controller_key_id,
+        controller_private_key: generation.join("controller.key"),
+        controller_public_key: generation.join("controller.pub"),
         receipt_key_id,
         receipt_private_key: directory.join("receipt.key"),
         receipt_public_key: directory.join("receipt.pub"),
-        audit_key_id,
-        audit_private_key: directory.join("audit.key"),
-        audit_public_key: directory.join("audit.pub"),
-        break_glass_key_id,
-        break_glass_private_key: data_root.join("recovery/break-glass.key"),
-        break_glass_public_key: directory.join("break-glass.pub"),
+        audit_key_id: active.audit_key_id,
+        audit_private_key: generation.join("audit.key"),
+        audit_public_key: generation.join("audit.pub"),
+        break_glass_key_id: active.break_glass_key_id,
+        break_glass_private_key: recovery_generation.join("break-glass.key"),
+        break_glass_public_key: generation.join("break-glass.pub"),
+        active_identity_file: directory.join("active-generation.json"),
+        identity_generations_directory: directory.join("generations"),
+        recovery_generations_directory: data_root.join("recovery/generations"),
         secret_revision_file: directory.join("secret-revision"),
         state_directory: data_root.join("app/operator-state"),
         audit_directory: data_root.join("audit"),
         trust_state_file: directory.join("release-trust.json"),
     })
-}
-
-fn write_operator_identities(directory: &Path, recovery_directory: &Path) -> anyhow::Result<()> {
-    let deployment_path = directory.join("deployment-id");
-    if !deployment_path.exists() {
-        atomic_write(
-            &deployment_path,
-            format!("deployment-{}", encode_hex(&rand::random::<[u8; 16]>())).as_bytes(),
-            0o400,
-        )?;
-    }
-    let secret_revision = directory.join("secret-revision");
-    if !secret_revision.exists() {
-        atomic_write(
-            &secret_revision,
-            format!("secret-{}", encode_hex(&rand::random::<[u8; 16]>())).as_bytes(),
-            0o400,
-        )?;
-    }
-    for name in ["controller", "receipt", "audit"] {
-        write_operator_keypair(directory, name)?;
-    }
-    write_break_glass_keypair(directory, recovery_directory)?;
-    Ok(())
-}
-
-fn write_break_glass_keypair(directory: &Path, recovery_directory: &Path) -> anyhow::Result<()> {
-    let private_path = recovery_directory.join("break-glass.key");
-    let public_path = directory.join("break-glass.pub");
-    let kid_path = directory.join("break-glass.kid");
-    if private_path.exists() || public_path.exists() || kid_path.exists() {
-        if private_path.is_file() && public_path.is_file() && kid_path.is_file() {
-            return Ok(());
-        }
-        bail!("incomplete break-glass recovery identity requires review");
-    }
-    let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-    let public = signing.verifying_key().to_bytes();
-    let digest = encode_hex(&Sha256::digest(public));
-    atomic_write(
-        &private_path,
-        URL_SAFE_NO_PAD.encode(signing.to_bytes()).as_bytes(),
-        0o400,
-    )?;
-    atomic_write(
-        &public_path,
-        URL_SAFE_NO_PAD.encode(public).as_bytes(),
-        0o444,
-    )?;
-    atomic_write(
-        &kid_path,
-        format!("break-glass-{}", &digest[..16]).as_bytes(),
-        0o444,
-    )
-}
-
-fn write_operator_keypair(directory: &Path, name: &str) -> anyhow::Result<()> {
-    let private_path = directory.join(format!("{name}.key"));
-    let public_path = directory.join(format!("{name}.pub"));
-    let kid_path = directory.join(format!("{name}.kid"));
-    if private_path.exists() || public_path.exists() || kid_path.exists() {
-        if private_path.is_file() && public_path.is_file() && kid_path.is_file() {
-            return Ok(());
-        }
-        bail!("incomplete operator keypair requires review: {name}");
-    }
-    let key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-    let public = key.verifying_key().to_bytes();
-    let digest = Sha256::digest(public);
-    let kid = format!("{name}-{}", encode_hex(&digest[..8]));
-    atomic_write(
-        &private_path,
-        URL_SAFE_NO_PAD.encode(key.to_bytes()).as_bytes(),
-        0o400,
-    )?;
-    atomic_write(
-        &public_path,
-        URL_SAFE_NO_PAD.encode(public).as_bytes(),
-        0o444,
-    )?;
-    atomic_write(&kid_path, kid.as_bytes(), 0o444)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

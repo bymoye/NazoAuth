@@ -1,6 +1,6 @@
 # Certification and Conformance Evidence
 
-This page is the entry point for certification status and current official-suite
+This page is the entry point for certification status and versioned official-suite
 evidence. Detailed protocol support is documented in
 [Standards and profile support](../integration/openid-connect.md).
 
@@ -20,9 +20,9 @@ Official listing pages:
 - [Certified OpenID Provider profiles](https://openid.net/certification/certified-openid-providers-profiles/)
 - [Certified FAPI 2.0 OP Security Profile Final and Message Signing Final](https://openid.net/certification/certified-fapi-2-0-op-security-profile-final-message-signing-final/)
 
-## Current public black-box evidence
+## Historical public black-box baseline
 
-Current conformance evidence is recorded in
+The most recent retained historical baseline is recorded in
 [2026-07-20 final automated OIDF results](2026-07-20-final-automated-oidf-results.md).
 The run used an operator-provided production HTTPS issuer. Public documentation
 uses `https://issuer.example` only as a sanitized placeholder. Repository
@@ -35,7 +35,7 @@ variables for private automation.
 | OIDC / FAPI / FAPI-CIBA | Success | 25 official public plans: 23 concurrent plans plus 2 browser-isolated plans |
 | OpenID4VC Final / HAIP | Success | 17 official-suite regression plans |
 
-Combined credential-free operator manifest:
+Historical combined credential-free operator manifest:
 
 | Metric | Value |
 | --- | ---: |
@@ -54,6 +54,11 @@ one-time-use conflict in the upstream multiple-clients module. Bounded warnings,
 reviews, and skips are documented in the linked evidence record. They are not
 hidden and must not be described as zero-warning, zero-failure, or zero-skipped
 evidence.
+
+This 2026-07-20 `25 + 17 = 42` run is not evidence for the current fixed
+`27 + 17 = 44` release gate. A release is current only after all 44 plans have
+run against that exact deployed Release and the resulting suite revision,
+plan/variant outcomes, and evidence paths have been recorded.
 
 ## Matrix scope
 

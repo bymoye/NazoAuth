@@ -1,9 +1,9 @@
 # NazoAuth Operator Task Protocol 实施任务书
 
-状态：实施中；本机可执行门禁已通过，Linux fuzz/精确提交 CI、正式 Release 与第 18 节唯一远端验收尚未完成
-日期：2026-07-31  
+状态：实施中；远端 Linux focused gate 已通过旧精确 head，原子 identity generation 正在补齐；正式双 Release 与第 18 节唯一远端验收尚未完成
+日期：2026-08-01
 设计计划：[operator-task-protocol-plan.zh-CN.md](../security/operator-task-protocol-plan.zh-CN.md)  
-源代码基线：`497a0adb441f4e3391e4521f821d9a81922e3961` 上的当前工作树
+源代码基线：`codex/cosign-private-staging` 当前工作树；安装/升级验收版本为 `v0.1.5 → v0.1.6`，最终 SHA 只由正式 Release 固定
 
 ## 1. 任务目标
 

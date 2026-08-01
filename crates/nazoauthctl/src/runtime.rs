@@ -31,6 +31,21 @@ impl PreparedAppTask {
         result
     }
 
+    /// Starts the already prepared task and accepts only the runtime's closed
+    /// authorization-failure boundary.  Any setup failure, timeout, unrelated
+    /// non-zero exit, or successful task is a failed retirement probe.
+    pub(crate) fn expect_authorization_rejection(
+        &self,
+        compact_envelope: &str,
+    ) -> anyhow::Result<()> {
+        let result = self.process.stdin_authorization_rejected(compact_envelope.as_bytes());
+        self.cleanup();
+        match result? {
+            true => Ok(()),
+            false => bail!("prepared runtime task did not reject retired controller at authorization boundary"),
+        }
+    }
+
     fn cleanup(&self) {
         match &self.cleanup {
             TaskCleanup::Container { engine, name } => {
