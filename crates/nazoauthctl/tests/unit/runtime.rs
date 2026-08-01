@@ -222,7 +222,7 @@ fn application_container_command_uses_hardening_and_secret_file_references() {
 fn write_executable(path: &Path, body: &str) {
     use std::{io::Write as _, os::unix::fs::PermissionsExt as _};
 
-    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
+    let temporary = path.with_extension("tmp");
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
