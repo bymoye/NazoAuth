@@ -17,7 +17,7 @@ fn authorization_rejection_requires_the_exact_closed_marker_and_nonzero_exit() {
     let rejected = Process::new("sh")
         .args([
             "-c",
-            "printf '%s\\n' 'nazoauth-operator-rejection=authorization' >&2; exit 17",
+            "cat >/dev/null; printf '%s\\n' 'nazoauth-operator-rejection=authorization' >&2; exit 17",
         ])
         .stdin_authorization_rejected(b"probe")
         .unwrap();
@@ -26,7 +26,7 @@ fn authorization_rejection_requires_the_exact_closed_marker_and_nonzero_exit() {
     let unrelated = Process::new("sh")
         .args([
             "-c",
-            "printf '%s\\n' 'prefix-nazoauth-operator-rejection=authorization' >&2; exit 17",
+            "cat >/dev/null; printf '%s\\n' 'prefix-nazoauth-operator-rejection=authorization' >&2; exit 17",
         ])
         .stdin_authorization_rejected(b"probe")
         .unwrap();
@@ -35,7 +35,7 @@ fn authorization_rejection_requires_the_exact_closed_marker_and_nonzero_exit() {
     let successful = Process::new("sh")
         .args([
             "-c",
-            "printf '%s\\n' 'nazoauth-operator-rejection=authorization' >&2; exit 0",
+            "cat >/dev/null; printf '%s\\n' 'nazoauth-operator-rejection=authorization' >&2; exit 0",
         ])
         .stdin_authorization_rejected(b"probe")
         .unwrap();
