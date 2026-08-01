@@ -9,6 +9,10 @@ mod release;
 mod runtime;
 mod secret_provider;
 
+#[cfg(all(test, unix))]
+#[path = "../tests/unit/support.rs"]
+mod test_support;
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     if let Some(topic) = cli::help_topic(&args) {

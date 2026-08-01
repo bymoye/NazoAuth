@@ -5,6 +5,8 @@ use std::{
 };
 
 use super::*;
+#[cfg(unix)]
+use crate::test_support::write_shell_executable;
 use crate::{
     filesystem::PrivateTempDir,
     model::{
@@ -329,24 +331,20 @@ fn write_fake_bootstrap_curl(
     work: &PrivateTempDir,
     response: &str,
 ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let executable = work.path().join("fake-curl");
     let arguments = work.path().join("curl-arguments");
     let body = work.path().join("curl-body");
     let environment = work.path().join("curl-environment");
-    fs::write(
+    write_shell_executable(
         &executable,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/usr/bin/env > '{}'\n/bin/cat > '{}'\nprintf '%s\\n' '{}'\nprintf '%s' '201'\n",
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\n/usr/bin/env > '{}'\n/bin/cat > '{}'\nprintf '%s\\n' '{}'\nprintf '%s' '201'",
             arguments.display(),
             environment.display(),
             body.display(),
             response
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     (executable, arguments, body, environment)
 }
 
@@ -1324,8 +1322,6 @@ fn host_identity_fixture(
     work: &PrivateTempDir,
     actual_identity: &nazo_operator_protocol::EmbeddedIdentity,
 ) -> (UpdateConfig, ReleaseManifest) {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let mut config = config(work);
     config.dependencies.mode = "external".to_owned();
     let mut release = manifest("v0.2.0", 'e');
@@ -1334,16 +1330,12 @@ fn host_identity_fixture(
     let binary = directory.join("nazoauth");
     let identity = serde_json::to_string(actual_identity).unwrap();
     assert!(!identity.contains('\''));
-    fs::write(
+    write_shell_executable(
         &binary,
-        format!(
-            "#!/bin/sh\nif [ \"${{1:-}}\" = build-identity ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nexit 1\n"
+        &format!(
+            "if [ \"${{1:-}}\" = build-identity ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nexit 1"
         ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&binary).unwrap().permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&binary, permissions).unwrap();
+    );
     let metadata = fs::metadata(&binary).unwrap();
     let artifact = release.artifacts.get_mut("binary").unwrap();
     artifact.sha256 = crate::filesystem::sha256(&binary).unwrap();
@@ -1413,23 +1405,17 @@ fn fake_container_runtime(
     candidate_commit: &str,
     candidate_active: bool,
 ) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let engine = work.path().join(if candidate_active {
         "active-container-engine"
     } else {
         "inactive-container-engine"
     });
-    fs::write(
+    write_shell_executable(
         &engine,
-        format!(
-            "#!/bin/sh\nif [ \"${{1:-}}\" = inspect ]; then\n  if [ \"{candidate_active}\" != true ]; then exit 1; fi\n  if [ \"$#\" -gt 2 ]; then printf '%s\\n' '{candidate_commit}'; fi\n  exit 0\nfi\nexit 0\n"
+        &format!(
+            "if [ \"${{1:-}}\" = inspect ]; then\n  if [ \"{candidate_active}\" != true ]; then exit 1; fi\n  if [ \"$#\" -gt 2 ]; then printf '%s\\n' '{candidate_commit}'; fi\n  exit 0\nfi\nexit 0"
         ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&engine).unwrap().permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&engine, permissions).unwrap();
+    );
     engine
 }
 

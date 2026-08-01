@@ -3,6 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[cfg(unix)]
 use std::fs;
 
+#[cfg(unix)]
+use crate::test_support::write_shell_executable;
+
 use super::*;
 use crate::{
     filesystem::PrivateTempDir,
@@ -171,18 +174,14 @@ fn privileged_task_fails_closed_without_required_config_mount() {
 #[cfg(unix)]
 #[test]
 fn application_container_command_uses_hardening_and_secret_file_references() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let work = PrivateTempDir::new("runtime-start-command").unwrap();
     let mut config = config(&work);
     let engine = work.path().join("fake-container-engine");
     let argv = work.path().join("argv.txt");
-    fs::write(
+    write_shell_executable(
         &engine,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", argv.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+        &format!("printf '%s\\n' \"$@\" > '{}'", argv.display()),
+    );
     config.runtime.engine = engine.to_string_lossy().into_owned();
     let raw_secret = "secret-canary-that-must-not-enter-argv";
     fs::create_dir_all(config.dependencies.database_url_file.parent().unwrap()).unwrap();
@@ -219,36 +218,13 @@ fn application_container_command_uses_hardening_and_secret_file_references() {
 }
 
 #[cfg(unix)]
-fn write_executable(path: &Path, body: &str) {
-    use std::{io::Write as _, os::unix::fs::PermissionsExt as _};
-
-    let temporary = path.with_extension("tmp");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .unwrap();
-    file.write_all(format!("#!/bin/sh\nset -eu\n{body}\n").as_bytes())
-        .unwrap();
-    file.set_permissions(fs::Permissions::from_mode(0o700))
-        .unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    fs::rename(&temporary, path).unwrap();
-    fs::File::open(path.parent().unwrap())
-        .unwrap()
-        .sync_all()
-        .unwrap();
-}
-
-#[cfg(unix)]
 #[test]
 fn pull_image_executes_the_selected_engine_without_secret_arguments() {
     let work = PrivateTempDir::new("runtime-pull-image").unwrap();
     let mut config = config(&work);
     let engine = work.path().join("fake-engine");
     let argv = work.path().join("argv.txt");
-    write_executable(
+    write_shell_executable(
         &engine,
         &format!("printf '%s\\n' \"$@\" > '{}'", argv.display()),
     );
@@ -270,7 +246,7 @@ fn image_digest_accepts_an_exact_repo_digest() {
     let mut config = config(&work);
     let engine = work.path().join("fake-engine");
     let digest = format!("sha256:{}", "a".repeat(64));
-    write_executable(
+    write_shell_executable(
         &engine,
         &format!("printf '%s\\n' '[\"ghcr.io/nazozero/nazoauth@{digest}\"]'"),
     );
@@ -286,7 +262,7 @@ fn image_digest_rejects_unpinned_invalid_and_unretained_references() {
     let work = PrivateTempDir::new("runtime-rejected-digests").unwrap();
     let mut config = config(&work);
     let engine = work.path().join("fake-engine");
-    write_executable(&engine, "printf '%s\\n' '[]'");
+    write_shell_executable(&engine, "printf '%s\\n' '[]'");
     config.runtime.engine = engine.to_string_lossy().into_owned();
     let runtime = Runtime::new(&config);
 
@@ -319,7 +295,7 @@ fn image_digest_rejects_unpinned_invalid_and_unretained_references() {
         "container engine did not retain the signed OCI digest"
     );
 
-    write_executable(&engine, "printf '%s\\n' 'not-json'");
+    write_shell_executable(&engine, "printf '%s\\n' 'not-json'");
     assert_eq!(
         runtime
             .image_digest(&valid_but_missing)
@@ -347,7 +323,7 @@ fn podman_image_digest_uses_the_engine_digest_fallback() {
     let bin = work.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let engine = bin.join("podman");
-    write_executable(
+    write_shell_executable(
         &engine,
         &format!(
             "case \"$5\" in\n  *RepoDigests*) printf '%s\\n' '[]' ;;\n  *) printf '%s\\n' '{digest}' ;;\nesac"
@@ -393,7 +369,7 @@ fn podman_image_digest_rejects_a_mismatched_fallback_digest() {
     let work = PrivateTempDir::new("runtime-podman-mismatch").unwrap();
     let bin = work.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    write_executable(
+    write_shell_executable(
         &bin.join("podman"),
         &format!(
             "case \"$5\" in\n  *RepoDigests*) printf '%s\\n' '[]' ;;\n  *) printf '%s\\n' 'sha256:{}' ;;\nesac",
@@ -437,7 +413,7 @@ fn embedded_identity_executes_host_binary_directly() {
     config.runtime.engine = "host".to_owned();
     let binary = work.path().join("nazoauth");
     let argv = work.path().join("argv.txt");
-    write_executable(
+    write_shell_executable(
         &binary,
         &format!(
             "printf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}'",
@@ -461,7 +437,7 @@ fn embedded_identity_container_is_networkless_and_hardened() {
     let mut config = config(&work);
     let engine = work.path().join("fake-engine");
     let argv = work.path().join("argv.txt");
-    write_executable(
+    write_shell_executable(
         &engine,
         &format!(
             "printf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}'",
@@ -500,7 +476,7 @@ fn embedded_identity_rejects_invalid_application_output() {
     let mut config = config(&work);
     config.runtime.engine = "host".to_owned();
     let binary = work.path().join("nazoauth");
-    write_executable(&binary, "printf '%s\\n' 'not-json'");
+    write_shell_executable(&binary, "printf '%s\\n' 'not-json'");
 
     let error = Runtime::new(&config)
         .embedded_identity(&binary.to_string_lossy())
