@@ -225,8 +225,30 @@ fn verified_attested_manifest(
             ),
         ])
         .stdout()?;
+    verified_manifest_from_attestations(
+        &response,
+        version,
+        work,
+        blob,
+        &digest,
+        identity,
+        |work, bundle, blob, identity| {
+            verify_blob_attestation(work, bundle, blob, identity, container_engine)
+        },
+    )
+}
+
+fn verified_manifest_from_attestations(
+    response: &str,
+    version: &str,
+    work: &Path,
+    blob: &str,
+    digest: &str,
+    identity: &str,
+    mut verify_attestation: impl FnMut(&Path, &str, &str, &str) -> anyhow::Result<()>,
+) -> anyhow::Result<ReleaseManifest> {
     let response: AttestationResponse =
-        serde_json::from_str(&response).context("GitHub attestation response is invalid")?;
+        serde_json::from_str(response).context("GitHub attestation response is invalid")?;
     if response.attestations.is_empty() || response.attestations.len() > MAX_ATTESTATIONS {
         bail!("GitHub returned no bounded Release attestation set");
     }
@@ -249,13 +271,13 @@ fn verified_attested_manifest(
             &serde_json::to_vec(&attestation.bundle)?,
             0o600,
         )?;
-        let Some(candidate) = manifest_from_bundle(&attestation.bundle, blob, &digest)? else {
+        let Some(candidate) = manifest_from_bundle(&attestation.bundle, blob, digest)? else {
             continue;
         };
         if candidate.version != version || candidate.release_identity != identity {
             continue;
         }
-        verify_blob_attestation(work, &bundle_name, blob, identity, container_engine)?;
+        verify_attestation(work, &bundle_name, blob, identity)?;
         candidate.validate(version, identity)?;
         let updater = candidate
             .artifacts

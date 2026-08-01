@@ -191,3 +191,7 @@ fn hex(bytes: &[u8]) -> String {
     }
     output
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/filesystem.rs"]
+mod tests;

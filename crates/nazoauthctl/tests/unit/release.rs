@@ -1,11 +1,14 @@
 use super::{
     AttestationResponse, COSIGN_IMAGE, RELEASE_PREDICATE, ReleaseTrustState,
-    SIGSTORE_BUNDLE_MEDIA_TYPE, accept_verified_manifest, compare_versions,
-    containerized_cosign_attestation_arguments, enforce_release_trust_state, manifest_from_bundle,
+    SIGSTORE_BUNDLE_MEDIA_TYPE, VerifiedRelease, accept_verified_manifest, commit_release_trust,
+    compare_versions, containerized_cosign_attestation_arguments, enforce_release_trust,
+    enforce_release_trust_state, manifest_from_bundle, resolve_version,
+    verified_manifest_from_attestations, verify_artifact,
 };
+use crate::filesystem::{PrivateTempDir, atomic_write, sha256};
 use crate::model::{
-    Artifact, DatabaseRestore, FrontendRelease, OciRelease, ReleaseManifest, Rollback,
-    release_target,
+    Artifact, DatabaseRestore, Dependencies, FrontendRelease, OciRelease, Operator, Postgres,
+    ReleaseManifest, Rollback, Runtime, Ui, UpdateConfig, Valkey, release_target,
 };
 use base64::Engine as _;
 use nazo_operator_protocol::EmbeddedIdentity;
@@ -102,6 +105,124 @@ fn state(version: &str) -> ReleaseTrustState {
     }
 }
 
+fn bundle(statement: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "mediaType": SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "dsseEnvelope": {
+            "payload": base64::engine::general_purpose::STANDARD.encode(
+                serde_json::to_vec(statement).unwrap()
+            )
+        }
+    })
+}
+
+fn attestation(bundle: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "bundle_url": "https://example.test/bundle.json",
+        "initiator": "github-actions",
+        "repository_id": 123,
+        "bundle": bundle,
+    })
+}
+
+fn statement(value: &ReleaseManifest, blob: &str, digest: &str) -> serde_json::Value {
+    serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{
+            "name": blob,
+            "digest": {"sha256": digest},
+        }],
+        "predicateType": RELEASE_PREDICATE,
+        "predicate": value,
+    })
+}
+
+fn attestation_response(attestations: Vec<serde_json::Value>) -> String {
+    serde_json::json!({"attestations": attestations}).to_string()
+}
+
+fn prepared_attestation() -> (PrivateTempDir, String, String, ReleaseManifest, String) {
+    let work = PrivateTempDir::new("release-attestation-test").unwrap();
+    let mut value = manifest("v1.2.3");
+    let blob = value.artifacts["updater"].name.clone();
+    atomic_write(&work.path().join(&blob), b"x", 0o600).unwrap();
+    let digest = sha256(&work.path().join(&blob)).unwrap();
+    value.artifacts.get_mut("updater").unwrap().sha256 = digest.clone();
+    let identity = value.release_identity.clone();
+    (work, blob, digest, value, identity)
+}
+
+fn config(work: &PrivateTempDir) -> UpdateConfig {
+    let path = |name: &str| work.path().join(name);
+    UpdateConfig {
+        schema: 2,
+        managed_install: true,
+        install_profile: "baseline".to_owned(),
+        repository: "nazozero/NazoAuth".to_owned(),
+        updater_install_path: path("nazoauthctl"),
+        backup_root: path("backups"),
+        deployment_root: path("deployments"),
+        operator: Operator {
+            deployment_id: "deployment-test".to_owned(),
+            controller_key_id: "controller-test".to_owned(),
+            controller_private_key: path("operator/controller.key"),
+            controller_public_key: path("operator/controller.pub"),
+            receipt_key_id: "receipt-test".to_owned(),
+            receipt_private_key: path("operator/receipt.key"),
+            receipt_public_key: path("operator/receipt.pub"),
+            audit_key_id: "audit-test".to_owned(),
+            audit_private_key: path("operator/audit.key"),
+            audit_public_key: path("operator/audit.pub"),
+            break_glass_key_id: "break-glass-test".to_owned(),
+            break_glass_private_key: path("operator/break-glass.key"),
+            break_glass_public_key: path("operator/break-glass.pub"),
+            secret_revision_file: path("operator/secret-revision"),
+            state_directory: path("operator-state"),
+            audit_directory: path("audit"),
+            trust_state_file: path("operator/release-trust.json"),
+        },
+        dependencies: Dependencies::default(),
+        runtime: Runtime {
+            engine: "host".to_owned(),
+            dependency_engine: String::new(),
+            container_name: "nazoauth".to_owned(),
+            network: "nazoauth".to_owned(),
+            ip_address: String::new(),
+            publish_address: String::new(),
+            health_url: "http://127.0.0.1:8000/ready".to_owned(),
+            readiness_attempts: 1,
+            readiness_interval_seconds: 0,
+            public_discovery_url: "https://auth.example/.well-known/openid-configuration"
+                .to_owned(),
+            expected_issuer: "https://auth.example".to_owned(),
+            mounts: Vec::new(),
+            snapshot_paths: Vec::new(),
+            environment: BTreeMap::new(),
+            service_name: "nazoauth.service".to_owned(),
+            service_user: "nazoauth".to_owned(),
+            binary_path: path("nazoauth"),
+            binary_releases: path("releases"),
+            working_directory: work.path().to_owned(),
+        },
+        postgres: Postgres {
+            container_name: "postgres".to_owned(),
+            database: "oauth".to_owned(),
+            user: "migrator".to_owned(),
+            image: "postgres".to_owned(),
+            validation_image: "postgres".to_owned(),
+        },
+        valkey: Valkey {
+            container_name: "valkey".to_owned(),
+            image: "valkey".to_owned(),
+            rdb_path: "/data/dump.rdb".to_owned(),
+            password_file: path("valkey-password"),
+        },
+        ui: Ui {
+            releases_root: path("ui-releases"),
+        },
+    }
+}
+
 #[test]
 fn github_attestation_response_accepts_current_inline_bundle() {
     let response: AttestationResponse = serde_json::from_value(serde_json::json!({
@@ -124,6 +245,28 @@ fn github_attestation_response_accepts_current_inline_bundle() {
             .and_then(serde_json::Value::as_str),
         Some(SIGSTORE_BUNDLE_MEDIA_TYPE)
     );
+}
+
+#[test]
+fn github_attestation_response_is_a_closed_schema() {
+    for invalid in [
+        serde_json::json!({}),
+        serde_json::json!({"attestations": [], "unexpected": true}),
+        serde_json::json!({"attestations": [{
+            "bundle_url": "https://example.test/bundle.json",
+            "initiator": "github-actions",
+            "repository_id": 123,
+        }]}),
+        serde_json::json!({"attestations": [{
+            "bundle_url": "https://example.test/bundle.json",
+            "initiator": "github-actions",
+            "repository_id": 123,
+            "bundle": {},
+            "unexpected": true,
+        }]}),
+    ] {
+        assert!(serde_json::from_value::<AttestationResponse>(invalid).is_err());
+    }
 }
 
 #[test]
@@ -157,6 +300,51 @@ fn trust_state_rejects_downgrade_and_same_version_identity_substitution() {
     assert!(enforce_release_trust_state(&trusted, &substituted).is_err());
 
     assert!(enforce_release_trust_state(&trusted, &manifest("v2.0.1")).is_ok());
+}
+
+#[test]
+fn trust_state_binds_every_same_version_release_identity_component() {
+    let trusted = state("v2.0.0");
+    assert!(enforce_release_trust_state(&trusted, &manifest("v2.0.0")).is_ok());
+
+    let mut substituted = manifest("v2.0.0");
+    substituted.oci.index_digest = format!("sha256:{}", "9".repeat(64));
+    assert!(enforce_release_trust_state(&trusted, &substituted).is_err());
+
+    let mut substituted = manifest("v2.0.0");
+    substituted.release_identity = "https://example.test/substituted".to_owned();
+    assert!(enforce_release_trust_state(&trusted, &substituted).is_err());
+}
+
+#[test]
+fn persisted_release_trust_is_private_closed_and_oci_index_bound() {
+    let work = PrivateTempDir::new("release-trust-test").unwrap();
+    let config = config(&work);
+    let value = manifest("v2.0.0");
+
+    enforce_release_trust(&config, &value).unwrap();
+    commit_release_trust(&config, &value).unwrap();
+    let persisted: ReleaseTrustState =
+        serde_json::from_slice(&std::fs::read(&config.operator.trust_state_file).unwrap()).unwrap();
+    assert_eq!(persisted.schema, 1);
+    assert_eq!(persisted.version, value.version);
+    assert_eq!(persisted.backend_commit, value.backend_commit);
+    assert_eq!(persisted.image_oci_digest, value.oci.index_digest);
+    assert_eq!(persisted.release_identity, value.release_identity);
+    enforce_release_trust(&config, &value).unwrap();
+
+    let mut unsupported = persisted;
+    unsupported.schema = 2;
+    atomic_write(
+        &config.operator.trust_state_file,
+        &serde_json::to_vec(&unsupported).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    assert!(enforce_release_trust(&config, &value).is_err());
+
+    atomic_write(&config.operator.trust_state_file, b"not-json", 0o600).unwrap();
+    assert!(enforce_release_trust(&config, &value).is_err());
 }
 
 #[test]
@@ -227,6 +415,63 @@ fn release_manifest_validation_is_closed_over_target_frontend_and_oci() {
 }
 
 #[test]
+fn release_manifest_rejects_oci_repository_index_and_platform_digest_substitution() {
+    let value = manifest("v1.2.3");
+    let identity = value.release_identity.clone();
+    let invalid = [
+        {
+            let mut changed = value.clone();
+            changed.oci.repository = "ghcr.io/attacker/nazoauth".to_owned();
+            changed
+        },
+        {
+            let mut changed = value.clone();
+            changed.oci.index_digest = "sha256:not-a-digest".to_owned();
+            changed
+        },
+        {
+            let mut changed = value.clone();
+            changed.oci.platform_manifests.insert(
+                "linux/amd64".to_owned(),
+                format!("sha256:{}", "A".repeat(64)),
+            );
+            changed
+        },
+        {
+            let mut changed = value.clone();
+            changed.oci.platform_manifests.insert(
+                "linux/s390x".to_owned(),
+                format!("sha256:{}", "3".repeat(64)),
+            );
+            changed
+        },
+    ];
+    for changed in invalid {
+        assert!(changed.validate("v1.2.3", &identity).is_err());
+    }
+
+    assert_eq!(value.image_oci_digest(), value.oci.index_digest);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    assert_eq!(
+        value.image_ref().unwrap(),
+        format!(
+            "{}@{}",
+            value.oci.repository, value.oci.platform_manifests["linux/amd64"]
+        )
+    );
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    assert_eq!(
+        value.image_ref().unwrap(),
+        format!(
+            "{}@{}",
+            value.oci.repository, value.oci.platform_manifests["linux/arm64"]
+        )
+    );
+    #[cfg(not(target_os = "linux"))]
+    assert!(value.image_ref().is_err());
+}
+
+#[test]
 fn repeated_identical_attestations_are_idempotent_but_conflicts_fail() {
     let first = manifest("v1.2.3");
     let mut verified = None;
@@ -266,4 +511,308 @@ fn dsse_statement_must_bind_the_updater_subject_and_custom_predicate() {
         value
     );
     assert!(manifest_from_bundle(&bundle, "wrong-updater", &updater.sha256).is_err());
+}
+
+#[test]
+fn dsse_statement_parser_fails_closed_for_malformed_or_unrelated_payloads() {
+    let value = manifest("v1.2.3");
+    let updater = &value.artifacts["updater"];
+
+    assert!(manifest_from_bundle(&serde_json::json!({}), &updater.name, &updater.sha256).is_err());
+    assert!(
+        manifest_from_bundle(
+            &serde_json::json!({"dsseEnvelope": {"payload": "%%%"}}),
+            &updater.name,
+            &updater.sha256,
+        )
+        .is_err()
+    );
+    let invalid_json = serde_json::json!({
+        "dsseEnvelope": {
+            "payload": base64::engine::general_purpose::STANDARD.encode(b"not-json")
+        }
+    });
+    assert!(manifest_from_bundle(&invalid_json, &updater.name, &updater.sha256).is_err());
+
+    let mut unrelated = statement(&value, &updater.name, &updater.sha256);
+    unrelated["_type"] = serde_json::json!("https://in-toto.io/Statement/v0.1");
+    assert!(
+        manifest_from_bundle(&bundle(&unrelated), &updater.name, &updater.sha256)
+            .unwrap()
+            .is_none()
+    );
+    let mut unrelated = statement(&value, &updater.name, &updater.sha256);
+    unrelated["predicateType"] = serde_json::json!("https://example.test/other-predicate");
+    assert!(
+        manifest_from_bundle(&bundle(&unrelated), &updater.name, &updater.sha256)
+            .unwrap()
+            .is_none()
+    );
+
+    for digest in [
+        serde_json::json!({"sha256": "0".repeat(64)}),
+        serde_json::json!({"sha512": updater.sha256}),
+        serde_json::json!({}),
+    ] {
+        let mut unbound = statement(&value, &updater.name, &updater.sha256);
+        unbound["subject"][0]["digest"] = digest;
+        assert!(manifest_from_bundle(&bundle(&unbound), &updater.name, &updater.sha256).is_err());
+    }
+
+    let mut invalid_predicate = statement(&value, &updater.name, &updater.sha256);
+    invalid_predicate["predicate"] = serde_json::json!({"schema": 4});
+    assert!(
+        manifest_from_bundle(&bundle(&invalid_predicate), &updater.name, &updater.sha256,).is_err()
+    );
+}
+
+#[test]
+fn attestation_set_accepts_only_verified_target_bound_manifests() {
+    let (work, blob, digest, value, identity) = prepared_attestation();
+    let response = attestation_response(vec![attestation(bundle(&statement(
+        &value, &blob, &digest,
+    )))]);
+    let mut verification_calls = 0;
+    let verified = verified_manifest_from_attestations(
+        &response,
+        "v1.2.3",
+        work.path(),
+        &blob,
+        &digest,
+        &identity,
+        |path, bundle_name, verified_blob, verified_identity| {
+            verification_calls += 1;
+            assert!(path.join(bundle_name).is_file());
+            assert_eq!(verified_blob, blob);
+            assert_eq!(verified_identity, identity);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(verified, value);
+    assert_eq!(verification_calls, 1);
+}
+
+#[test]
+fn attestation_set_rejects_unbounded_invalid_or_unsupported_responses() {
+    let (work, blob, digest, value, identity) = prepared_attestation();
+    let valid = attestation(bundle(&statement(&value, &blob, &digest)));
+    let responses = [
+        "not-json".to_owned(),
+        serde_json::json!({"attestations": [], "unexpected": true}).to_string(),
+        attestation_response(vec![]),
+        attestation_response(vec![valid.clone(); 21]),
+        attestation_response(vec![serde_json::json!({
+            "bundle_url": "https://example.test/bundle.json",
+            "initiator": "github-actions",
+            "repository_id": 0,
+            "bundle": bundle(&statement(&value, &blob, &digest)),
+        })]),
+        attestation_response(vec![serde_json::json!({
+            "bundle_url": "https://example.test/bundle.json",
+            "initiator": " ",
+            "repository_id": 123,
+            "bundle": bundle(&statement(&value, &blob, &digest)),
+        })]),
+        attestation_response(vec![attestation(serde_json::json!({
+            "mediaType": "application/json",
+            "dsseEnvelope": {"payload": "ignored"},
+        }))]),
+    ];
+
+    for response in responses {
+        assert!(
+            verified_manifest_from_attestations(
+                &response,
+                "v1.2.3",
+                work.path(),
+                &blob,
+                &digest,
+                &identity,
+                |_, _, _, _| panic!("invalid responses must not reach signature verification"),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn attestation_set_skips_unrelated_release_claims_before_signature_verification() {
+    let (work, blob, digest, value, identity) = prepared_attestation();
+    let mut wrong_version = value.clone();
+    wrong_version.version = "v9.9.9".to_owned();
+    wrong_version.embedded.release = wrong_version.version.clone();
+    let mut wrong_identity = value.clone();
+    wrong_identity.release_identity = "https://example.test/wrong".to_owned();
+    let mut wrong_statement_kind = statement(&value, &blob, &digest);
+    wrong_statement_kind["_type"] = serde_json::json!("https://in-toto.io/Statement/v0.1");
+    let response = attestation_response(vec![
+        attestation(bundle(&statement(&wrong_version, &blob, &digest))),
+        attestation(bundle(&statement(&wrong_identity, &blob, &digest))),
+        attestation(bundle(&wrong_statement_kind)),
+    ]);
+
+    assert!(
+        verified_manifest_from_attestations(
+            &response,
+            "v1.2.3",
+            work.path(),
+            &blob,
+            &digest,
+            &identity,
+            |_, _, _, _| panic!("unrelated claims must not reach signature verification"),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn attestation_set_propagates_signature_manifest_updater_and_conflict_failures() {
+    let (work, blob, digest, value, identity) = prepared_attestation();
+    let valid = attestation(bundle(&statement(&value, &blob, &digest)));
+    let response = attestation_response(vec![valid.clone()]);
+    assert!(
+        verified_manifest_from_attestations(
+            &response,
+            "v1.2.3",
+            work.path(),
+            &blob,
+            &digest,
+            &identity,
+            |_, _, _, _| anyhow::bail!("signature rejected"),
+        )
+        .is_err()
+    );
+
+    let mut invalid_manifest = value.clone();
+    invalid_manifest.schema = 3;
+    let response = attestation_response(vec![attestation(bundle(&statement(
+        &invalid_manifest,
+        &blob,
+        &digest,
+    )))]);
+    assert!(
+        verified_manifest_from_attestations(
+            &response,
+            "v1.2.3",
+            work.path(),
+            &blob,
+            &digest,
+            &identity,
+            |_, _, _, _| Ok(()),
+        )
+        .is_err()
+    );
+
+    let mut size_substitution = value.clone();
+    size_substitution.artifacts.get_mut("updater").unwrap().size = 2;
+    let response = attestation_response(vec![attestation(bundle(&statement(
+        &size_substitution,
+        &blob,
+        &digest,
+    )))]);
+    assert!(
+        verified_manifest_from_attestations(
+            &response,
+            "v1.2.3",
+            work.path(),
+            &blob,
+            &digest,
+            &identity,
+            |_, _, _, _| Ok(()),
+        )
+        .is_err()
+    );
+
+    let mut digest_substitution = value.clone();
+    digest_substitution
+        .artifacts
+        .get_mut("updater")
+        .unwrap()
+        .sha256 = "9".repeat(64);
+    let response = attestation_response(vec![attestation(bundle(&statement(
+        &digest_substitution,
+        &blob,
+        &digest,
+    )))]);
+    assert!(
+        verified_manifest_from_attestations(
+            &response,
+            "v1.2.3",
+            work.path(),
+            &blob,
+            &digest,
+            &identity,
+            |_, _, _, _| Ok(()),
+        )
+        .is_err()
+    );
+
+    let mut conflict = value.clone();
+    conflict.rollback.rationale = "different but valid policy".to_owned();
+    let response = attestation_response(vec![
+        valid,
+        attestation(bundle(&statement(&conflict, &blob, &digest))),
+    ]);
+    assert!(
+        verified_manifest_from_attestations(
+            &response,
+            "v1.2.3",
+            work.path(),
+            &blob,
+            &digest,
+            &identity,
+            |_, _, _, _| Ok(()),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn requested_versions_and_artifact_bytes_fail_closed() {
+    assert_eq!(
+        resolve_version("nazozero/NazoAuth", Some("v1.2.3")).unwrap(),
+        "v1.2.3"
+    );
+    assert!(resolve_version("nazozero/NazoAuth", Some("latest")).is_err());
+
+    let work = PrivateTempDir::new("release-artifact-test").unwrap();
+    let path = work.path().join("artifact");
+    atomic_write(&path, b"x", 0o600).unwrap();
+    let mut artifact = Artifact {
+        repository: "nazozero/NazoAuth".to_owned(),
+        name: "artifact".to_owned(),
+        sha256: sha256(&path).unwrap(),
+        size: 1,
+    };
+    verify_artifact(&path, &artifact).unwrap();
+    artifact.size = 2;
+    assert!(verify_artifact(&path, &artifact).is_err());
+    artifact.size = 1;
+    artifact.sha256 = "0".repeat(64);
+    assert!(verify_artifact(&path, &artifact).is_err());
+    assert!(verify_artifact(&work.path().join("missing"), &artifact).is_err());
+}
+
+#[test]
+fn verified_release_exposes_only_existing_policy_repository_artifacts() {
+    let work = PrivateTempDir::new("verified-release-artifact-test").unwrap();
+    let value = manifest("v1.2.3");
+    let updater = value.artifacts["updater"].clone();
+    atomic_write(&work.path().join(&updater.name), b"x", 0o600).unwrap();
+    let release = VerifiedRelease {
+        work,
+        manifest: value,
+    };
+
+    assert!(release.artifact("missing", "nazozero/NazoAuth").is_err());
+    assert!(release.artifact("updater", "attacker/NazoAuth").is_err());
+    assert_eq!(
+        release
+            .artifact("updater", "nazozero/NazoAuth")
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        updater.name.as_str()
+    );
 }

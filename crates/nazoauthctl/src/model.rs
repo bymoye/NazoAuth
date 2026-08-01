@@ -407,11 +407,7 @@ impl ReleaseManifest {
         if self.artifacts.keys().cloned().collect::<BTreeSet<_>>() != expected {
             bail!("signed release manifest has an unexpected artifact set");
         }
-        let executable_suffix = if self.target.contains("windows") {
-            ".exe"
-        } else {
-            ""
-        };
+        let executable_suffix = executable_suffix(&self.target);
         let expected_binary = format!("nazoauth-{}{executable_suffix}", self.target);
         let expected_updater = format!("nazoauthctl-{}{executable_suffix}", self.target);
         if self.artifacts["binary"].name != expected_binary
@@ -446,11 +442,7 @@ impl ReleaseManifest {
     }
 
     pub(crate) fn runtime_oci_digest(&self) -> anyhow::Result<&str> {
-        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("linux", "x86_64") => "linux/amd64",
-            ("linux", "aarch64") => "linux/arm64",
-            _ => bail!("managed OCI runtime is supported only on Linux x86-64 and Arm64"),
-        };
+        let platform = runtime_oci_platform(std::env::consts::OS, std::env::consts::ARCH)?;
         self.oci
             .platform_manifests
             .get(platform)
@@ -507,6 +499,22 @@ impl ReleaseManifest {
     }
 }
 
+fn executable_suffix(target: &str) -> &'static str {
+    if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    }
+}
+
+fn runtime_oci_platform(os: &str, arch: &str) -> anyhow::Result<&'static str> {
+    match (os, arch) {
+        ("linux", "x86_64") => Ok("linux/amd64"),
+        ("linux", "aarch64") => Ok("linux/arm64"),
+        _ => bail!("managed OCI runtime is supported only on Linux x86-64 and Arm64"),
+    }
+}
+
 pub(crate) fn release_target() -> Option<&'static str> {
     let target_env = if cfg!(target_env = "musl") {
         "musl"
@@ -515,7 +523,11 @@ pub(crate) fn release_target() -> Option<&'static str> {
     } else {
         ""
     };
-    match (std::env::consts::ARCH, std::env::consts::OS, target_env) {
+    release_target_for(std::env::consts::ARCH, std::env::consts::OS, target_env)
+}
+
+fn release_target_for(arch: &str, os: &str, target_env: &str) -> Option<&'static str> {
+    match (arch, os, target_env) {
         ("x86_64", "linux", "musl") => Some("x86_64-unknown-linux-musl"),
         ("aarch64", "linux", "musl") => Some("aarch64-unknown-linux-musl"),
         ("x86_64", "linux", _) => Some("x86_64-unknown-linux-gnu"),

@@ -369,3 +369,355 @@ fn controller_and_audit_rotation_chain_survives_normal_and_break_glass_recovery(
     recover_pending_rotation(&config_path, &mut recovered).unwrap();
     assert!(!intent_path.exists());
 }
+
+#[test]
+fn operator_target_and_receipt_bindings_are_closed_over_every_claim() {
+    let work = PrivateTempDir::new("nazoauth-operator-binding-test").unwrap();
+    let config = config(&work);
+    let (target, embedded, binding, operation) = task_parts();
+    let (task, compact, _) = load_or_issue_task(
+        &config,
+        target.clone(),
+        embedded.clone(),
+        binding.clone(),
+        operation,
+    )
+    .unwrap();
+    let host_claim = RuntimeTargetClaim::HostBinary {
+        path: "/opt/nazoauth".to_owned(),
+        sha256: "a".repeat(64),
+    };
+    let expected = ExpectedReleaseTarget {
+        embedded,
+        image_digest: format!("sha256:{}", "d".repeat(64)),
+        binary_digest: "a".repeat(64),
+    };
+    verify_target_expectation(&host_claim, &expected).unwrap();
+    assert_eq!(target_expectation(&host_claim), target);
+
+    let oci_claim = RuntimeTargetClaim::OciImage {
+        image_ref: format!("ghcr.io/nazozero/nazoauth@sha256:{}", "d".repeat(64)),
+        image_digest: format!("sha256:{}", "d".repeat(64)),
+    };
+    verify_target_expectation(&oci_claim, &expected).unwrap();
+    assert!(matches!(
+        target_expectation(&oci_claim),
+        nazo_operator_protocol::TargetExpectation::OciImage { .. }
+    ));
+
+    let mut bad_expected = expected.clone();
+    bad_expected.binary_digest = "b".repeat(64);
+    assert!(verify_target_expectation(&host_claim, &bad_expected).is_err());
+    bad_expected.image_digest = format!("sha256:{}", "e".repeat(64));
+    assert!(verify_target_expectation(&oci_claim, &bad_expected).is_err());
+
+    let mut receipt = RuntimeReceipt {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        iss: format!("runtime:{}", task.deployment_id),
+        aud: format!("controller:{}", task.deployment_id),
+        jti: task.jti.clone(),
+        request_sha256: compact_sha256(&compact),
+        deployment_id: task.deployment_id.clone(),
+        actor: task.actor.clone(),
+        operation: operation_name(&task.operation).to_owned(),
+        started_at: task.iat,
+        completed_at: task.iat + 1,
+        embedded: task.embedded.clone(),
+        config: task.config.clone(),
+        outcome: TaskOutcome::Succeeded {
+            result: TaskResult::KeyValidation {
+                keyset_revision: "test".to_owned(),
+            },
+        },
+    };
+    validate_runtime_receipt(&receipt, &task, &compact).unwrap();
+    receipt.completed_at = receipt.started_at - 1;
+    assert!(validate_runtime_receipt(&receipt, &task, &compact).is_err());
+    receipt.completed_at = receipt.started_at + 1;
+    receipt.request_sha256 = "0".repeat(64);
+    assert!(validate_runtime_receipt(&receipt, &task, &compact).is_err());
+}
+
+#[test]
+fn release_target_policy_and_operation_names_are_explicit() {
+    let work = PrivateTempDir::new("nazoauth-expected-release-test").unwrap();
+    let mut config = config(&work);
+    let embedded = EmbeddedIdentity {
+        release: "v0.2.0".to_owned(),
+        revision: "a".repeat(40),
+        protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+        build_id: "build:test".to_owned(),
+    };
+    expected_release_target(
+        &config,
+        embedded.clone(),
+        format!("sha256:{}", "b".repeat(64)),
+        "c".repeat(64),
+    )
+    .unwrap();
+
+    assert!(
+        expected_release_target(
+            &config,
+            EmbeddedIdentity {
+                protocol: nazo_operator_protocol::PROTOCOL_VERSION + 1,
+                ..embedded.clone()
+            },
+            String::new(),
+            "c".repeat(64),
+        )
+        .is_err()
+    );
+    assert!(
+        expected_release_target(&config, embedded.clone(), String::new(), "short".to_owned())
+            .is_err()
+    );
+    config.runtime.engine = "podman".to_owned();
+    expected_release_target(&config, embedded, "image".to_owned(), "short".to_owned()).unwrap();
+
+    assert_eq!(
+        operation_name(&TaskOperation::MigrateApply),
+        "migrate-apply"
+    );
+    assert_eq!(operation_name(&TaskOperation::KeysList), "keys-list");
+    assert_eq!(
+        operation_name(&TaskOperation::KeysValidate),
+        "keys-validate"
+    );
+    assert_eq!(
+        operation_name(&TaskOperation::KeysGenerateLocal {
+            alg: "ES256".to_owned(),
+            purposes: vec!["signing".to_owned()],
+        }),
+        "keys-generate-local"
+    );
+    assert_eq!(
+        operation_name(&TaskOperation::KeysRegisterExternal {
+            kid: "external".to_owned(),
+            alg: "ES256".to_owned(),
+            key_ref: "provider:key".to_owned(),
+            public_jwk_sha256: "d".repeat(64),
+        }),
+        "keys-register-external"
+    );
+}
+
+#[test]
+fn canonical_manifest_hashes_only_the_closed_non_secret_configuration() {
+    let work = PrivateTempDir::new("nazoauth-canonical-config-test").unwrap();
+    let mut config = config(&work);
+    fs::create_dir_all(&config.runtime.working_directory).unwrap();
+    let server_config = config.runtime.working_directory.join(".env.yaml");
+    fs::write(&server_config, "issuer: https://auth.example\n").unwrap();
+    let manifest = canonical_manifest(&config, &TaskOperation::MigrateApply).unwrap();
+    assert_eq!(
+        manifest.entries["server_config_sha256"],
+        crate::filesystem::sha256(&server_config).unwrap()
+    );
+    assert_eq!(manifest.entries["operation"], "migrate-apply");
+    assert_eq!(manifest.entries["deployment_id"], "deployment-test");
+
+    config.runtime.engine = "podman".to_owned();
+    config.runtime.mounts.clear();
+    assert!(canonical_manifest(&config, &TaskOperation::KeysList).is_err());
+    config.runtime.mounts.push(crate::model::Mount {
+        source: server_config.clone(),
+        target: "/app/.env.yaml".into(),
+        mode: "ro".to_owned(),
+    });
+    assert_eq!(
+        canonical_manifest(&config, &TaskOperation::KeysList)
+            .unwrap()
+            .entries["operation"],
+        "keys-list"
+    );
+}
+
+#[test]
+fn key_and_audit_file_readers_reject_ambiguous_or_unsafe_input() {
+    let work = PrivateTempDir::new("nazoauth-operator-reader-test").unwrap();
+    let config = config(&work);
+    assert!(audit_head(&config).unwrap().0 == 1);
+    verify_audit(&config).unwrap();
+
+    let invalid = work.path().join("invalid-key");
+    fs::write(&invalid, "not-base64!").unwrap();
+    assert!(read_key(&invalid).is_err());
+    fs::write(&invalid, URL_SAFE_NO_PAD.encode([1_u8; 31])).unwrap();
+    assert!(read_signing_key(&invalid).is_err());
+    assert!(read_verifying_key(&invalid).is_err());
+
+    let line = work.path().join("line");
+    fs::write(&line, "one\ntwo").unwrap();
+    assert!(read_single_line(&line).is_err());
+    assert!(load_management_event(&config, "../escape.jws").is_err());
+}
+
+#[test]
+fn nonempty_receipt_chain_and_public_audit_rendering_are_verified() {
+    let work = PrivateTempDir::new("nazoauth-audit-receipt-test").unwrap();
+    let config = config(&work);
+    let (target, embedded, binding, operation) = task_parts();
+    let (task, compact_task, _) =
+        load_or_issue_task(&config, target, embedded, binding, operation).unwrap();
+    let receipt = nazo_operator_protocol::FinalReceipt {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        iss: task.iss.clone(),
+        aud: "operator-audit".to_owned(),
+        jti: task.jti.clone(),
+        request_sha256: compact_sha256(&compact_task),
+        deployment_id: task.deployment_id.clone(),
+        actor: task.actor.clone(),
+        operation: operation_name(&task.operation).to_owned(),
+        completed_at: task.iat + 1,
+        audit_sequence: 1,
+        audit_previous_sha256: "0".repeat(64),
+        controller_verified_target: RuntimeTargetClaim::HostBinary {
+            path: "/opt/nazoauth".to_owned(),
+            sha256: "a".repeat(64),
+        },
+        embedded: task.embedded,
+        config: task.config,
+        runtime_receipt_sha256: "d".repeat(64),
+        outcome: TaskOutcome::Succeeded {
+            result: TaskResult::KeyValidation {
+                keyset_revision: "test".to_owned(),
+            },
+        },
+    };
+    let key = read_signing_key(&config.operator.audit_private_key).unwrap();
+    let compact = sign_final_receipt(&receipt, &config.operator.audit_key_id, &key).unwrap();
+    append_audit(&config, 1, &task.jti, &compact).unwrap();
+
+    verify_audit(&config).unwrap();
+    show_audit(&config, Some(&task.jti)).unwrap();
+}
+
+#[test]
+fn duplicate_management_request_ids_fail_before_untrusted_files_are_parsed() {
+    let work = PrivateTempDir::new("nazoauth-management-duplicate-test").unwrap();
+    let config = config(&work);
+    let directory = config.operator.audit_directory.join("management");
+    fs::create_dir_all(&directory).unwrap();
+    let request_id = "update-0123456789abcdef0123456789abcdef-complete";
+    let key = read_signing_key(&config.operator.audit_private_key).unwrap();
+    let event = |sequence, previous_sha256| ManagementAuditEvent {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        deployment_id: config.operator.deployment_id.clone(),
+        sequence,
+        previous_sha256,
+        request_id: request_id.to_owned(),
+        issued_at: Utc::now().timestamp(),
+        actor: Actor {
+            kind: ActorKind::LocalRoot,
+            id: "uid:0".to_owned(),
+        },
+        operation: "update-completed".to_owned(),
+        release: "v0.2.0".to_owned(),
+        recovery_boundary: "schema-compatible".to_owned(),
+    };
+    let first = sign_management_event(
+        &event(1, "0".repeat(64)),
+        &config.operator.audit_key_id,
+        &key,
+    )
+    .unwrap();
+    let second = sign_management_event(
+        &event(2, compact_sha256(&first)),
+        &config.operator.audit_key_id,
+        &key,
+    )
+    .unwrap();
+    fs::write(
+        directory.join(format!("00000000000000000001-{request_id}.jws")),
+        first.as_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        directory.join(format!("00000000000000000002-{request_id}.jws")),
+        second.as_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        config.operator.audit_directory.join("management-head.json"),
+        serde_json::to_vec(&AuditHead {
+            sequence: 2,
+            sha256: compact_sha256(&second),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = append_management_event_idempotent(
+        &config,
+        request_id,
+        "update-completed",
+        "v0.2.0",
+        "schema-compatible",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("request id is not unique"));
+}
+
+#[test]
+fn interrupted_rotation_activates_staged_controller_audit_and_break_glass_keys() {
+    let work = PrivateTempDir::new("nazoauth-staged-rotation-test").unwrap();
+    let config_path = work.path().join("update.json");
+    let mut config = config(&work);
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let directory = config
+        .operator
+        .controller_private_key
+        .parent()
+        .unwrap()
+        .to_owned();
+    let write_staged = |private: &Path, public: &Path, seed: u8| {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        fs::write(private, URL_SAFE_NO_PAD.encode(key.to_bytes())).unwrap();
+        fs::write(
+            public,
+            URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+    };
+    write_staged(
+        &directory.join("controller.next.key"),
+        &directory.join("controller.next.pub"),
+        5,
+    );
+    write_staged(
+        &directory.join("audit.next.key"),
+        &directory.join("audit.next.pub"),
+        6,
+    );
+    write_staged(
+        &config
+            .operator
+            .break_glass_private_key
+            .with_file_name("break-glass.next.key"),
+        &directory.join("break-glass.next.pub"),
+        7,
+    );
+    let intent = RotationIntent {
+        schema: 1,
+        previous_key_id: config.operator.controller_key_id.clone(),
+        next_key_id: "controller-next".to_owned(),
+        previous_audit_key_id: config.operator.audit_key_id.clone(),
+        next_audit_key_id: "audit-next".to_owned(),
+        previous_break_glass_key_id: config.operator.break_glass_key_id.clone(),
+        next_break_glass_key_id: "break-glass-next".to_owned(),
+        transition_file: "staged-transition.jws".to_owned(),
+        compact_transition: "staged-transition".to_owned(),
+    };
+    fs::write(
+        directory.join("rotation-intent.json"),
+        serde_json::to_vec(&intent).unwrap(),
+    )
+    .unwrap();
+
+    recover_pending_rotation(&config_path, &mut config).unwrap();
+    assert_eq!(config.operator.controller_key_id, "controller-next");
+    assert_eq!(config.operator.audit_key_id, "audit-next");
+    assert_eq!(config.operator.break_glass_key_id, "break-glass-next");
+    assert!(!directory.join("rotation-intent.json").exists());
+}

@@ -288,7 +288,7 @@ jobs:
           retention-days: 7
 
   container-image:
-    needs: policy
+    needs: platform-binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -297,6 +297,27 @@ jobs:
       arm64_digest: ${{ steps.descriptor.outputs.arm64_digest }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Download native amd64 Release binaries
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-binaries-x86_64-unknown-linux-gnu
+          path: target/release-container/source-amd64
+      - name: Download native arm64 Release binaries
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-binaries-aarch64-unknown-linux-gnu
+          path: target/release-container/source-arm64
+      - name: Stage the exact native application binaries for OCI assembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm755 \
+            target/release-container/source-amd64/nazoauth-x86_64-unknown-linux-gnu \
+            target/release-container/amd64/nazoauth
+          install -Dm755 \
+            target/release-container/source-arm64/nazoauth-aarch64-unknown-linux-gnu \
+            target/release-container/arm64/nazoauth
+          test "$(find target/release-container/amd64 target/release-container/arm64 -type f -name nazoauth | wc -l)" -eq 2
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Install OCI inspection tools
@@ -310,18 +331,13 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: Containerfile
-          target: runtime
+          file: Containerfile.release
           platforms: linux/amd64,linux/arm64
           outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=nazoauth-release-oci
           cache-to: type=gha,mode=max,scope=nazoauth-release-oci
-          build-args: |
-            NAZOAUTH_BUILD_RELEASE=${{ env.NAZOAUTH_BUILD_RELEASE }}
-            NAZOAUTH_BUILD_REVISION=${{ env.NAZOAUTH_BUILD_REVISION }}
-            NAZOAUTH_BUILD_ID=${{ env.NAZOAUTH_BUILD_ID }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.NAZOAUTH_BUILD_RELEASE }}

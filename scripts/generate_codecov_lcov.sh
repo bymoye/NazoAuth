@@ -303,6 +303,16 @@ cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
 cargo test --locked --workspace --all-features --lib --bins --tests
 
+# Exercise the public controller binary through the same schema-4 lifecycle
+# fixture used by the release gate. Unit tests alone cannot prove the process,
+# filesystem, OCI-engine, durable-journal, and rollback boundaries that make up
+# most of the controller's executable behavior. Keep the binary instrumented
+# and let every copied/upgraded controller inherit a unique profile path.
+cargo build --locked --package nazoauthctl --bin nazoauthctl
+NAZOAUTHCTL_TEST_BINARY="$BIN_DIR/nazoauthctl" \
+LLVM_PROFILE_FILE="$(profile_path 'ctl-e2e-%p-%m.profraw')" \
+  "$PYTHON_BIN" -m unittest tests.unit.test_release_update
+
 # Let cargo-llvm-cov resolve the complete workspace object graph as an
 # independent report. `show-env` deliberately points cargo-llvm-cov at the
 # Cargo target root so it can discover every instrumented object there, while
@@ -325,7 +335,10 @@ mapfile -t SERVER_PROFRAWS < <(
   find "$COVERAGE_DIR" -type f \
     \( -name 'server-*.profraw' -o -name 'signed-server-*.profraw' \)
 )
-mapfile -t TEST_PROFRAWS < <(find "$COVERAGE_DIR" -name 'cargo-*.profraw' -type f)
+mapfile -t TEST_PROFRAWS < <(
+  find "$COVERAGE_DIR" -type f \
+    \( -name 'cargo-*.profraw' -o -name 'ctl-e2e-*.profraw' \)
+)
 if [[ "${#SERVER_PROFRAWS[@]}" -eq 0 || "${#TEST_PROFRAWS[@]}" -eq 0 ]]; then
   echo "Both server and test llvm-cov profile files are required." >&2
   exit 1

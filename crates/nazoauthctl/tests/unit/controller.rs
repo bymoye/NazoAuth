@@ -183,6 +183,14 @@ fn journal(config: &UpdateConfig, phase: UpdatePhase) -> UpdateJournal {
     }
 }
 
+fn assert_invalid_journal(config: &UpdateConfig, value: &UpdateJournal, expected_message: &str) {
+    let error = validate_update_journal(config, value).unwrap_err();
+    assert!(
+        error.to_string().contains(expected_message),
+        "unexpected error: {error:#}"
+    );
+}
+
 #[test]
 fn every_pre_migration_fault_window_restores_the_previous_runtime() {
     let work = PrivateTempDir::new("nazoauth-update-phase").unwrap();
@@ -392,6 +400,614 @@ fn journal_rejects_runtime_and_ui_paths_outside_managed_roots() {
     let mut value = journal(&config, UpdatePhase::Prepared);
     value.previous_ui = Some(work.path().join("outside-ui"));
     assert!(validate_update_journal(&config, &value).is_err());
+}
+
+#[test]
+fn journal_validation_is_closed_over_headers_manifests_and_every_managed_path() {
+    let work = PrivateTempDir::new("nazoauth-update-closed-journal").unwrap();
+    let config = config(&work);
+    let baseline = journal(&config, UpdatePhase::Prepared);
+    validate_update_journal(&config, &baseline).unwrap();
+
+    for transaction_id in [String::new(), "a".repeat(97), "unsafe/request".to_owned()] {
+        let mut value = baseline.clone();
+        value.transaction_id = transaction_id;
+        assert_invalid_journal(&config, &value, "journal header is invalid");
+    }
+    for started_at in [String::new(), "a".repeat(65), "not-a-timestamp".to_owned()] {
+        let mut value = baseline.clone();
+        value.started_at = started_at;
+        assert_invalid_journal(&config, &value, "journal header is invalid");
+    }
+
+    let mut value = baseline.clone();
+    value.schema = 2;
+    assert_invalid_journal(&config, &value, "journal header is invalid");
+
+    let mut value = baseline.clone();
+    value.to_release.release_identity = "https://attacker.example/release".to_owned();
+    assert!(validate_update_journal(&config, &value).is_err());
+
+    for clear_previous in [true, false] {
+        let mut value = baseline.clone();
+        if clear_previous {
+            value.previous_runtime.clear();
+        } else {
+            value.candidate_runtime.clear();
+        }
+        assert_invalid_journal(&config, &value, "unsafe candidate path");
+    }
+
+    let mut value = baseline.clone();
+    value.candidate_ui = work.path().join("wrong-candidate-ui");
+    assert_invalid_journal(&config, &value, "candidate artifacts do not match");
+
+    let mut value = baseline.clone();
+    value.staged_updater = work.path().join("wrong-updater");
+    assert_invalid_journal(&config, &value, "candidate artifacts do not match");
+
+    let mut value = baseline.clone();
+    value.previous_ui = Some(work.path().join("wrong-previous-ui"));
+    assert_invalid_journal(&config, &value, "previous UI does not match");
+
+    let mut value = baseline.clone();
+    value.previous_runtime = work.path().join("wrong-previous").display().to_string();
+    assert_invalid_journal(&config, &value, "host runtime does not match");
+
+    let mut value = baseline.clone();
+    value.candidate_runtime = work.path().join("wrong-candidate").display().to_string();
+    assert_invalid_journal(&config, &value, "host runtime does not match");
+
+    let mut value = baseline;
+    value.backup = Some(work.path().join("outside-backup-root"));
+    assert_invalid_journal(&config, &value, "backup is outside");
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn container_journal_binds_both_runtime_images_to_the_signed_platform_digest() {
+    let work = PrivateTempDir::new("nazoauth-update-container-journal").unwrap();
+    let mut config = config(&work);
+    config.runtime.engine = "podman".to_owned();
+    let mut value = journal(&config, UpdatePhase::Prepared);
+    value.previous_runtime = value.from_release.image_ref().unwrap();
+    value.candidate_runtime = value.to_release.image_ref().unwrap();
+    validate_update_journal(&config, &value).unwrap();
+
+    value.candidate_runtime = format!(
+        "{}@sha256:{}",
+        value.to_release.oci.repository,
+        "9".repeat(64)
+    );
+    assert_invalid_journal(&config, &value, "image runtime does not match");
+
+    value.candidate_runtime = value.to_release.image_ref().unwrap();
+    value.previous_runtime = format!(
+        "{}@sha256:{}",
+        value.from_release.oci.repository,
+        "8".repeat(64)
+    );
+    assert_invalid_journal(&config, &value, "image runtime does not match");
+}
+
+#[test]
+fn failed_phase_persistence_restores_the_in_memory_phase() {
+    let work = PrivateTempDir::new("nazoauth-update-phase-write-failure").unwrap();
+    let config = config(&work);
+    fs::write(&config.deployment_root, b"not a directory").unwrap();
+    let mut value = journal(&config, UpdatePhase::Prepared);
+
+    assert!(set_update_phase(&config, &mut value, UpdatePhase::WriterStopping).is_err());
+    assert_eq!(value.phase, UpdatePhase::Prepared);
+}
+
+#[test]
+fn loading_a_journal_distinguishes_absent_non_regular_invalid_and_valid_state() {
+    let work = PrivateTempDir::new("nazoauth-update-load-journal").unwrap();
+    let config = config(&work);
+    let path = update_journal_path(&config);
+
+    assert!(load_update_journal(&config).unwrap().is_none());
+
+    fs::create_dir_all(&path).unwrap();
+    assert!(load_update_journal(&config).is_err());
+    fs::remove_dir(&path).unwrap();
+
+    fs::write(&path, b"not-json").unwrap();
+    assert!(load_update_journal(&config).is_err());
+    fs::remove_file(&path).unwrap();
+
+    let value = journal(&config, UpdatePhase::Prepared);
+    write_update_journal(&config, &value).unwrap();
+    let loaded = load_update_journal(&config).unwrap().unwrap();
+    assert_eq!(loaded.transaction_id, value.transaction_id);
+    assert_eq!(loaded.phase, value.phase);
+}
+
+#[cfg(unix)]
+#[test]
+fn loading_a_journal_rejects_a_symlink_even_when_its_target_is_valid() {
+    let work = PrivateTempDir::new("nazoauth-update-journal-symlink").unwrap();
+    let config = config(&work);
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    let target = work.path().join("journal-target.json");
+    fs::write(
+        &target,
+        serde_json::to_vec(&journal(&config, UpdatePhase::Prepared)).unwrap(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, update_journal_path(&config)).unwrap();
+
+    assert!(load_update_journal(&config).is_err());
+}
+
+#[test]
+fn verified_journal_backup_is_opened_only_from_the_configured_root() {
+    let work = PrivateTempDir::new("nazoauth-update-journal-backup").unwrap();
+    let config = config(&work);
+    fs::create_dir_all(&config.backup_root).unwrap();
+    let mut value = journal(&config, UpdatePhase::Prepared);
+    assert!(journal_backup(&config, &value).is_err());
+
+    let backup = config.backup_root.join("verified-backup");
+    fs::create_dir(&backup).unwrap();
+    fs::write(backup.join("state.bin"), b"durable-state").unwrap();
+    fs::write(
+        backup.join("SHA256SUMS"),
+        format!(
+            "{}  state.bin\n",
+            crate::filesystem::sha256(&backup.join("state.bin")).unwrap()
+        ),
+    )
+    .unwrap();
+    value.backup = Some(backup.clone());
+
+    assert_eq!(
+        journal_backup(&config, &value).unwrap().path(),
+        fs::canonicalize(backup).unwrap()
+    );
+}
+
+#[test]
+fn no_pending_update_is_an_idempotent_recovery_noop() {
+    let work = PrivateTempDir::new("nazoauth-update-recovery-noop").unwrap();
+    let config = config(&work);
+    recover_pending_update(&work.path().join("config.json"), &config).unwrap();
+    assert!(!update_journal_path(&config).exists());
+}
+
+#[test]
+fn early_update_faults_leave_the_last_durable_phase_for_restart() {
+    for (initial, expected) in [
+        (UpdatePhase::Prepared, UpdatePhase::WriterStopping),
+        (UpdatePhase::WriterStopped, UpdatePhase::BackupCreating),
+        (UpdatePhase::BackupCreated, UpdatePhase::MigrationRunning),
+    ] {
+        let work = PrivateTempDir::new("nazoauth-update-early-fault").unwrap();
+        let config = config(&work);
+        fs::create_dir_all(&config.deployment_root).unwrap();
+        let mut value = journal(&config, initial);
+        write_update_journal(&config, &value).unwrap();
+
+        assert!(
+            advance_update_transaction(&work.path().join("config.json"), &config, &mut value)
+                .is_err(),
+            "phase {initial:?} unexpectedly completed"
+        );
+        assert_eq!(value.phase, expected, "phase {initial:?}");
+        assert_eq!(
+            load_update_journal(&config).unwrap().unwrap().phase,
+            expected,
+            "phase {initial:?} was not durable"
+        );
+    }
+}
+
+#[test]
+fn finishing_a_transaction_durably_removes_only_its_journal_and_staged_updater() {
+    let work = PrivateTempDir::new("nazoauth-update-finish").unwrap();
+    let config = config(&work);
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    let value = journal(&config, UpdatePhase::AuditCommitted);
+    fs::write(&value.staged_updater, b"updater").unwrap();
+    write_update_journal(&config, &value).unwrap();
+    let unrelated = config.deployment_root.join("keep.json");
+    fs::write(&unrelated, b"keep").unwrap();
+
+    finish_update_journal(&config, &value).unwrap();
+    assert!(!value.staged_updater.exists());
+    assert!(!update_journal_path(&config).exists());
+    assert!(unrelated.exists());
+    finish_update_journal(&config, &value).unwrap();
+}
+
+#[test]
+fn transaction_ids_are_fixed_width_lower_hex_and_non_repeating() {
+    let first = encode_transaction_id();
+    let second = encode_transaction_id();
+    for value in [&first, &second] {
+        assert_eq!(value.len(), 32);
+        assert!(value.chars().all(|character| character.is_ascii_hexdigit()));
+        assert_eq!(value, &value.to_ascii_lowercase());
+    }
+    assert_ne!(first, second);
+}
+
+#[test]
+fn active_release_round_trip_revalidates_the_release_identity() {
+    let work = PrivateTempDir::new("nazoauth-active-release").unwrap();
+    let mut config = config(&work);
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    let release = manifest("v0.2.0", 'e');
+    write_active_release(&config, &release).unwrap();
+    let loaded = load_active_release(&config).unwrap();
+    assert_eq!(loaded.version, release.version);
+    assert_eq!(loaded.backend_commit, release.backend_commit);
+
+    config.repository = "attacker/NazoAuth".to_owned();
+    assert!(load_active_release(&config).is_err());
+
+    fs::write(active_release_path(&config), b"not-json").unwrap();
+    assert!(load_active_release(&config).is_err());
+}
+
+#[test]
+fn expected_target_separates_host_binary_and_release_aggregate_identity() {
+    let work = PrivateTempDir::new("nazoauth-expected-host-target").unwrap();
+    let config = config(&work);
+    let mut release = manifest("v0.2.0", 'e');
+    let expected = expected_target(&config, &release).unwrap();
+    assert_eq!(expected.embedded, release.embedded);
+    assert_eq!(expected.image_digest, release.oci.index_digest);
+    assert_eq!(expected.binary_digest, "a".repeat(64));
+
+    release.artifacts.remove("binary");
+    assert!(expected_target(&config, &release).is_err());
+}
+
+#[test]
+fn ui_cache_validation_rejects_missing_non_regular_and_malformed_artifacts() {
+    let work = PrivateTempDir::new("nazoauth-frontend-cache-boundaries").unwrap();
+    let config = config(&work);
+    let value = journal(&config, UpdatePhase::UiActivating);
+    assert!(!target_ui_is_active(&value));
+
+    fs::create_dir_all(value.candidate_ui.parent().unwrap()).unwrap();
+    fs::write(&value.candidate_ui, b"not a directory").unwrap();
+    assert!(!target_ui_is_active(&value));
+    fs::remove_file(&value.candidate_ui).unwrap();
+
+    fs::create_dir_all(&value.candidate_ui).unwrap();
+    assert!(!target_ui_is_active(&value));
+    fs::write(value.candidate_ui.join("index.html"), b"ui").unwrap();
+    assert!(!target_ui_is_active(&value));
+    fs::write(value.candidate_ui.join(".nazoauth-ui.json"), b"not-json").unwrap();
+    assert!(!target_ui_is_active(&value));
+}
+
+#[cfg(unix)]
+#[test]
+fn ui_cache_validation_rejects_symlinked_index_and_marker_files() {
+    let work = PrivateTempDir::new("nazoauth-frontend-cache-symlinks").unwrap();
+    let config = config(&work);
+    let value = journal(&config, UpdatePhase::UiActivating);
+    fs::create_dir_all(&value.candidate_ui).unwrap();
+    let external_index = work.path().join("external-index.html");
+    fs::write(&external_index, b"ui").unwrap();
+    std::os::unix::fs::symlink(&external_index, value.candidate_ui.join("index.html")).unwrap();
+    assert!(!target_ui_is_active(&value));
+
+    fs::remove_file(value.candidate_ui.join("index.html")).unwrap();
+    fs::write(value.candidate_ui.join("index.html"), b"ui").unwrap();
+    let external_marker = work.path().join("external-marker.json");
+    fs::write(&external_marker, b"{}").unwrap();
+    std::os::unix::fs::symlink(
+        &external_marker,
+        value.candidate_ui.join(".nazoauth-ui.json"),
+    )
+    .unwrap();
+    assert!(!target_ui_is_active(&value));
+}
+
+#[cfg(unix)]
+fn host_identity_fixture(
+    work: &PrivateTempDir,
+    actual_identity: &nazo_operator_protocol::EmbeddedIdentity,
+) -> (UpdateConfig, ReleaseManifest) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut config = config(work);
+    config.dependencies.mode = "external".to_owned();
+    let mut release = manifest("v0.2.0", 'e');
+    let directory = config.runtime.binary_releases.join(&release.backend_commit);
+    fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("nazoauth");
+    let identity = serde_json::to_string(actual_identity).unwrap();
+    assert!(!identity.contains('\''));
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = build-identity ]; then\n  printf '%s\\n' '{identity}'\n  exit 0\nfi\nexit 1\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&binary).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&binary, permissions).unwrap();
+    let metadata = fs::metadata(&binary).unwrap();
+    let artifact = release.artifacts.get_mut("binary").unwrap();
+    artifact.sha256 = crate::filesystem::sha256(&binary).unwrap();
+    artifact.size = metadata.len();
+    config.runtime.binary_path = binary;
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    write_active_release(&config, &release).unwrap();
+    (config, release)
+}
+
+#[cfg(unix)]
+fn health_server() -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    (format!("http://{address}/ready"), handle)
+}
+
+#[cfg(unix)]
+fn public_server(requests: usize) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let issuer = format!("http://{address}");
+    let response_issuer = issuer.clone();
+    let handle = std::thread::spawn(move || {
+        for _ in 0..requests {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = if request.starts_with("GET /.well-known/openid-configuration ") {
+                serde_json::json!({"issuer": response_issuer}).to_string()
+            } else {
+                "ok".to_owned()
+            };
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        }
+    });
+    (issuer, handle)
+}
+
+#[cfg(unix)]
+fn fake_container_runtime(
+    work: &PrivateTempDir,
+    candidate_commit: &str,
+    candidate_active: bool,
+) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let engine = work.path().join(if candidate_active {
+        "active-container-engine"
+    } else {
+        "inactive-container-engine"
+    });
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = inspect ]; then\n  if [ \"{candidate_active}\" != true ]; then exit 1; fi\n  if [ \"$#\" -gt 2 ]; then printf '%s\\n' '{candidate_commit}'; fi\n  exit 0\nfi\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&engine).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&engine, permissions).unwrap();
+    engine
+}
+
+#[cfg(unix)]
+fn install_audit_key(config: &UpdateConfig) {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::SigningKey;
+
+    let key = SigningKey::from_bytes(&[7; 32]);
+    fs::create_dir_all(config.operator.audit_private_key.parent().unwrap()).unwrap();
+    fs::write(
+        &config.operator.audit_private_key,
+        URL_SAFE_NO_PAD.encode(key.to_bytes()),
+    )
+    .unwrap();
+    fs::write(
+        &config.operator.audit_public_key,
+        URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes()),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn configure_public_checks(config: &mut UpdateConfig, issuer: &str) {
+    config.runtime.health_url = format!("{issuer}/ready");
+    config.runtime.public_discovery_url = format!("{issuer}/.well-known/openid-configuration");
+    config.runtime.expected_issuer = issuer.to_owned();
+}
+
+#[cfg(unix)]
+fn materialize_candidate_ui(value: &UpdateJournal) {
+    fs::create_dir_all(&value.candidate_ui).unwrap();
+    fs::write(value.candidate_ui.join("index.html"), b"ui").unwrap();
+    fs::write(
+        value.candidate_ui.join(".nazoauth-ui.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "repository": value.to_release.frontend.repository,
+            "version": value.to_release.frontend.version,
+            "commit": value.to_release.frontend.commit,
+            "release_identity": value.to_release.frontend.release_identity,
+            "artifact": value.to_release.frontend.artifact,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn materialize_verified_backup(config: &UpdateConfig, path: &std::path::Path) {
+    fs::create_dir_all(&config.backup_root).unwrap();
+    fs::create_dir(path).unwrap();
+    fs::write(path.join("state.bin"), b"durable-state").unwrap();
+    fs::write(
+        path.join("SHA256SUMS"),
+        format!(
+            "{}  state.bin\n",
+            crate::filesystem::sha256(&path.join("state.bin")).unwrap()
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn host_status_reports_signed_binary_and_embedded_identity_match() {
+    let work = PrivateTempDir::new("nazoauth-host-status").unwrap();
+    let release = manifest("v0.2.0", 'e');
+    let (mut config, _) = host_identity_fixture(&work, &release.embedded);
+    let (health_url, server) = health_server();
+    config.runtime.health_url = health_url;
+
+    status(&config).unwrap();
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn host_status_remains_observable_when_embedded_identity_mismatches() {
+    let work = PrivateTempDir::new("nazoauth-host-status-mismatch").unwrap();
+    let release = manifest("v0.2.0", 'e');
+    let mut actual = release.embedded.clone();
+    actual.build_id = "build:substituted".to_owned();
+    let (mut config, _) = host_identity_fixture(&work, &actual);
+    let (health_url, server) = health_server();
+    config.runtime.health_url = health_url;
+
+    status(&config).unwrap();
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn host_doctor_accepts_the_exact_signed_binary_and_embedded_identity() {
+    let work = PrivateTempDir::new("nazoauth-host-doctor").unwrap();
+    let release = manifest("v0.2.0", 'e');
+    let (mut config, _) = host_identity_fixture(&work, &release.embedded);
+    let (health_url, server) = health_server();
+    config.runtime.health_url = health_url;
+
+    doctor(&config).unwrap();
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn host_doctor_rejects_embedded_identity_substitution_before_health_checks() {
+    let work = PrivateTempDir::new("nazoauth-host-doctor-identity-mismatch").unwrap();
+    let release = manifest("v0.2.0", 'e');
+    let mut actual = release.embedded.clone();
+    actual.revision = "9".repeat(40);
+    let (config, _) = host_identity_fixture(&work, &actual);
+
+    let error = doctor(&config).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("runtime embedded build identity differs")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_pre_migration_update_restores_previous_artifact_and_closes_the_journal() {
+    let work = PrivateTempDir::new("nazoauth-recover-previous").unwrap();
+    let mut config = config(&work);
+    let mut value = journal(&config, UpdatePhase::WriterStopped);
+    config.runtime.engine = fake_container_runtime(&work, &value.to_release.backend_commit, false)
+        .display()
+        .to_string();
+    value.previous_runtime = value.from_release.image_ref().unwrap();
+    value.candidate_runtime = value.to_release.image_ref().unwrap();
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    fs::write(&value.staged_updater, b"staged-updater").unwrap();
+    install_audit_key(&config);
+    let (issuer, server) = public_server(3);
+    configure_public_checks(&mut config, &issuer);
+    write_update_journal(&config, &value).unwrap();
+
+    let result = recover_pending_update(&work.path().join("config.json"), &config);
+    assert!(result.is_ok(), "recovery failed: {result:#?}");
+    server.join().unwrap();
+    assert_eq!(
+        load_active_release(&config).unwrap().version,
+        value.from_release.version
+    );
+    assert!(!update_journal_path(&config).exists());
+    assert!(!value.staged_updater.exists());
+    crate::operator::verify_audit(&config).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_active_candidate_continues_all_commits_and_closes_the_journal() {
+    let work = PrivateTempDir::new("nazoauth-recover-forward").unwrap();
+    let mut config = config(&work);
+    let mut value = journal(&config, UpdatePhase::CandidateActive);
+    config.runtime.engine = fake_container_runtime(&work, &value.to_release.backend_commit, true)
+        .display()
+        .to_string();
+    value.previous_runtime = value.from_release.image_ref().unwrap();
+    value.candidate_runtime = value.to_release.image_ref().unwrap();
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    fs::write(&value.staged_updater, b"staged-updater").unwrap();
+    materialize_candidate_ui(&value);
+    materialize_verified_backup(&config, value.backup.as_deref().unwrap());
+    install_audit_key(&config);
+    let (issuer, server) = public_server(5);
+    configure_public_checks(&mut config, &issuer);
+    write_update_journal(&config, &value).unwrap();
+
+    let result = recover_pending_update(&work.path().join("config.json"), &config);
+    assert!(result.is_ok(), "recovery failed: {result:#?}");
+    server.join().unwrap();
+    assert_eq!(
+        load_active_release(&config).unwrap().version,
+        value.to_release.version
+    );
+    assert_eq!(
+        fs::read(&config.updater_install_path).unwrap(),
+        b"staged-updater"
+    );
+    assert!(!update_journal_path(&config).exists());
+    assert!(!value.staged_updater.exists());
+    crate::operator::verify_audit(&config).unwrap();
 }
 
 #[test]

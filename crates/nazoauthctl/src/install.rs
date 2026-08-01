@@ -1497,6 +1497,8 @@ fn validate_public_url(value: &str) -> anyhow::Result<()> {
     let url = Url::parse(value).context("--public-url must be an absolute HTTP(S) origin")?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
         || (url.path() != "" && url.path() != "/")
         || url.query().is_some()
         || url.fragment().is_some()

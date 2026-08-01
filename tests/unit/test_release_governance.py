@@ -51,6 +51,24 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ):
             self.assertNotIn(retired_binary, final_stage)
 
+    def test_release_oci_reuses_the_exact_native_application_binaries(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        containerfile = (ROOT / "Containerfile.release").read_text(encoding="utf-8")
+
+        self.assertIn("container-image:\n    needs: platform-binaries", workflow)
+        self.assertIn("release-binaries-x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("release-binaries-aarch64-unknown-linux-gnu", workflow)
+        self.assertIn("file: Containerfile.release", workflow)
+        self.assertNotIn("cargo build", containerfile)
+        self.assertIn(
+            "COPY target/release-container/${TARGETARCH}/nazoauth "
+            "/usr/local/bin/nazoauth",
+            containerfile,
+        )
+        self.assertNotIn("nazoauthctl", containerfile)
+
     def test_public_quick_start_is_platform_neutral_verified_controller(self) -> None:
         public_guides = [
             ROOT / "README.md",

@@ -157,7 +157,7 @@ jobs:
           file: .github/e2e-runner.Containerfile
       - name: Prepare isolated runtime config
         run: |
-          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap
+          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap runtime/e2e/ui-releases
           python scripts/ensure_runtime_keyset.py --key-dir runtime/e2e/keys --active-alg RS256 --required-alg RS256 --required-alg PS256
           cat > runtime/e2e/.env.yaml <<'YAML'
           BIND: "0.0.0.0:8000"
@@ -266,6 +266,7 @@ jobs:
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             nazo-oauth-e2e:latest nazoauth server
           docker run -d --name nazo-oauth-e2e-server-signed --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
@@ -275,6 +276,7 @@ jobs:
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             nazo-oauth-e2e:latest nazoauth server
       - name: Require both non-root servers to become ready
         run: |

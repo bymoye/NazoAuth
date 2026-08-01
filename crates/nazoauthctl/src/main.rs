@@ -35,7 +35,11 @@ fn main() {
 }
 
 fn print_help(topic: cli::HelpTopic) {
-    let help = match topic {
+    println!("{}", help_text(topic));
+}
+
+fn help_text(topic: cli::HelpTopic) -> &'static str {
+    match topic {
         cli::HelpTopic::TopLevel => {
             "nazoauthctl — install and safely operate NazoAuth
 
@@ -126,8 +130,29 @@ after the transition commits."
 This requires the separately stored recovery private key and rotates controller,
 audit, and break-glass identities in one audited transition."
         }
-    };
-    println!("{help}");
+    }
 }
 
 mod controller;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_public_help_topic_is_complete_without_runtime_state() {
+        for (topic, expected) in [
+            (cli::HelpTopic::TopLevel, "Commands:"),
+            (cli::HelpTopic::Install, "--external-dependencies"),
+            (cli::HelpTopic::Update, "--accept-migration-barrier"),
+            (cli::HelpTopic::Keys, "register-external"),
+            (cli::HelpTopic::Audit, "audit verify"),
+            (cli::HelpTopic::Identity, "identity rotate"),
+            (cli::HelpTopic::BreakGlass, "recover-controller"),
+        ] {
+            let help = help_text(topic);
+            assert!(help.starts_with("Usage:") || help.starts_with("nazoauthctl"));
+            assert!(help.contains(expected));
+        }
+    }
+}

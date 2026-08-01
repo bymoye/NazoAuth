@@ -699,3 +699,7 @@ fn append_mount(command: Process, mount: &Mount) -> Process {
         .arg("-v")
         .arg(mount_argument(&mount.source, &mount.target, &mount.mode))
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/runtime.rs"]
+mod tests;
