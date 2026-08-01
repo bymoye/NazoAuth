@@ -37,14 +37,20 @@ class OidfWorkflowTests(unittest.TestCase):
         for secret in (
             "OIDF_PLAN_CONFIG_AGE_IDENTITY",
             "OIDF_MTLS_MATERIAL_AGE_IDENTITY",
-            "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
             "OPENID4VC_OIDF_BASE_CONFIG_JSON",
             "OPENID4VC_OIDF_MTLS_CONFIG_JSON",
             "OPENID4VC_OIDF_DRIVER_CONFIG_JSON",
         ):
             self.assertIn(f"      {secret}:\n        required: true", workflow)
         self.assertNotIn("secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN", workflow)
+        self.assertNotIn(
+            "secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN", workflow
+        )
         self.assertIn("secrets.token_urlsafe(48)", workflow)
+        self.assertIn(
+            "--dynamic-registration-token-file dynamic-registration-initial-access-token",
+            workflow,
+        )
 
     def test_oidc_fapi_mtls_material_is_encrypted_and_applied_everywhere(self):
         root = Path(__file__).resolve().parents[2]
@@ -82,6 +88,20 @@ class OidfWorkflowTests(unittest.TestCase):
         self.assertIn(
             "if: ${{ !inputs.onboarding_material_only && inputs.runner_mode == 'parallel-isolated' }}",
             workflow,
+        )
+        self.assertEqual(
+            workflow.count(
+                "--dynamic-registration-token-file dynamic-registration-initial-access-token"
+            ),
+            2,
+        )
+        self.assertEqual(
+            workflow.count(
+                "unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN "
+                "OIDF_CIBA_AUTOMATED_DECISION_TOKEN "
+                "OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
+            ),
+            2,
         )
 
     def test_official_runners_require_production_delivered_client_material(self):

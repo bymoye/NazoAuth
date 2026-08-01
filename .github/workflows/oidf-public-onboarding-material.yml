@@ -34,8 +34,6 @@ on:
         required: true
       OIDF_MTLS_MATERIAL_AGE_IDENTITY:
         required: true
-      OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN:
-        required: true
       OPENID4VC_OIDF_BASE_CONFIG_JSON:
         required: true
       OPENID4VC_OIDF_MTLS_CONFIG_JSON:
@@ -125,21 +123,26 @@ jobs:
           import secrets
           from pathlib import Path
 
-          path = Path("ciba-automated-decision-token")
-          path.write_text(secrets.token_urlsafe(48), encoding="ascii")
-          path.chmod(0o600)
+          for name in (
+              "dynamic-registration-initial-access-token",
+              "ciba-automated-decision-token",
+          ):
+              path = Path(name)
+              path.write_text(secrets.token_urlsafe(48), encoding="ascii")
+              path.chmod(0o600)
           PY
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
+            --dynamic-registration-token-file dynamic-registration-initial-access-token \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$SUITE_BASE_URL" \
             --ciba-automated-decision-token-file ciba-automated-decision-token \
             --target-issuer "$TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f ciba-automated-decision-token
+          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           test -n "$OPENID4VC_OIDF_BASE_CONFIG_JSON"
           test -n "$OPENID4VC_OIDF_MTLS_CONFIG_JSON"
           test -n "$OPENID4VC_OIDF_DRIVER_CONFIG_JSON"
@@ -174,14 +177,13 @@ jobs:
         env:
           OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
           OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
-          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
           OPENID4VC_OIDF_BASE_CONFIG_JSON: ${{ secrets.OPENID4VC_OIDF_BASE_CONFIG_JSON }}
           OPENID4VC_OIDF_MTLS_CONFIG_JSON: ${{ secrets.OPENID4VC_OIDF_MTLS_CONFIG_JSON }}
           OPENID4VC_OIDF_DRIVER_CONFIG_JSON: ${{ secrets.OPENID4VC_OIDF_DRIVER_CONFIG_JSON }}
 
       - name: Remove plaintext secrets
         if: always()
-        run: rm -f ciba-automated-decision-token oidf-plan-config.agekey oidf-mtls-material.agekey oidf-mtls-material.json oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json runtime/openid4vc/base.json runtime/openid4vc/mtls.json runtime/openid4vc/driver.json runtime/openid4vc/materialized/openid4vc-driver.json runtime/openid4vc/materialized/openid4vc-plan-configs.json
+        run: rm -f dynamic-registration-initial-access-token ciba-automated-decision-token oidf-plan-config.agekey oidf-mtls-material.agekey oidf-mtls-material.json oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json runtime/openid4vc/base.json runtime/openid4vc/mtls.json runtime/openid4vc/driver.json runtime/openid4vc/materialized/openid4vc-driver.json runtime/openid4vc/materialized/openid4vc-plan-configs.json
 
       - name: Upload public OIDF onboarding material
         uses: actions/upload-artifact@v7.0.1

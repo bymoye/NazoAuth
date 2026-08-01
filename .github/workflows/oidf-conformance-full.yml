@@ -333,23 +333,26 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
+          test -n "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN"
+          printf '%s' "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN" > dynamic-registration-initial-access-token
           test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
           printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          chmod 600 ciba-automated-decision-token
+          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
+          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
+          chmod 600 dynamic-registration-initial-access-token ciba-automated-decision-token oidf-delivered-client-material.json
+          unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN OIDF_CIBA_AUTOMATED_DECISION_TOKEN OIDF_DELIVERED_CLIENT_MATERIAL_JSON
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
+            --dynamic-registration-token-file dynamic-registration-initial-access-token \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$CONFORMANCE_SERVER" \
             --ciba-automated-decision-token-file ciba-automated-decision-token \
             --target-issuer "$OIDF_TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f ciba-automated-decision-token
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
-          chmod 600 oidf-delivered-client-material.json
+          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           python scripts/apply_oidf_delivered_client_material.py \
             --material-json-file oidf-delivered-client-material.json \
             --config-json-file oidf-plan-configs.json \
@@ -580,23 +583,26 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
+          test -n "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN"
+          printf '%s' "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN" > dynamic-registration-initial-access-token
           test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
           printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          chmod 600 ciba-automated-decision-token
+          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
+          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
+          chmod 600 dynamic-registration-initial-access-token ciba-automated-decision-token oidf-delivered-client-material.json
+          unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN OIDF_CIBA_AUTOMATED_DECISION_TOKEN OIDF_DELIVERED_CLIENT_MATERIAL_JSON
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
+            --dynamic-registration-token-file dynamic-registration-initial-access-token \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$CONFORMANCE_SERVER" \
             --ciba-automated-decision-token-file ciba-automated-decision-token \
             --target-issuer "$OIDF_TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f ciba-automated-decision-token
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
-          chmod 600 oidf-delivered-client-material.json
+          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           python scripts/apply_oidf_delivered_client_material.py \
             --material-json-file oidf-delivered-client-material.json \
             --config-json-file oidf-plan-configs.json \

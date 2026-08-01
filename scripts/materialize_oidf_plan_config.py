@@ -435,6 +435,11 @@ def main() -> int:
         help="environment variable containing the RFC 7591 initial access token",
     )
     parser.add_argument(
+        "--dynamic-registration-token-file",
+        type=Path,
+        help="file containing the RFC 7591 initial access token",
+    )
+    parser.add_argument(
         "--derive-fapi-ciba-matrix-configs",
         action="store_true",
         help="derive the four orthogonal FAPI-CIBA static-client configurations",
@@ -470,9 +475,21 @@ def main() -> int:
         raise SystemExit("OIDF rendered config must be a JSON object")
     derive_logout_oidcc_configs(rendered)
     if args.derive_dynamic_oidcc_config:
-        initial_access_token = os.environ.get(args.dynamic_registration_token_env, "")
+        initial_access_token = (
+            args.dynamic_registration_token_file.read_text(encoding="utf-8")
+            if args.dynamic_registration_token_file is not None
+            else os.environ.get(args.dynamic_registration_token_env, "")
+        )
         if not initial_access_token:
-            raise SystemExit(f"{args.dynamic_registration_token_env} is required")
+            raise SystemExit("dynamic registration initial access token is required")
+        if (
+            not 32 <= len(initial_access_token) <= 4096
+            or initial_access_token.strip() != initial_access_token
+            or not all("!" <= character <= "~" for character in initial_access_token)
+        ):
+            raise SystemExit(
+                "dynamic registration initial access token must contain 32 through 4096 visible ASCII bytes"
+            )
         derive_dynamic_oidcc_config(rendered, initial_access_token)
     if args.derive_fapi_ciba_matrix_configs:
         if not isinstance(rendered, dict):
