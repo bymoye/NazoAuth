@@ -150,6 +150,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
             self.assertNotIn("GitHub CLI for the\nfirst bootstrap", source)
             self.assertNotIn("首次自举所需的 GitHub CLI", source)
             self.assertRegex(source, r"does not require GitHub CLI|不需要 GitHub CLI")
+            self.assertRegex(source, r"public non-draft Release|公开非草稿 Release")
 
     def test_release_builds_one_application_and_one_lifecycle_executable(self) -> None:
         server_manifest = (

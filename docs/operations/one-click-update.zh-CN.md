@@ -102,7 +102,9 @@ sudo nazoauthctl install --runtime podman \
   /absolute/oidf-public-onboarding-material/standards-full-profile.json
 ```
 
-workflow 先证明 `source_commit` 位于默认分支，再切换到该精确 commit 后生成所有材料；
+workflow 先证明 `source_commit` 是精确不可变 Release tag 指向的 commit。尚未进入默认
+分支的 commit，只有在公开非草稿 Release 及其绑定该 tag、由 GitHub-hosted runner 生成的
+attestation 验证通过后才被接受；随后 workflow 切换到该精确 commit 生成所有材料。
 artifact manifest 同时绑定源码 commit、目标 issuer、套件 origin 和每个文件摘要。接入
 其他标准套件的高级用户仍可使用 `build_oidf_full_install_profile.py` 的显式输入模式。
 

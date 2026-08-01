@@ -116,10 +116,13 @@ sudo nazoauthctl install --runtime podman \
   /absolute/oidf-public-onboarding-material/standards-full-profile.json
 ```
 
-The workflow first proves that `source_commit` is on the default branch, then
-checks out that exact commit before rendering any material. The artifact
-manifest binds the source commit, target issuer, suite origin, and every file
-digest. Advanced operators may instead use
+The workflow first proves that `source_commit` is the commit behind the exact
+immutable Release tag. A commit that is not yet on the default branch is
+accepted only after the public non-draft Release and its tag-specific,
+GitHub-hosted-runner attestation are verified. It then checks out that exact
+commit before rendering any material. The artifact manifest binds the source
+commit, target issuer, suite origin, and every file digest. Advanced operators
+may instead use
 `build_oidf_full_install_profile.py` in explicit-input mode when integrating a
 different standards suite.
 
