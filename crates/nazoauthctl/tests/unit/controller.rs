@@ -216,6 +216,18 @@ fn openid4vc_trust_export_keeps_only_the_ca_certificate() {
         .is_err()
     );
     assert!(extract_openid4vc_trust_anchors(b"-----BEGIN PRIVATE KEY-----\nno\n").is_err());
+    assert!(
+        extract_openid4vc_trust_anchors(
+            b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n"
+        )
+        .is_err()
+    );
+    assert!(
+        extract_openid4vc_trust_anchors(
+            b"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n"
+        )
+        .is_err()
+    );
     let oversized = vec![b' '; MAX_OPENID4VC_CERTIFICATE_BUNDLE_BYTES + 1];
     assert!(extract_openid4vc_trust_anchors(&oversized).is_err());
 }
@@ -230,6 +242,10 @@ fn openid4vc_trust_export_destination_is_absolute_regular_and_atomic() {
     atomic_write(&output, b"new", 0o644).unwrap();
     assert_eq!(fs::read(&output).unwrap(), b"new");
     assert!(safe_export_destination(Path::new("relative.pem")).is_err());
+    assert!(safe_export_destination(&work.path().join("missing/output.pem")).is_err());
+    let parent_file = work.path().join("parent-file");
+    fs::write(&parent_file, b"not-a-directory").unwrap();
+    assert!(safe_export_destination(&parent_file.join("output.pem")).is_err());
     let directory = work.path().join("directory");
     fs::create_dir(&directory).unwrap();
     assert!(safe_export_destination(&directory).is_err());
@@ -260,6 +276,68 @@ fn openid4vc_trust_export_uses_only_the_managed_key_directory() {
         .snapshot_paths
         .push(work.path().join("other/keys"));
     assert!(managed_openid4vc_bundle_path(&value).is_err());
+
+    value.runtime.engine = "podman".to_owned();
+    value.runtime.snapshot_paths.clear();
+    value.runtime.mounts = vec![crate::model::Mount {
+        source: keys.clone(),
+        target: PathBuf::from(OPENID4VC_KEYS_MOUNT),
+        mode: "rw,Z".to_owned(),
+    }];
+    assert_eq!(
+        managed_openid4vc_bundle_path(&value).unwrap(),
+        keys.join(OPENID4VC_CERTIFICATE_BUNDLE)
+    );
+    value.runtime.mounts[0].mode = "ro,Z".to_owned();
+    assert!(managed_openid4vc_bundle_path(&value).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn openid4vc_trust_export_is_release_bound_audited_and_fail_closed() {
+    let work = PrivateTempDir::new("openid4vc-trust-export-audit").unwrap();
+    let output = work.path().join("export/trust-anchors.pem");
+    fs::create_dir(output.parent().unwrap()).unwrap();
+
+    let mut value = config(&work);
+    assert!(export_openid4vc_trust(&value, &output).is_err());
+
+    value.install_profile = "standards-full".to_owned();
+    let keys = work.path().join("app/keys");
+    fs::create_dir_all(&keys).unwrap();
+    value.runtime.snapshot_paths = vec![keys.clone()];
+    assert!(export_openid4vc_trust(&value, &output).is_err());
+
+    let bundle = keys.join(OPENID4VC_CERTIFICATE_BUNDLE);
+    fs::create_dir(&bundle).unwrap();
+    assert!(export_openid4vc_trust(&value, &output).is_err());
+    fs::remove_dir(&bundle).unwrap();
+    fs::write(&bundle, format!("{OPENID4VC_TEST_LEAF}{OPENID4VC_TEST_CA}")).unwrap();
+
+    fs::create_dir_all(&value.deployment_root).unwrap();
+    write_active_release(&value, &manifest("v0.1.9", 'e')).unwrap();
+    install_audit_key(&value);
+    export_openid4vc_trust(&value, &output).unwrap();
+
+    assert_eq!(fs::read_to_string(&output).unwrap(), OPENID4VC_TEST_CA);
+    crate::operator::verify_audit(&value).unwrap();
+    let mut operations = fs::read_dir(value.operator.audit_directory.join("management"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|name| {
+            crate::operator::load_management_event(&value, &name)
+                .unwrap()
+                .operation
+        })
+        .collect::<Vec<_>>();
+    operations.sort();
+    assert_eq!(
+        operations,
+        [
+            "keys-export-openid4vc-trust-completed",
+            "keys-export-openid4vc-trust-intent",
+        ]
+    );
 }
 
 #[test]
@@ -1198,6 +1276,93 @@ fn settled_config(work: &PrivateTempDir) -> (PathBuf, UpdateConfig) {
     crate::operator::recover_pending_rotation(&config_path, &mut config).unwrap();
     assert!(!crate::operator::identity_recovery_required(&config).unwrap());
     (config_path, config)
+}
+
+#[test]
+fn public_command_dispatch_fails_closed_before_every_confirmed_mutation() {
+    let work = PrivateTempDir::new("nazoauth-command-dispatch").unwrap();
+    let (config_path, config) = settled_config(&work);
+    let config_before = fs::read(&config_path).unwrap();
+    let invoke = |command| {
+        run(Cli {
+            config: config_path.clone(),
+            command,
+        })
+    };
+
+    for command in [
+        Command::BootstrapAdmin(BootstrapAdminOptions {
+            credentials_stdin: false,
+            yes: false,
+        }),
+        Command::Rollback { yes: false },
+        Command::Recover { yes: false },
+        Command::Migrate { yes: false },
+        Command::Keys(KeysCommand::GenerateLocal {
+            alg: "ES256".to_owned(),
+            purposes: vec!["credential".to_owned()],
+            yes: false,
+        }),
+        Command::Keys(KeysCommand::RegisterExternal {
+            kid: "external-test".to_owned(),
+            alg: "ES256".to_owned(),
+            key_ref: "kms:test".to_owned(),
+            public_jwk: work.path().join("missing-public.jwk"),
+            yes: false,
+        }),
+        Command::IdentityRotate { yes: false },
+        Command::BreakGlassRehearseControllerLoss { yes: false },
+        Command::BreakGlassRecover {
+            yes: false,
+            reason: "lost".to_owned(),
+        },
+    ] {
+        assert!(invoke(command).is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    }
+
+    assert!(
+        invoke(Command::RecoverUpdate { yes: false })
+            .unwrap_err()
+            .to_string()
+            .contains("no interrupted update")
+    );
+    assert!(
+        invoke(Command::RecoverIdentity { yes: false })
+            .unwrap_err()
+            .to_string()
+            .contains("no interrupted identity")
+    );
+    assert!(
+        invoke(Command::Keys(KeysCommand::ExportOpenid4vcTrust {
+            output: work.path().join("public/trust.pem"),
+        }))
+        .is_err()
+    );
+    invoke(Command::AuditVerify).unwrap();
+    invoke(Command::AuditShow { request_id: None }).unwrap();
+    invoke(Command::BreakGlassControllerAvailability).unwrap();
+
+    fs::create_dir_all(&config.deployment_root).unwrap();
+    write_update_journal(&config, &journal(&config, UpdatePhase::Prepared)).unwrap();
+    assert!(invoke(Command::RecoverUpdate { yes: false }).is_err());
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    fs::remove_file(update_journal_path(&config)).unwrap();
+
+    let abandoned = config
+        .operator
+        .identity_generations_directory
+        .join("generation-abandoned");
+    fs::create_dir_all(&abandoned).unwrap();
+    fs::write(abandoned.join("controller.key"), b"pending-secret").unwrap();
+    assert!(
+        invoke(Command::RecoverUpdate { yes: false })
+            .unwrap_err()
+            .to_string()
+            .contains("identity recovery is pending")
+    );
+    assert!(invoke(Command::RecoverIdentity { yes: false }).is_err());
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
 }
 
 #[test]

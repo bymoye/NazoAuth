@@ -323,6 +323,17 @@ fn profile_secret_channels_fail_closed_without_consuming_ambiguous_stdin() {
             .to_string(),
         "secure profile secret input requires --profile standards-full"
     );
+
+    let mut duplicate_profile_channel = install_options(work.path().to_owned());
+    duplicate_profile_channel.profile = "standards-full".to_owned();
+    duplicate_profile_channel.profile_secrets_stdin = true;
+    duplicate_profile_channel.profile_secret_fd = Some(8);
+    assert_eq!(
+        normalize_profile_secrets(&mut duplicate_profile_channel)
+            .unwrap_err()
+            .to_string(),
+        "choose exactly one of --profile-secrets-stdin or --profile-secret-fd"
+    );
 }
 
 #[test]

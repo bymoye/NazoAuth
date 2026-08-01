@@ -209,3 +209,99 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate_chai
 
     tokio::fs::remove_dir_all(directory).await.unwrap();
 }
+
+#[tokio::test]
+async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
+    let directory = std::env::temp_dir().join(format!(
+        "nazoauth-keyctl-certificate-boundaries-{}",
+        uuid::Uuid::now_v7()
+    ));
+    tokio::fs::create_dir(&directory).await.unwrap();
+    let key_settings = key_settings_from_config(&ConfigSource::from_owned_pairs_for_test([(
+        "JWK_KEYS_DIR".to_owned(),
+        directory.join("keys").display().to_string(),
+    )]))
+    .unwrap();
+    let certificate = directory.join("bundle.pem");
+    let paths = Openid4vcCertificatePaths {
+        chain: certificate.clone(),
+        anchors: certificate.clone(),
+        hostname: "auth.example".to_owned(),
+    };
+    let options = parse_generate_local("ES256", &["credential".to_owned()]).unwrap();
+    assert!(
+        generate_local_with_key_settings(&key_settings, Some(&paths), options)
+            .await
+            .is_err()
+    );
+
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+    let private_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+    assert!(
+        !existing_openid4vc_bundle_matches(&paths, &private_key)
+            .await
+            .unwrap()
+    );
+
+    let split_paths = Openid4vcCertificatePaths {
+        chain: directory.join("chain.pem"),
+        anchors: directory.join("anchors.pem"),
+        hostname: "auth.example".to_owned(),
+    };
+    assert!(
+        existing_openid4vc_bundle_matches(&split_paths, &private_key)
+            .await
+            .is_err()
+    );
+    assert!(
+        activate_openid4vc_certificate_bundle(&split_paths, b"bundle")
+            .await
+            .is_err()
+    );
+
+    tokio::fs::write(&certificate, b"not-a-certificate")
+        .await
+        .unwrap();
+    assert!(
+        !existing_openid4vc_bundle_matches(&paths, &private_key)
+            .await
+            .unwrap()
+    );
+
+    let bundle = build_openid4vc_certificate_bundle(&private_key, "auth.example").unwrap();
+    tokio::fs::write(&certificate, &bundle).await.unwrap();
+    let wrong_hostname = Openid4vcCertificatePaths {
+        chain: certificate.clone(),
+        anchors: certificate.clone(),
+        hostname: "other.example".to_owned(),
+    };
+    assert!(
+        !existing_openid4vc_bundle_matches(&wrong_hostname, &private_key)
+            .await
+            .unwrap()
+    );
+
+    tokio::fs::remove_file(&certificate).await.unwrap();
+    tokio::fs::create_dir(&certificate).await.unwrap();
+    assert!(
+        existing_openid4vc_bundle_matches(&paths, &private_key)
+            .await
+            .is_err()
+    );
+    assert!(
+        activate_openid4vc_certificate_bundle(&paths, b"bundle")
+            .await
+            .is_err()
+    );
+
+    tokio::fs::remove_dir(&certificate).await.unwrap();
+    activate_openid4vc_certificate_bundle(&paths, b"atomic-bundle")
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::fs::read(&certificate).await.unwrap(),
+        b"atomic-bundle"
+    );
+
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}

@@ -176,6 +176,59 @@ fn privileged_task_fails_closed_without_required_config_mount() {
 
 #[cfg(unix)]
 #[test]
+fn retirement_probe_accepts_only_the_closed_runtime_authorization_marker() {
+    let work = PrivateTempDir::new("runtime-retirement-probe").unwrap();
+    let cleanup = work.path().join("cleanup");
+    write_shell_executable(&cleanup, "exit 0");
+
+    let target = RuntimeTargetClaim::HostBinary {
+        path: work.path().join("nazoauth").display().to_string(),
+        sha256: "a".repeat(64),
+    };
+    let rejected = work.path().join("authorization-rejected");
+    write_shell_executable(
+        &rejected,
+        "cat >/dev/null; echo nazoauth-operator-rejection=authorization >&2; exit 1",
+    );
+    let prepared = PreparedAppTask {
+        process: Process::new(rejected),
+        target: target.clone(),
+        cleanup: TaskCleanup::Container {
+            engine: cleanup.display().to_string(),
+            name: "test-probe".to_owned(),
+        },
+    };
+    prepared
+        .expect_authorization_rejection("signed-envelope")
+        .unwrap();
+
+    for (name, body) in [
+        ("successful", "cat >/dev/null; exit 0"),
+        (
+            "unrelated-failure",
+            "cat >/dev/null; echo unrelated >&2; exit 1",
+        ),
+    ] {
+        let executable = work.path().join(name);
+        write_shell_executable(&executable, body);
+        let prepared = PreparedAppTask {
+            process: Process::new(executable),
+            target: target.clone(),
+            cleanup: TaskCleanup::Container {
+                engine: cleanup.display().to_string(),
+                name: format!("test-probe-{name}"),
+            },
+        };
+        assert!(
+            prepared
+                .expect_authorization_rejection("signed-envelope")
+                .is_err()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn application_container_command_uses_hardening_and_secret_file_references() {
     let work = PrivateTempDir::new("runtime-start-command").unwrap();
     let mut config = config(&work);

@@ -140,6 +140,231 @@ fn test_runtime_rejects_retired_controller(
     })
 }
 
+#[test]
+fn retirement_probe_audit_evidence_is_closed_and_target_bound() {
+    let embedded = EmbeddedIdentity {
+        release: "v0.1.9".to_owned(),
+        revision: "b".repeat(40),
+        protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+        build_id: "github:test".to_owned(),
+    };
+    for target in [
+        RuntimeTargetClaim::HostBinary {
+            path: test_binary_path(),
+            sha256: "a".repeat(64),
+        },
+        RuntimeTargetClaim::OciImage {
+            image_ref: "ghcr.io/nazozero/nazoauth:v0.1.9".to_owned(),
+            image_digest: format!("sha256:{}", "c".repeat(64)),
+        },
+    ] {
+        let encoded = encode_retirement_probe_audit_evidence(
+            &RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
+                schema: 1,
+                previous_controller_key_id: "controller-previous".to_owned(),
+                active_controller_key_id: "controller-active".to_owned(),
+                probe_sha256: "d".repeat(64),
+                controller_verified_target: target,
+                application_reported_embedded_identity: embedded.clone(),
+            },
+        )
+        .unwrap();
+        validate_retirement_probe_audit_evidence(&encoded).unwrap();
+    }
+
+    let not_issued =
+        encode_retirement_probe_audit_evidence(&RetirementProbeAuditEvidence::NotIssued {
+            schema: 1,
+            previous_controller_key_id: "controller-previous".to_owned(),
+            previous_controller_public_sha256: "e".repeat(64),
+            reason: "controller-private-unavailable".to_owned(),
+        })
+        .unwrap();
+    validate_retirement_probe_audit_evidence(&not_issued).unwrap();
+
+    for invalid in ["not-evidence", "evidence-v1.not-base64!", "evidence-v1.e30"] {
+        assert!(validate_retirement_probe_audit_evidence(invalid).is_err());
+    }
+
+    for evidence in [
+        RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
+            schema: 2,
+            previous_controller_key_id: "controller-previous".to_owned(),
+            active_controller_key_id: "controller-active".to_owned(),
+            probe_sha256: "d".repeat(64),
+            controller_verified_target: RuntimeTargetClaim::HostBinary {
+                path: test_binary_path(),
+                sha256: "a".repeat(64),
+            },
+            application_reported_embedded_identity: embedded.clone(),
+        },
+        RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
+            schema: 1,
+            previous_controller_key_id: "controller-previous".to_owned(),
+            active_controller_key_id: "controller-active".to_owned(),
+            probe_sha256: "d".repeat(64),
+            controller_verified_target: RuntimeTargetClaim::HostBinary {
+                path: "relative/nazoauth".to_owned(),
+                sha256: "a".repeat(64),
+            },
+            application_reported_embedded_identity: embedded.clone(),
+        },
+        RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
+            schema: 1,
+            previous_controller_key_id: "controller-previous".to_owned(),
+            active_controller_key_id: "controller-active".to_owned(),
+            probe_sha256: "d".repeat(64),
+            controller_verified_target: RuntimeTargetClaim::OciImage {
+                image_ref: String::new(),
+                image_digest: format!("sha256:{}", "c".repeat(64)),
+            },
+            application_reported_embedded_identity: embedded,
+        },
+    ] {
+        let encoded = encode_retirement_probe_audit_evidence(&evidence).unwrap();
+        assert!(validate_retirement_probe_audit_evidence(&encoded).is_err());
+    }
+
+    let invalid_not_issued =
+        encode_retirement_probe_audit_evidence(&RetirementProbeAuditEvidence::NotIssued {
+            schema: 1,
+            previous_controller_key_id: "controller-previous".to_owned(),
+            previous_controller_public_sha256: "e".repeat(64),
+            reason: "copied-key-status-unknown".to_owned(),
+        })
+        .unwrap();
+    assert!(validate_retirement_probe_audit_evidence(&invalid_not_issued).is_err());
+}
+
+#[test]
+fn static_identity_files_are_idempotent_and_fail_closed_on_partial_state() {
+    let work = PrivateTempDir::new("operator-static-identity").unwrap();
+    let identity = work.path().join("identity");
+    fs::create_dir(&identity).unwrap();
+
+    ensure_static_identity_files(&identity).unwrap();
+    ensure_static_identity_files(&identity).unwrap();
+    for name in [
+        "deployment-id",
+        "secret-revision",
+        "receipt.key",
+        "receipt.pub",
+        "receipt.kid",
+    ] {
+        assert!(identity.join(name).is_file());
+    }
+
+    fs::remove_file(identity.join("receipt.pub")).unwrap();
+    assert!(ensure_static_identity_files(&identity).is_err());
+
+    let invalid = work.path().join("invalid-static");
+    fs::create_dir(&invalid).unwrap();
+    fs::write(invalid.join("deployment-id"), "x".repeat(129)).unwrap();
+    assert!(ensure_static_identity_files(&invalid).is_err());
+
+    let inconsistent = work.path().join("inconsistent-receipt");
+    fs::create_dir(&inconsistent).unwrap();
+    ensure_static_identity_files(&inconsistent).unwrap();
+    fs::write(inconsistent.join("receipt.kid"), "receipt-wrong").unwrap();
+    assert!(ensure_static_identity_files(&inconsistent).is_err());
+}
+
+#[test]
+fn legacy_generation_boundaries_accept_only_the_expected_regular_tree() {
+    let work = PrivateTempDir::new("operator-generation-boundaries").unwrap();
+    let missing = work.path().join("missing");
+    ensure_only_expected_generation(&missing, "generation-expected").unwrap();
+    remove_allowlisted_generation_directory(&missing, &["controller.key"]).unwrap();
+
+    let generations = work.path().join("generations");
+    fs::create_dir(&generations).unwrap();
+    fs::create_dir(generations.join("generation-expected")).unwrap();
+    ensure_only_expected_generation(&generations, "generation-expected").unwrap();
+    fs::write(generations.join("unexpected"), b"x").unwrap();
+    assert!(ensure_only_expected_generation(&generations, "generation-expected").is_err());
+
+    let not_directory = work.path().join("not-directory");
+    fs::write(&not_directory, b"x").unwrap();
+    assert!(ensure_only_expected_generation(&not_directory, "generation-expected").is_err());
+    assert!(remove_allowlisted_generation_directory(&not_directory, &["controller.key"]).is_err());
+
+    let removable = work.path().join("removable");
+    fs::create_dir(&removable).unwrap();
+    fs::write(removable.join("controller.key"), b"key").unwrap();
+    fs::write(removable.join("controller.pub"), b"public").unwrap();
+    remove_allowlisted_generation_directory(&removable, &["controller.key", "controller.pub"])
+        .unwrap();
+    assert!(!removable.exists());
+
+    let unexpected = work.path().join("unexpected-entry");
+    fs::create_dir(&unexpected).unwrap();
+    fs::write(unexpected.join("controller.key"), b"key").unwrap();
+    fs::write(unexpected.join("extra"), b"extra").unwrap();
+    assert!(remove_allowlisted_generation_directory(&unexpected, &["controller.key"]).is_err());
+    assert!(unexpected.join("extra").exists());
+}
+
+#[test]
+fn legacy_adoption_rejects_ambiguous_state_and_removes_only_staged_identity() {
+    let work = PrivateTempDir::new("operator-legacy-adoption-boundaries").unwrap();
+    let value = config(&work);
+    let layout = identity_layout(&value).unwrap();
+    let intent_path = layout.operator_directory.join("legacy-adoption.json");
+    let expected = LegacyAdoptionIntent {
+        schema: 1,
+        generation: "generation-expected".to_owned(),
+        controller_key_id: value.operator.controller_key_id.clone(),
+        audit_key_id: value.operator.audit_key_id.clone(),
+        break_glass_key_id: value.operator.break_glass_key_id.clone(),
+    };
+
+    refuse_ambiguous_legacy_adoption(&value, &layout, &intent_path, &expected).unwrap();
+
+    fs::create_dir_all(&layout.generations).unwrap();
+    fs::write(layout.generations.join("orphan"), b"unexpected").unwrap();
+    assert!(refuse_ambiguous_legacy_adoption(&value, &layout, &intent_path, &expected).is_err());
+    fs::remove_file(layout.generations.join("orphan")).unwrap();
+
+    fs::create_dir(layout.generations.join(&expected.generation)).unwrap();
+    fs::create_dir_all(layout.recovery_generations.join(&expected.generation)).unwrap();
+    fs::write(&intent_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+    refuse_ambiguous_legacy_adoption(&value, &layout, &intent_path, &expected).unwrap();
+
+    let conflicting = LegacyAdoptionIntent {
+        generation: "generation-conflicting".to_owned(),
+        ..expected
+    };
+    assert!(refuse_ambiguous_legacy_adoption(&value, &layout, &intent_path, &conflicting).is_err());
+
+    fs::write(
+        layout.operator_directory.join("rotation-intent.json"),
+        b"pending",
+    )
+    .unwrap();
+    assert!(refuse_ambiguous_legacy_adoption(&value, &layout, &intent_path, &conflicting).is_err());
+}
+
+#[test]
+fn staged_identity_cleanup_and_controller_availability_match_managed_files() {
+    let work = PrivateTempDir::new("operator-staged-identity-cleanup").unwrap();
+    let value = config(&work);
+    let layout = identity_layout(&value).unwrap();
+    let controller = read_signing_key(&value.operator.controller_private_key).unwrap();
+    let audit = read_signing_key(&value.operator.audit_private_key).unwrap();
+    let break_glass = read_signing_key(&value.operator.break_glass_private_key).unwrap();
+    let active = new_active_identity(&controller, &audit, &break_glass);
+
+    write_generation(&layout, &active, &controller, &audit, &break_glass).unwrap();
+    let (generation, recovery_generation) = generation_paths(&layout, &active);
+    remove_uncommitted_generation(&layout, &active).unwrap();
+    assert!(!generation.exists());
+    assert!(!recovery_generation.exists());
+
+    assert!(report_controller_availability(&value).unwrap());
+    fs::write(&value.operator.controller_public_key, b"invalid").unwrap();
+    assert!(!report_controller_availability(&value).unwrap());
+}
+
 fn task_parts() -> (
     nazo_operator_protocol::TargetExpectation,
     EmbeddedIdentity,
@@ -1018,6 +1243,31 @@ fn retired_controller_probe_is_rejected_and_audited_after_rotation() {
     let mut current: UpdateConfig =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut current).unwrap();
+    current.dependencies.migration_database_url_file =
+        work.path().join("secrets/migration-database-url");
+    fs::write(
+        current.runtime.working_directory.join(".env.yaml"),
+        "server: {}\n",
+    )
+    .unwrap();
+    fs::write(&current.runtime.binary_path, b"not-the-signed-release").unwrap();
+    let expected = ExpectedReleaseTarget {
+        embedded: EmbeddedIdentity {
+            release: "v0.1.5".to_owned(),
+            revision: "b".repeat(40),
+            protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+            build_id: "build:test".to_owned(),
+        },
+        image_digest: format!("sha256:{}", "d".repeat(64)),
+        binary_digest: "a".repeat(64),
+    };
+    let error = verify_retired_controller_probe(&current, &rotation, "v0.1.5", &expected)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("actual host binary digest does not match the signed Release manifest"),
+        "{error}"
+    );
     verify_retired_controller_probe_with(&current, &rotation, "v0.1.5", |probe| {
         test_runtime_rejects_retired_controller(&current, probe)
     })

@@ -261,6 +261,48 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
 }
 
 #[test]
+fn install_secret_channels_and_profile_flags_are_unambiguous() {
+    for arguments in [
+        &[
+            "nazoauthctl",
+            "install",
+            "--secrets-stdin",
+            "--secrets-stdin",
+        ][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--profile-secrets-stdin",
+            "--profile-secrets-stdin",
+        ][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--secret-fd",
+            "3",
+            "--secret-fd",
+            "4",
+        ][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--profile",
+            "standards-full",
+            "--profile-material",
+            "/tmp/material.json",
+            "--profile-secret-fd",
+            "3",
+            "--profile-secret-fd",
+            "4",
+        ][..],
+        &["nazoauthctl", "install", "--profile", "unsupported"][..],
+        &["nazoauthctl", "install", "--profile-secrets-stdin"][..],
+    ] {
+        assert!(parse(arguments).is_err(), "accepted {arguments:?}");
+    }
+}
+
+#[test]
 fn parses_update_and_recovery_authorization_without_weakening_plan_mode() {
     let command = parse(&[
         "nazoauthctl",

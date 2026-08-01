@@ -85,3 +85,114 @@ fn bounded_regular_archive_extracts_without_external_ui_source() {
     assert_eq!(fs::read(output.join("index.html")).unwrap(), b"fixture");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn frontend_descriptor_policy_rejects_each_untrusted_binding() {
+    let descriptor: FrontendDescriptor = serde_json::from_str(DEFAULT_FRONTEND).unwrap();
+    let mut invalid = Vec::new();
+    for mutate in [
+        |value: &mut FrontendDescriptor| value.schema = 2,
+        |value: &mut FrontendDescriptor| value.repository = "other/repository".to_owned(),
+        |value: &mut FrontendDescriptor| value.version = "latest".to_owned(),
+        |value: &mut FrontendDescriptor| value.commit = "A".repeat(40),
+        |value: &mut FrontendDescriptor| {
+            value.release_identity = "https://example.invalid".to_owned()
+        },
+        |value: &mut FrontendDescriptor| value.artifact.repository = "other/repository".to_owned(),
+        |value: &mut FrontendDescriptor| value.artifact.name = "frontend.zip".to_owned(),
+        |value: &mut FrontendDescriptor| value.artifact.sha256 = "A".repeat(64),
+        |value: &mut FrontendDescriptor| value.artifact.size = 0,
+        |value: &mut FrontendDescriptor| value.artifact.size = MAX_ARCHIVE_BYTES + 1,
+    ] {
+        let mut value = descriptor.clone();
+        mutate(&mut value);
+        invalid.push(value);
+    }
+    for value in invalid {
+        assert!(value.validate().is_err());
+    }
+    assert!(!semantic_tag("0.1.0"));
+    assert!(!semantic_tag("v01.0.0"));
+    assert!(!lower_hex("ABC", 3));
+    assert_eq!(hex(&[0, 15, 255]), "000fff");
+}
+
+#[tokio::test]
+async fn explicit_static_and_valid_cached_ui_paths_resolve_without_download() {
+    let root = std::env::temp_dir().join(format!("nazoauth-ui-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&root).unwrap();
+    let static_directory = root.join("static");
+    fs::create_dir(&static_directory).unwrap();
+    assert!(validate_static_directory(&static_directory).is_err());
+    fs::write(static_directory.join("index.html"), b"fixture").unwrap();
+    let config = ConfigSource::from_owned_pairs_for_test([(
+        "UI_STATIC_DIR".to_owned(),
+        static_directory.display().to_string(),
+    )]);
+    assert_eq!(
+        resolve(&config).await.unwrap().unwrap(),
+        fs::canonicalize(&static_directory).unwrap()
+    );
+
+    let descriptor: FrontendDescriptor = serde_json::from_str(DEFAULT_FRONTEND).unwrap();
+    let cache = root.join("cache");
+    let target = cache.join(&descriptor.artifact.sha256);
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("index.html"), b"fixture").unwrap();
+    fs::write(
+        target.join(".nazoauth-ui.json"),
+        serde_json::to_vec(&descriptor).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ensure_cached(&cache, &descriptor).await.unwrap(),
+        fs::canonicalize(&target).unwrap()
+    );
+
+    fs::remove_file(target.join(".nazoauth-ui.json")).unwrap();
+    assert!(ensure_cached(&cache, &descriptor).await.is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn private_ui_tree_and_archive_fail_closed_without_index() {
+    use flate2::{Compression, write::GzEncoder};
+    use tar::{Builder, Header};
+
+    let root = std::env::temp_dir().join(format!("nazoauth-ui-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&root).unwrap();
+    let private = root.join("tree/nested/asset.js");
+    fs::create_dir_all(private.parent().unwrap()).unwrap();
+    write_private(&private, b"asset").unwrap();
+    make_tree_read_only(&root.join("tree")).unwrap();
+    assert_eq!(fs::read(&private).unwrap(), b"asset");
+
+    let archive_path = root.join("missing-index.tar.gz");
+    let output = root.join("output");
+    fs::create_dir(&output).unwrap();
+    let archive = File::create(&archive_path).unwrap();
+    let mut builder = Builder::new(GzEncoder::new(archive, Compression::default()));
+    let mut header = Header::new_gnu();
+    header.set_size(5);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "asset.js", &b"asset"[..])
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap();
+    assert!(extract(&archive_path, &output).is_err());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(root.join("tree"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(root.join("tree")).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(root.join("tree"), permissions).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
