@@ -753,7 +753,12 @@ fn interrupted_rotation_activates_one_complete_staged_generation() {
     assert_eq!(config.operator.controller_key_id, next.controller_key_id);
     assert_eq!(config.operator.audit_key_id, next.audit_key_id);
     assert_eq!(config.operator.break_glass_key_id, next.break_glass_key_id);
-    assert!(!layout.operator_directory.join("rotation-intent.json").exists());
+    assert!(
+        !layout
+            .operator_directory
+            .join("rotation-intent.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -764,7 +769,8 @@ fn retired_controller_probe_is_rejected_and_audited_after_rotation() {
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut config).unwrap();
     let rotation = rotate_controller(&config_path, &config, false, "normal").unwrap();
-    let mut current: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let mut current: UpdateConfig =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut current).unwrap();
     verify_retired_controller_probe_with(&current, &rotation, "v0.1.5", |probe| {
         test_runtime_rejects_retired_controller(&current, probe)
@@ -788,7 +794,8 @@ fn controller_loss_rehearsal_rotates_with_controller_signing_forbidden_and_probe
     let previous = config.operator.controller_key_id.clone();
 
     let rotation = rehearse_controller_loss(&config_path, &config).unwrap();
-    let mut current: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let mut current: UpdateConfig =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut current).unwrap();
     assert_ne!(current.operator.controller_key_id, previous);
     assert!(rotation.retirement_probe.is_some());
@@ -808,9 +815,11 @@ fn controller_loss_recovery_does_not_require_the_controller_private_key() {
     recover_pending_rotation(&config_path, &mut config).unwrap();
     fs::remove_file(&config.operator.controller_private_key).unwrap();
 
-    let rotation = recover_controller_without_controller_key(&config_path, &config, "lost").unwrap();
+    let rotation =
+        recover_controller_without_controller_key(&config_path, &config, "lost").unwrap();
     assert!(rotation.retirement_probe.is_none());
-    let mut current: UpdateConfig = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let mut current: UpdateConfig =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut current).unwrap();
     verify_retired_controller_probe_with(&current, &rotation, "v0.1.5", |probe| {
         test_runtime_rejects_retired_controller(&current, probe)
@@ -827,7 +836,9 @@ fn active_pointer_recovers_a_stale_config_without_multiple_active_private_genera
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     recover_pending_rotation(&config_path, &mut config).unwrap();
     let layout = identity_layout(&config).unwrap();
-    let previous_generation = read_active_identity(&layout.active_file).unwrap().generation;
+    let previous_generation = read_active_identity(&layout.active_file)
+        .unwrap()
+        .generation;
     let controller = SigningKey::from_bytes(&[21; 32]);
     let audit = SigningKey::from_bytes(&[22; 32]);
     let break_glass = SigningKey::from_bytes(&[23; 32]);
@@ -872,7 +883,12 @@ fn restart_discards_uncommitted_partial_generation_without_touching_active_ident
 
     recover_pending_rotation(&config_path, &mut config).unwrap();
 
-    assert_eq!(read_active_identity(&layout.active_file).unwrap().generation, active_before.generation);
+    assert_eq!(
+        read_active_identity(&layout.active_file)
+            .unwrap()
+            .generation,
+        active_before.generation
+    );
     assert!(!abandoned.join("controller.key").exists());
 }
 
@@ -938,5 +954,8 @@ fn generation_cleanup_refuses_symlink_escape() {
 
     let error = recover_pending_rotation(&config_path, &mut config).unwrap_err();
     assert!(error.to_string().contains("unsafe entry"));
-    assert_eq!(fs::read(outside.join("controller.key")).unwrap(), b"must-survive");
+    assert_eq!(
+        fs::read(outside.join("controller.key")).unwrap(),
+        b"must-survive"
+    );
 }

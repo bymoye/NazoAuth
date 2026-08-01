@@ -265,7 +265,8 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
             require_root()?;
             let config = load_config(&cli.config)?;
             require_confirmation(yes, "rotate the controller identity")?;
-            let rotation = crate::operator::rotate_controller(&cli.config, &config, false, "normal")?;
+            let rotation =
+                crate::operator::rotate_controller(&cli.config, &config, false, "normal")?;
             let current = load_config(&cli.config)?;
             let release = load_active_release(&current)?;
             let expected = expected_target(&current, &release)?;
@@ -295,7 +296,10 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         Command::BreakGlassRehearseControllerLoss { yes } => {
             require_root()?;
             let config = load_config(&cli.config)?;
-            require_confirmation(yes, "rehearse controller-key loss with a simulated unavailable file provider")?;
+            require_confirmation(
+                yes,
+                "rehearse controller-key loss with a simulated unavailable file provider",
+            )?;
             let rotation = crate::operator::rehearse_controller_loss(&cli.config, &config)?;
             let current = load_config(&cli.config)?;
             let release = load_active_release(&current)?;

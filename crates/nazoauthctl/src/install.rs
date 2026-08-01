@@ -1269,7 +1269,9 @@ fn operator_config(config_dir: &Path, data_root: &Path) -> anyhow::Result<Operat
     let active = operator::read_active_identity(&directory.join("active-generation.json"))?;
     let receipt_key_id = fs::read_to_string(directory.join("receipt.kid"))?;
     let generation = directory.join("generations").join(&active.generation);
-    let recovery_generation = data_root.join("recovery/generations").join(&active.generation);
+    let recovery_generation = data_root
+        .join("recovery/generations")
+        .join(&active.generation);
     Ok(Operator {
         deployment_id,
         controller_key_id: active.controller_key_id,

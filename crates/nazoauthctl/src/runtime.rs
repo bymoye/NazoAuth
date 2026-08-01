@@ -38,11 +38,15 @@ impl PreparedAppTask {
         &self,
         compact_envelope: &str,
     ) -> anyhow::Result<()> {
-        let result = self.process.stdin_authorization_rejected(compact_envelope.as_bytes());
+        let result = self
+            .process
+            .stdin_authorization_rejected(compact_envelope.as_bytes());
         self.cleanup();
         match result? {
             true => Ok(()),
-            false => bail!("prepared runtime task did not reject retired controller at authorization boundary"),
+            false => bail!(
+                "prepared runtime task did not reject retired controller at authorization boundary"
+            ),
         }
     }
 

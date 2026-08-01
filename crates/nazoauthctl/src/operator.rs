@@ -1106,19 +1106,21 @@ pub(crate) fn initialize_identity_generation(
         operator_directory.join("break-glass.pub"),
     ] {
         if path_present(&legacy)? {
-            bail!("legacy operator identity exists without an active generation; refuse ambiguous fresh install")
+            bail!(
+                "legacy operator identity exists without an active generation; refuse ambiguous fresh install"
+            )
         }
     }
     create_private_directory(operator_directory)?;
     create_private_directory(recovery_directory)?;
     repair_uncommitted_receipt_identity(operator_directory)?;
     ensure_static_identity_files(operator_directory)?;
-    retire_generation_private_material(&layout.generations, None, &["controller.key", "audit.key"])?;
     retire_generation_private_material(
-        &layout.recovery_generations,
+        &layout.generations,
         None,
-        &["break-glass.key"],
+        &["controller.key", "audit.key"],
     )?;
+    retire_generation_private_material(&layout.recovery_generations, None, &["break-glass.key"])?;
     let controller = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
     let audit = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
     let break_glass = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
@@ -1141,7 +1143,7 @@ fn repair_uncommitted_receipt_identity(directory: &Path) -> anyhow::Result<()> {
         .filter(|present| *present)
         .count();
     if present == 0 || present == paths.len() {
-        return Ok(())
+        return Ok(());
     }
     for path in paths {
         remove_managed_regular_file(&path)?;
@@ -1150,8 +1152,12 @@ fn repair_uncommitted_receipt_identity(directory: &Path) -> anyhow::Result<()> {
 }
 
 pub(crate) fn read_active_identity(path: &Path) -> anyhow::Result<ActiveIdentity> {
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect active identity record {}", path.display()))?;
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect active identity record {}",
+            path.display()
+        )
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         bail!("active identity record must be a regular non-symlink file")
     }
@@ -1181,7 +1187,12 @@ fn identity_layout(config: &UpdateConfig) -> anyhow::Result<IdentityLayout> {
         .parent()
         .context("recovery private key has no parent directory")?;
     Ok(IdentityLayout {
-        generations: if config.operator.identity_generations_directory.as_os_str().is_empty() {
+        generations: if config
+            .operator
+            .identity_generations_directory
+            .as_os_str()
+            .is_empty()
+        {
             operator_directory.join("generations")
         } else {
             config.operator.identity_generations_directory.clone()
@@ -1217,7 +1228,10 @@ fn ensure_static_identity_files(directory: &Path) -> anyhow::Result<()> {
             };
             atomic_write(&path, value.as_bytes(), private_mode)?;
         } else if !is_regular_non_symlink(&path)? || read_single_line(&path)?.len() > 128 {
-            bail!("static operator identity file is invalid: {}", path.display())
+            bail!(
+                "static operator identity file is invalid: {}",
+                path.display()
+            )
         }
     }
     let private = directory.join("receipt.key");
@@ -1245,8 +1259,16 @@ fn ensure_static_identity_files(directory: &Path) -> anyhow::Result<()> {
     let key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
     let public_bytes = key.verifying_key().to_bytes();
     let digest = encode_hex(&Sha256::digest(public_bytes));
-    atomic_write(&private, URL_SAFE_NO_PAD.encode(key.to_bytes()).as_bytes(), 0o400)?;
-    atomic_write(&public, URL_SAFE_NO_PAD.encode(public_bytes).as_bytes(), 0o444)?;
+    atomic_write(
+        &private,
+        URL_SAFE_NO_PAD.encode(key.to_bytes()).as_bytes(),
+        0o400,
+    )?;
+    atomic_write(
+        &public,
+        URL_SAFE_NO_PAD.encode(public_bytes).as_bytes(),
+        0o444,
+    )?;
     atomic_write(&kid, format!("receipt-{}", &digest[..16]).as_bytes(), 0o444)
 }
 
@@ -1315,7 +1337,9 @@ fn write_generation(
     )?;
     atomic_write(
         &generation.join("controller.pub"),
-        URL_SAFE_NO_PAD.encode(controller.verifying_key().to_bytes()).as_bytes(),
+        URL_SAFE_NO_PAD
+            .encode(controller.verifying_key().to_bytes())
+            .as_bytes(),
         0o444,
     )?;
     atomic_write(
@@ -1325,7 +1349,9 @@ fn write_generation(
     )?;
     atomic_write(
         &generation.join("audit.pub"),
-        URL_SAFE_NO_PAD.encode(audit.verifying_key().to_bytes()).as_bytes(),
+        URL_SAFE_NO_PAD
+            .encode(audit.verifying_key().to_bytes())
+            .as_bytes(),
         0o444,
     )?;
     atomic_write(
@@ -1335,7 +1361,9 @@ fn write_generation(
     )?;
     atomic_write(
         &generation.join("break-glass.pub"),
-        URL_SAFE_NO_PAD.encode(break_glass.verifying_key().to_bytes()).as_bytes(),
+        URL_SAFE_NO_PAD
+            .encode(break_glass.verifying_key().to_bytes())
+            .as_bytes(),
         0o444,
     )?;
     validate_generation(layout, active)
@@ -1408,10 +1436,18 @@ fn validate_generation_for_break_glass_recovery(
 
 fn write_active_identity(layout: &IdentityLayout, active: &ActiveIdentity) -> anyhow::Result<()> {
     validate_generation(layout, active)?;
-    atomic_write(&layout.active_file, &serde_json::to_vec_pretty(active)?, 0o600)
+    atomic_write(
+        &layout.active_file,
+        &serde_json::to_vec_pretty(active)?,
+        0o600,
+    )
 }
 
-fn apply_active_identity(config: &mut UpdateConfig, layout: &IdentityLayout, active: &ActiveIdentity) {
+fn apply_active_identity(
+    config: &mut UpdateConfig,
+    layout: &IdentityLayout,
+    active: &ActiveIdentity,
+) {
     let (generation, recovery_generation) = generation_paths(layout, active);
     config.operator.controller_key_id = active.controller_key_id.clone();
     config.operator.controller_private_key = generation.join("controller.key");
@@ -1517,7 +1553,7 @@ fn refuse_ambiguous_legacy_adoption(
         }
         ensure_only_expected_generation(&layout.generations, &expected.generation)?;
         ensure_only_expected_generation(&layout.recovery_generations, &expected.generation)?;
-        return Ok(())
+        return Ok(());
     }
     if directory_has_entries(&layout.generations)?
         || directory_has_entries(&layout.recovery_generations)?
@@ -1529,7 +1565,7 @@ fn refuse_ambiguous_legacy_adoption(
 
 fn directory_has_entries(path: &Path) -> anyhow::Result<bool> {
     if !path_present(path)? {
-        return Ok(false)
+        return Ok(false);
     }
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1540,7 +1576,7 @@ fn directory_has_entries(path: &Path) -> anyhow::Result<bool> {
 
 fn ensure_only_expected_generation(directory: &Path, expected: &str) -> anyhow::Result<()> {
     if !path_present(directory)? {
-        return Ok(())
+        return Ok(());
     }
     let metadata = fs::symlink_metadata(directory)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1562,14 +1598,20 @@ fn remove_uncommitted_generation(
     let (generation, recovery_generation) = generation_paths(layout, active);
     remove_allowlisted_generation_directory(
         &generation,
-        &["controller.key", "controller.pub", "audit.key", "audit.pub", "break-glass.pub"],
+        &[
+            "controller.key",
+            "controller.pub",
+            "audit.key",
+            "audit.pub",
+            "break-glass.pub",
+        ],
     )?;
     remove_allowlisted_generation_directory(&recovery_generation, &["break-glass.key"])
 }
 
 fn remove_allowlisted_generation_directory(path: &Path, allowed: &[&str]) -> anyhow::Result<()> {
     if !path_present(path)? {
-        return Ok(())
+        return Ok(());
     }
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1671,9 +1713,7 @@ fn verify_rotation_intent(
     }
     match transition.authorization {
         TransitionAuthorization::Controller if header.kid == intent.previous_key_id => Ok(()),
-        TransitionAuthorization::BreakGlass
-            if header.kid == intent.previous_break_glass_key_id =>
-        {
+        TransitionAuthorization::BreakGlass if header.kid == intent.previous_break_glass_key_id => {
             Ok(())
         }
         _ => bail!("controller rotation intent authorization does not match its signer"),
@@ -1716,7 +1756,7 @@ fn retire_generation_private_material(
     private_names: &[&str],
 ) -> anyhow::Result<()> {
     if !path_present(directory)? {
-        return Ok(())
+        return Ok(());
     }
     let metadata = fs::symlink_metadata(directory)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1745,10 +1785,15 @@ fn remove_managed_regular_file(path: &Path) -> anyhow::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("managed identity path is not a regular non-symlink file: {}", path.display())
+        bail!(
+            "managed identity path is not a regular non-symlink file: {}",
+            path.display()
+        )
     }
     crate::filesystem::remove_file_durable(path)
 }
@@ -1857,20 +1902,15 @@ where
         let evidence = serde_json::to_string(&RetirementProbeAuditEvidence::NotIssued {
             schema: 1,
             previous_controller_key_id: rotation.previous_controller_key_id.clone(),
-            previous_controller_public_sha256: rotation
-                .previous_controller_public_sha256
-                .clone(),
+            previous_controller_public_sha256: rotation.previous_controller_public_sha256.clone(),
             reason: "controller-private-unavailable".to_owned(),
         })?;
-        append_management_event(
-            config,
-            "controller-retirement-probe",
-            release,
-            &evidence,
-        )?;
+        append_management_event(config, "controller-retirement-probe", release, &evidence)?;
         println!(
             "retired controller probe not issued: previous={} previous_public_sha256={} release={} category=controller-private-unavailable",
-            rotation.previous_controller_key_id, rotation.previous_controller_public_sha256, release
+            rotation.previous_controller_key_id,
+            rotation.previous_controller_public_sha256,
+            release
         );
         return Ok(());
     };
@@ -1887,12 +1927,7 @@ where
                 .application_reported_embedded_identity,
         },
     )?;
-    append_management_event(
-        config,
-        "controller-retirement-probe",
-        release,
-        &evidence,
-    )?;
+    append_management_event(config, "controller-retirement-probe", release, &evidence)?;
     println!(
         "retired controller probe rejected: previous={} previous_public_sha256={} release={}",
         rotation.previous_controller_key_id, rotation.previous_controller_public_sha256, release
@@ -1911,7 +1946,11 @@ pub(crate) fn report_controller_availability(config: &UpdateConfig) -> anyhow::R
         });
     println!(
         "controller-key-availability={}; provider=file; copied-key-status=not-provable",
-        if available { "available" } else { "unavailable" }
+        if available {
+            "available"
+        } else {
+            "unavailable"
+        }
     );
     Ok(available)
 }
@@ -1997,7 +2036,8 @@ fn rotate_controller_with_access(
         (
             TransitionAuthorization::Controller,
             config.operator.controller_key_id.as_str(),
-            controller_access.controller_for_normal_rotation(&config.operator.controller_private_key)?,
+            controller_access
+                .controller_for_normal_rotation(&config.operator.controller_private_key)?,
         )
     };
     let transition = ControllerTrustTransition {
@@ -2010,10 +2050,14 @@ fn rotate_controller_with_access(
         next_public_key_sha256: encode_hex(&Sha256::digest(new_key.verifying_key().to_bytes())),
         previous_audit_key_id: config.operator.audit_key_id.clone(),
         next_audit_key_id: next.audit_key_id.clone(),
-        next_audit_public_key_sha256: encode_hex(&Sha256::digest(new_audit_key.verifying_key().to_bytes())),
+        next_audit_public_key_sha256: encode_hex(&Sha256::digest(
+            new_audit_key.verifying_key().to_bytes(),
+        )),
         previous_break_glass_key_id: config.operator.break_glass_key_id.clone(),
         next_break_glass_key_id: next.break_glass_key_id.clone(),
-        next_break_glass_public_key_sha256: encode_hex(&Sha256::digest(next_break_glass.verifying_key().to_bytes())),
+        next_break_glass_public_key_sha256: encode_hex(&Sha256::digest(
+            next_break_glass.verifying_key().to_bytes(),
+        )),
         reason: reason.to_owned(),
     };
     let compact = sign_trust_transition(&transition, signer_id, &signer)?;
@@ -2087,8 +2131,7 @@ pub(crate) fn recover_pending_rotation(
     apply_active_identity(config, &layout, &active);
     let adoption_path = layout.operator_directory.join("legacy-adoption.json");
     let adoption_pending = if path_present(&adoption_path)? {
-        let adoption: LegacyAdoptionIntent =
-            serde_json::from_slice(&fs::read(&adoption_path)?)?;
+        let adoption: LegacyAdoptionIntent = serde_json::from_slice(&fs::read(&adoption_path)?)?;
         if adoption.schema != 1
             || adoption.generation != active.generation
             || adoption.controller_key_id != active.controller_key_id
@@ -2137,7 +2180,11 @@ pub(crate) fn recover_pending_rotation(
                     .parent()
                     .context("rotation transition path has no parent")?,
             )?;
-            atomic_write(&transition_path, intent.compact_transition.as_bytes(), 0o400)?;
+            atomic_write(
+                &transition_path,
+                intent.compact_transition.as_bytes(),
+                0o400,
+            )?;
         }
         if active.generation != next.generation {
             write_active_identity(&layout, &next)?;
@@ -2161,7 +2208,9 @@ fn trusted_controller_key(config: &UpdateConfig, key_id: &str) -> anyhow::Result
     if key_id == config.operator.controller_key_id {
         return read_verifying_key(&config.operator.controller_public_key);
     }
-    let directory = identity_layout(config)?.operator_directory.join("trusted-controllers");
+    let directory = identity_layout(config)?
+        .operator_directory
+        .join("trusted-controllers");
     read_verifying_key(&directory.join(format!("{key_id}.pub")))
 }
 
@@ -2169,7 +2218,9 @@ fn trusted_audit_key(config: &UpdateConfig, key_id: &str) -> anyhow::Result<Veri
     if key_id == config.operator.audit_key_id {
         return read_verifying_key(&config.operator.audit_public_key);
     }
-    let directory = identity_layout(config)?.operator_directory.join("trusted-audit");
+    let directory = identity_layout(config)?
+        .operator_directory
+        .join("trusted-audit");
     read_verifying_key(&directory.join(format!("{key_id}.pub")))
 }
 
@@ -2177,7 +2228,9 @@ fn trusted_break_glass_key(config: &UpdateConfig, key_id: &str) -> anyhow::Resul
     if key_id == config.operator.break_glass_key_id {
         return read_verifying_key(&config.operator.break_glass_public_key);
     }
-    let directory = identity_layout(config)?.operator_directory.join("trusted-break-glass");
+    let directory = identity_layout(config)?
+        .operator_directory
+        .join("trusted-break-glass");
     read_verifying_key(&directory.join(format!("{key_id}.pub")))
 }
 
