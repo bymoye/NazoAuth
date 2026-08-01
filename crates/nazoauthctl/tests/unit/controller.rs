@@ -1176,6 +1176,16 @@ fn only_observation_commands_use_the_shared_noncreating_lock() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn production_config_permission_policy_requires_root_and_rejects_writable_files() {
+    assert!(config_permissions_are_safe(0, 0o100600));
+    assert!(config_permissions_are_safe(0, 0o100640));
+    assert!(!config_permissions_are_safe(1000, 0o100600));
+    assert!(!config_permissions_are_safe(0, 0o100620));
+    assert!(!config_permissions_are_safe(0, 0o100602));
+}
+
 fn settled_config(work: &PrivateTempDir) -> (PathBuf, UpdateConfig) {
     let config_path = work.path().join("update.json");
     let mut config = config(work);

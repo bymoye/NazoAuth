@@ -2341,14 +2341,19 @@ fn load_config(path: &Path) -> anyhow::Result<UpdateConfig> {
 fn validate_config_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    if test_mode() {
+    if cfg!(test) || test_mode() {
         return Ok(());
     }
     let metadata = fs::metadata(path)?;
-    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+    if !config_permissions_are_safe(metadata.uid(), metadata.mode()) {
         bail!("update config must be root-owned and not group/world writable");
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn config_permissions_are_safe(owner_uid: u32, mode: u32) -> bool {
+    owner_uid == 0 && mode & 0o022 == 0
 }
 
 #[cfg(not(unix))]

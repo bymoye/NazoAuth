@@ -3,7 +3,7 @@
 状态：实施中；远端代码门禁已通过当前候选改动；正式双 Release 与第 18 节唯一远端验收尚未完成
 日期：2026-08-01
 设计计划：[operator-task-protocol-plan.zh-CN.md](../security/operator-task-protocol-plan.zh-CN.md)  
-源代码基线：`codex/cosign-private-staging` 当前工作树；安装/升级验收版本为 `v0.1.7 → v0.1.8`，最终 SHA 只由正式 Release 固定
+源代码基线：`codex/cosign-private-staging` 当前工作树；安装/升级验收版本为 `v0.1.8 → v0.1.9`，最终 SHA 只由正式 Release 固定
 
 ## 1. 任务目标
 
