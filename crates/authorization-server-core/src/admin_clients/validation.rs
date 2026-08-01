@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::sector_identifier_host_for_redirects;
 use super::{AdminClientCryptoPort, AdminClientError, CreateClientRequest};
 use crate::{
     OAuthClient, SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS, SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
@@ -25,80 +23,20 @@ const SUPPORTED_TOKEN_AUTH_METHODS: &[&str] = &[
     "self_signed_tls_client_auth",
     "attest_jwt_client_auth",
 ];
-const SUPPORTED_CLIENT_JWT_SIGNING_ALGS: &[&str] = &["EdDSA", "RS256", "ES256", "PS256"];
+use crate::SUPPORTED_CLIENT_JWT_SIGNING_ALGS;
 
 #[cfg(test)]
-mod tests {
-    use super::{AdminClientError, sector_identifier_host_for_redirects};
-
-    #[test]
-    fn policy_debug_output_redacts_server_secrets() {
-        let policy = super::super::AdminClientPolicy {
-            tenant: nazo_identity::TenantContext::default_system(),
-            pairwise_subject_secret: Some("pairwise-secret".to_owned()),
-            client_secret_pepper: "client-secret-pepper".to_owned(),
-        };
-        let debug = format!("{policy:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("pairwise-secret"));
-        assert!(!debug.contains("client-secret-pepper"));
-    }
-
-    #[test]
-    fn sector_identifier_document_requires_every_redirect() {
-        let redirect_uris = vec![
-            "https://client.example/callback".to_owned(),
-            "https://client.example/alternate".to_owned(),
-        ];
-        let sector_uris = vec![
-            "https://client.example/callback".to_owned(),
-            "https://client.example/alternate".to_owned(),
-        ];
-        assert_eq!(
-            sector_identifier_host_for_redirects(
-                "https://sector.example/client.json",
-                &redirect_uris,
-                &sector_uris,
-            )
-            .expect("valid sector document"),
-            "sector.example"
-        );
-
-        let error = sector_identifier_host_for_redirects(
-            "https://sector.example/client.json",
-            &[
-                "https://client.example/callback".to_owned(),
-                "https://other.example/callback".to_owned(),
-            ],
-            &["https://client.example/callback".to_owned()],
-        )
-        .expect_err("unlisted redirect must fail");
-        assert!(matches!(error, AdminClientError::InvalidRequest(_)));
-        assert!(error.to_string().contains("other.example"));
-    }
-
-    #[test]
-    fn sector_identifier_uri_must_have_a_host() {
-        let error = sector_identifier_host_for_redirects(
-            "not-a-uri",
-            &["https://client.example/callback".to_owned()],
-            &["https://client.example/callback".to_owned()],
-        )
-        .expect_err("sector identifier URI without a host must fail");
-        assert_eq!(
-            error.to_string(),
-            "sector_identifier_uri host 解析失败: InvalidUri"
-        );
-    }
-}
+#[path = "../../tests/unit/admin_clients/validation.rs"]
+mod tests;
 
 #[cfg(test)]
-#[path = "validation/metadata_tests.rs"]
+#[path = "../../tests/unit/admin_clients/validation/metadata.rs"]
 mod metadata_tests;
 #[cfg(test)]
-#[path = "validation/mtls_tests.rs"]
+#[path = "../../tests/unit/admin_clients/validation/mtls.rs"]
 mod mtls_tests;
 #[cfg(test)]
+#[path = "../../tests/support/admin_clients/validation.rs"]
 mod test_support;
 
 pub(super) struct ClientMetadata<'a> {
@@ -116,6 +54,14 @@ pub(super) struct ClientMetadata<'a> {
     backchannel_logout_uri: Option<&'a str>,
     frontchannel_logout_uri: Option<&'a str>,
     jwks: Option<&'a Value>,
+    id_token_signed_response_alg: Option<&'a str>,
+    id_token_encrypted_response_alg: Option<&'a str>,
+    id_token_encrypted_response_enc: Option<&'a str>,
+    request_object_signing_alg: Option<&'a str>,
+    request_object_encryption_alg: Option<&'a str>,
+    request_object_encryption_enc: Option<&'a str>,
+    token_endpoint_auth_signing_alg: Option<&'a str>,
+    introspection_signed_response_alg: Option<&'a str>,
     introspection_encrypted_response_alg: Option<&'a str>,
     introspection_encrypted_response_enc: Option<&'a str>,
     userinfo_signed_response_alg: Option<&'a str>,
@@ -157,6 +103,14 @@ impl<'a> ClientMetadata<'a> {
             backchannel_logout_uri: request.backchannel_logout_uri.as_deref(),
             frontchannel_logout_uri: request.frontchannel_logout_uri.as_deref(),
             jwks: request.jwks.as_ref(),
+            id_token_signed_response_alg: request.id_token_signed_response_alg.as_deref(),
+            id_token_encrypted_response_alg: request.id_token_encrypted_response_alg.as_deref(),
+            id_token_encrypted_response_enc: request.id_token_encrypted_response_enc.as_deref(),
+            request_object_signing_alg: request.request_object_signing_alg.as_deref(),
+            request_object_encryption_alg: request.request_object_encryption_alg.as_deref(),
+            request_object_encryption_enc: request.request_object_encryption_enc.as_deref(),
+            token_endpoint_auth_signing_alg: request.token_endpoint_auth_signing_alg.as_deref(),
+            introspection_signed_response_alg: request.introspection_signed_response_alg.as_deref(),
             introspection_encrypted_response_alg: request
                 .introspection_encrypted_response_alg
                 .as_deref(),
@@ -204,6 +158,14 @@ impl<'a> ClientMetadata<'a> {
             backchannel_logout_uri: client.backchannel_logout_uri.as_deref(),
             frontchannel_logout_uri: client.frontchannel_logout_uri.as_deref(),
             jwks: client.jwks.as_ref(),
+            id_token_signed_response_alg: client.id_token_signed_response_alg.as_deref(),
+            id_token_encrypted_response_alg: client.id_token_encrypted_response_alg.as_deref(),
+            id_token_encrypted_response_enc: client.id_token_encrypted_response_enc.as_deref(),
+            request_object_signing_alg: client.request_object_signing_alg.as_deref(),
+            request_object_encryption_alg: client.request_object_encryption_alg.as_deref(),
+            request_object_encryption_enc: client.request_object_encryption_enc.as_deref(),
+            token_endpoint_auth_signing_alg: client.token_endpoint_auth_signing_alg.as_deref(),
+            introspection_signed_response_alg: client.introspection_signed_response_alg.as_deref(),
             introspection_encrypted_response_alg: client
                 .introspection_encrypted_response_alg
                 .as_deref(),
@@ -234,6 +196,7 @@ impl<'a> ClientMetadata<'a> {
 
 pub(super) fn validate_client_metadata<C: AdminClientCryptoPort + ?Sized>(
     metadata: ClientMetadata<'_>,
+    id_token_signing_algorithms: &[String],
     response_signing_algorithms: &[String],
     crypto: &C,
 ) -> Result<(), AdminClientError> {
@@ -308,13 +271,62 @@ pub(super) fn validate_client_metadata<C: AdminClientCryptoPort + ?Sized>(
             .validate_jwks(jwks)
             .map_err(AdminClientError::InvalidRequest)?;
     }
-    validate_jwe_metadata(
+    validate_response_crypto_metadata(
+        "id_token",
+        metadata.id_token_signed_response_alg,
+        metadata.id_token_encrypted_response_alg,
+        metadata.id_token_encrypted_response_enc,
+        metadata.jwks,
+        id_token_signing_algorithms,
+        crypto,
+    )?;
+    validate_response_crypto_metadata(
         "introspection",
+        metadata.introspection_signed_response_alg,
         metadata.introspection_encrypted_response_alg,
         metadata.introspection_encrypted_response_enc,
         metadata.jwks,
+        response_signing_algorithms,
         crypto,
     )?;
+    validate_request_object_crypto_metadata(
+        metadata.request_object_signing_alg,
+        metadata.request_object_encryption_alg,
+        metadata.request_object_encryption_enc,
+    )?;
+    for (field, algorithm) in [
+        (
+            "request_object_signing_alg",
+            metadata.request_object_signing_alg,
+        ),
+        (
+            "token_endpoint_auth_signing_alg",
+            metadata.token_endpoint_auth_signing_alg,
+        ),
+        (
+            "backchannel_authentication_request_signing_alg",
+            metadata.backchannel_authentication_request_signing_alg,
+        ),
+    ] {
+        if let Some(algorithm) = algorithm
+            && !metadata
+                .jwks
+                .is_some_and(|jwks| crypto.contains_signing_key_for_algorithm(jwks, algorithm))
+        {
+            return invalid(format!("{field} 必须有一个算法匹配的客户端签名 jwks 公钥"));
+        }
+    }
+    if let Some(algorithm) = metadata.token_endpoint_auth_signing_alg {
+        if metadata.token_endpoint_auth_method != "private_key_jwt" {
+            return invalid("token_endpoint_auth_signing_alg 只能用于 private_key_jwt 客户端");
+        }
+        if !SUPPORTED_CLIENT_JWT_SIGNING_ALGS.contains(&algorithm) {
+            return invalid(format!(
+                "token_endpoint_auth_signing_alg 必须是 {}",
+                SUPPORTED_CLIENT_JWT_SIGNING_ALGS.join(", ")
+            ));
+        }
+    }
     validate_response_crypto_metadata(
         "userinfo",
         metadata.userinfo_signed_response_alg,
@@ -526,6 +538,32 @@ fn validate_response_crypto_metadata<C: AdminClientCryptoPort + ?Sized>(
         jwks,
         crypto,
     )
+}
+
+fn validate_request_object_crypto_metadata(
+    signing_algorithm: Option<&str>,
+    encryption_algorithm: Option<&str>,
+    encryption: Option<&str>,
+) -> Result<(), AdminClientError> {
+    if let Some(algorithm) = signing_algorithm
+        && !SUPPORTED_CLIENT_JWT_SIGNING_ALGS.contains(&algorithm)
+    {
+        return invalid(format!(
+            "request_object_signing_alg 必须是 {}",
+            SUPPORTED_CLIENT_JWT_SIGNING_ALGS.join(", ")
+        ));
+    }
+    match (encryption_algorithm, encryption) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => invalid(
+            "request_object_encryption_enc 不能在未设置 request_object_encryption_alg 时使用",
+        ),
+        (Some(_), None) => {
+            invalid("request_object_encryption_alg 必须同时配置 request_object_encryption_enc")
+        }
+        (Some("RSA-OAEP-256"), Some("A256GCM")) => Ok(()),
+        (Some(_), Some(_)) => invalid("request_object encryption 必须使用 RSA-OAEP-256 和 A256GCM"),
+    }
 }
 
 fn validate_mtls_metadata<C: AdminClientCryptoPort + ?Sized>(

@@ -19,13 +19,14 @@ registration metadata 都是可执行 allowlist。
 | 能力 | 状态 | 启用 / 宣告条件 | 规范依据 | 说明 |
 | --- | --- | --- | --- | --- |
 | OpenID Connect Core 1.0 | 完整支持 | OIDC 部署始终可用；交互式登录仅使用 Authorization Code | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | ID Token 会签名并绑定客户端。 |
-| OpenID Connect Discovery 1.0 | 完整支持 | OIDC 部署始终可用 | [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) | Discovery 元数据由当前运行 profile 和已启用模块生成。 |
+| OpenID Connect Discovery 1.0 | 完整支持 | OIDC 部署始终可用 | [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) | Discovery 元数据由活跃的服务端模块生成；客户端授权策略独立执行。 |
 | OAuth 2.0 Authorization Server Metadata | 完整支持 | OAuth/OIDC 部署可用 | [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414.html) | OAuth 元数据必须反映授权服务器实际可执行行为。 |
 | OAuth 2.0 Protected Resource Metadata | 完整支持 | 配置对应 protected-resource metadata 表面后可用 | [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728.html) | 提供通用和 FAPI 资源元数据面。 |
 | OAuth 2.0 Form Post Response Mode | 完整支持 | active profile 允许 `form_post` 时为基线 code-flow 客户端宣告 | [OAuth 2.0 Form Post Response Mode](https://openid.net/specs/oauth-v2-form-post-response-mode-1_0.html) | 不启用 implicit 或 hybrid 前通道令牌交付。 |
 | OpenID Connect Third-Party Initiated Login | 完整支持 | 通过 HTTPS `initiate_login_uri` 客户端元数据提供 | [OpenID Connect Third-Party Initiated Login 1.0](https://openid.net/specs/openid-connect-3rd-party-initiated-login.html) | 这是 OP 侧元数据支持；initiation URI 本身是 RP 端点。 |
-| Dynamic Client Registration | 完整支持 | 默认关闭；仅在 `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true` 时宣告 | [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html), [OpenID Connect Dynamic Client Registration 1.0](https://openid.net/specs/openid-connect-registration-1_0.html) | 公网部署应配置 initial access token。 |
+| Dynamic Client Registration | 完整支持 | 仅在配置非空 initial access token 时宣告 | [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html), [OpenID Connect Dynamic Client Registration 1.0](https://openid.net/specs/openid-connect-registration-1_0.html) | DCR 创建的客户端只获得 baseline 策略，不能自行提升能力。 |
 | Dynamic Client Registration Management | 完整支持 | 对通过 Dynamic Client Registration 创建的客户端可用 | [RFC 7592](https://www.rfc-editor.org/rfc/rfc7592.html) | 使用受保护的 `registration_client_uri` 和 registration access token。 |
+| OpenID Connect RP Metadata Choices | 完整支持 | DCR 已启用，且服务端支持对应单值元数据 | [OpenID Connect RP Metadata Choices 1.0](https://openid.net/specs/openid-connect-rp-metadata-choices-1_0-final.html) | 规范定义的 19 个 choices 字段都按服务端真实可执行能力协商，并持久化为单值客户端元数据；ID Token、Request Object、客户端断言、UserInfo/JARM/CIBA 与 introspection 的运行时消费者会执行所选算法。choices 数组只作为注册输入，注册响应只返回最终单值。 |
 | Pushed Authorization Requests | 完整支持 | FAPI profile 必需；基线客户端按客户端策略可用 | [RFC 9126](https://www.rfc-editor.org/rfc/rfc9126.html) | 基线客户端不强制使用 PAR，除非客户端策略要求。 |
 | JWT Secured Authorization Request | 完整支持 | 客户端/profile 策略允许 JAR 时接受签名 Request Object | [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | unsigned Request Object 会被拒绝。 |
 | JWT Secured Authorization Response Mode / JARM | 完整支持 | JARM 模块/profile/客户端元数据启用签名授权响应时宣告 | [JARM](https://openid.net/specs/oauth-v2-jarm.html) | 用于 message-signing profile 和要求 JARM 的客户端元数据。 |
@@ -39,10 +40,10 @@ registration metadata 都是可执行 allowlist。
 | Resource Indicators | 完整支持 | authorization、token、refresh 流程携带 resource indicators 时可用 | [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html) | 使用重复 URI 形式 `resource` 参数；外部协议输入中的 JSON 数组语法永不支持。 |
 | Token Introspection | 完整支持 | introspection endpoint 可用，受客户端策略限制 | [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662.html) | FAPI message-signing profile 可使用受保护 introspection 响应。 |
 | Token Revocation | 完整支持 | revocation endpoint 可用 | [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009.html) | 按 token 类型和客户端策略撤销 token。 |
-| Device Authorization Grant | 支持 | 默认关闭；仅在 device 模块启用且客户端 grant allowlist 包含 device code 时宣告 | [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628.html) | 禁用部署不声明该 grant。 |
-| OpenID CIBA / FAPI-CIBA | 支持；ID1 兼容 | 默认关闭；仅在 CIBA 启用且客户端注册 poll 或 ping 时宣告 | [OpenID CIBA Core](https://openid.net/specs/openid-client-initiated-backchannel-authentication-core-1_0.html), [FAPI-CIBA](https://openid.net/specs/openid-financial-api-ciba.html) | FAPI-CIBA ID1 的 `private_key_jwt / mTLS` × `poll / ping` 组合已支持；更新的 `fapi-ciba-03` working draft 仍需单独 delta audit。push 永不支持。 |
-| FAPI 2.0 Security Profile | 完整支持 | 选择 FAPI 运行 profile 并注册 FAPI-compatible 客户端后启用 | [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html) | 要求 confidential client、PAR、sender constraint 和强客户端认证。 |
-| FAPI 2.0 Message Signing | 完整支持 | 选择 message-signing profile/选项和兼容客户端元数据后启用 | [FAPI 2.0 Message Signing](https://openid.net/specs/fapi-2_0-message-signing.html) | 按 profile 增加签名授权请求、JARM 和受保护响应选项。 |
+| Device Authorization Grant | 支持 | 新数据库默认开启服务端支持；客户端还必须登记 device-code grant 并设置 `allow_cross_device_flows=true` | [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628.html) | 运行时模块决定是否宣告，客户端策略决定是否有权使用。 |
+| OpenID CIBA / FAPI-CIBA | 支持；ID1 兼容 | 新数据库默认开启 poll/ping 服务端支持；客户端还必须具备 CIBA grant/元数据并设置 `allow_cross_device_flows=true` | [OpenID CIBA Core](https://openid.net/specs/openid-client-initiated-backchannel-authentication-core-1_0.html), [FAPI-CIBA](https://openid.net/specs/openid-financial-api-ciba.html) | FAPI-CIBA ID1 的 `private_key_jwt / mTLS` × `poll / ping` 组合已支持；更新的 `fapi-ciba-03` working draft 仍需单独 delta audit。push 永不支持。 |
+| FAPI 2.0 Security Profile | 完整支持 | 按客户端设置 `security_policy.assurance=fapi2` | [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html) | 要求 confidential client、PAR、sender constraint 和强客户端认证。 |
+| FAPI 2.0 Message Signing | 完整支持 | 由独立客户端策略字段启用签名授权请求、JARM 与签名 introspection | [FAPI 2.0 Message Signing](https://openid.net/specs/fapi-2_0-message-signing.html) | 兼容选项可以同时启用，并与 FAPI2 assurance 共存。 |
 | OpenID4VCI 1.0 Final | 完整支持 | 默认关闭；启用 Credential Issuer 角色并完成 credential/trust 配置后，通过 OpenID4VCI issuer metadata 宣告 | [OpenID4VCI 1.0 Final](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-final.html) | 不属于普通 OIDC RP 登录。 |
 | OpenID4VP 1.0 Final | 完整支持 | 默认关闭；启用 Verifier 角色并完成 trust 配置后，通过 OpenID4VP verifier metadata 宣告 | [OpenID4VP 1.0 Final](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html) | 不属于普通 OIDC RP 登录。 |
 | OpenID4VC High Assurance Interoperability Profile 1.0 / HAIP | 完整支持 | 默认关闭；通过 HAIP-compatible Credential Issuer 和 Verifier 角色配置、credential-format 配置、trust 配置启用 | [OpenID4VC HAIP 1.0](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html), [OpenID4VCI 1.0 Final](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-final.html), [OpenID4VP 1.0 Final](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html) | 面向高保障 OpenID4VC 签发和出示流程的 profile 级支持；不属于普通 OIDC RP 登录。 |
@@ -105,8 +106,8 @@ metadata 中宣告的能力。它不是当前部署能力清单。状态为“�
 | Introspection | `/introspect` | 用于资源服务器验证和 profile-specific 受保护响应。 |
 | Revocation | `/revoke` | 用于适用的 refresh/access token 撤销。 |
 | Logout | `/logout` | RP-Initiated Logout，严格校验已注册 redirect URI。 |
-| Dynamic registration | `/register` | 仅在 `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true` 时宣告。 |
-| Device authorization | `/device_authorization` | 仅在 `ENABLE_DEVICE_AUTHORIZATION_GRANT=true` 时宣告。 |
+| Dynamic registration | `/register` | 仅在配置非空 initial access token 时宣告。 |
+| Device authorization | `/device_authorization` | 运行时模块活跃时宣告；客户端使用仍需 grant 与跨设备策略授权。 |
 
 Discovery 元数据是权威信息。字段缺失时，该部署没有声明对应能力。
 
@@ -136,9 +137,11 @@ Discovery 元数据是权威信息。字段缺失时，该部署没有声明对�
 支持两种客户端接入方式：
 
 1. 静态管理注册。
-2. 启用 `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true` 后使用 RFC 7591 / RFC 7592 动态客户端注册。
+2. 配置 initial access token 后使用 RFC 7591 / RFC 7592 动态客户端注册。
 
-动态注册默认关闭。公网部署应使用 initial access token 保护。动态注册客户端会收到 `registration_client_uri` 和 registration access token，用于管理自己的生命周期。
+未配置 initial access token 时动态注册关闭。动态注册客户端会收到
+`registration_client_uri` 和 registration access token，用于管理自己的
+生命周期；它们只获得 baseline 安全策略，不能自行提升能力。
 
 接受的客户端元数据包括：
 
@@ -392,7 +395,7 @@ Front-channel 和 session-management 行为由 OIDF 矩阵验证。浏览器敏�
 
 术语应精确使用：
 
-- “Dynamic Client Registration” 指默认关闭的 RFC 7591 / RFC 7592 客户端生命周期支持。
+- “Dynamic Client Registration” 指由 initial access token 前提控制的 RFC 7591 / RFC 7592 客户端生命周期支持。
 - “Dynamic OP certification profile” 永不支持。
 
 ## 规范支撑的永不支持边界
@@ -429,11 +432,11 @@ Front-channel 和 session-management 行为由 OIDF 矩阵验证。浏览器敏�
 
 | 能力 | 宣告前所需部署状态 |
 | --- | --- |
-| Dynamic Client Registration | `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`；公网部署应配置 initial access token。 |
-| Device Authorization Grant | `ENABLE_DEVICE_AUTHORIZATION_GRANT=true` 且客户端 grant allowlist 包含 device code。 |
-| CIBA | `ENABLE_CIBA=true` 且已注册允许 delivery mode 的 CIBA 客户端。 |
+| Dynamic Client Registration | 配置非空 `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`。 |
+| Device Authorization Grant | 运行时模块活跃、客户端 grant allowlist 包含 device code，并且 `allow_cross_device_flows=true`。 |
+| CIBA | 运行时模块活跃、已注册 poll/ping grant 与元数据，并且 `allow_cross_device_flows=true`。 |
 | mTLS 客户端认证 / sender constraints | 可信 mTLS/proxy 边界已配置，且客户端元数据已注册。 |
-| FAPI profiles | `AUTHORIZATION_SERVER_PROFILE` 和客户端策略必须强制 PAR、sender constraints、强客户端认证，以及适用时的 PKCE。 |
+| FAPI profiles | 按客户端设置 `security_policy.assurance=fapi2`，同时配置 sender constraint 与兼容的强客户端认证。 |
 | UserInfo/JARM encryption | 客户端元数据包含有效加密偏好，并且选定算法只有一个可用公钥。 |
 | OpenID4VCI / OpenID4VP | 对应运行模块启用，credential/trust 配置完整，并基于该配置生成公网元数据。 |
 
@@ -450,7 +453,7 @@ Front-channel 和 session-management 行为由 OIDF 矩阵验证。浏览器敏�
 7. 不要把 ID Token 当作 API access token。
 8. 使用 logout 时精确注册 post-logout redirect URI。
 9. 高风险客户端使用 `private_key_jwt`、mTLS、DPoP、PAR 或 JARM。
-10. 修改运行 profile 开关后重新检查 discovery 元数据。
+10. 修改运行时模块状态后重新检查 discovery 元数据，并核对目标客户端的显式策略。
 
 ## 规范引用
 

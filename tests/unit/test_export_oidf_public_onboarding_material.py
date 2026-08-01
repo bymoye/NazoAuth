@@ -144,12 +144,55 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
                                     },
                                 },
                                 "vci": {"credential_configuration_id": "pid"},
+                                "client_attestation": {
+                                    "issuer": "https://attester.example/",
+                                    "attester_jwks": {
+                                        "keys": [
+                                            {
+                                                "kty": "EC",
+                                                "crv": "P-256",
+                                                "x": "x",
+                                                "y": "y",
+                                                "d": "private",
+                                            }
+                                        ]
+                                    },
+                                    "key_attestation_jwks": {
+                                        "keys": [
+                                            {
+                                                "kty": "OKP",
+                                                "crv": "Ed25519",
+                                                "x": "x2",
+                                                "d": "private",
+                                            }
+                                        ]
+                                    },
+                                },
                                 "nazo": {
                                     "openid4vc_role": "issuer",
                                     "client_auth_type": "private_key_jwt",
+                                    "credential_format": "sd_jwt_vc",
                                     "credential_dataset": {"given_name": "Specimen"},
                                 },
-                            }
+                            },
+                            "openid4vc-second-issuer.json": {
+                                "vci": {"credential_configuration_id": "org.example.mdoc"},
+                                "nazo": {
+                                    "openid4vc_role": "issuer",
+                                    "client_auth_type": "private_key_jwt",
+                                    "credential_format": "mdoc",
+                                    "credential_dataset": {"given_name": "Specimen"},
+                                },
+                            },
+                            "openid4vc-verifier.json": {
+                                "client": {
+                                    "request_object_trust_anchor_pem": (
+                                        "-----BEGIN CERTIFICATE-----\nanchor\n"
+                                        "-----END CERTIFICATE-----\n"
+                                    )
+                                },
+                                "nazo": {"openid4vc_role": "verifier"},
+                            },
                         }
                     }
                 ),
@@ -158,6 +201,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
             output = root / "public"
             args = export_args(oauth, output)
             args[2:2] = ["--config-json-file", str(openid4vc)]
+            args.extend(["--credential-holder-email-sha256", "b" * 64])
             self.assertEqual(module.main_with_args_for_test(args), 0)
 
             bundle = json.loads(
@@ -169,13 +213,21 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
             self.assertEqual(config["vci"]["credential_configuration_id"], "pid")
             self.assertEqual(config["nazo"]["credential_dataset"]["given_name"], "Specimen")
             self.assertNotIn("d", config["client"]["jwks"]["keys"][0])
-            self.assertRegex(
-                bundle["credential_holder_email_sha256"], r"^[0-9a-f]{64}$"
-            )
+            self.assertEqual(bundle["credential_holder_email_sha256"], "b" * 64)
             manifest = json.loads(
                 (output / module.MANIFEST_FILE_NAME).read_text(encoding="utf-8")
             )
             self.assertIn(module.OPENID4VC_ONBOARDING_BUNDLE_FILE, manifest["files"])
+            self.assertIn(module.STANDARDS_FULL_PROFILE_FILE, manifest["files"])
+            install_profile = json.loads(
+                (output / module.STANDARDS_FULL_PROFILE_FILE).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                set(install_profile["credential_configurations"]),
+                {"pid", "org.example.mdoc"},
+            )
 
     def test_strip_private_jwks_removes_private_key_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,6 +265,19 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
                                     }
                                 ]
                             },
+                            "request_object_trust_anchor_pem": (
+                                "-----BEGIN CERTIFICATE-----\nanchor\n"
+                                "-----END CERTIFICATE-----\n"
+                            ),
+                        },
+                        "client_attestation": {
+                            "issuer": "https://suite.example/",
+                            "attester_jwks": {
+                                "keys": [{"kty": "EC", "x": "x", "y": "y", "d": "private"}]
+                            },
+                            "key_attestation_jwks": {
+                                "keys": [{"kty": "EC", "x": "x2", "y": "y2", "d": "private"}]
+                            },
                         },
                         "client_secret_post": {
                             "client_id": "client-post",
@@ -226,6 +291,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
                             "fapi_response_mode": "jarm",
                             "client_auth_type": "mtls",
                             "sender_constrain": "mtls",
+                            "credential_format": "sd_jwt_vc",
                             "oidf_user_email": "conformance@example.test",
                             "oidf_user_password": "secret",
                         },
@@ -273,6 +339,21 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
             "PS256",
         )
         self.assertFalse(exported["client"]["backchannel_user_code_parameter"])
+        self.assertIn(
+            "BEGIN CERTIFICATE",
+            exported["client"]["request_object_trust_anchor_pem"],
+        )
+        self.assertEqual(
+            exported["client_attestation"]["issuer"],
+            "https://suite.example/",
+        )
+        self.assertNotIn(
+            "d", exported["client_attestation"]["attester_jwks"]["keys"][0]
+        )
+        self.assertNotIn(
+            "d",
+            exported["client_attestation"]["key_attestation_jwks"]["keys"][0],
+        )
 
         self.assertEqual(exported["mtls"]["cert"], mtls["cert"])
         self.assertEqual(exported["nazo"]["fapi_profile"], "plain_fapi")
@@ -282,6 +363,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
         self.assertEqual(exported["nazo"]["fapi_response_mode"], "jarm")
         self.assertEqual(exported["nazo"]["client_auth_type"], "mtls")
         self.assertEqual(exported["nazo"]["sender_constrain"], "mtls")
+        self.assertEqual(exported["nazo"]["credential_format"], "sd_jwt_vc")
 
         jwk = exported["client"]["jwks"]["keys"][0]
         self.assertEqual(jwk["kid"], "client-key")
@@ -297,10 +379,7 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
         self.assertEqual(exported["mtls"]["ca"], mtls["ca"])
         self.assertNotIn("oidf_user_password", exported["nazo"])
         self.assertNotIn("oidf_user_email", exported["nazo"])
-        self.assertEqual(
-            exported["nazo"]["oidf_user_password_sha256"],
-            "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b",
-        )
+        self.assertNotIn("oidf_user_password_sha256", exported["nazo"])
         self.assertEqual(
             exported["nazo"]["oidf_user_email_sha256"],
             "a23fb0e9642ab8fe5d3bd3288247ae0bbfb0a49a36bd3f3aa9c713279f88cf80",
@@ -599,7 +678,12 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
         self.assertIn("/auth/me/access-requests", onboarding)
         self.assertEqual(
             module.OPENID4VC_ONBOARDING_NAZO_FIELDS,
-            {"client_auth_type", "openid4vc_role", "credential_dataset"},
+            {
+                "client_auth_type",
+                "openid4vc_role",
+                "credential_format",
+                "credential_dataset",
+            },
         )
 
     def test_public_export_preserves_every_onboarding_policy_decision_input(self):
@@ -612,6 +696,18 @@ class ExportOidfPublicPlanConfigsTests(unittest.TestCase):
         }
 
         self.assertEqual(module.public_onboarding_nazo(policy_inputs), policy_inputs)
+
+    def test_explicit_holder_commitment_replaces_stale_email_without_password_hash(self):
+        commitment = "a" * 64
+        exported = module.public_onboarding_nazo(
+            {
+                "oidf_user_email": "old@example.com",
+                "oidf_user_password": "guessable-password",
+            },
+            commitment,
+        )
+
+        self.assertEqual(exported, {"oidf_user_email_sha256": commitment})
 
     def test_real_fapi_matrix_template_preserves_onboarding_policy_fields(self):
         template = Path(__file__).resolve().parents[2] / "docs" / "conformance" / "oidf-plan-config-template.json"

@@ -291,6 +291,17 @@ async fn device_authorization_with_admission(
     {
         return response;
     }
+    if !config
+        .authorization_server_profile
+        .effective_client_policy(&client)
+        .allow_cross_device_flows
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "该客户端未授权使用跨设备流程.",
+        );
+    }
     let payload =
         match device_authorization_request_payload(&config, &client, &form, module_admissible) {
             Ok(payload) => payload,
@@ -711,5 +722,5 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/device.rs"]
+#[path = "../../../tests/unit/http/token/device.rs"]
 mod tests;

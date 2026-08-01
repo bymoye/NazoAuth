@@ -85,7 +85,11 @@ impl SessionManagementOperations for ServerSessionManagementOperations {
                     SessionManagementError::SessionLookupUnavailable
                 })?;
             Ok(client.is_some_and(|client| {
-                client_allows_origin(client.is_active, &client.redirect_uris, origin)
+                client
+                    .security_policy
+                    .as_ref()
+                    .is_none_or(|policy| policy.session_management)
+                    && client_allows_origin(client.is_active, &client.redirect_uris, origin)
             }))
         })
     }
@@ -99,36 +103,5 @@ fn client_allows_origin(is_active: bool, redirect_uris: &[String], origin: &str)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::client_allows_origin;
-
-    #[test]
-    fn client_origin_policy_requires_an_active_client_and_registered_redirect_origin() {
-        let redirect_uris = vec![
-            "https://client.example/callback".to_owned(),
-            "https://client.example:443/alternate".to_owned(),
-            "not a URI".to_owned(),
-        ];
-
-        assert!(client_allows_origin(
-            true,
-            &redirect_uris,
-            "https://client.example"
-        ));
-        assert!(!client_allows_origin(
-            false,
-            &redirect_uris,
-            "https://client.example"
-        ));
-        assert!(!client_allows_origin(
-            true,
-            &redirect_uris,
-            "https://other.example"
-        ));
-        assert!(!client_allows_origin(
-            true,
-            &["not a URI".to_owned()],
-            "https://client.example"
-        ));
-    }
-}
+#[path = "../../tests/unit/domain/session_management.rs"]
+mod tests;

@@ -3,9 +3,6 @@ pub use nazo_http_actix::{
     form_post_authorization_response, login_required_response, oauth_error, redirect_found,
 };
 
-#[path = "../src/authorization_decision.rs"]
-mod authorization_decision;
-
 use std::sync::{Arc, Mutex};
 
 use actix_web::{
@@ -16,12 +13,12 @@ use actix_web::{
     test::TestRequest,
     web::{Data, Form},
 };
-use authorization_decision::{
+use nazo_http_actix::ClientIpHeaderMode;
+use nazo_http_actix::{
     AuthorizationDecisionCommand, AuthorizationDecisionEndpoint, AuthorizationDecisionError,
     AuthorizationDecisionForm, AuthorizationDecisionFuture, AuthorizationDecisionOperations,
     AuthorizationDecisionResponse, authorize_decision,
 };
-use nazo_http_actix::ClientIpHeaderMode;
 use serde_json::{Value, json};
 
 struct FakeOperations {

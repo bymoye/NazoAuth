@@ -1,80 +1,167 @@
 name: nazo-oauth
 
 services:
+  secrets-init:
+    image: docker.io/library/alpine:3.22
+    volumes:
+      - runtime_secrets:/run/nazoauth-secrets
+      - ./deploy/compose/initialize-secrets.sh:/usr/local/libexec/nazoauth-initialize-secrets.sh:ro
+    command: ["/bin/sh", "/usr/local/libexec/nazoauth-initialize-secrets.sh"]
+    networks:
+      nazo_oauth_net:
+
+  runtime-init:
+    image: docker.io/library/alpine:3.22
+    user: "0:0"
+    volumes:
+      - keys_data:/state/keys
+      - avatars_data:/state/avatars
+      - generated_secrets:/state/secrets
+      - bootstrap_data:/state/bootstrap
+      - operator_state:/state/operator
+    command: ["sh", "-euc", "chown -R 10001:10001 /state/*; chmod 0700 /state/*"]
+    networks:
+      nazo_oauth_net:
+
+  server:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: development-runtime
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /var/lib/nazo_oauth
+      DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
+      VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
+    volumes:
+      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
+      - keys_data:/var/lib/nazo_oauth/keys
+      - avatars_data:/var/lib/nazo_oauth/avatars
+      - generated_secrets:/var/lib/nazo_oauth/secrets
+      - bootstrap_data:/var/lib/nazo_oauth/bootstrap
+      - runtime_secrets:/run/nazoauth-secrets:ro
+    ports:
+      - "127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      runtime-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      nazo_oauth_net:
+    command: ["nazoauth", "server"]
+
   migrate:
     build:
       context: .
       dockerfile: Containerfile
-    container_name: nazo-oauth-migrate
+      target: development-runtime
+    environment:
+      DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
     volumes:
-      - ./.env.yaml:/app/.env.yaml:ro
-    command: ["nazo-oauth-migrate"]
+      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
+      - runtime_secrets:/run/nazoauth-secrets:ro
+      - operator_state:/var/lib/nazoauth/operator-state
     depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      runtime-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
-    networks:
-      nazo_oauth_net:
-
-  nazo_oauth_server:
-    build:
-      context: .
-      dockerfile: Containerfile
-    container_name: nazo-oauth-server
-    volumes:
-      - ./.env.yaml:/app/.env.yaml:ro
-      - ./runtime/keys:/var/lib/nazo_oauth/keys
-      - ./runtime/avatars:/var/lib/nazo_oauth/avatars
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
       valkey:
         condition: service_healthy
     networks:
       nazo_oauth_net:
-        ipv4_address: 10.101.0.20
+    command:
+      - sh
+      - -euc
+      - |
+        ci_operator_task prepare \
+          --config /app/.env.yaml \
+          --output /tmp/operator \
+          --image-ref localhost/nazoauth-development:local \
+          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
+        NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
+        NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
+        NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
+        NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
+        NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
+          nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws
+        ci_operator_task verify \
+          --receipt /tmp/operator/receipt.jws \
+          --public-key /tmp/operator/receipt.pub \
+          --request-sha256 /tmp/operator/request.sha256
 
   postgres:
     image: docker.io/library/postgres:18
-    container_name: nazo-oauth-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: oauth
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: nazoauth
+      POSTGRES_PASSWORD_FILE: /run/nazoauth-secrets/postgres-password
     volumes:
       - postgres_data:/var/lib/postgresql
+      - runtime_secrets:/run/nazoauth-secrets:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d oauth"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
     networks:
       nazo_oauth_net:
-        ipv4_address: 10.101.0.10
 
   valkey:
     image: docker.io/valkey/valkey:8-alpine
-    container_name: nazo-oauth-valkey
-    command: ["valkey-server", "--save", "60", "1", "--loglevel", "warning"]
+    restart: unless-stopped
+    command:
+      [
+        "valkey-server",
+        "--aclfile",
+        "/run/nazoauth-secrets/valkey.acl",
+        "--save",
+        "60",
+        "1",
+        "--loglevel",
+        "warning",
+      ]
     volumes:
       - valkey_data:/data
+      - runtime_secrets:/run/nazoauth-secrets:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "cat /run/nazoauth-secrets/valkey-password | valkey-cli --askpass ping",
+        ]
       interval: 5s
       timeout: 3s
       retries: 10
     networks:
       nazo_oauth_net:
-        ipv4_address: 10.101.0.11
 
 volumes:
   postgres_data:
   valkey_data:
+  keys_data:
+  avatars_data:
+  bootstrap_data:
+  generated_secrets:
+  runtime_secrets:
+  operator_state:
 
 networks:
   nazo_oauth_net:
-    name: nazo_oauth_net
     driver: bridge
-    ipam:
-      config:
-        - subnet: 10.101.0.0/24
-          gateway: 10.101.0.1

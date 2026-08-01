@@ -1,30 +1,15 @@
 //! 当前用户客户端接入申请接口。
-#[cfg(test)]
-use crate::domain::DatabaseUserFixture;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
-#[cfg(test)]
-use crate::http::sessions::SessionPayload;
+
 use crate::http::sessions::SessionProfileHandles;
-#[cfg(test)]
-use crate::settings::Settings;
-#[cfg(test)]
-use crate::test_support::valkey::valkey_set_ex;
+
 use actix_web::http::StatusCode;
-#[cfg(test)]
-use actix_web::http::header;
+
 use actix_web::web::{Data, Json};
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use chrono::Utc;
+
 use nazo_http_actix::csrf_error;
 use nazo_http_actix::{json_response_no_store, json_response_status, oauth_error};
-#[cfg(test)]
-use nazo_identity::AccessRequestStatus;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 // 只处理用户侧申请列表和新建申请。
@@ -62,15 +47,6 @@ pub(crate) async fn my_access_requests(
             )
         }
     }
-}
-
-#[cfg(test)]
-fn my_access_requests_response(rows: Vec<nazo_identity::AccessRequest>) -> HttpResponse {
-    let items: Vec<Value> = rows
-        .into_iter()
-        .map(|row| user_access_request_json(row, None))
-        .collect();
-    access_request_items_response(items)
 }
 
 fn access_request_items_response(items: Vec<Value>) -> HttpResponse {
@@ -166,5 +142,5 @@ fn create_access_request_response(row: nazo_identity::AccessRequest) -> HttpResp
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/profile/tests/access_requests.rs"]
+#[path = "../../../tests/unit/http/profile/access_requests.rs"]
 mod tests;

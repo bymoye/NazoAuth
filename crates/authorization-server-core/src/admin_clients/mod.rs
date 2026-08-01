@@ -5,7 +5,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{ClientPresentationMetadata, OAuthClient, ValidatedClientRegistration};
+use crate::{
+    ClientPresentationMetadata, ClientProfile, ClientSecurityPolicy, OAuthClient, SecurityProfile,
+    SenderConstraintPolicy, ValidatedClientRegistration, validate_token_request_profile,
+};
 
 mod validation;
 
@@ -63,11 +66,18 @@ pub trait SectorIdentifierResolverPort: Send + Sync {
 /// Cryptographic operations are isolated from protocol validation and use-case policy.
 pub trait AdminClientCryptoPort: Send + Sync {
     fn response_signing_algorithms(&self) -> Vec<String>;
+    fn id_token_signing_algorithms(&self) -> Vec<String> {
+        self.response_signing_algorithms()
+    }
     fn issue_client_secret(&self, pepper: &str) -> (String, String);
     fn validate_jwks(&self, jwks: &Value) -> Result<(), String>;
     fn validate_rfc4514_dn(&self, value: &str) -> Result<(), String>;
     fn matching_encryption_key_count(&self, jwks: &Value, algorithm: &str) -> usize;
     fn contains_signing_key(&self, jwks: &Value) -> bool;
+    fn contains_signing_key_for_algorithm(&self, jwks: &Value, algorithm: &str) -> bool {
+        let _ = algorithm;
+        self.contains_signing_key(jwks)
+    }
     fn valid_self_signed_mtls_jwks(&self, jwks: &Value) -> bool;
 }
 
@@ -181,6 +191,22 @@ pub struct CreateClientRequest {
     #[serde(default, skip_deserializing)]
     pub presentation: ClientPresentationMetadata,
     #[serde(default)]
+    pub id_token_signed_response_alg: Option<String>,
+    #[serde(default)]
+    pub id_token_encrypted_response_alg: Option<String>,
+    #[serde(default)]
+    pub id_token_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub request_object_signing_alg: Option<String>,
+    #[serde(default)]
+    pub request_object_encryption_alg: Option<String>,
+    #[serde(default)]
+    pub request_object_encryption_enc: Option<String>,
+    #[serde(default)]
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    #[serde(default)]
+    pub introspection_signed_response_alg: Option<String>,
+    #[serde(default)]
     pub introspection_encrypted_response_alg: Option<String>,
     #[serde(default)]
     pub introspection_encrypted_response_enc: Option<String>,
@@ -196,6 +222,8 @@ pub struct CreateClientRequest {
     pub authorization_encrypted_response_alg: Option<String>,
     #[serde(default)]
     pub authorization_encrypted_response_enc: Option<String>,
+    #[serde(default)]
+    pub security_policy: ClientSecurityPolicy,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -228,6 +256,14 @@ pub struct PatchClientRequest {
     pub tls_client_auth_san_ip: Option<Vec<String>>,
     pub tls_client_auth_san_email: Option<Vec<String>>,
     pub jwks: Option<Value>,
+    pub id_token_signed_response_alg: Option<String>,
+    pub id_token_encrypted_response_alg: Option<String>,
+    pub id_token_encrypted_response_enc: Option<String>,
+    pub request_object_signing_alg: Option<String>,
+    pub request_object_encryption_alg: Option<String>,
+    pub request_object_encryption_enc: Option<String>,
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    pub introspection_signed_response_alg: Option<String>,
     pub introspection_encrypted_response_alg: Option<String>,
     pub introspection_encrypted_response_enc: Option<String>,
     pub userinfo_signed_response_alg: Option<String>,
@@ -236,6 +272,7 @@ pub struct PatchClientRequest {
     pub authorization_signed_response_alg: Option<String>,
     pub authorization_encrypted_response_alg: Option<String>,
     pub authorization_encrypted_response_enc: Option<String>,
+    pub security_policy: Option<ClientSecurityPolicy>,
     pub is_active: Option<bool>,
 }
 
@@ -451,9 +488,26 @@ where
     S: SectorIdentifierResolverPort + ?Sized,
     C: AdminClientCryptoPort + ?Sized,
 {
+    request
+        .security_policy
+        .validate()
+        .map_err(|message| AdminClientError::InvalidRequest(message.to_owned()))?;
     validate_client_metadata(
         ClientMetadata::from_create(&request),
+        &crypto.id_token_signing_algorithms(),
         &crypto.response_signing_algorithms(),
+        crypto,
+    )?;
+    validate_composable_security_policy(
+        &request.security_policy,
+        ClientSecurityPolicyContext {
+            client_type: &request.client_type,
+            authentication_method: &request.token_endpoint_auth_method,
+            require_dpop_bound_tokens: request.require_dpop_bound_tokens,
+            require_mtls_bound_tokens: request.require_mtls_bound_tokens,
+            jwks_uri: request.jwks_uri.as_deref(),
+            jwks: request.jwks.as_ref(),
+        },
         crypto,
     )?;
     let (issued_secret, client_secret_hash) = if request.client_type == "confidential"
@@ -519,6 +573,28 @@ where
             request_uris: trim_string_vec(request.request_uris),
             initiate_login_uri: trim_optional_string(request.initiate_login_uri),
             presentation: request.presentation,
+            id_token_signed_response_alg: trim_optional_string(
+                request.id_token_signed_response_alg,
+            ),
+            id_token_encrypted_response_alg: trim_optional_string(
+                request.id_token_encrypted_response_alg,
+            ),
+            id_token_encrypted_response_enc: trim_optional_string(
+                request.id_token_encrypted_response_enc,
+            ),
+            request_object_signing_alg: trim_optional_string(request.request_object_signing_alg),
+            request_object_encryption_alg: trim_optional_string(
+                request.request_object_encryption_alg,
+            ),
+            request_object_encryption_enc: trim_optional_string(
+                request.request_object_encryption_enc,
+            ),
+            token_endpoint_auth_signing_alg: trim_optional_string(
+                request.token_endpoint_auth_signing_alg,
+            ),
+            introspection_signed_response_alg: trim_optional_string(
+                request.introspection_signed_response_alg,
+            ),
             introspection_encrypted_response_alg: trim_optional_string(
                 request.introspection_encrypted_response_alg,
             ),
@@ -543,6 +619,7 @@ where
             authorization_encrypted_response_enc: trim_optional_string(
                 request.authorization_encrypted_response_enc,
             ),
+            security_policy: Some(request.security_policy),
         },
         require_mtls_bound_tokens: request.require_mtls_bound_tokens,
         issued_secret,
@@ -562,6 +639,11 @@ where
     S: SectorIdentifierResolverPort + ?Sized,
     C: AdminClientCryptoPort + ?Sized,
 {
+    if let Some(security_policy) = request.security_policy.as_ref() {
+        security_policy
+            .validate()
+            .map_err(|message| AdminClientError::InvalidRequest(message.to_owned()))?;
+    }
     let redirect_uris_changed = request.redirect_uris.is_some();
     if let Some(value) = request.client_name {
         client.client_name = value;
@@ -641,6 +723,30 @@ where
     if let Some(value) = request.jwks {
         client.jwks = Some(value);
     }
+    if let Some(value) = request.id_token_signed_response_alg {
+        client.id_token_signed_response_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.id_token_encrypted_response_alg {
+        client.id_token_encrypted_response_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.id_token_encrypted_response_enc {
+        client.id_token_encrypted_response_enc = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.request_object_signing_alg {
+        client.request_object_signing_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.request_object_encryption_alg {
+        client.request_object_encryption_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.request_object_encryption_enc {
+        client.request_object_encryption_enc = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.token_endpoint_auth_signing_alg {
+        client.token_endpoint_auth_signing_alg = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.introspection_signed_response_alg {
+        client.introspection_signed_response_alg = trim_optional_string(Some(value));
+    }
     if let Some(value) = request.introspection_encrypted_response_alg {
         client.introspection_encrypted_response_alg = trim_optional_string(Some(value));
     }
@@ -664,6 +770,9 @@ where
     }
     if let Some(value) = request.authorization_encrypted_response_enc {
         client.authorization_encrypted_response_enc = trim_optional_string(Some(value));
+    }
+    if let Some(value) = request.security_policy {
+        client.security_policy = Some(value);
     }
     if let Some(value) = request.is_active {
         client.is_active = value;
@@ -728,10 +837,73 @@ where
 
     validate_client_metadata(
         ClientMetadata::from_client(&client),
+        &crypto.id_token_signing_algorithms(),
         &crypto.response_signing_algorithms(),
         crypto,
     )?;
+    if let Some(effective_policy) = client.security_policy.as_ref() {
+        validate_composable_security_policy(
+            effective_policy,
+            ClientSecurityPolicyContext {
+                client_type: &client.client_type,
+                authentication_method: &client.token_endpoint_auth_method,
+                require_dpop_bound_tokens: client.require_dpop_bound_tokens,
+                require_mtls_bound_tokens: client.require_mtls_bound_tokens,
+                jwks_uri: client.jwks_uri.as_deref(),
+                jwks: client.jwks.as_ref(),
+            },
+            crypto,
+        )?;
+    }
     Ok(client)
+}
+
+#[derive(Clone, Copy)]
+struct ClientSecurityPolicyContext<'a> {
+    client_type: &'a str,
+    authentication_method: &'a str,
+    require_dpop_bound_tokens: bool,
+    require_mtls_bound_tokens: bool,
+    jwks_uri: Option<&'a str>,
+    jwks: Option<&'a Value>,
+}
+
+fn validate_composable_security_policy<C: AdminClientCryptoPort + ?Sized>(
+    policy: &ClientSecurityPolicy,
+    context: ClientSecurityPolicyContext<'_>,
+    crypto: &C,
+) -> Result<(), AdminClientError> {
+    if policy.requires_fapi2_security() {
+        let sender_constraint = match (
+            context.require_dpop_bound_tokens,
+            context.require_mtls_bound_tokens,
+        ) {
+            (false, false) => SenderConstraintPolicy::BearerAllowed,
+            (true, false) => SenderConstraintPolicy::DpopRequired,
+            (false, true) => SenderConstraintPolicy::MtlsRequired,
+            (true, true) => SenderConstraintPolicy::DpopOrMtls,
+        };
+        validate_token_request_profile(
+            SecurityProfile::Fapi2Security,
+            ClientProfile {
+                client_type: context.client_type,
+                authentication_method: context.authentication_method,
+                sender_constraint,
+            },
+        )
+        .map_err(|error| AdminClientError::InvalidRequest(error.description.to_owned()))?;
+    }
+    if policy.require_signed_authorization_request
+        && context.jwks_uri.is_none()
+        && !context
+            .jwks
+            .is_some_and(|jwks| crypto.contains_signing_key(jwks))
+    {
+        return Err(AdminClientError::InvalidRequest(
+            "signed authorization requests require a client signing key".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn pairwise_subject<S: SectorIdentifierResolverPort + ?Sized>(

@@ -107,29 +107,42 @@ composite score:
 
 ## Quick start
 
-Requirements:
-
-- The exact Rust stable version pinned by `rust-toolchain.toml`
-- PostgreSQL 18 or a compatible PostgreSQL server
-- Valkey 8 or a compatible Redis protocol server
-- Container runtime for the optional integration stack
-
-Run with Docker Compose:
+Install the signed `nazoauthctl` from an immutable GitHub Release using the
+[verified bootstrap procedure](docs/operations/one-click-update.md), then run:
 
 ```sh
-cp .env.yaml.example .env.yaml
-docker compose up -d nazo_oauth_server
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/.well-known/openid-configuration
+sudo nazoauthctl install --runtime auto
+sudo nazoauthctl doctor
 ```
 
-Run directly on the host after pointing `.env.yaml` at reachable PostgreSQL and
-Valkey services:
+`auto` selects Podman first and Docker second. The controller generates private
+PostgreSQL and Valkey credentials, starts both services, runs a signed one-shot
+migration task, and starts NazoAuth. There are no published default passwords.
+Open `http://127.0.0.1:8000/health` or
+`http://127.0.0.1:8000/.well-known/openid-configuration`. Data, signing keys,
+generated application secrets, and avatars are persistent.
+
+On a database without an administrator, the server log reports a time-bounded
+one-time setup URL. Treat the URL as a password and use it to create the first
+administrator without configuring SMTP.
+
+For a public issuer, pass `--public-url https://auth.example.com`; see the
+[deployment guide](docs/operations/deployment.md) for TLS ingress requirements.
+`compose.yml` remains a source-tree development sandbox and uses a development
+operator identity; it is not the production lifecycle boundary.
+
+For a direct binary run, `server` creates a local `.env.yaml` when absent,
+generates persistent application secrets, creates signing keys when needed,
+and continues starting. Schema changes are deliberately owned by the host-side
+controller and are never attempted by the managed server runtime:
 
 ```sh
-cargo run --bin nazo-oauth-migrate
-cargo run --bin nazo-oauth-server
+nazoauth server
 ```
+
+Explicit YAML and environment values still take precedence. Managed deployments
+run schema changes only through `sudo nazoauthctl migrate --yes`, which issues a
+short-lived signed task to the exact verified release target.
 
 ## Configuration
 
@@ -141,9 +154,17 @@ PUBLIC_BASE_URL: "https://auth.example.com"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
+
+`CLIENT_SECRET_PEPPER`, the DCR initial-access token, and a pairwise-subject
+secret when required are generated under `DATA_DIR/secrets` if absent.
+Back up that directory with the database. A missing or malformed persisted
+secret fails startup instead of being silently replaced.
+
+New deployments use composable server capabilities and explicit per-client
+policy. `AUTHORIZATION_SERVER_PROFILE` is retained only as a compatibility
+preset for clients that predate stored client policy.
 
 `PUBLIC_BASE_URL` drives the same-origin defaults:
 
@@ -168,14 +189,20 @@ They are documented in [docs/operations/configuration.md](docs/operations/config
 
 ## Default boundaries
 
-The following capabilities are outside the default authorization-server surface
-and are not advertised unless implemented, tested, and explicitly enabled:
+Stable, non-conflicting server handlers are active together on new databases.
+This includes signed Request Objects, JARM, Device Grant, CIBA poll/ping, the
+bounded Token Exchange and JWT Bearer Grant profiles, SCIM, Front-Channel
+Logout, and Session Management. Server support does not grant a client access:
+grant allowlists, registered metadata, sender constraints, and the versioned
+per-client `security_policy` still fail closed.
+
+The following capabilities remain conditional or excluded:
 
 - Dynamic Client Registration / RFC 7591 and Client Configuration Management
-  / RFC 7592 unless `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`; public
-  registration deployments should protect `/register` with an initial access
-  token.
-- Device Authorization Grant / RFC 8628 unless `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`.
+  / RFC 7592 require a configured
+  `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`.
+- OpenID4VCI, OpenID4VP, SCIM Security Events, Native SSO, RAR, and experimental
+  HTTP Signatures require their complete role-specific prerequisites.
 - External-token, refresh-token, or ID-token Token Exchange profiles.
 - Modular third-party login providers such as QQ, WeChat, Google, Microsoft, or
   enterprise SAML; these are roadmap items until provider-specific adapters,
@@ -198,11 +225,14 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 | Configuration | [docs/operations/configuration.md](docs/operations/configuration.md) |
 | Deployment | [docs/operations/deployment.md](docs/operations/deployment.md) |
 | Chinese deployment guide | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |
+| One-click updates | [docs/operations/one-click-update.md](docs/operations/one-click-update.md) |
+| 一键升级 | [docs/operations/one-click-update.zh-CN.md](docs/operations/one-click-update.zh-CN.md) |
 | Conformance records | [docs/conformance](docs/conformance) |
 | Performance benchmarks | [docs/performance/performance-capacity-curve.md](docs/performance/performance-capacity-curve.md) |
 | OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |
 | OAuth/OIDC/FAPI future roadmap | [docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md](docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md) |
 | Profile matrix | [docs/protocol/profile-matrix.md](docs/protocol/profile-matrix.md) |
+| Composable capability policy | [docs/protocol/composable-capability-policy.md](docs/protocol/composable-capability-policy.md) |
 | Ecosystem client onboarding | [docs/features/ecosystem-onboarding.md](docs/features/ecosystem-onboarding.md) |
 | Threat model | [docs/security/threat-model.md](docs/security/threat-model.md) |
 | Release security | [docs/operations/release-security.md](docs/operations/release-security.md) |

@@ -73,6 +73,14 @@ fn client(jwks: Value) -> OAuthClient {
             request_uris: Vec::new(),
             initiate_login_uri: None,
             presentation: nazo_auth::ClientPresentationMetadata::default(),
+            id_token_signed_response_alg: None,
+            id_token_encrypted_response_alg: None,
+            id_token_encrypted_response_enc: None,
+            request_object_signing_alg: None,
+            request_object_encryption_alg: None,
+            request_object_encryption_enc: None,
+            token_endpoint_auth_signing_alg: None,
+            introspection_signed_response_alg: None,
             introspection_encrypted_response_alg: None,
             introspection_encrypted_response_enc: None,
             userinfo_signed_response_alg: None,
@@ -81,6 +89,7 @@ fn client(jwks: Value) -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
+            security_policy: None,
         },
         require_mtls_bound_tokens: false,
         is_active: true,
@@ -136,6 +145,7 @@ fn verify_at(
         client,
         assertion,
         now: NOW,
+        expected_signing_algorithm: None,
     })
 }
 
@@ -154,6 +164,25 @@ fn valid_assertion_returns_only_replay_and_algorithm_material() {
     assert_eq!(verified.expires_at(), NOW + 120);
     assert_eq!(verified.replay_ttl_seconds(NOW), 120);
     assert_eq!(verified.algorithm(), jsonwebtoken::Algorithm::EdDSA);
+}
+
+#[test]
+fn registered_client_assertion_algorithm_is_enforced_before_key_selection() {
+    let mut client = client(json!({"keys": [public_jwk(Some("client-kid"))]}));
+    client.token_endpoint_auth_signing_alg = Some("PS256".to_owned());
+    let assertion = assertion(json!({}), Some("client-kid"));
+
+    assert!(matches!(
+        verify_private_key_jwt(ClientAssertionVerificationInput {
+            issuer: "https://issuer.example",
+            endpoint_path: "/token",
+            client: &client,
+            assertion: &assertion,
+            now: NOW,
+            expected_signing_algorithm: client.token_endpoint_auth_signing_alg.as_deref(),
+        }),
+        Err(ClientAssertionValidationError::InvalidAlgorithm)
+    ));
 }
 
 #[test]

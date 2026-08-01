@@ -3,17 +3,13 @@
 use nazo_http_actix::{empty_response_no_store, json_response_no_store, oauth_error};
 
 use crate::adapters::audit::{audit_event, audit_fields};
-#[cfg(test)]
-use crate::domain::DatabaseExternalIdentityFixture;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::http::sessions::SessionProfileHandles;
 use actix_web::http::StatusCode;
 use actix_web::web::Data;
 use actix_web::web::Path;
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use chrono::Utc;
+
 use nazo_identity::ports::FederationLink;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -103,5 +99,5 @@ fn federation_link_json(link: FederationLink) -> Value {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/profile/tests/federation_links.rs"]
+#[path = "../../../tests/unit/http/profile/federation_links.rs"]
 mod tests;

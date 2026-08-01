@@ -26,7 +26,7 @@ use crate::http::admin::{
     },
     clients::{
         create::admin_create_client, detail::admin_get_client, list::admin_clients,
-        update::admin_patch_client,
+        templates::admin_client_templates, update::admin_patch_client,
     },
     federation::admin_federation_providers,
     grants::{admin_grants, admin_revoke_grant},
@@ -37,7 +37,7 @@ use crate::http::admin::{
     openid4vc::{
         admin_delete_credential_dataset, admin_get_credential_dataset, admin_put_credential_dataset,
     },
-    users::{admin_patch_user, admin_users},
+    users::{admin_create_user, admin_patch_user, admin_users},
 };
 use crate::http::auth::{
     csrf::csrf,
@@ -52,6 +52,7 @@ use crate::http::authorization::{
     presentation::authorize_client_presentation,
     request::{authorize_get, authorize_post},
 };
+use crate::http::bootstrap_admin::{claim_initial_admin, initial_admin_setup_page};
 use crate::http::perf_metrics::perf_metrics;
 use crate::http::profile::{
     access_requests::{create_access_request, my_access_requests},
@@ -70,7 +71,7 @@ use crate::http::token::{
     },
     dispatch::token,
 };
-use crate::http::well_known::{captcha_config, health};
+use crate::http::well_known::{captcha_config, live, ready, startup};
 use crate::settings::Settings;
 use nazo_http_actix::{
     scim_create_user, scim_delete_user, scim_get_user, scim_list_users, scim_patch_user,
@@ -115,8 +116,24 @@ pub(crate) fn configure(
     cfg.service(
         web::resource("/health")
             .wrap(cors::cors_well_known(settings))
-            .route(web::get().to(health)),
+            .route(web::get().to(ready)),
     );
+    cfg.service(
+        web::resource("/live")
+            .wrap(cors::cors_well_known(settings))
+            .route(web::get().to(live)),
+    );
+    cfg.service(
+        web::resource("/startup")
+            .wrap(cors::cors_well_known(settings))
+            .route(web::get().to(startup)),
+    );
+    cfg.service(
+        web::resource("/ready")
+            .wrap(cors::cors_well_known(settings))
+            .route(web::get().to(ready)),
+    );
+    cfg.route("/setup", web::get().to(initial_admin_setup_page));
     // NO CORS: /authorize
     cfg.route("/authorize", web::get().to(authorize_get))
         .route("/authorize", web::post().to(authorize_post))
@@ -208,6 +225,7 @@ pub(crate) fn configure(
         // /auth scope — NO CORS for UI routes, cors_auth_api for /auth/me
         .service(
             web::scope("/auth")
+                .route("/bootstrap-admin", web::post().to(claim_initial_admin))
                 .route("/captcha-config", web::get().to(captcha_config))
                 .route("/send-code", web::post().to(send_code))
                 .route("/register", web::post().to(register))
@@ -276,6 +294,7 @@ pub(crate) fn configure(
             web::scope("/admin")
                 .wrap(cors::cors_admin(settings))
                 .route("/users", web::get().to(admin_users))
+                .route("/users", web::post().to(admin_create_user))
                 .route("/users/{user_id}", web::patch().to(admin_patch_user))
                 .route("/runtime-modules", web::get().to(admin_runtime_modules))
                 .route(
@@ -288,6 +307,7 @@ pub(crate) fn configure(
                 )
                 .route("/clients", web::get().to(admin_clients))
                 .route("/clients", web::post().to(admin_create_client))
+                .route("/clients/templates", web::get().to(admin_client_templates))
                 .route("/clients/{client_id}", web::get().to(admin_get_client))
                 .route("/clients/{client_id}", web::patch().to(admin_patch_client))
                 .route(

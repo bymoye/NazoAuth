@@ -4,44 +4,31 @@ use crate::adapters::audit::audit_fields;
 use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::constant_time_eq;
-#[cfg(test)]
-use crate::adapters::security::decode_access_claims_with;
-#[cfg(test)]
-use crate::domain::TestInfrastructure;
+
 use crate::domain::client_policy::audiences_allowed;
 use crate::domain::client_policy::is_subset;
 use crate::domain::client_policy::json_array_to_strings;
 use crate::domain::client_policy::parse_scope;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue, TokenRow};
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::dpop_proof_present;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
-#[cfg(test)]
-use crate::settings::Settings;
+
 use actix_web::http::StatusCode;
-#[cfg(test)]
-use actix_web::http::header;
+
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use chrono::Duration;
+
 use chrono::{DateTime, Utc};
 use nazo_http_actix::client_ip_with_context;
 use nazo_http_actix::oauth_token_error;
-#[cfg(test)]
-use serde_json::Value;
+
 use serde_json::json;
 use uuid::Uuid;
 // 只处理 refresh token 校验、复用检测和轮换前置约束。
-#[cfg(test)]
-use super::issue::TokenIssuanceConfig;
+
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
     issue::{TokenIssuanceContext, issue_token_response_with_service},
@@ -57,7 +44,10 @@ fn refresh_token_policy_for_authorization_server_profile(
     let sender_constrained_confidential_client = client.client_type == "confidential"
         && (client.require_dpop_bound_tokens || client.require_mtls_bound_tokens);
     if sender_constrained_confidential_client
-        || (profile.requires_fapi2_security() && refresh_token_has_stable_sender_constraint(token))
+        || (profile
+            .effective_client_policy(client)
+            .requires_fapi2_security()
+            && refresh_token_has_stable_sender_constraint(token))
     {
         RefreshTokenPolicy::PreserveExisting
     } else {
@@ -70,19 +60,6 @@ fn refresh_token_policy_for_authorization_server_profile(
 
 fn refresh_token_has_stable_sender_constraint(token: &TokenRow) -> bool {
     token.dpop_jkt.is_some() || token.mtls_x5t_s256.is_some()
-}
-
-#[cfg(test)]
-fn refresh_token_policy_for_profile(
-    settings: &Settings,
-    client: &ClientRow,
-    token: &TokenRow,
-) -> RefreshTokenPolicy {
-    refresh_token_policy_for_authorization_server_profile(
-        settings.protocol.authorization_server_profile,
-        client,
-        token,
-    )
 }
 
 fn refresh_token_policy_for_profile_value(
@@ -125,26 +102,6 @@ fn client_attestation_refresh_binding_matches(
         (Some(expected), Some(presented))
             if constant_time_eq(expected.as_bytes(), presented.as_bytes())
     )
-}
-
-#[cfg(test)]
-fn refresh_token_audiences(
-    settings: &Settings,
-    token: &TokenRow,
-    form: &TokenForm,
-) -> Result<Vec<String>, ()> {
-    let original_audiences = json_array_to_strings(&token.audience);
-    let original_audiences = if original_audiences.is_empty() {
-        vec![settings.protocol.default_audience.clone()]
-    } else {
-        original_audiences
-    };
-    if form.audiences.is_empty() {
-        return Ok(original_audiences);
-    }
-    is_subset(&form.audiences, &original_audiences)
-        .then(|| form.audiences.clone())
-        .ok_or(())
 }
 
 fn refresh_token_audiences_with_default(
@@ -497,37 +454,5 @@ pub(crate) async fn token_refresh_with_service(
 }
 
 #[cfg(test)]
-pub(crate) async fn token_refresh(
-    state: &TestInfrastructure,
-    req: &HttpRequest,
-    client: &ClientRow,
-    form: &TokenForm,
-    client_assertion: Option<&ValidatedClientAssertion>,
-) -> HttpResponse {
-    let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
-        state.keyset.clone(),
-    );
-    let config = TokenIssuanceConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
-    let authorization = super::issue::test_authorization_service(state);
-    token_refresh_with_service(
-        &service,
-        &TokenIssuanceContext {
-            config: &config,
-            modules: &modules,
-            authorization: &authorization,
-        },
-        req,
-        client,
-        form,
-        client_assertion,
-        None,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/refresh.rs"]
+#[path = "../../../tests/unit/http/token/refresh.rs"]
 mod tests;

@@ -16,12 +16,6 @@ use crate::settings::{EmailDelivery, Settings, SmtpEmailSettings, SmtpTlsMode};
 
 use super::email_templates::VerificationEmail;
 
-#[cfg(test)]
-pub(crate) struct EmailRecipient {
-    pub(crate) normalized: String,
-    pub(crate) mailbox: Mailbox,
-}
-
 pub(crate) fn normalize_email_address(raw: &str) -> anyhow::Result<String> {
     Ok(nazo_identity::email::normalize_email_address(raw)?)
 }
@@ -31,16 +25,6 @@ fn parse_email_address(raw: &str) -> anyhow::Result<Address> {
     normalized
         .parse::<Address>()
         .context("email address is invalid")
-}
-
-#[cfg(test)]
-pub(crate) fn parse_email_recipient(raw: &str) -> anyhow::Result<EmailRecipient> {
-    let address = parse_email_address(raw)?;
-    let normalized = address.to_string();
-    Ok(EmailRecipient {
-        normalized,
-        mailbox: Mailbox::new(None, address),
-    })
 }
 
 pub(crate) fn email_delivery_configured(settings: &Settings) -> bool {
@@ -144,5 +128,5 @@ fn html_part(body: String) -> SinglePart {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/email.rs"]
+#[path = "../../tests/unit/adapters/email.rs"]
 mod tests;

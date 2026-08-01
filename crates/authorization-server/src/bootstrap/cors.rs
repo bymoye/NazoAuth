@@ -2,8 +2,6 @@
 // 为路由组提供独立的 CORS 策略，避免统一宽泛的跨域配置。
 
 use actix_cors::Cors;
-#[cfg(test)]
-use actix_web::http::header;
 
 use crate::settings::Settings;
 
@@ -32,5 +30,5 @@ pub(crate) fn cors_scim(settings: &Settings) -> Cors {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/bootstrap/tests/cors.rs"]
+#[path = "../../tests/unit/bootstrap/cors.rs"]
 mod tests;

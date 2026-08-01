@@ -1,0 +1,83 @@
+{
+  "schema": 2,
+  "repository": "nazozero/NazoAuth",
+  "updater_install_path": "/usr/local/sbin/nazoauthctl",
+  "backup_root": "/opt/nazo-oauth/backups",
+  "deployment_root": "/opt/nazo-oauth/deployments",
+  "operator": {
+    "deployment_id": "deployment-example",
+    "controller_key_id": "controller-example",
+    "controller_private_key": "/etc/nazoauth/operator/controller.key",
+    "controller_public_key": "/etc/nazoauth/operator/controller.pub",
+    "receipt_key_id": "receipt-example",
+    "receipt_private_key": "/etc/nazoauth/operator/receipt.key",
+    "receipt_public_key": "/etc/nazoauth/operator/receipt.pub",
+    "audit_key_id": "audit-example",
+    "audit_private_key": "/etc/nazoauth/operator/audit.key",
+    "audit_public_key": "/etc/nazoauth/operator/audit.pub",
+    "break_glass_key_id": "break-glass-example",
+    "break_glass_private_key": "/etc/nazoauth/operator/break-glass.key",
+    "break_glass_public_key": "/etc/nazoauth/operator/break-glass.pub",
+    "secret_revision_file": "/etc/nazoauth/operator/secret-revision",
+    "state_directory": "/opt/nazo-oauth/app/operator-state",
+    "audit_directory": "/opt/nazo-oauth/audit",
+    "trust_state_file": "/etc/nazoauth/operator/release-trust.json"
+  },
+  "dependencies": {
+    "mode": "managed",
+    "database_url_file": "",
+    "migration_database_url_file": "",
+    "valkey_url_file": ""
+  },
+  "runtime": {
+    "engine": "podman",
+    "container_name": "nazo-oauth-server",
+    "network": "nazo_oauth_net",
+    "ip_address": "10.101.0.20",
+    "publish_address": "",
+    "health_url": "http://10.101.0.20:8000/ready",
+    "readiness_attempts": 60,
+    "readiness_interval_seconds": 1,
+    "public_discovery_url": "https://auth.example.com/.well-known/openid-configuration",
+    "expected_issuer": "https://auth.example.com",
+    "mounts": [
+      {
+        "source": "/opt/nazo-oauth/.env.yaml",
+        "target": "/app/.env.yaml",
+        "mode": "ro"
+      },
+      {
+        "source": "/opt/nazo-oauth/runtime/keys",
+        "target": "/var/lib/nazo_oauth/keys",
+        "mode": "rw"
+      },
+      {
+        "source": "/opt/nazo-oauth/runtime/avatars",
+        "target": "/var/lib/nazo_oauth/avatars",
+        "mode": "rw"
+      }
+    ],
+    "snapshot_paths": [
+      "/opt/nazo-oauth/runtime/keys"
+    ],
+    "environment": {}
+  },
+  "postgres": {
+    "container_name": "nazo-oauth-postgres",
+    "database": "oauth",
+    "user": "nazoauth",
+    "image": "docker.io/library/postgres:18@sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a",
+    "validation_image": "docker.io/library/postgres:18@sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a"
+  },
+  "valkey": {
+    "container_name": "nazo-oauth-valkey",
+    "image": "docker.io/valkey/valkey:8-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec",
+    "rdb_path": "/data/dump.rdb",
+    "password_file": ""
+  },
+  "ui": {
+    "active_path": "/usr/local/angie/html/auth/ui",
+    "releases_root": "/usr/local/angie/html/auth-releases",
+    "serve_from_application": false
+  }
+}

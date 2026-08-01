@@ -3,39 +3,22 @@ use std::sync::Arc;
 
 use crate::adapters::security::ClientCredentials;
 use crate::adapters::security::blake3_hex;
-#[cfg(test)]
-use crate::domain::client_policy::authorization_code_key;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{AuthorizationCodeState, ClientRow};
-#[cfg(test)]
-use crate::domain::{CodePayload, TestInfrastructure};
+
 use crate::http::client_attestation::client_attestation_headers;
 use crate::http::dpop::dpop_proof_present;
 use crate::http::mtls::client_mtls_certificate_matches;
 use crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy;
 use crate::http::rate_limit::rate_limited_response;
-#[cfg(test)]
-use crate::settings::Settings;
+
 use actix_web::http::{StatusCode, header};
 use actix_web::web::{Bytes, Data};
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use base64::Engine;
-#[cfg(test)]
-use chrono::{Duration, Utc};
-#[cfg(test)]
-use nazo_http_actix::OAuthJsonErrorFields;
+
 use nazo_http_actix::client_ip_with_context;
 use nazo_http_actix::{TokenClientAuthForm, oauth_token_error, token_client_auth_transport_facts};
-#[cfg(test)]
-use serde_json::{Value, json};
-#[cfg(test)]
-use uuid::Uuid;
+
 // 只负责客户端认证与 grant_type 分派，不直接签发令牌。
 use super::ciba::{CibaTokenContext, CibaTokenHandles};
 use super::client_auth::{
@@ -59,14 +42,6 @@ use nazo_auth::{
     token_client_authentication_context, unverified_client_assertion_client_id,
     validate_token_request_profile as validate_auth_token_request_profile,
 };
-
-#[cfg(test)]
-fn pending_authorization_code_payload(raw: &str) -> Result<Option<CodePayload>, serde_json::Error> {
-    match serde_json::from_str::<AuthorizationCodeState>(raw)? {
-        AuthorizationCodeState::Pending { payload } => Ok(Some(payload)),
-        _ => Ok(None),
-    }
-}
 
 fn mtls_client_credentials(client_id: String) -> ClientCredentials {
     ClientCredentials {
@@ -433,15 +408,11 @@ pub(crate) async fn token_with_service(
         }
     }
 
-    if issuance_config
-        .authorization_server_profile()
-        .requires_fapi2_security()
-        && form.grant_type == "password"
-    {
+    if form.grant_type == "password" {
         return oauth_token_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
-            "FAPI2 profiles do not allow resource owner password credentials.",
+            "Resource owner password credentials are not supported.",
             false,
         );
     }
@@ -930,63 +901,7 @@ fn attestation_client_id_matches_form_hint(
     form_client_id.is_none_or(|client_id| client_id == attested_client_id)
 }
 
-#[cfg(not(test))]
 pub(crate) use token_with_service as token;
-
-#[cfg(test)]
-pub(crate) async fn token(
-    state: Data<TestInfrastructure>,
-    req: HttpRequest,
-    body: Bytes,
-) -> HttpResponse {
-    let service = Data::new(ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
-        state.keyset.clone(),
-    ));
-    let connection = state.valkey_connection();
-    let authorization_service = Data::new(ServerAuthorizationService::new(
-        nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
-        state.keyset.clone(),
-    ));
-    let ciba_service = Data::new(super::ciba::ServerCibaService::new(
-        nazo_valkey::CibaStore::new(&connection),
-    ));
-    let ciba_users = Data::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()));
-    let ciba_config = Data::new(super::ciba::CibaHttpConfig::from(state.settings.as_ref()));
-    let issuance_config = Data::new(TokenIssuanceConfig::from(state.settings.as_ref()));
-    let device_service = Data::new(super::device::ServerDeviceGrantService::new(
-        nazo_valkey::DeviceStore::new(&connection),
-    ));
-    let runtime_modules = Data::from(
-        crate::runtime_modules::runtime_module_registry_for_test(
-            state.diesel_db.clone(),
-            state.settings.as_ref(),
-        )
-        .expect("test runtime module registry should be valid"),
-    );
-    token_with_service(
-        Data::new(TokenEndpointHandles::new(
-            TokenCoreHandles {
-                token_service: service,
-                authorization_service,
-                device_service,
-            },
-            CibaTokenHandles::new(ciba_service, ciba_users, ciba_config),
-            issuance_config,
-            runtime_modules,
-            Arc::new(
-                crate::domain::remote_client_documents::RemoteClientDocumentResolver::new(&[])
-                    .expect("empty remote document policy is valid"),
-            ),
-            Openid4vcTokenHandles::default(),
-        )),
-        req,
-        body,
-    )
-    .await
-}
 
 fn validate_token_client_enabled(client: &ClientRow, grant_type: &str) -> Result<(), HttpResponse> {
     if !client.is_active || !client.grant_types.iter().any(|grant| grant == grant_type) {
@@ -1000,25 +915,15 @@ fn validate_token_client_enabled(client: &ClientRow, grant_type: &str) -> Result
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn validate_token_request_profile(
-    settings: &Settings,
-    client: &ClientRow,
-    auth_method: &str,
-) -> Result<(), HttpResponse> {
-    validate_token_request_profile_with_profile(
-        settings.protocol.authorization_server_profile,
-        client,
-        auth_method,
-    )
-}
-
-fn validate_token_request_profile_with_profile(
+pub(crate) fn validate_token_request_profile_with_profile(
     server_profile: crate::settings::AuthorizationServerProfile,
     client: &ClientRow,
     auth_method: &str,
 ) -> Result<(), HttpResponse> {
-    let profile = if server_profile.requires_fapi2_security() {
+    let profile = if server_profile
+        .effective_client_policy(client)
+        .requires_fapi2_security()
+    {
         SecurityProfile::Fapi2Security
     } else {
         SecurityProfile::Baseline
@@ -1051,5 +956,5 @@ fn validate_token_request_profile_with_profile(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/dispatch.rs"]
+#[path = "../../../tests/unit/http/token/dispatch.rs"]
 mod tests;

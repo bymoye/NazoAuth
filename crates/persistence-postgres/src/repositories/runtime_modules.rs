@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+use std::time::SystemTime;
+
 use chrono::{DateTime, Utc};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
@@ -22,6 +25,22 @@ use crate::{
 };
 
 pub type RuntimeModuleEventPage = ModuleEventPage;
+
+const COMPOSABLE_DEFAULT_POLICY_VERSION: i32 = 2;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeDefaultPolicyMigration {
+    pub previous_version: i32,
+    pub current_version: i32,
+    pub materialized_inherited_rows: usize,
+    pub initialized_empty_state: bool,
+}
+
+#[derive(diesel::QueryableByName)]
+struct RuntimeDefaultPolicyVersionRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    version: i32,
+}
 
 #[derive(Clone)]
 pub struct RuntimeModuleRepository {
@@ -81,6 +100,158 @@ impl RuntimeModuleRepository {
             .map(event_from_row)
             .collect::<Result<_, _>>()?;
         Ok(ModuleEventPage { total, events })
+    }
+
+    pub async fn migrate_composable_default_policy(
+        &self,
+        legacy_inherited_enabled: &BTreeSet<ModuleId>,
+    ) -> Result<RuntimeDefaultPolicyMigration, RepositoryError> {
+        let mut connection = self.connection().await?;
+        connection
+            .transaction::<RuntimeDefaultPolicyMigration, RuntimeTransactionError, _>(
+                async |connection| {
+                    let policy = diesel::sql_query(
+                        "SELECT version
+                         FROM runtime_module_default_policy
+                         WHERE singleton = TRUE
+                         FOR UPDATE",
+                    )
+                    .get_result::<RuntimeDefaultPolicyVersionRow>(connection)
+                    .await?;
+                    if policy.version == COMPOSABLE_DEFAULT_POLICY_VERSION {
+                        return Ok(RuntimeDefaultPolicyMigration {
+                            previous_version: policy.version,
+                            current_version: policy.version,
+                            materialized_inherited_rows: 0,
+                            initialized_empty_state: false,
+                        });
+                    }
+                    if policy.version != 1 {
+                        return Err(RuntimeTransactionError::Repository(
+                            RepositoryError::Consistency(format!(
+                                "unsupported runtime module default policy version: {}",
+                                policy.version
+                            )),
+                        ));
+                    }
+
+                    let current_rows = runtime_module_desired_states::table
+                        .select(DesiredStateRow::as_select())
+                        .for_update()
+                        .load::<DesiredStateRow>(connection)
+                        .await?;
+                    let initialized_empty_state = current_rows.is_empty();
+                    let mut materialized_inherited_rows = 0;
+                    let mut existing_modules = BTreeSet::new();
+                    for row in current_rows {
+                        let current =
+                            desired_from_row(row).map_err(RuntimeTransactionError::Repository)?;
+                        existing_modules.insert(current.module_id);
+                        if current.mode != DesiredMode::Inherit {
+                            continue;
+                        }
+                        let next_revision = next_desired_revision(Some(current.revision))
+                            .map_err(RuntimeTransactionError::Repository)?;
+                        let next = DesiredStateRecord {
+                            module_id: current.module_id,
+                            mode: if legacy_inherited_enabled.contains(&current.module_id) {
+                                DesiredMode::Enabled
+                            } else {
+                                DesiredMode::Disabled
+                            },
+                            revision: ModuleRevision::new(next_revision),
+                            actor_id: None,
+                            reason: Some(
+                                "materialized legacy inherited default before policy v2".to_owned(),
+                            ),
+                            updated_at: SystemTime::now(),
+                        };
+                        diesel::update(
+                            runtime_module_desired_states::table.find(module_id(current.module_id)),
+                        )
+                        .set((
+                            runtime_module_desired_states::desired_mode.eq(desired_mode(next.mode)),
+                            runtime_module_desired_states::revision.eq(revision(next.revision)
+                                .map_err(RuntimeTransactionError::Repository)?),
+                            runtime_module_desired_states::actor_id.eq(Option::<Uuid>::None),
+                            runtime_module_desired_states::reason.eq(next.reason.as_deref()),
+                            runtime_module_desired_states::updated_at
+                                .eq(DateTime::<Utc>::from(next.updated_at)),
+                        ))
+                        .execute(connection)
+                        .await?;
+                        let event = desired_event(&next, DesiredMode::Inherit, next.revision, None);
+                        append_runtime_event(connection, &event)
+                            .await
+                            .map_err(RuntimeTransactionError::Repository)?;
+                        materialized_inherited_rows += 1;
+                    }
+                    if !initialized_empty_state {
+                        for module_id_value in ModuleId::ALL {
+                            if existing_modules.contains(&module_id_value) {
+                                continue;
+                            }
+                            let next = DesiredStateRecord {
+                                module_id: module_id_value,
+                                mode: if legacy_inherited_enabled.contains(&module_id_value) {
+                                    DesiredMode::Enabled
+                                } else {
+                                    DesiredMode::Disabled
+                                },
+                                revision: ModuleRevision::new(1),
+                                actor_id: None,
+                                reason: Some(
+                                    "materialized missing legacy default before policy v2"
+                                        .to_owned(),
+                                ),
+                                updated_at: SystemTime::now(),
+                            };
+                            diesel::insert_into(runtime_module_desired_states::table)
+                                .values((
+                                    runtime_module_desired_states::module_id
+                                        .eq(module_id(next.module_id)),
+                                    runtime_module_desired_states::desired_mode
+                                        .eq(desired_mode(next.mode)),
+                                    runtime_module_desired_states::revision
+                                        .eq(revision(next.revision)
+                                            .map_err(RuntimeTransactionError::Repository)?),
+                                    runtime_module_desired_states::actor_id
+                                        .eq(Option::<Uuid>::None),
+                                    runtime_module_desired_states::reason
+                                        .eq(next.reason.as_deref()),
+                                    runtime_module_desired_states::updated_at
+                                        .eq(DateTime::<Utc>::from(next.updated_at)),
+                                ))
+                                .execute(connection)
+                                .await?;
+                            let event =
+                                desired_event(&next, DesiredMode::Inherit, next.revision, None);
+                            append_runtime_event(connection, &event)
+                                .await
+                                .map_err(RuntimeTransactionError::Repository)?;
+                            materialized_inherited_rows += 1;
+                        }
+                    }
+
+                    diesel::sql_query(
+                        "UPDATE runtime_module_default_policy
+                         SET version = $1, updated_at = now()
+                         WHERE singleton = TRUE",
+                    )
+                    .bind::<diesel::sql_types::Integer, _>(COMPOSABLE_DEFAULT_POLICY_VERSION)
+                    .execute(connection)
+                    .await?;
+
+                    Ok(RuntimeDefaultPolicyMigration {
+                        previous_version: policy.version,
+                        current_version: COMPOSABLE_DEFAULT_POLICY_VERSION,
+                        materialized_inherited_rows,
+                        initialized_empty_state,
+                    })
+                },
+            )
+            .await
+            .map_err(RuntimeTransactionError::into_repository)
     }
 }
 
@@ -636,23 +807,8 @@ fn next_desired_revision(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn desired_revision_exhaustion_is_rejected_without_saturation() {
-        assert_eq!(next_desired_revision(None).unwrap(), 1);
-        assert_eq!(
-            next_desired_revision(Some(ModuleRevision::new(41))).unwrap(),
-            42
-        );
-        assert!(matches!(
-            next_desired_revision(Some(ModuleRevision::new(u64::MAX))),
-            Err(RepositoryError::Consistency(message))
-                if message == "desired revision space is exhausted"
-        ));
-    }
-}
+#[path = "../../tests/unit/repositories/runtime_modules.rs"]
+mod tests;
 
 fn parse_desired_mode(value: &str) -> Result<DesiredMode, RepositoryError> {
     match value {

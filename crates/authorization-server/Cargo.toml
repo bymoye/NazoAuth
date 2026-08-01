@@ -6,24 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "nazo-oauth-server"
+name = "nazoauth"
 path = "src/main.rs"
-test = false
-
-[[bin]]
-name = "nazo-oauth-migrate"
-path = "src/bin/nazo_oauth_migrate.rs"
-test = false
-
-[[bin]]
-name = "nazo-oauth-keyctl"
-path = "src/bin/nazo_oauth_keyctl.rs"
 test = false
 
 [dependencies]
 actix-cors.workspace = true
+actix-files.workspace = true
 actix-multipart = "0.8.0"
-actix-web = { workspace = true, features = ["cookies"] }
+actix-web = { workspace = true, features = ["cookies", "openssl"] }
+actix-tls = { workspace = true, features = ["accept", "openssl"] }
 anyhow.workspace = true
 argon2.workspace = true
 aws-lc-rs.workspace = true
@@ -43,6 +35,7 @@ nazo-auth.workspace = true
 nazo-http-signatures.workspace = true
 nazo-http-actix.workspace = true
 nazo-openid4vc-http-actix.workspace = true
+nazo-operator-protocol.workspace = true
 nazo-openid4vci.workspace = true
 nazo-openid4vp.workspace = true
 nazo-digital-credentials.workspace = true

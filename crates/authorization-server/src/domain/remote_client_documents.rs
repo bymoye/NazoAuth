@@ -100,6 +100,7 @@ impl RemoteClientDocumentResolver {
         }
 
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
@@ -185,5 +186,5 @@ impl nazo_http_actix::RemoteJwksResolverPort for RemoteClientDocumentResolver {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/remote_client_documents.rs"]
+#[path = "../../tests/unit/domain/remote_client_documents.rs"]
 mod tests;

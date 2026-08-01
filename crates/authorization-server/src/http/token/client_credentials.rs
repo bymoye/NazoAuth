@@ -1,34 +1,23 @@
 //! client_credentials grant 处理。
 use crate::adapters::security::ValidatedClientAssertion;
-#[cfg(test)]
-use crate::domain::TestInfrastructure;
 use crate::domain::client_policy::audiences_allowed;
 use crate::domain::client_policy::is_subset;
 use crate::domain::client_policy::parse_scope;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
-#[cfg(test)]
-use crate::settings::Settings;
+
 use actix_web::http::StatusCode;
-#[cfg(test)]
-use actix_web::web::Data;
+
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use nazo_http_actix::OAuthJsonErrorFields;
+
 use nazo_http_actix::oauth_token_error;
 use serde_json::json;
-#[cfg(test)]
-use uuid::Uuid;
+
 // 只为机密客户端签发无用户主体的访问令牌。
 use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
 use super::{
@@ -94,19 +83,6 @@ pub(super) fn client_credentials_issue_request_with_default_audience(
         ));
     }
     Ok(ClientCredentialsIssue { scopes, audiences })
-}
-
-#[cfg(test)]
-pub(super) fn client_credentials_issue_request(
-    settings: &Settings,
-    client: &ClientRow,
-    form: &TokenForm,
-) -> Result<ClientCredentialsIssue, HttpResponse> {
-    client_credentials_issue_request_with_default_audience(
-        &settings.protocol.default_audience,
-        client,
-        form,
-    )
 }
 
 pub(crate) async fn token_client_credentials_with_service(
@@ -208,42 +184,5 @@ pub(crate) async fn token_client_credentials_with_service(
 }
 
 #[cfg(test)]
-pub(crate) async fn token_client_credentials(
-    state: &TestInfrastructure,
-    req: &HttpRequest,
-    client: &ClientRow,
-    form: &TokenForm,
-    client_assertion: Option<&ValidatedClientAssertion>,
-) -> HttpResponse {
-    let connection = state.valkey_connection();
-    let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
-        state.keyset.clone(),
-    );
-    let config = super::issue::TokenIssuanceConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
-    let authorization_service = crate::http::authorization::ServerAuthorizationService::new(
-        nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
-        state.keyset.clone(),
-    );
-    token_client_credentials_with_service(
-        &service,
-        &authorization_service,
-        &TokenIssuanceContext {
-            config: &config,
-            modules: &modules,
-            authorization: &authorization_service,
-        },
-        req,
-        client,
-        form,
-        client_assertion,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/client_credentials.rs"]
+#[path = "../../../tests/unit/http/token/client_credentials.rs"]
 mod tests;

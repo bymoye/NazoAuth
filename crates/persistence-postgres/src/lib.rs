@@ -20,11 +20,12 @@ pub(crate) mod schema;
 
 pub use pool::{
     DbConnection, DbPool, DbPoolMetrics, cleanup_expired_security_state, create_pool,
-    db_pool_metrics, get_conn, run_pending_migrations,
+    db_pool_metrics, get_conn, health_check, run_pending_migrations,
 };
 pub use repositories::{
     AccessRequestRepository, AuditRepository, AuthorizationFlowRepository, AuthorizationRepository,
-    FederationRepository, GrantAuthorization, GrantRepository, ManagedCredentialDataset,
+    FederationRepository, GrantAuthorization, GrantRepository, InitialAdminBootstrapRepository,
+    InitialAdminBootstrapState, InitialAdminClaimOutcome, ManagedCredentialDataset,
     ManagedCredentialDatasetWrite, MfaRepository, MtlsTrustAnchorRepository, OAuthClientRepository,
     Openid4vciDatasetRepository, Openid4vciRepository, Openid4vpRepository, PasskeyRepository,
     RuntimeModuleEventPage, RuntimeModuleRepository, ScimEventRepository, ScimRepository,

@@ -254,16 +254,17 @@ keyset_path.write_text(json.dumps(keyset, indent=2) + "\n", encoding="utf-8")
 os.chmod(keyset_path, 0o600)
 PY
 export LLVM_PROFILE_FILE="$(profile_path 'cargo-%p-%m.profraw')"
-cargo build --locked --workspace --all-features --bins
+cargo test --locked -p nazo-postgres --test migrations \
+  pending_migrations_create_all_runtime_module_state_tables
+cargo build --locked --workspace --all-features --bin nazoauth
 
-LLVM_PROFILE_FILE="$(profile_path 'migrate-%p.profraw')" "$BIN_DIR/nazo-oauth-migrate"
-LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazo-oauth-server" &
+LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
 SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
   NAZO_RUNTIME_INSTANCE_ID='codecov-signed' \
   BIND='127.0.0.1:18001' \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
-  "$BIN_DIR/nazo-oauth-server" &
+  "$BIN_DIR/nazoauth" server &
 SIGNED_SERVER_PID=$!
 
 for _ in $(seq 1 60); do
@@ -298,22 +299,45 @@ wait "$SERVER_PID" || true
 SERVER_PID=""
 
 TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"
-cargo test --locked --workspace --all-features --lib --tests \
+cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
-cargo test --locked --workspace --all-features --lib --tests
+cargo test --locked --workspace --all-features --lib --bins --tests
+
+# Let cargo-llvm-cov resolve the complete workspace object graph as an
+# independent report. `show-env` deliberately points cargo-llvm-cov at the
+# Cargo target root so it can discover every instrumented object there, while
+# this script keeps raw profiles in a dedicated child directory. Expose those
+# same profiles at the target root with hard links: this preserves one set of
+# bytes, keeps the explicit per-object export below independent, and avoids
+# silently dropping integration-test copies of library code.
+while IFS= read -r -d '' profile; do
+  link="$CARGO_TARGET_DIR/workspace-$(basename "$profile")"
+  [[ ! -e "$link" ]]
+  ln "$profile" "$link"
+done < <(find "$COVERAGE_DIR" -maxdepth 1 -type f -name '*.profraw' -print0)
+cargo llvm-cov report --locked --lcov \
+  --ignore-filename-regex "$IGNORE_REGEX" \
+  --output-path lcov-workspace-tests.info
 
 RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
 LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$RUST_HOST/bin"
-mapfile -t PROFRAWS < <(find "$COVERAGE_DIR" -name '*.profraw' -type f)
-if [[ "${#PROFRAWS[@]}" -eq 0 ]]; then
-  echo "No llvm-cov profile files were generated." >&2
+mapfile -t SERVER_PROFRAWS < <(
+  find "$COVERAGE_DIR" -type f \
+    \( -name 'server-*.profraw' -o -name 'signed-server-*.profraw' \)
+)
+mapfile -t TEST_PROFRAWS < <(find "$COVERAGE_DIR" -name 'cargo-*.profraw' -type f)
+if [[ "${#SERVER_PROFRAWS[@]}" -eq 0 || "${#TEST_PROFRAWS[@]}" -eq 0 ]]; then
+  echo "Both server and test llvm-cov profile files are required." >&2
   exit 1
 fi
-"$LLVM_TOOLS_DIR/llvm-profdata" merge -sparse "${PROFRAWS[@]}" -o "$COVERAGE_DIR/codecov.profdata"
+"$LLVM_TOOLS_DIR/llvm-profdata" merge -sparse "${SERVER_PROFRAWS[@]}" \
+  -o "$COVERAGE_DIR/server.profdata"
+"$LLVM_TOOLS_DIR/llvm-profdata" merge -sparse "${TEST_PROFRAWS[@]}" \
+  -o "$COVERAGE_DIR/tests.profdata"
 
-objects=("$BIN_DIR/nazo-oauth-server")
+test_objects=()
 while IFS= read -r object; do
-  objects+=("$object")
+  test_objects+=("$object")
 done < <(
   "$PYTHON_BIN" - "$TEST_OBJECT_MANIFEST" <<'PY'
 import json
@@ -338,13 +362,41 @@ for executable in sorted(executables):
 PY
 )
 
-if [[ ! -x "${objects[0]}" ]]; then
-  echo "Instrumented server binary was not found at ${objects[0]}." >&2
+if [[ ! -x "$BIN_DIR/nazoauth" ]]; then
+  echo "Instrumented server binary was not found at $BIN_DIR/nazoauth." >&2
+  exit 1
+fi
+if [[ "${#test_objects[@]}" -eq 0 ]]; then
+  echo "No instrumented test objects were found." >&2
   exit 1
 fi
 
-cov_args=(export --format=lcov --instr-profile "$COVERAGE_DIR/codecov.profdata" --ignore-filename-regex "$IGNORE_REGEX" "${objects[0]}")
-for object in "${objects[@]:1}"; do
-  cov_args+=(--object "$object")
+"$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
+  --instr-profile "$COVERAGE_DIR/server.profdata" \
+  --ignore-filename-regex "$IGNORE_REGEX" \
+  "$BIN_DIR/nazoauth" > lcov-e2e.info
+
+# Some integration tests deliberately execute the production binary as a child
+# process. Those profiles belong to the test run, not the long-lived E2E server
+# run, so export the same binary against tests.profdata as a distinct report.
+# The deterministic merger keeps the maximum counter for duplicate records.
+"$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
+  --instr-profile "$COVERAGE_DIR/tests.profdata" \
+  --ignore-filename-regex "$IGNORE_REGEX" \
+  "$BIN_DIR/nazoauth" > lcov-process-tests.info
+
+test_reports=()
+test_report_index=0
+for object in "${test_objects[@]}"; do
+  test_report="$COVERAGE_DIR/test-object-${test_report_index}.lcov"
+  "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
+    --instr-profile "$COVERAGE_DIR/tests.profdata" \
+    --ignore-filename-regex "$IGNORE_REGEX" \
+    "$object" > "$test_report"
+  test_reports+=("$test_report")
+  test_report_index=$((test_report_index + 1))
 done
-"$LLVM_TOOLS_DIR/llvm-cov" "${cov_args[@]}" > lcov.info
+"$PYTHON_BIN" scripts/merge_lcov.py \
+  --source-root "$PWD" \
+  --output lcov.info \
+  lcov-workspace-tests.info lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"

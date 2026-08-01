@@ -102,7 +102,8 @@ pub use claims::{
 pub use client::{ClientProfile, validate_token_request_profile};
 pub use client_assertion::{
     CLIENT_ASSERTION_MAX_TTL_SECONDS, CLIENT_ASSERTION_TYPE_JWT_BEARER,
-    ClientAssertionValidationError, ClientAssertionVerificationInput, ValidatedClientAssertion,
+    ClientAssertionValidationError, ClientAssertionVerificationInput,
+    SUPPORTED_CLIENT_JWT_SIGNING_ALGS, ValidatedClientAssertion,
     unverified_client_assertion_client_id, verify_private_key_jwt,
 };
 pub use client_authentication::{
@@ -118,7 +119,8 @@ pub use client_jwe_policy::{
     RSA_PUBLIC_KEY_MAX_BITS, RSA_PUBLIC_KEY_MIN_BITS, rsa_public_key_components_are_safe,
 };
 pub use client_registration::{
-    ApprovedClient, ClientPresentationMetadata, OAuthClient, ValidatedClientRegistration,
+    ApprovedClient, ClientAssuranceLevel, ClientPresentationMetadata, ClientSecurityPolicy,
+    OAuthClient, ValidatedClientRegistration,
 };
 pub use device::{
     ApprovedDeviceAuthorization, DeviceAtomicResult, DeviceAuthorizationApproval,

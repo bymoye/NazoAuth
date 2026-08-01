@@ -14,8 +14,6 @@ mod jwk;
 mod presentation;
 mod service;
 pub use dpop::{DpopProofVerifier, DpopProofVerifierConfig, DpopProofVerifierError};
-#[cfg(test)]
-use dpop::{access_token_hash, dpop_jwk_thumbprint};
 use presentation::{
     PresentedAccessTokenScheme, http_authorization_headers, http_dpop_headers,
     presented_authorization_token, query_has_access_token, single_dpop_header,
@@ -420,5 +418,5 @@ fn scope_values(value: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[path = "../tests/source_mounted/resource_server.rs"]
+#[path = "../tests/unit/lib.rs"]
 mod tests;

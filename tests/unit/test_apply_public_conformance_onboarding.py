@@ -23,6 +23,74 @@ def load_module():
 
 
 class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
+    def test_credentials_are_read_from_a_bounded_fd_without_environment_fallback(self):
+        module = load_module()
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(
+                write_fd,
+                json.dumps(
+                    {
+                        "applicant_email": "applicant@example.com",
+                        "applicant_password": "applicant-password",
+                        "admin_email": "admin@example.com",
+                        "admin_password": "admin-password",
+                    }
+                ).encode("utf-8"),
+            )
+        finally:
+            os.close(write_fd)
+        try:
+            credentials = module.read_operator_credentials(
+                SimpleNamespace(credentials_stdin=False, credentials_fd=read_fd)
+            )
+        finally:
+            os.close(read_fd)
+
+        self.assertEqual(credentials["admin_email"], "admin@example.com")
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "scripts"
+            / "apply_public_conformance_onboarding.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn('os.environ.get("OIDF_APPLICANT_PASSWORD"', source)
+        self.assertNotIn('os.environ.get("OIDF_ADMIN_PASSWORD"', source)
+
+    def test_credentials_reject_duplicate_or_unknown_fields(self):
+        module = load_module()
+        for payload in (
+            (
+                b'{"applicant_email":"a","applicant_email":"b",'
+                b'"applicant_password":"p","admin_email":"c","admin_password":"q"}'
+            ),
+            (
+                b'{"applicant_email":"a","applicant_password":"p",'
+                b'"admin_email":"c","admin_password":"q","extra":"x"}'
+            ),
+        ):
+            read_fd, write_fd = os.pipe()
+            try:
+                os.write(write_fd, payload)
+            finally:
+                os.close(write_fd)
+            try:
+                with self.assertRaises(module.OnboardingError):
+                    module.read_operator_credentials(
+                        SimpleNamespace(credentials_stdin=False, credentials_fd=read_fd)
+                    )
+            finally:
+                os.close(read_fd)
+
+    def test_empty_trust_bundle_is_allowed_without_a_requested_anchor(self):
+        module = load_module()
+
+        self.assertEqual(module.validate_trust_bundle(b"", required=False), "")
+        with self.assertRaisesRegex(
+            module.OnboardingError,
+            "approved mTLS trust bundle contains no certificate",
+        ):
+            module.validate_trust_bundle(b"", required=True)
+
     def test_login_retries_transport_failure_but_not_http_failure(self):
         module = load_module()
 
@@ -177,14 +245,15 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.dict(
-                    os.environ,
-                    {
-                        "OIDF_APPLICANT_PASSWORD": "applicant-password",
-                        "OIDF_ADMIN_EMAIL": "admin@example.com",
-                        "OIDF_ADMIN_PASSWORD": "admin-password",
+                mock.patch.object(
+                    module,
+                    "read_operator_credentials",
+                    return_value={
+                        "applicant_email": "applicant@example.com",
+                        "applicant_password": "applicant-password",
+                        "admin_email": "admin@example.com",
+                        "admin_password": "admin-password",
                     },
-                    clear=True,
                 ),
                 mock.patch.object(
                     module.ControlPlaneSession,
@@ -248,15 +317,15 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                 delivered_client_material=Path(directory) / "delivered.json",
             )
             with (
-                mock.patch.dict(
-                    os.environ,
-                    {
-                        "OIDF_APPLICANT_EMAIL": "applicant@example.com",
-                        "OIDF_APPLICANT_PASSWORD": "applicant-password",
-                        "OIDF_ADMIN_EMAIL": "admin@example.com",
-                        "OIDF_ADMIN_PASSWORD": "admin-password",
+                mock.patch.object(
+                    module,
+                    "read_operator_credentials",
+                    return_value={
+                        "applicant_email": "applicant@example.com",
+                        "applicant_password": "applicant-password",
+                        "admin_email": "admin@example.com",
+                        "admin_password": "admin-password",
                     },
-                    clear=True,
                 ),
                 mock.patch.object(
                     module.ControlPlaneSession,
@@ -294,15 +363,15 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                 delivered_client_material=Path(directory) / "delivered.json",
             )
             with (
-                mock.patch.dict(
-                    os.environ,
-                    {
-                        "OIDF_APPLICANT_EMAIL": "applicant@example.com",
-                        "OIDF_APPLICANT_PASSWORD": "applicant-password",
-                        "OIDF_ADMIN_EMAIL": "admin@example.com",
-                        "OIDF_ADMIN_PASSWORD": "admin-password",
+                mock.patch.object(
+                    module,
+                    "read_operator_credentials",
+                    return_value={
+                        "applicant_email": "applicant@example.com",
+                        "applicant_password": "applicant-password",
+                        "admin_email": "admin@example.com",
+                        "admin_password": "admin-password",
                     },
-                    clear=True,
                 ),
                 mock.patch.object(
                     module.ControlPlaneSession,

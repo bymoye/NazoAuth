@@ -131,8 +131,10 @@ Prerequisites:
 Start the backend with the documented minimal configuration:
 
 ```sh
-cp .env.example .env.yaml
-cargo run --bin nazo-oauth-server
+cargo run --bin nazoauth -- server
+# Review the generated .env.yaml, then:
+cargo run --bin nazoauth -- migrate
+cargo run --bin nazoauth -- server
 curl -fsS http://127.0.0.1:8000/health
 ```
 

@@ -5,15 +5,9 @@ use crate::adapters::audit::audit_event;
 use crate::adapters::audit::audit_fields;
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::random_urlsafe_token;
-#[cfg(test)]
-use crate::domain::TestInfrastructure;
+use crate::domain::client_jwe::{JwePayloadKind, client_jwe_key, encrypt_compact_jwe};
 use crate::domain::oidc_claims::oidc_id_token_user_claims;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
@@ -24,14 +18,12 @@ use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::HeaderValue;
 use chrono::{Duration, Utc};
-#[cfg(test)]
-use nazo_auth::OidcClaimRequest;
+
 use nazo_auth::normalize_authorization_details;
-#[cfg(test)]
-use nazo_http_actix::OAuthJsonErrorFields;
+
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 use nazo_http_actix::{json_response_no_store, oauth_token_error};
-use nazo_key_management::signing_algorithm_name;
+use nazo_key_management::{signing_algorithm_from_name, signing_algorithm_name};
 use serde_json::{Value, json};
 use uuid::Uuid;
 // 统一 access_token、refresh_token 和 id_token 的响应形状。
@@ -228,14 +220,20 @@ fn id_token_session_sid<'a>(
 }
 
 fn id_token_signing_alg_for_client(client: &ClientRow) -> jsonwebtoken::Algorithm {
-    if client.require_dpop_bound_tokens
-        || client.require_mtls_bound_tokens
-        || client.require_par_request_object
-    {
-        jsonwebtoken::Algorithm::PS256
-    } else {
-        jsonwebtoken::Algorithm::RS256
-    }
+    client
+        .id_token_signed_response_alg
+        .as_deref()
+        .and_then(signing_algorithm_from_name)
+        .unwrap_or_else(|| {
+            if client.require_dpop_bound_tokens
+                || client.require_mtls_bound_tokens
+                || client.require_par_request_object
+            {
+                jsonwebtoken::Algorithm::PS256
+            } else {
+                jsonwebtoken::Algorithm::RS256
+            }
+        })
 }
 
 async fn persist_access_token_subject_mapping(
@@ -495,7 +493,7 @@ pub(crate) async fn issue_token_response_with_service(
                 claims.insert("ds_hash".to_owned(), json!(native_sso.ds_hash));
             }
         }
-        let id_token = match token_service
+        let signed_id_token = match token_service
             .sign_id_token(nazo_auth::IdTokenSignInput {
                 issuer: &context.config.issuer,
                 subject: &issue.subject,
@@ -528,6 +526,38 @@ pub(crate) async fn issue_token_response_with_service(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "server_error",
                     "id_token 签发失败.",
+                    false,
+                );
+            }
+        };
+        let id_token = match client_jwe_key(
+            client.jwks.as_ref(),
+            client.id_token_encrypted_response_alg.as_deref(),
+            client.id_token_encrypted_response_enc.as_deref(),
+            "id_token",
+        )
+        .and_then(|key| {
+            key.map_or_else(
+                || Ok(signed_id_token.clone()),
+                |key| {
+                    encrypt_compact_jwe(&key, signed_id_token.as_bytes(), JwePayloadKind::NestedJwt)
+                },
+            )
+        }) {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!(%error, "failed to encrypt id_token");
+                mark_failed_authorization_code_if_needed(
+                    token_service,
+                    issue.authorization_code_hash.as_deref(),
+                    "id_token_encryption_failed",
+                    auth_code_ttl_seconds,
+                )
+                .await;
+                return oauth_token_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "id_token 加密失败.",
                     false,
                 );
             }
@@ -752,44 +782,9 @@ pub(crate) async fn issue_token_response_with_service(
 }
 
 #[cfg(test)]
-pub(crate) fn test_authorization_service(
-    state: &TestInfrastructure,
-) -> crate::http::authorization::ServerAuthorizationService {
-    let connection = state.valkey_connection();
-    crate::http::authorization::ServerAuthorizationService::new(
-        nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
-        state.keyset.clone(),
-    )
-}
+#[path = "../../../tests/support/http/token/issue.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
-pub(crate) async fn issue_token_response(
-    state: &TestInfrastructure,
-    client: &ClientRow,
-    issue: TokenIssue,
-) -> HttpResponse {
-    let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
-        state.keyset.clone(),
-    );
-    let config = TokenIssuanceConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
-    let authorization = test_authorization_service(state);
-    issue_token_response_with_service(
-        &TokenIssuanceContext {
-            config: &config,
-            modules: &modules,
-            authorization: &authorization,
-        },
-        &service,
-        client,
-        issue,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/issue.rs"]
+#[path = "../../../tests/unit/http/token/issue.rs"]
 mod tests;

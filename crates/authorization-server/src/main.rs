@@ -1,4 +1,6 @@
+#![forbid(unsafe_code)]
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    nazo_oauth_server::bootstrap::run().await
+    nazo_oauth_server::cli::run(std::env::args()).await
 }

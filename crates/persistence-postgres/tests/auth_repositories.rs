@@ -918,11 +918,9 @@ fn server_auth_callers_do_not_query_diesel_or_auth_tables() {
             );
         }
     }
-    let schema = std::fs::read_to_string(server.join("schema.rs")).expect("server schema reads");
-    assert_eq!(
-        schema.matches("diesel::table!").count(),
-        0,
-        "server production schema must not define persistence tables"
+    assert!(
+        !server.join("schema.rs").exists(),
+        "server production source must not contain a test-only Diesel schema"
     );
 }
 

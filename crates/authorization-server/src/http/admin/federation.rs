@@ -79,5 +79,5 @@ fn admin_provider_view(provider: &crate::settings::ExternalLoginProvider) -> Val
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/admin/tests/federation.rs"]
+#[path = "../../../tests/unit/http/admin/federation.rs"]
 mod tests;

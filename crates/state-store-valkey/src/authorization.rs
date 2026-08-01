@@ -187,29 +187,7 @@ impl AuthorizationStore {
             vec![consuming_at.to_rfc3339_opts(SecondsFormat::Millis, true)],
         )
         .await?;
-        if let Some(raw) = reply.strip_prefix("consuming|") {
-            return serde_json::from_str(raw)
-                .map(AuthorizationCodeBegin::Consuming)
-                .map_err(|error| {
-                    Error::corrupt_data(format!("malformed consuming authorization code: {error}"))
-                });
-        }
-        if let Some(raw) = reply.strip_prefix("consumed|") {
-            return serde_json::from_str(raw)
-                .map(AuthorizationCodeBegin::Consumed)
-                .map_err(|error| {
-                    Error::corrupt_data(format!("malformed consumed authorization code: {error}"))
-                });
-        }
-        match reply.as_str() {
-            "busy" => Ok(AuthorizationCodeBegin::Busy),
-            "failed" => Ok(AuthorizationCodeBegin::Failed),
-            "missing" => Ok(AuthorizationCodeBegin::Missing),
-            "malformed" => Ok(AuthorizationCodeBegin::Malformed),
-            other => Err(Error::unexpected(format!(
-                "unexpected authorization-code begin reply {other:?}"
-            ))),
-        }
+        parse_authorization_code_begin_reply(&reply)
     }
 
     pub async fn mark_authorization_code(
@@ -323,3 +301,33 @@ impl AuthorizationStore {
             .map(|outcome| matches!(outcome, command::CompareDelete::Deleted))
     }
 }
+
+fn parse_authorization_code_begin_reply(reply: &str) -> Result<AuthorizationCodeBegin, Error> {
+    if let Some(raw) = reply.strip_prefix("consuming|") {
+        return serde_json::from_str(raw)
+            .map(AuthorizationCodeBegin::Consuming)
+            .map_err(|error| {
+                Error::corrupt_data(format!("malformed consuming authorization code: {error}"))
+            });
+    }
+    if let Some(raw) = reply.strip_prefix("consumed|") {
+        return serde_json::from_str(raw)
+            .map(AuthorizationCodeBegin::Consumed)
+            .map_err(|error| {
+                Error::corrupt_data(format!("malformed consumed authorization code: {error}"))
+            });
+    }
+    match reply {
+        "busy" => Ok(AuthorizationCodeBegin::Busy),
+        "failed" => Ok(AuthorizationCodeBegin::Failed),
+        "missing" => Ok(AuthorizationCodeBegin::Missing),
+        "malformed" => Ok(AuthorizationCodeBegin::Malformed),
+        other => Err(Error::unexpected(format!(
+            "unexpected authorization-code begin reply {other:?}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/authorization.rs"]
+mod tests;

@@ -8,11 +8,11 @@ use nazo_http_actix::{
 };
 use nazo_postgres::{DbPool, RuntimeModuleRepository};
 use nazo_runtime_modules::{
-    ActiveModuleSnapshot, CasOutcome, CatalogDurations, DesiredMode, DesiredStateUpdate,
-    DesiredStateUpdateOutcome, ModuleCatalog, ModuleEventPage, ModuleId, ModuleLifecycle,
-    ModuleRevision, ModuleState, ModuleStateRepository, ReconcileOutcome, RegistryError,
-    RuntimeModuleManagement, RuntimeModuleManagementError, RuntimeModuleRegistry,
-    RuntimeModuleView,
+    ActiveModuleSnapshot, CasOutcome, CatalogDurations, DesiredMode, DesiredStateChange,
+    DesiredStateRecord, DesiredStateUpdate, DesiredStateUpdateOutcome, ModuleCatalog,
+    ModuleEventPage, ModuleId, ModuleLifecycle, ModuleRevision, ModuleState, ModuleStateRepository,
+    ReconcileOutcome, RegistryError, RuntimeModuleManagement, RuntimeModuleManagementError,
+    RuntimeModuleRegistry, RuntimeModuleView,
 };
 
 use crate::settings::Settings;
@@ -85,26 +85,25 @@ pub(crate) struct RuntimeModules {
 
 impl RuntimeModules {
     pub(crate) async fn initialize(pool: DbPool, settings: &Settings) -> anyhow::Result<Self> {
+        let repository = Arc::new(RuntimeModuleRepository::new(pool));
+        let migration = repository
+            .migrate_composable_default_policy(&legacy_inherited_enabled(settings))
+            .await?;
+        tracing::info!(
+            previous_version = migration.previous_version,
+            current_version = migration.current_version,
+            materialized_inherited_rows = migration.materialized_inherited_rows,
+            initialized_empty_state = migration.initialized_empty_state,
+            "runtime module default policy is ready"
+        );
         let inherited_enabled = inherited_enabled(settings);
         let catalog = module_catalog(settings, inherited_enabled.clone())?;
-        let repository = Arc::new(RuntimeModuleRepository::new(pool));
         let lifecycle = Arc::new(ServerModuleLifecycle {
             repository: repository.clone(),
         });
         let instance_id = runtime_instance_id()?;
-        let seed_registry = Arc::new(RuntimeModuleRegistry::new(
-            repository.clone(),
-            lifecycle.clone(),
-            catalog.clone(),
-            instance_id.clone(),
-            ActiveModuleSnapshot {
-                revision: ModuleRevision::new(0),
-                accepting: inherited_enabled,
-                draining: BTreeSet::new(),
-            },
-        ));
         let (accepting, draining) =
-            seed_desired_states(&repository, &seed_registry, &catalog, &instance_id).await?;
+            seed_desired_states(&repository, &catalog, &instance_id).await?;
         let registry = Arc::new(RuntimeModuleRegistry::new(
             repository.clone(),
             lifecycle,
@@ -261,59 +260,45 @@ fn module_catalog(
             [ModuleId::AuthorizationDetails, ModuleId::RequestObjects],
         )?
         .with_dependencies(ModuleId::Openid4vpVerifier, [ModuleId::RequestObjects])?
+        .with_dependencies(ModuleId::NativeSso, [ModuleId::TokenExchange])?
         .with_runtime_disable_blocked(runtime_disable_blocked);
     Ok(catalog)
 }
 
-#[cfg(test)]
-pub(crate) fn runtime_module_registry_for_test(
-    pool: DbPool,
-    settings: &Settings,
-) -> anyhow::Result<Arc<ServerRuntimeModuleRegistry>> {
-    let inherited_enabled = inherited_enabled(settings);
-    let catalog = module_catalog(settings, inherited_enabled.clone())?;
-    let repository = Arc::new(RuntimeModuleRepository::new(pool));
-    let lifecycle = Arc::new(ServerModuleLifecycle {
-        repository: repository.clone(),
-    });
-    Ok(Arc::new(RuntimeModuleRegistry::new(
-        repository,
-        lifecycle,
-        catalog,
-        "token-test".to_owned(),
-        ActiveModuleSnapshot {
-            revision: ModuleRevision::new(0),
-            accepting: inherited_enabled,
-            draining: BTreeSet::new(),
-        },
-    )))
-}
-
 async fn seed_desired_states(
     repository: &RuntimeModuleRepository,
-    registry: &ServerRuntimeModuleRegistry,
     catalog: &ModuleCatalog,
     instance_id: &str,
 ) -> anyhow::Result<(BTreeSet<ModuleId>, BTreeSet<ModuleId>)> {
-    let mut accepting = BTreeSet::new();
-    let mut draining = BTreeSet::new();
+    // Bootstrap every record before applying dependency policy. The runtime
+    // administration path assumes that the complete closed catalog already
+    // exists, so using it to insert records one at a time makes first startup
+    // depend on enum order. CAS keeps concurrent first starts idempotent.
     for module_id in ModuleId::ALL {
         if repository.read_desired(module_id).await?.is_none() {
-            match registry
-                .set_desired_mode(
-                    module_id,
-                    DesiredMode::Inherit,
-                    None,
-                    None,
-                    Some("initial configuration inheritance".to_owned()),
-                    SystemTime::now(),
-                )
+            match repository
+                .compare_and_set_desired(DesiredStateChange {
+                    expected_revision: None,
+                    next: DesiredStateRecord {
+                        module_id,
+                        mode: DesiredMode::Inherit,
+                        revision: ModuleRevision::new(1),
+                        actor_id: None,
+                        reason: Some("initial configuration inheritance".to_owned()),
+                        updated_at: SystemTime::now(),
+                    },
+                })
                 .await
                 .map_err(|error| anyhow::anyhow!("runtime desired-state seed failed: {error:?}"))?
             {
                 CasOutcome::Applied(_) | CasOutcome::Stale { .. } => {}
             }
         }
+    }
+
+    let mut accepting = BTreeSet::new();
+    let mut draining = BTreeSet::new();
+    for module_id in ModuleId::ALL {
         let desired = repository
             .read_desired(module_id)
             .await?
@@ -344,6 +329,53 @@ async fn seed_desired_states(
 }
 
 pub(crate) fn inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
+    let modules = &settings.modules;
+    let mut enabled = BTreeSet::from([
+        ModuleId::DeviceAuthorization,
+        ModuleId::TokenExchange,
+        ModuleId::JwtBearerGrant,
+        ModuleId::Ciba,
+        ModuleId::RequestObjects,
+        ModuleId::Jarm,
+        ModuleId::Scim,
+        ModuleId::FrontchannelLogout,
+        ModuleId::SessionManagement,
+    ]);
+    let prerequisite_ready = [
+        (
+            ModuleId::DynamicClientRegistration,
+            modules
+                .dynamic_client_registration_initial_access_token
+                .is_some(),
+        ),
+        (
+            ModuleId::AuthorizationDetails,
+            modules.enable_authorization_details,
+        ),
+        (
+            ModuleId::HttpMessageSignatures,
+            modules.enable_fapi_http_signatures,
+        ),
+        (
+            ModuleId::ScimSecurityEvents,
+            modules.enable_scim_security_events,
+        ),
+        (ModuleId::Openid4vciIssuer, modules.enable_openid4vci_issuer),
+        (
+            ModuleId::Openid4vpVerifier,
+            modules.enable_openid4vp_verifier,
+        ),
+        (ModuleId::NativeSso, modules.enable_native_sso),
+    ];
+    enabled.extend(
+        prerequisite_ready
+            .into_iter()
+            .filter_map(|(module_id, ready)| ready.then_some(module_id)),
+    );
+    enabled
+}
+
+fn legacy_inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
     let settings = &settings.modules;
     let mut enabled = BTreeSet::from([
         ModuleId::TokenExchange,
@@ -420,52 +452,9 @@ fn runtime_instance_id() -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::ConfigSource;
+#[path = "../tests/support/runtime_modules.rs"]
+pub(crate) mod test_support;
 
-    #[test]
-    fn instance_id_is_nonempty_and_storage_bounded() {
-        let instance_id = runtime_instance_id().expect("default runtime instance id is valid");
-        assert!(!instance_id.trim().is_empty());
-        assert!(instance_id.len() <= 255);
-    }
-
-    #[test]
-    fn par_request_objects_enable_the_shared_request_object_capability() {
-        let mut settings =
-            Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-        settings.modules.enable_request_object = false;
-        settings.modules.enable_par_request_object = true;
-
-        assert!(inherited_enabled(&settings).contains(&ModuleId::RequestObjects));
-    }
-
-    #[test]
-    fn scim_security_events_are_default_closed_and_depend_on_scim() {
-        let mut settings =
-            Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-        assert!(!inherited_enabled(&settings).contains(&ModuleId::ScimSecurityEvents));
-
-        settings.modules.enable_scim_security_events = true;
-        let inherited = inherited_enabled(&settings);
-        assert!(inherited.contains(&ModuleId::ScimSecurityEvents));
-        let catalog = module_catalog(&settings, inherited).unwrap();
-        assert_eq!(
-            catalog
-                .spec(ModuleId::ScimSecurityEvents)
-                .unwrap()
-                .dependencies,
-            BTreeSet::from([ModuleId::Scim])
-        );
-        assert_eq!(
-            catalog
-                .spec(ModuleId::ScimSecurityEvents)
-                .unwrap()
-                .disable_policy,
-            nazo_runtime_modules::DisablePolicy::DrainStoredTransactions {
-                max_duration: Duration::from_secs(604_800)
-            }
-        );
-    }
-}
+#[cfg(test)]
+#[path = "../tests/unit/runtime_modules.rs"]
+mod tests;

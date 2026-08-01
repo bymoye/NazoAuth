@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import urllib.parse
+import uuid
 
 
 VCI_STANDARD = "oid4vci-1_0-issuer-test-plan"
@@ -22,8 +23,22 @@ OFFICIAL_VCI_PRIVATE_KEY_CLIENT_ID = "nazo-openid4vc-oidf-private-key-jwt"
 OFFICIAL_VCI_ATTESTED_CLIENT_ID = "nazo-openid4vc-oidf-client-attestation"
 VCI_UNSUPPORTED_ENCRYPTION_MODULE = "oid4vci-1_0-issuer-fail-unsupported-encryption-algorithm"
 VCI_MULTIPLE_CLIENTS_MODULE = "oid4vci-1_0-issuer-happy-flow-multiple-clients"
-VCI_PREAUTH_REPLAY_BLOCK = "Second client: Verify token endpoint response"
-VCI_PREAUTH_REPLAY_CONDITION = "CheckTokenEndpointHttpStatus200"
+VCI_PREAUTHORIZED_APPLICABLE_MODULES = (
+    "oid4vci-1_0-issuer-metadata-test",
+    "oid4vci-1_0-issuer-metadata-test-signed",
+    "oid4vci-1_0-issuer-happy-flow",
+    "oid4vci-1_0-issuer-happy-flow-additional-requests",
+    "oid4vci-1_0-issuer-happy-flow-skip-notification",
+    "oid4vci-1_0-issuer-batch-issuance",
+    "oid4vci-1_0-issuer-fail-invalid-nonce",
+    "oid4vci-1_0-issuer-fail-invalid-jwt-proof-signature",
+    "oid4vci-1_0-issuer-fail-invalid-key-attestation-signature",
+    "oid4vci-1_0-issuer-fail-missing-proof",
+    VCI_UNSUPPORTED_ENCRYPTION_MODULE,
+    "oid4vci-1_0-issuer-fail-unknown-credential-configuration",
+    "oid4vci-1_0-issuer-fail-unknown-credential-identifier",
+    "oid4vci-1_0-issuer-fail-on-access-token-in-query",
+)
 P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
 P256_A = -3
 P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
@@ -93,6 +108,23 @@ def vci_client_ids(onboarding_profile: str, run_namespace: str | None) -> dict[s
     }
 
 
+def bind_subject_id(
+    issuer_settings: dict[str, object],
+    onboarding_profile: str,
+    subject_id: str | None,
+) -> None:
+    if subject_id:
+        try:
+            issuer_settings["subject_id"] = str(uuid.UUID(subject_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise SystemExit("--subject-id must be a UUID") from error
+    elif onboarding_profile == "operator-black-box":
+        raise SystemExit(
+            "operator-black-box OpenID4VC material requires --subject-id "
+            "for the current dedicated conformance user"
+        )
+
+
 def matrix_cases() -> list[tuple[str, str, dict[str, str]]]:
     return [
         (VCI_STANDARD, "vci-sd-wallet-plain", {"fapi_profile":"vci","client_auth_type":"private_key_jwt","sender_constrain":"dpop","fapi_request_method":"unsigned","authorization_request_type":"simple","openid":"plain_oauth","fapi_response_mode":"plain_response","vci_grant_type":"authorization_code","vci_authorization_code_flow_variant":"wallet_initiated","credential_format":"sd_jwt_vc","vci_credential_encryption":"plain"}),
@@ -116,7 +148,15 @@ def matrix_cases() -> list[tuple[str, str, dict[str, str]]]:
 
 
 def plan_expression(plan: str, variants: dict[str, str], filename: str) -> str:
-    return plan + "".join(f"[{name}={value}]" for name, value in variants.items()) + f" {filename}"
+    expression = plan + "".join(
+        f"[{name}={value}]" for name, value in variants.items()
+    )
+    if plan == VCI_STANDARD and variants.get("vci_grant_type") == "pre_authorization_code":
+        # The pinned official multiple-client module starts its second client
+        # without requesting another Credential Offer. Select every applicable
+        # module explicitly so it cannot reuse a single-use pre-authorized code.
+        expression += ":" + ",".join(VCI_PREAUTHORIZED_APPLICABLE_MODULES)
+    return f"{expression} {filename}"
 
 
 def expected_skips_for_cases(cases: list[tuple[str, str, dict[str, str]]]) -> list[dict[str, object]]:
@@ -151,20 +191,7 @@ def full_vci_variant(plan: str, variants: dict[str, str]) -> dict[str, str]:
 
 
 def expected_problems_for_cases(cases: list[tuple[str, str, dict[str, str]]]) -> list[dict[str, object]]:
-    pre_authorized_code_replay = [
-        {
-            "expected-result": "failure",
-            "test-name": VCI_MULTIPLE_CLIENTS_MODULE,
-            "variant": dict(variants),
-            "configuration-filename": f"openid4vc-{slug}.json",
-            "current-block": VCI_PREAUTH_REPLAY_BLOCK,
-            "condition": VCI_PREAUTH_REPLAY_CONDITION,
-        }
-        for plan, slug, variants in cases
-        if plan == VCI_STANDARD
-        and variants.get("vci_grant_type") == "pre_authorization_code"
-    ]
-    return pre_authorized_code_replay
+    return []
 
 
 def b64url_decode(value: str) -> bytes:
@@ -290,6 +317,7 @@ def main() -> int:
         required=True,
     )
     parser.add_argument("--run-namespace")
+    parser.add_argument("--subject-id")
     args = parser.parse_args()
     base = json.loads(Path(args.base_config_json_file).read_text(encoding="utf-8"))
     if args.onboarding_profile == "official":
@@ -338,6 +366,7 @@ def main() -> int:
         raise SystemExit(
             "driver issuer must explicitly mark its subject as a dedicated conformance identity"
         )
+    bind_subject_id(issuer_settings, args.onboarding_profile, args.subject_id)
     issuer_settings["credential_datasets"] = {
         configuration_ids[format_name]: copy.deepcopy(dataset)
         for format_name, dataset in credential_datasets.items()
@@ -453,6 +482,7 @@ def main() -> int:
             config["nazo"] = {
                 "openid4vc_role": "issuer",
                 "client_auth_type": client_auth_type,
+                "credential_format": format_name,
                 "credential_dataset": copy.deepcopy(
                     credential_datasets[format_name]
                 ),

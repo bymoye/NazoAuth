@@ -361,6 +361,48 @@ def derive_fapi_ciba_matrix_configs(
         nazo["sender_constrain"] = "mtls"
 
 
+def bind_ciba_automated_decision_token(
+    rendered: dict[str, Any], decision_token: str
+) -> None:
+    token_alphabet = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+    if (
+        not 32 <= len(decision_token) <= 1024
+        or decision_token.strip() != decision_token
+        or not set(decision_token).issubset(token_alphabet)
+    ):
+        raise SystemExit(
+            "CIBA automated decision token must contain 32 through 1024 URL-safe bytes"
+        )
+    configs = rendered.get("configs")
+    if not isinstance(configs, dict):
+        raise SystemExit("OIDF config root must contain a configs object")
+    replaced = 0
+    marker = "decision_token="
+    for config in configs.values():
+        if not isinstance(config, dict):
+            continue
+        value = config.get("automated_ciba_approval_url")
+        if not isinstance(value, str):
+            continue
+        prefix, separator, remainder = value.partition(marker)
+        if not separator:
+            raise SystemExit(
+                "automated_ciba_approval_url must contain a decision_token parameter"
+            )
+        _, suffix_separator, suffix = remainder.partition("&")
+        config["automated_ciba_approval_url"] = (
+            prefix
+            + marker
+            + decision_token
+            + (suffix_separator + suffix if suffix_separator else "")
+        )
+        replaced += 1
+    if replaced == 0:
+        raise SystemExit("OIDF config contains no CIBA automated approval URL")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--template", required=True, type=Path)
@@ -393,6 +435,11 @@ def main() -> int:
         help="environment variable containing the RFC 7591 initial access token",
     )
     parser.add_argument(
+        "--dynamic-registration-token-file",
+        type=Path,
+        help="file containing the RFC 7591 initial access token",
+    )
+    parser.add_argument(
         "--derive-fapi-ciba-matrix-configs",
         action="store_true",
         help="derive the four orthogonal FAPI-CIBA static-client configurations",
@@ -410,6 +457,11 @@ def main() -> int:
             "issuer in all generated config URLs"
         ),
     )
+    parser.add_argument(
+        "--ciba-automated-decision-token-file",
+        type=Path,
+        help="root-managed file containing the current deployment CIBA decision token",
+    )
     args = parser.parse_args()
 
     template = read_json(args.template)
@@ -423,14 +475,31 @@ def main() -> int:
         raise SystemExit("OIDF rendered config must be a JSON object")
     derive_logout_oidcc_configs(rendered)
     if args.derive_dynamic_oidcc_config:
-        initial_access_token = os.environ.get(args.dynamic_registration_token_env, "")
+        initial_access_token = (
+            args.dynamic_registration_token_file.read_text(encoding="utf-8")
+            if args.dynamic_registration_token_file is not None
+            else os.environ.get(args.dynamic_registration_token_env, "")
+        )
         if not initial_access_token:
-            raise SystemExit(f"{args.dynamic_registration_token_env} is required")
+            raise SystemExit("dynamic registration initial access token is required")
+        if (
+            not 32 <= len(initial_access_token) <= 4096
+            or initial_access_token.strip() != initial_access_token
+            or not all("!" <= character <= "~" for character in initial_access_token)
+        ):
+            raise SystemExit(
+                "dynamic registration initial access token must contain 32 through 4096 visible ASCII bytes"
+            )
         derive_dynamic_oidcc_config(rendered, initial_access_token)
     if args.derive_fapi_ciba_matrix_configs:
         if not isinstance(rendered, dict):
             raise SystemExit("OIDF rendered config must be a JSON object")
         derive_fapi_ciba_matrix_configs(rendered, args.ciba_notification_base_url)
+    if args.ciba_automated_decision_token_file is not None:
+        decision_token = args.ciba_automated_decision_token_file.read_text(
+            encoding="utf-8"
+        )
+        bind_ciba_automated_decision_token(rendered, decision_token)
     if args.mtls_material_file is not None:
         if not isinstance(rendered, dict):
             raise SystemExit("OIDF rendered config must be a JSON object")

@@ -3,8 +3,6 @@ use nazo_http_actix::oauth_token_error;
 
 use super::{ServerTokenService, TokenForm};
 use crate::adapters::security::ValidatedClientAssertion;
-#[cfg(test)]
-use crate::adapters::security::blake3_hex;
 use crate::adapters::security::random_urlsafe_token;
 use crate::domain::client_policy::is_subset;
 use crate::domain::client_policy::parse_scope;
@@ -59,14 +57,6 @@ pub(crate) fn native_sso_client_authorized(client: &ClientRow) -> bool {
 
 pub(crate) fn native_sso_device_secret_hash(device_secret: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(device_secret.as_bytes()))
-}
-
-#[cfg(test)]
-pub(crate) fn native_sso_device_secret_key(device_secret: &str) -> String {
-    format!(
-        "oauth:native_sso:device_secret:{}",
-        blake3_hex(device_secret)
-    )
 }
 
 pub(crate) fn native_sso_profile_requested(form: &TokenForm) -> bool {
@@ -444,5 +434,5 @@ pub(crate) async fn token_native_sso_exchange(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/native_sso.rs"]
+#[path = "../../../tests/unit/http/token/native_sso.rs"]
 mod tests;

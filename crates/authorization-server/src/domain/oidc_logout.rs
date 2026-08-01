@@ -15,7 +15,6 @@ use serde_json::Value;
 
 use crate::adapters::security::jwt_decoding_key_from_jwk;
 use crate::http::sessions::SessionProfileHandles;
-#[cfg(not(test))]
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use crate::settings::Settings;
 use nazo_key_management::signing_algorithm_name;
@@ -49,14 +48,10 @@ pub(crate) struct OidcLogoutHandles {
     service: LogoutService,
     keys: KeyManager,
     config: OidcLogoutConfig,
-    #[cfg(not(test))]
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
-    #[cfg(test)]
-    frontchannel_logout_enabled: bool,
 }
 
 impl OidcLogoutHandles {
-    #[cfg(not(test))]
     pub(crate) fn new(
         sessions: SessionProfileHandles,
         clients: OAuthClientRepository,
@@ -84,50 +79,16 @@ impl OidcLogoutHandles {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn new(
-        sessions: SessionProfileHandles,
-        clients: OAuthClientRepository,
-        deliveries: AuditRepository,
-        keys: KeyManager,
-        config: OidcLogoutConfig,
-        frontchannel_logout_enabled: bool,
-    ) -> Self {
-        let service = LogoutService::new(
-            Arc::new(clients.clone()),
-            Arc::new(deliveries.clone()),
-            Arc::new(ServerLogoutTokenSigner {
-                keys: keys.clone(),
-                issuer: config.issuer.clone(),
-            }),
-            config.issuer.clone(),
-            config.pairwise_subject_secret.clone(),
-        );
-        Self {
-            sessions,
-            service,
-            keys,
-            config,
-            frontchannel_logout_enabled,
-        }
-    }
-
     pub(crate) fn issuer(&self) -> &str {
         &self.config.issuer
     }
 
-    #[cfg(not(test))]
     pub(crate) fn permits_existing_frontchannel_transaction(&self) -> bool {
         nazo_auth::module_admissible(
             &self.runtime_modules.snapshot(),
             nazo_runtime_modules::ModuleId::FrontchannelLogout,
             nazo_auth::CapabilityAdmission::ExistingTransaction,
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn permits_existing_frontchannel_transaction(&self) -> bool {
-        self.frontchannel_logout_enabled
     }
 
     fn decode_id_token_hint_with_expiry(
@@ -355,72 +316,5 @@ fn map_logout_service_error(error: LogoutServiceError) -> OidcLogoutError {
 }
 
 #[cfg(test)]
-mod orchestration_tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    use chrono::TimeZone as _;
-
-    use super::*;
-
-    fn committed_execution(operation_key: &str) -> nazo_auth::LogoutExecution {
-        nazo_auth::LogoutExecution {
-            redirect_uri: None,
-            frontchannel_logout_urls: Vec::new(),
-            operation_key: Some(operation_key.to_owned()),
-        }
-    }
-
-    #[test]
-    fn id_token_hint_expires_at_the_exact_exp_boundary() {
-        let now = Utc.timestamp_opt(2_000_000_000, 0).unwrap();
-        assert!(!id_token_hint_expired(2_000_000_001, now));
-        assert!(id_token_hint_expired(2_000_000_000, now));
-        assert!(id_token_hint_expired(1_999_999_999, now));
-    }
-
-    #[tokio::test]
-    async fn postgres_outbox_failure_never_deletes_the_valkey_session() {
-        let delete_calls = Arc::new(AtomicUsize::new(0));
-        let observed = delete_calls.clone();
-        let result = finalize_logout_execution(
-            Err(LogoutServiceError::OutboxUnavailable),
-            Some("session-cookie".to_owned()),
-            move |_| {
-                observed.fetch_add(1, Ordering::SeqCst);
-                async { Ok(()) }
-            },
-        )
-        .await;
-        assert_eq!(result, Err(OidcLogoutError::OutboxUnavailable));
-        assert_eq!(delete_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn valkey_failure_keeps_the_committed_operation_retryable() {
-        let operation_key = "same-user-and-oidc-session";
-        let first = finalize_logout_execution(
-            Ok(committed_execution(operation_key)),
-            Some("session-cookie".to_owned()),
-            |_| async { Err(()) },
-        )
-        .await;
-        assert_eq!(first, Err(OidcLogoutError::SessionDeleteUnavailable));
-
-        let second = finalize_logout_execution(
-            Ok(committed_execution(operation_key)),
-            Some("session-cookie".to_owned()),
-            |_| async { Ok(()) },
-        )
-        .await;
-        assert_eq!(
-            second,
-            Ok(OidcLogoutSuccess {
-                redirect_uri: None,
-                frontchannel_logout_urls: Vec::new(),
-            })
-        );
-    }
-}
+#[path = "../../tests/unit/domain/oidc_logout/orchestration.rs"]
+mod orchestration_tests;

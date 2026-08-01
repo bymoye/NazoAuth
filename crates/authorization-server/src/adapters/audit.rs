@@ -12,6 +12,7 @@ const SENSITIVE_FIELD_NAMES: &[&str] = &[
 ];
 
 const AUDIT_EVENT_DEFINITIONS: &[(&str, &str)] = &[
+    ("admin_user_created", "administration"),
     ("admin_user_updated", "administration"),
     ("authorization_approved", "authorization"),
     ("authorization_denied", "authorization"),
@@ -116,5 +117,5 @@ fn audit_event_name_valid(event: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/audit.rs"]
+#[path = "../../tests/unit/adapters/audit.rs"]
 mod tests;

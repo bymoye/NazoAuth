@@ -1,50 +1,9 @@
 //! OIDC 标准 claims 构造。
 //! 只从已授权 scope、显式授权的 claims 请求和本地用户事实源生成声明，不为缺失字段写入 null。
 
-#[cfg(test)]
-use crate::settings::Settings;
-#[cfg(test)]
-use chrono::Utc;
 use serde_json::{Value, json};
-#[cfg(test)]
-use uuid::Uuid;
 
 use nazo_auth::OidcClaimRequest;
-
-#[cfg(test)]
-pub(crate) fn oidc_subject(
-    pairwise_subject_secret: &[u8],
-    issuer: &str,
-    sector_identifier_host: &str,
-    user_id: Uuid,
-) -> String {
-    debug_assert!(pairwise_subject_secret.len() >= 32);
-    nazo_auth::pairwise_subject(
-        pairwise_subject_secret,
-        issuer,
-        sector_identifier_host,
-        user_id,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn compute_subject_for_client(
-    settings: &Settings,
-    user_id: Uuid,
-    client_subject_type: &str,
-    sector_identifier_host: Option<&str>,
-    redirect_uri: &str,
-) -> anyhow::Result<String> {
-    nazo_auth::oidc_subject_for_client(
-        &settings.endpoint.issuer,
-        settings.protocol.pairwise_subject_secret.as_deref(),
-        user_id,
-        client_subject_type,
-        sector_identifier_host,
-        redirect_uri,
-    )
-    .map_err(Into::into)
-}
 
 const PROFILE_CLAIMS: &[&str] = &[
     "preferred_username",
@@ -66,14 +25,6 @@ const PROFILE_CLAIMS: &[&str] = &[
 const EMAIL_CLAIMS: &[&str] = &["email", "email_verified"];
 const ADDRESS_CLAIMS: &[&str] = &["address"];
 const PHONE_CLAIMS: &[&str] = &["phone_number", "phone_number_verified"];
-
-#[cfg(test)]
-pub(crate) fn supported_user_claim(name: &str) -> bool {
-    PROFILE_CLAIMS.contains(&name)
-        || EMAIL_CLAIMS.contains(&name)
-        || ADDRESS_CLAIMS.contains(&name)
-        || PHONE_CLAIMS.contains(&name)
-}
 
 pub(crate) fn user_claims_are_covered_by_scopes(
     scopes: &[String],
@@ -425,5 +376,5 @@ pub(crate) fn oidc_id_token_user_claims(
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/oidc_claims.rs"]
+#[path = "../../tests/unit/domain/oidc_claims.rs"]
 mod tests;

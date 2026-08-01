@@ -1,19 +1,12 @@
 //! JSON view 组装函数。
 use crate::domain::ClientRow;
-#[cfg(test)]
-use crate::domain::DatabaseUserFixture;
-#[cfg(test)]
-use actix_web::http::header;
+
 use actix_web::http::header::HeaderMap;
-#[cfg(test)]
-use actix_web::http::header::HeaderValue;
-#[cfg(test)]
-use chrono::Utc;
+
 use nazo_identity::PublicAccount;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-#[cfg(test)]
-use uuid::Uuid;
+
 // 将数据库行转换为前端和管理端直接消费的 JSON 形状。
 
 pub(crate) fn auth_me_json_with_count(user: &PublicAccount, count: i64) -> Value {
@@ -94,6 +87,7 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
         .backchannel_authentication_request_signing_alg
         .clone();
     let backchannel_user_code_parameter = client.backchannel_user_code_parameter;
+    let security_policy = client.security_policy.clone();
     let mut value = json!({
         "client_id": client.client_id,
         "client_name": client.client_name,
@@ -139,6 +133,42 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
     let object = value
         .as_object_mut()
         .expect("client JSON construction always produces an object");
+    for (field, selected) in [
+        (
+            "id_token_signed_response_alg",
+            &client.id_token_signed_response_alg,
+        ),
+        (
+            "id_token_encrypted_response_alg",
+            &client.id_token_encrypted_response_alg,
+        ),
+        (
+            "id_token_encrypted_response_enc",
+            &client.id_token_encrypted_response_enc,
+        ),
+        (
+            "request_object_signing_alg",
+            &client.request_object_signing_alg,
+        ),
+        (
+            "request_object_encryption_alg",
+            &client.request_object_encryption_alg,
+        ),
+        (
+            "request_object_encryption_enc",
+            &client.request_object_encryption_enc,
+        ),
+        (
+            "token_endpoint_auth_signing_alg",
+            &client.token_endpoint_auth_signing_alg,
+        ),
+        (
+            "introspection_signed_response_alg",
+            &client.introspection_signed_response_alg,
+        ),
+    ] {
+        object.insert(field.to_owned(), json!(selected));
+    }
     object.insert(
         "backchannel_token_delivery_mode".to_owned(),
         json!(backchannel_token_delivery_mode),
@@ -155,6 +185,7 @@ pub(crate) fn client_json(client: ClientRow) -> Value {
         "backchannel_user_code_parameter".to_owned(),
         json!(backchannel_user_code_parameter),
     );
+    object.insert("security_policy".to_owned(), json!(security_policy));
     value
 }
 
@@ -190,5 +221,5 @@ pub(crate) fn append_query(base: &str, pairs: &[(&str, &str)]) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/views.rs"]
+#[path = "../../tests/unit/http/views.rs"]
 mod tests;

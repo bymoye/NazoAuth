@@ -279,5 +279,5 @@ fn aes_key_wrap(kek: &[u8], cek: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/jwe.rs"]
+#[path = "../../tests/unit/domain/client_jwe.rs"]
 mod tests;

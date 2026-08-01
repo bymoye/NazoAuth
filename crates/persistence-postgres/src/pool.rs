@@ -46,6 +46,17 @@ pub async fn get_conn(pool: &DbPool) -> anyhow::Result<DbConnection> {
     Ok(connection?)
 }
 
+/// Performs a real database round trip used by readiness probes.
+pub async fn health_check(pool: &DbPool) -> anyhow::Result<()> {
+    use diesel_async::RunQueryDsl as _;
+
+    let mut connection = get_conn(pool).await?;
+    diesel::sql_query("SELECT 1")
+        .execute(&mut connection)
+        .await?;
+    Ok(())
+}
+
 #[must_use]
 pub fn db_pool_metrics() -> DbPoolMetrics {
     DbPoolMetrics {
@@ -58,7 +69,13 @@ pub fn db_pool_metrics() -> DbPoolMetrics {
 pub async fn run_pending_migrations(database_url: &str) -> anyhow::Result<()> {
     let database_url = database_url.to_owned();
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        use diesel::RunQueryDsl as _;
+
         let mut connection = diesel::PgConnection::establish(&database_url)?;
+        // Serialize application-managed migrations across concurrent first
+        // starts. PostgreSQL releases this session lock if the process exits.
+        diesel::sql_query("SELECT pg_advisory_lock(564196923451771041)")
+            .execute(&mut connection)?;
         connection
             .run_pending_migrations(MIGRATIONS)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;

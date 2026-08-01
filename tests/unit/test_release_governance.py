@@ -24,17 +24,115 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "production Rust sources must implement standards, not OIDF plan-specific behavior",
         )
 
-    def test_runtime_container_copies_only_product_binaries(self) -> None:
+    def test_runtime_container_copies_only_the_unified_product_binary(self) -> None:
         source = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn("target=/usr/local/cargo/registry,sharing=locked", source)
+        self.assertIn("target=/app/target,sharing=locked", source)
+        self.assertIn(
+            "COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./",
+            source,
+        )
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn(".env.*", dockerignore)
+        self.assertIn("!.env.yaml.example", dockerignore)
         final_stage = source.split("FROM runtime-base AS runtime", 1)[1].split(
-            "FROM runtime AS perf-runtime", 1
+            "\nFROM ", 1
         )[0]
         self.assertNotIn("scripts/", final_stage)
         self.assertNotIn("tests/", final_stage)
         self.assertNotIn("docs/", final_stage)
         self.assertNotIn("oidf", final_stage.lower())
-        for binary in ("nazo-oauth-server", "nazo-oauth-migrate", "nazo-oauth-keyctl"):
-            self.assertIn(binary, final_stage)
+        self.assertEqual(final_stage.count("/usr/local/bin/nazoauth"), 1)
+        self.assertNotIn("/usr/local/bin/nazoauthctl", final_stage)
+        for retired_binary in (
+            "nazo-oauth-server",
+            "nazo-oauth-migrate",
+            "nazo-oauth-keyctl",
+        ):
+            self.assertNotIn(retired_binary, final_stage)
+
+    def test_public_quick_start_is_platform_neutral_verified_controller(self) -> None:
+        public_guides = [
+            ROOT / "README.md",
+            ROOT / "README.zh-CN.md",
+            ROOT / "docs" / "operations" / "deployment.md",
+            ROOT / "docs" / "operations" / "deployment.zh-CN.md",
+            ROOT / "docs" / "operations" / "fresh-production-activation.md",
+            ROOT / "docs" / "operations" / "fresh-production-activation.zh-CN.md",
+        ]
+        forbidden = re.compile(
+            r"(?i)(?:\.ps1\b|\bpwsh\b|\bpowershell\b|[a-z]:\\|/home/nazoauth\b)"
+        )
+        for path in public_guides:
+            source = path.read_text(encoding="utf-8")
+            self.assertIsNone(
+                forbidden.search(source),
+                f"{path.relative_to(ROOT)} exposes a host-specific deployment path",
+            )
+
+        for path in (ROOT / "README.md", ROOT / "README.zh-CN.md"):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("nazoauthctl install --runtime auto", source)
+            self.assertIn("nazoauthctl doctor", source)
+            self.assertIn("compose.yml", source)
+            self.assertRegex(source.lower(), r"development|开发")
+            self.assertNotIn("docker compose up -d --build", source)
+
+    def test_compose_quick_start_is_self_contained_and_project_scoped(self) -> None:
+        source = (ROOT / "compose.yml").read_text(encoding="utf-8")
+        self.assertIn("${NAZOAUTH_CONFIG:-./.env.yaml.example}", source)
+        self.assertIn('"127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"', source)
+        self.assertIn("condition: service_completed_successfully", source)
+        self.assertIn("keys_data:/var/lib/nazo_oauth/keys", source)
+        self.assertIn("avatars_data:/var/lib/nazo_oauth/avatars", source)
+        self.assertNotIn("container_name:", source)
+        self.assertNotIn("ipv4_address:", source)
+        self.assertNotIn("name: nazo_oauth_net", source)
+
+    def test_release_builds_one_application_and_one_lifecycle_executable(self) -> None:
+        server_manifest = (
+            ROOT / "crates" / "authorization-server" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        ctl_manifest = (
+            ROOT / "crates" / "nazoauthctl" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(server_manifest.count("[[bin]]"), 1)
+        self.assertIn('name = "nazoauth"', server_manifest)
+        self.assertEqual(ctl_manifest.count("[[bin]]"), 1)
+        self.assertIn('name = "nazoauthctl"', ctl_manifest)
+
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("cargo build --release", release)
+        self.assertIn(
+            'docker cp "$container_id:/usr/local/bin/nazoauth" target/release/nazoauth',
+            release,
+        )
+        self.assertIn(
+            'docker cp "$container_id:/usr/local/bin/nazoauthctl" target/nazoauthctl',
+            release,
+        )
+        self.assertNotRegex(
+            release,
+            r"target/release/nazo-oauth-(?:server|migrate|keyctl)",
+        )
+
+    def test_conformance_workflow_does_not_repeat_the_rust_quality_gate(self) -> None:
+        quality = (
+            ROOT / ".github" / "workflows" / "code-quality.yml"
+        ).read_text(encoding="utf-8")
+        conformance = (
+            ROOT / ".github" / "workflows" / "conformance-security.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Swatinem/rust-cache@v2.9.1", quality)
+        self.assertIn("cargo clippy --workspace --all-targets", quality)
+        self.assertIn("cargo test --workspace --all-features", quality)
+        self.assertNotIn("cargo check --workspace", quality)
+        self.assertNotIn("cargo check --workspace", conformance)
+        self.assertNotIn("cargo clippy --workspace", conformance)
+        self.assertNotIn("cargo test --workspace", conformance)
 
     def test_official_suite_is_never_patched(self) -> None:
         tracked = [

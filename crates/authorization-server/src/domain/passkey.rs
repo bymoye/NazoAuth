@@ -143,69 +143,13 @@ impl PasskeyProfileOperations for PasskeyOperationsProvider {
 }
 
 #[cfg(test)]
-fn test_operations(
-    state: &crate::domain::TestInfrastructure,
-) -> std::sync::Arc<PasskeyOperationsProvider> {
-    std::sync::Arc::new(PasskeyOperationsProvider::new(
-        crate::test_support::passkey_service(state)
-            .get_ref()
-            .clone(),
-        SessionService::new(
-            std::sync::Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
-            std::sync::Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
-            nazo_identity::TenantId::new(crate::domain::tenancy::DEFAULT_TENANT_ID)
-                .expect("default tenant ID is valid"),
-        ),
-    ))
-}
+#[path = "../../tests/support/domain/passkey.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
-fn test_login_endpoint(
-    state: &crate::domain::TestInfrastructure,
-) -> actix_web::web::Data<nazo_http_actix::PasskeyLoginEndpoint> {
-    let identity = &state.settings.identity;
-    let session = &state.settings.session;
-    let endpoint = &state.settings.endpoint;
-    actix_web::web::Data::new(nazo_http_actix::PasskeyLoginEndpoint::new(
-        test_operations(state),
-        std::sync::Arc::new(crate::domain::ServerAuthenticationRateLimit::new(
-            nazo_valkey::RateLimitStore::new(&state.valkey_connection()),
-            identity.rate_limit.window_seconds,
-            identity.rate_limit.auth_max_requests,
-        )),
-        nazo_http_actix::ClientIpConfig::new(
-            &endpoint.trusted_proxy_cidrs,
-            endpoint.client_ip_header_mode,
-        ),
-        nazo_http_actix::PasskeyLoginConfig::new(
-            &session.session_cookie_name,
-            &session.csrf_cookie_name,
-            crate::domain::MFA_REMEMBERED_COOKIE_NAME,
-            session.session_ttl_seconds,
-            session.cookie_secure,
-        ),
-    ))
-}
-
-#[cfg(test)]
-fn test_profile_endpoint(
-    state: &crate::domain::TestInfrastructure,
-) -> actix_web::web::Data<nazo_http_actix::PasskeyProfileEndpoint> {
-    let session = &state.settings.session;
-    actix_web::web::Data::new(nazo_http_actix::PasskeyProfileEndpoint::new(
-        test_operations(state),
-        nazo_http_actix::PasskeyProfileConfig::new(
-            &session.session_cookie_name,
-            &session.csrf_cookie_name,
-            session.cookie_secure,
-        ),
-    ))
-}
-
-#[cfg(test)]
-#[path = "../../tests/source_mounted/src/http/auth/tests/passkey.rs"]
+#[path = "../../tests/unit/domain/passkey/login.rs"]
 mod login_tests;
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/http/profile/tests/passkeys.rs"]
+#[path = "../../tests/unit/domain/passkey/profile.rs"]
 mod profile_tests;

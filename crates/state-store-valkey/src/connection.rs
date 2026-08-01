@@ -41,6 +41,18 @@ impl ValkeyConnection {
         client.init().await.map_err(Error::from_fred)?;
         Ok(Self { client })
     }
+
+    /// Performs a real round trip used by readiness probes.
+    pub async fn health_check(&self) -> Result<(), Error> {
+        let response: String = self.client.ping(None).await.map_err(Error::from_fred)?;
+        if response == "PONG" {
+            Ok(())
+        } else {
+            Err(Error::unexpected(
+                "Valkey PING returned an unexpected response",
+            ))
+        }
+    }
 }
 
 impl std::fmt::Debug for ValkeyConnection {

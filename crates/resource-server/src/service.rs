@@ -356,5 +356,5 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../tests/source_mounted/service.rs"]
+#[path = "../tests/unit/service.rs"]
 mod tests;

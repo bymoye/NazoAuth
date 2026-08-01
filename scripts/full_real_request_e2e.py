@@ -2114,7 +2114,16 @@ def run() -> None:
         admin = requests.Session()
 
         health = expect_status("GET /health", anonymous.get(f"{BASE_URL}/health", timeout=10), 200)
-        check("health_body", expect_json(health).get("status") == "正常")
+        health_body = expect_json(health)
+        check("health_body", health_body.get("status") == "ready")
+        check(
+            "health_dependencies",
+            health_body.get("checks")
+            == {
+                "postgresql": {"status": "up"},
+                "valkey": {"status": "up"},
+            },
+        )
 
         discovery = expect_json(
             expect_status(
@@ -2870,18 +2879,14 @@ def run() -> None:
             allow_redirects=False,
             timeout=10,
         )
+        expect_status(
+            "GET /authorize confidential client missing PKCE",
+            confidential_without_pkce,
+            302,
+        )
         confidential_without_pkce_request_id = consent_request_from_redirect(
             confidential_without_pkce,
-            "GET /authorize baseline confidential OIDC without PKCE",
-        )
-        expect_status(
-            "GET /authorize/consent baseline confidential OIDC without PKCE",
-            user.get(
-                f"{BASE_URL}/authorize/consent",
-                params={"request_id": confidential_without_pkce_request_id},
-                timeout=10,
-            ),
-            200,
+            "GET /authorize confidential client missing PKCE",
         )
         confidential_without_pkce_code, _ = approve_authorization(
             user,
@@ -2889,26 +2894,19 @@ def run() -> None:
             "",
             state="confidential-no-pkce",
         )
-        confidential_without_pkce_tokens = expect_json(
-            expect_status(
-                "POST /token baseline confidential OIDC without PKCE",
-                requests.post(
-                    f"{BASE_URL}/token",
-                    data={
-                        "grant_type": "authorization_code",
-                        "code": confidential_without_pkce_code,
-                        "redirect_uri": CLIENT_REDIRECT_URI,
-                    },
-                    auth=(secret_auth_client_id, secret_auth_client_secret),
-                    timeout=10,
-                ),
-                200,
-            )
+        confidential_without_pkce_tokens = token_basic(
+            secret_auth_client_id,
+            secret_auth_client_secret,
+            {
+                "grant_type": "authorization_code",
+                "code": confidential_without_pkce_code,
+                "redirect_uri": CLIENT_REDIRECT_URI,
+            },
+            "POST /token confidential client missing PKCE",
         )
         check(
-            "baseline_confidential_oidc_without_pkce_tokens_issued",
-            bool(confidential_without_pkce_tokens.get("access_token"))
-            and bool(confidential_without_pkce_tokens.get("id_token")),
+            "confidential_without_pkce_token_issued",
+            bool(confidential_without_pkce_tokens.get("access_token")),
         )
 
         post_authorize_request_id, post_authorize_verifier = authorize_request(

@@ -18,10 +18,15 @@ set can be scanned from one place.
 | OpenAI Build Week 2026 engineering record | [project/openai-build-week-2026.md](project/openai-build-week-2026.md) |
 | Deployment | [operations/deployment.md](operations/deployment.md) |
 | Chinese deployment | [operations/deployment.zh-CN.md](operations/deployment.zh-CN.md) |
+| Fresh production activation | [operations/fresh-production-activation.md](operations/fresh-production-activation.md) |
+| Chinese fresh production activation | [operations/fresh-production-activation.zh-CN.md](operations/fresh-production-activation.zh-CN.md) |
 | Configuration | [operations/configuration.md](operations/configuration.md) |
+| Operator-task security and UX plan | [security/operator-task-protocol-plan.zh-CN.md](security/operator-task-protocol-plan.zh-CN.md) |
+| Operator-task implementation task book | [project/operator-task-protocol-implementation-task.zh-CN.md](project/operator-task-protocol-implementation-task.zh-CN.md) |
 | OpenID Connect integration | [integration/openid-connect.md](integration/openid-connect.md) |
 | Chinese OpenID Connect integration | [integration/openid-connect.zh-CN.md](integration/openid-connect.zh-CN.md) |
 | Protocol and profile status | [protocol/profile-matrix.md](protocol/profile-matrix.md) |
+| Composable capability policy | [protocol/composable-capability-policy.md](protocol/composable-capability-policy.md) |
 | Certification and conformance evidence | [conformance/certification.md](conformance/certification.md) |
 | OIDF conformance evidence | [conformance/README.md](conformance/README.md) |
 | Performance benchmark overview | [performance/performance-capacity-curve.md](performance/performance-capacity-curve.md) |
@@ -60,6 +65,12 @@ set can be scanned from one place.
 | [operations/configuration.md](operations/configuration.md) | Runtime configuration model and environment settings. |
 | [operations/deployment.md](operations/deployment.md) | English deployment guide. |
 | [operations/deployment.zh-CN.md](operations/deployment.zh-CN.md) | Chinese deployment guide. |
+| [operations/one-click-update.md](operations/one-click-update.md) | Signed one-click Podman, Docker, and host installation and updates. |
+| [operations/one-click-update.zh-CN.md](operations/one-click-update.zh-CN.md) | Chinese signed one-click installation and update guide. |
+| [operations/fresh-production-activation.md](operations/fresh-production-activation.md) | Clean-data deployment and OIDF-gated production activation. |
+| [operations/fresh-production-activation.zh-CN.md](operations/fresh-production-activation.zh-CN.md) | Chinese clean-data deployment and OIDF-gated production activation. |
+| [operations/2026-07-23-fresh-production-activation.zh-CN.md](operations/2026-07-23-fresh-production-activation.zh-CN.md) | Evidence record for the 2026-07-23 clean-data production activation. |
+| [operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md](operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md) | Evidence and scheduling decision for bounded parallel OIDC/FAPI and OpenID4VC matrices. |
 | [operations/ha-operations.md](operations/ha-operations.md) | PostgreSQL and Valkey operational guidance. |
 | [operations/release-security.md](operations/release-security.md) | Release security checks, provenance, and supply-chain controls. |
 | [operations/release-boundary.md](operations/release-boundary.md) | Production artifact and conformance-tool separation boundary. |
@@ -78,6 +89,7 @@ set can be scanned from one place.
 
 | Document | Role |
 | --- | --- |
+| [protocol/composable-capability-policy.md](protocol/composable-capability-policy.md) | Server defaults, per-client authority, compatible policy composition, and upgrade semantics. |
 | [protocol/profile-matrix.md](protocol/profile-matrix.md) | Runtime profile capability matrix. |
 | [protocol/rfc-compliance-matrix.md](protocol/rfc-compliance-matrix.md) | OAuth, OAuth 2.1, OIDC, and FAPI best-practice matrix. |
 | [protocol/oauth2-1-self-audit.md](protocol/oauth2-1-self-audit.md) | OAuth 2.1 and best-practice self-audit. |
@@ -105,6 +117,7 @@ set can be scanned from one place.
 | --- | --- |
 | [security/threat-model.md](security/threat-model.md) | Threat model and security boundaries. |
 | [security/security-events.md](security/security-events.md) | Security event taxonomy. |
+| [security/operator-task-protocol-plan.zh-CN.md](security/operator-task-protocol-plan.zh-CN.md) | Chinese security, capability-boundary, UX, rollout, and final-acceptance plan for privileged ctl/app interactions. |
 | [../SECURITY.md](../SECURITY.md) | Security policy and reporting channel. |
 
 ### Conformance
@@ -157,6 +170,7 @@ set can be scanned from one place.
 | --- | --- |
 | [project/roadmap.md](project/roadmap.md) | Current scope, roadmap, and deferred capability record. |
 | [project/architecture.md](project/architecture.md) | Workspace boundaries, dependency direction, composition, and runtime-module lifecycle contract. |
+| [project/operator-task-protocol-implementation-task.zh-CN.md](project/operator-task-protocol-implementation-task.zh-CN.md) | Chinese ordered implementation task book for the signed operator-task protocol and ctl UX. |
 | [project/openai-build-week-2026.md](project/openai-build-week-2026.md) | English Build Week before/after boundary, Codex collaboration, evidence, and judge test path. |
 
 ### Examples

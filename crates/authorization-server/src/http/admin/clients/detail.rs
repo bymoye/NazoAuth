@@ -41,5 +41,5 @@ fn client_detail_not_found_response() -> HttpResponse {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/source_mounted/src/http/admin/clients/tests/detail.rs"]
+#[path = "../../../../tests/unit/http/admin/clients/detail.rs"]
 mod tests;

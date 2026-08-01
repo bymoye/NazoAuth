@@ -93,6 +93,14 @@ fn client(suffix: &str) -> ValidatedClientRegistration {
         request_uris: Vec::new(),
         initiate_login_uri: None,
         presentation: nazo_auth::ClientPresentationMetadata::default(),
+        id_token_signed_response_alg: None,
+        id_token_encrypted_response_alg: None,
+        id_token_encrypted_response_enc: None,
+        request_object_signing_alg: None,
+        request_object_encryption_alg: None,
+        request_object_encryption_enc: None,
+        token_endpoint_auth_signing_alg: None,
+        introspection_signed_response_alg: None,
         introspection_encrypted_response_alg: None,
         introspection_encrypted_response_enc: None,
         userinfo_signed_response_alg: None,
@@ -101,6 +109,7 @@ fn client(suffix: &str) -> ValidatedClientRegistration {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
+        security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
     }
 }
 

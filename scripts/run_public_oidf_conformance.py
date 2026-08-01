@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
+import queue
 import shutil
 import ssl
 import subprocess
@@ -37,6 +39,10 @@ REQUIRED_ENV = (
     "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
 )
 OFFICIAL_INGRESS_ONLY_WARNING_CONDITIONS = frozenset({"EnsureIncomingTls13"})
+MAX_SAFE_GROUP_WORKERS = 4
+MAX_BROWSER_GROUP_WORKERS = 2
+
+
 class PublicRunError(RuntimeError):
     pass
 
@@ -48,8 +54,13 @@ def origin(value: str, option: str) -> str:
     return parsed._replace(path="", query="", fragment="").geturl()
 
 
-def command(args: list[str], *, env: dict[str, str] | None = None) -> None:
-    subprocess.run(args, cwd=ROOT, env=env, check=True)
+def command(
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin: bytes | None = None,
+) -> None:
+    subprocess.run(args, cwd=ROOT, env=env, input=stdin, check=True)
 
 
 def output(args: list[str], *, cwd: Path = ROOT) -> str:
@@ -62,12 +73,14 @@ def output(args: list[str], *, cwd: Path = ROOT) -> str:
     ).stdout.strip()
 
 
-def verify_source(deployed_sha: str) -> None:
-    head = output(["git", "rev-parse", "HEAD"])
-    if head != deployed_sha:
-        raise PublicRunError(f"checked-out commit {head} does not match --deployed-sha")
-    if output(["git", "status", "--porcelain"]):
-        raise PublicRunError("product source tree must be clean")
+def verify_source(source_dir: Path, expected_sha: str, label: str) -> None:
+    head = output(["git", "rev-parse", "HEAD"], cwd=source_dir)
+    if head != expected_sha:
+        raise PublicRunError(
+            f"{label} source commit {head} does not match expected {expected_sha}"
+        )
+    if output(["git", "status", "--porcelain"], cwd=source_dir):
+        raise PublicRunError(f"{label} source tree must be clean")
 
 
 def verify_suite(suite_dir: Path, suite_revision: str) -> None:
@@ -206,6 +219,7 @@ def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
         action,
         "--target-issuer",
         issuer,
+        "--credentials-stdin",
         "--manifest",
         str(work_dir / "oidf-onboarding-manifest.json"),
         "--plan-configs",
@@ -223,6 +237,24 @@ def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
         "--trust-bundle",
         str(work_dir / "approved-mtls-trust-anchors.pem"),
     ]
+
+
+def onboarding_credentials(env: dict[str, str]) -> tuple[bytes, dict[str, str]]:
+    document = {
+        "applicant_email": env["OIDF_APPLICANT_EMAIL"],
+        "applicant_password": env["OIDF_APPLICANT_PASSWORD"],
+        "admin_email": env["OIDF_ADMIN_EMAIL"],
+        "admin_password": env["OIDF_ADMIN_PASSWORD"],
+    }
+    child_env = env.copy()
+    for name in (
+        "OIDF_APPLICANT_EMAIL",
+        "OIDF_APPLICANT_PASSWORD",
+        "OIDF_ADMIN_EMAIL",
+        "OIDF_ADMIN_PASSWORD",
+    ):
+        child_env.pop(name, None)
+    return json.dumps(document, separators=(",", ":")).encode("utf-8"), child_env
 
 
 def filter_problem_records(
@@ -376,7 +408,11 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
     return tuple(result)
 
 
-def run_plan_groups(args: argparse.Namespace, work_dir: Path, env: dict[str, str]) -> None:
+def prepare_group_invocations(
+    args: argparse.Namespace,
+    work_dir: Path,
+) -> tuple[tuple[str, list[str]], ...]:
+    invocations = []
     for name, plan_set_file, isolated in split_plan_groups(work_dir):
         expected_skips_file = work_dir / f"oidf-expected-skips-{name}.json"
         expected_warnings_file = work_dir / f"oidf-expected-warnings-{name}.json"
@@ -395,7 +431,7 @@ def run_plan_groups(args: argparse.Namespace, work_dir: Path, env: dict[str, str
             sys.executable,
             str(ROOT / "scripts" / "run_oidf_conformance.py"),
             "--suite-dir",
-            str(args.suite_dir),
+            "{suite_dir}",
             "--suite-revision",
             args.suite_revision,
             "--conformance-server",
@@ -422,7 +458,151 @@ def run_plan_groups(args: argparse.Namespace, work_dir: Path, env: dict[str, str
         ]
         if isolated:
             invocation.append("--no-parallel")
-        command(invocation, env=env)
+        invocations.append((name, invocation))
+    return tuple(invocations)
+
+
+def group_lane(name: str) -> str:
+    if name.startswith("03"):
+        return "ciba"
+    if name.startswith(("08", "09", "10", "11")):
+        return "browser"
+    return "safe"
+
+
+def add_suite_worktree(suite_dir: Path, destination: Path, revision: str) -> None:
+    command(
+        [
+            "git",
+            "-C",
+            str(suite_dir),
+            "worktree",
+            "add",
+            "--detach",
+            str(destination),
+            revision,
+        ]
+    )
+    try:
+        verify_suite(destination, revision)
+    except BaseException as error:
+        try:
+            remove_suite_worktree(suite_dir, destination)
+        except BaseException as cleanup_error:
+            raise ExceptionGroup(
+                "OIDF suite worktree verification and cleanup failed",
+                [error, cleanup_error],
+            ) from error
+        raise
+
+
+def remove_suite_worktree(suite_dir: Path, destination: Path) -> None:
+    command(
+        [
+            "git",
+            "-C",
+            str(suite_dir),
+            "worktree",
+            "remove",
+            "--force",
+            str(destination),
+        ]
+    )
+
+
+def run_group_phase(
+    phase: str,
+    invocations: tuple[tuple[str, list[str]], ...],
+    suite_dirs: tuple[Path, ...],
+    workers: int,
+    env: dict[str, str],
+) -> None:
+    if not invocations:
+        return
+    available: queue.SimpleQueue[Path] = queue.SimpleQueue()
+    for suite_dir in suite_dirs[:workers]:
+        available.put(suite_dir)
+
+    def run_one(name: str, invocation: list[str]) -> None:
+        suite_dir = available.get()
+        try:
+            resolved = [
+                str(suite_dir) if value == "{suite_dir}" else value
+                for value in invocation
+            ]
+            print(f"OIDF {phase} group start: {name}", flush=True)
+            command(resolved, env=env)
+            print(f"OIDF {phase} group complete: {name}", flush=True)
+        finally:
+            available.put(suite_dir)
+
+    failures: list[BaseException] = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix=f"oidf-{phase}",
+    ) as executor:
+        futures = {
+            executor.submit(run_one, name, invocation): name
+            for name, invocation in invocations
+        }
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except BaseException as error:
+                error.add_note(f"OIDF {phase} group failed: {futures[future]}")
+                failures.append(error)
+    if failures:
+        raise ExceptionGroup(f"OIDF {phase} group execution failed", failures)
+
+
+def run_plan_groups(args: argparse.Namespace, work_dir: Path, env: dict[str, str]) -> None:
+    safe_workers = getattr(args, "safe_group_workers", 1)
+    browser_workers = getattr(args, "browser_group_workers", 1)
+    invocations = prepare_group_invocations(args, work_dir)
+    phases = {
+        lane: tuple(item for item in invocations if group_lane(item[0]) == lane)
+        for lane in ("safe", "ciba", "browser")
+    }
+    worker_count = max(safe_workers, browser_workers)
+    if worker_count == 1:
+        suite_dirs = (args.suite_dir,)
+        worktrees: tuple[Path, ...] = ()
+    else:
+        worktree_root = work_dir / "suite-workers"
+        worktree_root.mkdir()
+        worktrees = tuple(
+            worktree_root / f"worker-{index:02d}"
+            for index in range(1, worker_count + 1)
+        )
+        created = []
+        try:
+            for destination in worktrees:
+                add_suite_worktree(args.suite_dir, destination, args.suite_revision)
+                created.append(destination)
+        except BaseException:
+            for destination in reversed(created):
+                remove_suite_worktree(args.suite_dir, destination)
+            raise
+        suite_dirs = worktrees
+
+    failure: BaseException | None = None
+    try:
+        run_group_phase("safe", phases["safe"], suite_dirs, safe_workers, env)
+        run_group_phase("ciba", phases["ciba"], suite_dirs, 1, env)
+        run_group_phase("browser", phases["browser"], suite_dirs, browser_workers, env)
+    except BaseException as error:
+        failure = error
+    finally:
+        cleanup_errors = []
+        for destination in reversed(worktrees):
+            try:
+                remove_suite_worktree(args.suite_dir, destination)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            raise ExceptionGroup("OIDF suite worktree cleanup failed", cleanup_errors) from failure
+    if failure is not None:
+        raise failure
 
 
 def aliases_from_config_bundle(work_dir: Path) -> dict[str, str]:
@@ -488,15 +668,30 @@ def inspect_complete_matrix(
 def run(args: argparse.Namespace) -> None:
     if args.final_stabilization_seconds < 0:
         raise PublicRunError("--final-stabilization-seconds must be zero or greater")
+    args.safe_group_workers = getattr(args, "safe_group_workers", 1)
+    args.browser_group_workers = getattr(args, "browser_group_workers", 1)
+    if not 1 <= args.safe_group_workers <= MAX_SAFE_GROUP_WORKERS:
+        raise PublicRunError(
+            f"--safe-group-workers must be between 1 and {MAX_SAFE_GROUP_WORKERS}"
+        )
+    if not 1 <= args.browser_group_workers <= MAX_BROWSER_GROUP_WORKERS:
+        raise PublicRunError(
+            f"--browser-group-workers must be between 1 and {MAX_BROWSER_GROUP_WORKERS}"
+        )
     args.target_issuer = origin(args.target_issuer, "--target-issuer")
     args.conformance_server = origin(args.conformance_server, "--conformance-server")
     args.work_dir = args.work_dir.resolve()
     args.export_dir = args.export_dir.resolve()
     args.suite_dir = args.suite_dir.resolve()
+    args.runner_sha = getattr(args, "runner_sha", None) or args.deployed_sha
+    args.deployed_source_dir = getattr(args, "deployed_source_dir", None) or ROOT
+    args.deployed_source_dir = args.deployed_source_dir.resolve()
     if args.work_dir.exists() or args.export_dir.exists():
         raise PublicRunError("--work-dir and --export-dir must not already exist")
     validate_output_paths(args.work_dir, args.export_dir, args.suite_dir)
-    verify_source(args.deployed_sha)
+    verify_source(ROOT, args.runner_sha, "runner")
+    if args.deployed_source_dir != ROOT or args.deployed_sha != args.runner_sha:
+        verify_source(args.deployed_source_dir, args.deployed_sha, "deployed")
     verify_suite(args.suite_dir, args.suite_revision)
     env = required_environment(args.token_env)
     env.update(
@@ -508,6 +703,7 @@ def run(args: argparse.Namespace) -> None:
             "OIDF_RUNTIME_DIR": str(args.work_dir),
         }
     )
+    credentials, onboarding_env = onboarding_credentials(env)
     args.work_dir.parent.mkdir(parents=True, exist_ok=True)
     args.export_dir.parent.mkdir(parents=True, exist_ok=True)
     proxy = ProxyTrust(args.proxy_trust_bundle, args.proxy_executable, args.work_dir)
@@ -516,7 +712,11 @@ def run(args: argparse.Namespace) -> None:
     try:
         command([sys.executable, str(ROOT / "scripts" / "prepare_oidf_black_box.py")], env=env)
         protect_directory(args.work_dir)
-        command(onboarding_args("apply", args.work_dir, args.target_issuer), env=env)
+        command(
+            onboarding_args("apply", args.work_dir, args.target_issuer),
+            env=onboarding_env,
+            stdin=credentials,
+        )
         proxy.install(args.work_dir / "approved-mtls-trust-anchors.pem")
         verify_suite_boundary(args.conformance_server, env[args.token_env])
         run_plan_groups(args, args.work_dir, env)
@@ -532,7 +732,11 @@ def run(args: argparse.Namespace) -> None:
             cleanup_errors.append(error)
         if state_file.exists():
             try:
-                command(onboarding_args("cleanup", args.work_dir, args.target_issuer), env=env)
+                command(
+                    onboarding_args("cleanup", args.work_dir, args.target_issuer),
+                    env=onboarding_env,
+                    stdin=credentials,
+                )
             except BaseException as error:
                 cleanup_errors.append(error)
         try:
@@ -554,6 +758,15 @@ def run(args: argparse.Namespace) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deployed-sha", required=True)
+    parser.add_argument(
+        "--deployed-source-dir",
+        type=Path,
+        help="clean checkout matching --deployed-sha when the runner is newer",
+    )
+    parser.add_argument(
+        "--runner-sha",
+        help="exact runner checkout commit; defaults to --deployed-sha",
+    )
     parser.add_argument("--target-issuer", required=True)
     parser.add_argument("--conformance-server", required=True)
     parser.add_argument("--suite-dir", type=Path, required=True)
@@ -566,6 +779,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--token-env", default="OIDF_CONFORMANCE_TOKEN")
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--monitor-interval-seconds", type=int, default=30)
+    parser.add_argument(
+        "--safe-group-workers",
+        type=int,
+        default=1,
+        help="parallel workers for independent OIDC/FAPI plan groups (1-4)",
+    )
+    parser.add_argument(
+        "--browser-group-workers",
+        type=int,
+        default=1,
+        help="parallel workers for isolated logout/session plan groups (1-2)",
+    )
     parser.add_argument(
         "--final-stabilization-seconds",
         type=int,

@@ -11,7 +11,11 @@ use actix_web::{HttpRequest, HttpResponse};
 use nazo_http_actix::{ClientIpConfig, client_ip_with_config};
 use nazo_http_actix::{csrf_error, has_valid_csrf_token_for_cookies};
 use nazo_http_actix::{json_response, oauth_error};
-use nazo_identity::{PublicAccount, ports::AdminUserRepositoryPort};
+use nazo_identity::{
+    PublicAccount,
+    email::normalize_email_address,
+    ports::{AdminUserRepositoryPort, NewUser, RegistrationAccountRepositoryPort, SecretHashPort},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -61,6 +65,98 @@ pub(crate) struct PatchUserRequest {
     role: Option<String>,
     admin_level: Option<i32>,
     is_active: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateUserRequest {
+    email: String,
+    password: String,
+}
+
+pub(crate) async fn admin_create_user(
+    admin_sessions: Data<AdminSessionHandles>,
+    accounts: Data<dyn RegistrationAccountRepositoryPort>,
+    client_ip_config: Data<ClientIpConfig>,
+    req: HttpRequest,
+    Json(payload): Json<CreateUserRequest>,
+) -> HttpResponse {
+    let session_http = admin_sessions.http_config();
+    if !has_valid_csrf_token_for_cookies(
+        &req,
+        None,
+        session_http.session_cookie_name(),
+        session_http.csrf_cookie_name(),
+    ) {
+        return csrf_error();
+    }
+    let admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+        Ok(admin) => admin,
+        Err(response) => return response,
+    };
+    let email = match normalize_email_address(&payload.email) {
+        Ok(email) => email,
+        Err(_) => {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "邮箱格式无效.");
+        }
+    };
+    if !(12..=1024).contains(&payload.password.len()) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "密码长度必须为 12 到 1024 字节.",
+        );
+    }
+    let password_hash = match crate::bootstrap::RegistrationSecretHasher
+        .hash_secret(payload.password)
+        .await
+    {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::warn!(%error, "failed to hash administratively provisioned password");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "用户创建失败.",
+            );
+        }
+    };
+    match accounts
+        .create_user(NewUser {
+            tenant: admin.tenant(),
+            username: format!("user_{}", Uuid::now_v7()),
+            email,
+            password_hash,
+            email_verified: true,
+        })
+        .await
+    {
+        Ok(account) => {
+            audit_event(
+                "admin_user_created",
+                audit_fields(&[
+                    ("user_id", json!(account.id())),
+                    (
+                        "source_ip_hash",
+                        json!(blake3_hex(&client_ip_with_config(&req, &client_ip_config))),
+                    ),
+                ]),
+            );
+            HttpResponse::Created()
+                .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+                .json(admin_user_json(account))
+        }
+        Err(nazo_identity::ports::RepositoryError::Conflict) => {
+            oauth_error(StatusCode::CONFLICT, "invalid_request", "该邮箱已注册.")
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to create administratively provisioned user");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "用户创建失败.",
+            )
+        }
+    }
 }
 
 pub(crate) async fn admin_patch_user(
@@ -193,5 +289,5 @@ fn patch_user_validation_error(payload: &PatchUserRequest) -> Option<HttpRespons
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/admin/tests/users.rs"]
+#[path = "../../../tests/unit/http/admin/users.rs"]
 mod tests;

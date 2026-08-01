@@ -14,6 +14,7 @@ request descriptions.
 | `OIDF_USER_EMAIL`, `OIDF_USER_PASSWORD` | Normal non-admin browser identity used by official plans. | Account/password lifecycle change or suspected disclosure. |
 | `OIDF_ADMIN_EMAIL`, `OIDF_ADMIN_PASSWORD` | Separate approver identity for operations that require normal administrative approval. | Account/password lifecycle change or suspected disclosure. |
 | `OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN` | Authorizes RFC 7591 registration where the deployment requires an initial access token. | Target deployment token rotation. |
+| `OIDF_CIBA_AUTOMATED_DECISION_TOKEN` | Binds official CIBA automation to the current deployment without reusing a prior deployment token. | Every fresh installation or target token rotation. |
 | `OIDF_PLAN_CONFIG_AGE_IDENTITY` | Decrypts the versioned OIDC/FAPI runner configuration overlay. | Re-encryption or recipient-key rotation. |
 | `OIDF_MTLS_MATERIAL_AGE_IDENTITY` | Decrypts the versioned OIDC/FAPI test-client mTLS identity bundle. | CA/client identity rotation or re-encryption. |
 | `OIDF_DELIVERED_CLIENT_MATERIAL_JSON` | Maps approved production client registrations to runner aliases. | Every onboarding/cleanup cycle; never reuse after the clients are deactivated. |

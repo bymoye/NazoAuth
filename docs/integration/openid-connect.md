@@ -26,13 +26,14 @@ executable allowlist.
 | Capability | Status | Enablement / advertisement condition | References | Notes |
 | --- | --- | --- | --- | --- |
 | OpenID Connect Core 1.0 | Complete | Always available for OIDC deployments; interactive login is Authorization Code only | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | ID Tokens are signed and client-bound. |
-| OpenID Connect Discovery 1.0 | Complete | Always available for OIDC deployments | [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) | Discovery metadata is generated from the active runtime profile and enabled modules. |
+| OpenID Connect Discovery 1.0 | Complete | Always available for OIDC deployments | [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) | Discovery metadata is generated from active server modules; client policy is enforced separately. |
 | OAuth 2.0 Authorization Server Metadata | Complete | Available for OAuth/OIDC deployments | [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414.html) | OAuth metadata mirrors executable authorization-server behavior. |
 | OAuth 2.0 Protected Resource Metadata | Complete | Available for configured protected-resource metadata surfaces | [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728.html) | Exposes generic and FAPI resource metadata surfaces. |
 | OAuth 2.0 Form Post Response Mode | Complete | Advertised for baseline code-flow clients when the active profile allows `form_post` | [OAuth 2.0 Form Post Response Mode](https://openid.net/specs/oauth-v2-form-post-response-mode-1_0.html) | Does not enable implicit or hybrid token delivery. |
 | OpenID Connect Third-Party Initiated Login | Complete | Available through HTTPS `initiate_login_uri` client metadata | [OpenID Connect Third-Party Initiated Login 1.0](https://openid.net/specs/openid-connect-3rd-party-initiated-login.html) | This is OP-side metadata support; the initiation URI itself is an RP endpoint. |
-| Dynamic Client Registration | Complete | Disabled by default; advertised only when `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true` | [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html), [OpenID Connect Dynamic Client Registration 1.0](https://openid.net/specs/openid-connect-registration-1_0.html) | Public deployments should require an initial access token. |
+| Dynamic Client Registration | Complete | Advertised only when a non-empty initial access token is configured | [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html), [OpenID Connect Dynamic Client Registration 1.0](https://openid.net/specs/openid-connect-registration-1_0.html) | DCR-created clients receive baseline policy and cannot self-grant elevated capabilities. |
 | Dynamic Client Registration Management | Complete | Available for clients created through Dynamic Client Registration | [RFC 7592](https://www.rfc-editor.org/rfc/rfc7592.html) | Uses protected `registration_client_uri` and registration access tokens. |
+| OpenID Connect RP Metadata Choices | Complete | DCR is enabled and the corresponding single-valued metadata is supported | [OpenID Connect RP Metadata Choices 1.0](https://openid.net/specs/openid-connect-rp-metadata-choices-1_0-final.html) | All 19 choices fields are negotiated against executable server capabilities and persisted as single-valued client metadata. The selected ID Token, Request Object, client-assertion, UserInfo/JARM/CIBA, and introspection algorithms are enforced by their runtime consumers. Choice arrays are registration inputs only; registration responses return selected single values. |
 | Pushed Authorization Requests | Complete | Required by FAPI profiles; available to baseline clients according to client policy | [RFC 9126](https://www.rfc-editor.org/rfc/rfc9126.html) | Baseline clients are not forced to use PAR unless client policy requires it. |
 | JWT Secured Authorization Request | Complete | Accepted for signed Request Objects when client/profile policy allows JAR | [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | Unsigned Request Objects are rejected. |
 | JWT Secured Authorization Response Mode / JARM | Complete | Advertised when the JARM module/profile/client metadata enables signed authorization responses | [JARM](https://openid.net/specs/oauth-v2-jarm.html) | Used by message-signing profiles and client metadata that require it. |
@@ -46,10 +47,10 @@ executable allowlist.
 | Resource Indicators | Complete | Available for authorization, token, and refresh flows that carry resource indicators | [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html) | Uses repeated URI-valued `resource` parameters; JSON-array syntax is not accepted externally. |
 | Token Introspection | Complete | Available through the introspection endpoint when client policy permits it | [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662.html) | FAPI message-signing profiles can use protected introspection responses. |
 | Token Revocation | Complete | Available through the revocation endpoint | [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009.html) | Revokes tokens according to token type and client policy. |
-| Device Authorization Grant | Supported | Disabled by default; advertised only when the device module is enabled and the client grant allowlist includes device code | [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628.html) | Disabled deployments do not claim this grant. |
-| OpenID CIBA / FAPI-CIBA | Supported; ID1-compatible | Disabled by default; advertised only when CIBA is enabled and the client is registered for poll or ping | [OpenID CIBA Core](https://openid.net/specs/openid-client-initiated-backchannel-authentication-core-1_0.html), [FAPI-CIBA](https://openid.net/specs/openid-financial-api-ciba.html) | The FAPI-CIBA ID1 `private_key_jwt / mTLS` x `poll / ping` combinations are supported; the newer `fapi-ciba-03` working draft still requires a separate delta audit. Push is never supported. |
-| FAPI 2.0 Security Profile | Complete | Enabled by selecting the FAPI runtime profile and registering FAPI-compatible clients | [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html) | Requires confidential clients, PAR, sender constraints, and strong client authentication. |
-| FAPI 2.0 Message Signing | Complete | Enabled by selecting the message-signing profile/options and compatible client metadata | [FAPI 2.0 Message Signing](https://openid.net/specs/fapi-2_0-message-signing.html) | Adds signed authorization requests, JARM, and protected response options according to profile. |
+| Device Authorization Grant | Supported | Server support is active by default on new databases; use requires the client device-code grant and `allow_cross_device_flows=true` | [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628.html) | Runtime module state controls advertisement; client policy controls authority. |
+| OpenID CIBA / FAPI-CIBA | Supported; ID1-compatible | Server poll/ping support is active by default on new databases; use requires CIBA client grant/metadata and `allow_cross_device_flows=true` | [OpenID CIBA Core](https://openid.net/specs/openid-client-initiated-backchannel-authentication-core-1_0.html), [FAPI-CIBA](https://openid.net/specs/openid-financial-api-ciba.html) | The FAPI-CIBA ID1 `private_key_jwt / mTLS` x `poll / ping` combinations are supported; the newer `fapi-ciba-03` working draft still requires a separate delta audit. Push is never supported. |
+| FAPI 2.0 Security Profile | Complete | Enabled per client with `security_policy.assurance=fapi2` | [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html) | Requires confidential clients, PAR, sender constraints, and strong client authentication. |
+| FAPI 2.0 Message Signing | Complete | Independent client-policy fields enable signed authorization requests, JARM, and signed introspection | [FAPI 2.0 Message Signing](https://openid.net/specs/fapi-2_0-message-signing.html) | Compatible options may be enabled together and coexist with FAPI2 assurance. |
 | OpenID4VCI 1.0 Final | Complete | Disabled by default; advertised through OpenID4VCI issuer metadata after enabling the Credential Issuer role and complete credential/trust configuration | [OpenID4VCI 1.0 Final](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-final.html) | Not part of ordinary OIDC RP login. |
 | OpenID4VP 1.0 Final | Complete | Disabled by default; advertised through OpenID4VP verifier metadata after enabling the Verifier role and complete trust configuration | [OpenID4VP 1.0 Final](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html) | Not part of ordinary OIDC RP login. |
 | OpenID4VC High Assurance Interoperability Profile 1.0 / HAIP | Complete | Disabled by default; enabled through HAIP-compatible Credential Issuer and Verifier role configuration, credential-format configuration, and trust configuration | [OpenID4VC HAIP 1.0](https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0-final.html), [OpenID4VCI 1.0 Final](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-final.html), [OpenID4VP 1.0 Final](https://openid.net/specs/openid-4-verifiable-presentations-1_0-final.html) | Profile-level support for high-assurance OpenID4VC issuance and presentation flows; it is separate from ordinary OIDC RP login. |
@@ -115,8 +116,8 @@ expose the following endpoints when the matching modules are enabled:
 | Introspection | `/introspect` | For protected resource validation and profile-specific protected responses. |
 | Revocation | `/revoke` | For refresh/access token revocation where applicable. |
 | Logout | `/logout` | RP-Initiated Logout with exact registered redirect URI validation. |
-| Dynamic registration | `/register` | Advertised only when `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`. |
-| Device authorization | `/device_authorization` | Advertised only when `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`. |
+| Dynamic registration | `/register` | Advertised only when a non-empty initial access token is configured. |
+| Device authorization | `/device_authorization` | Advertised when its runtime module is active; client use still requires grant and cross-device policy. |
 
 Discovery metadata must be treated as authoritative. If a field is absent, the
 deployment is not claiming that capability.
@@ -148,13 +149,13 @@ paths. Hardcoded paths are shown only to make the integration shape explicit.
 The provider supports two client onboarding models:
 
 1. Static administrative registration.
-2. RFC 7591 / RFC 7592 Dynamic Client Registration when
-   `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`.
+2. RFC 7591 / RFC 7592 Dynamic Client Registration when an initial access
+   token is configured.
 
-Dynamic registration is disabled by default and should be protected by an initial
-access token in public deployments. A dynamically registered client receives a
-`registration_client_uri` and a registration access token for its own
-management lifecycle.
+Without an initial access token, dynamic registration is disabled. A
+dynamically registered client receives a `registration_client_uri` and a
+registration access token for its own management lifecycle, but only a
+baseline security policy.
 
 Accepted client metadata includes the usual OIDC/OAuth fields:
 
@@ -484,8 +485,8 @@ excluded by RFC 9700 and the OAuth 2.1 direction described below.
 
 Use this terminology precisely:
 
-- "Dynamic Client Registration" means disabled-by-default RFC 7591 / RFC 7592 client
-  lifecycle support.
+- "Dynamic Client Registration" means RFC 7591 / RFC 7592 client lifecycle
+  support conditional on a configured initial access token.
 - "Dynamic OP certification profile" is never supported.
 
 ## Specification-backed non-implementation boundaries
@@ -526,11 +527,11 @@ server must not advertise disabled or incomplete behavior.
 
 | Capability | Required deployment state before advertising |
 | --- | --- |
-| Dynamic Client Registration | `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`; public deployments should configure an initial access token. |
-| Device Authorization Grant | `ENABLE_DEVICE_AUTHORIZATION_GRANT=true` and client grant allowlist includes device code. |
-| CIBA | `ENABLE_CIBA=true` and registered CIBA clients with allowed delivery mode. |
+| Dynamic Client Registration | Non-empty `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`. |
+| Device Authorization Grant | Active runtime module, client grant allowlist includes device code, and `allow_cross_device_flows=true`. |
+| CIBA | Active runtime module, registered poll/ping metadata and grant, and `allow_cross_device_flows=true`. |
 | mTLS client authentication / sender constraints | Trusted mTLS/proxy boundary configured and client metadata registered. |
-| FAPI profiles | `AUTHORIZATION_SERVER_PROFILE` and client policy must enforce PAR, sender constraints, strong client authentication, and PKCE where applicable. |
+| FAPI profiles | Per-client `security_policy.assurance=fapi2` plus sender constraints and compatible client authentication. |
 | UserInfo/JARM encryption | Client metadata includes valid encryption preferences and exactly one usable public key for the selected algorithm. |
 | OpenID4VCI / OpenID4VP | Corresponding runtime module enabled, credential/trust configuration complete, and public metadata generated from that configuration. |
 
@@ -548,7 +549,8 @@ Before putting a relying party into production:
 7. Do not treat the ID Token as an API access token.
 8. Register post-logout redirect URIs exactly when logout is used.
 9. Use `private_key_jwt`, mTLS, DPoP, PAR, or JARM for higher-risk clients.
-10. Re-check discovery metadata after changing runtime profile flags.
+10. Re-check discovery metadata after changing runtime-module state, then verify
+    the target client's explicit policy.
 
 ## Normative references
 

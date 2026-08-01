@@ -565,4 +565,5 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/dpop.rs"]
 mod tests;

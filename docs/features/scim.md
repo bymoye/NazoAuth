@@ -38,7 +38,7 @@ Credential behavior:
 - Create, replace, patch, and delete endpoints require `scim:write` or `scim:*`.
 - Successful database-token use updates `last_used_at` and inserts `scim_audit_events`.
 - Successful and denied SCIM token checks emit structured audit events without raw token material.
-- `nazo_oauth_migrate` runs `nazo_oauth_cleanup_expired_security_state()`, which
+- `nazoauthctl migrate --yes` runs `nazo_oauth_cleanup_expired_security_state()` through a signed task, which
   removes SCIM audit events older than 180 days together with expired security
   state. This keeps audit retention bounded while preserving a compromise
   investigation window.

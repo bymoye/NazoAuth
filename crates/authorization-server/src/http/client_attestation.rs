@@ -33,5 +33,5 @@ fn exactly_one_header<'a>(
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/http/tests/client_attestation.rs"]
+#[path = "../../tests/unit/http/client_attestation.rs"]
 mod tests;

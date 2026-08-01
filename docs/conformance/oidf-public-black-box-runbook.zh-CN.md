@@ -118,10 +118,14 @@ gh workflow run oidf-conformance-full.yml \
   --ref <精确分支> \
   -f deployed_sha=<已部署-sha> \
   -f target_issuer=https://issuer.example \
+  -f credential_holder_email_sha256=<全新申请人邮箱的-sha256> \
   -f onboarding_material_only=true
 ```
 
-该模式调用可复用的接入材料 workflow，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。进入第 3 步前，必须下载该 artifact，并按相同 source commit 完成校验。artifact 本身仍不具有生产权限：客户端创建和 CA 审批必须由不同身份通过公网控制面完成。
+该模式调用可复用的接入材料 workflow，在不暴露邮箱或密码哈希的前提下绑定全新申请人
+邮箱承诺，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。进入第 3 步前，
+必须下载该 artifact，并按相同 source commit 完成校验。artifact 本身仍不具有生产权限：
+客户端创建和 CA 审批必须由不同身份通过公网控制面完成。
 
 使用以下命令把已校验的官方 artifact 转换为生产申请，不得重新生成客户端、密钥或证书：
 
@@ -164,7 +168,8 @@ CA 边界：缺失 `keyCertSign`、扩展非 critical，或 Basic Constraints �
 执行：
 
 ```sh
-python scripts/apply_public_conformance_onboarding.py apply \
+secret-provider read nazoauth/oidf-operator-credentials | \
+python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
@@ -173,6 +178,10 @@ python scripts/apply_public_conformance_onboarding.py apply \
   --trust-bundle runtime/official-onboarding-apply/approved-mtls-trust-anchors.pem \
   --no-runner-env
 ```
+
+凭据输入是严格 JSON，并且只能包含 `applicant_email`、`applicant_password`、
+`admin_email` 和 `admin_password`。自动化也可使用 `--credentials-fd N`；工具不提供
+密码环境变量或 argv 回退路径。
 
 每个客户端都执行普通运行者可用的正式流程：
 
@@ -253,8 +262,9 @@ plan 由 workflow 自动隔离；OpenID4VC 按有界 group 执行 17 个 plan。
 无论运行结果如何，均执行：
 
 ```sh
+secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
-  --target-issuer "$OIDF_TARGET_ISSUER"
+  --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
 ```
 
 清理过程通过公网管理员 API 撤销信任申请并停用本次创建的客户端。只有代理回滚流程确认旧信任配置恢复后，才能删除安装的 CA。留存脱敏后的结果、精确 commit、plan manifest、bundle digest、审批/撤销审计 ID 和官方 run ID；文档中严禁保存密码、私钥、session cookie、CSRF token、client secret 或一次性交付 token。

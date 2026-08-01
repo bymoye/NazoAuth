@@ -5,8 +5,8 @@ use crate::adapters::security::random_urlsafe_token;
 use crate::domain::{AuthorizationCodeState, CodePayload, ConsentPayload};
 use crate::http::authorization::AuthorizationRequestContext;
 use crate::http::authorization::request::{
-    AuthorizationResponseRedirect, PushedAuthorizationRequestConsumeError,
-    authorization_response_redirect_with_context,
+    AuthorizationResponseClientPolicy, AuthorizationResponseRedirect,
+    PushedAuthorizationRequestConsumeError, authorization_response_redirect_with_context,
     consume_pushed_authorization_request_with_context,
 };
 use actix_web::http::StatusCode;
@@ -48,53 +48,21 @@ pub(super) async fn user_grant_covers_requested_scopes_with_context(
     }
 }
 
-#[cfg(test)]
-pub(super) async fn user_grant_covers_requested_scopes(
-    state: &crate::domain::TestInfrastructure,
-    user_id: Uuid,
-    client_id: Uuid,
-    requested_scopes: &[String],
-    requested_resource_indicators: &[String],
-    requested_authorization_details: &Value,
-) -> Result<bool, HttpResponse> {
-    let dependencies = crate::http::authorization::TestAuthorizationDependencies::new(state);
-    user_grant_covers_requested_scopes_with_context(
-        &dependencies.context(),
-        user_id,
-        client_id,
-        requested_scopes,
-        requested_resource_indicators,
-        requested_authorization_details,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(super) fn stored_grant_covers_requested_authorization(
-    stored_scopes: &Value,
-    stored_resource_indicators: &Value,
-    stored_authorization_details: &Value,
-    requested_scopes: &[String],
-    requested_resource_indicators: &[String],
-    requested_authorization_details: &Value,
-) -> bool {
-    nazo_auth::stored_grant_covers_requested_authorization(
-        &nazo_auth::StoredAuthorizationGrant {
-            scopes: stored_scopes.clone(),
-            resource_indicators: stored_resource_indicators.clone(),
-            authorization_details: stored_authorization_details.clone(),
-        },
-        requested_scopes,
-        requested_resource_indicators,
-        requested_authorization_details,
-    )
-}
-
 pub(super) async fn issue_authorization_code_without_interaction_with_context(
     context: &AuthorizationRequestContext<'_>,
     req: &HttpRequest,
     payload: ConsentPayload,
 ) -> HttpResponse {
+    let legacy_policy = context.config.profile.legacy_client_policy();
+    let response_policy = AuthorizationResponseClientPolicy {
+        signed_response_required: payload
+            .signed_authorization_response_required
+            .unwrap_or(legacy_policy.require_signed_authorization_response),
+        session_management_allowed: payload.session_management_allowed.unwrap_or(true),
+        ttl_seconds: payload
+            .authorization_code_ttl_seconds
+            .unwrap_or(context.config.auth_code_ttl_seconds),
+    };
     if let Some(request_uri) = payload.pushed_request_uri.as_deref() {
         match consume_pushed_authorization_request_with_context(context, request_uri).await {
             Ok(()) => {}
@@ -109,6 +77,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
                         error: Some("invalid_request_uri"),
                         state: payload.state.as_deref(),
                         oidc_sid: None,
+                        client_policy: Some(response_policy),
                     },
                 )
                 .await;
@@ -125,6 +94,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
                         error: Some("server_error"),
                         state: payload.state.as_deref(),
                         oidc_sid: None,
+                        client_policy: Some(response_policy),
                     },
                 )
                 .await;
@@ -158,7 +128,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
         dpop_jkt: payload.dpop_jkt,
         mtls_x5t_s256: payload.mtls_x5t_s256,
         issued_at: now,
-        expires_at: now + Duration::seconds(context.config.auth_code_ttl_seconds as i64),
+        expires_at: now + Duration::seconds(response_policy.ttl_seconds as i64),
     };
     if let Err(error) = context
         .service
@@ -167,7 +137,7 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
             &AuthorizationCodeState::Pending {
                 payload: code_payload,
             },
-            context.config.auth_code_ttl_seconds,
+            response_policy.ttl_seconds,
         )
         .await
     {
@@ -203,18 +173,8 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
             error: None,
             state: payload.state.as_deref(),
             oidc_sid: oidc_sid.as_deref(),
+            client_policy: Some(response_policy),
         },
     )
     .await
-}
-
-#[cfg(test)]
-pub(super) async fn issue_authorization_code_without_interaction(
-    state: &crate::domain::TestInfrastructure,
-    req: &HttpRequest,
-    payload: ConsentPayload,
-) -> HttpResponse {
-    let dependencies = crate::http::authorization::TestAuthorizationDependencies::new(state);
-    issue_authorization_code_without_interaction_with_context(&dependencies.context(), req, payload)
-        .await
 }

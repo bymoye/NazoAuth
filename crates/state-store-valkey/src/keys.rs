@@ -27,6 +27,10 @@ pub(crate) fn private_key_jwt_replay(client_id: &str, jti: &str) -> String {
     )
 }
 
+#[cfg(test)]
+#[path = "../tests/unit/keys.rs"]
+mod tests;
+
 pub(crate) fn jar_replay(client_id: &str, jti: &str) -> String {
     format!(
         "oauth:jar:jti:{}:{}",

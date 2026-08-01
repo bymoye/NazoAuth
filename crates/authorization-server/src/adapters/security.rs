@@ -2,13 +2,9 @@
 
 use super::audit::{audit_event, audit_fields};
 use crate::domain::ClientRow;
-#[cfg(test)]
-use crate::domain::TestInfrastructure;
-#[cfg(test)]
-use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID};
-use crate::http::mtls::request_mtls_client_certificate_from_headers;
-#[cfg(test)]
-use crate::settings::Settings;
+
+use crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy;
+
 use actix_web::HttpRequest;
 use actix_web::http::header;
 use actix_web::http::header::{HeaderMap, HeaderValue};
@@ -38,11 +34,9 @@ use tokio::sync::Semaphore;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "../../tests/support/adapters/security/tokens.rs"]
 pub(crate) mod tokens;
-#[cfg(test)]
-pub(crate) use tokens::decode_access_claims_with;
-#[cfg(test)]
-pub(crate) use tokens::{AccessTokenJwtInput, IssuedAccessToken, make_jwt};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -90,16 +84,6 @@ pub(crate) fn hash_password(password: &str) -> argon2::password_hash::Result<Str
     Ok(password_hasher()
         .hash_password(password.as_bytes(), &salt)?
         .to_string())
-}
-
-#[cfg(test)]
-pub(crate) fn verify_password(password: &str, password_hash: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(password_hash) else {
-        return false;
-    };
-    password_hasher()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok()
 }
 
 pub(crate) fn initialize_dummy_password_hash() -> anyhow::Result<()> {
@@ -203,12 +187,6 @@ pub(crate) async fn verify_encoded_hashes_blocking_limited(
     .map_err(|_| PasswordVerificationError::WorkerFailed)
 }
 
-#[cfg(test)]
-pub(crate) fn hash_client_secret(secret: &str, pepper: &str) -> String {
-    let salt = random_urlsafe_token();
-    client_secret_digest(secret, pepper, &salt)
-}
-
 pub(crate) fn client_secret_digest(secret: &str, pepper: &str, salt: &str) -> String {
     let mac = client_secret_mac(secret, pepper, salt);
     format!("{CLIENT_SECRET_HASH_VERSION}:{salt}:{mac}")
@@ -265,26 +243,12 @@ pub(crate) fn random_urlsafe_token() -> String {
     URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
 }
 
-#[cfg(test)]
-pub(crate) fn random_numeric_code() -> String {
-    const RANGE: u32 = 1_000_000;
-    const LIMIT: u32 = u32::MAX - (u32::MAX % RANGE);
-
-    loop {
-        let value = u32::from_be_bytes(rand::random::<[u8; 4]>());
-        if value < LIMIT {
-            return format!("{:06}", value % RANGE);
-        }
-    }
-}
-
 pub(crate) fn pkce_s256(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 pub(crate) use nazo_auth::{CLIENT_ASSERTION_TYPE_JWT_BEARER, ValidatedClientAssertion};
-#[cfg(test)]
-pub(crate) const SUPPORTED_CLIENT_JWT_SIGNING_ALGS: &[&str] = &["EdDSA", "RS256", "ES256", "PS256"];
+
 pub(crate) use nazo_auth::{
     SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS, SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
 };
@@ -308,25 +272,6 @@ pub(crate) fn has_basic_authorization_scheme(headers: &HeaderMap) -> bool {
         .map(|offset| start + offset)
         .unwrap_or(raw.len());
     raw[start..end].eq_ignore_ascii_case(b"Basic")
-}
-
-#[cfg(test)]
-pub(crate) fn extract_client_credentials(
-    req: &HttpRequest,
-    settings: &Settings,
-    form_client_id: Option<&str>,
-    form_secret: Option<&str>,
-    form_assertion_type: Option<&str>,
-    form_assertion: Option<&str>,
-) -> ClientCredentials {
-    extract_client_credentials_with_trusted_proxies(
-        req,
-        &settings.endpoint.trusted_proxy_cidrs,
-        form_client_id,
-        form_secret,
-        form_assertion_type,
-        form_assertion,
-    )
 }
 
 pub(crate) fn extract_client_credentials_with_trusted_proxies(
@@ -358,8 +303,8 @@ pub(crate) fn extract_client_credentials_with_trusted_proxies(
     {
         form_client_id
             .filter(|_| {
-                nazo_http_actix::request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs)
-                    && request_mtls_client_certificate_from_headers(req.headers()).is_some()
+                request_mtls_client_certificate_from_trusted_proxy(req, trusted_proxy_cidrs)
+                    .is_some()
             })
             .map(str::to_owned)
     } else {
@@ -384,21 +329,6 @@ pub(crate) fn verify_private_key_jwt_claims_for_issuer(
     verify_private_key_jwt_claims_with_issuer(issuer, endpoint_path, client, assertion)
 }
 
-#[cfg(test)]
-fn verify_private_key_jwt_claims_with_settings(
-    settings: &Settings,
-    req: &HttpRequest,
-    client: &ClientRow,
-    assertion: &str,
-) -> Result<ValidatedClientAssertion, ClientAssertionError> {
-    verify_private_key_jwt_claims_with_issuer(
-        &settings.endpoint.issuer,
-        req.uri().path(),
-        client,
-        assertion,
-    )
-}
-
 fn verify_private_key_jwt_claims_with_issuer(
     issuer: &str,
     endpoint_path: &str,
@@ -411,6 +341,7 @@ fn verify_private_key_jwt_claims_with_issuer(
         client,
         assertion,
         now: Utc::now().timestamp(),
+        expected_signing_algorithm: client.token_endpoint_auth_signing_alg.as_deref(),
     })
     .map_err(|error| {
         log_client_assertion_rejection(endpoint_path, client, error.audit_reason());
@@ -426,51 +357,6 @@ fn log_client_assertion_rejection(endpoint_path: &str, client: &ClientRow, reaso
         endpoint_path,
         blake3_hex(&client.client_id)
     );
-}
-
-#[cfg(test)]
-pub(crate) async fn consume_private_key_jwt(
-    state: &TestInfrastructure,
-    client: &ClientRow,
-    assertion: &ValidatedClientAssertion,
-) -> Result<(), ClientAssertionError> {
-    consume_private_key_jwt_with_store(
-        &nazo_valkey::ReplayStore::new(&state.valkey_connection()),
-        client,
-        assertion,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn consume_private_key_jwt_with_store(
-    replay: &nazo_valkey::ReplayStore,
-    client: &ClientRow,
-    assertion: &ValidatedClientAssertion,
-) -> Result<(), ClientAssertionError> {
-    let now = Utc::now().timestamp();
-    let ttl_seconds = assertion.replay_ttl_seconds(now);
-    match replay
-        .consume_private_key_jwt(&client.client_id, assertion.jti(), ttl_seconds)
-        .await
-    {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            audit_event(
-                "client_assertion_replay_detected",
-                audit_fields(&[
-                    ("client_id", json!(client.client_id)),
-                    ("jti_hash", json!(blake3_hex(assertion.jti()))),
-                    ("kid", json!(assertion.kid())),
-                ]),
-            );
-            Err(ClientAssertionError::ReplayDetected)
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to store private_key_jwt jti");
-            Err(ClientAssertionError::StoreUnavailable)
-        }
-    }
 }
 
 pub(crate) async fn consume_private_key_jwt_with_authorization_service(
@@ -500,26 +386,6 @@ pub(crate) async fn consume_private_key_jwt_with_authorization_service(
             tracing::warn!(%error, "failed to store private_key_jwt jti");
             Err(ClientAssertionError::StoreUnavailable)
         }
-    }
-}
-
-#[cfg(test)]
-fn client_assertion_replay_key(client_id: &str, jti: &str) -> String {
-    format!(
-        "oauth:client_assertion:jti:{}:{}",
-        blake3_hex(client_id),
-        blake3_hex(jti)
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn client_jwt_algorithm_from_name(value: &str) -> Option<jsonwebtoken::Algorithm> {
-    match value {
-        "EdDSA" => Some(jsonwebtoken::Algorithm::EdDSA),
-        "RS256" => Some(jsonwebtoken::Algorithm::RS256),
-        "ES256" => Some(jsonwebtoken::Algorithm::ES256),
-        "PS256" => Some(jsonwebtoken::Algorithm::PS256),
-        _ => None,
     }
 }
 
@@ -617,5 +483,5 @@ fn supported_client_jwt_algorithm(
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/security.rs"]
+#[path = "../../tests/unit/adapters/security.rs"]
 mod tests;

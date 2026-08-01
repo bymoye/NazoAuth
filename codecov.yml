@@ -22,7 +22,7 @@ coverage:
 ignore:
   # Generated Diesel table declarations. Protocol and persistence behavior is
   # tested through repository/handler code, not by executing generated macros.
-  - "crates/authorization-server/src/schema.rs"
+  - "crates/authorization-server/tests/support/schema.rs"
   # Third-party macro expansions can appear in local llvm-cov LCOV output when
   # generic derive/test code is instantiated by this crate. They are dependency
   # implementation details, not project behavior.
@@ -61,13 +61,10 @@ ignore:
   - "crates/authorization-server/src/support/mod.rs"
   # Thin binary/bootstrap wrappers with no protocol or security decisions.
   - "main.rs"
-  - "bin/nazo_oauth_keyctl.rs"
-  - "bin/nazo_oauth_migrate.rs"
   - "crates/authorization-server/src/main.rs"
-  - "crates/authorization-server/src/bin/nazo_oauth_keyctl.rs"
-  - "crates/authorization-server/src/bin/nazo_oauth_migrate.rs"
   # Test implementation files are excluded so coverage measures production code.
   - "tests/**"
+  - "crates/**/tests/**"
   - "crates/authorization-server/tests/**"
   - "benches/**"
   - "examples/**"

@@ -24,9 +24,15 @@ pub(crate) use profile_services::{
 };
 pub(crate) use registration_services::{LocalRegistrationService, RegistrationSecretHasher};
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use actix_web::{App, HttpServer, dev::Service, middleware::from_fn, web};
+use actix_files::{Files, NamedFile};
+use actix_web::{
+    App, HttpResponse, HttpServer,
+    dev::{Service, ServiceRequest, ServiceResponse, fn_service},
+    middleware::from_fn,
+    web,
+};
 use anyhow::Context as _;
 
 use crate::adapters::email::{SmtpVerificationEmailDelivery, email_delivery_configured};
@@ -89,8 +95,6 @@ use crate::http::token::dispatch::{Openid4vcTokenHandles, TokenCoreHandles, Toke
 use crate::http::token::issue::TokenIssuanceConfig;
 use crate::runtime_modules::{RuntimeModules, ServerRuntimeModuleRegistry};
 use crate::settings::Settings;
-#[cfg(test)]
-use actix_web::http::header;
 use nazo_http_actix::ClientIpConfig;
 use nazo_http_actix::{
     AuthorizationDecisionEndpoint, LocalRegistrationEndpoint, MfaProfileConfig, MfaProfileEndpoint,
@@ -101,6 +105,7 @@ use nazo_http_actix::{
 };
 use nazo_openid4vc_http_actix::{CredentialIssuerEndpoint, PresentationEndpoint};
 use nazo_postgres::create_pool;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
 use tracing::Instrument;
 
 pub async fn run() -> anyhow::Result<()> {
@@ -143,6 +148,22 @@ pub async fn run() -> anyhow::Result<()> {
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
 
     let settings = Arc::new(Settings::from_config(&config)?);
+    let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
+        settings.endpoint.mtls_certificate_source,
+    ));
+    let readiness_dependencies =
+        web::Data::new(crate::http::well_known::ReadinessDependencies::new(
+            diesel_db.clone(),
+            valkey_connection.clone(),
+        ));
+    let initial_admin_bootstrap = web::Data::new(
+        crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint::initialize(
+            diesel_db.clone(),
+            &settings.storage.data_dir,
+            &settings.endpoint.issuer,
+        )
+        .await?,
+    );
     let remote_client_documents = Arc::new(
         crate::domain::remote_client_documents::RemoteClientDocumentResolver::new(
             &settings.modules.remote_client_document_private_origins,
@@ -260,7 +281,11 @@ pub async fn run() -> anyhow::Result<()> {
         &valkey_connection,
     )));
     #[cfg(not(test))]
-    if settings.modules.enable_ciba {
+    if nazo_auth::module_admissible(
+        runtime_modules.registry.snapshot().as_ref(),
+        nazo_runtime_modules::ModuleId::Ciba,
+        nazo_auth::CapabilityAdmission::NewRequest,
+    ) {
         spawn_ciba_ping_delivery_worker(CibaPingDeliveryWorker::new(
             nazo_valkey::CibaStore::new(&valkey_connection),
             &settings.ciba.ciba_notification_private_origins,
@@ -510,6 +535,7 @@ pub async fn run() -> anyhow::Result<()> {
         admin_sessions.clone().into_inner(),
         runtime_modules.registry.clone(),
         remote_client_documents.clone(),
+        keyset.clone(),
         if settings.modules.enable_openid4vci_issuer {
             Some(Arc::new(nazo_postgres::Openid4vciRepository::new(
                 diesel_db.clone(),
@@ -557,7 +583,6 @@ pub async fn run() -> anyhow::Result<()> {
         authorization_runtime.clone(),
     ));
     let logout_deliveries = nazo_postgres::AuditRepository::new(diesel_db.clone());
-    #[cfg(not(test))]
     let oidc_logout_operations = OidcLogoutHandles::new(
         session_profiles.get_ref().clone(),
         client_repository,
@@ -565,15 +590,6 @@ pub async fn run() -> anyhow::Result<()> {
         keyset.clone(),
         OidcLogoutConfig::from(settings.as_ref()),
         runtime_modules.registry.clone(),
-    );
-    #[cfg(test)]
-    let oidc_logout_operations = OidcLogoutHandles::new(
-        session_profiles.get_ref().clone(),
-        nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
-        logout_deliveries.clone(),
-        keyset.clone(),
-        OidcLogoutConfig::from(settings.as_ref()),
-        settings.modules.enable_frontchannel_logout,
     );
     let oidc_logout = web::Data::new(OidcLogoutEndpoint::new(
         Arc::new(oidc_logout_operations),
@@ -621,6 +637,12 @@ pub async fn run() -> anyhow::Result<()> {
     let admin_users: web::Data<dyn nazo_identity::ports::AdminUserRepositoryPort> = web::Data::from(
         Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()))
             as Arc<dyn nazo_identity::ports::AdminUserRepositoryPort>,
+    );
+    let admin_user_registration: web::Data<
+        dyn nazo_identity::ports::RegistrationAccountRepositoryPort,
+    > = web::Data::from(
+        Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()))
+            as Arc<dyn nazo_identity::ports::RegistrationAccountRepositoryPort>,
     );
     let admin_grants: web::Data<dyn nazo_auth::AdminGrantRepositoryPort> = web::Data::from(
         Arc::new(nazo_postgres::GrantRepository::new(diesel_db.clone()))
@@ -819,9 +841,22 @@ pub async fn run() -> anyhow::Result<()> {
 
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
+    let direct_tls = direct_tls_listener(&config, &settings)?;
+    let ui_static_dir = config
+        .optional_string("UI_STATIC_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            let path = std::fs::canonicalize(&path)
+                .with_context(|| format!("failed to resolve UI_STATIC_DIR {}", path.display()))?;
+            if !path.join("index.html").is_file() {
+                anyhow::bail!("UI_STATIC_DIR must contain index.html: {}", path.display());
+            }
+            Ok::<_, anyhow::Error>(path)
+        })
+        .transpose()?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let app = App::new()
             .wrap_fn(|req, service| {
                 let method = req.method().clone();
@@ -862,6 +897,9 @@ pub async fn run() -> anyhow::Result<()> {
         let app = app.app_data(token_management_endpoint.clone());
         let app = app.app_data(userinfo_endpoint.clone());
         let app = app
+            .app_data(mtls_certificate_source.clone())
+            .app_data(readiness_dependencies.clone())
+            .app_data(initial_admin_bootstrap.clone())
             .app_data(token_endpoint_handles.clone())
             .app_data(ciba_service.clone())
             .app_data(ciba_users.clone())
@@ -890,6 +928,7 @@ pub async fn run() -> anyhow::Result<()> {
             .app_data(profile_federation.clone())
             .app_data(resource_server_http_data.clone())
             .app_data(admin_users.clone())
+            .app_data(admin_user_registration.clone())
             .app_data(admin_grants.clone())
             .app_data(admin_access_requests.clone())
             .app_data(mtls_trust_anchors.clone())
@@ -928,14 +967,94 @@ pub async fn run() -> anyhow::Result<()> {
         } else {
             app
         };
+        let app = if let Some(path) = ui_static_dir.clone() {
+            app.service(ui_static_files(path))
+        } else {
+            app
+        };
         app.configure(|cfg| routes::configure(cfg, &settings, perf_metrics_enabled))
     })
-    .bind(addr)?
-    .run()
-    .await?;
+    .on_connect(|io, extensions| {
+        let Some(stream) = io
+            .downcast_ref::<actix_tls::accept::openssl::TlsStream<actix_web::rt::net::TcpStream>>()
+        else {
+            return;
+        };
+        let Some(certificate) = stream.ssl().peer_certificate() else {
+            return;
+        };
+        let Ok(der) = certificate.to_der() else {
+            return;
+        };
+        if let Some(identity) = crate::http::mtls::certificate_der_identity(&der) {
+            extensions.insert(identity);
+        }
+    })
+    .bind(addr)?;
+    let server = if let Some((tls_addr, acceptor)) = direct_tls {
+        tracing::info!("nazo-oauth-server direct mTLS listener on {tls_addr}");
+        server.bind_openssl(tls_addr, acceptor)?
+    } else {
+        server
+    };
+    server.run().await?;
     Ok(())
 }
 
+fn ui_static_files(root: PathBuf) -> Files {
+    let index = root.join("index.html");
+    Files::new("/ui", root)
+        .index_file("index.html")
+        .disable_content_disposition()
+        .default_handler(fn_service(move |request: ServiceRequest| {
+            let index = index.clone();
+            async move {
+                let missing_asset = request
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|segment| segment.contains('.'));
+                let (request, _) = request.into_parts();
+                if missing_asset {
+                    return Ok(ServiceResponse::new(
+                        request,
+                        HttpResponse::NotFound().finish(),
+                    ));
+                }
+                let file = NamedFile::open_async(index).await?;
+                let response = file.into_response(&request);
+                Ok(ServiceResponse::new(request, response))
+            }
+        }))
+}
+
+fn direct_tls_listener(
+    config: &ConfigSource,
+    settings: &Settings,
+) -> anyhow::Result<Option<(SocketAddr, openssl::ssl::SslAcceptorBuilder)>> {
+    use crate::http::mtls::MtlsCertificateSourceMode;
+
+    if settings.endpoint.mtls_certificate_source != MtlsCertificateSourceMode::DirectTls {
+        return Ok(None);
+    }
+    let required = |key: &str| {
+        config
+            .optional_string(key)
+            .ok_or_else(|| anyhow::anyhow!("{key} is required for direct-tls mTLS"))
+    };
+    let bind: SocketAddr = required("TLS_BIND")?.parse()?;
+    let certificate = required("TLS_CERTIFICATE_FILE")?;
+    let private_key = required("TLS_PRIVATE_KEY_FILE")?;
+    let client_ca = required("TLS_CLIENT_CA_FILE")?;
+    let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())?;
+    acceptor.set_certificate_chain_file(certificate)?;
+    acceptor.set_private_key_file(private_key, SslFiletype::PEM)?;
+    acceptor.check_private_key()?;
+    acceptor.set_ca_file(client_ca)?;
+    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    Ok(Some((bind, acceptor)))
+}
+
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/bootstrap/tests/bootstrap.rs"]
+#[path = "../../tests/unit/bootstrap.rs"]
 mod tests;

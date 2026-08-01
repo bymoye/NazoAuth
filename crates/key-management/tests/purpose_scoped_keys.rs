@@ -40,6 +40,21 @@ async fn purpose_scoped_key_signs_only_declared_openid4vc_purposes() {
     )
     .await
     .unwrap();
+    let retried_kid = KeyManager::register_local(
+        &settings,
+        LocalKeyRegistration {
+            algorithm: jsonwebtoken::Algorithm::ES256,
+            purposes: [
+                SigningPurpose::Credential,
+                SigningPurpose::PresentationRequest,
+            ]
+            .into_iter()
+            .collect(),
+        },
+    )
+    .await
+    .expect("an exact purpose-scoped registration retry must be idempotent");
+    assert_eq!(retried_kid, scoped_kid);
     let manager = KeyManager::load_or_create(settings.clone()).await.unwrap();
 
     for purpose in [

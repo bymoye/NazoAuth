@@ -155,6 +155,7 @@ pub(crate) fn dynamic_registration_endpoint(
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     remote_client_documents: Arc<RemoteClientDocumentResolver>,
 ) -> DynamicRegistrationEndpoint {
+    let key_snapshot = keyset.snapshot();
     let crypto = Arc::new(nazo_key_management::ClientRegistrationCrypto::new(keyset));
     let request_guard = Arc::new(ServerDynamicRegistrationRequestGuard::new(
         rate_limits,
@@ -170,6 +171,10 @@ pub(crate) fn dynamic_registration_endpoint(
             initial_access_token: config.initial_access_token,
             client_ip_header_mode: config.client_ip_header_mode,
             trusted_proxy_cidrs: config.trusted_proxy_cidrs,
+            id_token_signing_algs: key_snapshot.id_token_signing_alg_values_supported(),
+            response_signing_algs: key_snapshot.response_signing_alg_values_supported(),
+            request_object_encryption_algs: vec!["RSA-OAEP-256"],
+            request_object_encryption_encs: vec!["A256GCM"],
         },
         Arc::new(clients),
         Arc::new(ServerSectorIdentifierResolver),

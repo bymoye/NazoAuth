@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -39,6 +40,32 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 "OIDF_APPLICANT_EMAIL.*OIDF_CONFORMANCE_TOKEN",
             ):
                 self.module.required_environment("OIDF_CONFORMANCE_TOKEN")
+
+    def test_onboarding_child_receives_credentials_only_through_stdin(self):
+        environment = {
+            "OIDF_APPLICANT_EMAIL": "applicant@example.com",
+            "OIDF_APPLICANT_PASSWORD": "applicant-password",
+            "OIDF_ADMIN_EMAIL": "admin@example.com",
+            "OIDF_ADMIN_PASSWORD": "admin-password",
+            "OIDF_CONFORMANCE_TOKEN": "suite-token",
+        }
+
+        payload, child_environment = self.module.onboarding_credentials(environment)
+
+        self.assertEqual(
+            json.loads(payload),
+            {
+                "applicant_email": "applicant@example.com",
+                "applicant_password": "applicant-password",
+                "admin_email": "admin@example.com",
+                "admin_password": "admin-password",
+            },
+        )
+        self.assertEqual(child_environment, {"OIDF_CONFORMANCE_TOKEN": "suite-token"})
+        self.assertIn(
+            "--credentials-stdin",
+            self.module.onboarding_args("apply", Path("work"), "https://issuer.example"),
+        )
 
     def test_suite_runner_config_cleanup_removes_only_generated_untracked_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +138,15 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 mock.patch.object(
                     self.module,
                     "required_environment",
-                    return_value={"OIDF_CONFORMANCE_TOKEN": "token"},
+                    return_value={
+                        "OIDF_APPLICANT_EMAIL": "applicant@example.com",
+                        "OIDF_APPLICANT_PASSWORD": "applicant-password",
+                        "OIDF_ADMIN_EMAIL": "admin@example.com",
+                        "OIDF_ADMIN_PASSWORD": "admin-password",
+                        "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN": "d" * 48,
+                        "OIDF_CIBA_AUTOMATED_DECISION_TOKEN": "c" * 48,
+                        "OIDF_CONFORMANCE_TOKEN": "token",
+                    },
                 ),
                 mock.patch.object(
                     self.module, "command", side_effect=RuntimeError("prepare failed")
@@ -188,14 +223,17 @@ class PublicOidfRunnerTests(unittest.TestCase):
 
             self.assertEqual(command.call_count, 14)
             invocations = [call.args[0] for call in command.call_args_list]
-            self.assertNotIn("--no-parallel", invocations[0])
-            self.assertNotIn("--no-parallel", invocations[1])
-            for invocation in invocations[2:6]:
-                self.assertIn("--no-parallel", invocation)
-            for invocation in invocations[6:10]:
-                self.assertNotIn("--no-parallel", invocation)
-            for invocation in invocations[10:14]:
-                self.assertIn("--no-parallel", invocation)
+            by_group = {
+                Path(
+                    invocation[invocation.index("--plan-set-json-file") + 1]
+                ).stem.removeprefix("oidf-plan-set-"): invocation
+                for invocation in invocations
+            }
+            for name, invocation in by_group.items():
+                if name.startswith(("03", "08", "09", "10", "11")):
+                    self.assertIn("--no-parallel", invocation)
+                else:
+                    self.assertNotIn("--no-parallel", invocation)
             self.assertTrue(all("--no-api-token" not in invocation for invocation in invocations))
             self.assertTrue(
                 all(
@@ -206,6 +244,68 @@ class PublicOidfRunnerTests(unittest.TestCase):
             self.assertTrue(
                 all("--expected-failures-file" in invocation for invocation in invocations)
             )
+
+    def test_parallel_group_workers_use_isolated_suite_worktrees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            work.mkdir()
+            args = Namespace(
+                suite_dir=root / "suite",
+                suite_revision="suite-commit",
+                safe_group_workers=2,
+                browser_group_workers=2,
+            )
+            invocations = (
+                ("01-safe-a", ["runner", "--suite-dir", "{suite_dir}", "safe-a"]),
+                ("02-safe-b", ["runner", "--suite-dir", "{suite_dir}", "safe-b"]),
+                ("03a-ciba", ["runner", "--suite-dir", "{suite_dir}", "ciba"]),
+                ("08-browser-a", ["runner", "--suite-dir", "{suite_dir}", "browser-a"]),
+                ("09-browser-b", ["runner", "--suite-dir", "{suite_dir}", "browser-b"]),
+            )
+            safe_barrier = threading.Barrier(2)
+
+            def run_command(invocation, **_kwargs):
+                if invocation[-1].startswith("safe-"):
+                    safe_barrier.wait(timeout=2)
+
+            with (
+                mock.patch.object(
+                    self.module,
+                    "prepare_group_invocations",
+                    return_value=invocations,
+                ),
+                mock.patch.object(self.module, "add_suite_worktree") as add_worktree,
+                mock.patch.object(self.module, "remove_suite_worktree") as remove_worktree,
+                mock.patch.object(
+                    self.module,
+                    "command",
+                    side_effect=run_command,
+                ) as command,
+            ):
+                self.module.run_plan_groups(args, work, {})
+
+            worker_one = work / "suite-workers" / "worker-01"
+            worker_two = work / "suite-workers" / "worker-02"
+            self.assertEqual(
+                add_worktree.call_args_list,
+                [
+                    mock.call(args.suite_dir, worker_one, "suite-commit"),
+                    mock.call(args.suite_dir, worker_two, "suite-commit"),
+                ],
+            )
+            self.assertEqual(
+                remove_worktree.call_args_list,
+                [
+                    mock.call(args.suite_dir, worker_two),
+                    mock.call(args.suite_dir, worker_one),
+                ],
+            )
+            suite_arguments = {
+                Path(call.args[0][call.args[0].index("--suite-dir") + 1])
+                for call in command.call_args_list
+            }
+            self.assertEqual(suite_arguments, {worker_one, worker_two})
 
     def test_problem_records_are_filtered_to_the_selected_plan_configs(self):
         with tempfile.TemporaryDirectory() as directory:

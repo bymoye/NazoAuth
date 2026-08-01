@@ -8,6 +8,11 @@ Nazo Auth Server is configured in two layers:
 - runtime/application configuration: feature and integration settings that can
   move to the administrator UI over time
 
+`nazoauth server` requires `.env.yaml` in its working directory. If the file is
+absent, the command copies the minimal example to `.env.yaml`, prints an
+instruction to review it, and exits successfully without opening network or
+database connections. Edit the file before running the command again.
+
 The default deployment is same-origin. The public URL is configured once and
 the server derives the related URLs from it:
 
@@ -30,7 +35,6 @@ DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 CLIENT_SECRET_PEPPER: "<random 32+ byte secret>"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
 
@@ -51,12 +55,13 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
 | `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string |
 | `DATA_DIR` | `runtime` | Base directory for persistent local files |
-| `CLIENT_SECRET_PEPPER` | development-only default for loopback issuers | Required for non-loopback issuers; use a random 32+ byte secret and keep it stable across restarts |
+| `UI_STATIC_DIR` | unset | Optional signed frontend directory containing `index.html`; serves files and SPA routes under `/ui/` |
+| `CLIENT_SECRET_PEPPER` | generated under `DATA_DIR/secrets` | Explicit values override the persisted generated value; keep it stable and back it up with the database |
 | `PASSWORD_HASH_MAX_CONCURRENCY` | `8` | Maximum concurrent Argon2 password verifications per process; tune from CPU and memory capacity, not by lowering Argon2 cost |
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `100` | Maximum bounded wait for a password-verification slot before returning `temporarily_unavailable` |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
-| `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, or `fapi2-message-signing-introspection` |
+| `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
 | `ENABLE_FAPI_HTTP_SIGNATURES` | `false` | Experimental resource-only profile for the 2026-06-26 FAPI 2.0 HTTP Signatures working draft; when enabled, `/fapi/resource` requires a registered client JWK and RFC 9421 signature and signs every response |
 | `FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS` | `60` | Request signature age and replay-marker lifetime; accepted range is 1–300 seconds, with at most five seconds of future clock skew |
@@ -80,6 +85,38 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 
 Explicit overrides are retained for advanced deployments and backward
 compatibility. New deployments should prefer same-origin defaults.
+
+`JWK_KEYS_DIR` is persistent state, not a disposable cache. On first start,
+NazoAuth atomically creates both its signing keyset and a dedicated
+`request-object-encryption.pem` recipient key. Existing key directories are
+upgraded automatically when first loaded. Back up or mount this directory
+together with the database; replacing the recipient key makes already-issued
+encrypted Request Objects undecryptable.
+
+## Composable capability defaults
+
+New databases activate stable, non-conflicting server modules together.
+Client authority remains default-deny: a client still needs the appropriate
+grant allowlist, metadata, sender constraint, and versioned `security_policy`.
+Device Grant and CIBA therefore have active server support but new clients
+cannot use either until `allow_cross_device_flows=true` and the corresponding
+grant/metadata are assigned. Session Management similarly requires
+`session_management=true`.
+
+Dynamic Client Registration is active only when
+`DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. Experimental,
+draft, remote-trust, and role-specific modules remain conditional on their
+complete prerequisites.
+
+During the first upgrade to composable defaults, existing inherited module
+states are materialized as explicit rows using the old `ENABLE_*` settings.
+This avoids silently changing an existing deployment. After migration, runtime
+module administration is authoritative; the old stable-module flags are only
+migration inputs.
+
+See
+[Composable Capability Policy](../protocol/composable-capability-policy.md)
+for the server/client boundary, default matrix, policy JSON, and upgrade rules.
 
 ## Experimental FAPI HTTP signatures
 
@@ -140,9 +177,11 @@ is only appropriate for local loopback development.
 The following settings are still supported but should not be part of a quick
 deployment path. They are candidates for the administrator UI:
 
-- OAuth/OIDC feature gates: `ENABLE_REQUEST_OBJECT`,
-  `ENABLE_PAR_REQUEST_OBJECT`, `ENABLE_AUTHORIZATION_DETAILS`,
-  `ENABLE_DEVICE_AUTHORIZATION_GRANT`, `ENABLE_DYNAMIC_CLIENT_REGISTRATION`
+- OAuth/OIDC compatibility/migration gates: `ENABLE_REQUEST_OBJECT`,
+  `ENABLE_PAR_REQUEST_OBJECT`, `ENABLE_DEVICE_AUTHORIZATION_GRANT`,
+  `ENABLE_DYNAMIC_CLIENT_REGISTRATION`; new deployments use runtime-module
+  state and per-client policy
+- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`
 - protocol tuning: `DPOP_NONCE_POLICY`, `FAPI_RESOURCE_DPOP_NONCE_POLICY`, `REQUEST_OBJECT_JTI_POLICY`,
   `CIBA_SECURITY_PROFILE`, `REQUIRE_PUSHED_AUTHORIZATION_REQUESTS`,
   `PAR_TTL_SECONDS`,
@@ -191,7 +230,21 @@ loopback endpoints.
 - observability: `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
   `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_TIMEOUT`
 - proxy and client IP handling: `TRUSTED_PROXY_CIDRS`,
-  `CLIENT_IP_HEADER_MODE`
+  `CLIENT_IP_HEADER_MODE`, `MTLS_CERTIFICATE_SOURCE`
+
+`MTLS_CERTIFICATE_SOURCE` accepts `disabled`, `direct-tls`, `rfc9440`, or
+`legacy-verified-headers`. `rfc9440` consumes the singleton RFC 9440
+`Client-Cert` DER byte sequence. `legacy-verified-headers` requires
+`X-SSL-Client-Verify: SUCCESS` and the existing forwarded certificate fields.
+Both proxy modes require `TRUSTED_PROXY_CIDRS`; without a trusted proxy the
+default is `disabled`. When trusted proxy CIDRs are present and the source is
+omitted, the compatibility mode remains the default for existing deployments.
+
+`direct-tls` creates a separate client-certificate-required TLS listener. It
+requires `TLS_BIND`, `TLS_CERTIFICATE_FILE`, `TLS_PRIVATE_KEY_FILE`, and
+`TLS_CLIENT_CA_FILE`. The ordinary `BIND` listener remains available for the
+browser/public route behind a normal TLS terminator; route the RFC 8705 mTLS
+endpoint aliases to `TLS_BIND`.
 
 `EMAIL_SMTP_TLS` accepts only `starttls`, `implicit`, or `none`. The `none`
 mode is rejected unless the issuer is loopback HTTP and no SMTP credentials

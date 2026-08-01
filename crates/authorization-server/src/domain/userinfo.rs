@@ -323,15 +323,6 @@ impl UserinfoHandles {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_infrastructure(state: &super::TestInfrastructure) -> Self {
-        Self::new(
-            nazo_valkey::ReplayStore::new(&state.valkey_connection()),
-            state.keyset.clone(),
-            UserinfoConfig::from(state.settings.as_ref()),
-        )
-    }
-
     pub(crate) fn issuer(&self) -> &str {
         &self.config.issuer
     }
@@ -380,5 +371,5 @@ impl UserinfoHandles {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/http/token/tests/userinfo.rs"]
+#[path = "../../tests/unit/domain/userinfo.rs"]
 mod tests;

@@ -34,15 +34,28 @@ class OidfWorkflowTests(unittest.TestCase):
         self.assertIn("OPENID4VC_OIDF_BASE_CONFIG_JSON", workflow)
         self.assertIn("OPENID4VC_OIDF_DRIVER_CONFIG_JSON", workflow)
         self.assertIn("workflow_call:", workflow)
+        self.assertEqual(workflow.count("credential_holder_email_sha256:"), 2)
+        self.assertIn(
+            '--credential-holder-email-sha256 "${{ inputs.credential_holder_email_sha256 }}"',
+            workflow,
+        )
         for secret in (
             "OIDF_PLAN_CONFIG_AGE_IDENTITY",
             "OIDF_MTLS_MATERIAL_AGE_IDENTITY",
-            "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
             "OPENID4VC_OIDF_BASE_CONFIG_JSON",
             "OPENID4VC_OIDF_MTLS_CONFIG_JSON",
             "OPENID4VC_OIDF_DRIVER_CONFIG_JSON",
         ):
             self.assertIn(f"      {secret}:\n        required: true", workflow)
+        self.assertNotIn("secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN", workflow)
+        self.assertNotIn(
+            "secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN", workflow
+        )
+        self.assertIn("secrets.token_urlsafe(48)", workflow)
+        self.assertIn(
+            "--dynamic-registration-token-file dynamic-registration-initial-access-token",
+            workflow,
+        )
 
     def test_oidc_fapi_mtls_material_is_encrypted_and_applied_everywhere(self):
         root = Path(__file__).resolve().parents[2]
@@ -75,11 +88,29 @@ class OidfWorkflowTests(unittest.TestCase):
             "uses: ./.github/workflows/oidf-public-onboarding-material.yml",
             workflow,
         )
+        self.assertIn(
+            "credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}",
+            workflow,
+        )
         self.assertIn("secrets: inherit", workflow)
         self.assertIn("if: ${{ !inputs.onboarding_material_only }}", workflow)
         self.assertIn(
             "if: ${{ !inputs.onboarding_material_only && inputs.runner_mode == 'parallel-isolated' }}",
             workflow,
+        )
+        self.assertEqual(
+            workflow.count(
+                "--dynamic-registration-token-file dynamic-registration-initial-access-token"
+            ),
+            2,
+        )
+        self.assertEqual(
+            workflow.count(
+                "unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN "
+                "OIDF_CIBA_AUTOMATED_DECISION_TOKEN "
+                "OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
+            ),
+            2,
         )
 
     def test_official_runners_require_production_delivered_client_material(self):
@@ -105,6 +136,8 @@ class OidfWorkflowTests(unittest.TestCase):
         self.assertIn(validation, workflow)
         self.assertIn('--source-commit "$SOURCE_COMMIT"', workflow)
         self.assertIn('--expected-source-commit "$SOURCE_COMMIT"', workflow)
+        self.assertIn('git checkout --detach "$SOURCE_COMMIT"', workflow)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"', workflow)
         self.assertIn("path: oidf-public-onboarding-material", workflow)
 
         conformance = (

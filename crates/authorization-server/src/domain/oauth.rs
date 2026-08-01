@@ -66,5 +66,5 @@ pub(crate) struct NativeSsoTokenBinding {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/domain/oauth/tests/oauth.rs"]
+#[path = "../../tests/unit/domain/oauth.rs"]
 mod tests;

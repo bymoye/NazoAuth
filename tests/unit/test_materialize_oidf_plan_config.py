@@ -205,6 +205,36 @@ class MaterializeOidfPlanConfigTests(unittest.TestCase):
             {"cert": "shared-cert", "key": "shared-key"},
         )
 
+    def test_ciba_decision_token_is_rebound_without_preserving_old_secret(self):
+        module = load_materializer_module()
+        rendered = {
+            "configs": {
+                "poll.json": {
+                    "automated_ciba_approval_url": (
+                        "https://issuer.example/auth/ciba-automated-decision"
+                        "?token={auth_req_id}&type={action}&decision_token=old-secret"
+                    )
+                },
+                "ping.json": {
+                    "automated_ciba_approval_url": (
+                        "https://issuer.example/auth/ciba-automated-decision"
+                        "?decision_token=old-secret&token={auth_req_id}"
+                    )
+                },
+            }
+        }
+        token = "new-deployment-token-0123456789abcdef"
+
+        module.bind_ciba_automated_decision_token(rendered, token)
+
+        serialized = json.dumps(rendered)
+        self.assertNotIn("old-secret", serialized)
+        self.assertEqual(serialized.count(token), 2)
+        self.assertIn("&token={auth_req_id}", serialized)
+        for invalid in ("short", "x" * 32 + "&suffix", " x" * 20):
+            with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
+                module.bind_ciba_automated_decision_token(rendered, invalid)
+
     def test_target_issuer_rewrites_every_template_issuer_url(self):
         module = load_materializer_module()
         rendered = {

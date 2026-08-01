@@ -35,6 +35,7 @@ pub(crate) struct AuthorizationEndpoint {
     sessions: Arc<AdminSessionHandles>,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     remote_client_documents: Arc<RemoteClientDocumentResolver>,
+    request_object_keys: nazo_key_management::KeyManager,
     credential_authorization_offers: Option<Arc<dyn AuthorizationOfferPort>>,
 }
 
@@ -45,6 +46,7 @@ impl AuthorizationEndpoint {
         sessions: Arc<AdminSessionHandles>,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
         remote_client_documents: Arc<RemoteClientDocumentResolver>,
+        request_object_keys: nazo_key_management::KeyManager,
         credential_authorization_offers: Option<Arc<dyn AuthorizationOfferPort>>,
     ) -> Self {
         Self {
@@ -53,6 +55,7 @@ impl AuthorizationEndpoint {
             sessions,
             runtime_modules,
             remote_client_documents,
+            request_object_keys,
             credential_authorization_offers,
         }
     }
@@ -64,6 +67,7 @@ impl AuthorizationEndpoint {
             sessions: &self.sessions,
             modules: self.runtime_modules.snapshot().as_ref().clone(),
             remote_client_documents: Some(&self.remote_client_documents),
+            request_object_keys: &self.request_object_keys,
             credential_authorization_offers: self.credential_authorization_offers.as_deref(),
         }
     }
@@ -75,30 +79,8 @@ pub(crate) struct AuthorizationRequestContext<'a> {
     pub(crate) sessions: &'a AdminSessionHandles,
     pub(crate) modules: ActiveModuleSnapshot,
     pub(crate) remote_client_documents: Option<&'a RemoteClientDocumentResolver>,
+    pub(crate) request_object_keys: &'a nazo_key_management::KeyManager,
     pub(crate) credential_authorization_offers: Option<&'a dyn AuthorizationOfferPort>,
-}
-
-impl<'a> AuthorizationRequestContext<'a> {
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        service: &'a ServerAuthorizationService,
-        config: &'a AuthorizationHttpConfig,
-        sessions: &'a AdminSessionHandles,
-        enabled_modules: std::collections::BTreeSet<ModuleId>,
-    ) -> Self {
-        Self {
-            service,
-            config,
-            sessions,
-            modules: ActiveModuleSnapshot {
-                revision: nazo_runtime_modules::ModuleRevision::new(0),
-                accepting: enabled_modules,
-                draining: std::collections::BTreeSet::new(),
-            },
-            remote_client_documents: None,
-            credential_authorization_offers: None,
-        }
-    }
 }
 
 pub(crate) fn accepts_module(
@@ -124,167 +106,11 @@ pub(crate) fn permits_existing_module_transaction(
 }
 
 #[cfg(test)]
-pub(crate) struct AuthorizationTestFixture {
-    service: ServerAuthorizationService,
-    config: AuthorizationHttpConfig,
-    sessions: AdminSessionHandles,
-    enabled_modules: std::collections::BTreeSet<ModuleId>,
-}
+#[path = "../../../tests/support/http/authorization.rs"]
+pub(crate) mod test_support;
 
-#[cfg(test)]
-impl AuthorizationTestFixture {
-    pub(crate) fn new(
-        service: ServerAuthorizationService,
-        config: AuthorizationHttpConfig,
-        sessions: AdminSessionHandles,
-        enabled_modules: std::collections::BTreeSet<ModuleId>,
-    ) -> Self {
-        Self {
-            service,
-            config,
-            sessions,
-            enabled_modules,
-        }
-    }
-
-    pub(crate) fn context(&self) -> AuthorizationRequestContext<'_> {
-        AuthorizationRequestContext::for_test(
-            &self.service,
-            &self.config,
-            &self.sessions,
-            self.enabled_modules.clone(),
-        )
-    }
-
-    pub(crate) fn rebind_storage(
-        &self,
-        database: nazo_postgres::DbPool,
-        connection: &nazo_valkey::ValkeyConnection,
-        keyset: nazo_key_management::KeyManager,
-    ) -> Self {
-        Self::new(
-            ServerAuthorizationService::new(
-                nazo_postgres::AuthorizationFlowRepository::new(
-                    database.clone(),
-                    crate::domain::tenancy::DEFAULT_TENANT_ID,
-                ),
-                nazo_valkey::AuthorizationStateAdapter::new(connection),
-                keyset,
-            ),
-            self.config.clone(),
-            AdminSessionHandles::new(
-                nazo_valkey::SessionStore::new(connection),
-                nazo_postgres::UserRepository::new(database),
-                self.sessions.http_config().clone(),
-            ),
-            self.enabled_modules.clone(),
-        )
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct TestAuthorizationDependencies {
-    fixture: AuthorizationTestFixture,
-}
-
-#[cfg(test)]
-impl TestAuthorizationDependencies {
-    pub(crate) fn new(state: &crate::domain::TestInfrastructure) -> Self {
-        let connection = state.valkey_connection();
-        let session = &state.settings.session;
-        Self {
-            fixture: AuthorizationTestFixture::new(
-                ServerAuthorizationService::new(
-                    nazo_postgres::AuthorizationFlowRepository::new(
-                        state.diesel_db.clone(),
-                        crate::domain::tenancy::DEFAULT_TENANT_ID,
-                    ),
-                    nazo_valkey::AuthorizationStateAdapter::new(&connection),
-                    state.keyset.clone(),
-                ),
-                AuthorizationHttpConfig::from(state.settings.as_ref()),
-                AdminSessionHandles::new(
-                    nazo_valkey::SessionStore::new(&connection),
-                    nazo_postgres::UserRepository::new(state.diesel_db.clone()),
-                    crate::http::sessions::SessionHttpConfig::new(
-                        &session.session_cookie_name,
-                        &session.csrf_cookie_name,
-                        session.cookie_secure,
-                    ),
-                ),
-                crate::runtime_modules::inherited_enabled(&state.settings),
-            ),
-        }
-    }
-
-    pub(crate) fn context(&self) -> AuthorizationRequestContext<'_> {
-        self.fixture.context()
-    }
-}
-
-#[cfg(test)]
-pub(crate) const BASELINE_ACR_VALUE: &str = "1";
-
-pub(crate) use jar::{
-    apply_request_object_with_context, unverified_signed_request_object_client_id,
-};
+pub(crate) use jar::{apply_request_object_with_context, unverified_request_object_client_id};
 pub(crate) use par::is_pushed_authorization_request_uri;
 #[cfg(test)]
-mod boundary_tests {
-    #[test]
-    fn authorization_entrypoints_use_focused_dependencies() {
-        for (name, source) in [
-            ("request", include_str!("request.rs")),
-            ("par", include_str!("par.rs")),
-            ("jar", include_str!("jar.rs")),
-            ("consent", include_str!("consent.rs")),
-            (
-                "decision",
-                include_str!("../../../../http-actix/src/authorization_decision.rs"),
-            ),
-            ("prompt_none", include_str!("request/prompt_none.rs")),
-        ] {
-            assert!(
-                !source.contains("Data<TestInfrastructure>"),
-                "{name} reintroduced the giant TestInfrastructure extractor"
-            );
-            assert!(
-                !source.contains("AuthorizationHandles"),
-                "{name} reintroduced the authorization forwarding facade"
-            );
-        }
-        for (name, source) in [
-            ("request", include_str!("request.rs")),
-            ("par", include_str!("par.rs")),
-            ("consent", include_str!("consent.rs")),
-        ] {
-            assert!(
-                source.contains("Data<AuthorizationEndpoint>"),
-                "{name} must extract only the focused authorization endpoint"
-            );
-            for dependency in [
-                "Data<ServerAuthorizationService>",
-                "Data<AuthorizationHttpConfig>",
-                "Data<AdminSessionHandles>",
-                "Data<ServerRuntimeModuleRegistry>",
-            ] {
-                assert!(
-                    !source.contains(dependency),
-                    "{name} directly extracts {dependency}"
-                );
-            }
-        }
-        let decision = include_str!("../../../../http-actix/src/authorization_decision.rs");
-        assert!(decision.contains("Data<AuthorizationDecisionEndpoint>"));
-        for (name, source) in [
-            ("par", include_str!("par.rs")),
-            ("jar", include_str!("jar.rs")),
-        ] {
-            assert!(
-                !source.contains("TestInfrastructure")
-                    && !source.contains("TestAuthorizationDependencies"),
-                "{name} reintroduced the monolithic authorization test fixture"
-            );
-        }
-    }
-}
+#[path = "../../../tests/unit/http/authorization/boundary.rs"]
+mod boundary_tests;

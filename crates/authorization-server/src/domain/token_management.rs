@@ -183,6 +183,7 @@ impl ServerTokenManagementOperations {
                 issuer: &self.config.issuer,
                 audience: &client.client_id,
                 body: &body,
+                signing_algorithm: client.introspection_signed_response_alg.as_deref(),
             })
             .await
             .map_err(|error| {
@@ -235,7 +236,8 @@ impl TokenManagementOperations for ServerTokenManagementOperations {
                     tracing::warn!(%error, "failed to inspect token state");
                     TokenManagementError::InspectionUnavailable
                 })?;
-            if signed_response_requested && self.config.profile.requires_signed_introspection() {
+            let client_policy = self.config.profile.effective_client_policy(&client);
+            if signed_response_requested || client_policy.require_signed_introspection_response {
                 return self
                     .protected_introspection(&client, &inspection)
                     .await

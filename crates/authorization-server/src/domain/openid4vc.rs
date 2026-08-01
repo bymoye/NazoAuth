@@ -730,7 +730,7 @@ fn mdoc_holder_key(device_key: Option<&coset::CoseKey>) -> Result<Value, Credent
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/domain/tests/openid4vc.rs"]
+#[path = "../../tests/unit/domain/openid4vc.rs"]
 mod tests;
 
 #[derive(Deserialize)]
@@ -771,6 +771,12 @@ pub(crate) struct Openid4vcProofValidator {
     key_attestation_jwks: Arc<Value>,
 }
 
+#[derive(Clone, Copy)]
+enum KeyAttestationContext {
+    AttestationProof,
+    JwtProof,
+}
+
 impl Openid4vcProofValidator {
     pub(crate) fn new(key_attestation_jwks: Value) -> anyhow::Result<Self> {
         if key_attestation_jwks
@@ -803,8 +809,13 @@ impl ProofValidatorPort for Openid4vcProofValidator {
                 let mut validated = Vec::new();
                 for encoded in attestations {
                     let encoded = encoded.as_str().ok_or(ProofError::InvalidKeyAttestation)?;
-                    let claims =
-                        self.validate_key_attestation(encoded, expected_nonce, metadata, now)?;
+                    let claims = self.validate_key_attestation(
+                        encoded,
+                        expected_nonce,
+                        metadata,
+                        now,
+                        KeyAttestationContext::AttestationProof,
+                    )?;
                     let keys = claims
                         .get("attested_keys")
                         .and_then(Value::as_array)
@@ -862,7 +873,13 @@ impl ProofValidatorPort for Openid4vcProofValidator {
                     .get("key_attestation")
                     .and_then(Value::as_str)
                     .map(|encoded| {
-                        self.validate_key_attestation(encoded, expected_nonce, metadata, now)
+                        self.validate_key_attestation(
+                            encoded,
+                            expected_nonce,
+                            metadata,
+                            now,
+                            KeyAttestationContext::JwtProof,
+                        )
                     })
                     .transpose()?;
                 if metadata.key_attestations_required.is_some() {
@@ -896,6 +913,7 @@ impl Openid4vcProofValidator {
         expected_nonce: &str,
         metadata: &nazo_openid4vci::ProofTypeMetadata,
         now: chrono::DateTime<Utc>,
+        context: KeyAttestationContext,
     ) -> Result<Value, ProofError> {
         let compact = decode_compact_jwt(encoded).map_err(|_| ProofError::InvalidKeyAttestation)?;
         if compact.header.typ.as_deref() != Some("key-attestation+jwt") {
@@ -927,18 +945,42 @@ impl Openid4vcProofValidator {
         let claims = decode::<Value>(encoded, &decoding_key(key, algorithm)?, &validation)
             .map_err(|_| ProofError::InvalidKeyAttestation)?
             .claims;
-        if claims
+        let issued_at = claims
+            .get("iat")
+            .and_then(Value::as_i64)
+            .ok_or(ProofError::InvalidKeyAttestation)?;
+        if issued_at < (now - Duration::minutes(5)).timestamp()
+            || issued_at > (now + Duration::seconds(60)).timestamp()
+        {
+            return Err(ProofError::InvalidKeyAttestation);
+        }
+        let expires_at = claims
+            .get("exp")
+            .map(|value| value.as_i64().ok_or(ProofError::InvalidKeyAttestation))
+            .transpose()?;
+        if expires_at.is_some_and(|exp| exp <= now.timestamp()) {
+            return Err(ProofError::InvalidKeyAttestation);
+        }
+        let nonce = claims
             .get("nonce")
-            .and_then(Value::as_str)
-            .is_some_and(|nonce| nonce != expected_nonce)
-            || claims
-                .get("exp")
-                .and_then(Value::as_i64)
-                .is_some_and(|exp| exp <= now.timestamp())
-            || claims
-                .get("attested_keys")
-                .and_then(Value::as_array)
-                .is_none_or(Vec::is_empty)
+            .map(|value| value.as_str().ok_or(ProofError::InvalidKeyAttestation))
+            .transpose()?;
+        match context {
+            KeyAttestationContext::AttestationProof => {
+                if nonce != Some(expected_nonce) {
+                    return Err(ProofError::InvalidKeyAttestation);
+                }
+            }
+            KeyAttestationContext::JwtProof => {
+                if expires_at.is_none() || nonce.is_some_and(|nonce| nonce != expected_nonce) {
+                    return Err(ProofError::InvalidKeyAttestation);
+                }
+            }
+        }
+        if claims
+            .get("attested_keys")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
         {
             return Err(ProofError::InvalidKeyAttestation);
         }

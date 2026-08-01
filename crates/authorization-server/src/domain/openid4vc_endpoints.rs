@@ -2048,5 +2048,5 @@ const fn vp_error(
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/domain/tests/openid4vc_endpoints.rs"]
+#[path = "../../tests/unit/domain/openid4vc_endpoints.rs"]
 mod tests;

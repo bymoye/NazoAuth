@@ -65,5 +65,5 @@ pub(super) fn saml_gateway_signature(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/source_mounted/src/http/auth/tests/federation_saml.rs"]
+#[path = "../../../../tests/unit/http/auth/federation/saml.rs"]
 mod tests;

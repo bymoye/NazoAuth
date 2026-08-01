@@ -3,19 +3,11 @@ use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::constant_time_eq;
 use crate::adapters::security::pkce_s256;
-#[cfg(test)]
-use crate::domain::TestInfrastructure;
 use crate::domain::client_policy::audiences_allowed;
-#[cfg(test)]
-use crate::domain::client_policy::authorization_code_key;
+
 use crate::domain::client_policy::is_subset;
 use crate::domain::client_policy::is_valid_pkce_value;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{
     AuthorizationCodeState, ClientRow, CodePayload, ConsumedAuthorizationCode, RefreshTokenPolicy,
     TokenIssue,
@@ -25,34 +17,15 @@ use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
-#[cfg(test)]
-use crate::settings::Settings;
-#[cfg(test)]
-use crate::test_support::valkey::valkey_get;
-#[cfg(test)]
-use crate::test_support::valkey::valkey_set_ex;
+
 use actix_web::http::StatusCode;
-#[cfg(test)]
-use actix_web::http::header;
-#[cfg(test)]
-use actix_web::http::header::HeaderValue;
-#[cfg(test)]
-use actix_web::web::Data;
+
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use base64::Engine;
+
 use chrono::Utc;
-#[cfg(test)]
-use chrono::{DateTime, Duration};
-#[cfg(test)]
-use nazo_auth::OidcClaimRequest;
-#[cfg(test)]
-use nazo_http_actix::OAuthJsonErrorFields;
+
 use nazo_http_actix::oauth_token_error;
-#[cfg(test)]
-use serde_json::{Value, json};
-#[cfg(test)]
-use uuid::Uuid;
+
 // 只消费授权码并转入统一令牌签发逻辑。
 use super::issue::TokenIssuanceConfig;
 use super::{
@@ -68,37 +41,6 @@ enum AuthorizationCodeConsumption {
     Failed,
     Missing,
     Malformed,
-}
-
-#[cfg(test)]
-fn parse_authorization_code_consumption_response(response: &str) -> AuthorizationCodeConsumption {
-    if let Some(raw) = response.strip_prefix("consuming|") {
-        return match serde_json::from_str::<CodePayload>(raw) {
-            Ok(payload) => AuthorizationCodeConsumption::Consuming(Box::new(payload)),
-            Err(error) => {
-                tracing::warn!(%error, "authorization code pending payload is malformed");
-                AuthorizationCodeConsumption::Malformed
-            }
-        };
-    }
-    if let Some(raw) = response.strip_prefix("consumed|") {
-        return match serde_json::from_str::<AuthorizationCodeState>(raw) {
-            Ok(AuthorizationCodeState::Consumed { marker }) => {
-                AuthorizationCodeConsumption::Consumed(marker)
-            }
-            Ok(_) => AuthorizationCodeConsumption::Malformed,
-            Err(error) => {
-                tracing::warn!(%error, "consumed authorization code marker is malformed");
-                AuthorizationCodeConsumption::Malformed
-            }
-        };
-    }
-    match response {
-        "busy" => AuthorizationCodeConsumption::Busy,
-        "failed" => AuthorizationCodeConsumption::Failed,
-        "missing" => AuthorizationCodeConsumption::Missing,
-        _ => AuthorizationCodeConsumption::Malformed,
-    }
 }
 
 async fn load_pending_authorization_code_payload_with_service(
@@ -247,21 +189,6 @@ fn authorization_code_audiences_with_default(
     is_subset(&form.audiences, &payload.resource_indicators)
         .then(|| form.audiences.clone())
         .ok_or(())
-}
-
-#[cfg(test)]
-fn authorization_code_audiences(
-    settings: &Settings,
-    payload: &CodePayload,
-    form: &TokenForm,
-) -> Result<Vec<String>, ()> {
-    let config = TokenIssuanceConfig::from(settings);
-    authorization_code_audiences_with_default(
-        config.default_audience(),
-        config.openid4vci_audience(&payload.scopes, &payload.authorization_details),
-        payload,
-        form,
-    )
 }
 
 fn refresh_token_dpop_binding(
@@ -662,60 +589,6 @@ pub(crate) async fn token_authorization_code_with_service(
     .await
 }
 
-#[cfg(test)]
-fn test_token_service(state: &TestInfrastructure) -> ServerTokenService {
-    ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
-        state.keyset.clone(),
-    )
-}
-
-#[cfg(test)]
-async fn load_pending_authorization_code_payload(
-    state: &TestInfrastructure,
-    code_hash: &str,
-) -> Result<Option<Box<CodePayload>>, HttpResponse> {
-    load_pending_authorization_code_payload_with_service(&test_token_service(state), code_hash)
-        .await
-}
-
-#[cfg(test)]
-async fn begin_authorization_code_consumption(
-    state: &TestInfrastructure,
-    code_hash: &str,
-) -> Result<AuthorizationCodeConsumption, HttpResponse> {
-    begin_authorization_code_consumption_with_service(&test_token_service(state), code_hash).await
-}
-
-#[cfg(test)]
-pub(crate) async fn token_authorization_code(
-    state: &TestInfrastructure,
-    req: &HttpRequest,
-    client: &ClientRow,
-    form: &TokenForm,
-    client_assertion: Option<&ValidatedClientAssertion>,
-) -> HttpResponse {
-    let service = test_token_service(state);
-    let config = TokenIssuanceConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
-    let authorization = super::issue::test_authorization_service(state);
-    token_authorization_code_with_service(
-        &service,
-        &TokenIssuanceContext {
-            config: &config,
-            modules: &modules,
-            authorization: &authorization,
-        },
-        req,
-        client,
-        form,
-        client_assertion,
-        None,
-    )
-    .await
-}
-
 async fn mark_failed_authorization_code(
     service: &ServerTokenService,
     ttl_seconds: u64,
@@ -749,5 +622,5 @@ fn authorization_code_subject(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/authorization_code.rs"]
+#[path = "../../../tests/unit/http/token/authorization_code.rs"]
 mod tests;

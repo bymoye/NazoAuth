@@ -158,5 +158,5 @@ where
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/domain/tests/profile_account.rs"]
+#[path = "../../tests/unit/domain/profile_account.rs"]
 mod tests;

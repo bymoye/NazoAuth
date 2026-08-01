@@ -178,11 +178,14 @@ gh workflow run oidf-conformance-full.yml \
   --ref <exact-branch> \
   -f deployed_sha=<deployed-sha> \
   -f target_issuer=https://issuer.example \
+  -f credential_holder_email_sha256=<sha256-of-fresh-applicant-email> \
   -f onboarding_material_only=true
 ```
 
-This mode calls the reusable onboarding-material workflow, validates the bundle,
-and uploads the private artifact. Both conformance jobs are skipped. Download and
+This mode calls the reusable onboarding-material workflow, binds the fresh
+applicant email commitment without exposing the email or a password hash,
+validates the bundle, and uploads the private artifact. Both conformance jobs
+are skipped. Download and
 verify that artifact at the same source commit before step 3. The artifact still
 has no production authority: client creation and CA approval remain separate
 applicant and administrator operations through the public control plane.
@@ -255,7 +258,8 @@ health endpoint, Discovery issuer, JWKS, UI assets, and rollback record.
 Run:
 
 ```sh
-python scripts/apply_public_conformance_onboarding.py apply \
+secret-provider read nazoauth/oidf-operator-credentials | \
+python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
@@ -264,6 +268,11 @@ python scripts/apply_public_conformance_onboarding.py apply \
   --trust-bundle runtime/official-onboarding-apply/approved-mtls-trust-anchors.pem \
   --no-runner-env
 ```
+
+The credential payload is strict JSON with exactly `applicant_email`,
+`applicant_password`, `admin_email`, and `admin_password`. Automation may use
+`--credentials-fd N` instead. The tool has no environment-variable or argv
+fallback for passwords.
 
 For every client, the tool performs the same public operations available to an
 operator:
@@ -389,8 +398,9 @@ split plans, copy configuration, or alter runner concurrency.
 Always run:
 
 ```sh
+secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
-  --target-issuer "$OIDF_TARGET_ISSUER"
+  --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
 ```
 
 Cleanup revokes approved trust requests and deactivates created clients through

@@ -75,5 +75,5 @@ fn create_error_response(error: AdminClientError) -> HttpResponse {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/source_mounted/src/http/admin/clients/tests/create.rs"]
+#[path = "../../../../tests/unit/http/admin/clients/create.rs"]
 mod tests;

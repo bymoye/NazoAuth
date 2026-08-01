@@ -2,17 +2,11 @@
 //! 限流主体默认取连接来源地址，不信任可伪造的转发头。
 use nazo_http_actix::{authorization_error_response, oauth_error};
 
-#[cfg(test)]
-use crate::adapters::security::blake3_hex;
-#[cfg(test)]
-use crate::{domain::TestInfrastructure, settings::RateLimitSettings, settings::Settings};
 use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::HeaderValue;
 use actix_web::{HttpRequest, HttpResponse};
 use nazo_http_actix::{ClientIpConfig, client_ip_with_config};
-#[cfg(test)]
-use nazo_http_actix::{ClientIpHeaderMode, IpCidr, client_ip_with_context};
 
 #[derive(Clone, Copy)]
 pub(crate) struct AuthRateLimitConfig {
@@ -107,99 +101,6 @@ impl AuthRateLimitConfig {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy)]
-pub(crate) enum RateLimitPolicy {
-    Auth,
-    #[cfg(test)]
-    Token,
-    #[cfg(test)]
-    TokenManagement,
-}
-
-#[cfg(test)]
-impl RateLimitPolicy {
-    #[cfg(test)]
-    fn name(self) -> &'static str {
-        match self {
-            Self::Auth => "auth",
-            Self::Token => "token",
-            Self::TokenManagement => "token_management",
-        }
-    }
-
-    fn dimension(self) -> nazo_valkey::RateDimension {
-        match self {
-            Self::Auth => nazo_valkey::RateDimension::Auth,
-            #[cfg(test)]
-            Self::Token => nazo_valkey::RateDimension::Token,
-            #[cfg(test)]
-            Self::TokenManagement => nazo_valkey::RateDimension::TokenManagement,
-        }
-    }
-
-    #[cfg(test)]
-    fn max_requests(self, settings: &RateLimitSettings) -> u64 {
-        match self {
-            Self::Auth => settings.auth_max_requests,
-            Self::Token => settings.token_max_requests,
-            Self::TokenManagement => settings.token_management_max_requests,
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) async fn enforce_rate_limit(
-    state: &TestInfrastructure,
-    req: &HttpRequest,
-    policy: RateLimitPolicy,
-) -> Result<(), HttpResponse> {
-    let settings = &state.settings.identity.rate_limit;
-    let endpoint = &state.settings.endpoint;
-    enforce_rate_limit_with_store(
-        &nazo_valkey::RateLimitStore::new(&state.valkey_connection()),
-        req,
-        policy,
-        settings.window_seconds,
-        policy.max_requests(settings),
-        endpoint.client_ip_header_mode,
-        &endpoint.trusted_proxy_cidrs,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn enforce_rate_limit_with_store(
-    store: &nazo_valkey::RateLimitStore,
-    req: &HttpRequest,
-    policy: RateLimitPolicy,
-    window_seconds: u64,
-    max_requests: u64,
-    client_ip_header_mode: ClientIpHeaderMode,
-    trusted_proxy_cidrs: &[IpCidr],
-) -> Result<(), HttpResponse> {
-    let count = store
-        .increment(
-            policy.dimension(),
-            &client_ip_with_context(req, client_ip_header_mode, trusted_proxy_cidrs),
-            window_seconds,
-        )
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "rate limit increment failed");
-            oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "请求频率校验失败.",
-            )
-        })?;
-
-    if count > max_requests {
-        return Err(rate_limited_response(window_seconds));
-    }
-    Ok(())
-}
-
 pub(crate) async fn enforce_auth_rate_limit(
     store: &nazo_valkey::RateLimitStore,
     req: &HttpRequest,
@@ -227,24 +128,6 @@ pub(crate) async fn enforce_auth_rate_limit(
     Ok(())
 }
 
-#[cfg(test)]
-fn rate_limit_subject(req: &HttpRequest, settings: &Settings) -> String {
-    client_ip_with_context(
-        req,
-        settings.endpoint.client_ip_header_mode,
-        &settings.endpoint.trusted_proxy_cidrs,
-    )
-}
-
-#[cfg(test)]
-fn rate_limit_key(policy: RateLimitPolicy, subject: &str) -> String {
-    format!(
-        "oauth:rate:{}:{}",
-        policy.name(),
-        blake3_hex(subject.trim())
-    )
-}
-
 pub(crate) fn rate_limited_response(retry_after_seconds: u64) -> HttpResponse {
     let mut response = authorization_error_response(
         StatusCode::TOO_MANY_REQUESTS,
@@ -258,5 +141,5 @@ pub(crate) fn rate_limited_response(retry_after_seconds: u64) -> HttpResponse {
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/rate_limit.rs"]
+#[path = "../../tests/unit/http/rate_limit.rs"]
 mod tests;

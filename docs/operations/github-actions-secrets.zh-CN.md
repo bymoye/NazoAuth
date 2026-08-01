@@ -12,6 +12,7 @@
 | `OIDF_USER_EMAIL`、`OIDF_USER_PASSWORD` | 官方计划使用的普通非管理员浏览器身份。 | 账号或密码生命周期变化、疑似泄露。 |
 | `OIDF_ADMIN_EMAIL`、`OIDF_ADMIN_PASSWORD` | 需要正常管理员审批时使用的独立审批身份。 | 账号或密码生命周期变化、疑似泄露。 |
 | `OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN` | 部署要求初始 access token 时，用于 RFC 7591 注册。 | 被测部署轮换该 token。 |
+| `OIDF_CIBA_AUTOMATED_DECISION_TOKEN` | 把官方 CIBA 自动决策绑定到本轮部署，禁止复用上一部署的 token。 | 每次全新安装或目标 token 轮换。 |
 | `OIDF_PLAN_CONFIG_AGE_IDENTITY` | 解密版本化 OIDC/FAPI runner 私密配置覆盖层。 | 重新加密或 recipient key 轮换。 |
 | `OIDF_MTLS_MATERIAL_AGE_IDENTITY` | 解密版本化 OIDC/FAPI 外部测试客户端 mTLS 身份。 | CA、客户端身份或加密密钥轮换。 |
 | `OIDF_DELIVERED_CLIENT_MATERIAL_JSON` | 把审批后的生产客户端映射到 runner alias。 | 每轮接入或 cleanup；客户端停用后不得复用。 |

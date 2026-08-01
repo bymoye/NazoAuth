@@ -9,6 +9,7 @@ perf/results/
 # Local-only environment and editor files.
 .env
 .env.*
+!.env.yaml.example
 .idea/
 .vscode/
 *.swp

@@ -1,6 +1,4 @@
 //! RFC 7523 JWT bearer authorization grant.
-#[cfg(test)]
-use nazo_http_actix::OAuthJsonErrorFields;
 use nazo_http_actix::oauth_token_error;
 
 use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
@@ -9,28 +7,17 @@ use super::{
 };
 use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::client_jwt_decoding_key;
-#[cfg(test)]
-use crate::domain::TestInfrastructure;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
-#[cfg(test)]
-use crate::settings::Settings;
-#[cfg(test)]
-use crate::test_support::{ClientSigningFixture, client_signing_fixture};
+
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use base64::Engine;
+
 use chrono::Utc;
 use nazo_auth::{
     JwtBearerAssertionClaims, JwtBearerGrantError, JwtBearerGrantPolicy,
@@ -38,8 +25,6 @@ use nazo_auth::{
     validate_jwt_bearer_assertion_claims, validate_jwt_bearer_grant_prerequisites,
 };
 use serde_json::json;
-#[cfg(test)]
-use uuid::Uuid;
 
 pub(crate) const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 pub(crate) const JWT_BEARER_ASSERTION_TYP: &str = "oauth-jwt-bearer+jwt";
@@ -102,15 +87,6 @@ fn validate_jwt_bearer_assertion_with_issuer(
         },
     )
     .map_err(|_| JwtBearerAssertionError::Invalid)
-}
-
-#[cfg(test)]
-fn validate_jwt_bearer_assertion(
-    settings: &Settings,
-    client: &ClientRow,
-    assertion: &str,
-) -> Result<ValidatedJwtBearerAssertion, JwtBearerAssertionError> {
-    validate_jwt_bearer_assertion_with_issuer(&settings.endpoint.issuer, client, assertion)
 }
 
 async fn consume_jwt_bearer_assertion_with_authorization_service(
@@ -192,16 +168,6 @@ fn jwt_bearer_grant_error_response(
             )
         }
     }
-}
-
-#[cfg(test)]
-async fn consume_jwt_bearer_assertion(
-    state: &TestInfrastructure,
-    client: &ClientRow,
-    assertion: &ValidatedJwtBearerAssertion,
-) -> Result<(), JwtBearerAssertionError> {
-    let authorization = super::issue::test_authorization_service(state);
-    consume_jwt_bearer_assertion_with_authorization_service(&authorization, client, assertion).await
 }
 
 pub(crate) async fn token_jwt_bearer_with_service(
@@ -347,37 +313,5 @@ pub(crate) async fn token_jwt_bearer_with_service(
 }
 
 #[cfg(test)]
-pub(crate) async fn token_jwt_bearer(
-    state: &TestInfrastructure,
-    req: &HttpRequest,
-    client: &ClientRow,
-    form: &TokenForm,
-    client_assertion: Option<&ValidatedClientAssertion>,
-) -> HttpResponse {
-    let connection = state.valkey_connection();
-    let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
-        state.keyset.clone(),
-    );
-    let config = super::issue::TokenIssuanceConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
-    let authorization = super::issue::test_authorization_service(state);
-    token_jwt_bearer_with_service(
-        &service,
-        &TokenIssuanceContext {
-            config: &config,
-            modules: &modules,
-            authorization: &authorization,
-        },
-        req,
-        client,
-        form,
-        client_assertion,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/jwt_bearer.rs"]
+#[path = "../../../tests/unit/http/token/jwt_bearer.rs"]
 mod tests;

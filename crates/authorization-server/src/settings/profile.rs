@@ -1,5 +1,6 @@
 use anyhow::bail;
 pub(crate) use nazo_auth::DpopNoncePolicy;
+use nazo_auth::{ClientAssuranceLevel, ClientSecurityPolicy, OAuthClient};
 
 use crate::config::ConfigSource;
 
@@ -61,17 +62,39 @@ impl AuthorizationServerProfile {
         self == Self::Fapi2MessageSigningAuthzRequest
     }
 
-    pub(crate) fn requires_signed_request_object_at_par(self) -> bool {
-        self == Self::Fapi2MessageSigningAuthzRequest
-    }
-
     pub(crate) fn requires_signed_authorization_response(self) -> bool {
         self == Self::Fapi2MessageSigningJarm
     }
 
-    #[cfg(not(test))]
-    pub(crate) fn requires_signed_introspection(self) -> bool {
-        self == Self::Fapi2MessageSigningIntrospection
+    pub(crate) fn effective_client_policy(self, client: &OAuthClient) -> ClientSecurityPolicy {
+        self.effective_security_policy(client.security_policy.as_ref())
+    }
+
+    pub(crate) fn effective_security_policy(
+        self,
+        explicit: Option<&ClientSecurityPolicy>,
+    ) -> ClientSecurityPolicy {
+        explicit
+            .cloned()
+            .unwrap_or_else(|| self.legacy_client_policy())
+    }
+
+    pub(crate) fn legacy_client_policy(self) -> ClientSecurityPolicy {
+        ClientSecurityPolicy {
+            assurance: if self.requires_fapi2_security() {
+                ClientAssuranceLevel::Fapi2
+            } else {
+                ClientAssuranceLevel::Baseline
+            },
+            require_signed_authorization_request: self.requires_signed_authorization_request(),
+            require_signed_authorization_response: self.requires_signed_authorization_response(),
+            require_signed_introspection_response: self == Self::Fapi2MessageSigningIntrospection,
+            // Legacy clients preserve the prior server-wide behavior. The
+            // corresponding runtime module and grant allowlist remain required.
+            session_management: true,
+            allow_cross_device_flows: true,
+            ..ClientSecurityPolicy::default()
+        }
     }
 }
 
@@ -164,3 +187,7 @@ impl SubjectType {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/settings_profile.rs"]
+mod tests;

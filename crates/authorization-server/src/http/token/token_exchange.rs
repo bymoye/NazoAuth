@@ -12,12 +12,7 @@ use super::{
 use super::{native_sso_profile_requested, token_native_sso_exchange};
 use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::constant_time_eq;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
@@ -27,8 +22,7 @@ use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
-#[cfg(test)]
-use nazo_auth::ACCESS_TOKEN_TYPE;
+
 use nazo_auth::{
     Claims, PresentedSenderConstraint, TokenExchangeError, TokenExchangePolicy,
     TokenExchangeRequestInput, TokenExchangeSenderBinding, admit_token_exchange, parse_scope,
@@ -528,5 +522,5 @@ pub(crate) async fn token_exchange(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/token/tests/token_exchange.rs"]
+#[path = "../../../tests/unit/http/token/token_exchange.rs"]
 mod tests;

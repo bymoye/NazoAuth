@@ -338,5 +338,5 @@ fn sha256_hex(value: &[u8]) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/admin/tests/mtls_trust.rs"]
+#[path = "../../../tests/unit/http/admin/mtls_trust.rs"]
 mod tests;

@@ -1,34 +1,19 @@
 //! 授权确认页数据端点。
 use crate::domain::ConsentPayload;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_REALM_ID;
-#[cfg(test)]
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
+
 use crate::http::authorization::{AuthorizationEndpoint, AuthorizationRequestContext};
-#[cfg(test)]
-use crate::settings::Settings;
-#[cfg(test)]
-use crate::test_support::valkey::valkey_set_ex;
+
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Query};
 use actix_web::{HttpRequest, HttpResponse};
-#[cfg(test)]
-use chrono::{Duration, Utc};
+
 use nazo_http_actix::cookie_value;
 use nazo_http_actix::{json_response, oauth_error};
-#[cfg(test)]
-use serde_json::Value;
+
 use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
 // 前端通过 request_id 读取待确认内容，服务端再次校验该请求属于当前用户。
-
-#[cfg(test)]
-fn parse_consent_payload(raw: Option<String>) -> Option<ConsentPayload> {
-    raw.and_then(|value| serde_json::from_str::<ConsentPayload>(&value).ok())
-}
 
 fn validate_consent_payload_user(
     payload: ConsentPayload,
@@ -137,5 +122,5 @@ async fn authorize_consent_with_context(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/authorization/tests/consent.rs"]
+#[path = "../../../tests/unit/http/authorization/consent.rs"]
 mod tests;

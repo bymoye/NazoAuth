@@ -3,14 +3,12 @@ use serde_json::{Value, json};
 use super::MetadataCapabilities;
 use crate::{
     SUPPORTED_AUTHORIZATION_DETAILS_TYPES, SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
-    SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+    SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS, SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
 };
 use nazo_runtime_modules::ActiveModuleSnapshot;
 
-const CLIENT_JWT_SIGNING_ALGS: [&str; 4] = ["EdDSA", "RS256", "ES256", "PS256"];
 const DPOP_SIGNING_ALGS: [&str; 2] = ["EdDSA", "ES256"];
 const FAPI_CIBA_REQUEST_OBJECT_SIGNING_ALGS: [&str; 3] = ["EdDSA", "ES256", "PS256"];
-const REQUEST_OBJECT_SIGNING_ALGS: [&str; 4] = ["EdDSA", "RS256", "ES256", "PS256"];
 const PROMPT_VALUES_SUPPORTED: [&str; 4] = ["login", "consent", "select_account", "none"];
 const CLAIMS_SUPPORTED: [&str; 24] = [
     "sub",
@@ -66,6 +64,7 @@ const BASELINE_ACR_VALUE: &str = "1";
 /// Authorization-server profile choices that affect standard metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataAuthorizationServerProfile {
+    Composable,
     Oauth2Baseline,
     Fapi2Security,
     Fapi2MessageSigningAuthorizationRequest,
@@ -75,7 +74,7 @@ pub enum MetadataAuthorizationServerProfile {
 
 impl MetadataAuthorizationServerProfile {
     const fn requires_fapi2_security(self) -> bool {
-        !matches!(self, Self::Oauth2Baseline)
+        !matches!(self, Self::Composable | Self::Oauth2Baseline)
     }
 
     const fn requires_signed_authorization_request(self) -> bool {
@@ -84,10 +83,6 @@ impl MetadataAuthorizationServerProfile {
 
     const fn requires_signed_authorization_response(self) -> bool {
         matches!(self, Self::Fapi2MessageSigningJarm)
-    }
-
-    const fn requires_signed_introspection(self) -> bool {
-        matches!(self, Self::Fapi2MessageSigningIntrospection)
     }
 }
 
@@ -198,9 +193,9 @@ pub fn authorization_server_metadata(
         "token_endpoint_auth_methods_supported": token_auth_methods,
         "token_endpoint_auth_signing_alg_values_supported": token_auth_signing_algs,
         "revocation_endpoint_auth_methods_supported": token_auth_methods,
-        "revocation_endpoint_auth_signing_alg_values_supported": CLIENT_JWT_SIGNING_ALGS,
+        "revocation_endpoint_auth_signing_alg_values_supported": SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
         "introspection_endpoint_auth_methods_supported": token_auth_methods,
-        "introspection_endpoint_auth_signing_alg_values_supported": CLIENT_JWT_SIGNING_ALGS,
+        "introspection_endpoint_auth_signing_alg_values_supported": SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
         "scopes_supported": scopes_supported,
         "claims_supported": CLAIMS_SUPPORTED,
         "acr_values_supported": [BASELINE_ACR_VALUE],
@@ -215,6 +210,30 @@ pub fn authorization_server_metadata(
         "code_challenge_methods_supported": ["S256"],
         "dpop_signing_alg_values_supported": DPOP_SIGNING_ALGS
     });
+    for (field, values) in [
+        (
+            "id_token_encryption_alg_values_supported",
+            SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+        ),
+        (
+            "id_token_encryption_enc_values_supported",
+            SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+        ),
+        (
+            "introspection_signing_alg_values_supported",
+            active_signing_algs,
+        ),
+        (
+            "introspection_encryption_alg_values_supported",
+            SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
+        ),
+        (
+            "introspection_encryption_enc_values_supported",
+            SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+        ),
+    ] {
+        metadata[field] = json!(values);
+    }
 
     if capabilities.authorization_details {
         metadata["authorization_details_types_supported"] = json!(
@@ -249,17 +268,12 @@ pub fn authorization_server_metadata(
         metadata["backchannel_authentication_request_signing_alg_values_supported"] =
             json!(FAPI_CIBA_REQUEST_OBJECT_SIGNING_ALGS);
     }
-    if input.profile.requires_signed_introspection() {
-        metadata["introspection_signing_alg_values_supported"] = json!(active_signing_algs);
-        metadata["introspection_encryption_alg_values_supported"] =
-            json!(SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS);
-        metadata["introspection_encryption_enc_values_supported"] =
-            json!(SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS);
-    }
     if capabilities.request_objects {
         metadata["request_parameter_supported"] = json!(true);
         metadata["request_object_signing_alg_values_supported"] =
             json!(request_object_signing_algs);
+        metadata["request_object_encryption_alg_values_supported"] = json!(["RSA-OAEP-256"]);
+        metadata["request_object_encryption_enc_values_supported"] = json!(["A256GCM"]);
     }
     // External request_uri is available only with the dynamically registered,
     // signed-Request-Object baseline. FAPI continues to require AS-issued PAR handles.
@@ -352,7 +366,7 @@ fn token_endpoint_auth_signing_alg_values_supported(
     if ciba_profile.requires_fapi2_hardening() {
         return FAPI_CIBA_REQUEST_OBJECT_SIGNING_ALGS.to_vec();
     }
-    CLIENT_JWT_SIGNING_ALGS.to_vec()
+    SUPPORTED_CLIENT_JWT_SIGNING_ALGS.to_vec()
 }
 
 fn request_object_signing_alg_values_supported<'a>(
@@ -363,9 +377,9 @@ fn request_object_signing_alg_values_supported<'a>(
         return active_signing_algs.to_vec();
     }
     if profile.requires_fapi2_security() {
-        return REQUEST_OBJECT_SIGNING_ALGS.to_vec();
+        return SUPPORTED_CLIENT_JWT_SIGNING_ALGS.to_vec();
     }
-    REQUEST_OBJECT_SIGNING_ALGS.to_vec()
+    SUPPORTED_CLIENT_JWT_SIGNING_ALGS.to_vec()
 }
 
 fn response_modes_supported(profile: MetadataAuthorizationServerProfile) -> Vec<&'static str> {
@@ -387,5 +401,5 @@ fn id_token_signing_alg_values_supported<'a>(active: &'a [&'a str]) -> Vec<&'a s
 }
 
 #[cfg(test)]
-#[path = "document_tests.rs"]
+#[path = "../../tests/unit/metadata/document.rs"]
 mod tests;

@@ -1,21 +1,17 @@
 //! mTLS client certificate binding helpers.
 //!
 //! The application only trusts certificate data from configured trusted proxy
-//! peers after the proxy has verified the client certificate and forwarded
+//! peers. Deployments can use the standardized RFC 9440 `Client-Cert` field or
+//! the compatibility header contract that includes
 //! `X-SSL-Client-Verify: SUCCESS`.
 
 use crate::adapters::security::constant_time_eq;
 use crate::domain::ClientRow;
-#[cfg(test)]
-use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID};
-#[cfg(test)]
-use crate::settings::Settings;
-use actix_web::HttpRequest;
-#[cfg(test)]
-use actix_web::http::header;
+
+use actix_web::{HttpRequest, web::Data};
+
 use actix_web::http::header::HeaderMap;
-#[cfg(test)]
-use actix_web::http::header::HeaderValue;
+
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -26,14 +22,11 @@ use openssl::asn1::Asn1Time;
 use openssl::nid::Nid;
 use openssl::x509::{X509, X509NameRef};
 use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+
 use sha2::Digest;
 use sha2::Sha256;
 use std::cmp::Ordering;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-#[cfg(test)]
-use uuid::Uuid;
 
 const VERIFY_HEADER: &str = "x-ssl-client-verify";
 const DIRECT_THUMBPRINT_HEADERS: &[&str] = &[
@@ -60,43 +53,102 @@ const SAN_EMAIL_HEADERS: &[&str] = &[
     "x-forwarded-tls-client-cert-san-email",
     "x-ssl-client-san-email",
 ];
+const RFC9440_CLIENT_CERT_HEADER: &str = "client-cert";
 
 pub(crate) use nazo_http_actix::ClientCertificateFacts as MtlsClientCertificate;
 
-#[cfg(test)]
-pub(crate) fn request_mtls_thumbprint(req: &HttpRequest, settings: &Settings) -> Option<String> {
-    request_mtls_client_certificate(req, settings)?.thumbprint
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MtlsCertificateSourceMode {
+    Disabled,
+    DirectTls,
+    Rfc9440,
+    LegacyVerifiedHeaders,
 }
 
-#[cfg(test)]
-pub(crate) fn request_mtls_client_certificate(
-    req: &HttpRequest,
-    settings: &Settings,
-) -> Option<MtlsClientCertificate> {
-    if !request_from_trusted_proxy_cidrs(req, &settings.endpoint.trusted_proxy_cidrs) {
-        return None;
+impl MtlsCertificateSourceMode {
+    pub(crate) fn from_config(value: Option<&str>, proxy_configured: bool) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None if proxy_configured => Ok(Self::LegacyVerifiedHeaders),
+            None => Ok(Self::Disabled),
+            Some("disabled") => Ok(Self::Disabled),
+            Some("direct-tls") => Ok(Self::DirectTls),
+            Some("rfc9440") => Ok(Self::Rfc9440),
+            Some("legacy-verified-headers") => Ok(Self::LegacyVerifiedHeaders),
+            Some(value) => anyhow::bail!(
+                "MTLS_CERTIFICATE_SOURCE must be disabled, direct-tls, rfc9440, or legacy-verified-headers; got {value}"
+            ),
+        }
     }
-    request_mtls_client_certificate_from_headers(req.headers())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MtlsCertificateSource {
+    mode: MtlsCertificateSourceMode,
+}
+
+impl MtlsCertificateSource {
+    pub(crate) fn new(mode: MtlsCertificateSourceMode) -> Self {
+        Self { mode }
+    }
 }
 
 pub(crate) fn request_mtls_thumbprint_from_trusted_proxy(
     req: &HttpRequest,
     trusted_proxy_cidrs: &[IpCidr],
 ) -> Option<String> {
-    if !request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) {
-        return None;
-    }
-    request_mtls_client_certificate_from_headers(req.headers())?.thumbprint
+    request_mtls_client_certificate_from_configured_source(req, trusted_proxy_cidrs)?.thumbprint
 }
 
 pub(crate) fn request_mtls_client_certificate_from_trusted_proxy(
     req: &HttpRequest,
     trusted_proxy_cidrs: &[IpCidr],
 ) -> Option<MtlsClientCertificate> {
-    if !request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) {
+    request_mtls_client_certificate_from_configured_source(req, trusted_proxy_cidrs)
+}
+
+fn request_mtls_client_certificate_from_configured_source(
+    req: &HttpRequest,
+    trusted_proxy_cidrs: &[IpCidr],
+) -> Option<MtlsClientCertificate> {
+    let mode = req
+        .app_data::<Data<MtlsCertificateSource>>()
+        .map(|source| source.mode)
+        // Focused unit tests without production app data retain the historical
+        // compatibility contract.
+        .unwrap_or(MtlsCertificateSourceMode::LegacyVerifiedHeaders);
+    match mode {
+        MtlsCertificateSourceMode::Disabled => None,
+        MtlsCertificateSourceMode::DirectTls => req.conn_data::<MtlsClientCertificate>().cloned(),
+        MtlsCertificateSourceMode::Rfc9440
+            if request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) =>
+        {
+            request_mtls_client_certificate_from_rfc9440(req.headers())
+        }
+        MtlsCertificateSourceMode::LegacyVerifiedHeaders
+            if request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) =>
+        {
+            request_mtls_client_certificate_from_headers(req.headers())
+        }
+        MtlsCertificateSourceMode::Rfc9440 | MtlsCertificateSourceMode::LegacyVerifiedHeaders => {
+            None
+        }
+    }
+}
+
+pub(crate) fn request_mtls_client_certificate_from_rfc9440(
+    headers: &HeaderMap,
+) -> Option<MtlsClientCertificate> {
+    let mut values = headers.get_all(RFC9440_CLIENT_CERT_HEADER);
+    let value = values.next()?.to_str().ok()?.trim();
+    if values.next().is_some() || value.len() < 3 {
         return None;
     }
-    request_mtls_client_certificate_from_headers(req.headers())
+    let encoded = value.strip_prefix(':')?.strip_suffix(':')?;
+    if encoded.is_empty() || encoded.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let der = STANDARD.decode(encoded).ok()?;
+    certificate_der_identity(&der)
 }
 
 pub(crate) fn request_mtls_client_certificate_from_headers(
@@ -152,10 +204,14 @@ pub(crate) fn certificate_pem_identity(value: &str) -> Option<MtlsClientCertific
         .filter(|ch| !ch.is_ascii_whitespace())
         .collect::<String>();
     let der = STANDARD.decode(body).ok()?;
-    let x509 = X509::from_der(&der).ok()?;
+    certificate_der_identity(&der)
+}
+
+pub(crate) fn certificate_der_identity(der: &[u8]) -> Option<MtlsClientCertificate> {
+    let x509 = X509::from_der(der).ok()?;
     x509_is_current(&x509)?;
     let mut certificate = MtlsClientCertificate {
-        thumbprint: Some(URL_SAFE_NO_PAD.encode(Sha256::digest(&der))),
+        thumbprint: Some(URL_SAFE_NO_PAD.encode(Sha256::digest(der))),
         subject_dn: Some(subject_name_to_dn(x509.subject_name())?),
         verified_certificate_expiry: true,
         ..MtlsClientCertificate::default()
@@ -376,13 +432,6 @@ fn string_slices_match(left: &[String], right: &[String]) -> bool {
             .all(|(left, right)| constant_time_eq(left.as_bytes(), right.as_bytes()))
 }
 
-#[cfg(test)]
-fn merge_sorted_unique(target: &mut Vec<String>, incoming: Vec<String>) {
-    target.extend(incoming);
-    target.sort();
-    target.dedup();
-}
-
 fn decode_forwarded_pem(value: &str) -> String {
     let decoded = if value.contains('%') {
         urlencoding::decode(value)
@@ -493,5 +542,5 @@ fn registered_email_values_match(registered: &[String], actual: &[String]) -> bo
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/support/tests/mtls.rs"]
+#[path = "../../tests/unit/http/mtls.rs"]
 mod tests;

@@ -47,5 +47,5 @@ fn clients_list_response(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/source_mounted/src/http/admin/clients/tests/list.rs"]
+#[path = "../../../../tests/unit/http/admin/clients/list.rs"]
 mod tests;

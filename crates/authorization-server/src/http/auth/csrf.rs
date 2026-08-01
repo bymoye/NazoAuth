@@ -1,14 +1,11 @@
 //! CSRF token 刷新端点。
 use crate::adapters::security::random_urlsafe_token;
 use crate::http::sessions::SessionProfileHandles;
-#[cfg(test)]
-use actix_web::http::StatusCode;
 use actix_web::web::Data;
 use actix_web::{HttpRequest, HttpResponse};
 use nazo_http_actix::json_response;
 use nazo_http_actix::{make_cookie, with_cookie_headers};
-#[cfg(test)]
-use serde_json::Value;
+
 use serde_json::json;
 // 只有已登录用户可以刷新 token，避免匿名请求制造无意义状态。
 
@@ -61,5 +58,5 @@ fn csrf_response(config: &CsrfHttpConfig, csrf_token: String) -> HttpResponse {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/auth/tests/csrf.rs"]
+#[path = "../../../tests/unit/http/auth/csrf.rs"]
 mod tests;

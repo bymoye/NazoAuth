@@ -49,7 +49,7 @@ write_service_override() {
     echo "    cpus: \"${cpus}\""
   fi
   if [ "${service}" = "nazoauth" ] && [ -n "${taskset_cpu}" ]; then
-    echo "    command: [\"taskset\", \"-c\", \"${taskset_cpu}\", \"nazo-oauth-server\"]"
+    echo "    command: [\"taskset\", \"-c\", \"${taskset_cpu}\", \"nazoauth\", \"server\"]"
   fi
 }
 
@@ -162,7 +162,7 @@ fi
   echo "| Valkey container | docker.io/valkey/valkey:8-alpine; RDB save disabled; AOF disabled; warning log level; ephemeral state for benchmark isolation. |"
   echo "| NazoAuth container | Built from local Containerfile target runtime; PERF_METRICS_ENABLED=true; runtime key volume shared with keyset/migrate. |"
   echo "| Key material setup | keyset service generates runtime RS256 and PS256 keys before migration and benchmark traffic. |"
-  echo "| Migration setup | migrate service runs nazo-oauth-migrate before the NazoAuth service is considered ready for benchmark traffic. |"
+  echo "| Migration setup | migrate service runs a signed, one-shot operator-task before the NazoAuth service is considered ready for benchmark traffic. |"
   echo "| Perf runner | Built from perf/runner/Containerfile; mounts Docker socket for container stats; writes Markdown reports under docs/performance/reports/ and runtime JSON/logs to ignored perf/results/. |"
   echo "| Metrics sources | k6 HTTP metrics; Docker stats CPU/memory samples; PostgreSQL pg_stat_statements; NazoAuth DB pool metrics; Valkey INFO counters. |"
   echo

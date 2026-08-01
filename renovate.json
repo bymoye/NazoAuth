@@ -22,10 +22,12 @@
       "description": "Update the exact Rust stable pin as one reviewable change",
       "managerFilePatterns": [
         "/^rust-toolchain\\.toml$/",
+        "/^Containerfile$/",
         "/^\\.github/workflows/[^/]+\\.yml$/"
       ],
       "matchStrings": [
         "channel\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "ENV\\s+RUSTUP_TOOLCHAIN=(?<currentValue>\\d+\\.\\d+\\.\\d+)",
         "uses:\\s*dtolnay/rust-toolchain@(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ],
       "depNameTemplate": "rust",

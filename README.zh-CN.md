@@ -61,30 +61,35 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
   HTTP 集成；不再提供历史 Axum/Tower 和 tonic adapter。
 - 发布安全 workflow：CodeQL、dependency review、cargo audit、cargo deny、SBOM、Trivy image scanning、keyless signing、provenance attestation。
 
-## 快速启动
+## 快速开始
 
-需要：
-
-- `rust-toolchain.toml` 精确锁定的 Rust stable 版本
-- PostgreSQL 18 或兼容版本
-- Valkey 8 或兼容 Redis protocol 的服务
-- 可选集成栈所需的容器运行时
-
-用 Docker Compose 启动：
+先按[已验证的 bootstrap 流程](docs/operations/one-click-update.zh-CN.md)从不可变
+GitHub Release 安装签名的 `nazoauthctl`，然后执行：
 
 ```sh
-cp .env.yaml.example .env.yaml
-docker compose up -d nazo_oauth_server
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/.well-known/openid-configuration
+sudo nazoauthctl install --runtime auto
+sudo nazoauthctl doctor
 ```
 
-如果直接在宿主机运行，先把 `.env.yaml` 里的 PostgreSQL 和 Valkey 地址改成可访问的服务：
+`auto` 优先选择 Podman，其次选择 Docker。控制器会生成 PostgreSQL、Valkey 和应用
+秘密，启动依赖，通过签名的一次性任务执行迁移，再启动 NazoAuth。可打开
+`http://127.0.0.1:8000/health` 或
+`http://127.0.0.1:8000/.well-known/openid-configuration`。数据、签名密钥和头像
+会持久保存。
+
+公开部署时传入 `--public-url https://auth.example.com`；TLS 入口要求见
+[部署指南](docs/operations/deployment.zh-CN.md)。`compose.yml` 仅保留为源码树开发沙箱，
+使用开发 operator identity，不是生产生命周期边界。
+
+直接运行二进制时，首次启动保护保持不变：
 
 ```sh
-cargo run --bin nazo-oauth-migrate
-cargo run --bin nazo-oauth-server
+nazoauth server
 ```
+
+如果当前目录没有 `.env.yaml`，该命令只创建模板并退出。修改配置后，通过正式的
+`nazoauthctl migrate --yes` 签发一次性任务，再执行 `nazoauth server`，避免以示例
+秘密、错误 issuer 或无审计的数据库权限意外启动。
 
 ## 配置
 
@@ -96,9 +101,11 @@ PUBLIC_BASE_URL: "https://auth.example.com"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
-AUTHORIZATION_SERVER_PROFILE: "oauth2-baseline"
 RUST_LOG: "info"
 ```
+
+新部署使用可组合的服务端能力与显式的按客户端策略。
+`AUTHORIZATION_SERVER_PROFILE` 只作为未持久化客户端策略的旧客户端兼容预设。
 
 `PUBLIC_BASE_URL` 派生同域默认值：
 
@@ -123,11 +130,18 @@ RUST_LOG: "info"
 
 ## 默认边界
 
-以下能力不属于默认授权服务器表面；只有在实现、测试并显式启用后才会对外声明：
+新数据库会同时开启稳定且不冲突的服务端处理器，包括签名 Request Object、
+JARM、Device Grant、CIBA poll/ping、受限 Token Exchange 与 JWT Bearer
+Grant、SCIM、Front-Channel Logout 和 Session Management。服务端支持不等于
+客户端获权；grant allowlist、注册元数据、sender constraint 与版本化
+`security_policy` 仍然默认拒绝。
 
-- Dynamic Client Registration / RFC 7591 和 Client Configuration Management
-  / RFC 7592，除非 `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`；公开注册部署应使用 initial access token 保护 `/register`。
-- Device Authorization Grant / RFC 8628，除非 `ENABLE_DEVICE_AUTHORIZATION_GRANT=true`。
+以下能力仍有前提或明确排除：
+
+- Dynamic Client Registration / RFC 7591 和 RFC 7592 需要配置非空
+  `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`。
+- OpenID4VCI、OpenID4VP、SCIM Security Events、Native SSO、RAR 与实验性
+  HTTP Signatures 需要各自完整的角色或部署前提。
 - 外部 token、refresh token 或 ID token 的 Token Exchange profile。
 - QQ、微信、Google、Microsoft、企业 SAML 等模块化第三方登录 provider；在 provider-specific adapter、配置 gate、账号绑定、E2E 和负向测试完成前仅属于路线图能力。
 - 请求级动态 tenant 或 issuer routing。
@@ -150,6 +164,7 @@ RUST_LOG: "info"
 | OAuth/OIDC/FAPI best-practice matrix | [docs/protocol/rfc-compliance-matrix.md](docs/protocol/rfc-compliance-matrix.md) |
 | OAuth/OIDC/FAPI 未来路线图 | [docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md](docs/protocol/oauth-best-practice-implementation-plan.zh-CN.md) |
 | Profile matrix | [docs/protocol/profile-matrix.md](docs/protocol/profile-matrix.md) |
+| 可组合能力策略 | [docs/protocol/composable-capability-policy.md](docs/protocol/composable-capability-policy.md) |
 | Ecosystem client onboarding | [docs/features/ecosystem-onboarding.md](docs/features/ecosystem-onboarding.md) |
 | Threat model | [docs/security/threat-model.md](docs/security/threat-model.md) |
 | 发布安全 | [docs/operations/release-security.md](docs/operations/release-security.md) |

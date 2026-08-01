@@ -458,5 +458,5 @@ fn access_request_already_rejected_response() -> HttpResponse {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/admin/tests/access_requests.rs"]
+#[path = "../../../tests/unit/http/admin/access_requests.rs"]
 mod tests;

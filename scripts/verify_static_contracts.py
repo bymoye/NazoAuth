@@ -173,13 +173,27 @@ def check_toolchain_pins() -> None:
     )
     if rust_builder is None or rust_builder.group(1) != version:
         raise SystemExit("Containerfile Rust builder pin differs from rust-toolchain.toml")
+    if f"ENV RUSTUP_TOOLCHAIN={version}" not in containerfile:
+        raise SystemExit(
+            "Containerfile must select the preinstalled Rust toolchain without network sync"
+        )
     if not re.search(
         r"FROM docker\.io/library/debian:[^\s@]+@sha256:[0-9a-f]{64} AS runtime-base",
         containerfile,
     ):
         raise SystemExit("Containerfile runtime base image must be pinned by digest")
-    if "RUN cargo build --release --locked" not in containerfile:
+    if "cargo build --release --locked" not in containerfile:
         raise SystemExit("Containerfile release build must use Cargo.lock")
+    if (
+        "COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./"
+        not in containerfile
+    ):
+        raise SystemExit("Containerfile builder must include the embedded initial config template")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    if ".env.*" not in dockerignore or "!.env.yaml.example" not in dockerignore:
+        raise SystemExit(
+            ".dockerignore must exclude local environment files but include the initial template"
+        )
 
     workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     rust_actions = []
@@ -259,6 +273,134 @@ def check_workspace_package_metadata() -> None:
                     f"{manifest_path.relative_to(ROOT)} must inherit package.{field} "
                     "from [workspace.package]"
                 )
+
+
+def check_rust_test_structure() -> None:
+    inline_test_module = re.compile(
+        r"(?m)^\s*#\[cfg\(test\)\]\s*"
+        r"(?:#\[[^\]]+\]\s*)*"
+        r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{"
+    )
+    test_attribute = re.compile(r"(?m)^\s*#\[(?:tokio::)?test(?:\([^\]]*\))?\]")
+    top_level_cfg = re.compile(r"(?m)^#\[cfg\(test\)\]$")
+    top_level_hook = re.compile(
+        r"(?m)^#\[cfg\(test\)\]\r?\n"
+        r"(?:(?:#\[[^\r\n]+\]\r?\n)*)"
+        r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;"
+    )
+    nested_cfg = re.compile(
+        r"(?m)^(?P<indent>[ \t]+)#\[cfg\(test\)\]\r?\n"
+        r"(?P=indent)(?P<item>[^\r\n]+)"
+    )
+    allowed_nested_seams = {
+        "crates/authorization-server/src/bootstrap/mod.rs": (
+            "let valkey = nazo_valkey::test_support::connect(",
+            "let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);",
+            "let session_profiles = web::Data::new(SessionProfileHandles::new(",
+        ),
+        "crates/authorization-server/src/http/auth/federation.rs": (
+            "let builder = builder.no_proxy();",
+        ),
+        "crates/key-management/src/lifecycle.rs": (
+            'panic!("signing key lifecycle refresh failed: {error:#}");',
+        ),
+    }
+
+    violations = []
+    for crate in (ROOT / "crates").iterdir():
+        source_root = crate / "src"
+        if not source_root.is_dir():
+            continue
+        legacy_files = [
+            *source_root.rglob("tests.rs"),
+            *source_root.rglob("*_tests.rs"),
+        ]
+        if legacy_files:
+            violations.append(
+                f"{crate.relative_to(ROOT).as_posix()} keeps test files under src: "
+                f"{[path.relative_to(ROOT).as_posix() for path in legacy_files]}"
+            )
+
+        for source_file in source_root.rglob("*.rs"):
+            source = source_file.read_text(encoding="utf-8")
+            relative = source_file.relative_to(ROOT).as_posix()
+            if inline_test_module.search(source) or test_attribute.search(source):
+                violations.append(f"{relative} embeds executable tests in production source")
+            if "include!(" in source:
+                violations.append(f"{relative} includes another source file")
+
+            hook_matches = list(top_level_hook.finditer(source))
+            for cfg_match in top_level_cfg.finditer(source):
+                if not any(
+                    hook.start() == cfg_match.start() for hook in hook_matches
+                ):
+                    violations.append(f"{relative} has a non-mount top-level cfg(test) item")
+
+            actual_nested = tuple(
+                match.group("item").strip() for match in nested_cfg.finditer(source)
+            )
+            expected_nested = allowed_nested_seams.get(relative, ())
+            if len(actual_nested) != len(expected_nested) or any(
+                not actual.startswith(expected)
+                for actual, expected in zip(actual_nested, expected_nested, strict=True)
+            ):
+                violations.append(
+                    f"{relative} has unreviewed nested test seams: {actual_nested}"
+                )
+
+            for hook in hook_matches:
+                hook_source = hook.group(0)
+                path_match = re.search(r'#\[path\s*=\s*"([^"]+)"\]', hook_source)
+                if path_match is None:
+                    violations.append(f"{relative} has a test module without an explicit path")
+                    continue
+                target = (source_file.parent / path_match.group(1)).resolve()
+                if not target.is_file():
+                    violations.append(
+                        f"{relative} mounts a missing test file: {path_match.group(1)}"
+                    )
+
+        seam_root = crate / "tests" / "support" / "seams"
+        seam_files = list(seam_root.rglob("*.rs")) if seam_root.is_dir() else []
+        if seam_files:
+            violations.append(
+                f"{crate.relative_to(ROOT).as_posix()} retains forbidden tests/support/seams: "
+                f"{[path.relative_to(ROOT).as_posix() for path in seam_files]}"
+            )
+        if (crate / "tests" / "source_mounted").exists():
+            violations.append(
+                f"{crate.relative_to(ROOT).as_posix()} retains tests/source_mounted"
+            )
+
+        test_root = crate / "tests"
+        if test_root.is_dir():
+            for test_file in test_root.rglob("*.rs"):
+                relative_parts = test_file.relative_to(test_root).parts
+                if "src" in relative_parts or relative_parts.count("tests") > 0:
+                    violations.append(
+                        f"{test_file.relative_to(ROOT).as_posix()} repeats production/test layout"
+                    )
+                source = test_file.read_text(encoding="utf-8")
+                if "include!(" in source:
+                    violations.append(
+                        f"{test_file.relative_to(ROOT).as_posix()} includes another source file"
+                    )
+                for literal in re.finditer(
+                    r'#\[path\s*=\s*"([^"]+)"\]|include!\("([^"]+)"\)', source
+                ):
+                    raw_target = literal.group(1) or literal.group(2)
+                    target = (test_file.parent / raw_target).resolve()
+                    try:
+                        target.relative_to(source_root.resolve())
+                    except ValueError:
+                        continue
+                    violations.append(
+                        f"{test_file.relative_to(ROOT).as_posix()} recompiles production source "
+                        f"through {raw_target}"
+                    )
+
+    if violations:
+        raise SystemExit("Rust test structure violations:\n- " + "\n- ".join(violations))
 
 
 def check_rfc9967_test_boundaries() -> None:
@@ -372,7 +514,7 @@ def check_fapi_ciba_boundaries() -> None:
     if any(marker in delivery for marker in forbidden_test_markers):
         raise SystemExit("CIBA ping delivery tests must remain outside production source")
     required_delivery_guards = (
-        "apply_ciba_ping_tls_policy(reqwest::Client::builder())",
+        "apply_ciba_ping_tls_policy(reqwest::Client::builder().no_proxy())",
         "reqwest::redirect::Policy::none()",
         ".resolve_to_addrs(host, &addresses)",
         ".bearer_auth(&delivery.client_notification_token)",
@@ -401,10 +543,8 @@ def check_fapi_ciba_boundaries() -> None:
         / "crates"
         / "authorization-server"
         / "tests"
-        / "source_mounted"
-        / "src"
+        / "unit"
         / "domain"
-        / "tests"
         / "ciba_ping_delivery.rs"
     )
     if not tls_policy_test.is_file():
@@ -678,7 +818,7 @@ def check_openid4vc_boundaries() -> None:
             raise SystemExit(f"OpenID4VC purpose-scoped rotation boundary is missing: {marker}")
     for doc_name in ("openid4vc-final-matrix.md", "openid4vc-final-matrix.zh-CN.md"):
         doc = (ROOT / "docs" / "conformance" / doc_name).read_text(encoding="utf-8")
-        if "generate-local --alg ES256 --purposes credential,presentation_request" not in doc:
+        if "nazoauthctl keys generate-local --alg ES256" not in doc:
             raise SystemExit(f"OpenID4VC purpose-scoped key procedure missing from {doc_name}")
         for statement in ("alpha", "not an OpenID Foundation certification claim") if doc_name.endswith(".md") and not doc_name.endswith("zh-CN.md") else ("alpha", "不能称为 OpenID Foundation 正式认证"):
             if statement not in doc:
@@ -1063,6 +1203,25 @@ def check_conformance_provisioning_boundaries() -> None:
             raise SystemExit(f"operator black-box onboarding contract is missing: {marker}")
 
 
+def check_bootstrap_secret_log_boundary() -> None:
+    source = (
+        ROOT
+        / "crates"
+        / "authorization-server"
+        / "src"
+        / "http"
+        / "bootstrap_admin.rs"
+    ).read_text(encoding="utf-8")
+    for forbidden in (
+        'let setup_url = format!("{}/setup?token={token}"',
+        "tracing::warn!(%setup_url",
+    ):
+        if forbidden in source:
+            raise SystemExit("initial administrator bootstrap token enters tracing output")
+    if "read the root-owned token file through the operator workflow" not in source:
+        raise SystemExit("initial administrator bootstrap lacks a non-secret recovery hint")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-migrations", action="store_true")
@@ -1081,11 +1240,13 @@ def main() -> None:
         check_toolchain_pins()
         check_crate_dependency_boundaries()
         check_workspace_package_metadata()
+        check_rust_test_structure()
         check_rfc9967_test_boundaries()
         check_removed_security_capabilities()
         check_fapi_ciba_boundaries()
         check_openid4vc_boundaries()
         check_conformance_provisioning_boundaries()
+        check_bootstrap_secret_log_boundary()
 
 
 if __name__ == "__main__":

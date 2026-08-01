@@ -15,6 +15,8 @@ use nazo_valkey::{
 };
 use serde_json::json;
 
+static CIBA_PING_DELIVERY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn setup() -> Option<(ValkeyConnection, fred::prelude::Client)> {
     let url = std::env::var("VALKEY_URL").ok()?;
     let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
@@ -144,6 +146,7 @@ async fn concurrent_approved_ciba_polls_have_exactly_one_token_issuance_winner()
 
 #[tokio::test]
 async fn ciba_decision_atomically_schedules_and_terminally_acks_ping_delivery() {
+    let _ping_delivery_guard = CIBA_PING_DELIVERY_TEST_LOCK.lock().await;
     let Some((connection, inspector)) = setup().await else {
         return;
     };
@@ -214,6 +217,7 @@ async fn ciba_decision_atomically_schedules_and_terminally_acks_ping_delivery() 
 
 #[tokio::test]
 async fn expired_ciba_ping_is_failed_without_exposing_its_notification_token() {
+    let _ping_delivery_guard = CIBA_PING_DELIVERY_TEST_LOCK.lock().await;
     let Some((connection, inspector)) = setup().await else {
         return;
     };

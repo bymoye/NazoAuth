@@ -16,7 +16,7 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
 use nazo_auth::SigningPurpose;
-use openssl::rsa::Rsa;
+use openssl::{pkey::PKey, rsa::Rsa, sha::sha256};
 use p256::elliptic_curve::{Generate, pkcs8::EncodePrivateKey as EncodeEcPrivateKey};
 
 use serde_json::{Value, json};
@@ -30,6 +30,7 @@ use crate::model::{
 
 const OIDC_DEFAULT_ID_TOKEN_SIGNING_ALG: jsonwebtoken::Algorithm = jsonwebtoken::Algorithm::RS256;
 const FAPI_ID_TOKEN_SIGNING_ALG: jsonwebtoken::Algorithm = jsonwebtoken::Algorithm::PS256;
+const REQUEST_OBJECT_ENCRYPTION_KEY_FILE: &str = "request-object-encryption.pem";
 
 pub(crate) async fn load_or_create_keyset(settings: &KeySettings) -> anyhow::Result<LoadedKeyset> {
     tokio::fs::create_dir_all(&settings.keys_dir).await?;
@@ -136,6 +137,19 @@ pub(crate) async fn maintain_keyset_lifecycle(
             }
         }
     }
+    if let Some(keys) = payload.get_mut("keys").and_then(Value::as_array_mut) {
+        for entry in keys {
+            let Some(purposes) = entry.get_mut("purposes").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let protocol_response_key = purposes.iter().any(|value| value == "id_token")
+                && purposes.iter().any(|value| value == "jarm");
+            if protocol_response_key && !purposes.iter().any(|value| value == "introspection") {
+                purposes.push(json!("introspection"));
+                changed = true;
+            }
+        }
+    }
     if let Some(next_kid) = new_active_kid {
         payload["active_kid"] = json!(next_kid);
     }
@@ -216,7 +230,8 @@ async fn create_protocol_signing_key_entry(
     let mut entry = create_prepublished_local_key_entry(settings, alg, now).await?;
     entry["purposes"] = json!([
         SigningPurpose::IdToken.as_str(),
-        SigningPurpose::Jarm.as_str()
+        SigningPurpose::Jarm.as_str(),
+        SigningPurpose::Introspection.as_str()
     ]);
     Ok(entry)
 }
@@ -276,6 +291,10 @@ pub(crate) async fn try_load_keyset(
     };
     let payload = serde_json::from_str::<Value>(&raw)
         .with_context(|| format!("failed to parse {}", keyset_path.display()))?;
+    // A loaded keyset must be immediately usable for every advertised key
+    // capability. Existing installations predate the dedicated Request Object
+    // recipient key, so loading is also the atomic upgrade boundary.
+    ensure_request_object_encryption_key(settings).await?;
     let active_kid = payload
         .get("active_kid")
         .and_then(Value::as_str)
@@ -399,6 +418,9 @@ pub(crate) async fn try_load_keyset(
         });
     }
 
+    let request_object_decryption_key = load_request_object_decryption_key(settings).await?;
+    let request_object_encryption_jwk =
+        request_object_encryption_jwk(&request_object_decryption_key)?;
     Ok(Some(LoadedKeyset {
         active_kid: active_kid.to_owned(),
         active_alg: active_alg
@@ -406,6 +428,51 @@ pub(crate) async fn try_load_keyset(
         active_signing_key: active_signing_key
             .ok_or_else(|| anyhow!("keyset.json active_kid does not reference a live key"))?,
         verification_keys,
+        request_object_decryption_key,
+        request_object_encryption_jwk,
+    }))
+}
+
+async fn ensure_request_object_encryption_key(settings: &KeySettings) -> anyhow::Result<()> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    let key = PKey::from_rsa(Rsa::generate(3072)?)?;
+    let pem = String::from_utf8(key.private_key_to_pem_pkcs8()?)
+        .context("generated request object key was not PEM text")?;
+    write_private_key_pem_if_absent(&path, &pem).await
+}
+
+async fn load_request_object_decryption_key(settings: &KeySettings) -> anyhow::Result<Vec<u8>> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    let pem = tokio::fs::read(&path)
+        .await
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    PKey::private_key_from_pem(&pem)
+        .context("request object decryption key is not valid PKCS#8 PEM")?;
+    Ok(pem)
+}
+
+pub(crate) fn request_object_encryption_jwk(private_key_pem: &[u8]) -> anyhow::Result<Value> {
+    let key = PKey::private_key_from_pem(private_key_pem)?;
+    let rsa = key.rsa()?;
+    let public_der = key.public_key_to_der()?;
+    let kid = format!(
+        "request-object-{}",
+        URL_SAFE_NO_PAD.encode(&sha256(&public_der)[..12])
+    );
+    Ok(json!({
+        "kty": "RSA",
+        "use": "enc",
+        "alg": "RSA-OAEP-256",
+        "kid": kid,
+        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
+        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
     }))
 }
 
@@ -435,6 +502,7 @@ fn all_signing_purposes() -> BTreeSet<SigningPurpose> {
         SigningPurpose::AccessToken,
         SigningPurpose::IdToken,
         SigningPurpose::Jarm,
+        SigningPurpose::Introspection,
         SigningPurpose::LogoutToken,
         SigningPurpose::HttpMessage,
         SigningPurpose::SecurityEvent,
@@ -445,173 +513,8 @@ fn all_signing_purposes() -> BTreeSet<SigningPurpose> {
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    fn settings(keys_dir: PathBuf) -> KeySettings {
-        KeySettings {
-            keys_dir,
-            external_command: Vec::new(),
-            external_timeout: std::time::Duration::from_secs(2),
-            rotation_interval: chrono::Duration::seconds(3_600),
-            prepublish_window: chrono::Duration::seconds(1_800),
-            verification_grace: chrono::Duration::seconds(600),
-        }
-    }
-
-    #[tokio::test]
-    async fn atomic_json_write_leaves_only_complete_target() {
-        let directory = std::env::temp_dir().join(format!("nazo-key-atomic-{}", Uuid::now_v7()));
-        let path = directory.join("keyset.json");
-        write_json_atomic(&path, &json!({"active_kid":"new","keys":[]}))
-            .await
-            .expect("atomic write should succeed");
-
-        let parsed: Value =
-            serde_json::from_slice(&tokio::fs::read(&path).await.expect("target should exist"))
-                .expect("target must contain complete JSON");
-        assert_eq!(parsed["active_kid"], "new");
-        let files = std::fs::read_dir(&directory)
-            .expect("directory should exist")
-            .map(|entry| entry.expect("entry should be readable").file_name())
-            .collect::<Vec<_>>();
-        assert_eq!(files, vec![std::ffi::OsString::from("keyset.json")]);
-        tokio::fs::remove_dir_all(directory)
-            .await
-            .expect("cleanup should succeed");
-    }
-
-    #[tokio::test]
-    async fn lifecycle_prepublishes_then_activates_with_grace() {
-        let directory = std::env::temp_dir().join(format!("nazo-key-lifecycle-{}", Uuid::now_v7()));
-        let settings = settings(directory.clone());
-        create_new_keyset(&settings)
-            .await
-            .expect("initial keyset should be created");
-        let path = directory.join("keyset.json");
-        let mut payload: Value =
-            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-        let original_kid = payload["active_kid"].as_str().unwrap().to_owned();
-        payload["keys"][0]["created_at"] =
-            json!(timestamp(Utc::now() - chrono::Duration::seconds(2_000)));
-        write_json_atomic(&path, &payload).await.unwrap();
-
-        maintain_keyset_lifecycle(&settings, &path).await.unwrap();
-        let mut payload: Value =
-            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-        assert_eq!(payload["active_kid"], original_kid);
-        assert_eq!(payload["keys"].as_array().unwrap().len(), 3);
-        payload["keys"][0]["created_at"] =
-            json!(timestamp(Utc::now() - chrono::Duration::seconds(4_000)));
-        let candidate = payload["keys"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|key| key["kid"] != original_kid && key["alg"] == "RS256")
-            .unwrap();
-        candidate["created_at"] = json!(timestamp(Utc::now() - chrono::Duration::seconds(2_000)));
-        let candidate_kid = candidate["kid"].as_str().unwrap().to_owned();
-        write_json_atomic(&path, &payload).await.unwrap();
-
-        maintain_keyset_lifecycle(&settings, &path).await.unwrap();
-        let payload: Value =
-            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-        assert_eq!(payload["active_kid"], candidate_kid);
-        let previous = payload["keys"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["kid"] == original_kid)
-            .unwrap();
-        assert!(previous["retire_at"].as_str().is_some());
-        tokio::fs::remove_dir_all(directory).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn key_manager_lists_persisted_key_states_without_server_schema_logic() {
-        let directory = std::env::temp_dir().join(format!("nazo-key-list-{}", Uuid::now_v7()));
-        let settings = settings(directory.clone());
-        let now = Utc::now();
-        write_json_atomic(
-            &directory.join("keyset.json"),
-            &json!({
-                "active_kid":"active",
-                "keys":[
-                    {"kid":"active","alg":"EdDSA","file":"active.pem","retire_at":null},
-                    {"kid":"candidate","alg":"EdDSA","file":"candidate.pem","retire_at":null},
-                    {"kid":"grace","alg":"RS256","file":"grace.pem","retire_at":timestamp(now + chrono::Duration::minutes(5))},
-                    {"kid":"retired","alg":"RS256","file":"retired.pem","retire_at":timestamp(now - chrono::Duration::minutes(5))}
-                ]
-            }),
-        )
-        .await
-        .unwrap();
-
-        let records = crate::KeyManager::list_keys(&settings).await.unwrap();
-        assert_eq!(
-            records
-                .iter()
-                .map(|record| (record.kid.as_str(), record.status))
-                .collect::<Vec<_>>(),
-            vec![
-                ("active", KeyRecordStatus::Active),
-                ("candidate", KeyRecordStatus::Prepublished),
-                ("grace", KeyRecordStatus::Grace),
-                ("retired", KeyRecordStatus::Retired),
-            ]
-        );
-        tokio::fs::remove_dir_all(directory).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn key_manager_registers_exact_external_key_schema_atomically() {
-        let directory = std::env::temp_dir().join(format!("nazo-key-register-{}", Uuid::now_v7()));
-        let settings = settings(directory.clone());
-        let public_jwk_file = directory.join("external-public.jwk.json");
-        tokio::fs::create_dir_all(&directory).await.unwrap();
-        tokio::fs::write(
-            &public_jwk_file,
-            serde_json::to_vec(&json!({
-                "kty":"RSA","kid":"external","alg":"RS256","use":"sig",
-                "n":"modulus","e":"AQAB"
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        crate::KeyManager::register_external(
-            &settings,
-            crate::ExternalKeyRegistration {
-                kid: "external".to_owned(),
-                algorithm: jsonwebtoken::Algorithm::RS256,
-                key_ref: "kms://key/1".to_owned(),
-                public_jwk_file,
-            },
-        )
-        .await
-        .unwrap();
-
-        let payload: Value = serde_json::from_slice(
-            &tokio::fs::read(directory.join("keyset.json"))
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(payload["active_kid"], "external");
-        let entry = &payload["keys"][0];
-        assert_eq!(entry["kid"], "external");
-        assert_eq!(entry["alg"], "RS256");
-        assert_eq!(entry["backend"], "external-command");
-        assert_eq!(entry["key_ref"], "kms://key/1");
-        assert_eq!(entry["retire_at"], Value::Null);
-        assert!(entry["created_at"].as_str().is_some());
-        assert_eq!(entry["public_jwk"]["kid"], "external");
-        tokio::fs::remove_dir_all(directory).await.unwrap();
-    }
-}
+#[path = "../tests/unit/store.rs"]
+mod tests;
 
 pub(crate) async fn list_keys(settings: &KeySettings) -> anyhow::Result<Vec<KeyRecord>> {
     let value = load_keyset_json(settings).await?;
@@ -677,6 +580,19 @@ pub(crate) async fn register_external_key(
     } else {
         json!({"active_kid":registration.kid,"keys":[]})
     };
+    if let Some(existing) = keyset_keys(&keyset)?
+        .iter()
+        .find(|key| key.get("kid").and_then(Value::as_str) == Some(registration.kid.as_str()))
+    {
+        if existing.get("alg").and_then(Value::as_str) == Some(algorithm)
+            && existing.get("key_ref").and_then(Value::as_str)
+                == Some(registration.key_ref.as_str())
+            && existing.get("public_jwk") == Some(&public_jwk)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("external key kid already exists with different material");
+    }
     keyset_keys_mut(&mut keyset)?.push(json!({
         "kid":registration.kid,
         "alg":algorithm,
@@ -718,6 +634,13 @@ pub(crate) async fn register_local_key(
         let Some(existing) = key_entry_purposes(key)? else {
             continue;
         };
+        if existing == registration.purposes {
+            return key
+                .get("kid")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("purpose-scoped key is missing kid"));
+        }
         if existing
             .iter()
             .any(|purpose| registration.purposes.contains(purpose))
@@ -903,6 +826,52 @@ pub(crate) async fn write_json_atomic(path: &Path, value: &Value) -> anyhow::Res
 pub(crate) async fn write_private_key_pem_atomic(path: &Path, pem: &str) -> anyhow::Result<()> {
     write_file_atomic(path, pem.as_bytes()).await?;
     set_private_key_permissions(path).await
+}
+
+async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("target file must have a parent directory"))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let tmp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("private-key"),
+        Uuid::now_v7()
+    ));
+    let prepare_result = async {
+        tokio::fs::write(&tmp_path, pem.as_bytes()).await?;
+        set_private_key_permissions(&tmp_path).await
+    }
+    .await;
+    if let Err(error) = prepare_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error);
+    }
+    let link_result = tokio::fs::hard_link(&tmp_path, path).await;
+    let cleanup_result = tokio::fs::remove_file(&tmp_path).await;
+    match link_result {
+        Ok(()) => {
+            cleanup_result.with_context(|| {
+                format!(
+                    "failed to remove private-key temporary file {}",
+                    tmp_path.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let _ = cleanup_result;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = cleanup_result;
+            Err(error).with_context(|| {
+                format!("failed to atomically create private key {}", path.display())
+            })
+        }
+    }
 }
 
 async fn write_file_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -1176,5 +1145,5 @@ pub(crate) fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[path = "tests/keyset_store.rs"]
+#[path = "../tests/unit/store/keyset_store.rs"]
 mod keyset_store_tests;

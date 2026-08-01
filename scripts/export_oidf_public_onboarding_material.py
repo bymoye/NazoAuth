@@ -19,6 +19,10 @@ from oidf_onboarding_bundle import (
     build_artifact_manifest,
     build_ca_bundle,
 )
+from build_oidf_full_install_profile import (
+    ProfileError,
+    document_from_onboarding_artifact,
+)
 
 
 PRIVATE_JWK_FIELDS = {"d", "p", "q", "dp", "dq", "qi", "oth", "k"}
@@ -32,10 +36,12 @@ OAUTH_ONBOARDING_NAZO_FIELDS = {
 OPENID4VC_ONBOARDING_NAZO_FIELDS = {
     "client_auth_type",
     "openid4vc_role",
+    "credential_format",
     "credential_dataset",
 }
 ONBOARDING_NAZO_FIELDS = OAUTH_ONBOARDING_NAZO_FIELDS | OPENID4VC_ONBOARDING_NAZO_FIELDS
 OPENID4VC_ONBOARDING_BUNDLE_FILE = "openid4vc-onboarding-configs.json"
+STANDARDS_FULL_PROFILE_FILE = "standards-full-profile.json"
 
 
 def read_json(path: Path) -> Any:
@@ -72,9 +78,20 @@ def public_onboarding_client(value: Any) -> dict[str, Any] | None:
         "backchannel_client_notification_endpoint",
         "backchannel_authentication_request_signing_alg",
         "backchannel_user_code_parameter",
+        "request_object_trust_anchor_pem",
     ):
         if key in value:
-            result[key] = copy.deepcopy(value[key])
+            item = copy.deepcopy(value[key])
+            if key == "request_object_trust_anchor_pem" and (
+                not isinstance(item, str)
+                or "-----BEGIN CERTIFICATE-----" not in item
+                or "-----END CERTIFICATE-----" not in item
+                or "PRIVATE KEY" in item
+            ):
+                raise SystemExit(
+                    "request_object_trust_anchor_pem must contain certificates and no private key"
+                )
+            result[key] = item
     if "jwks" in value:
         result["jwks"] = strip_private_jwks(value["jwks"])
     if isinstance(value.get("client_secret"), str) and value["client_secret"]:
@@ -82,6 +99,25 @@ def public_onboarding_client(value: Any) -> dict[str, Any] | None:
             value["client_secret"].encode("utf-8")
         ).hexdigest()
     return result or None
+
+
+def public_client_attestation(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    issuer = value.get("issuer")
+    attester_jwks = value.get("attester_jwks")
+    key_attestation_jwks = value.get("key_attestation_jwks")
+    if not isinstance(issuer, str) or not issuer:
+        return None
+    if not isinstance(attester_jwks, dict) or not isinstance(
+        key_attestation_jwks, dict
+    ):
+        raise SystemExit("client_attestation requires both public trust JWKS sets")
+    return {
+        "issuer": issuer,
+        "attester_jwks": strip_private_jwks(attester_jwks),
+        "key_attestation_jwks": strip_private_jwks(key_attestation_jwks),
+    }
 
 
 def public_onboarding_mtls(value: Any) -> dict[str, Any] | None:
@@ -93,19 +129,24 @@ def public_onboarding_mtls(value: Any) -> dict[str, Any] | None:
     }
 
 
-def public_onboarding_nazo(value: Any) -> dict[str, Any] | None:
+def public_onboarding_nazo(
+    value: Any, credential_holder_email_sha256: str | None = None
+) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     result = {key: copy.deepcopy(value[key]) for key in ONBOARDING_NAZO_FIELDS if key in value}
-    for key in ("oidf_user_email", "oidf_user_password"):
-        if isinstance(value.get(key), str) and value[key]:
-            result[f"{key}_sha256"] = hashlib.sha256(
-                value[key].encode("utf-8")
-            ).hexdigest()
+    if credential_holder_email_sha256 is not None:
+        result["oidf_user_email_sha256"] = credential_holder_email_sha256
+    elif isinstance(value.get("oidf_user_email"), str) and value["oidf_user_email"]:
+        result["oidf_user_email_sha256"] = hashlib.sha256(
+            value["oidf_user_email"].encode("utf-8")
+        ).hexdigest()
     return result or None
 
 
-def public_onboarding_config(config: Any) -> dict[str, Any]:
+def public_onboarding_config(
+    config: Any, credential_holder_email_sha256: str | None = None
+) -> dict[str, Any]:
     if not isinstance(config, dict):
         return {}
     result: dict[str, Any] = {}
@@ -122,11 +163,16 @@ def public_onboarding_config(config: Any) -> dict[str, Any]:
         public_client = public_onboarding_client(config.get(key))
         if public_client is not None:
             result[key] = public_client
+    client_attestation = public_client_attestation(config.get("client_attestation"))
+    if client_attestation is not None:
+        result["client_attestation"] = client_attestation
     for key in ("mtls", "mtls2"):
         public_mtls = public_onboarding_mtls(config.get(key))
         if public_mtls is not None:
             result[key] = public_mtls
-    public_nazo = public_onboarding_nazo(config.get("nazo"))
+    public_nazo = public_onboarding_nazo(
+        config.get("nazo"), credential_holder_email_sha256
+    )
     if public_nazo is not None:
         result["nazo"] = public_nazo
     return result
@@ -141,12 +187,21 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--target-issuer", required=True)
     parser.add_argument("--suite-base-url", required=True)
+    parser.add_argument("--credential-holder-email-sha256")
     parser.add_argument(
         "--onboarding-profile",
         choices=("official", "operator-black-box"),
         required=True,
     )
     args = parser.parse_args(argv)
+    credential_holder_email_sha256 = args.credential_holder_email_sha256
+    if credential_holder_email_sha256 is not None and (
+        len(credential_holder_email_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in credential_holder_email_sha256)
+    ):
+        raise SystemExit(
+            "--credential-holder-email-sha256 must be a lowercase SHA-256 digest"
+        )
 
     configs: dict[str, Any] = {}
     for config_path in args.config_json_file:
@@ -170,7 +225,9 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
     for file_name, config in configs.items():
         if Path(file_name).name != file_name or not file_name.endswith(".json"):
             raise SystemExit(f"invalid OIDF config file name: {file_name}")
-        public_config = public_onboarding_config(config)
+        public_config = public_onboarding_config(
+            config, credential_holder_email_sha256
+        )
         public_nazo = public_config.get("nazo")
         if isinstance(public_nazo, dict) and isinstance(
             public_nazo.get("oidf_user_email_sha256"), str
@@ -186,19 +243,25 @@ def main_with_args_for_test(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(
                 "combined OpenID4VC onboarding artifact requires exactly one credential-holder email commitment"
             )
+        openid4vc_bundle = {
+            "configs": openid4vc_configs,
+            "credential_holder_email_sha256": next(iter(user_email_commitments)),
+        }
         outputs[OPENID4VC_ONBOARDING_BUNDLE_FILE] = (
-            json.dumps(
-                {
-                    "configs": openid4vc_configs,
-                    "credential_holder_email_sha256": next(
-                        iter(user_email_commitments)
-                    ),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
+            json.dumps(openid4vc_bundle, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
+        if args.onboarding_profile == "official":
+            try:
+                standards_full_profile = document_from_onboarding_artifact(
+                    openid4vc_bundle, args.suite_base_url
+                )
+            except ProfileError as error:
+                raise SystemExit(
+                    f"cannot derive closed standards-full install profile: {error}"
+                ) from error
+            outputs[STANDARDS_FULL_PROFILE_FILE] = (
+                json.dumps(standards_full_profile, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
     outputs[BUNDLE_FILE_NAME] = ca_bundle
     outputs[MANIFEST_FILE_NAME] = build_artifact_manifest(
         outputs,

@@ -70,5 +70,5 @@ fn client_presentation_error(status: StatusCode, error: &'static str) -> HttpRes
 }
 
 #[cfg(test)]
-#[path = "../../../tests/source_mounted/src/http/authorization/tests/presentation.rs"]
+#[path = "../../../tests/unit/http/authorization/presentation.rs"]
 mod tests;

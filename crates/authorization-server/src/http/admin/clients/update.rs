@@ -77,5 +77,5 @@ pub(crate) async fn admin_patch_client(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/source_mounted/src/http/admin/clients/tests/update.rs"]
+#[path = "../../../../tests/unit/http/admin/clients/update.rs"]
 mod tests;

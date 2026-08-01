@@ -189,5 +189,5 @@ fn otel_http_log_exporter(config: &OtelConfig) -> anyhow::Result<opentelemetry_o
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/bootstrap/observability/tests/observability.rs"]
+#[path = "../../tests/unit/bootstrap/observability.rs"]
 mod tests;

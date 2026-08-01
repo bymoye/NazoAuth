@@ -12,6 +12,7 @@ on:
       - "crates/**"
       - "src/**"
       - "tests/**"
+      - "fuzz/**"
       - "benches/**"
       - "examples/**/*.rs"
       - "examples/**/Cargo.toml"
@@ -29,6 +30,7 @@ on:
       - "crates/**"
       - "src/**"
       - "tests/**"
+      - "fuzz/**"
       - "benches/**"
       - "examples/**/*.rs"
       - "examples/**/Cargo.toml"
@@ -106,6 +108,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          shared-key: workspace-quality
+
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
 
@@ -118,17 +124,33 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Check all targets
-        run: cargo check --workspace --all-targets --all-features --locked
-
       - name: Clippy all targets
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Run migrations
-        run: cargo run --locked --bin nazo-oauth-migrate
+      - name: Materialize the isolated CI schema through the persistence owner
+        run: >-
+          cargo test --locked -p nazo-postgres --test migrations
+          pending_migrations_create_all_runtime_module_state_tables
 
       - name: Test workspace with PostgreSQL and Valkey
         run: cargo test --workspace --all-features --locked
+
+  operator-parser-fuzz:
+    name: Operator JWS parser fuzz gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      - name: Install pinned nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-07-31 --profile minimal
+          cargo +nightly-2026-07-31 install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Fuzz closed operator JWS parser
+        run: cargo +nightly-2026-07-31 fuzz run operator_jws_parser -- -max_total_time=60 -rss_limit_mb=512 -timeout=10
 
   python-quality:
     name: Python script syntax gate

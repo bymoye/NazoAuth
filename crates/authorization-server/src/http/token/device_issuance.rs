@@ -41,6 +41,19 @@ pub(crate) async fn token_device_code_with_service(
             false,
         );
     }
+    if !issuance
+        .config
+        .authorization_server_profile()
+        .effective_client_policy(client)
+        .allow_cross_device_flows
+    {
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "This client is not authorized for cross-device flows.",
+            false,
+        );
+    }
     let device_code = match required_device_code(form) {
         Ok(device_code) => device_code,
         Err(response) => return response,

@@ -134,7 +134,9 @@ impl ServerAuthorizationDecisionOperations {
                 code_hash: &code_hash,
                 code_id: &code_id,
                 issued_at: now,
-                code_ttl_seconds: self.config.auth_code_ttl_seconds,
+                code_ttl_seconds: payload
+                    .authorization_code_ttl_seconds
+                    .unwrap_or(self.config.auth_code_ttl_seconds),
                 tenant_id: default_tenant_context().tenant_id,
             })
             .await
@@ -178,18 +180,23 @@ impl ServerAuthorizationDecisionOperations {
             code,
             error,
             state: payload.state.as_deref(),
-            ttl_seconds: self.config.auth_code_ttl_seconds as i64,
-            signed_response_required: self.config.profile.requires_signed_authorization_response(),
+            ttl_seconds: payload
+                .authorization_code_ttl_seconds
+                .unwrap_or(self.config.auth_code_ttl_seconds) as i64,
+            signed_response_required: payload
+                .signed_authorization_response_required
+                .unwrap_or_else(|| self.config.profile.requires_signed_authorization_response()),
             jarm_available: module_admissible(
                 &modules,
                 ModuleId::Jarm,
                 CapabilityAdmission::ExistingTransaction,
             ),
-            session_management_available: module_admissible(
-                &modules,
-                ModuleId::SessionManagement,
-                CapabilityAdmission::NewRequest,
-            ),
+            session_management_available: payload.session_management_allowed.unwrap_or(true)
+                && module_admissible(
+                    &modules,
+                    ModuleId::SessionManagement,
+                    CapabilityAdmission::NewRequest,
+                ),
         })
         .map_err(map_response_policy_error)?;
 
@@ -324,5 +331,5 @@ fn record_decision_audit(event: &str, payload: &nazo_auth::ConsentPayload, sourc
 }
 
 #[cfg(test)]
-#[path = "../../tests/source_mounted/src/http/authorization/tests/decision.rs"]
+#[path = "../../tests/unit/domain/authorization_decision.rs"]
 mod tests;

@@ -2,6 +2,70 @@ use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 use uuid::Uuid;
 
+const CLIENT_SECURITY_POLICY_VERSION: u16 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAssuranceLevel {
+    #[default]
+    Baseline,
+    Fapi2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientSecurityPolicy {
+    pub version: u16,
+    #[serde(default)]
+    pub assurance: ClientAssuranceLevel,
+    #[serde(default)]
+    pub require_signed_authorization_request: bool,
+    #[serde(default)]
+    pub require_signed_authorization_response: bool,
+    #[serde(default)]
+    pub require_signed_introspection_response: bool,
+    #[serde(default)]
+    pub session_management: bool,
+    #[serde(default)]
+    pub allow_cross_device_flows: bool,
+}
+
+impl Default for ClientSecurityPolicy {
+    fn default() -> Self {
+        Self {
+            version: CLIENT_SECURITY_POLICY_VERSION,
+            assurance: ClientAssuranceLevel::Baseline,
+            require_signed_authorization_request: false,
+            require_signed_authorization_response: false,
+            require_signed_introspection_response: false,
+            session_management: false,
+            allow_cross_device_flows: false,
+        }
+    }
+}
+
+impl ClientSecurityPolicy {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.version != CLIENT_SECURITY_POLICY_VERSION {
+            return Err("unsupported client security policy version");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn fapi2() -> Self {
+        Self {
+            assurance: ClientAssuranceLevel::Fapi2,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn requires_fapi2_security(&self) -> bool {
+        self.assurance == ClientAssuranceLevel::Fapi2
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct ClientPresentationMetadata {
     pub logo_uri: Option<String>,
@@ -61,6 +125,14 @@ pub struct ValidatedClientRegistration {
     /// Dynamically registered, display-only RP metadata. These URIs are never
     /// dereferenced by the authorization server.
     pub presentation: ClientPresentationMetadata,
+    pub id_token_signed_response_alg: Option<String>,
+    pub id_token_encrypted_response_alg: Option<String>,
+    pub id_token_encrypted_response_enc: Option<String>,
+    pub request_object_signing_alg: Option<String>,
+    pub request_object_encryption_alg: Option<String>,
+    pub request_object_encryption_enc: Option<String>,
+    pub token_endpoint_auth_signing_alg: Option<String>,
+    pub introspection_signed_response_alg: Option<String>,
     pub introspection_encrypted_response_alg: Option<String>,
     pub introspection_encrypted_response_enc: Option<String>,
     pub userinfo_signed_response_alg: Option<String>,
@@ -69,6 +141,9 @@ pub struct ValidatedClientRegistration {
     pub authorization_signed_response_alg: Option<String>,
     pub authorization_encrypted_response_alg: Option<String>,
     pub authorization_encrypted_response_enc: Option<String>,
+    /// Explicit per-client policy. `None` is reserved for clients created
+    /// before composable policy and delegates to the legacy deployment profile.
+    pub security_policy: Option<ClientSecurityPolicy>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,3 +181,7 @@ impl DerefMut for OAuthClient {
         &mut self.registration
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/client_registration.rs"]
+mod tests;
