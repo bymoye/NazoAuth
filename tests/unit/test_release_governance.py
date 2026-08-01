@@ -272,6 +272,11 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn('echo "$cc_variable=musl-gcc"', release)
         self.assertIn('echo "$linker_variable=musl-gcc"', release)
         self.assertIn("platforms: linux/amd64,linux/arm64", release)
+        self.assertIn(
+            "outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,"
+            "name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }}",
+            release,
+        )
         self.assertIn("Publish the exact scanned OCI index without rebuilding", release)
         self.assertIn(
             "msvc_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
