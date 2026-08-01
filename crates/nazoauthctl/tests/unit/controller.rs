@@ -944,7 +944,7 @@ fn host_doctor_rejects_embedded_identity_substitution_before_health_checks() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn pending_pre_migration_update_restores_previous_artifact_and_closes_the_journal() {
     let work = PrivateTempDir::new("nazoauth-recover-previous").unwrap();
@@ -974,7 +974,7 @@ fn pending_pre_migration_update_restores_previous_artifact_and_closes_the_journa
     crate::operator::verify_audit(&config).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn pending_active_candidate_continues_all_commits_and_closes_the_journal() {
     let work = PrivateTempDir::new("nazoauth-recover-forward").unwrap();
