@@ -8,6 +8,7 @@ fn private_temporary_directory_is_unique_private_and_removed_on_drop() {
     let second = PrivateTempDir::new("nazoauthctl-filesystem-test").unwrap();
     assert_ne!(first.path(), second.path());
     assert!(first.path().is_dir());
+    assert_eq!(fs::canonicalize(first.path()).unwrap(), first.path());
 
     #[cfg(unix)]
     {

@@ -20,7 +20,17 @@ impl PrivateTempDir {
             match fs::create_dir(&path) {
                 Ok(()) => {
                     set_mode(&path, 0o700)?;
-                    return Ok(Self { path });
+                    let canonical = fs::canonicalize(&path)
+                        .inspect_err(|_| {
+                            let _ = fs::remove_dir(&path);
+                        })
+                        .with_context(|| {
+                            format!(
+                                "failed to canonicalize private temporary directory {}",
+                                path.display()
+                            )
+                        })?;
+                    return Ok(Self { path: canonical });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
