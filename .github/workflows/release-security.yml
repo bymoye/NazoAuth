@@ -380,6 +380,7 @@ jobs:
             --expected-index-digest "${{ steps.oci.outputs.digest }}" \
             --repository "ghcr.io/nazozero/nazoauth" \
             --output target/release-evidence/oci/descriptor.json
+          chmod -R go+rX "$layout"
           for platform in linux/amd64 linux/arm64; do
             docker run --rm \
               --cap-drop ALL \

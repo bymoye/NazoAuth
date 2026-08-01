@@ -277,6 +277,13 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }}",
             release,
         )
+        scan = release.split(
+            "- name: Scan the exact OCI archive before publication", 1
+        )[1].split("- name: Record the closed OCI descriptor", 1)[0]
+        self.assertLess(
+            scan.index('chmod -R go+rX "$layout"'),
+            scan.index("docker run --rm"),
+        )
         self.assertIn("Publish the exact scanned OCI index without rebuilding", release)
         self.assertIn(
             "msvc_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
