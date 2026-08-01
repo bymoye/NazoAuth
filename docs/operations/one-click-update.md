@@ -264,9 +264,11 @@ boundary instead of claiming cross-store transactional backup.
 
 ## Prerequisites and configuration
 
-The baseline requires Linux x86-64 or Arm64, root, `curl`, GitHub CLI for the
-first bootstrap, and either local Cosign or a container engine that can run the
-pinned Cosign image. Container modes additionally require Podman or Docker.
+The baseline requires Linux x86-64 or Arm64, root, `curl`, `python3`,
+`sha256sum`, and `install`, plus either local Cosign or a container engine that
+can run the pinned Cosign image. The bootstrap uses anonymous GitHub APIs and
+does not require GitHub CLI or an account token. Container modes additionally
+require Podman or Docker.
 Pure host mode needs systemd with `systemd-run`; external PostgreSQL/Valkey
 dependencies also require `pg_dump`, `pg_restore`, and `valkey-cli`.
 Automatically managed PostgreSQL and Valkey images are pinned to reviewed

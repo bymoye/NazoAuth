@@ -216,9 +216,10 @@ managed 模式会先停止唯一的受管应用写入者，再依次生成两个
 
 ## 前置条件和配置
 
-基础条件是 Linux x86_64 或 Arm64、root、`curl`、首次自举所需的 GitHub CLI，
-以及本地 Cosign 或能够运行固定 Cosign 镜像的容器引擎。容器模式需要 Docker 或
-Podman；纯宿主机模式需要 systemd（包括 `systemd-run`）；外部 PostgreSQL/Valkey
+基础条件是 Linux x86_64 或 Arm64、root、`curl`、`python3`、`sha256sum` 和
+`install`，以及本地 Cosign 或能够运行固定 Cosign 镜像的容器引擎。自举使用匿名
+GitHub API，不需要 GitHub CLI 或账号 token。容器模式需要 Docker 或 Podman；纯宿主机模式
+需要 systemd（包括 `systemd-run`）；外部 PostgreSQL/Valkey
 还需要 `pg_dump`、`pg_restore` 和 `valkey-cli`。自动部署的 PostgreSQL 和 Valkey
 镜像固定到经过评审的多架构 OCI digest。纯宿主机任务通过 `systemd-run` transient
 sandbox 执行。正式执行前，应从目标 GitHub Release 下载 `nazoauthctl`，按上文校验

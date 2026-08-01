@@ -141,6 +141,16 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("ipv4_address:", source)
         self.assertNotIn("name: nazo_oauth_net", source)
 
+    def test_public_bootstrap_does_not_require_a_github_login_or_cli(self) -> None:
+        for name in ("one-click-update.md", "one-click-update.zh-CN.md"):
+            source = (ROOT / "docs" / "operations" / name).read_text(encoding="utf-8")
+            self.assertIn("`python3`", source)
+            self.assertIn("`sha256sum`", source)
+            self.assertIn("`install`", source)
+            self.assertNotIn("GitHub CLI for the\nfirst bootstrap", source)
+            self.assertNotIn("首次自举所需的 GitHub CLI", source)
+            self.assertRegex(source, r"does not require GitHub CLI|不需要 GitHub CLI")
+
     def test_release_builds_one_application_and_one_lifecycle_executable(self) -> None:
         server_manifest = (
             ROOT / "crates" / "authorization-server" / "Cargo.toml"
