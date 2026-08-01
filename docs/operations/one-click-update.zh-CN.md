@@ -15,7 +15,8 @@ Rust 二进制，与 `nazoauth` 在同一个发布中分别构建、签名和出
 从同一个不可变源码 tag 下载并审阅这个小型 bootstrap，然后固定该 tag 执行：
 
 ```sh
-version=v0.1.2
+# 将 vX.Y.Z 替换为你选择的精确不可变 Release tag。
+version=vX.Y.Z
 curl --fail --silent --show-error --location --proto '=https' \
   --output install_nazoauthctl.sh \
   "https://raw.githubusercontent.com/nazozero/NazoAuth/$version/scripts/install_nazoauthctl.sh"

@@ -91,7 +91,7 @@ jobs:
             --deny-self-hosted-runners \
             --format json > target/release-evidence/frontend/verification.json
       - name: Validate Release workflow and predicate contracts
-        run: python3 -m unittest tests.unit.test_release_attestation tests.unit.test_release_governance
+        run: python3 -m unittest tests.unit.test_release_attestation tests.unit.test_release_governance tests.unit.test_release_oci
       - name: Install pinned Rust supply-chain tools
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
@@ -373,126 +373,13 @@ jobs:
           set -euo pipefail
           archive="${{ runner.temp }}/nazoauth-image.oci.tar"
           layout="$(mktemp -d "${RUNNER_TEMP}/nazoauth-image.oci.XXXXXX")"
-          python3 - "$archive" "$layout" <<'PY'
-          import hashlib
-          import json
-          import re
-          import sys
-          import tarfile
-          from pathlib import Path, PurePosixPath
-
-          archive = Path(sys.argv[1])
-          layout = Path(sys.argv[2]).resolve(strict=True)
-          if not archive.is_file() or archive.is_symlink():
-              raise SystemExit("OCI candidate must be one regular archive")
-          if any(layout.iterdir()):
-              raise SystemExit("OCI extraction directory must start empty")
-
-          with tarfile.open(archive, mode="r:*") as source:
-              members = source.getmembers()
-              if not members:
-                  raise SystemExit("OCI archive is empty")
-              seen = set()
-              for member in members:
-                  path = PurePosixPath(member.name)
-                  parts = tuple(part for part in path.parts if part not in ("", "."))
-                  if (
-                      path.is_absolute()
-                      or not parts
-                      or ".." in parts
-                      or "\\" in member.name
-                      or not (member.isfile() or member.isdir())
-                  ):
-                      raise SystemExit(f"unsafe OCI archive member: {member.name!r}")
-                  normalized = PurePosixPath(*parts).as_posix()
-                  if normalized in seen:
-                      raise SystemExit(f"duplicate OCI archive member: {normalized}")
-                  seen.add(normalized)
-              source.extractall(layout, members=members, filter="data")
-
-          if {entry.name for entry in layout.iterdir()} != {
-              "blobs",
-              "index.json",
-              "oci-layout",
-          }:
-              raise SystemExit("OCI layout has unexpected root entries")
-          for entry in layout.rglob("*"):
-              if entry.is_symlink():
-                  raise SystemExit(f"OCI layout contains a symbolic link: {entry}")
-
-          metadata = json.loads((layout / "oci-layout").read_text(encoding="utf-8"))
-          if metadata != {"imageLayoutVersion": "1.0.0"}:
-              raise SystemExit("OCI layout metadata is not the closed 1.0.0 schema")
-
-          blob_pattern = re.compile(r"^[0-9a-f]{64}$")
-          blob_root = layout / "blobs" / "sha256"
-          if not blob_root.is_dir():
-              raise SystemExit("OCI layout has no sha256 blob directory")
-          blobs = {}
-          for entry in layout.rglob("*"):
-              if entry.is_dir():
-                  if entry not in {layout / "blobs", blob_root}:
-                      raise SystemExit(f"OCI layout contains an unexpected directory: {entry}")
-                  continue
-              if not entry.is_file() or entry in {layout / "index.json", layout / "oci-layout"}:
-                  continue
-              if entry.parent != blob_root or not blob_pattern.fullmatch(entry.name):
-                  raise SystemExit(f"OCI layout contains an unexpected file: {entry}")
-              payload = entry.read_bytes()
-              if hashlib.sha256(payload).hexdigest() != entry.name:
-                  raise SystemExit(f"OCI blob digest mismatch: {entry.name}")
-              blobs[f"sha256:{entry.name}"] = len(payload)
-
-          index = json.loads((layout / "index.json").read_text(encoding="utf-8"))
-          allowed_index = {
-              "schemaVersion",
-              "mediaType",
-              "artifactType",
-              "manifests",
-              "subject",
-              "annotations",
-          }
-          if (
-              not isinstance(index, dict)
-              or not set(index).issubset(allowed_index)
-              or index.get("schemaVersion") != 2
-              or index.get("mediaType") != "application/vnd.oci.image.index.v1+json"
-              or not isinstance(index.get("manifests"), list)
-              or not index["manifests"]
-          ):
-              raise SystemExit("OCI index is not a closed image-index document")
-
-          allowed_descriptor = {
-              "mediaType",
-              "digest",
-              "size",
-              "urls",
-              "annotations",
-              "data",
-              "artifactType",
-              "platform",
-          }
-          image_platforms = set()
-          for descriptor in index["manifests"]:
-              if not isinstance(descriptor, dict) or not set(descriptor).issubset(allowed_descriptor):
-                  raise SystemExit("OCI index contains an invalid descriptor")
-              digest = descriptor.get("digest")
-              size = descriptor.get("size")
-              if (
-                  not isinstance(digest, str)
-                  or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
-                  or not isinstance(size, int)
-                  or isinstance(size, bool)
-                  or size < 0
-                  or blobs.get(digest) != size
-              ):
-                  raise SystemExit(f"OCI index descriptor is not blob-bound: {digest!r}")
-              platform = descriptor.get("platform")
-              if isinstance(platform, dict):
-                  image_platforms.add((platform.get("os"), platform.get("architecture")))
-          if not {("linux", "amd64"), ("linux", "arm64")}.issubset(image_platforms):
-              raise SystemExit("OCI index does not contain both release platforms")
-          PY
+          mkdir -p target/release-evidence/oci
+          python3 scripts/validate_release_oci.py \
+            --archive "$archive" \
+            --layout "$layout" \
+            --expected-index-digest "${{ steps.oci.outputs.digest }}" \
+            --repository "ghcr.io/nazozero/nazoauth" \
+            --output target/release-evidence/oci/descriptor.json
           for platform in linux/amd64 linux/arm64; do
             docker run --rm \
               --cap-drop ALL \
@@ -511,22 +398,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          raw="$(skopeo inspect --raw "oci-archive:${{ runner.temp }}/nazoauth-image.oci.tar")"
-          index_digest="${{ steps.oci.outputs.digest }}"
+          descriptor="target/release-evidence/oci/descriptor.json"
+          index_digest="$(jq -er .index_digest "$descriptor")"
           [[ "$index_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          amd64_digest="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' <<<"$raw")"
-          arm64_digest="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' <<<"$raw")"
+          test "$index_digest" = "${{ steps.oci.outputs.digest }}"
+          amd64_digest="$(jq -er '.platform_manifests["linux/amd64"]' "$descriptor")"
+          arm64_digest="$(jq -er '.platform_manifests["linux/arm64"]' "$descriptor")"
           [[ "$amd64_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$arm64_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$(jq '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))] | length' <<<"$raw")" -eq 2
-          mkdir -p target/release-evidence/oci
-          jq -n \
-            --arg repository "ghcr.io/nazozero/nazoauth" \
-            --arg index "$index_digest" \
-            --arg amd64 "$amd64_digest" \
-            --arg arm64 "$arm64_digest" \
-            '{repository:$repository,index_digest:$index,platform_manifests:{"linux/amd64":$amd64,"linux/arm64":$arm64}}' \
-            > target/release-evidence/oci/descriptor.json
           {
             echo "index_digest=$index_digest"
             echo "amd64_digest=$amd64_digest"

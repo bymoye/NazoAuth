@@ -73,22 +73,31 @@ class ReleaseGovernanceTests(unittest.TestCase):
         workflow = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
+        validator = (ROOT / "scripts" / "validate_release_oci.py").read_text(
+            encoding="utf-8"
+        )
         scan = workflow.split("- name: Scan the exact OCI archive before publication", 1)[
             1
         ].split("- name: Record the closed OCI descriptor", 1)[0]
+        record = workflow.split("- name: Record the closed OCI descriptor", 1)[1].split(
+            "- name: Upload OCI descriptor", 1
+        )[0]
 
         self.assertIn('archive="${{ runner.temp }}/nazoauth-image.oci.tar"', scan)
         self.assertIn('layout="$(mktemp -d "${RUNNER_TEMP}/nazoauth-image.oci.XXXXXX")"', scan)
-        self.assertIn("with tarfile.open(archive, mode=\"r:*\") as source:", scan)
-        self.assertIn("member.isfile() or member.isdir()", scan)
-        self.assertIn('or ".." in parts', scan)
-        self.assertIn('source.extractall(layout, members=members, filter="data")', scan)
-        self.assertIn('metadata != {"imageLayoutVersion": "1.0.0"}', scan)
-        self.assertIn("OCI layout has unexpected root entries", scan)
-        self.assertIn("OCI layout contains an unexpected directory", scan)
-        self.assertIn("hashlib.sha256(payload).hexdigest()", scan)
-        self.assertIn("blobs.get(digest) != size", scan)
-        self.assertIn('{("linux", "amd64"), ("linux", "arm64")}', scan)
+        self.assertIn("python3 scripts/validate_release_oci.py", scan)
+        self.assertIn('--expected-index-digest "${{ steps.oci.outputs.digest }}"', scan)
+        self.assertIn("--output target/release-evidence/oci/descriptor.json", scan)
+        self.assertIn('tarfile.open(archive, mode="r:*")', validator)
+        self.assertIn("member.isfile() or member.isdir()", validator)
+        self.assertIn('or ".." in parts', validator)
+        self.assertNotIn("extractall(", validator)
+        self.assertIn('metadata != {"imageLayoutVersion": "1.0.0"}', validator)
+        self.assertIn("OCI layout has unexpected root entries", validator)
+        self.assertIn("OCI layout contains an unexpected directory", validator)
+        self.assertIn("digest.hexdigest() != entry.name", validator)
+        self.assertIn("OCI release index must contain exactly two images and two attestations", validator)
+        self.assertIn("OCI layout contains unreferenced blobs", validator)
         self.assertIn('--security-opt no-new-privileges', scan)
         self.assertIn('-v "$layout:/image:ro"', scan)
         self.assertIn("--input /image", scan)
@@ -102,6 +111,11 @@ class ReleaseGovernanceTests(unittest.TestCase):
             ),
             1,
         )
+        self.assertIn('descriptor="target/release-evidence/oci/descriptor.json"', record)
+        self.assertIn(".platform_manifests[\"linux/amd64\"]", record)
+        self.assertIn(".platform_manifests[\"linux/arm64\"]", record)
+        self.assertNotIn("skopeo inspect --raw", record)
+        self.assertIn("tests.unit.test_release_oci", workflow)
 
     def test_public_quick_start_is_platform_neutral_verified_controller(self) -> None:
         public_guides = [

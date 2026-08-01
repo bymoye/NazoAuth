@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-auth"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-digital-credentials"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-http-actix"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-http-signatures"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "base64",
  "ed25519-dalek 3.0.0",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-identity"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "argon2",
  "base64",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-key-management"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-oauth-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vc-http-actix"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "actix-web",
  "chrono",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vci"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake3",
  "chrono",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vp"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake3",
  "chrono",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-operator-protocol"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -2834,7 +2834,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-postgres"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-resource-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "base64",
  "chrono",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-runtime-modules"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "arc-swap",
  "futures-util",
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-scim-events"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "serde",
@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-valkey"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake3",
  "chrono",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "nazoauthctl"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
