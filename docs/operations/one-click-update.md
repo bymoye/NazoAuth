@@ -20,7 +20,7 @@ Review the small bootstrap from the same immutable source tag, then run it with
 that tag pinned:
 
 ```sh
-version=v0.2.0
+version=v0.1.2
 curl --fail --silent --show-error --location --proto '=https' \
   --output install_nazoauthctl.sh \
   "https://raw.githubusercontent.com/nazozero/NazoAuth/$version/scripts/install_nazoauthctl.sh"
