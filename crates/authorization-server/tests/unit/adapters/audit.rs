@@ -41,6 +41,13 @@ fn audit_event_definitions_include_dynamic_client_lifecycle() {
 }
 
 #[test]
+fn audit_event_definitions_include_administrative_user_lifecycle() {
+    for name in ["admin_user_created", "admin_user_updated"] {
+        assert_eq!(audit_event_category(name), Some("administration"));
+    }
+}
+
+#[test]
 fn audit_event_definitions_include_external_identity_lifecycle() {
     assert_eq!(
         audit_event_category("external_identity_linked"),

@@ -12,6 +12,7 @@ const SENSITIVE_FIELD_NAMES: &[&str] = &[
 ];
 
 const AUDIT_EVENT_DEFINITIONS: &[(&str, &str)] = &[
+    ("admin_user_created", "administration"),
     ("admin_user_updated", "administration"),
     ("authorization_approved", "authorization"),
     ("authorization_denied", "authorization"),
