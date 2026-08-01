@@ -77,8 +77,10 @@ secret-provider read nazoauth/initial-admin | \
 exact HTTP 201 response contract, the `/ui/auth` continuation, and durable
 consumption of the local one-time token.
 
-The controller persists only a non-secret request ID, a controller-keyed HMAC
-of the normalized email, and a closed status. If the database commits but the
+The controller persists only a non-secret request ID, a deployment-secret-revision
+HMAC of the normalized email, the recovery epoch and verified application receipt
+identity, and a closed status. Controller or break-glass key rotation therefore
+does not strand the pending request. If the database commits but the
 HTTP response is lost, the next invocation reuses that request ID and retrieves
 the same database-owned receipt; it does not create another administrator.
 Network and malformed-response windows are audited as outcome-unknown until a

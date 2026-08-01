@@ -66,8 +66,10 @@ secret-provider read nazoauth/initial-admin | \
 `--yes` 只跳过确认提示；命令仍会验证精确 HTTP 201 响应契约、`/ui/auth` 后续路径，
 以及本地一次性 token 已耐久消费。
 
-控制器只持久化非秘密 request ID、使用 controller key 计算的规范化邮箱 HMAC，以及
-封闭状态。若数据库已经提交但 HTTP 响应丢失，下次执行会复用原 request ID，取回同一个
+控制器只持久化非秘密 request ID、使用部署 secret revision 计算的规范化邮箱 HMAC、
+recovery epoch、已验证的应用 receipt identity，以及封闭状态。因此 controller 或
+break-glass key 轮换不会使未决请求失去恢复能力。若数据库已经提交但 HTTP 响应丢失，
+下次执行会复用原 request ID，取回同一个
 数据库权威 receipt，而不会创建第二个管理员。网络或异常响应窗口在确认匹配 receipt 前
 记为 outcome-unknown；密码、邮箱和 token 都不会进入该恢复状态。
 

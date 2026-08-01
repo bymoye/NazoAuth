@@ -149,6 +149,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
             self.assertIn("`install`", source)
             self.assertNotIn("GitHub CLI for the\nfirst bootstrap", source)
             self.assertNotIn("首次自举所需的 GitHub CLI", source)
+            self.assertNotIn("controller-keyed HMAC", source)
+            self.assertNotIn("使用 controller key 计算", source)
             self.assertRegex(source, r"does not require GitHub CLI|不需要 GitHub CLI")
             self.assertRegex(source, r"public non-draft Release|公开非草稿 Release")
 
