@@ -2160,10 +2160,10 @@ pub(crate) fn recover_pending_rotation(
         }
         let next = ActiveIdentity {
             schema: 1,
-            generation: intent.next_generation,
-            controller_key_id: intent.next_key_id,
-            audit_key_id: intent.next_audit_key_id,
-            break_glass_key_id: intent.next_break_glass_key_id,
+            generation: intent.next_generation.clone(),
+            controller_key_id: intent.next_key_id.clone(),
+            audit_key_id: intent.next_audit_key_id.clone(),
+            break_glass_key_id: intent.next_break_glass_key_id.clone(),
         };
         validate_generation(&layout, &next)?;
         verify_rotation_intent(config, &active, &next, &intent)?;

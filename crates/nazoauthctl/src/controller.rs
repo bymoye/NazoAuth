@@ -291,7 +291,8 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
                 } else {
                     "file-provider-unavailable:copied-key-status-not-provable"
                 },
-            )
+            )?;
+            Ok(())
         }
         Command::BreakGlassRehearseControllerLoss { yes } => {
             require_root()?;

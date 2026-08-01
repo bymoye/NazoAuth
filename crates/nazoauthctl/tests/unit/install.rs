@@ -528,7 +528,7 @@ fn generated_container_config_exposes_secret_files_but_not_secret_values() {
     let work = PrivateTempDir::new("container-config-boundary").unwrap();
     let config_dir = work.path().join("config");
     let mut options = install_options(work.path().join("data"));
-    initialize_identity_generation(
+    operator::initialize_identity_generation(
         &config_dir.join("operator"),
         &options.data_root.join("recovery"),
     )
