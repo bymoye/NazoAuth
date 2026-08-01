@@ -6,14 +6,22 @@
 
 生产接入的安全边界不能省略，但操作者入口固定为四步：
 
-1. 部署一个精确仓库 commit，并记录完整 SHA。
-2. 运行 `oidf-conformance-full.yml`，输入 `deployed_sha`、`target_issuer`，并将
-   `onboarding_material_only` 设为 `true`；下载并校验生成的 bundle。
+1. 部署一个精确且不可变的 Release tag，并同时记录 tag 与其完整源码 commit SHA。
+2. 运行 `oidf-conformance-full.yml`，输入 `release_tag`、`deployed_sha`、
+   `target_issuer`，并将 `onboarding_material_only` 设为 `true`；下载并校验生成的 bundle。
 3. 由普通申请人与不同的审批人，通过 `apply_public_conformance_onboarding.py`
    和正式公开控制面完成接入。禁止数据库 seed 和私有网络访问。
 4. 使用相同输入、将 `onboarding_material_only` 设为 `false` 运行 27-plan
    OIDC/FAPI/FAPI-CIBA/Logout 矩阵，再运行 17-plan OpenID4VC Final/HAIP 矩阵。
    workflow 会检出已部署 SHA、克隆精确官方套件提交，并在发现受版本控制的修改时拒绝运行。
+
+`--ref` 只选择要运行的 workflow 定义，不是源码信任 allowlist。两个 workflow 都会先
+要求所给 tag 解引用后精确等于所给 commit。若该 commit 不是默认分支的祖先，还必须确认
+GitHub Release 存在且不是 draft，下载当前 runner 对应的 Linux `nazoauthctl` bootstrap
+制品，并用 GitHub attestation 精确验证
+`release-security.yml@refs/tags/<release-tag>` 证书身份、source ref、source digest、
+自定义 Release predicate 和 hosted-runner 策略。全部证明通过后才允许检出或执行目标
+commit 的源码；不存在按分支名称放行的例外。
 
 所需 Secret 名称和轮换规则见
 [`GitHub Actions Secrets`](../operations/github-actions-secrets.zh-CN.md)。每个 fork 必须提供自己的
@@ -115,14 +123,16 @@ python scripts/prepare_oidf_black_box.py
 
 ```sh
 gh workflow run oidf-conformance-full.yml \
-  --ref <精确分支> \
+  --ref <workflow-定义-ref> \
+  -f release_tag=<精确-release-tag> \
   -f deployed_sha=<已部署-sha> \
   -f target_issuer=https://issuer.example \
   -f credential_holder_email_sha256=<全新申请人邮箱的-sha256> \
   -f onboarding_material_only=true
 ```
 
-该模式调用可复用的接入材料 workflow，在不暴露邮箱或密码哈希的前提下绑定全新申请人
+该模式调用可复用的接入材料 workflow，先把精确 Release tag 与已部署源码 commit 绑定，
+再在不暴露邮箱或密码哈希的前提下绑定全新申请人
 邮箱承诺，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。进入第 3 步前，
 必须下载该 artifact，并按相同 source commit 完成校验。artifact 本身仍不具有生产权限：
 客户端创建和 CA 审批必须由不同身份通过公网控制面完成。
@@ -240,7 +250,8 @@ OpenID4VC runner 只能使用明确标记的专用 conformance 用户。driver �
 
 ```sh
 gh workflow run oidf-conformance-full.yml \
-  --ref main \
+  --ref <workflow-定义-ref> \
+  -f release_tag=<精确-release-tag> \
   -f deployed_sha=<已部署-sha> \
   -f target_issuer=https://issuer.example \
   -f runner_mode=parallel-isolated \

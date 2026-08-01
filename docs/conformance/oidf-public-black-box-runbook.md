@@ -10,9 +10,11 @@ runtime mounts, or alternate protocol behavior.
 The security boundary makes production onboarding unavoidable, but the operator
 path is fixed and short:
 
-1. Deploy an exact repository commit and record its full SHA.
-2. Run `oidf-conformance-full.yml` with `deployed_sha`, `target_issuer`, and
-   `onboarding_material_only=true`; download and verify the generated bundle.
+1. Deploy an exact immutable Release tag and record both the tag and its full
+   source commit SHA.
+2. Run `oidf-conformance-full.yml` with `release_tag`, `deployed_sha`,
+   `target_issuer`, and `onboarding_material_only=true`; download and verify the
+   generated bundle.
 3. Apply the bundle through `apply_public_conformance_onboarding.py` using a
    normal applicant and a distinct approver. No database seed or private network
    access is permitted.
@@ -20,6 +22,17 @@ path is fixed and short:
    `onboarding_material_only=false`, then run the 17-plan OpenID4VC Final/HAIP
    matrix. The workflows check out the deployed SHA, clone the exact official
    suite revision, and refuse tracked modifications before execution.
+
+`--ref` selects the workflow definition to run; it is not a source-trust
+allowlist. Both workflows always require the supplied tag to dereference to the
+supplied commit. If that commit is not an ancestor of the repository default
+branch, they additionally require a non-draft GitHub Release, download the
+current runner's Linux `nazoauthctl` bootstrap subject, and verify its GitHub
+attestation against the exact
+`release-security.yml@refs/tags/<release-tag>` certificate identity, source ref,
+source digest, custom Release predicate, and hosted-runner policy. Source from
+the requested commit is not checked out or executed until this proof succeeds.
+No branch-name exception exists.
 
 The required repository Secret names and their rotation rules are listed in
 [`GitHub Actions secrets`](../operations/github-actions-secrets.md). Each fork
@@ -175,14 +188,16 @@ material, export it without creating suite plans:
 
 ```sh
 gh workflow run oidf-conformance-full.yml \
-  --ref <exact-branch> \
+  --ref <workflow-definition-ref> \
+  -f release_tag=<exact-release-tag> \
   -f deployed_sha=<deployed-sha> \
   -f target_issuer=https://issuer.example \
   -f credential_holder_email_sha256=<sha256-of-fresh-applicant-email> \
   -f onboarding_material_only=true
 ```
 
-This mode calls the reusable onboarding-material workflow, binds the fresh
+This mode calls the reusable onboarding-material workflow, binds the exact
+Release tag to the deployed source commit, and binds the fresh
 applicant email commitment without exposing the email or a password hash,
 validates the bundle, and uploads the private artifact. Both conformance jobs
 are skipped. Download and
@@ -375,7 +390,8 @@ After one onboarding cycle, the standard automation entry points are:
 
 ```sh
 gh workflow run oidf-conformance-full.yml \
-  --ref main \
+  --ref <workflow-definition-ref> \
+  -f release_tag=<exact-release-tag> \
   -f deployed_sha=<deployed-sha> \
   -f target_issuer=https://issuer.example \
   -f runner_mode=parallel-isolated \

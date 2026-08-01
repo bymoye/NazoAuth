@@ -7,6 +7,10 @@ on:
         description: "Exact deployed repository commit to test."
         required: true
         type: string
+      release_tag:
+        description: "Exact immutable Release tag that resolves to deployed_sha."
+        required: true
+        type: string
       target_issuer:
         description: "Production HTTPS issuer under test. No repository default is provided."
         required: true
@@ -30,20 +34,76 @@ on:
         type: string
 
 permissions:
+  attestations: read
   contents: read
 
 jobs:
+  verify-release-source:
+    if: ${{ !inputs.onboarding_material_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOYED_SHA: ${{ inputs.deployed_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Verify exact deployed revision trust before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git cat-file -e "$DEPLOYED_SHA^{commit}"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$DEPLOYED_SHA"
+          if ! git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"; then
+            release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft)"
+            test "$(jq -r '.tagName' <<<"$release_json")" = "$RELEASE_TAG"
+            test "$(jq -r '.isDraft' <<<"$release_json")" = false
+            case "$(uname -m)" in
+              x86_64) bootstrap_subject="nazoauthctl-x86_64-unknown-linux-gnu" ;;
+              aarch64) bootstrap_subject="nazoauthctl-aarch64-unknown-linux-gnu" ;;
+              *) echo "unsupported Linux runner architecture: $(uname -m)" >&2; exit 1 ;;
+            esac
+            proof_dir="$RUNNER_TEMP/nazoauth-source-release-proof"
+            install -d -m 700 "$proof_dir"
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$bootstrap_subject" \
+              --dir "$proof_dir"
+            subject="$proof_dir/$bootstrap_subject"
+            test -f "$subject"
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_TAG" \
+              --source-ref "refs/tags/$RELEASE_TAG" \
+              --source-digest "$DEPLOYED_SHA" \
+              --predicate-type "https://nazo.run/attestations/release-manifest/v1" \
+              --deny-self-hosted-runners \
+              --format json > "$proof_dir/attestation-verification.json"
+            test -s "$proof_dir/attestation-verification.json"
+          fi
+          git checkout --detach "$DEPLOYED_SHA"
+          test "$(git rev-parse HEAD)" = "$DEPLOYED_SHA"
+
   export-onboarding-material:
     if: ${{ inputs.onboarding_material_only }}
     uses: ./.github/workflows/oidf-public-onboarding-material.yml
     with:
       source_commit: ${{ inputs.deployed_sha }}
+      release_tag: ${{ inputs.release_tag }}
       target_issuer: ${{ inputs.target_issuer }}
       suite_base_url: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
       credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}
     secrets: inherit
 
   oidf-conformance-full:
+    needs: verify-release-source
     if: ${{ !inputs.onboarding_material_only }}
     runs-on: ubuntu-latest
     environment: oidf-conformance
@@ -64,14 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - name: Verify deployed revision is trusted
-        run: |
-          set -euo pipefail
-          git cat-file -e "$DEPLOYED_SHA^{commit}"
-          git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"
+          ref: ${{ inputs.deployed_sha }}
 
       - name: Verify target issuer is trusted
         run: |
@@ -471,6 +524,7 @@ jobs:
 
 
   oidf-conformance-browser-isolated:
+    needs: verify-release-source
     if: ${{ !inputs.onboarding_material_only && inputs.runner_mode == 'parallel-isolated' }}
     runs-on: ubuntu-latest
     environment: oidf-conformance
@@ -505,14 +559,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - name: Verify deployed revision is trusted
-        run: |
-          set -euo pipefail
-          git cat-file -e "$DEPLOYED_SHA^{commit}"
-          git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"
+          ref: ${{ inputs.deployed_sha }}
 
       - name: Verify target issuer is trusted
         run: |

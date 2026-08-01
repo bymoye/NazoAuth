@@ -92,6 +92,7 @@ class OidfWorkflowTests(unittest.TestCase):
             "credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}",
             workflow,
         )
+        self.assertIn("release_tag: ${{ inputs.release_tag }}", workflow)
         self.assertIn("secrets: inherit", workflow)
         self.assertIn("if: ${{ !inputs.onboarding_material_only }}", workflow)
         self.assertIn(
@@ -144,6 +145,80 @@ class OidfWorkflowTests(unittest.TestCase):
             root / ".github" / "workflows" / "oidf-conformance-full.yml"
         ).read_text(encoding="utf-8")
         self.assertNotIn("Upload public OIDF onboarding material", conformance)
+
+    def test_public_workflows_accept_only_exact_tag_bound_release_source(self):
+        root = Path(__file__).resolve().parents[2]
+        workflows = {
+            "oidf-public-onboarding-material.yml": "SOURCE_COMMIT",
+            "oidf-conformance-full.yml": "DEPLOYED_SHA",
+        }
+        for name, source_variable in workflows.items():
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                self.assertIn("release_tag:", workflow)
+                self.assertIn("required: true", workflow)
+                self.assertIn("attestations: read", workflow)
+                self.assertIn("RELEASE_TAG: ${{ inputs.release_tag }}", workflow)
+                self.assertIn(
+                    'git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"',
+                    workflow,
+                )
+                self.assertIn(
+                    f'test "$(git rev-parse "refs/tags/$RELEASE_TAG^{{commit}}")" = "${source_variable}"',
+                    workflow,
+                )
+                self.assertIn(
+                    f'if ! git merge-base --is-ancestor "${source_variable}" "origin/${{{{ github.event.repository.default_branch }}}}"; then',
+                    workflow,
+                )
+                self.assertIn(
+                    'gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft',
+                    workflow,
+                )
+                self.assertIn(
+                    'test "$(jq -r \'.isDraft\' <<<"$release_json")" = false',
+                    workflow,
+                )
+                self.assertIn(
+                    'bootstrap_subject="nazoauthctl-x86_64-unknown-linux-gnu"',
+                    workflow,
+                )
+                self.assertIn(
+                    'bootstrap_subject="nazoauthctl-aarch64-unknown-linux-gnu"',
+                    workflow,
+                )
+                self.assertIn('gh release download "$RELEASE_TAG"', workflow)
+                self.assertIn('gh attestation verify "$subject"', workflow)
+                self.assertIn(
+                    '--cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_TAG"',
+                    workflow,
+                )
+                self.assertIn('--source-ref "refs/tags/$RELEASE_TAG"', workflow)
+                self.assertIn(f'--source-digest "${source_variable}"', workflow)
+                self.assertIn(
+                    '--predicate-type "https://nazo.run/attestations/release-manifest/v1"',
+                    workflow,
+                )
+                self.assertIn("--deny-self-hosted-runners", workflow)
+                self.assertNotIn("github.head_ref", workflow)
+                self.assertNotIn("refs/heads/$RELEASE_TAG", workflow)
+
+                attestation = workflow.index('gh attestation verify "$subject"')
+                checkout = workflow.index(f'git checkout --detach "${source_variable}"')
+                self.assertLess(attestation, checkout)
+
+        onboarding = (
+            root / ".github" / "workflows" / "oidf-public-onboarding-material.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(onboarding.count("release_tag:"), 2)
+        full = (root / ".github" / "workflows" / "oidf-conformance-full.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(full.count("needs: verify-release-source"), 2)
+        self.assertEqual(full.count("ref: ${{ inputs.deployed_sha }}"), 2)
+        self.assertEqual(full.count("git merge-base --is-ancestor"), 1)
 
     def test_oidf_workflows_default_to_latest_verified_release(self):
         root = Path(__file__).resolve().parents[2]
