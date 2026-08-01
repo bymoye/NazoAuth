@@ -1296,10 +1296,6 @@ fn operator_config(config_dir: &Path, data_root: &Path) -> anyhow::Result<Operat
     })
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn mount(source: PathBuf, target: &str, mode: &str) -> Mount {
     Mount {
         source,

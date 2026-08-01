@@ -944,7 +944,16 @@ fn verify_management_events(config: &UpdateConfig) -> anyhow::Result<()> {
 }
 
 fn validate_retirement_probe_audit_evidence(value: &str) -> anyhow::Result<()> {
-    let evidence: RetirementProbeAuditEvidence = serde_json::from_str(value)
+    let encoded = value
+        .strip_prefix("evidence-v1.")
+        .context("controller retirement probe evidence prefix is invalid")?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("controller retirement probe evidence is not canonical base64url")?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+        bail!("controller retirement probe evidence is not canonical base64url")
+    }
+    let evidence: RetirementProbeAuditEvidence = serde_json::from_slice(&bytes)
         .context("controller retirement probe evidence is not strict JSON")?;
     match evidence {
         RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
@@ -996,6 +1005,15 @@ fn validate_retirement_probe_audit_evidence(value: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn encode_retirement_probe_audit_evidence(
+    evidence: &RetirementProbeAuditEvidence,
+) -> anyhow::Result<String> {
+    Ok(format!(
+        "evidence-v1.{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(evidence)?)
+    ))
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -1899,12 +1917,16 @@ where
     F: FnOnce(&str) -> anyhow::Result<RetirementProbeExecution>,
 {
     let Some(probe) = rotation.retirement_probe.as_deref() else {
-        let evidence = serde_json::to_string(&RetirementProbeAuditEvidence::NotIssued {
-            schema: 1,
-            previous_controller_key_id: rotation.previous_controller_key_id.clone(),
-            previous_controller_public_sha256: rotation.previous_controller_public_sha256.clone(),
-            reason: "controller-private-unavailable".to_owned(),
-        })?;
+        let evidence = encode_retirement_probe_audit_evidence(
+            &RetirementProbeAuditEvidence::NotIssued {
+                schema: 1,
+                previous_controller_key_id: rotation.previous_controller_key_id.clone(),
+                previous_controller_public_sha256: rotation
+                    .previous_controller_public_sha256
+                    .clone(),
+                reason: "controller-private-unavailable".to_owned(),
+            },
+        )?;
         append_management_event(config, "controller-retirement-probe", release, &evidence)?;
         println!(
             "retired controller probe not issued: previous={} previous_public_sha256={} release={} category=controller-private-unavailable",
@@ -1916,7 +1938,7 @@ where
     };
     let execution = runtime_rejection(probe)?;
     let probe_digest = compact_sha256(probe);
-    let evidence = serde_json::to_string(
+    let evidence = encode_retirement_probe_audit_evidence(
         &RetirementProbeAuditEvidence::RuntimeAuthorizationRejected {
             schema: 1,
             previous_controller_key_id: rotation.previous_controller_key_id.clone(),

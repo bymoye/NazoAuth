@@ -239,8 +239,17 @@ fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
             &controller_key.verifying_key()
         )
         .unwrap(),
-        event
+        event.clone()
     );
+
+    let mut encoded_evidence = event.clone();
+    encoded_evidence.recovery_boundary = format!("evidence-v1.{}", "_".repeat(300));
+    assert!(sign_management_event(&encoded_evidence, "controller-1", &controller_key).is_ok());
+    encoded_evidence.recovery_boundary = "{raw-json-is-not-an-audit-boundary}".to_owned();
+    assert!(matches!(
+        sign_management_event(&encoded_evidence, "controller-1", &controller_key),
+        Err(ProtocolError::Policy(_))
+    ));
 }
 
 proptest! {

@@ -617,13 +617,21 @@ fn validate_management_event(event: &ManagementAuditEvent) -> Result<(), Protoco
     validate_file_identifier(&event.deployment_id)?;
     validate_file_identifier(&event.request_id)?;
     validate_lower_hex(&event.previous_sha256, 64)?;
-    for value in [
-        &event.actor.id,
-        &event.operation,
-        &event.release,
-        &event.recovery_boundary,
-    ] {
+    for value in [&event.actor.id, &event.operation, &event.release] {
         validate_identifier(value)?;
+    }
+    validate_audit_boundary(&event.recovery_boundary)?;
+    Ok(())
+}
+
+fn validate_audit_boundary(value: &str) -> Result<(), ProtocolError> {
+    if value.is_empty()
+        || value.len() > 4096
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || ".:_/@+_-".contains(character)
+        })
+    {
+        return Err(ProtocolError::Policy("invalid audit recovery boundary"));
     }
     Ok(())
 }
