@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import ssl
+import sys
 import tempfile
 import time
 import urllib.error
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_CREDENTIAL_BYTES = 16 * 1024
 DEFAULT_TIMEOUT_SECONDS = 20.0
 LOGIN_TRANSPORT_ATTEMPTS = 3
 LOGIN_RETRY_BASE_SECONDS = 1.0
@@ -30,6 +32,68 @@ LOGIN_RETRY_BASE_SECONDS = 1.0
 
 class OnboardingError(RuntimeError):
     pass
+
+
+def closed_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, child in pairs:
+        if key in value:
+            raise OnboardingError("operator credentials contain a duplicate field")
+        value[key] = child
+    return value
+
+
+def read_operator_credentials(args: argparse.Namespace) -> dict[str, str]:
+    use_stdin = bool(getattr(args, "credentials_stdin", False))
+    descriptor = getattr(args, "credentials_fd", None)
+    if use_stdin == (descriptor is not None):
+        raise OnboardingError(
+            "select exactly one of --credentials-stdin or --credentials-fd"
+        )
+    if use_stdin:
+        if sys.stdin.isatty():
+            raise OnboardingError("--credentials-stdin refuses an interactive terminal")
+        payload = sys.stdin.buffer.read(MAX_CREDENTIAL_BYTES + 1)
+    else:
+        if not isinstance(descriptor, int) or descriptor < 3:
+            raise OnboardingError("--credentials-fd must be an already-open descriptor >= 3")
+        chunks = []
+        total = 0
+        while total <= MAX_CREDENTIAL_BYTES:
+            chunk = os.read(descriptor, min(4096, MAX_CREDENTIAL_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        payload = b"".join(chunks)
+    if not payload or len(payload) > MAX_CREDENTIAL_BYTES:
+        raise OnboardingError(
+            f"operator credentials must contain 1 through {MAX_CREDENTIAL_BYTES} bytes"
+        )
+    try:
+        value = json.loads(payload, object_pairs_hook=closed_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise OnboardingError("operator credentials must be strict UTF-8 JSON") from error
+    required = {
+        "applicant_email",
+        "applicant_password",
+        "admin_email",
+        "admin_password",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise OnboardingError(
+            "operator credentials must contain exactly applicant_email, applicant_password, admin_email, and admin_password"
+        )
+    if any(
+        not isinstance(value[field], str)
+        or not value[field]
+        or len(value[field].encode("utf-8")) > 1024
+        for field in required
+    ):
+        raise OnboardingError("operator credential values must contain 1 through 1024 bytes")
+    if value["applicant_email"] == value["admin_email"]:
+        raise OnboardingError("applicant and administrator identities must differ")
+    return value
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -340,11 +404,14 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     applicant_email = str(manifest.get("applicant_email", "")).strip()
     if not applicant_email:
         raise OnboardingError("onboarding manifest applicant_email is required")
-    applicant_password = os.environ.get("OIDF_APPLICANT_PASSWORD", "")
-    admin_email = os.environ.get("OIDF_ADMIN_EMAIL", "")
-    admin_password = os.environ.get("OIDF_ADMIN_PASSWORD", "")
-    if not applicant_password or not admin_email or not admin_password:
-        raise OnboardingError("OIDF_APPLICANT_PASSWORD, OIDF_ADMIN_EMAIL, and OIDF_ADMIN_PASSWORD are required")
+    credentials = read_operator_credentials(args)
+    if credentials["applicant_email"] != applicant_email:
+        raise OnboardingError(
+            "operator credential applicant_email does not match the manifest commitment"
+        )
+    applicant_password = credentials["applicant_password"]
+    admin_email = credentials["admin_email"]
+    admin_password = credentials["admin_password"]
     if args.state_file.exists():
         raise OnboardingError(f"state file already exists; clean up the prior onboarding first: {args.state_file}")
 
@@ -477,14 +544,11 @@ def cleanup_onboarding(args: argparse.Namespace) -> int:
     configured = canonical_https_origin(args.target_issuer, label="--target-issuer")
     if origin != configured:
         raise OnboardingError("cleanup state target_issuer does not match --target-issuer")
-    applicant_email = os.environ.get("OIDF_APPLICANT_EMAIL", "")
-    applicant_password = os.environ.get("OIDF_APPLICANT_PASSWORD", "")
-    admin_email = os.environ.get("OIDF_ADMIN_EMAIL", "")
-    admin_password = os.environ.get("OIDF_ADMIN_PASSWORD", "")
-    if not applicant_email or not applicant_password or not admin_email or not admin_password:
-        raise OnboardingError(
-            "OIDF_APPLICANT_EMAIL, OIDF_APPLICANT_PASSWORD, OIDF_ADMIN_EMAIL, and OIDF_ADMIN_PASSWORD are required"
-        )
+    credentials = read_operator_credentials(args)
+    applicant_email = credentials["applicant_email"]
+    applicant_password = credentials["applicant_password"]
+    admin_email = credentials["admin_email"]
+    admin_password = credentials["admin_password"]
     applicant = ControlPlaneSession.login(origin, applicant_email, applicant_password)
     admin = ControlPlaneSession.login(origin, admin_email, admin_password)
     for item in reversed(state.get("clients", [])):
@@ -561,6 +625,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("apply", "cleanup"))
     parser.add_argument("--target-issuer", required=True)
+    credentials = parser.add_mutually_exclusive_group(required=True)
+    credentials.add_argument("--credentials-stdin", action="store_true")
+    credentials.add_argument("--credentials-fd", type=int)
     parser.add_argument("--manifest", type=Path, default=Path("runtime/oidf/oidf-onboarding-manifest.json"))
     parser.add_argument("--plan-configs", type=Path, default=Path("runtime/oidf/oidf-plan-configs.json"))
     parser.add_argument("--plan-set", type=Path, default=Path("runtime/oidf/oidf-plan-set.json"))

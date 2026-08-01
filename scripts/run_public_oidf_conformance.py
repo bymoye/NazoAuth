@@ -54,8 +54,13 @@ def origin(value: str, option: str) -> str:
     return parsed._replace(path="", query="", fragment="").geturl()
 
 
-def command(args: list[str], *, env: dict[str, str] | None = None) -> None:
-    subprocess.run(args, cwd=ROOT, env=env, check=True)
+def command(
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin: bytes | None = None,
+) -> None:
+    subprocess.run(args, cwd=ROOT, env=env, input=stdin, check=True)
 
 
 def output(args: list[str], *, cwd: Path = ROOT) -> str:
@@ -214,6 +219,7 @@ def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
         action,
         "--target-issuer",
         issuer,
+        "--credentials-stdin",
         "--manifest",
         str(work_dir / "oidf-onboarding-manifest.json"),
         "--plan-configs",
@@ -231,6 +237,24 @@ def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
         "--trust-bundle",
         str(work_dir / "approved-mtls-trust-anchors.pem"),
     ]
+
+
+def onboarding_credentials(env: dict[str, str]) -> tuple[bytes, dict[str, str]]:
+    document = {
+        "applicant_email": env["OIDF_APPLICANT_EMAIL"],
+        "applicant_password": env["OIDF_APPLICANT_PASSWORD"],
+        "admin_email": env["OIDF_ADMIN_EMAIL"],
+        "admin_password": env["OIDF_ADMIN_PASSWORD"],
+    }
+    child_env = env.copy()
+    for name in (
+        "OIDF_APPLICANT_EMAIL",
+        "OIDF_APPLICANT_PASSWORD",
+        "OIDF_ADMIN_EMAIL",
+        "OIDF_ADMIN_PASSWORD",
+    ):
+        child_env.pop(name, None)
+    return json.dumps(document, separators=(",", ":")).encode("utf-8"), child_env
 
 
 def filter_problem_records(
@@ -679,6 +703,7 @@ def run(args: argparse.Namespace) -> None:
             "OIDF_RUNTIME_DIR": str(args.work_dir),
         }
     )
+    credentials, onboarding_env = onboarding_credentials(env)
     args.work_dir.parent.mkdir(parents=True, exist_ok=True)
     args.export_dir.parent.mkdir(parents=True, exist_ok=True)
     proxy = ProxyTrust(args.proxy_trust_bundle, args.proxy_executable, args.work_dir)
@@ -687,7 +712,11 @@ def run(args: argparse.Namespace) -> None:
     try:
         command([sys.executable, str(ROOT / "scripts" / "prepare_oidf_black_box.py")], env=env)
         protect_directory(args.work_dir)
-        command(onboarding_args("apply", args.work_dir, args.target_issuer), env=env)
+        command(
+            onboarding_args("apply", args.work_dir, args.target_issuer),
+            env=onboarding_env,
+            stdin=credentials,
+        )
         proxy.install(args.work_dir / "approved-mtls-trust-anchors.pem")
         verify_suite_boundary(args.conformance_server, env[args.token_env])
         run_plan_groups(args, args.work_dir, env)
@@ -703,7 +732,11 @@ def run(args: argparse.Namespace) -> None:
             cleanup_errors.append(error)
         if state_file.exists():
             try:
-                command(onboarding_args("cleanup", args.work_dir, args.target_issuer), env=env)
+                command(
+                    onboarding_args("cleanup", args.work_dir, args.target_issuer),
+                    env=onboarding_env,
+                    stdin=credentials,
+                )
             except BaseException as error:
                 cleanup_errors.append(error)
         try:

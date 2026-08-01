@@ -41,6 +41,32 @@ class PublicOidfRunnerTests(unittest.TestCase):
             ):
                 self.module.required_environment("OIDF_CONFORMANCE_TOKEN")
 
+    def test_onboarding_child_receives_credentials_only_through_stdin(self):
+        environment = {
+            "OIDF_APPLICANT_EMAIL": "applicant@example.com",
+            "OIDF_APPLICANT_PASSWORD": "applicant-password",
+            "OIDF_ADMIN_EMAIL": "admin@example.com",
+            "OIDF_ADMIN_PASSWORD": "admin-password",
+            "OIDF_CONFORMANCE_TOKEN": "suite-token",
+        }
+
+        payload, child_environment = self.module.onboarding_credentials(environment)
+
+        self.assertEqual(
+            json.loads(payload),
+            {
+                "applicant_email": "applicant@example.com",
+                "applicant_password": "applicant-password",
+                "admin_email": "admin@example.com",
+                "admin_password": "admin-password",
+            },
+        )
+        self.assertEqual(child_environment, {"OIDF_CONFORMANCE_TOKEN": "suite-token"})
+        self.assertIn(
+            "--credentials-stdin",
+            self.module.onboarding_args("apply", Path("work"), "https://issuer.example"),
+        )
+
     def test_suite_runner_config_cleanup_removes_only_generated_untracked_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -112,7 +138,15 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 mock.patch.object(
                     self.module,
                     "required_environment",
-                    return_value={"OIDF_CONFORMANCE_TOKEN": "token"},
+                    return_value={
+                        "OIDF_APPLICANT_EMAIL": "applicant@example.com",
+                        "OIDF_APPLICANT_PASSWORD": "applicant-password",
+                        "OIDF_ADMIN_EMAIL": "admin@example.com",
+                        "OIDF_ADMIN_PASSWORD": "admin-password",
+                        "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN": "d" * 48,
+                        "OIDF_CIBA_AUTOMATED_DECISION_TOKEN": "c" * 48,
+                        "OIDF_CONFORMANCE_TOKEN": "token",
+                    },
                 ),
                 mock.patch.object(
                     self.module, "command", side_effect=RuntimeError("prepare failed")

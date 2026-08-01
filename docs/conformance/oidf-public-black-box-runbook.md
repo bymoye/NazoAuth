@@ -255,7 +255,8 @@ health endpoint, Discovery issuer, JWKS, UI assets, and rollback record.
 Run:
 
 ```sh
-python scripts/apply_public_conformance_onboarding.py apply \
+secret-provider read nazoauth/oidf-operator-credentials | \
+python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
@@ -264,6 +265,11 @@ python scripts/apply_public_conformance_onboarding.py apply \
   --trust-bundle runtime/official-onboarding-apply/approved-mtls-trust-anchors.pem \
   --no-runner-env
 ```
+
+The credential payload is strict JSON with exactly `applicant_email`,
+`applicant_password`, `admin_email`, and `admin_password`. Automation may use
+`--credentials-fd N` instead. The tool has no environment-variable or argv
+fallback for passwords.
 
 For every client, the tool performs the same public operations available to an
 operator:
@@ -389,8 +395,9 @@ split plans, copy configuration, or alter runner concurrency.
 Always run:
 
 ```sh
+secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
-  --target-issuer "$OIDF_TARGET_ISSUER"
+  --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
 ```
 
 Cleanup revokes approved trust requests and deactivates created clients through
