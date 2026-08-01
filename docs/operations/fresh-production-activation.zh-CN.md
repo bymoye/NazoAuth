@@ -27,6 +27,8 @@
      --profile standards-full \
      --profile-material /absolute/oidf-public-onboarding-material/standards-full-profile.json \
      --to vX.Y.Z
+   secret-provider read nazoauth/initial-admin | \
+     sudo nazoauthctl bootstrap-admin --credentials-stdin --yes
    sudo nazoauthctl status
    sudo nazoauthctl doctor
    ```
@@ -34,6 +36,8 @@
    使用正式 public onboarding workflow 针对该精确源码 commit、issuer 和套件 origin
    生成并校验过的 `standards-full-profile.json`。它只含公开信任/配置材料，不来自被删除
    的旧部署；全部安装秘密和匹配的本地签名身份都由正式安装流程重新生成。
+   首任管理员 token 只从本轮生成的私有 runtime-owned mount 定位，不打印、不复用旧状态，
+   也不进入 argv 或普通环境变量。
 
 4. 只通过公开命令依次演练 `update --plan`、update、制品 rollback、显式 backup
    recovery、migrate、keys 查询/验证/变更、audit show/verify、正常 identity rotation、

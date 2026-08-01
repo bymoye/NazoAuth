@@ -6,29 +6,27 @@ Rust 二进制，与 `nazoauth` 在同一个发布中分别构建、签名和出
 
 ## 首次安装
 
-公开 GitHub Release 只包含可执行文件。先下载与本机 target 对应的控制器，用自定义
-GitHub attestation 校验精确的标签工作流身份，再安装这个已经验证的文件。公开 Release
+公开 GitHub Release 只包含可执行文件。仓库中的 bootstrap 脚本通过匿名的公开 Release
+和 artifact attestation API 下载本机对应的控制器，用 digest 固定的 Cosign 镜像校验
+封闭 manifest，之后才安装已验证文件。验证同时绑定制品、tag ref、源提交、签名工作流、
+仓库和 GitHub-hosted runner；不使用 GitHub 登录，也不读取 `GH_TOKEN`。公开 Release
 不包含 shell 安装器或独立 bundle；出于信任自举原因，正式文档不提供 `curl | sh` 路径。
 
-例如，先固定一个不可变 Release，校验 bootstrap 后再执行：
+从同一个不可变源码 tag 下载并审阅这个小型 bootstrap，然后固定该 tag 执行：
 
 ```sh
-version=v1.2.3
-case "$(uname -m)" in
-  x86_64) target=x86_64-unknown-linux-gnu ;;
-  aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
-  *) echo "unsupported Linux architecture" >&2; exit 1 ;;
-esac
-artifact="nazoauthctl-$target"
-gh release download "$version" --repo nazozero/NazoAuth --pattern "$artifact"
-gh attestation verify "$artifact" \
-  --repo nazozero/NazoAuth \
-  --predicate-type 'https://nazo.run/attestations/release-manifest/v1' \
-  --signer-workflow nazozero/NazoAuth/.github/workflows/release-security.yml \
-  --source-ref "refs/tags/$version" \
-  --deny-self-hosted-runners
-sudo install -o root -g root -m 0755 "$artifact" /usr/local/sbin/nazoauthctl
+version=v0.2.0
+curl --fail --silent --show-error --location --proto '=https' \
+  --output install_nazoauthctl.sh \
+  "https://raw.githubusercontent.com/nazozero/NazoAuth/$version/scripts/install_nazoauthctl.sh"
+less install_nazoauthctl.sh
+sudo sh install_nazoauthctl.sh --version "$version"
 ```
+
+bootstrap 需要 `curl`、`python3`、`sha256sum` 和 `install`，并优先使用 Podman 或
+Docker 运行 digest 固定的 Cosign。只有两个容器引擎都不存在时，才接受由运维方另行
+可信安装的本地 `cosign`。匿名 GitHub API 仍受公开速率限制；触发限制时安装会封闭失败，
+不会要求或探测账户 token。
 
 默认只需要选择运行方式。`auto` 优先使用已安装的 Podman，其次使用 Docker：
 
@@ -47,6 +45,31 @@ sudo nazoauthctl install --runtime podman
 sudo nazoauthctl install --runtime docker
 sudo nazoauthctl install --runtime host
 ```
+
+全新安装完成后，以交互方式创建首任管理员：
+
+```sh
+sudo nazoauthctl bootstrap-admin
+```
+
+控制器会提示邮箱，并以无回显方式读取密码。它根据受管 runtime 的 bootstrap mount
+定位宿主机源目录，验证目录和 token 都是私有普通文件，并由精确 runtime UID 持有
+（容器为 `10001`，host 为配置的 systemd service UID），再将一次性 token
+和凭据仅通过子进程 stdin 放入 HTTPS 请求体。它们不会进入 argv、普通环境变量、配置、
+日志、审计记录或命令输出。自动化只接受恰好包含 `email`、`password` 的封闭 JSON：
+
+```sh
+secret-provider read nazoauth/initial-admin | \
+  sudo nazoauthctl bootstrap-admin --credentials-stdin --yes
+```
+
+`--yes` 只跳过确认提示；命令仍会验证精确 HTTP 201 响应契约、`/ui/auth` 后续路径，
+以及本地一次性 token 已耐久消费。
+
+控制器只持久化非秘密 request ID、使用 controller key 计算的规范化邮箱 HMAC，以及
+封闭状态。若数据库已经提交但 HTTP 响应丢失，下次执行会复用原 request ID，取回同一个
+数据库权威 receipt，而不会创建第二个管理员。网络或异常响应窗口在确认匹配 receipt 前
+记为 outcome-unknown；密码、邮箱和 token 都不会进入该恢复状态。
 
 `host` 把签名的 `nazoauth` 二进制安装成 systemd 服务。没有外部数据库时，它仍
 使用本机已有的 Podman 或 Docker 托管 PostgreSQL 和 Valkey。独立发布物支持 Linux
@@ -178,6 +201,11 @@ predicate、签名 bundle 和 OCI archive 只作为 CI evidence 保留，不进�
 `update --plan` 分别展示制品回滚、schema 兼容回滚、备份/PITR 恢复和不可逆
 migration barrier。控制器绝不把数据库恢复描述为自动行为；只有签名策略确认 schema
 兼容时才自动恢复旧制品，数据库必须通过显式 `recover --yes` 从已验证备份恢复。
+`20260801000100` receipt migration 是 additive，上一应用无需 schema downgrade 即可继续
+运行，所以制品回滚仍是 schema-compatible；但它的 down migration 在已经产生新 receipt
+或应用审计证据时会明确拒绝删除证据。这个条件式 schema downgrade barrier 与制品回滚、
+显式已验证备份恢复是三个不同边界；`update --plan` 通过签名 migration floor 和 policy
+rationale 如实展示。
 managed 模式会先停止唯一的受管应用写入者，再依次生成两个备份；恢复 Valkey 仍可能令临时
 会话失效。external 模式只能停止本实例，部署者必须静止其他写入者并负责已声明的备份/PITR
 流程。`update --plan` 会输出这个边界，不会伪称两个数据系统具有跨存储事务快照。
@@ -191,6 +219,12 @@ Podman；纯宿主机模式需要 systemd（包括 `systemd-run`）；外部 Pos
 镜像固定到经过评审的多架构 OCI digest。纯宿主机任务通过 `systemd-run` transient
 sandbox 执行。正式执行前，应从目标 GitHub Release 下载 `nazoauthctl`，按上文校验
 其自定义 attestation，再安装到 `/usr/local/sbin/nazoauthctl`。
+
+生命周期控制器只接受 Linux `x86_64` 和 `aarch64`（云厂商界面通常称为 Arm64），
+其他操作系统或 CPU 组合会在创建部署状态前被拒绝。宿主机模式下载并验证与当前架构
+完全匹配的 Release 二进制；Podman 和 Docker 模式分别绑定签名 Release 中的
+`linux/amd64` 或 `linux/arm64` platform manifest digest，不会把 OCI index digest
+伪装成实际运行制品的 digest。
 
 安装器生成 root 所有、不可被组/其他用户写入的
 `/etc/nazoauth/update.json`。已有的手工部署可以从

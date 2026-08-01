@@ -10,6 +10,7 @@ pub(crate) const DEFAULT_CONFIG: &str = "/etc/nazoauth/update.json";
 pub(crate) enum HelpTopic {
     TopLevel,
     Install,
+    BootstrapAdmin,
     Update,
     Keys,
     Audit,
@@ -34,6 +35,7 @@ pub(crate) fn help_topic(args: &[String]) -> Option<HelpTopic> {
     };
     Some(match command {
         Some("install") => HelpTopic::Install,
+        Some("bootstrap-admin") => HelpTopic::BootstrapAdmin,
         Some("update" | "check" | "rollback" | "recover" | "migrate") => HelpTopic::Update,
         Some("keys") => HelpTopic::Keys,
         Some("audit") => HelpTopic::Audit,
@@ -52,6 +54,7 @@ pub(crate) struct Cli {
 #[derive(Debug)]
 pub(crate) enum Command {
     Install(InstallOptions),
+    BootstrapAdmin(BootstrapAdminOptions),
     Status,
     Doctor,
     Check(Option<String>),
@@ -109,6 +112,12 @@ pub(crate) struct InstallOptions {
     pub(crate) version: Option<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct BootstrapAdminOptions {
+    pub(crate) credentials_stdin: bool,
+    pub(crate) yes: bool,
+}
+
 impl Cli {
     pub(crate) fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Option<Self>> {
         let mut args = args.into_iter();
@@ -135,6 +144,7 @@ impl Cli {
         values.remove(0);
         let command = match command.as_str() {
             "install" => Command::Install(parse_install(values)?),
+            "bootstrap-admin" => Command::BootstrapAdmin(parse_bootstrap_admin(values)?),
             "status" => {
                 no_arguments(&values, "status")?;
                 Command::Status
@@ -220,6 +230,24 @@ impl Cli {
         };
         Ok(Some(Self { config, command }))
     }
+}
+
+fn parse_bootstrap_admin(values: Vec<String>) -> anyhow::Result<BootstrapAdminOptions> {
+    let mut credentials_stdin = false;
+    let mut yes = false;
+    for value in values {
+        match value.as_str() {
+            "--credentials-stdin" if !credentials_stdin => credentials_stdin = true,
+            "--yes" if !yes => yes = true,
+            "--credentials-stdin" => bail!("--credentials-stdin may be supplied only once"),
+            "--yes" => bail!("--yes may be supplied only once"),
+            other => bail!("unknown bootstrap-admin option {other}"),
+        }
+    }
+    Ok(BootstrapAdminOptions {
+        credentials_stdin,
+        yes,
+    })
 }
 
 fn parse_keys(values: Vec<String>) -> anyhow::Result<KeysCommand> {

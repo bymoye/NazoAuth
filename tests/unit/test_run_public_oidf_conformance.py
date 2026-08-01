@@ -33,13 +33,14 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 with self.assertRaises(self.module.PublicRunError):
                     self.module.origin(invalid, "--suite")
 
-    def test_required_environment_reports_all_missing_values(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(
-                self.module.PublicRunError,
-                "OIDF_APPLICANT_EMAIL.*OIDF_CONFORMANCE_TOKEN",
-            ):
-                self.module.required_environment("OIDF_CONFORMANCE_TOKEN")
+    def test_child_environment_strips_secret_shaped_variables(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": "safe", "OIDF_CONFORMANCE_TOKEN": "secret", "DB_PASSWORD": "secret"},
+            clear=True,
+        ):
+            environment = self.module.sanitized_environment()
+        self.assertEqual(environment, {"PATH": "safe"})
 
     def test_onboarding_child_receives_credentials_only_through_stdin(self):
         environment = {
@@ -50,7 +51,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
             "OIDF_CONFORMANCE_TOKEN": "suite-token",
         }
 
-        payload, child_environment = self.module.onboarding_credentials(environment)
+        payload = self.module.onboarding_credentials(environment)
 
         self.assertEqual(
             json.loads(payload),
@@ -61,7 +62,6 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 "admin_password": "admin-password",
             },
         )
-        self.assertEqual(child_environment, {"OIDF_CONFORMANCE_TOKEN": "suite-token"})
         self.assertIn(
             "--credentials-stdin",
             self.module.onboarding_args("apply", Path("work"), "https://issuer.example"),
@@ -126,7 +126,9 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 run_namespace="failure-cleanup",
                 proxy_trust_bundle=root / "trust.pem",
                 proxy_executable=root / "proxy",
-                token_env="OIDF_CONFORMANCE_TOKEN",
+                secrets_stdin=True,
+                secret_fd=None,
+                secret_file=None,
                 timeout_seconds=100,
                 monitor_interval_seconds=5,
                 final_stabilization_seconds=45,
@@ -137,15 +139,15 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 mock.patch.object(self.module, "verify_suite"),
                 mock.patch.object(
                     self.module,
-                    "required_environment",
+                    "read_secret_document",
                     return_value={
-                        "OIDF_APPLICANT_EMAIL": "applicant@example.com",
-                        "OIDF_APPLICANT_PASSWORD": "applicant-password",
-                        "OIDF_ADMIN_EMAIL": "admin@example.com",
-                        "OIDF_ADMIN_PASSWORD": "admin-password",
-                        "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN": "d" * 48,
-                        "OIDF_CIBA_AUTOMATED_DECISION_TOKEN": "c" * 48,
-                        "OIDF_CONFORMANCE_TOKEN": "token",
+                        "oidf_applicant_email": "applicant@example.com",
+                        "oidf_applicant_password": "applicant-password",
+                        "oidf_admin_email": "admin@example.com",
+                        "oidf_admin_password": "admin-password",
+                        "oidf_dynamic_registration_initial_access_token": "d" * 48,
+                        "oidf_ciba_automated_decision_token": "c" * 48,
+                        "oidf_conformance_token": "token",
                     },
                 ),
                 mock.patch.object(
@@ -210,7 +212,6 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 suite_revision="suite-commit",
                 conformance_server="https://suite.example",
                 target_issuer="https://issuer.example",
-                token_env="OIDF_CONFORMANCE_TOKEN",
                 export_dir=root / "results",
                 timeout_seconds=100,
                 monitor_interval_seconds=5,
@@ -219,7 +220,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 mock.patch.object(self.module, "command") as command,
                 mock.patch.object(self.module, "ROOT", root),
             ):
-                self.module.run_plan_groups(args, work, {})
+                self.module.run_plan_groups(args, work, {}, "suite-token")
 
             self.assertEqual(command.call_count, 14)
             invocations = [call.args[0] for call in command.call_args_list]
@@ -283,7 +284,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                     side_effect=run_command,
                 ) as command,
             ):
-                self.module.run_plan_groups(args, work, {})
+                self.module.run_plan_groups(args, work, {}, "suite-token")
 
             worker_one = work / "suite-workers" / "worker-01"
             worker_two = work / "suite-workers" / "worker-02"

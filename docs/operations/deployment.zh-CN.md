@@ -31,8 +31,10 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 命名卷，执行 `docker compose down` 后仍会保留。除非明确要删除全部本地数据，
 不要执行 `docker compose down -v`。
 
-新数据库没有管理员时，服务日志会输出一个限时、单次使用的初始化 URL。该 URL
-等同密码；通过它可以在未配置 SMTP 的情况下创建首任管理员。
+新数据库没有管理员时，服务会在私有 bootstrap 状态中创建限时、单次使用的 token，
+但不会打印 token 或携带 token 的 URL。正式受管流程通过 `nazoauthctl bootstrap-admin`
+验证并读取私有的 runtime-owned 状态；授权服务器只暴露 JSON `POST /auth/bootstrap-admin` API，不再提供
+后端内嵌初始化页面。
 
 ## 公开部署
 
@@ -42,6 +44,7 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 sudo nazoauthctl install \
   --runtime auto \
   --public-url https://auth.example.com
+sudo nazoauthctl bootstrap-admin
 ```
 
 `auto` 优先使用 Podman，其次使用 Docker。已有 PostgreSQL/Valkey、宿主机安装、

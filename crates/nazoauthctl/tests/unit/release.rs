@@ -1,9 +1,9 @@
 use super::{
     AttestationResponse, COSIGN_IMAGE, RELEASE_PREDICATE, ReleaseTrustState,
-    SIGSTORE_BUNDLE_MEDIA_TYPE, VerifiedRelease, accept_verified_manifest, commit_release_trust,
-    compare_versions, containerized_cosign_attestation_arguments, enforce_release_trust,
-    enforce_release_trust_state, manifest_from_bundle, resolve_version,
-    verified_manifest_from_attestations, verify_artifact,
+    SIGSTORE_BUNDLE_MEDIA_TYPE, VerifiedRelease, accept_verified_manifest,
+    bounded_https_curl_arguments, commit_release_trust, compare_versions,
+    containerized_cosign_attestation_arguments, enforce_release_trust, enforce_release_trust_state,
+    manifest_from_bundle, resolve_version, verified_manifest_from_attestations, verify_artifact,
 };
 use crate::filesystem::{PrivateTempDir, atomic_write, sha256};
 use crate::model::{
@@ -49,7 +49,7 @@ fn manifest(version: &str) -> ReleaseManifest {
             database_restore: DatabaseRestore::Backup,
             irreversible_migration: false,
             minimum_supported_version: "1.0.0".to_owned(),
-            migration_floor: "20260731000200".to_owned(),
+            migration_floor: "20260801000100".to_owned(),
             rationale: "test recovery policy".to_owned(),
         },
         artifacts: BTreeMap::from([
@@ -373,7 +373,7 @@ fn containerized_cosign_policy_can_read_private_staging_without_host_privileges(
             "--tmpfs",
             "/root/.sigstore:rw,noexec,nosuid,nodev,size=16m",
             "-v",
-            "/private/release:/work:ro",
+            "/private/release:/work:ro,Z",
             COSIGN_IMAGE,
             "verify-blob-attestation",
             "--bundle",
@@ -387,6 +387,21 @@ fn containerized_cosign_policy_can_read_private_staging_without_host_privileges(
             "/work/manifest.json",
         ]
     );
+}
+
+#[test]
+fn github_download_policy_is_https_only_redirect_closed_and_bounded() {
+    let args = bounded_https_curl_arguments(300, 12345);
+    for pair in [
+        ["--proto", "=https"],
+        ["--proto-redir", "=https"],
+        ["--max-redirs", "5"],
+        ["--connect-timeout", "10"],
+        ["--max-time", "300"],
+        ["--max-filesize", "12345"],
+    ] {
+        assert!(args.windows(2).any(|window| window == pair));
+    }
 }
 
 #[test]
@@ -797,9 +812,11 @@ fn requested_versions_and_artifact_bytes_fail_closed() {
 #[test]
 fn verified_release_exposes_only_existing_policy_repository_artifacts() {
     let work = PrivateTempDir::new("verified-release-artifact-test").unwrap();
-    let value = manifest("v1.2.3");
+    let mut value = manifest("v1.2.3");
     let updater = value.artifacts["updater"].clone();
-    atomic_write(&work.path().join(&updater.name), b"x", 0o600).unwrap();
+    let path = work.path().join(&updater.name);
+    atomic_write(&path, b"x", 0o600).unwrap();
+    value.artifacts.get_mut("updater").unwrap().sha256 = sha256(&path).unwrap();
     let release = VerifiedRelease {
         work,
         manifest: value,
@@ -815,4 +832,7 @@ fn verified_release_exposes_only_existing_policy_repository_artifacts() {
             .unwrap(),
         updater.name.as_str()
     );
+
+    atomic_write(&path, b"y", 0o600).unwrap();
+    assert!(release.artifact("updater", "nazozero/NazoAuth").is_err());
 }

@@ -29,6 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_oidf_conformance as oidf  # noqa: E402
 import materialize_openid4vc_oidf_config as materializer  # noqa: E402
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
+from oidf_secret_input import (  # noqa: E402
+    read_private_text,
+    read_secret_document,
+    read_secret_value,
+    sanitized_environment,
+)
 from apply_public_conformance_onboarding import (  # noqa: E402
     ControlPlaneSession,
     OnboardingError,
@@ -45,6 +51,7 @@ def fail(message: str) -> None:
 
 def install_credential_datasets(
     config: dict[str, object],
+    credentials: dict[str, str],
 ) -> tuple[ControlPlaneSession, list[tuple[str, str]]]:
     issuer = config.get("issuer")
     if not isinstance(issuer, dict) or issuer.get("dedicated_conformance_subject") is not True:
@@ -68,12 +75,12 @@ def install_credential_datasets(
     ):
         raise RuntimeError("issuer credential_datasets contains an invalid entry")
     origin = canonical_https_origin(str(config.get("target_origin", "")), label="target_origin")
-    admin_email = os.environ.get("OIDF_ADMIN_EMAIL", "")
-    admin_password = os.environ.get("OIDF_ADMIN_PASSWORD", "")
-    if not admin_email or not admin_password:
-        raise RuntimeError("OIDF_ADMIN_EMAIL and OIDF_ADMIN_PASSWORD are required")
     try:
-        admin = ControlPlaneSession.login(origin, admin_email, admin_password)
+        admin = ControlPlaneSession.login(
+            origin,
+            credentials["admin_email"],
+            credentials["admin_password"],
+        )
         profile = admin.request_json("GET", "/auth/me", expected_status=200)
     except OnboardingError as error:
         raise RuntimeError(f"OpenID4VC admin control-plane login failed: {error}") from error
@@ -150,8 +157,9 @@ def request_json(method: str, url: str, token: str, payload: object | None = Non
     try:
         response = opener.open(request, timeout=30)
     except urllib.error.HTTPError as error:
-        detail = error.read(64 * 1024).decode("utf-8", errors="replace")
-        raise RuntimeError(f"management request failed with HTTP {error.code}: {detail}") from error
+        with error:
+            error.read(64 * 1024)
+            raise RuntimeError(f"management request failed with HTTP {error.code}") from error
     with response:
         encoded = response.read(1024 * 1024 + 1)
         if len(encoded) > 1024 * 1024:
@@ -318,9 +326,7 @@ class Openid4vcDriver:
 
     def drive_once(self) -> None:
         server = str(self.config["conformance_server"])
-        configured_token = str(
-            self.config.get("conformance_token") or os.environ.get("OIDF_CONFORMANCE_TOKEN", "")
-        )
+        configured_token = str(self.config.get("conformance_token") or "")
         if configured_token == "":
             raise RuntimeError("OIDF conformance API token is required")
         token = configured_token
@@ -495,6 +501,18 @@ def parse_args() -> argparse.Namespace:
             "require the expected-problems file to be empty; intended for "
             "strict diagnostic runs against a patched conformance suite"
         ),
+    )
+    parser.add_argument(
+        "--operator-credentials-file",
+        type=Path,
+        required=True,
+        help="POSIX non-symlink mode-0600 admin credential document",
+    )
+    parser.add_argument(
+        "--suite-token-file",
+        type=Path,
+        required=True,
+        help="POSIX non-symlink mode-0600 suite bearer token file",
     )
     parser.add_argument("runner_args", nargs=argparse.REMAINDER)
     return parser.parse_args()
@@ -737,7 +755,11 @@ def run_runner_invocations(invocations: list[list[str]]) -> int:
     for index, runner_args in enumerate(invocations, start=1):
         print(f"OpenID4VC official runner group {index}/{len(invocations)}", flush=True)
         command = [sys.executable, str(Path(__file__).with_name("run_oidf_conformance.py")), *runner_args]
-        process = subprocess.Popen(command, start_new_session=True)
+        process = subprocess.Popen(
+            command,
+            env=sanitized_environment(),
+            start_new_session=True,
+        )
         previous_sigterm = signal.getsignal(signal.SIGTERM)
 
         def interrupt_runner(_signum, _frame) -> None:  # noqa: ANN001
@@ -764,7 +786,19 @@ def main() -> int:
         fail("arguments for run_oidf_conformance.py are required after --")
     if args.plan_group_size < 0:
         fail("--plan-group-size must be zero or greater")
-    config = json.loads(Path(args.driver_config_json_file).read_text(encoding="utf-8"))
+    config = json.loads(read_private_text(Path(args.driver_config_json_file)))
+    credentials = read_secret_document(
+        argparse.Namespace(
+            secrets_stdin=False,
+            secret_fd=None,
+            secret_file=args.operator_credentials_file,
+        ),
+        required_fields=("admin_email", "admin_password"),
+    )
+    suite_token = read_secret_value(path=args.suite_token_file)
+    if not isinstance(config, dict):
+        fail("OpenID4VC driver config must be a JSON object")
+    config["conformance_token"] = suite_token
     if "--no-api-token" in runner_args or "--disable-ssl-verify" in runner_args:
         fail("public black-box OpenID4VC runs require API authentication and TLS verification")
     validate_materialized_matrix(
@@ -779,7 +813,7 @@ def main() -> int:
             "OpenID4VC suite contains stale generated plan configs: "
             + ", ".join(path.name for path in existing_plan_configs)
         )
-    admin, installed_datasets = install_credential_datasets(config)
+    admin, installed_datasets = install_credential_datasets(config, credentials)
     stop = threading.Event()
     driver = Openid4vcDriver(config, stop)
     thread = threading.Thread(target=driver.run, name="openid4vc-oidf-driver", daemon=True)

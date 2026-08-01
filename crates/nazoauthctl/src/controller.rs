@@ -1,5 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
+    io::{IsTerminal as _, Read as _, Write as _},
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -13,7 +14,7 @@ use serde_json::json;
 
 use crate::{
     backup::Backup,
-    cli::{Cli, Command, KeysCommand, UpdateOptions},
+    cli::{BootstrapAdminOptions, Cli, Command, KeysCommand, UpdateOptions},
     filesystem::{atomic_write, copy_atomic, remove_file_durable, set_mode, symlink_atomic},
     install::{self, PreparedInstall},
     model::{ReleaseManifest, UpdateConfig},
@@ -91,6 +92,63 @@ struct InstallCompletion {
     management_event_sha256: String,
 }
 
+const BOOTSTRAP_MOUNT_TARGET: &str = "/var/lib/nazo_oauth/bootstrap";
+const BOOTSTRAP_TOKEN_FILE: &str = "initial-admin-token";
+const MAX_BOOTSTRAP_CREDENTIAL_BYTES: u64 = 8 * 1024;
+const MAX_BOOTSTRAP_TOKEN_BYTES: u64 = 2 * 1024;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapAdminCredentials {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BootstrapAdminRequest<'a> {
+    request_id: &'a str,
+    token: &'a str,
+    email: &'a str,
+    password: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapAdminResponse {
+    request_id: String,
+    id: String,
+    email: String,
+    role: String,
+    next: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum BootstrapAdminPendingStatus {
+    Intent,
+    Succeeded,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapAdminPending {
+    schema: u32,
+    request_id: String,
+    email_hmac_sha256: String,
+    status: BootstrapAdminPendingStatus,
+}
+
+#[derive(Debug)]
+struct BootstrapOutcomeUnknown;
+
+impl std::fmt::Display for BootstrapOutcomeUnknown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("initial administrator request outcome is unknown")
+    }
+}
+
+impl std::error::Error for BootstrapOutcomeUnknown {}
+
 pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Install(options) => install(cli.config, options),
@@ -101,6 +159,12 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Doctor => {
             let config = load_config(&cli.config)?;
             doctor(&config)
+        }
+        Command::BootstrapAdmin(options) => {
+            require_root()?;
+            let config = load_config(&cli.config)?;
+            require_confirmation(options.yes, "create the first NazoAuth administrator")?;
+            bootstrap_admin(&config, options)
         }
         Command::Check(version) => {
             let config = load_config(&cli.config)?;
@@ -197,6 +261,517 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
             crate::operator::rotate_controller(&cli.config, &config, true, &reason)
         }
     }
+}
+
+fn bootstrap_admin(config: &UpdateConfig, options: BootstrapAdminOptions) -> anyhow::Result<()> {
+    let credentials = read_bootstrap_admin_credentials(options.credentials_stdin)?;
+    let request_id = audited_bootstrap_admin(
+        config,
+        &credentials,
+        std::ffi::OsStr::new("curl"),
+        Some(bootstrap_state_owner_uid(config)?),
+    )?;
+    println!(
+        "Initial administrator created (request ID: {request_id}). Continue at {}/ui/auth",
+        config.runtime.expected_issuer.trim_end_matches('/'),
+    );
+    Ok(())
+}
+
+fn audited_bootstrap_admin(
+    config: &UpdateConfig,
+    credentials: &BootstrapAdminCredentials,
+    curl_program: &std::ffi::OsStr,
+    expected_owner_uid: Option<u32>,
+) -> anyhow::Result<String> {
+    let normalized_email = normalize_bootstrap_admin_email(&credentials.email)?;
+    let mut pending = load_or_create_bootstrap_pending(config, &normalized_email)?;
+    let request_id = pending.request_id.clone();
+    let release = load_active_release(config)?.version;
+    let intent_id = format!("{request_id}-intent");
+    crate::operator::append_management_event_idempotent(
+        config,
+        &intent_id,
+        "bootstrap-admin-intent",
+        &release,
+        "single-use-database-claim",
+    )?;
+    if pending.status == BootstrapAdminPendingStatus::Succeeded {
+        crate::operator::append_management_event_idempotent(
+            config,
+            &format!("{request_id}-succeeded"),
+            "bootstrap-admin-succeeded",
+            &release,
+            "single-use-database-claim",
+        )?;
+        let token_path = bootstrap_token_path(config, expected_owner_uid)?;
+        remove_file_durable(&token_path)?;
+        return Ok(request_id);
+    }
+    match claim_bootstrap_admin(
+        config,
+        credentials,
+        &request_id,
+        curl_program,
+        expected_owner_uid,
+    ) {
+        Ok(()) => {
+            crate::operator::append_management_event_idempotent(
+                config,
+                &format!("{request_id}-succeeded"),
+                "bootstrap-admin-succeeded",
+                &release,
+                "single-use-database-claim",
+            )
+            .with_context(|| {
+                format!(
+                    "initial administrator was created but audit finalization failed for request ID {request_id}"
+                )
+            })?;
+            pending.status = BootstrapAdminPendingStatus::Succeeded;
+            atomic_write(
+                &bootstrap_pending_path(config),
+                &serde_json::to_vec_pretty(&pending)?,
+                0o600,
+            )?;
+            let token_path = bootstrap_token_path(config, expected_owner_uid)?;
+            remove_file_durable(&token_path)
+                .context("initial administrator was created but token cleanup failed")?;
+            Ok(request_id)
+        }
+        Err(error) => {
+            let outcome_unknown = error.is::<BootstrapOutcomeUnknown>();
+            let (suffix, operation) = if outcome_unknown {
+                ("outcome-unknown", "bootstrap-admin-outcome-unknown")
+            } else {
+                ("failed", "bootstrap-admin-failed")
+            };
+            crate::operator::append_management_event_idempotent(
+                config,
+                &format!("{request_id}-{suffix}"),
+                operation,
+                &release,
+                "single-use-database-claim",
+            )
+            .with_context(|| {
+                format!(
+                    "bootstrap-admin failed and its audit outcome could not be recorded for request ID {request_id}; original error: {error:#}"
+                )
+            })?;
+            Err(error).with_context(|| format!("bootstrap-admin request ID {request_id} failed"))
+        }
+    }
+}
+
+fn claim_bootstrap_admin(
+    config: &UpdateConfig,
+    credentials: &BootstrapAdminCredentials,
+    request_id: &str,
+    curl_program: &std::ffi::OsStr,
+    expected_owner_uid: Option<u32>,
+) -> anyhow::Result<()> {
+    let normalized_email = normalize_bootstrap_admin_email(&credentials.email)?;
+    if !(12..=1024).contains(&credentials.password.chars().count()) {
+        bail!("administrator password must contain between 12 and 1024 characters");
+    }
+
+    let token_path = bootstrap_token_path(config, expected_owner_uid)?;
+    let token = read_bootstrap_token(&token_path, expected_owner_uid)?;
+    let endpoint = bootstrap_admin_endpoint(&config.runtime.expected_issuer)?;
+    let request = serde_json::to_vec(&BootstrapAdminRequest {
+        request_id,
+        token: &token,
+        email: &normalized_email,
+        password: &credentials.password,
+    })?;
+    let protocol = if endpoint.scheme() == "https" {
+        "=https"
+    } else {
+        "=http"
+    };
+    let submission = (|| -> anyhow::Result<()> {
+        let output = Process::new(curl_program)
+            .args([
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--proto",
+                protocol,
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "30",
+                "--request",
+                "POST",
+                "--header",
+                "Content-Type: application/json",
+                "--data-binary",
+                "@-",
+                "--write-out",
+                "\n%{http_code}",
+            ])
+            .arg(endpoint.as_str())
+            .stdin_stdout(&request)
+            .context("initial administrator request failed")?;
+        let (body, status) = output
+            .rsplit_once('\n')
+            .context("initial administrator response omitted its HTTP status")?;
+        if status.trim() != "201" {
+            bail!("initial administrator endpoint returned an unexpected HTTP status");
+        }
+        let response: BootstrapAdminResponse = serde_json::from_str(body)
+            .context("initial administrator endpoint returned an invalid response")?;
+        if response.request_id != request_id
+            || uuid::Uuid::parse_str(&response.id).is_err()
+            || response.email != normalized_email
+            || response.role != "admin"
+            || response.next != "/ui/auth"
+        {
+            bail!("initial administrator endpoint returned an unexpected response contract");
+        }
+        Ok(())
+    })();
+    if let Err(error) = submission {
+        return Err(anyhow::Error::new(BootstrapOutcomeUnknown).context(error.to_string()));
+    }
+    Ok(())
+}
+
+fn bootstrap_pending_path(config: &UpdateConfig) -> PathBuf {
+    config
+        .operator
+        .state_directory
+        .join("bootstrap-admin-pending.json")
+}
+
+fn load_or_create_bootstrap_pending(
+    config: &UpdateConfig,
+    normalized_email: &str,
+) -> anyhow::Result<BootstrapAdminPending> {
+    let path = bootstrap_pending_path(config);
+    let email_hmac_sha256 = bootstrap_email_hmac(config, normalized_email)?;
+    if path.exists() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("bootstrap-admin pending state is not a regular file");
+        }
+        let pending: BootstrapAdminPending = serde_json::from_slice(&fs::read(&path)?)
+            .context("bootstrap-admin pending state is invalid")?;
+        if pending.schema != 1
+            || !valid_bootstrap_request_id(&pending.request_id)
+            || pending.email_hmac_sha256 != email_hmac_sha256
+        {
+            bail!("bootstrap-admin pending state does not match this request");
+        }
+        return Ok(pending);
+    }
+    fs::create_dir_all(&config.operator.state_directory)?;
+    let pending = BootstrapAdminPending {
+        schema: 1,
+        request_id: format!("bootstrap-admin-{:032x}", rand::random::<u128>()),
+        email_hmac_sha256,
+        status: BootstrapAdminPendingStatus::Intent,
+    };
+    atomic_write(&path, &serde_json::to_vec_pretty(&pending)?, 0o600)?;
+    Ok(pending)
+}
+
+fn bootstrap_email_hmac(config: &UpdateConfig, email: &str) -> anyhow::Result<String> {
+    use hmac::{Hmac, KeyInit as _, Mac as _};
+    use sha2::Sha256;
+
+    let key = fs::read(&config.operator.controller_private_key)
+        .context("failed to read controller identity for bootstrap binding")?;
+    let mut hmac = Hmac::<Sha256>::new_from_slice(&key)
+        .context("controller identity cannot bind bootstrap state")?;
+    hmac.update(b"nazoauthctl-bootstrap-admin-email-v1\0");
+    hmac.update(email.as_bytes());
+    let bytes = hmac.finalize().into_bytes();
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(encoded)
+}
+
+fn valid_bootstrap_request_id(request_id: &str) -> bool {
+    request_id.len() == 48
+        && request_id
+            .strip_prefix("bootstrap-admin-")
+            .is_some_and(|suffix| {
+                suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+}
+
+fn read_bootstrap_admin_credentials(from_stdin: bool) -> anyhow::Result<BootstrapAdminCredentials> {
+    if from_stdin {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(MAX_BOOTSTRAP_CREDENTIAL_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context("failed to read administrator credentials from stdin")?;
+        return parse_bootstrap_admin_credentials(&bytes);
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!("interactive bootstrap requires a terminal or --credentials-stdin");
+    }
+    eprint!("Administrator email: ");
+    std::io::stderr().flush()?;
+    let mut email = String::new();
+    std::io::stdin()
+        .read_line(&mut email)
+        .context("failed to read administrator email")?;
+    let password = rpassword::prompt_password("Administrator password: ")
+        .context("failed to read administrator password")?;
+    validate_bootstrap_admin_credentials(BootstrapAdminCredentials { email, password })
+}
+
+fn parse_bootstrap_admin_credentials(bytes: &[u8]) -> anyhow::Result<BootstrapAdminCredentials> {
+    if bytes.len() as u64 > MAX_BOOTSTRAP_CREDENTIAL_BYTES {
+        bail!("administrator credential input exceeds the allowed size");
+    }
+    let credentials = serde_json::from_slice(bytes)
+        .context("administrator credentials must be strict JSON with email and password")?;
+    validate_bootstrap_admin_credentials(credentials)
+}
+
+fn validate_bootstrap_admin_credentials(
+    credentials: BootstrapAdminCredentials,
+) -> anyhow::Result<BootstrapAdminCredentials> {
+    normalize_bootstrap_admin_email(&credentials.email)?;
+    if !(12..=1024).contains(&credentials.password.chars().count()) {
+        bail!("administrator password must contain between 12 and 1024 characters");
+    }
+    Ok(credentials)
+}
+
+fn normalize_bootstrap_admin_email(value: &str) -> anyhow::Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    let Some((local, domain)) = value.split_once('@') else {
+        bail!("administrator email is invalid");
+    };
+    if value.len() > 254
+        || local.is_empty()
+        || local.len() > 64
+        || domain.is_empty()
+        || domain.len() > 253
+        || domain.contains('@')
+        || local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+        || !local.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'.' | b'!'
+                        | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'/'
+                        | b'='
+                        | b'?'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'{'
+                        | b'|'
+                        | b'}'
+                        | b'~'
+                )
+        })
+        || !domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        || domain.split('.').any(|label| {
+            label.is_empty() || label.starts_with('-') || label.ends_with('-') || label.len() > 63
+        })
+    {
+        bail!("administrator email is invalid");
+    }
+    Ok(value)
+}
+
+fn bootstrap_admin_endpoint(issuer: &str) -> anyhow::Result<url::Url> {
+    let mut endpoint =
+        url::Url::parse(issuer).context("configured issuer is not an HTTP origin")?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || !matches!(endpoint.path(), "" | "/")
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        bail!("configured issuer is not an HTTP origin");
+    }
+    if endpoint.scheme() == "http"
+        && !endpoint.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+    {
+        bail!("initial administrator bootstrap requires HTTPS outside loopback trial mode");
+    }
+    endpoint.set_path("/auth/bootstrap-admin");
+    Ok(endpoint)
+}
+
+fn bootstrap_token_path(
+    config: &UpdateConfig,
+    expected_owner_uid: Option<u32>,
+) -> anyhow::Result<PathBuf> {
+    let target = Path::new(BOOTSTRAP_MOUNT_TARGET);
+    let mut sources = config
+        .runtime
+        .mounts
+        .iter()
+        .filter(|mount| mount.target == target)
+        .map(|mount| mount.source.clone())
+        .collect::<Vec<_>>();
+    if config.runtime.engine == "host" && sources.is_empty() {
+        sources.extend(
+            config
+                .runtime
+                .snapshot_paths
+                .iter()
+                .filter(|path| path.file_name().is_some_and(|name| name == "bootstrap"))
+                .cloned(),
+        );
+    }
+    if sources.len() != 1 {
+        bail!("managed runtime must expose exactly one bootstrap state source");
+    }
+    let source = &sources[0];
+    validate_bootstrap_directory(source, expected_owner_uid)?;
+    Ok(source.join(BOOTSTRAP_TOKEN_FILE))
+}
+
+fn read_bootstrap_token(path: &Path, expected_owner_uid: Option<u32>) -> anyhow::Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .context("initial administrator token is unavailable or already consumed")?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("initial administrator token is not a regular file");
+    }
+    validate_bootstrap_secret_metadata(&metadata, expected_owner_uid)?;
+    let file = File::open(path).context("failed to open initial administrator token")?;
+    let opened_metadata = file
+        .metadata()
+        .context("failed to inspect opened initial administrator token")?;
+    validate_same_file(&metadata, &opened_metadata)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BOOTSTRAP_TOKEN_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read initial administrator token")?;
+    if bytes.len() as u64 > MAX_BOOTSTRAP_TOKEN_BYTES {
+        bail!("initial administrator token exceeds the allowed size");
+    }
+    let token = std::str::from_utf8(&bytes)
+        .context("initial administrator token is not valid UTF-8")?
+        .trim_end_matches(['\r', '\n']);
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("initial administrator token has an invalid format");
+    }
+    Ok(token.to_owned())
+}
+
+fn bootstrap_state_owner_uid(config: &UpdateConfig) -> anyhow::Result<u32> {
+    if config.runtime.engine != "host" {
+        return Ok(10_001);
+    }
+    Process::new("id")
+        .args(["-u", config.runtime.service_user.as_str()])
+        .stdout()?
+        .trim()
+        .parse()
+        .context("managed host service user has no valid numeric UID")
+}
+
+#[cfg(unix)]
+fn validate_bootstrap_directory(
+    path: &Path,
+    expected_owner_uid: Option<u32>,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata =
+        fs::symlink_metadata(path).context("managed bootstrap state directory is unavailable")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("managed bootstrap state source is not a directory");
+    }
+    if fs::canonicalize(path)? != path {
+        bail!("managed bootstrap state source must not traverse symbolic links");
+    }
+    if expected_owner_uid.is_some_and(|expected| metadata.uid() != expected) {
+        bail!("managed bootstrap state source has an unexpected runtime owner");
+    }
+    if metadata.mode() & 0o077 != 0 {
+        bail!("managed bootstrap state source must not be accessible by group or other users");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_bootstrap_directory(
+    _path: &Path,
+    _expected_owner_uid: Option<u32>,
+) -> anyhow::Result<()> {
+    bail!("bootstrap-admin is supported only on Unix managed hosts")
+}
+
+#[cfg(unix)]
+fn validate_bootstrap_secret_metadata(
+    metadata: &fs::Metadata,
+    expected_owner_uid: Option<u32>,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if expected_owner_uid.is_some_and(|expected| metadata.uid() != expected) {
+        bail!("initial administrator token has an unexpected runtime owner");
+    }
+    if metadata.mode() & 0o077 != 0 {
+        bail!("initial administrator token must not be accessible by group or other users");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_bootstrap_secret_metadata(
+    _metadata: &fs::Metadata,
+    _expected_owner_uid: Option<u32>,
+) -> anyhow::Result<()> {
+    bail!("bootstrap-admin is supported only on Unix managed hosts")
+}
+
+#[cfg(unix)]
+fn validate_same_file(before: &fs::Metadata, opened: &fs::Metadata) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        bail!("initial administrator token changed while it was being opened");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_same_file(_before: &fs::Metadata, _opened: &fs::Metadata) -> anyhow::Result<()> {
+    Ok(())
 }
 
 pub(crate) fn acquire_lock(install: bool) -> anyhow::Result<File> {
@@ -315,7 +890,7 @@ fn install_transaction(
     }
     wait_ready(config)?;
     verify_public(config)?;
-    verify_ui(config)?;
+    verify_ui(config, &release.manifest)?;
     write_active_release(config, &release.manifest)?;
     commit_release_trust(config, &release.manifest)?;
     copy_atomic(&updater, &config.updater_install_path, 0o755)?;
@@ -350,6 +925,7 @@ fn install_transaction(
         "Break-glass recovery key: {} (root-only; copy it to protected offline storage)",
         config.operator.break_glass_private_key.display()
     );
+    println!("Create the first administrator with: nazoauthctl bootstrap-admin");
     Ok(())
 }
 
@@ -539,7 +1115,7 @@ fn advance_update_transaction(
     if journal.phase >= UpdatePhase::HealthVerified {
         wait_ready(config)?;
         verify_public(config)?;
-        verify_ui(config)?;
+        verify_ui(config, &journal.to_release)?;
     }
     if journal.phase < UpdatePhase::WriterStopped {
         set_update_phase(config, journal, UpdatePhase::WriterStopping)?;
@@ -572,7 +1148,7 @@ fn advance_update_transaction(
     if journal.phase < UpdatePhase::UiActive {
         set_update_phase(config, journal, UpdatePhase::UiActivating)?;
         wait_ready(config)?;
-        verify_ui(config)?;
+        verify_ui(config, &journal.to_release)?;
         if !target_ui_is_active(journal) {
             bail!("candidate application did not materialize its signed frontend cache");
         }
@@ -582,7 +1158,7 @@ fn advance_update_transaction(
         set_update_phase(config, journal, UpdatePhase::HealthChecking)?;
         wait_ready(config)?;
         verify_public(config)?;
-        verify_ui(config)?;
+        verify_ui(config, &journal.to_release)?;
         set_update_phase(config, journal, UpdatePhase::HealthVerified)?;
     }
     if journal.phase < UpdatePhase::StateCommitted {
@@ -846,7 +1422,7 @@ fn restore_previous_transaction(
         wait_ready(config)?;
     }
     verify_public(config)?;
-    verify_ui(config)?;
+    verify_ui(config, &journal.from_release)?;
     write_active_release(config, &journal.from_release)
 }
 
@@ -943,19 +1519,19 @@ fn activate_candidate(
     }
 }
 
-fn target_ui_is_active(journal: &UpdateJournal) -> bool {
+fn frontend_cache_matches(candidate_ui: &Path, release: &ReleaseManifest) -> bool {
     fn regular_file(path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
     }
 
     if !matches!(
-        fs::symlink_metadata(&journal.candidate_ui),
+        fs::symlink_metadata(candidate_ui),
         Ok(metadata) if metadata.is_dir()
-    ) || !regular_file(&journal.candidate_ui.join("index.html"))
+    ) || !regular_file(&candidate_ui.join("index.html"))
     {
         return false;
     }
-    let marker = journal.candidate_ui.join(".nazoauth-ui.json");
+    let marker = candidate_ui.join(".nazoauth-ui.json");
     if !regular_file(&marker) {
         return false;
     }
@@ -968,12 +1544,16 @@ fn target_ui_is_active(journal: &UpdateJournal) -> bool {
     actual
         == json!({
             "schema": 1,
-            "repository": journal.to_release.frontend.repository,
-            "version": journal.to_release.frontend.version,
-            "commit": journal.to_release.frontend.commit,
-            "release_identity": journal.to_release.frontend.release_identity,
-            "artifact": journal.to_release.frontend.artifact,
+            "repository": release.frontend.repository,
+            "version": release.frontend.version,
+            "commit": release.frontend.commit,
+            "release_identity": release.frontend.release_identity,
+            "artifact": release.frontend.artifact,
         })
+}
+
+fn target_ui_is_active(journal: &UpdateJournal) -> bool {
+    frontend_cache_matches(&journal.candidate_ui, &journal.to_release)
 }
 
 fn finish_update_journal(config: &UpdateConfig, journal: &UpdateJournal) -> anyhow::Result<()> {
@@ -1081,6 +1661,8 @@ fn public_rollback(config: &UpdateConfig) -> anyhow::Result<()> {
         state.previous_ui.as_deref(),
         &backup,
     )?;
+    verify_public(config)?;
+    verify_ui(config, &state.from_release)?;
     write_active_release(config, &state.from_release)?;
     crate::operator::append_management_event(
         config,
@@ -1130,7 +1712,7 @@ fn recover_from_backup(config: &UpdateConfig) -> anyhow::Result<()> {
     }
     wait_ready(config)?;
     verify_public(config)?;
-    verify_ui(config)?;
+    verify_ui(config, &state.from_release)?;
     write_active_release(config, &state.from_release)?;
     crate::operator::append_management_event(
         config,
@@ -1478,12 +2060,47 @@ fn verify_public(config: &UpdateConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn verify_ui(config: &UpdateConfig) -> anyhow::Result<()> {
+const MAX_UI_INDEX_BYTES: u64 = 1024 * 1024;
+
+fn signed_ui_index(config: &UpdateConfig, release: &ReleaseManifest) -> anyhow::Result<Vec<u8>> {
+    let cache = config
+        .ui
+        .releases_root
+        .join(&release.frontend.artifact.sha256);
+    if !frontend_cache_matches(&cache, release) {
+        bail!("runtime frontend cache does not match the signed Release descriptor");
+    }
+    let index = cache.join("index.html");
+    let metadata = fs::metadata(&index)?;
+    if metadata.len() == 0 || metadata.len() > MAX_UI_INDEX_BYTES {
+        bail!("runtime frontend index is empty or exceeds the verification boundary");
+    }
+    let content = fs::read(index)?;
+    if content.len() as u64 != metadata.len() {
+        bail!("runtime frontend index changed during verification");
+    }
+    Ok(content)
+}
+
+fn verify_ui_binding(
+    config: &UpdateConfig,
+    release: &ReleaseManifest,
+    served: &[u8],
+) -> anyhow::Result<()> {
+    let expected = signed_ui_index(config, release)?;
+    if served != expected {
+        bail!("served frontend does not match the signed runtime cache");
+    }
+    Ok(())
+}
+
+fn verify_ui(config: &UpdateConfig, release: &ReleaseManifest) -> anyhow::Result<()> {
+    let expected = signed_ui_index(config, release)?;
     let url = format!(
         "{}/ui/",
         config.runtime.expected_issuer.trim_end_matches('/')
     );
-    Process::new("curl")
+    let output = Process::new("curl")
         .args([
             "--fail",
             "--silent",
@@ -1491,11 +2108,21 @@ fn verify_ui(config: &UpdateConfig) -> anyhow::Result<()> {
             "--location",
             "--proto",
             "=https,http",
+            "--proto-redir",
+            "=https",
+            "--max-redirs",
+            "5",
             "--max-time",
             "10",
-            &url,
         ])
-        .run_quiet()
+        .arg("--max-filesize")
+        .arg(expected.len().to_string())
+        .arg(&url)
+        .output()?;
+    if !output.status.success() {
+        bail!("public frontend verification request failed");
+    }
+    verify_ui_binding(config, release, &output.stdout)
 }
 
 fn install_host_candidate(

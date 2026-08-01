@@ -68,15 +68,8 @@ issuer、账号、客户端材料和 suite token；仓库不提供共享被测�
 操作者公网 OIDC/FAPI/FAPI-CIBA 矩阵应使用统一入口，不应手工拼接后续各节的内部命令。运行前只准备两个彼此独立的生产身份、动态注册/CIBA 令牌和公网套件短期 API token：
 
 ```sh
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-export OIDF_CONFORMANCE_TOKEN=...
-
-python scripts/run_public_oidf_conformance.py \
+secret-provider read nazoauth/oidf-run-secrets | \
+python scripts/run_public_oidf_conformance.py --secrets-stdin \
   --deployed-sha <已部署-sha> \
   --target-issuer https://issuer.example \
   --conformance-server https://suite.example \
@@ -89,16 +82,23 @@ python scripts/run_public_oidf_conformance.py \
   --proxy-executable /usr/sbin/nginx
 ```
 
+输入必须是严格 JSON，且字段恰好为 `oidf_applicant_email`、
+`oidf_applicant_password`、`oidf_admin_email`、`oidf_admin_password`、
+`oidf_dynamic_registration_initial_access_token`、
+`oidf_ciba_automated_decision_token` 和 `oidf_conformance_token`。也可通过
+`--secret-fd N` 或当前用户/root 所有、单硬链接、权限为 `0600` 的
+`--secret-file` 提供（仅 POSIX）。Windows 的 mode bits 不能证明 DACL，因此必须使用
+stdin 或继承 FD。所有秘密都没有 argv 或环境变量回退。
+
 该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并按并发、CIBA、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout 和 Session Management 隔离组执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
 
 最后一组完成后，驱动会立即复查本轮全部 alias 的全部模块，等待 45 秒让异步回调与投递 worker 稳定，再复查一次完整矩阵。早期分组的任何晚到状态变化都会令整轮失败；单个分组的导出结果本身不能作为全矩阵成功证据。
 
 审批仍是正式、可审计的授权事件；自动化只消除文件复制、路径推断、命令拼接和恢复操作，不绕过申请人与审批人分离。
 
-浏览器自动化登录凭据的事实源是运行时环境变量
-`OIDF_USER_EMAIL` / `OIDF_USER_PASSWORD`。plan 配置中的同名 `nazo` 字段只允许作为
-本地操作者运行的显式后备值；GitHub Actions Secret 必须覆盖它们，避免轮换 Secret 后
-仍使用陈旧 plan 配置。
+统一 runner 会通过管理员登录、CSRF 和公网 `POST /admin/users` 幂等创建 applicant，
+随后再以普通公网登录验证 applicant 凭据。浏览器凭据只会写入权限为 `0600` 的私有
+plan 文件；子进程只会收到封闭环境白名单，不会复制任何未知父进程环境项。
 
 ## 1. 生成不可变的 runner 材料
 
@@ -108,14 +108,16 @@ python scripts/run_public_oidf_conformance.py \
 export OIDF_TARGET_ISSUER=https://issuer.example
 export OIDF_MTLS_TARGET_ISSUER=https://mtls.issuer.example
 export OIDF_SUITE_BASE_URL=https://suite.example
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-python scripts/prepare_oidf_black_box.py
+secret-provider mount nazoauth/oidf-preparation /run/secrets/nazoauth-oidf-preparation.json
+chmod 0600 /run/secrets/nazoauth-oidf-preparation.json
+python scripts/prepare_oidf_black_box.py \
+  --secret-file /run/secrets/nazoauth-oidf-preparation.json
 ```
+
+该 preparation 文档是封闭的四字段 JSON，只包含 `oidf_applicant_email`、
+`oidf_applicant_password`、`oidf_dynamic_registration_initial_access_token` 和
+`oidf_ciba_automated_decision_token`。准备完成后立即移除 provider mount；若 provider
+能够安全流式提供该封闭文档，也可使用 `--secrets-stdin` 或 `--secret-fd N`。
 
 命令只在 `runtime/oidf` 生成 runner 配置、密钥、证书、onboarding manifest 以及精确的 plan/skip/review 清单。这些是测试输入，不是生产记录，也不具备修改生产数据库的权限。
 
@@ -263,8 +265,10 @@ gh workflow run openid4vc-conformance.yml \
   -f target_origin=https://issuer.example
 ```
 
-两个 workflow 都从 `oidf-conformance` environment 读取经过轮换的套件 token、
-运行账号和已交付客户端材料。OIDC/FAPI 的并发组、四个 CIBA 组以及两个浏览器敏感
+GitHub Actions 平台没有原生继承 FD 输入，因此仓库 Secret 只暴露给一个短生命周期的
+materializer step。只有该进程拥有秘密环境项；它把内容写入 `RUNNER_TEMP` 下权限为
+`0600` 的文件，后续 step 只接收路径或继承 FD，并通过 `if: always()` 删除目录。该方案
+缩小了暴露窗口，但不会伪称消除了 GitHub runner 信任边界。OIDC/FAPI 的并发组、四个 CIBA 组以及两个浏览器敏感
 plan 由 workflow 自动隔离；OpenID4VC 按有界 group 执行 17 个 plan。操作者不应手工
 拆 plan、复制配置或修改 runner 并发策略。
 

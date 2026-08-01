@@ -356,22 +356,32 @@ jobs:
           ]
           JSON
 
+      - name: Materialize OIDF job secrets
+        run: python scripts/materialize_github_oidf_secrets.py --output-dir "$RUNNER_TEMP/oidf-secrets"
+        env:
+          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
+          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
+          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
+          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
+          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
+          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
+          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
+
       - name: Write full OIDF matrix config
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' "$OIDF_PLAN_CONFIG_AGE_IDENTITY" > oidf-plan-config.agekey
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-secret-patch.json \
             docs/conformance/oidf-plan-config-secret-patch.json.age
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-ciba-secret-patch.json \
             docs/conformance/oidf-plan-config-ciba-secret-patch.json.age
-          printf '%s\n' "$OIDF_MTLS_MATERIAL_AGE_IDENTITY" > oidf-mtls-material.agekey
           rage --decrypt \
-            --identity oidf-mtls-material.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/mtls-material.agekey" \
             --output oidf-mtls-material.json \
             docs/conformance/oidf-mtls-material.json.age
           python - <<'PY'
@@ -391,37 +401,25 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
-          test -n "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN"
-          printf '%s' "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN" > dynamic-registration-initial-access-token
-          test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
-          printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
-          chmod 600 dynamic-registration-initial-access-token ciba-automated-decision-token oidf-delivered-client-material.json
-          unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN OIDF_CIBA_AUTOMATED_DECISION_TOKEN OIDF_DELIVERED_CLIENT_MATERIAL_JSON
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
-            --dynamic-registration-token-file dynamic-registration-initial-access-token \
+            --dynamic-registration-token-file "$RUNNER_TEMP/oidf-secrets/dynamic-registration-token" \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$CONFORMANCE_SERVER" \
-            --ciba-automated-decision-token-file ciba-automated-decision-token \
+            --ciba-automated-decision-token-file "$RUNNER_TEMP/oidf-secrets/ciba-decision-token" \
             --target-issuer "$OIDF_TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           python scripts/apply_oidf_delivered_client_material.py \
-            --material-json-file oidf-delivered-client-material.json \
+            --material-json-file "$RUNNER_TEMP/oidf-secrets/delivered-client-material.json" \
             --config-json-file oidf-plan-configs.json \
             --expected-target-issuer "$OIDF_TARGET_ISSUER" \
             --expected-suite-base-url "$CONFORMANCE_SERVER"
-        env:
-          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
-          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
-          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
-          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
-          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          python scripts/apply_oidf_browser_credentials.py \
+            --config-json-file oidf-plan-configs.json \
+            --credentials-file "$RUNNER_TEMP/oidf-secrets/browser-credentials.json"
 
       - name: Run full OIDF matrix
         run: |
@@ -460,6 +458,7 @@ jobs:
               --target-issuer "$OIDF_TARGET_ISSUER"
               --timeout-seconds "$RUN_TIMEOUT_SECONDS"
               --monitor-interval-seconds "$MONITOR_INTERVAL_SECONDS"
+              --token-file "$RUNNER_TEMP/oidf-secrets/suite-token"
             )
             if [ "$VERBOSE" = "true" ]; then
               args+=(--verbose)
@@ -496,11 +495,6 @@ jobs:
               exit 2
               ;;
           esac
-        env:
-          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
-          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
-          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
-
       - name: Verify official suite remained pristine
         if: always()
         run: |
@@ -512,6 +506,12 @@ jobs:
       - name: Consolidate credential-free OIDF evidence
         if: always()
         run: python scripts/oidf_evidence.py "$RUNNER_TEMP/oidf-evidence"
+
+      - name: Remove OIDF job secrets
+        if: always()
+        run: |
+          rm -f -- oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json oidf-mtls-material.json oidf-plan-configs.json
+          rm -rf -- "$RUNNER_TEMP/oidf-secrets"
 
       - name: Upload credential-free OIDF evidence
         if: always()
@@ -600,22 +600,32 @@ jobs:
           ]
           JSON
 
+      - name: Materialize isolated OIDF job secrets
+        run: python scripts/materialize_github_oidf_secrets.py --output-dir "$RUNNER_TEMP/oidf-secrets"
+        env:
+          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
+          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
+          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
+          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
+          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
+          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
+          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
+
       - name: Write isolated OIDF matrix config
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' "$OIDF_PLAN_CONFIG_AGE_IDENTITY" > oidf-plan-config.agekey
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-secret-patch.json \
             docs/conformance/oidf-plan-config-secret-patch.json.age
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-ciba-secret-patch.json \
             docs/conformance/oidf-plan-config-ciba-secret-patch.json.age
-          printf '%s\n' "$OIDF_MTLS_MATERIAL_AGE_IDENTITY" > oidf-mtls-material.agekey
           rage --decrypt \
-            --identity oidf-mtls-material.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/mtls-material.agekey" \
             --output oidf-mtls-material.json \
             docs/conformance/oidf-mtls-material.json.age
           python - <<'PY'
@@ -635,37 +645,25 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
-          test -n "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN"
-          printf '%s' "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN" > dynamic-registration-initial-access-token
-          test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
-          printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
-          chmod 600 dynamic-registration-initial-access-token ciba-automated-decision-token oidf-delivered-client-material.json
-          unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN OIDF_CIBA_AUTOMATED_DECISION_TOKEN OIDF_DELIVERED_CLIENT_MATERIAL_JSON
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
-            --dynamic-registration-token-file dynamic-registration-initial-access-token \
+            --dynamic-registration-token-file "$RUNNER_TEMP/oidf-secrets/dynamic-registration-token" \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$CONFORMANCE_SERVER" \
-            --ciba-automated-decision-token-file ciba-automated-decision-token \
+            --ciba-automated-decision-token-file "$RUNNER_TEMP/oidf-secrets/ciba-decision-token" \
             --target-issuer "$OIDF_TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           python scripts/apply_oidf_delivered_client_material.py \
-            --material-json-file oidf-delivered-client-material.json \
+            --material-json-file "$RUNNER_TEMP/oidf-secrets/delivered-client-material.json" \
             --config-json-file oidf-plan-configs.json \
             --expected-target-issuer "$OIDF_TARGET_ISSUER" \
             --expected-suite-base-url "$CONFORMANCE_SERVER"
-        env:
-          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
-          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
-          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
-          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
-          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          python scripts/apply_oidf_browser_credentials.py \
+            --config-json-file oidf-plan-configs.json \
+            --credentials-file "$RUNNER_TEMP/oidf-secrets/browser-credentials.json"
 
       - name: Run isolated OIDF browser-sensitive plan
         run: |
@@ -679,6 +677,7 @@ jobs:
             --target-issuer "$OIDF_TARGET_ISSUER"
             --timeout-seconds "$RUN_TIMEOUT_SECONDS"
             --monitor-interval-seconds "$MONITOR_INTERVAL_SECONDS"
+            --token-file "$RUNNER_TEMP/oidf-secrets/suite-token"
             --no-parallel
           )
           if [ "$VERBOSE" = "true" ]; then
@@ -688,11 +687,6 @@ jobs:
             args+=(--disable-ssl-verify)
           fi
           python -u scripts/run_oidf_conformance.py "${args[@]}"
-        env:
-          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
-          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
-          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
-
       - name: Verify official suite remained pristine
         if: always()
         run: |
@@ -700,6 +694,12 @@ jobs:
             test "$(git -C oidf-conformance-suite rev-parse HEAD)" = "$OIDF_REF"
             test -z "$(git -C oidf-conformance-suite status --porcelain --untracked-files=no)"
           }
+
+      - name: Remove isolated OIDF job secrets
+        if: always()
+        run: |
+          rm -f -- oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json oidf-mtls-material.json oidf-plan-configs.json
+          rm -rf -- "$RUNNER_TEMP/oidf-secrets"
 
 
       - name: Upload credential-free browser evidence

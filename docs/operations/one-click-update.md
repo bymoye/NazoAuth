@@ -7,32 +7,32 @@ It is a Rust executable built and signed in the same release as `nazoauth`.
 
 ## First installation
 
-The public GitHub Release contains executables only. Download the controller for
-the local target, verify its custom GitHub attestation against the exact tag
-workflow identity, and then install that verified file. No shell installer or
-detached bundle is part of the public Release, and `curl | sh` is intentionally
-not a trusted bootstrap path.
+The public GitHub Release contains executables only. The repository's bootstrap
+script downloads the matching controller through the anonymous public Release
+and artifact-attestation APIs, verifies the closed manifest with the digest-pinned
+Cosign image, and only then installs the verified file. It binds the artifact,
+tag ref, source commit, signer workflow, repository, and GitHub-hosted runner.
+Neither a GitHub login nor `GH_TOKEN` is used. No shell installer or detached
+bundle is part of the public Release, and `curl | sh` is intentionally not a
+trusted bootstrap path.
 
-For example, pin one immutable release and verify the bootstrap before running
-it:
+Review the small bootstrap from the same immutable source tag, then run it with
+that tag pinned:
 
 ```sh
-version=v1.2.3
-case "$(uname -m)" in
-  x86_64) target=x86_64-unknown-linux-gnu ;;
-  aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
-  *) echo "unsupported Linux architecture" >&2; exit 1 ;;
-esac
-artifact="nazoauthctl-$target"
-gh release download "$version" --repo nazozero/NazoAuth --pattern "$artifact"
-gh attestation verify "$artifact" \
-  --repo nazozero/NazoAuth \
-  --predicate-type 'https://nazo.run/attestations/release-manifest/v1' \
-  --signer-workflow nazozero/NazoAuth/.github/workflows/release-security.yml \
-  --source-ref "refs/tags/$version" \
-  --deny-self-hosted-runners
-sudo install -o root -g root -m 0755 "$artifact" /usr/local/sbin/nazoauthctl
+version=v0.2.0
+curl --fail --silent --show-error --location --proto '=https' \
+  --output install_nazoauthctl.sh \
+  "https://raw.githubusercontent.com/nazozero/NazoAuth/$version/scripts/install_nazoauthctl.sh"
+less install_nazoauthctl.sh
+sudo sh install_nazoauthctl.sh --version "$version"
 ```
+
+Bootstrap requires `curl`, `python3`, `sha256sum`, and `install`, plus Podman or
+Docker for the pinned Cosign verifier. A separately provisioned local `cosign`
+is accepted only when neither container engine is available. Anonymous GitHub
+API rate limits apply; a rate-limit response fails closed instead of asking for
+or discovering an account token.
 
 `auto` selects an installed Podman runtime first and Docker second:
 
@@ -52,6 +52,38 @@ sudo nazoauthctl install --runtime podman
 sudo nazoauthctl install --runtime docker
 sudo nazoauthctl install --runtime host
 ```
+
+After a fresh installation, create the first administrator interactively:
+
+```sh
+sudo nazoauthctl bootstrap-admin
+```
+
+The controller prompts for the email and reads the password without echo. It
+resolves the host source of the managed bootstrap mount, verifies that the
+directory and token are private regular objects owned by the exact runtime UID
+(`10001` for containers or the configured systemd service UID for host mode), and sends the
+single-use token and credentials only as an HTTPS request body through the
+child process stdin. They never enter argv, ordinary environment variables,
+configuration, logs, audit records, or command output. Automation supplies a
+closed JSON object containing exactly `email` and `password`:
+
+```sh
+secret-provider read nazoauth/initial-admin | \
+  sudo nazoauthctl bootstrap-admin --credentials-stdin --yes
+```
+
+`--yes` skips only the confirmation prompt. The command still verifies the
+exact HTTP 201 response contract, the `/ui/auth` continuation, and durable
+consumption of the local one-time token.
+
+The controller persists only a non-secret request ID, a controller-keyed HMAC
+of the normalized email, and a closed status. If the database commits but the
+HTTP response is lost, the next invocation reuses that request ID and retrieves
+the same database-owned receipt; it does not create another administrator.
+Network and malformed-response windows are audited as outcome-unknown until a
+matching receipt is verified. The password, email, and token are never stored
+in this recovery state.
 
 `host` installs the signed `nazoauth` binary as a systemd service. Unless
 external dependency URLs are supplied, an installed Podman or Docker runtime
@@ -210,6 +242,13 @@ rollback, backup/PITR recovery, and an irreversible migration barrier. The
 controller never describes database recovery as automatic. It restores the
 previous artifact only when the signed policy says the resulting schema is
 compatible; `recover --yes` is the explicit verified-backup restoration path.
+The `20260801000100` receipt migration is additive, so the immediately previous
+application can run without a schema downgrade and artifact rollback remains
+schema-compatible. Its down migration deliberately refuses to erase a new
+bootstrap receipt or application audit event. That conditional schema-downgrade
+barrier is distinct from artifact rollback and from explicit verified-backup
+database recovery; `update --plan` reports the signed migration floor and this
+boundary in the policy rationale.
 For managed dependencies, the single managed application writer is stopped
 before both backups; restored Valkey state can still invalidate ephemeral
 sessions. For external dependencies, the operator must quiesce every other
@@ -227,6 +266,12 @@ Automatically managed PostgreSQL and Valkey images are pinned to reviewed
 multi-architecture OCI digests. Download `nazoauthctl` from the target GitHub
 Release, verify its custom attestation as shown above, and install it at
 `/usr/local/sbin/nazoauthctl`.
+
+The lifecycle controller accepts `uname -m` architectures `x86_64` and
+`aarch64` (often displayed as Arm64 by providers). It rejects other OS/CPU
+pairs before creating deployment state. Native host installs use the matching
+target-specific Release executables; Podman and Docker use the signed
+`linux/amd64` or `linux/arm64` platform-manifest digest for the current host.
 
 The installer generates root-owned, non-group/world-writable
 `/etc/nazoauth/update.json`. Existing hand-managed deployments can start from

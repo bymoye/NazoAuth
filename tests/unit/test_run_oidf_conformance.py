@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -20,7 +21,13 @@ def load_runner_module():
 
 
 class RunOidfConformanceTests(unittest.TestCase):
-    def test_runtime_credentials_override_stale_plan_config_credentials(self):
+    def test_private_plan_config_has_no_environment_fallback(self):
+        module = load_runner_module()
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('parser.add_argument("--config-env"', source)
+        self.assertNotIn("OIDF_PLAN_CONFIG_JSON", source)
+
+    def test_runtime_secret_environment_cannot_override_private_plan_credentials(self):
         module = load_runner_module()
         config = {
             "nazo": {
@@ -38,7 +45,7 @@ class RunOidfConformanceTests(unittest.TestCase):
         ):
             credentials = module.nazo_automation_credentials(config)
 
-        self.assertEqual(credentials, ("current@example.test", "current-password"))
+        self.assertEqual(credentials, ("stale@example.test", "stale-password"))
 
     def test_plan_config_credentials_remain_available_for_local_runs(self):
         module = load_runner_module()
@@ -68,14 +75,14 @@ class RunOidfConformanceTests(unittest.TestCase):
                 suite_dir=str(suite_dir),
                 suite_revision="revision",
                 config_file_name="config.json",
-                config_env="CONFIG",
                 config_json_file=None,
                 plan_expression=[],
                 plan_set_env="PLAN_SET",
                 plan_set_json_file=None,
                 conformance_server="https://suite.example",
                 no_api_token=True,
-                token_env="TOKEN",
+                token_fd=None,
+                token_file=None,
                 list=False,
                 no_parallel=False,
                 expected_failures_file=None,
@@ -100,7 +107,8 @@ class RunOidfConformanceTests(unittest.TestCase):
             ):
                 self.assertEqual(module.main(), 0)
 
-        self.assertEqual(run.call_args.args[-1], {})
+        self.assertEqual(run.call_args.args[-2], {})
+        self.assertIsNone(run.call_args.args[-1])
 
     def test_official_runner_terminates_nested_process_group_when_interrupted(self):
         module = load_runner_module()
@@ -130,6 +138,7 @@ class RunOidfConformanceTests(unittest.TestCase):
                 {},
                 {},
                 {},
+                None,
             )
 
         terminate.assert_called_once_with(process)
@@ -277,19 +286,24 @@ class RunOidfConformanceTests(unittest.TestCase):
             clear=True,
         ):
             env = module.sanitized_runner_environment()
-        command = module.official_runner_command(suite_scripts, runner)
+        command = module.official_runner_command(suite_scripts, runner, None)
 
         self.assertEqual(
             command[0:6],
             [module.sys.executable, "-I", "-S", "-B", "-u", "-c"],
         )
         self.assertIn("runpy.run_path", command[6])
-        self.assertIn("sysconfig.get_paths", command[6])
-        self.assertEqual(command[7:9], [str(suite_scripts), str(runner)])
+        self.assertTrue(command[7].endswith("oidf_fd_bootstrap.py"))
+        self.assertEqual(command[8:11], [str(suite_scripts), str(runner), "-"])
         self.assertNotIn("PYTHONPATH", env)
+
+        bootstrap = Path(command[7]).read_text(encoding="utf-8")
+        self.assertIn("sysconfig.get_paths", bootstrap)
+        self.assertIn("class OneShotSecretEnvironment", bootstrap)
+        self.assertNotIn("os.environ.__setitem__", bootstrap)
         self.assertNotIn("PYTHONSTARTUP", env)
         self.assertNotIn("PYTHONUNBUFFERED", env)
-        self.assertEqual(env["SAFE_SETTING"], "preserved")
+        self.assertNotIn("SAFE_SETTING", env)
 
     def test_isolated_bootstrap_does_not_run_attacker_sitecustomize_or_write_bytecode(self):
         module = load_runner_module()
@@ -315,7 +329,7 @@ class RunOidfConformanceTests(unittest.TestCase):
             env["PYTHONPATH"] = str(attacker)
 
             result = subprocess.run(
-                module.official_runner_command(suite_scripts, runner),
+                module.official_runner_command(suite_scripts, runner, None),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -325,6 +339,72 @@ class RunOidfConformanceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(marker.exists())
             self.assertFalse((suite_scripts / "__pycache__").exists())
+
+    def test_fd_bootstrap_token_is_one_shot_and_absent_from_copies(self):
+        bootstrap_path = (
+            Path(__file__).resolve().parents[2] / "scripts" / "oidf_fd_bootstrap.py"
+        )
+        spec = importlib.util.spec_from_file_location("oidf_fd_bootstrap_test", bootstrap_path)
+        bootstrap = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(bootstrap)
+
+        environment = bootstrap.OneShotSecretEnvironment(
+            {"PATH": os.environ.get("PATH", "")}, bytearray(b"one-shot-token")
+        )
+        self.assertNotIn("CONFORMANCE_TOKEN", environment)
+        self.assertNotIn("CONFORMANCE_TOKEN", environment.copy())
+        self.assertEqual(environment["CONFORMANCE_TOKEN"], "one-shot-token")
+        with self.assertRaises(KeyError):
+            _ = environment["CONFORMANCE_TOKEN"]
+
+        child = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                "import os;print(os.environ.get('CONFORMANCE_TOKEN','absent'))",
+            ],
+            env=environment.copy(),
+            text=True,
+        )
+        self.assertEqual(child.strip(), "absent")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux /proc and pass_fds")
+    def test_token_fd_is_absent_from_proc_environment_and_descendants(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite_scripts = root / "suite" / "scripts"
+            suite_scripts.mkdir(parents=True)
+            runner = suite_scripts / "run-test-plan.py"
+            runner.write_text(
+                "import os,subprocess,sys\n"
+                "token=os.environ['CONFORMANCE_TOKEN']\n"
+                "assert token == 'fd-only-test-token'\n"
+                "assert 'CONFORMANCE_TOKEN' not in os.environ\n"
+                "assert b'fd-only-test-token' not in open('/proc/self/environ','rb').read()\n"
+                "child=subprocess.check_output([sys.executable,'-c',"
+                "\"import os;print(os.environ.get('CONFORMANCE_TOKEN','absent'))\"])\n"
+                "assert child.strip() == b'absent'\n",
+                encoding="utf-8",
+            )
+            reader, writer = os.pipe()
+            try:
+                os.write(writer, b"fd-only-test-token")
+            finally:
+                os.close(writer)
+            try:
+                result = subprocess.run(
+                    module.official_runner_command(suite_scripts, runner, reader),
+                    pass_fds=(reader,),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=module.sanitized_runner_environment(),
+                )
+            finally:
+                os.close(reader)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_oidf_api_request_retries_remote_disconnect(self):
         module = load_runner_module()

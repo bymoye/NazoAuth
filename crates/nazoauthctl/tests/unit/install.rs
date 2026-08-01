@@ -446,3 +446,19 @@ fn managed_directory_rejects_symlink_targets() {
             .contains("managed directory must not be a symlink")
     );
 }
+
+#[test]
+fn lifecycle_install_platform_boundary_is_linux_x86_64_and_arm64_only() {
+    assert!(install_platform_supported("linux", "x86_64"));
+    assert!(install_platform_supported("linux", "aarch64"));
+    for (os, arch) in [
+        ("linux", "arm"),
+        ("linux", "s390x"),
+        ("windows", "x86_64"),
+        ("windows", "aarch64"),
+        ("macos", "x86_64"),
+        ("macos", "aarch64"),
+    ] {
+        assert!(!install_platform_supported(os, arch));
+    }
+}

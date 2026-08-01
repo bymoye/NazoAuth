@@ -40,9 +40,12 @@ The effective configuration order is:
 - [x] Run pending migrations before accepting traffic.
 - [x] Create or load generated secrets before settings validation.
 - [x] Keep automatic signing-key creation in the normal server startup path.
-- [x] Create a one-time initial-administrator claim and report its setup URL.
-- [x] Add an HTTP endpoint that atomically consumes the claim and creates the
-      first administrator without SMTP.
+- [x] Create a one-time initial-administrator claim without printing its value
+      or a token-bearing URL.
+- [x] Add a closed JSON HTTP endpoint that atomically consumes the claim and
+      creates the first administrator without SMTP.
+- [x] Add `nazoauthctl bootstrap-admin`, which verifies and reads the private
+      runtime-owned mount and transports all credentials only through request stdin.
 - [x] Reject the endpoint after claim expiry, consumption, or the existence of
       any administrator.
 
@@ -73,6 +76,7 @@ The effective configuration order is:
 - [x] Focused configuration and CLI unit tests.
 - [x] Initial-administrator repository and HTTP tests, including concurrency
       and replay.
+
 - [x] Compose configuration validation and container smoke test where the
       container runtime is available.
 - [x] Migration/schema contract refresh.
@@ -80,6 +84,13 @@ The effective configuration order is:
 - [x] Relevant crate tests.
 - [x] Workspace test gate.
 - [x] `git diff --check`.
+
+The public endpoint verifies the possession token before password hashing. A caller that already
+possesses that single-use secret can still deliberately consume password-hashing work while a
+claim remains open or is being replayed. Avoiding that cost would require a separate preflight read
+or a second in-memory protocol state, neither of which is authoritative across concurrent replicas;
+the database transaction therefore remains the only claim/replay decision point. Rate and resource
+limits at the public HTTP boundary remain the mitigation for a compromised bootstrap token.
 
 ## Completion evidence
 

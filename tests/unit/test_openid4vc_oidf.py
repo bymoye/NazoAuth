@@ -19,6 +19,18 @@ def load(name: str):
 
 
 class Openid4vcOidfTests(unittest.TestCase):
+    def test_admin_credentials_have_only_a_private_file_contract(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "scripts"
+            / "run_openid4vc_conformance.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--operator-credentials-file", source)
+        self.assertIn('required_fields=("admin_email", "admin_password")', source)
+        self.assertIn("read_secret_document", source)
+        self.assertNotIn("OIDF_ADMIN_EMAIL", source)
+        self.assertNotIn("OIDF_ADMIN_PASSWORD", source)
+
     def test_dataset_fixture_uses_admin_session_csrf_and_is_cleaned_up(self):
         module = load("run_openid4vc_conformance.py")
 
@@ -46,15 +58,11 @@ class Openid4vcOidfTests(unittest.TestCase):
                 "credential_datasets": {"pid/1": {"given_name": "Ada"}},
             },
         }
-        with (
-            patch.dict(
-                module.os.environ,
-                {"OIDF_ADMIN_EMAIL": "admin@example.test", "OIDF_ADMIN_PASSWORD": "secret"},
-                clear=True,
-            ),
-            patch.object(module.ControlPlaneSession, "login", return_value=session) as login,
-        ):
-            admin, installed = module.install_credential_datasets(config)
+        with patch.object(module.ControlPlaneSession, "login", return_value=session) as login:
+            admin, installed = module.install_credential_datasets(
+                config,
+                {"admin_email": "admin@example.test", "admin_password": "secret"},
+            )
             module.cleanup_credential_datasets(admin, installed)
 
         login.assert_called_once_with(
@@ -84,7 +92,8 @@ class Openid4vcOidfTests(unittest.TestCase):
                         "subject_id": "00000000-0000-0000-0000-000000000123",
                         "credential_datasets": {"pid": {"given_name": "Ada"}},
                     },
-                }
+                },
+                {"admin_email": "admin@example.test", "admin_password": "secret"},
             )
         login.assert_not_called()
 
@@ -341,12 +350,26 @@ class Openid4vcOidfTests(unittest.TestCase):
         try:
             for forbidden in ("--disable-ssl-verify", "--no-api-token"):
                 with (
+                    patch.object(
+                        module,
+                        "read_secret_document",
+                        return_value={
+                            "admin_email": "admin@example.test",
+                            "admin_password": "secret",
+                        },
+                    ),
+                    patch.object(module, "read_secret_value", return_value="suite-token"),
+                    patch.object(module, "read_private_text", return_value='{"aliases":[]}'),
                     patch(
                         "sys.argv",
                         [
                             "run_openid4vc_conformance.py",
                             "--driver-config-json-file",
                             config_path,
+                            "--operator-credentials-file",
+                            "operator-credentials.json",
+                            "--suite-token-file",
+                            "suite-token",
                             "--",
                             forbidden,
                         ],
@@ -814,13 +837,17 @@ class Openid4vcOidfTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            written, aliases = module.write_plan_configs(
-                suite_scripts,
-                "ignored.json",
-                "OPENID4VC_CONFIGS",
-                str(config_json),
-                "https://issuer.example",
-            )
+            with patch.object(
+                module,
+                "read_private_text",
+                return_value=config_json.read_text(encoding="utf-8"),
+            ):
+                written, aliases = module.write_plan_configs(
+                    suite_scripts,
+                    "ignored.json",
+                    str(config_json),
+                    "https://issuer.example",
+                )
 
         self.assertEqual(written, {"openid4vc-vci-sd-wallet-plain.json"})
         self.assertEqual(
@@ -873,13 +900,17 @@ class Openid4vcOidfTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            module.write_plan_configs(
-                suite_scripts,
-                "ignored.json",
-                "OPENID4VC_CONFIGS",
-                str(config_json),
-                "https://issuer.example",
-            )
+            with patch.object(
+                module,
+                "read_private_text",
+                return_value=config_json.read_text(encoding="utf-8"),
+            ):
+                module.write_plan_configs(
+                    suite_scripts,
+                    "ignored.json",
+                    str(config_json),
+                    "https://issuer.example",
+                )
             written = json.loads(
                 (suite_scripts / "openid4vc-vci-haip-sd-wallet.json").read_text(
                     encoding="utf-8"

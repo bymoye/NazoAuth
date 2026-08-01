@@ -33,6 +33,16 @@ alerts are not restricted to the normal weekly update window.
 
 The `release-security` workflow runs for `v*` tags and manual dispatch:
 
+- a tag-triggered run accepts only an exact stable `vMAJOR.MINOR.PATCH` tag;
+  the tag without its `v` prefix must equal `[workspace.package].version`, and
+  `cargo metadata --locked` must resolve every workspace member to that same
+  version. A mismatch stops the policy job before artifacts are built or
+  published
+- a branch-triggered `workflow_dispatch` remains a non-publishing native-matrix
+  rehearsal. It embeds `sha-<commit>` as the release identity, runs the policy,
+  native tests, binary builds, and OCI assembly, and skips every tag-only
+  attestation and publication job
+
 - builds eight platform targets on native x86-64 and Arm64 Linux, Windows, and
   macOS runners with the pinned Rust toolchain
 - runs the `nazoauthctl` tests and executes both binaries on every target
@@ -63,6 +73,22 @@ tag-specific workflow identity and closed predicate before parsing artifact
 names or changing runtime state, and separately verifies the attested frontend
 and OCI descriptors. Custom deployment pipelines must enforce the same
 identity, digest, target, backup, and rollback-compatibility boundaries.
+
+`nazoauthctl` does not download or install frontend files. The signed runtime
+downloads the independently released frontend, verifies the descriptor's
+archive digest and size, safely materializes its content-addressed cache, and
+writes the exact descriptor marker. Lifecycle acceptance then requires that
+marker, the cached `index.html`, and the bytes actually served from `/ui/` to
+match; an unrelated successful HTTP response is not sufficient.
+
+All controller GitHub requests are HTTPS-only across redirects and have
+connection, redirect-count, total-time, and response-size bounds. Once an
+attested artifact size is known, that exact size is the curl transfer ceiling;
+only the first updater fetch uses a fixed bootstrap ceiling because its digest
+is the subject used to retrieve the attestation. When host Cosign is absent,
+the private temporary staging directory is mounted into the pinned Cosign
+container as `ro,Z`: read-only with a private SELinux relabel, compatible with
+Podman and Docker without sharing the label or adding container privileges.
 
 The precise native target and managed-lifecycle qualification boundary is
 documented in [platform-support.md](platform-support.md).

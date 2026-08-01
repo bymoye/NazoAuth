@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import http.client
 import ipaddress
@@ -26,6 +27,12 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
+from oidf_secret_input import (  # noqa: E402
+    SecretInputError,
+    read_private_text,
+    read_secret_value,
+    sanitized_environment,
+)
 
 
 OIDCC_CONFIG_FILE = "oidf-oidcc-plan-config.json"
@@ -364,21 +371,19 @@ def nazo_automation_credentials(config_value: dict[str, object]) -> tuple[str, s
     nazo = config_value.get("nazo")
     nazo_object = nazo if isinstance(nazo, dict) else {}
     email = (
-        non_empty_string(os.environ.get("OIDF_USER_EMAIL"))
-        or non_empty_string(nazo_object.get("oidf_user_email"))
+        non_empty_string(nazo_object.get("oidf_user_email"))
         or non_empty_string(nazo_object.get("user_email"))
         or non_empty_string(nazo_object.get("login_email"))
     )
     password = (
-        non_empty_string(os.environ.get("OIDF_USER_PASSWORD"))
-        or non_empty_string(nazo_object.get("oidf_user_password"))
+        non_empty_string(nazo_object.get("oidf_user_password"))
         or non_empty_string(nazo_object.get("user_password"))
         or non_empty_string(nazo_object.get("login_password"))
     )
     if not email or not password:
         fail(
-            "Nazo user-facing /ui browser automation requires OIDF_USER_EMAIL and "
-            "OIDF_USER_PASSWORD secrets, or matching nazo.oidf_user_* fields in the plan config"
+            "Nazo user-facing /ui browser automation requires matching "
+            "nazo.oidf_user_* fields in the private plan config"
         )
     return email, password
 
@@ -1075,24 +1080,20 @@ def add_nazo_browser_overrides(config_value: dict[str, object]) -> None:
 def write_plan_configs(
     suite_scripts: Path,
     file_name: str,
-    env_name: str,
     config_json_file: str,
     target_issuer: str,
 ) -> tuple[set[str], dict[str, str]]:
     validate_config_file_name(file_name)
-    raw_config = (
-        non_empty_file(config_json_file, "--config-json-file")
-        if config_json_file
-        else non_empty_env(env_name)
-    )
+    try:
+        raw_config = read_private_text(Path(config_json_file))
+    except SecretInputError as error:
+        fail(str(error))
     try:
         parsed = json.loads(raw_config)
     except json.JSONDecodeError as exc:
-        source = config_json_file if config_json_file else env_name
-        fail(f"{source} is not valid JSON: {exc}")
+        fail(f"{config_json_file} is not valid JSON: {exc}")
     if not isinstance(parsed, dict):
-        source = config_json_file if config_json_file else env_name
-        fail(f"{source} must contain a JSON object")
+        fail(f"{config_json_file} must contain a JSON object")
 
     configs = parsed.get("configs")
     if configs is None:
@@ -1171,8 +1172,9 @@ def oidf_api_request(
                 status = response.status
                 body = response.read()
         except urllib.error.HTTPError as exc:
-            status = exc.code
-            body = exc.read()
+            with exc:
+                status = exc.code
+                body = exc.read()
             if status < 500 or attempt == attempts:
                 break
             time.sleep(min(attempt * 2, 15))
@@ -2212,11 +2214,10 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="read the JSON array of plan expressions from this file instead of --plan-set-env",
     )
-    parser.add_argument("--config-env", default="OIDF_PLAN_CONFIG_JSON")
     parser.add_argument(
         "--config-json-file",
-        default="",
-        help="read the plan configuration JSON object from this file instead of --config-env",
+        required=True,
+        help="read the private plan configuration JSON object from this file",
     )
     parser.add_argument("--config-file-name", default="oidf-plan-config.json")
     parser.add_argument(
@@ -2224,7 +2225,17 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("OIDF_TARGET_ISSUER", ""),
         help="expected HTTPS issuer origin supplied by the operator; no repository default is provided",
     )
-    parser.add_argument("--token-env", default="OIDF_CONFORMANCE_TOKEN")
+    token_source = parser.add_mutually_exclusive_group()
+    token_source.add_argument(
+        "--token-fd",
+        type=int,
+        help="read the suite bearer token from an inherited descriptor >= 3",
+    )
+    token_source.add_argument(
+        "--token-file",
+        type=Path,
+        help="read the suite bearer token from a POSIX non-symlink mode-0600 file",
+    )
     parser.add_argument(
         "--no-api-token",
         action="store_true",
@@ -2288,6 +2299,7 @@ def run_official_runner(
     allowed_expected_skips_by_alias: dict[
         str, frozenset[tuple[str, tuple[tuple[str, str], ...] | None]]
     ],
+    token_fd: int | None,
 ) -> int:
     if timeout_seconds <= 0:
         fail("--timeout-seconds must be greater than zero")
@@ -2307,6 +2319,7 @@ def run_official_runner(
         command,
         cwd=suite_scripts,
         env=env,
+        pass_fds=(() if token_fd is None else (token_fd,)),
         start_new_session=True,
     )
     monitor: OidfEarlyStopMonitor | None = None
@@ -2439,14 +2452,16 @@ def verify_pristine_oidf_suite(suite_dir: Path, expected_revision: str) -> None:
         fail("official suite contains tracked modifications; refusing to run")
 
 
-def official_runner_command(suite_scripts: Path, runner: Path) -> list[str]:
+def official_runner_command(
+    suite_scripts: Path,
+    runner: Path,
+    token_fd: int | None,
+) -> list[str]:
     bootstrap = (
-        "import runpy,sys,sysconfig;"
-        "paths=sysconfig.get_paths();"
-        "sys.path.extend(dict.fromkeys([paths['purelib'],paths['platlib']]));"
-        "suite_scripts=sys.argv.pop(1);runner=sys.argv.pop(1);"
-        "sys.path.insert(0,suite_scripts);sys.argv[0]=runner;"
-        "runpy.run_path(runner,run_name='__main__')"
+        "import runpy,sys;"
+        "bootstrap=sys.argv.pop(1);"
+        "sys.argv[0]=bootstrap;"
+        "runpy.run_path(bootstrap,run_name='__main__')"
     )
     return [
         sys.executable,
@@ -2456,17 +2471,69 @@ def official_runner_command(suite_scripts: Path, runner: Path) -> list[str]:
         "-u",
         "-c",
         bootstrap,
+        str(Path(__file__).with_name("oidf_fd_bootstrap.py")),
         str(suite_scripts),
         str(runner),
+        "-" if token_fd is None else str(token_fd),
     ]
 
 
 def sanitized_runner_environment() -> dict[str, str]:
     return {
         name: value
-        for name, value in os.environ.items()
+        for name, value in sanitized_environment().items()
         if not name.upper().startswith("PYTHON")
     }
+
+
+def suite_token(args: argparse.Namespace) -> str | None:
+    has_source = args.token_fd is not None or args.token_file is not None
+    if args.no_api_token:
+        if has_source:
+            fail("--no-api-token cannot be combined with a token source")
+        return None
+    if not has_source:
+        fail("select --token-fd or --token-file for the suite bearer token")
+    try:
+        return read_secret_value(descriptor=args.token_fd, path=args.token_file)
+    except SecretInputError as error:
+        fail(str(error))
+
+
+@contextlib.contextmanager
+def inherited_token_descriptor(token: str | None):
+    if token is None:
+        yield None
+        return
+    if os.name == "nt":
+        fail("suite token descriptor transport requires a POSIX host")
+    reader, writer = os.pipe()
+    write_errors: list[OSError] = []
+
+    def write_secret() -> None:
+        payload = token.encode("utf-8")
+        try:
+            written = 0
+            while written < len(payload):
+                written += os.write(writer, payload[written:])
+        except OSError as error:
+            write_errors.append(error)
+        finally:
+            os.close(writer)
+
+    delivery = threading.Thread(
+        target=write_secret,
+        name="oidf-secret-fd-writer",
+        daemon=True,
+    )
+    delivery.start()
+    try:
+        yield reader
+    finally:
+        os.close(reader)
+        delivery.join()
+        if write_errors and sys.exc_info()[0] is None:
+            fail("suite token descriptor delivery failed")
 
 
 def main() -> int:
@@ -2488,7 +2555,6 @@ def main() -> int:
     config_names, aliases_by_config = write_plan_configs(
         suite_scripts,
         args.config_file_name,
-        args.config_env,
         args.config_json_file,
         target_issuer,
     )
@@ -2508,11 +2574,9 @@ def main() -> int:
 
     env = sanitized_runner_environment()
     env["CONFORMANCE_SERVER"] = args.conformance_server
-    token = None if args.no_api_token else non_empty_env(args.token_env)
-    if token is not None:
-        env["CONFORMANCE_TOKEN"] = token
-    else:
-        env.pop("CONFORMANCE_TOKEN", None)
+    token = suite_token(args)
+    env.pop("CONFORMANCE_TOKEN", None)
+    if token is None:
         env["CONFORMANCE_DEV_MODE"] = "1"
     if args.disable_ssl_verify:
         env["DISABLE_SSL_VERIFY"] = "1"
@@ -2520,31 +2584,16 @@ def main() -> int:
     if not args.list and not args.rerun:
         cleanup_existing_alias_plans(args.conformance_server, token, aliases)
 
-    command = official_runner_command(suite_scripts, runner)
-    if args.list:
-        command.append("--list")
-    if args.no_parallel:
-        command.append("--no-parallel")
-    if args.rerun:
-        command.extend(["--rerun", args.rerun])
     expected_failures_file = (
         Path(args.expected_failures_file).resolve() if args.expected_failures_file else None
     )
-    if expected_failures_file is not None:
-        command.extend(["--expected-failures-file", str(expected_failures_file)])
     expected_skips_file = None
     if args.expected_skips_file:
         expected_skips_file = Path(args.expected_skips_file).resolve()
-        command.extend(["--expected-skips-file", str(expected_skips_file)])
     export_dir = None
     if args.export_dir:
         export_dir = Path(args.export_dir).resolve()
         export_dir.mkdir(parents=True, exist_ok=True)
-        command.extend(["--export-dir", str(export_dir)])
-    if args.verbose:
-        command.append("--verbose")
-    for expression in expressions:
-        command.extend(shlex.split(expression))
 
     monitor_aliases = set() if args.list else aliases
     if monitor_aliases and any("ciba" in alias for alias in monitor_aliases):
@@ -2566,20 +2615,43 @@ def main() -> int:
         )
 
     try:
-        return run_official_runner(
-            command,
-            expressions,
-            suite_scripts,
-            env,
-            args.timeout_seconds,
-            args.conformance_server,
-            monitor_aliases,
-            token,
-            monitor_interval_seconds,
-            allowed_review_contexts_by_alias(aliases_by_config),
-            expected_problem_contexts_by_alias(expected_failures_file, aliases_by_config),
-            expected_skip_contexts_by_alias(expected_skips_file, aliases_by_config),
-        )
+        with inherited_token_descriptor(token) as token_fd:
+            command = official_runner_command(suite_scripts, runner, token_fd)
+            if args.list:
+                command.append("--list")
+            if args.no_parallel:
+                command.append("--no-parallel")
+            if args.rerun:
+                command.extend(["--rerun", args.rerun])
+            if expected_failures_file is not None:
+                command.extend(
+                    ["--expected-failures-file", str(expected_failures_file)]
+                )
+            if expected_skips_file is not None:
+                command.extend(["--expected-skips-file", str(expected_skips_file)])
+            if export_dir is not None:
+                command.extend(["--export-dir", str(export_dir)])
+            if args.verbose:
+                command.append("--verbose")
+            for expression in expressions:
+                command.extend(shlex.split(expression))
+            return run_official_runner(
+                command,
+                expressions,
+                suite_scripts,
+                env,
+                args.timeout_seconds,
+                args.conformance_server,
+                monitor_aliases,
+                token,
+                monitor_interval_seconds,
+                allowed_review_contexts_by_alias(aliases_by_config),
+                expected_problem_contexts_by_alias(
+                    expected_failures_file, aliases_by_config
+                ),
+                expected_skip_contexts_by_alias(expected_skips_file, aliases_by_config),
+                token_fd,
+            )
     finally:
         if export_dir is not None:
             sanitize_evidence_tree(export_dir)

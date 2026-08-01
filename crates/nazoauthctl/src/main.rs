@@ -48,6 +48,7 @@ Usage:
 
 Start here:
   nazoauthctl install --public-url https://auth.example
+  nazoauthctl [--config PATH] bootstrap-admin
   nazoauthctl [--config PATH] status
   nazoauthctl [--config PATH] doctor
   nazoauthctl [--config PATH] update --plan
@@ -55,6 +56,7 @@ Start here:
 
 Commands:
   install       Fresh Podman, Docker, or host installation
+  bootstrap-admin  Securely create the first administrator
   status        Machine-readable deployment and identity state
   doctor        Read-only health and security diagnostics
   check         Resolve and verify a candidate Release
@@ -88,6 +90,17 @@ Options:
 With managed dependencies, identities and secrets are generated automatically.
 External JSON keys: database_url, migration_database_url, valkey_url.
 Secret values are rejected in argv and ordinary environment variables."
+        }
+        cli::HelpTopic::BootstrapAdmin => {
+            "Usage:
+  nazoauthctl [--config PATH] bootstrap-admin [--yes]
+  nazoauthctl [--config PATH] bootstrap-admin --credentials-stdin --yes
+
+Interactive mode prompts for the administrator email and reads the password without
+echo. Non-interactive mode accepts only strict JSON on stdin with keys `email` and
+`password`. The private one-time bootstrap token is read from the exact managed
+runtime-owned mount and sent only in the HTTPS request body; it never enters argv, environment,
+configuration, logs, audit records, or command output."
         }
         cli::HelpTopic::Update => {
             "Usage:

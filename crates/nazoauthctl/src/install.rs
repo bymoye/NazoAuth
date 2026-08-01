@@ -42,7 +42,7 @@ pub(crate) fn prepare(
     config_path: &Path,
     mut options: InstallOptions,
 ) -> anyhow::Result<PreparedInstall> {
-    require_linux()?;
+    require_supported_install_platform()?;
     require_root()?;
     safe_absolute(config_path)?;
     safe_absolute(&options.data_root)?;
@@ -1553,14 +1553,18 @@ fn create_directory(path: &Path, mode: u32) -> anyhow::Result<()> {
     set_mode(path, mode)
 }
 
-fn require_linux() -> anyhow::Result<()> {
+fn require_supported_install_platform() -> anyhow::Result<()> {
     if test_mode() {
         return Ok(());
     }
-    if std::env::consts::OS != "linux" || std::env::consts::ARCH != "x86_64" {
-        bail!("standalone installation currently supports Linux x86_64");
+    if !install_platform_supported(std::env::consts::OS, std::env::consts::ARCH) {
+        bail!("install lifecycle supports only Linux x86_64 and aarch64");
     }
     Ok(())
+}
+
+fn install_platform_supported(os: &str, arch: &str) -> bool {
+    matches!((os, arch), ("linux", "x86_64" | "aarch64"))
 }
 
 fn require_root() -> anyhow::Result<()> {

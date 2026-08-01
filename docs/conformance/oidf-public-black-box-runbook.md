@@ -112,15 +112,8 @@ two separate production identities, the dynamic-registration/CIBA tokens, and
 a short-lived public-suite API token:
 
 ```sh
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-export OIDF_CONFORMANCE_TOKEN=...
-
-python scripts/run_public_oidf_conformance.py \
+secret-provider read nazoauth/oidf-run-secrets | \
+python scripts/run_public_oidf_conformance.py --secrets-stdin \
   --deployed-sha <deployed-sha> \
   --target-issuer https://issuer.example \
   --conformance-server https://suite.example \
@@ -132,6 +125,15 @@ python scripts/run_public_oidf_conformance.py \
   --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
   --proxy-executable /usr/sbin/nginx
 ```
+
+The input is strict JSON with exactly `oidf_applicant_email`,
+`oidf_applicant_password`, `oidf_admin_email`, `oidf_admin_password`,
+`oidf_dynamic_registration_initial_access_token`,
+`oidf_ciba_automated_decision_token`, and `oidf_conformance_token`. The same
+document may instead be supplied through `--secret-fd N` or a regular,
+single-link, current-user/root-owned mode-`0600` `--secret-file` on POSIX.
+Windows operators must use stdin or an inherited descriptor because POSIX mode
+bits do not prove a Windows DACL. No secret has an argv or environment fallback.
 
 The entry point verifies the deployed product commit, the explicitly selected
 official-suite commit, and clean tracked source trees. It then generates source-bound material,
@@ -155,10 +157,11 @@ Approval remains a real, auditable authorization event. Automation removes file
 copying, path inference, command assembly, and recovery work; it does not
 collapse applicant and approver identities.
 
-Runtime `OIDF_USER_EMAIL` and `OIDF_USER_PASSWORD` values are authoritative for
-browser automation. Matching `nazo` fields in plan configuration are an
-explicit fallback for local operator runs only. GitHub Actions secrets override
-them so rotating a secret cannot silently leave stale plan credentials active.
+The unified runner idempotently provisions the applicant through administrator
+login, CSRF, and public `POST /admin/users`, then verifies the applicant by a
+normal public login. Browser credentials are copied only into mode-`0600`
+private plan files. Spawned processes receive a closed environment allowlist;
+unknown parent settings are not copied at all.
 
 ## 1. Prepare immutable runner material
 
@@ -169,14 +172,18 @@ caller-supplied values:
 export OIDF_TARGET_ISSUER=https://issuer.example
 export OIDF_MTLS_TARGET_ISSUER=https://mtls.issuer.example
 export OIDF_SUITE_BASE_URL=https://suite.example
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-python scripts/prepare_oidf_black_box.py
+secret-provider mount nazoauth/oidf-preparation /run/secrets/nazoauth-oidf-preparation.json
+chmod 0600 /run/secrets/nazoauth-oidf-preparation.json
+python scripts/prepare_oidf_black_box.py \
+  --secret-file /run/secrets/nazoauth-oidf-preparation.json
 ```
+
+The preparation document is a closed four-field JSON object containing only
+`oidf_applicant_email`, `oidf_applicant_password`,
+`oidf_dynamic_registration_initial_access_token`, and
+`oidf_ciba_automated_decision_token`. Remove the provider mount immediately
+after preparation. `--secrets-stdin` and `--secret-fd N` accept the same closed
+document when a provider can stream it without a filesystem mount.
 
 The command generates runner configurations, keys, certificates, an onboarding
 manifest, and exact plan/skip/review registries under `runtime/oidf`. These are
@@ -403,8 +410,12 @@ gh workflow run openid4vc-conformance.yml \
   -f target_origin=https://issuer.example
 ```
 
-Both workflows read rotated suite tokens, automation accounts, and delivered
-client material from the `oidf-conformance` environment. The workflow isolates
+GitHub Actions exposes repository secrets to one short-lived materializer step
+because that platform boundary has no native inherited-FD input. That step is
+the only process with secret environment entries; it writes mode-`0600` files
+under `RUNNER_TEMP`, and later steps receive only paths or inherited FDs and
+delete the directory with `if: always()`. This narrows but does not pretend to
+eliminate the GitHub runner's trust boundary. The workflow isolates
 the OIDC/FAPI concurrent groups, four CIBA groups, and two browser-sensitive
 plans. OpenID4VC runs its 17 plans in bounded groups. Operators do not manually
 split plans, copy configuration, or alter runner concurrency.

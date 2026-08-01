@@ -466,7 +466,11 @@ if [[ "$url" == *"openid-configuration" ]]; then
   exit 0
 fi
 if [[ "$url" == *"/ui/" ]]; then
-  printf '%s\n' '<!doctype html><title>NazoAuth</title>'
+  if [ "$(cat "$FAKE_STATE/revision")" = "$FAKE_BACKEND_COMMIT" ]; then
+    printf 'new-ui\n'
+  else
+    printf 'old-ui\n'
+  fi
   exit 0
 fi
 if [[ "$url" == *"/ready" ]]; then
@@ -830,10 +834,12 @@ class ReleaseUpdateTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('artifact="nazoauthctl-$target"', bootstrap)
-        self.assertIn("gh attestation verify", bootstrap)
-        self.assertIn("--predicate-type", bootstrap)
-        self.assertIn("--source-ref", bootstrap)
-        self.assertIn("--deny-self-hosted-runners", bootstrap)
+        self.assertNotIn("gh attestation verify", bootstrap)
+        self.assertIn("/attestations/sha256%3A$artifact_digest", bootstrap)
+        self.assertIn("verify-blob-attestation", bootstrap)
+        self.assertIn("--certificate-github-workflow-ref", bootstrap)
+        self.assertIn("--certificate-github-workflow-sha", bootstrap)
+        self.assertIn('values != ["github-hosted"]', bootstrap)
         self.assertNotIn("nazoauthctl.bundle", bootstrap)
         for hardened_argument in (
             '"0:0"',
@@ -844,6 +850,11 @@ class ReleaseUpdateTests(unittest.TestCase):
             '"/root/.sigstore:rw,noexec,nosuid,nodev,size=16m"',
         ):
             self.assertIn(hardened_argument, source)
+        self.assertIn('format!("{}:/work:ro,Z", work.display())', source)
+        self.assertIn('"--proto-redir"', source)
+        self.assertIn('"--max-filesize"', source)
+        self.assertIn("artifact.size,", source)
+        self.assertIn("served frontend does not match the signed runtime cache", source)
         self.assertIn("try_lock()", source)
         self.assertIn("\"pg_restore\"", source)
         self.assertIn("restore_snapshots", source)
@@ -957,7 +968,11 @@ class ReleaseUpdateTests(unittest.TestCase):
         self.assertFalse(manifest["rollback"]["irreversible_migration"])
         self.assertEqual(manifest["target"], target)
         self.assertEqual(manifest["embedded"]["build_id"], "github:123:1")
-        self.assertEqual(manifest["rollback"]["migration_floor"], "20260731000200")
+        self.assertEqual(manifest["rollback"]["migration_floor"], "20260801000100")
+        self.assertIn(
+            "refuses schema downgrade",
+            manifest["rollback"]["rationale"],
+        )
         self.assertEqual(len(manifest["artifacts"]["binary"]["sha256"]), 64)
 
     def test_manifest_rejects_non_tag_version(self) -> None:

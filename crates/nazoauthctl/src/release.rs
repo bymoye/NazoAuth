@@ -30,6 +30,10 @@ const RELEASE_PREDICATE: &str = "https://nazo.run/attestations/release-manifest/
 const SIGSTORE_BUNDLE_MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
 const MAX_ATTESTATIONS: usize = 20;
 const ATTESTATION_PAGE_SIZE: usize = MAX_ATTESTATIONS + 1;
+const MAX_GITHUB_JSON_BYTES: u64 = 1024 * 1024;
+const MAX_UNATTESTED_UPDATER_BYTES: u64 = 256 * 1024 * 1024;
+const GITHUB_REQUEST_SECONDS: u64 = 30;
+const RELEASE_DOWNLOAD_SECONDS: u64 = 300;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,7 +156,13 @@ impl VerifiedRelease {
             ""
         };
         let updater = format!("nazoauthctl-{target}{suffix}");
-        download(repository, &version, &updater, work.path())?;
+        download(
+            repository,
+            &version,
+            &updater,
+            work.path(),
+            MAX_UNATTESTED_UPDATER_BYTES,
+        )?;
         let identity = format!(
             "https://github.com/{repository}/.github/workflows/release-security.yml@refs/tags/{version}"
         );
@@ -184,11 +194,34 @@ impl VerifiedRelease {
                 &self.manifest.version,
                 &artifact.name,
                 self.work.path(),
+                artifact.size,
             )?;
-            verify_artifact(&path, artifact)?;
         }
+        verify_artifact(&path, artifact)?;
         Ok(path)
     }
+}
+
+fn bounded_https_curl_arguments(max_time: u64, max_filesize: u64) -> Vec<String> {
+    vec![
+        "--fail".to_owned(),
+        "--silent".to_owned(),
+        "--show-error".to_owned(),
+        "--location".to_owned(),
+        "--proto".to_owned(),
+        "=https".to_owned(),
+        "--proto-redir".to_owned(),
+        "=https".to_owned(),
+        "--max-redirs".to_owned(),
+        "5".to_owned(),
+        "--tlsv1.2".to_owned(),
+        "--connect-timeout".to_owned(),
+        "10".to_owned(),
+        "--max-time".to_owned(),
+        max_time.to_string(),
+        "--max-filesize".to_owned(),
+        max_filesize.to_string(),
+    ]
 }
 
 fn verified_attested_manifest(
@@ -201,20 +234,11 @@ fn verified_attested_manifest(
 ) -> anyhow::Result<ReleaseManifest> {
     let digest = sha256(&work.join(blob))?;
     let response = Process::new("curl")
+        .args(bounded_https_curl_arguments(
+            GITHUB_REQUEST_SECONDS,
+            MAX_GITHUB_JSON_BYTES,
+        ))
         .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--tlsv1.2",
-            "--max-time",
-            "30",
-            "--max-filesize",
-            "10485760",
             "-H",
             "Accept: application/vnd.github+json",
             "-H",
@@ -351,16 +375,11 @@ fn resolve_version(repository: &str, requested: Option<&str>) -> anyhow::Result<
         return Ok(version.to_owned());
     }
     let response = Process::new("curl")
+        .args(bounded_https_curl_arguments(
+            GITHUB_REQUEST_SECONDS,
+            MAX_GITHUB_JSON_BYTES,
+        ))
         .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--tlsv1.2",
             "-H",
             "Accept: application/vnd.github+json",
             &format!("https://api.github.com/repos/{repository}/releases/latest"),
@@ -378,20 +397,22 @@ fn resolve_version(repository: &str, requested: Option<&str>) -> anyhow::Result<
     Ok(version.to_owned())
 }
 
-fn download(repository: &str, version: &str, name: &str, destination: &Path) -> anyhow::Result<()> {
+fn download(
+    repository: &str,
+    version: &str,
+    name: &str,
+    destination: &Path,
+    maximum_size: u64,
+) -> anyhow::Result<()> {
+    if maximum_size == 0 {
+        bail!("release artifact has no bounded download size");
+    }
     Process::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--tlsv1.2",
-            "--output",
-        ])
+        .args(bounded_https_curl_arguments(
+            RELEASE_DOWNLOAD_SECONDS,
+            maximum_size,
+        ))
+        .arg("--output")
         .arg(destination.join(name))
         .arg(format!(
             "https://github.com/{repository}/releases/download/{version}/{name}"
@@ -450,7 +471,7 @@ fn containerized_cosign_attestation_arguments(
         "--tmpfs".to_owned(),
         "/root/.sigstore:rw,noexec,nosuid,nodev,size=16m".to_owned(),
         "-v".to_owned(),
-        format!("{}:/work:ro", work.display()),
+        format!("{}:/work:ro,Z", work.display()),
         COSIGN_IMAGE.to_owned(),
         "verify-blob-attestation".to_owned(),
         "--bundle".to_owned(),

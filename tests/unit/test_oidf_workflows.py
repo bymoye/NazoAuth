@@ -9,6 +9,67 @@ def workflow_heredoc_json(workflow: str, name: str):
     return json.loads(payload)
 
 class OidfWorkflowTests(unittest.TestCase):
+    def test_github_secrets_are_scoped_to_the_single_materializer_step_per_job(self):
+        root = Path(__file__).resolve().parents[2]
+        workflows = {
+            "oidf-conformance.yml": {
+                "jobs": 1,
+                "secrets": (
+                    "OIDF_PLAN_CONFIG_AGE_IDENTITY",
+                    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
+                    "OIDF_CONFORMANCE_TOKEN",
+                ),
+            },
+            "oidf-conformance-full.yml": {
+                "jobs": 2,
+                "secrets": (
+                    "OIDF_PLAN_CONFIG_AGE_IDENTITY",
+                    "OIDF_MTLS_MATERIAL_AGE_IDENTITY",
+                    "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
+                    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
+                    "OIDF_DELIVERED_CLIENT_MATERIAL_JSON",
+                    "OIDF_CONFORMANCE_TOKEN",
+                    "OIDF_USER_EMAIL",
+                    "OIDF_USER_PASSWORD",
+                ),
+            },
+            "openid4vc-conformance.yml": {
+                "jobs": 1,
+                "secrets": (
+                    "OIDF_CONFORMANCE_TOKEN",
+                    "OPENID4VC_OIDF_BASE_CONFIG_JSON",
+                    "OPENID4VC_OIDF_MTLS_CONFIG_JSON",
+                    "OPENID4VC_OIDF_DRIVER_CONFIG_JSON",
+                    "OIDF_DELIVERED_CLIENT_MATERIAL_JSON",
+                    "OIDF_USER_EMAIL",
+                    "OIDF_USER_PASSWORD",
+                    "OIDF_ADMIN_EMAIL",
+                    "OIDF_ADMIN_PASSWORD",
+                ),
+            },
+        }
+        for name, contract in workflows.items():
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            jobs = contract["jobs"]
+            self.assertEqual(
+                workflow.count("materialize_github_oidf_secrets.py"),
+                jobs,
+                name,
+            )
+            self.assertEqual(
+                workflow.count('rm -rf -- "$RUNNER_TEMP/oidf-secrets"'),
+                jobs,
+                name,
+            )
+            for secret in contract["secrets"]:
+                self.assertEqual(
+                    workflow.count(f"${{{{ secrets.{secret} }}}}"),
+                    jobs,
+                    f"{name}: {secret} must appear only on its materializer step",
+                )
+
     def test_public_onboarding_workflow_derives_the_complete_ciba_matrix(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (
@@ -101,16 +162,16 @@ class OidfWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow.count(
-                "--dynamic-registration-token-file dynamic-registration-initial-access-token"
+                '--dynamic-registration-token-file "$RUNNER_TEMP/oidf-secrets/dynamic-registration-token"'
             ),
             2,
         )
         self.assertEqual(
-            workflow.count(
-                "unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN "
-                "OIDF_CIBA_AUTOMATED_DECISION_TOKEN "
-                "OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-            ),
+            workflow.count("python scripts/materialize_github_oidf_secrets.py"),
+            2,
+        )
+        self.assertEqual(
+            workflow.count('rm -rf -- "$RUNNER_TEMP/oidf-secrets"'),
             2,
         )
 

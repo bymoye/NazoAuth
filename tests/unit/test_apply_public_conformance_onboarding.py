@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -23,6 +24,37 @@ def load_module():
 
 
 class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
+    def test_http_failure_does_not_include_response_body_in_error(self):
+        module = load_module()
+        response_secret = "server-leaked-password"
+        http_error = urllib.error.HTTPError(
+            "https://issuer.example/admin/users",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(response_secret.encode("utf-8")),
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = http_error
+        session = module.ControlPlaneSession(
+            origin="https://issuer.example",
+            opener=opener,
+            csrf_token="csrf-token",
+        )
+
+        with self.assertRaises(module.OnboardingHttpError) as raised:
+            session.request_json(
+                "POST",
+                "/admin/users",
+                {"email": "applicant@example.test", "password": "request-secret"},
+                expected_status=201,
+                csrf=True,
+            )
+
+        self.assertEqual(str(raised.exception), "POST /admin/users returned HTTP 409")
+        self.assertNotIn(response_secret, str(raised.exception))
+        self.assertNotIn("request-secret", str(raised.exception))
+
     def test_credentials_are_read_from_a_bounded_fd_without_environment_fallback(self):
         module = load_module()
         read_fd, write_fd = os.pipe()
@@ -119,6 +151,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
         http_error = urllib.error.HTTPError(
             "https://issuer.example/auth/login", 401, "Unauthorized", {}, None
         )
+        self.addCleanup(http_error.close)
         authentication_error = module.OnboardingError("POST /auth/login returned 401")
         authentication_error.__cause__ = http_error
         with (

@@ -5,6 +5,7 @@ fn every_public_help_topic_is_complete_without_runtime_state() {
     for (topic, expected) in [
         (cli::HelpTopic::TopLevel, "Commands:"),
         (cli::HelpTopic::Install, "--external-dependencies"),
+        (cli::HelpTopic::BootstrapAdmin, "--credentials-stdin"),
         (cli::HelpTopic::Update, "--accept-migration-barrier"),
         (cli::HelpTopic::Keys, "register-external"),
         (cli::HelpTopic::Audit, "audit verify"),

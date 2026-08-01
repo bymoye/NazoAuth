@@ -21,6 +21,12 @@ diesel::table! {
         token_hash -> Varchar,
         expires_at -> Timestamptz,
         consumed_at -> Nullable<Timestamptz>,
+        request_id -> Nullable<Varchar>,
+        request_email_hash -> Nullable<Varchar>,
+        claimed_user_id -> Nullable<Uuid>,
+        claim_result -> Nullable<Varchar>,
+        receipt_version -> Nullable<Int2>,
+        claimed_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
@@ -54,6 +60,7 @@ diesel::table! {
         id -> Uuid, tenant_id -> Uuid, category -> Varchar, event_type -> Varchar,
         outcome -> Varchar, actor_id -> Nullable<Uuid>, target_user_id -> Nullable<Uuid>,
         reason_code -> Varchar, occurred_at -> Timestamptz,
+        request_id -> Nullable<Varchar>,
     }
 }
 
@@ -308,6 +315,7 @@ diesel::joinable!(user_client_grants -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
+    initial_admin_bootstrap,
     user_totp_credentials,
     user_mfa_backup_codes,
     user_mfa_remembered_devices,

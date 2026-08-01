@@ -69,6 +69,38 @@ class ReleaseGovernanceTests(unittest.TestCase):
         )
         self.assertNotIn("nazoauthctl", containerfile)
 
+    def test_release_scans_a_validated_read_only_oci_layout(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        scan = workflow.split("- name: Scan the exact OCI archive before publication", 1)[
+            1
+        ].split("- name: Record the closed OCI descriptor", 1)[0]
+
+        self.assertIn('archive="${{ runner.temp }}/nazoauth-image.oci.tar"', scan)
+        self.assertIn('layout="$(mktemp -d "${RUNNER_TEMP}/nazoauth-image.oci.XXXXXX")"', scan)
+        self.assertIn("with tarfile.open(archive, mode=\"r:*\") as source:", scan)
+        self.assertIn("member.isfile() or member.isdir()", scan)
+        self.assertIn('or ".." in parts', scan)
+        self.assertIn('source.extractall(layout, members=members, filter="data")', scan)
+        self.assertIn('metadata != {"imageLayoutVersion": "1.0.0"}', scan)
+        self.assertIn("OCI layout has unexpected root entries", scan)
+        self.assertIn("OCI layout contains an unexpected directory", scan)
+        self.assertIn("hashlib.sha256(payload).hexdigest()", scan)
+        self.assertIn("blobs.get(digest) != size", scan)
+        self.assertIn('{("linux", "amd64"), ("linux", "arm64")}', scan)
+        self.assertIn('--security-opt no-new-privileges', scan)
+        self.assertIn('-v "$layout:/image:ro"', scan)
+        self.assertIn("--input /image", scan)
+        self.assertNotIn("--input /image.tar", scan)
+        self.assertEqual(
+            scan.count(
+                "docker.io/aquasec/trivy:0.72.0@sha256:"
+                "cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+            ),
+            1,
+        )
+
     def test_public_quick_start_is_platform_neutral_verified_controller(self) -> None:
         public_guides = [
             ROOT / "README.md",
@@ -131,6 +163,53 @@ class ReleaseGovernanceTests(unittest.TestCase):
             release,
             r"target/release/nazo-oauth-(?:server|migrate|keyctl)",
         )
+
+    def test_tag_release_requires_the_exact_workspace_package_version(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        validation = release.split("- name: Validate immutable release input", 1)[1].split(
+            "- name: Verify the independently released frontend subject", 1
+        )[0]
+
+        self.assertIn('if [[ "$GITHUB_REF_TYPE" = tag ]]; then', validation)
+        self.assertIn(
+            '[[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
+            validation,
+        )
+        self.assertNotIn("[0-9A-Za-z.-]+", validation)
+        self.assertIn('release_version="${GITHUB_REF_NAME#v}"', validation)
+        self.assertIn('["workspace"]["package"]["version"]', validation)
+        self.assertIn(
+            "cargo metadata --locked --no-deps --format-version 1", validation
+        )
+        self.assertIn(".workspace_members[] as $member", validation)
+        self.assertIn("select(.id == $member and .version != $version)", validation)
+        self.assertIn("does not match workspace package versions", validation)
+
+        policy = release.split("  policy:", 1)[1].split("  platform-binaries:", 1)[0]
+        self.assertLess(
+            policy.index("uses: dtolnay/rust-toolchain@"),
+            policy.index("- name: Validate immutable release input"),
+        )
+
+    def test_branch_dispatch_keeps_the_native_matrix_without_publishing(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        platform_binaries = release.split("  platform-binaries:", 1)[1].split(
+            "  container-image:", 1
+        )[0]
+
+        self.assertIn("workflow_dispatch:", release)
+        self.assertIn("    needs: policy", platform_binaries)
+        self.assertNotIn("github.ref_type == 'tag'", platform_binaries)
+        for job in ("attest-platform-binaries", "publish-container", "publish-release"):
+            self.assertRegex(
+                release,
+                rf"(?m)^  {re.escape(job)}:\n    if: github\.ref_type == 'tag'$",
+                job,
+            )
 
     def test_release_matrix_is_native_smoked_and_binary_only(self) -> None:
         release = (

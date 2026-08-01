@@ -109,7 +109,7 @@ Podman、SELinux/AppArmor、TPM/PKCS#11/HSM 和外部审计继续缩小该残余
 - 不要求 NazoAuth 正在在线运行才能进行迁移、恢复或 break-glass 操作。
 - 不让 `nazoauthctl` 依赖完整授权服务器实现。
 - 不因控制面协议而改变对外 OAuth/OIDC/FAPI 行为。
-- 默认支持当前声明的 Linux x86_64 部署边界；新增平台必须有真实运行证据。
+- 默认支持当前声明的 Linux x86_64 与 aarch64 部署边界；新增平台必须有真实运行证据。
 
 ### 4.3 非目标
 

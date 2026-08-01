@@ -34,6 +34,14 @@ class OnboardingError(RuntimeError):
     pass
 
 
+class OnboardingHttpError(OnboardingError):
+    def __init__(self, method: str, path: str, status: int) -> None:
+        super().__init__(f"{method} {path} returned HTTP {status}")
+        self.method = method
+        self.path = path
+        self.status = status
+
+
 def closed_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, child in pairs:
@@ -212,10 +220,10 @@ class ControlPlaneSession:
 
             csrf_token = body.get("csrf_token") if isinstance(body, dict) else None
             if not isinstance(csrf_token, str) or not csrf_token:
-                raise OnboardingError(f"login for {email} did not establish a CSRF token")
+                raise OnboardingError("login did not establish a CSRF token")
             if body.get("mfa_required") is True:
                 raise OnboardingError(
-                    f"login for {email} requires interactive MFA; use an approved automation identity"
+                    "login requires interactive MFA; use an approved automation identity"
                 )
             session.csrf_token = csrf_token
             return session
@@ -247,9 +255,9 @@ class ControlPlaneSession:
         try:
             response = self.opener.open(request, timeout=DEFAULT_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as error:
-            body = error.read(MAX_RESPONSE_BYTES + 1)
-            detail = body[:MAX_RESPONSE_BYTES].decode("utf-8", errors="replace")
-            raise OnboardingError(f"{method} {path} returned {error.code}: {detail}") from error
+            with error:
+                error.read(MAX_RESPONSE_BYTES + 1)
+                raise OnboardingHttpError(method, path, error.code) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise OnboardingError(f"{method} {path} failed: {error}") from error
         with response:
@@ -257,10 +265,7 @@ class ControlPlaneSession:
             if len(body) > MAX_RESPONSE_BYTES:
                 raise OnboardingError(f"{method} {path} response exceeds {MAX_RESPONSE_BYTES} bytes")
             if response.status != expected_status:
-                detail = body.decode("utf-8", errors="replace")
-                raise OnboardingError(
-                    f"{method} {path} returned {response.status}, expected {expected_status}: {detail}"
-                )
+                raise OnboardingHttpError(method, path, response.status)
             final = urllib.parse.urlsplit(response.geturl())
             if f"{final.scheme}://{final.netloc}" != self.origin:
                 raise OnboardingError(f"{method} {path} escaped the configured origin")
@@ -313,7 +318,7 @@ def replace_client_material(value: Any, logical_id: str, actual_id: str, secret:
 
 def write_runner_env(
     path: Path,
-    plan_document: dict[str, Any],
+    plan_config_path: Path,
     plan_set_path: Path,
     plan_manifest_path: Path,
 ) -> None:
@@ -325,9 +330,10 @@ def write_runner_env(
         path,
         "\n".join(
             (
-                f"OIDF_PLAN_CONFIG_JSON={json.dumps(plan_document, separators=(',', ':'))}",
-                f"OIDF_PLAN_SET_JSON={json.dumps(plan_set, separators=(',', ':'))}",
-                f"OIDF_PLAN_MANIFEST_JSON={json.dumps(plan_manifest, separators=(',', ':'))}",
+                "# Secret-free path hints; pass these files explicitly to the runner.",
+                f"OIDF_PLAN_CONFIG_FILE={plan_config_path.name}",
+                f"OIDF_PLAN_SET_FILE={plan_set_path.name}",
+                f"OIDF_PLAN_MANIFEST_FILE={plan_manifest_path.name}",
                 "",
             )
         ),
@@ -520,7 +526,12 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     state["trust_bundle_sha256"] = hashlib.sha256(bundle).hexdigest()
     write_private_json(args.plan_configs, plan_document)
     if not args.no_runner_env:
-        write_runner_env(args.runner_env, plan_document, args.plan_set, args.plan_manifest)
+        write_runner_env(
+            args.runner_env,
+            args.plan_configs,
+            args.plan_set,
+            args.plan_manifest,
+        )
     write_private_json(
         args.delivered_client_material,
         {

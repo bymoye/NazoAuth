@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import json
 import os
 import queue
@@ -13,6 +14,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -21,6 +23,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
+from oidf_secret_input import (  # noqa: E402
+    SecretInputError,
+    add_secret_source_arguments,
+    read_secret_document,
+    sanitized_environment,
+)
 from run_oidf_conformance import (  # noqa: E402
     allowed_review_contexts_by_alias,
     expected_problem_contexts_by_alias,
@@ -30,14 +38,16 @@ from run_oidf_conformance import (  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_ENV = (
+REQUIRED_SECRET_FIELDS = (
     "OIDF_APPLICANT_EMAIL",
     "OIDF_APPLICANT_PASSWORD",
     "OIDF_ADMIN_EMAIL",
     "OIDF_ADMIN_PASSWORD",
     "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
     "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
+    "OIDF_CONFORMANCE_TOKEN",
 )
+SECRET_INPUT_FIELDS = tuple(name.lower() for name in REQUIRED_SECRET_FIELDS)
 OFFICIAL_INGRESS_ONLY_WARNING_CONDITIONS = frozenset({"EnsureIncomingTls13"})
 MAX_SAFE_GROUP_WORKERS = 4
 MAX_BROWSER_GROUP_WORKERS = 2
@@ -59,8 +69,16 @@ def command(
     *,
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> None:
-    subprocess.run(args, cwd=ROOT, env=env, input=stdin, check=True)
+    subprocess.run(
+        args,
+        cwd=ROOT,
+        env=env,
+        input=stdin,
+        pass_fds=pass_fds,
+        check=True,
+    )
 
 
 def output(args: list[str], *, cwd: Path = ROOT) -> str:
@@ -116,12 +134,46 @@ def cleanup_suite_runner_configs(suite_dir: Path, work_dir: Path) -> None:
         target.unlink(missing_ok=True)
 
 
-def required_environment(token_env: str) -> dict[str, str]:
-    names = (*REQUIRED_ENV, token_env)
-    missing = [name for name in names if not os.environ.get(name, "").strip()]
-    if missing:
-        raise PublicRunError(f"missing required environment variables: {', '.join(missing)}")
-    return os.environ.copy()
+def normalized_secrets(value: dict[str, str]) -> dict[str, str]:
+    return {
+        name: value[name.lower()]
+        for name in REQUIRED_SECRET_FIELDS
+    }
+
+
+@contextlib.contextmanager
+def secret_pipe(value: str):
+    reader, writer = os.pipe()
+    write_errors: list[OSError] = []
+
+    def write_secret() -> None:
+        payload = value.encode("utf-8")
+        try:
+            written = 0
+            while written < len(payload):
+                written += os.write(writer, payload[written:])
+        except OSError as error:
+            write_errors.append(error)
+        finally:
+            os.close(writer)
+
+    delivery = threading.Thread(
+        target=write_secret,
+        name="oidf-secret-fd-writer",
+        daemon=True,
+    )
+    delivery.start()
+    try:
+        yield reader
+    finally:
+        delivery.join(timeout=5)
+        if delivery.is_alive():
+            os.close(reader)
+            delivery.join()
+            raise PublicRunError("suite token descriptor was not consumed within its bound")
+        os.close(reader)
+        if write_errors and sys.exc_info()[0] is None:
+            raise PublicRunError("suite token descriptor delivery failed") from write_errors[0]
 
 
 def suite_request(server: str, token: str | None) -> int:
@@ -135,8 +187,9 @@ def suite_request(server: str, token: str | None) -> int:
             response.read(1024 * 1024 + 1)
             return response.status
     except urllib.error.HTTPError as error:
-        error.read(1024 * 1024 + 1)
-        return error.code
+        with error:
+            error.read(1024 * 1024 + 1)
+            return error.code
 
 
 def verify_suite_boundary(server: str, token: str) -> None:
@@ -239,22 +292,47 @@ def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
     ]
 
 
-def onboarding_credentials(env: dict[str, str]) -> tuple[bytes, dict[str, str]]:
+def onboarding_credentials(secrets: dict[str, str]) -> bytes:
     document = {
-        "applicant_email": env["OIDF_APPLICANT_EMAIL"],
-        "applicant_password": env["OIDF_APPLICANT_PASSWORD"],
-        "admin_email": env["OIDF_ADMIN_EMAIL"],
-        "admin_password": env["OIDF_ADMIN_PASSWORD"],
+        "applicant_email": secrets["OIDF_APPLICANT_EMAIL"],
+        "applicant_password": secrets["OIDF_APPLICANT_PASSWORD"],
+        "admin_email": secrets["OIDF_ADMIN_EMAIL"],
+        "admin_password": secrets["OIDF_ADMIN_PASSWORD"],
     }
-    child_env = env.copy()
-    for name in (
-        "OIDF_APPLICANT_EMAIL",
-        "OIDF_APPLICANT_PASSWORD",
-        "OIDF_ADMIN_EMAIL",
-        "OIDF_ADMIN_PASSWORD",
-    ):
-        child_env.pop(name, None)
-    return json.dumps(document, separators=(",", ":")).encode("utf-8"), child_env
+    return json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+
+def provisioning_args(issuer: str) -> list[str]:
+    return [
+        sys.executable,
+        str(ROOT / "scripts" / "provision_public_oidf_applicant.py"),
+        "--target-issuer",
+        issuer,
+        "--secrets-stdin",
+    ]
+
+
+@contextlib.contextmanager
+def private_secret_file(directory: Path, document: dict[str, str]):
+    descriptor, name = tempfile.mkstemp(
+        dir=directory,
+        prefix=".oidf-secrets-",
+        suffix=".json",
+    )
+    path = Path(name)
+    try:
+        payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        path.chmod(0o600)
+        yield path
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
 
 
 def filter_problem_records(
@@ -442,8 +520,6 @@ def prepare_group_invocations(
             str(work_dir / "oidf-plan-configs.json"),
             "--target-issuer",
             args.target_issuer,
-            "--token-env",
-            args.token_env,
             "--export-dir",
             str(args.export_dir / name),
             "--expected-skips-file",
@@ -516,6 +592,7 @@ def run_group_phase(
     suite_dirs: tuple[Path, ...],
     workers: int,
     env: dict[str, str],
+    suite_token: str,
 ) -> None:
     if not invocations:
         return
@@ -531,7 +608,9 @@ def run_group_phase(
                 for value in invocation
             ]
             print(f"OIDF {phase} group start: {name}", flush=True)
-            command(resolved, env=env)
+            with secret_pipe(suite_token) as descriptor:
+                resolved.extend(["--token-fd", str(descriptor)])
+                command(resolved, env=env, pass_fds=(descriptor,))
             print(f"OIDF {phase} group complete: {name}", flush=True)
         finally:
             available.put(suite_dir)
@@ -555,7 +634,12 @@ def run_group_phase(
         raise ExceptionGroup(f"OIDF {phase} group execution failed", failures)
 
 
-def run_plan_groups(args: argparse.Namespace, work_dir: Path, env: dict[str, str]) -> None:
+def run_plan_groups(
+    args: argparse.Namespace,
+    work_dir: Path,
+    env: dict[str, str],
+    suite_token: str,
+) -> None:
     safe_workers = getattr(args, "safe_group_workers", 1)
     browser_workers = getattr(args, "browser_group_workers", 1)
     invocations = prepare_group_invocations(args, work_dir)
@@ -587,9 +671,16 @@ def run_plan_groups(args: argparse.Namespace, work_dir: Path, env: dict[str, str
 
     failure: BaseException | None = None
     try:
-        run_group_phase("safe", phases["safe"], suite_dirs, safe_workers, env)
-        run_group_phase("ciba", phases["ciba"], suite_dirs, 1, env)
-        run_group_phase("browser", phases["browser"], suite_dirs, browser_workers, env)
+        run_group_phase("safe", phases["safe"], suite_dirs, safe_workers, env, suite_token)
+        run_group_phase("ciba", phases["ciba"], suite_dirs, 1, env, suite_token)
+        run_group_phase(
+            "browser",
+            phases["browser"],
+            suite_dirs,
+            browser_workers,
+            env,
+            suite_token,
+        )
     except BaseException as error:
         failure = error
     finally:
@@ -693,8 +784,9 @@ def run(args: argparse.Namespace) -> None:
     if args.deployed_source_dir != ROOT or args.deployed_sha != args.runner_sha:
         verify_source(args.deployed_source_dir, args.deployed_sha, "deployed")
     verify_suite(args.suite_dir, args.suite_revision)
-    env = required_environment(args.token_env)
-    env.update(
+    secret_document = read_secret_document(args, required_fields=SECRET_INPUT_FIELDS)
+    secrets = normalized_secrets(secret_document)
+    env = sanitized_environment(
         {
             "OIDF_TARGET_ISSUER": args.target_issuer,
             "OIDF_MTLS_TARGET_ISSUER": args.target_issuer,
@@ -703,24 +795,52 @@ def run(args: argparse.Namespace) -> None:
             "OIDF_RUNTIME_DIR": str(args.work_dir),
         }
     )
-    credentials, onboarding_env = onboarding_credentials(env)
+    credentials = onboarding_credentials(secrets)
     args.work_dir.parent.mkdir(parents=True, exist_ok=True)
     args.export_dir.parent.mkdir(parents=True, exist_ok=True)
     proxy = ProxyTrust(args.proxy_trust_bundle, args.proxy_executable, args.work_dir)
     state_file = args.work_dir / "oidf-onboarding-state.json"
     failure: BaseException | None = None
     try:
-        command([sys.executable, str(ROOT / "scripts" / "prepare_oidf_black_box.py")], env=env)
+        command(provisioning_args(args.target_issuer), env=env, stdin=credentials)
+        preparation_secrets = {
+            field: secret_document[field]
+            for field in (
+                "oidf_applicant_email",
+                "oidf_applicant_password",
+                "oidf_dynamic_registration_initial_access_token",
+                "oidf_ciba_automated_decision_token",
+            )
+        }
+        with private_secret_file(args.work_dir.parent, preparation_secrets) as secret_file:
+            command(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "prepare_oidf_black_box.py"),
+                    "--secret-file",
+                    str(secret_file),
+                ],
+                env=env,
+            )
         protect_directory(args.work_dir)
         command(
             onboarding_args("apply", args.work_dir, args.target_issuer),
-            env=onboarding_env,
+            env=env,
             stdin=credentials,
         )
         proxy.install(args.work_dir / "approved-mtls-trust-anchors.pem")
-        verify_suite_boundary(args.conformance_server, env[args.token_env])
-        run_plan_groups(args, args.work_dir, env)
-        inspect_complete_matrix(args, args.work_dir, env[args.token_env])
+        verify_suite_boundary(args.conformance_server, secrets["OIDF_CONFORMANCE_TOKEN"])
+        run_plan_groups(
+            args,
+            args.work_dir,
+            env,
+            secrets["OIDF_CONFORMANCE_TOKEN"],
+        )
+        inspect_complete_matrix(
+            args,
+            args.work_dir,
+            secrets["OIDF_CONFORMANCE_TOKEN"],
+        )
     except BaseException as error:
         failure = error
     finally:
@@ -734,7 +854,7 @@ def run(args: argparse.Namespace) -> None:
             try:
                 command(
                     onboarding_args("cleanup", args.work_dir, args.target_issuer),
-                    env=onboarding_env,
+                    env=env,
                     stdin=credentials,
                 )
             except BaseException as error:
@@ -776,7 +896,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-namespace", required=True)
     parser.add_argument("--proxy-trust-bundle", type=Path, required=True)
     parser.add_argument("--proxy-executable", type=Path, required=True)
-    parser.add_argument("--token-env", default="OIDF_CONFORMANCE_TOKEN")
+    add_secret_source_arguments(parser)
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--monitor-interval-seconds", type=int, default=30)
     parser.add_argument(
@@ -803,7 +923,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     try:
         run(parse_args(argv))
-    except (PublicRunError, subprocess.CalledProcessError) as error:
+    except (PublicRunError, SecretInputError, subprocess.CalledProcessError) as error:
         raise SystemExit(str(error)) from error
     return 0
 

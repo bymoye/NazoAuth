@@ -36,9 +36,11 @@ signing keys, and avatars use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
 
-When the database has no administrator, the server log reports a time-bounded,
-single-use setup URL. Treat it as a password; it creates the first administrator
-without requiring SMTP.
+When the database has no administrator, the server creates a time-bounded,
+single-use token in its private bootstrap state. It never prints the token or a
+token-bearing URL. The formal managed flow reads that private runtime-owned state through
+`nazoauthctl bootstrap-admin`; the authorization server exposes only the JSON
+`POST /auth/bootstrap-admin` API and does not serve an embedded setup page.
 
 ## Public deployment
 
@@ -48,6 +50,7 @@ For a formal release, prefer the lifecycle entry point:
 sudo nazoauthctl install \
   --runtime auto \
   --public-url https://auth.example.com
+sudo nazoauthctl bootstrap-admin
 ```
 
 `auto` selects Podman first and Docker second. Existing PostgreSQL/Valkey,

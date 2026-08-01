@@ -36,11 +36,20 @@ digests.
 
 `nazoauth` is the portable application executable. `nazoauthctl` is shipped on
 the same targets so its parsing, verification, status, and diagnostic surfaces
-can be used consistently, but the managed host lifecycle currently requires
-Linux, root, and systemd. Podman and Docker lifecycle automation is qualified on
-Linux. A successful Windows or macOS binary smoke does not claim that Linux
-service installation, ownership, mount labeling, or database recovery commands
-work natively on those operating systems.
+can be used consistently. The formal `install`, `update`, `rollback`, `recover`,
+and migration lifecycle supports Linux `x86_64` and Linux `aarch64` only. Host
+mode additionally requires root and systemd; Podman and Docker lifecycle modes
+require their corresponding Linux engine. Other operating systems and CPU
+architectures are rejected before installation mutates state. A successful
+Windows or macOS binary smoke does not claim that Linux service installation,
+ownership, mount labeling, or database recovery commands work natively there.
+
+On Linux x86-64, the controller selects the x86-64 GNU or musl Release artifact
+and binds container operations to the signed `linux/amd64` platform-manifest
+digest. On Linux Arm64 it selects the corresponding `aarch64` artifact and
+binds container operations to `linux/arm64`. Host paths and systemd units are
+architecture-neutral; the signed target-specific binary digest remains the
+authority for install and every later update.
 
 The browser UI is not embedded in either backend executable. A schema-4 Release
 attestation binds the independently attested NazoAuthWeb Release descriptor;

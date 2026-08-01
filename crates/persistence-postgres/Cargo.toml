@@ -25,6 +25,7 @@ nazo-openid4vp.workspace = true
 nazo-digital-credentials.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 uuid = { workspace = true, features = ["v7", "serde"] }
 

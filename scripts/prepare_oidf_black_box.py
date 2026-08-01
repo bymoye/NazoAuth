@@ -14,11 +14,48 @@ import ipaddress
 import re
 import secrets
 import ssl
+import sys
 import urllib.parse
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from oidf_secret_input import (  # noqa: E402
+    SecretInputError,
+    add_secret_source_arguments,
+    read_secret_document,
+)
+
+
+PREPARATION_SECRET_FIELDS = (
+    "oidf_applicant_email",
+    "oidf_applicant_password",
+    "oidf_dynamic_registration_initial_access_token",
+    "oidf_ciba_automated_decision_token",
+)
+
+
+def configure_operator_secrets(args: argparse.Namespace) -> None:
+    global USER_EMAIL
+    global USER_PASSWORD
+    global CLIENT_SECRET
+    global DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN
+    global OIDF_CIBA_AUTOMATED_DECISION_TOKEN
+
+    operator_secrets = read_secret_document(
+        args,
+        required_fields=PREPARATION_SECRET_FIELDS,
+    )
+    USER_EMAIL = operator_secrets["oidf_applicant_email"]
+    USER_PASSWORD = operator_secrets["oidf_applicant_password"]
+    CLIENT_SECRET = secrets.token_urlsafe(32)
+    DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN = operator_secrets[
+        "oidf_dynamic_registration_initial_access_token"
+    ]
+    OIDF_CIBA_AUTOMATED_DECISION_TOKEN = operator_secrets[
+        "oidf_ciba_automated_decision_token"
+    ]
 
 
 def runtime_directory() -> Path:
@@ -91,30 +128,11 @@ SESSION_CLIENT_ID = f"{OIDF_CLIENT_PREFIX}-session-client"
 BASIC_ALIAS = os.environ.get(
     "OIDF_BASIC_ALIAS", f"nazo-oauth-oidf-{RUN_NAMESPACE}"
 )
-USER_EMAIL = os.environ.get(
-    "OIDF_APPLICANT_EMAIL", ""
-)
-USER_PASSWORD = os.environ.get("OIDF_APPLICANT_PASSWORD", "")
-if not USER_EMAIL or not USER_PASSWORD:
-    raise RuntimeError(
-        "OIDF_APPLICANT_EMAIL and OIDF_APPLICANT_PASSWORD are required; "
-        "the applicant must be created through the normal verified-account flow"
-    )
-CLIENT_SECRET = os.environ.get("OIDF_CLIENT_SECRET") or secrets.token_urlsafe(32)
-DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN = os.environ.get(
-    "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN", ""
-)
-if not DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN:
-    raise RuntimeError(
-        "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN is required and must match the target deployment"
-    )
-OIDF_CIBA_AUTOMATED_DECISION_TOKEN = os.environ.get(
-    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN", ""
-)
-if not OIDF_CIBA_AUTOMATED_DECISION_TOKEN:
-    raise RuntimeError(
-        "OIDF_CIBA_AUTOMATED_DECISION_TOKEN is required and must match the target deployment"
-    )
+USER_EMAIL = ""
+USER_PASSWORD = ""
+CLIENT_SECRET = ""
+DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN = ""
+OIDF_CIBA_AUTOMATED_DECISION_TOKEN = ""
 FAPI_CLIENT_PREFIX = os.environ.get(
     "OIDF_FAPI_CLIENT_PREFIX", f"{OIDF_CLIENT_PREFIX}-fapi"
 )
@@ -1617,9 +1635,10 @@ def write_all_plan_configs() -> None:
         RUNTIME / "oidf-runner.env",
         "\n".join(
             [
-                f"OIDF_PLAN_CONFIG_JSON={json.dumps({'configs': configs})}",
-                f"OIDF_PLAN_SET_JSON={json.dumps(plan_set)}",
-                f"OIDF_PLAN_MANIFEST_JSON={json.dumps(plan_manifest)}",
+                "# Secret-free path hints; pass these files explicitly to the runner.",
+                "OIDF_PLAN_CONFIG_FILE=oidf-plan-configs.json",
+                "OIDF_PLAN_SET_FILE=oidf-plan-set.json",
+                "OIDF_PLAN_MANIFEST_FILE=oidf-plan-set-manifest.json",
                 "",
             ]
         ),
@@ -1975,11 +1994,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Materialize runner inputs for a caller-supplied public issuer and suite origin."
     )
+    add_secret_source_arguments(parser)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parse_args(argv)
+    args = parse_args(argv)
+    try:
+        configure_operator_secrets(args)
+    except SecretInputError as error:
+        raise SystemExit(str(error)) from error
     ensure_mtls_certs()
     write_all_plan_configs()
     print(f"Prepared public black-box runner inputs under {RUNTIME}")

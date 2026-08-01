@@ -52,7 +52,7 @@ use crate::http::authorization::{
     presentation::authorize_client_presentation,
     request::{authorize_get, authorize_post},
 };
-use crate::http::bootstrap_admin::{claim_initial_admin, initial_admin_setup_page};
+use crate::http::bootstrap_admin::claim_initial_admin;
 use crate::http::perf_metrics::perf_metrics;
 use crate::http::profile::{
     access_requests::{create_access_request, my_access_requests},
@@ -133,7 +133,6 @@ pub(crate) fn configure(
             .wrap(cors::cors_well_known(settings))
             .route(web::get().to(ready)),
     );
-    cfg.route("/setup", web::get().to(initial_admin_setup_page));
     // NO CORS: /authorize
     cfg.route("/authorize", web::get().to(authorize_get))
         .route("/authorize", web::post().to(authorize_post))

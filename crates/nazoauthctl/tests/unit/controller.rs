@@ -74,7 +74,7 @@ fn manifest(version: &str, revision: char) -> ReleaseManifest {
             database_restore: DatabaseRestore::Backup,
             irreversible_migration: false,
             minimum_supported_version: "0.0.0".to_owned(),
-            migration_floor: "20260731000200".to_owned(),
+            migration_floor: "20260801000100".to_owned(),
             rationale: "additive migration".to_owned(),
         },
     }
@@ -181,6 +181,336 @@ fn journal(config: &UpdateConfig, phase: UpdatePhase) -> UpdateJournal {
         backup: (phase >= UpdatePhase::BackupCreated)
             .then(|| config.backup_root.join("v0.2.0-test")),
     }
+}
+
+#[test]
+fn bootstrap_credentials_are_closed_bounded_json() {
+    let parsed = parse_bootstrap_admin_credentials(
+        br#"{"email":"Admin@Example.COM","password":"correct horse battery staple"}"#,
+    )
+    .unwrap();
+    assert_eq!(parsed.email, "Admin@Example.COM");
+    assert_eq!(parsed.password, "correct horse battery staple");
+
+    for input in [
+        br#"{"email":"admin@example.com"}"#.as_slice(),
+        br#"{"email":"admin@example.com","password":"short"}"#.as_slice(),
+        br#"{"email":"not-an-email","password":"correct horse battery staple"}"#.as_slice(),
+        br#"{"email":"admin@example.com","password":"correct horse battery staple","token":"forbidden"}"#.as_slice(),
+        br#"{"email":"admin@example.com","password":"correct horse battery staple"} trailing"#.as_slice(),
+    ] {
+        assert!(parse_bootstrap_admin_credentials(input).is_err());
+    }
+    assert!(
+        parse_bootstrap_admin_credentials(&vec![b'x'; MAX_BOOTSTRAP_CREDENTIAL_BYTES as usize + 1])
+            .is_err()
+    );
+}
+
+#[test]
+fn bootstrap_endpoint_is_fixed_to_the_public_api() {
+    assert_eq!(
+        bootstrap_admin_endpoint("https://auth.example")
+            .unwrap()
+            .as_str(),
+        "https://auth.example/auth/bootstrap-admin"
+    );
+    assert!(bootstrap_admin_endpoint("http://auth.example").is_err());
+    assert!(bootstrap_admin_endpoint("https://user@auth.example").is_err());
+    assert!(bootstrap_admin_endpoint("https://auth.example/other").is_err());
+    assert!(bootstrap_admin_endpoint("https://auth.example?token=secret").is_err());
+}
+
+#[cfg(unix)]
+fn write_bootstrap_fixture(
+    work: &PrivateTempDir,
+    config: &mut UpdateConfig,
+    token: &str,
+) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = work.path().join("bootstrap");
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let token_path = directory.join(BOOTSTRAP_TOKEN_FILE);
+    fs::write(&token_path, token).unwrap();
+    fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600)).unwrap();
+    config.runtime.engine = "docker".to_owned();
+    config.runtime.mounts = vec![crate::model::Mount {
+        source: directory,
+        target: PathBuf::from(BOOTSTRAP_MOUNT_TARGET),
+        mode: "rw,Z".to_owned(),
+    }];
+    token_path
+}
+
+#[cfg(unix)]
+fn write_fake_bootstrap_curl(
+    work: &PrivateTempDir,
+    response: &str,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let executable = work.path().join("fake-curl");
+    let arguments = work.path().join("curl-arguments");
+    let body = work.path().join("curl-body");
+    let environment = work.path().join("curl-environment");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n/usr/bin/env > '{}'\n/bin/cat > '{}'\nprintf '%s\\n' '{}'\nprintf '%s' '201'\n",
+            arguments.display(),
+            environment.display(),
+            body.display(),
+            response
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    (executable, arguments, body, environment)
+}
+
+#[cfg(unix)]
+fn write_bootstrap_pending_fixture(
+    config: &UpdateConfig,
+    email: &str,
+    request_id: &str,
+    status: BootstrapAdminPendingStatus,
+) {
+    fs::create_dir_all(config.operator.controller_private_key.parent().unwrap()).unwrap();
+    fs::write(
+        &config.operator.controller_private_key,
+        b"controller-binding-key",
+    )
+    .unwrap();
+    let pending = BootstrapAdminPending {
+        schema: 1,
+        request_id: request_id.to_owned(),
+        email_hmac_sha256: bootstrap_email_hmac(config, email).unwrap(),
+        status,
+    };
+    fs::create_dir_all(&config.operator.state_directory).unwrap();
+    atomic_write(
+        &bootstrap_pending_path(config),
+        &serde_json::to_vec_pretty(&pending).unwrap(),
+        0o600,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_submission_keeps_secrets_in_request_stdin_and_retains_retry_token() {
+    let work = PrivateTempDir::new("nazoauth-bootstrap-admin").unwrap();
+    let mut config = config(&work);
+    let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let password = "password-canary-correct-horse-battery-staple";
+    let token_path = write_bootstrap_fixture(&work, &mut config, token);
+    let request_id = "bootstrap-admin-0123456789abcdef0123456789abcdef";
+    let response = r#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","id":"550e8400-e29b-41d4-a716-446655440000","email":"admin@example.com","role":"admin","next":"/ui/auth"}"#;
+    let (curl, arguments, body, environment) = write_fake_bootstrap_curl(&work, response);
+    let credentials = BootstrapAdminCredentials {
+        email: "Admin@Example.COM".to_owned(),
+        password: password.to_owned(),
+    };
+
+    claim_bootstrap_admin(&config, &credentials, request_id, curl.as_os_str(), None).unwrap();
+
+    assert!(token_path.exists());
+    let arguments = fs::read_to_string(arguments).unwrap();
+    let environment = fs::read_to_string(environment).unwrap();
+    for secret in [token, password, "Admin@Example.COM"] {
+        assert!(!arguments.contains(secret));
+        assert!(!environment.contains(secret));
+    }
+    assert!(arguments.contains("@-"));
+    assert!(arguments.contains("https://auth.example/auth/bootstrap-admin"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(body).unwrap()).unwrap(),
+        serde_json::json!({
+            "request_id": request_id,
+            "token": token,
+            "email": "admin@example.com",
+            "password": password,
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_claim_rejects_response_substitution_without_consuming_the_token() {
+    let work = PrivateTempDir::new("nazoauth-bootstrap-response").unwrap();
+    let mut config = config(&work);
+    let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let token_path = write_bootstrap_fixture(&work, &mut config, token);
+    write_active_release(&config, &manifest("v0.2.0", 'e')).unwrap();
+    install_audit_key(&config);
+    write_bootstrap_pending_fixture(
+        &config,
+        "admin@example.com",
+        "bootstrap-admin-0123456789abcdef0123456789abcdef",
+        BootstrapAdminPendingStatus::Intent,
+    );
+    let response = r#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","id":"550e8400-e29b-41d4-a716-446655440000","email":"admin@example.com","role":"admin","next":"/ui/login"}"#;
+    let (curl, _, _, _) = write_fake_bootstrap_curl(&work, response);
+    let credentials = BootstrapAdminCredentials {
+        email: "admin@example.com".to_owned(),
+        password: "correct horse battery staple".to_owned(),
+    };
+
+    let error = audited_bootstrap_admin(&config, &credentials, curl.as_os_str(), None).unwrap_err();
+    assert!(format!("{error:#}").contains("unexpected response contract"));
+    assert!(token_path.exists());
+    crate::operator::verify_audit(&config).unwrap();
+    let mut operations = fs::read_dir(config.operator.audit_directory.join("management"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|name| {
+            crate::operator::load_management_event(&config, &name)
+                .unwrap()
+                .operation
+        })
+        .collect::<Vec<_>>();
+    operations.sort();
+    assert_eq!(
+        operations,
+        ["bootstrap-admin-intent", "bootstrap-admin-outcome-unknown"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_state_rejects_ambiguous_or_weak_secret_sources() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let work = PrivateTempDir::new("nazoauth-bootstrap-boundaries").unwrap();
+    let mut config = config(&work);
+    let token_path = write_bootstrap_fixture(
+        &work,
+        &mut config,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",
+    );
+    assert_eq!(bootstrap_token_path(&config, None).unwrap(), token_path);
+
+    config.runtime.mounts.push(config.runtime.mounts[0].clone());
+    assert!(bootstrap_token_path(&config, None).is_err());
+    config.runtime.mounts.pop();
+
+    fs::set_permissions(
+        token_path.parent().unwrap(),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(bootstrap_token_path(&config, None).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_owner_policy_matches_real_container_and_host_runtime_identities() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let work = PrivateTempDir::new("nazoauth-bootstrap-owner").unwrap();
+    let mut config = config(&work);
+    let token_path = write_bootstrap_fixture(
+        &work,
+        &mut config,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",
+    );
+    assert_eq!(bootstrap_state_owner_uid(&config).unwrap(), 10_001);
+
+    let actual_uid = fs::metadata(token_path.parent().unwrap()).unwrap().uid();
+    assert_eq!(
+        bootstrap_token_path(&config, Some(actual_uid)).unwrap(),
+        token_path
+    );
+    assert!(bootstrap_token_path(&config, Some(actual_uid.wrapping_add(1))).is_err());
+
+    config.runtime.engine = "host".to_owned();
+    config.runtime.service_user = Process::new("id")
+        .arg("-un")
+        .stdout()
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(bootstrap_state_owner_uid(&config).unwrap(), actual_uid);
+}
+
+#[cfg(unix)]
+#[test]
+fn audited_bootstrap_claim_records_correlated_closed_events_without_secrets() {
+    let work = PrivateTempDir::new("nazoauth-bootstrap-audit").unwrap();
+    let mut config = config(&work);
+    let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let password = "password-canary-correct-horse-battery-staple";
+    write_bootstrap_fixture(&work, &mut config, token);
+    write_active_release(&config, &manifest("v0.2.0", 'e')).unwrap();
+    install_audit_key(&config);
+    write_bootstrap_pending_fixture(
+        &config,
+        "admin@example.com",
+        "bootstrap-admin-0123456789abcdef0123456789abcdef",
+        BootstrapAdminPendingStatus::Intent,
+    );
+    let response = r#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","id":"550e8400-e29b-41d4-a716-446655440000","email":"admin@example.com","role":"admin","next":"/ui/auth"}"#;
+    let (curl, _, _, _) = write_fake_bootstrap_curl(&work, response);
+    let credentials = BootstrapAdminCredentials {
+        email: "admin@example.com".to_owned(),
+        password: password.to_owned(),
+    };
+
+    let request_id =
+        audited_bootstrap_admin(&config, &credentials, curl.as_os_str(), None).unwrap();
+    assert_eq!(
+        request_id,
+        "bootstrap-admin-0123456789abcdef0123456789abcdef"
+    );
+    assert!(
+        !work
+            .path()
+            .join("bootstrap")
+            .join(BOOTSTRAP_TOKEN_FILE)
+            .exists()
+    );
+    crate::operator::verify_audit(&config).unwrap();
+    let directory = config.operator.audit_directory.join("management");
+    let mut events = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|name| crate::operator::load_management_event(&config, &name).unwrap())
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.sequence);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].operation, "bootstrap-admin-intent");
+    assert_eq!(events[0].request_id, format!("{request_id}-intent"));
+    assert_eq!(events[1].operation, "bootstrap-admin-succeeded");
+    assert_eq!(events[1].request_id, format!("{request_id}-succeeded"));
+    let encoded = serde_json::to_string(&events).unwrap();
+    assert!(!encoded.contains(token));
+    assert!(!encoded.contains(password));
+    assert!(!encoded.contains("admin@example.com"));
+    let pending_bytes = fs::read(bootstrap_pending_path(&config)).unwrap();
+    let pending_text = String::from_utf8(pending_bytes.clone()).unwrap();
+    assert!(!pending_text.contains(token));
+    assert!(!pending_text.contains(password));
+    assert!(!pending_text.contains("admin@example.com"));
+    let pending: BootstrapAdminPending = serde_json::from_slice(&pending_bytes).unwrap();
+    assert_eq!(pending.request_id, request_id);
+    assert_eq!(pending.status, BootstrapAdminPendingStatus::Succeeded);
+
+    let resumed = audited_bootstrap_admin(
+        &config,
+        &credentials,
+        work.path().join("curl-must-not-run").as_os_str(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(resumed, request_id);
+    assert_eq!(
+        fs::read_dir(config.operator.audit_directory.join("management"))
+            .unwrap()
+            .count(),
+        2
+    );
 }
 
 fn assert_invalid_journal(config: &UpdateConfig, value: &UpdateJournal, expected_message: &str) {
@@ -688,6 +1018,64 @@ fn ui_cache_validation_rejects_missing_non_regular_and_malformed_artifacts() {
     assert!(!target_ui_is_active(&value));
 }
 
+fn ui_server(body: &[u8]) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = body.to_vec();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let length = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /ui/ "));
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        stream.write_all(&body).unwrap();
+    });
+    (format!("http://{address}"), handle)
+}
+
+#[test]
+fn ui_verification_binds_the_served_body_to_the_signed_runtime_cache() {
+    let work = PrivateTempDir::new("nazoauth-frontend-served-binding").unwrap();
+    let config = config(&work);
+    let value = journal(&config, UpdatePhase::UiActivating);
+    materialize_candidate_ui(&value);
+
+    verify_ui_binding(&config, &value.to_release, b"ui").unwrap();
+    assert!(verify_ui_binding(&config, &value.to_release, b"arbitrary-2xx").is_err());
+
+    fs::write(value.candidate_ui.join("index.html"), b"").unwrap();
+    assert!(verify_ui_binding(&config, &value.to_release, b"").is_err());
+}
+
+#[test]
+fn ui_verification_rejects_an_unrelated_success_response_through_curl() {
+    let work = PrivateTempDir::new("nazoauth-frontend-http-binding").unwrap();
+    let mut config = config(&work);
+    let value = journal(&config, UpdatePhase::UiActivating);
+    materialize_candidate_ui(&value);
+
+    let (issuer, server) = ui_server(b"arbitrary-2xx");
+    config.runtime.expected_issuer = issuer;
+    assert!(verify_ui(&config, &value.to_release).is_err());
+    server.join().unwrap();
+
+    let (issuer, server) = ui_server(b"ui");
+    config.runtime.expected_issuer = issuer;
+    verify_ui(&config, &value.to_release).unwrap();
+    server.join().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn ui_cache_validation_rejects_symlinked_index_and_marker_files() {
@@ -783,7 +1171,7 @@ fn public_server(requests: usize) -> (String, std::thread::JoinHandle<()>) {
             let body = if request.starts_with("GET /.well-known/openid-configuration ") {
                 serde_json::json!({"issuer": response_issuer}).to_string()
             } else {
-                "ok".to_owned()
+                "ui".to_owned()
             };
             stream
                 .write_all(
@@ -852,7 +1240,6 @@ fn configure_public_checks(config: &mut UpdateConfig, issuer: &str) {
     config.runtime.expected_issuer = issuer.to_owned();
 }
 
-#[cfg(unix)]
 fn materialize_candidate_ui(value: &UpdateJournal) {
     fs::create_dir_all(&value.candidate_ui).unwrap();
     fs::write(value.candidate_ui.join("index.html"), b"ui").unwrap();
@@ -957,6 +1344,7 @@ fn pending_pre_migration_update_restores_previous_artifact_and_closes_the_journa
     value.candidate_runtime = value.to_release.image_ref().unwrap();
     fs::create_dir_all(&config.deployment_root).unwrap();
     fs::write(&value.staged_updater, b"staged-updater").unwrap();
+    materialize_candidate_ui(&value);
     install_audit_key(&config);
     let (issuer, server) = public_server(3);
     configure_public_checks(&mut config, &issuer);

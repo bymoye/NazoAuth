@@ -43,6 +43,56 @@ fn dependency_secrets_are_rejected_in_argv() {
 }
 
 #[test]
+fn bootstrap_admin_accepts_only_explicit_secret_input_modes() {
+    let command = parse(&[
+        "nazoauthctl",
+        "bootstrap-admin",
+        "--credentials-stdin",
+        "--yes",
+    ])
+    .unwrap()
+    .unwrap()
+    .command;
+    assert!(matches!(
+        command,
+        Command::BootstrapAdmin(BootstrapAdminOptions {
+            credentials_stdin: true,
+            yes: true,
+        })
+    ));
+
+    assert!(matches!(
+        parse(&["nazoauthctl", "bootstrap-admin"])
+            .unwrap()
+            .unwrap()
+            .command,
+        Command::BootstrapAdmin(BootstrapAdminOptions {
+            credentials_stdin: false,
+            yes: false,
+        })
+    ));
+
+    for arguments in [
+        &[
+            "nazoauthctl",
+            "bootstrap-admin",
+            "--email",
+            "admin@example.com",
+        ][..],
+        &["nazoauthctl", "bootstrap-admin", "--password", "secret"][..],
+        &["nazoauthctl", "bootstrap-admin", "--yes", "--yes"][..],
+        &[
+            "nazoauthctl",
+            "bootstrap-admin",
+            "--credentials-stdin",
+            "--credentials-stdin",
+        ][..],
+    ] {
+        assert!(parse(arguments).is_err(), "accepted {arguments:?}");
+    }
+}
+
+#[test]
 fn update_rejects_mutable_versions() {
     assert!(parse(&["nazoauthctl", "update", "--to", "latest"]).is_err());
 }
@@ -116,6 +166,10 @@ fn help_topics_follow_user_intent_even_with_an_explicit_config() {
     assert_eq!(
         help_topic(&values(&["nazoauthctl", "install", "--help"])),
         Some(HelpTopic::Install)
+    );
+    assert_eq!(
+        help_topic(&values(&["nazoauthctl", "bootstrap-admin", "--help"])),
+        Some(HelpTopic::BootstrapAdmin)
     );
     assert_eq!(
         help_topic(&values(&[

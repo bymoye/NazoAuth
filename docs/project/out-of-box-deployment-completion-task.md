@@ -58,7 +58,7 @@ outside the out-of-box contract. The lifecycle follow-up is now tracked here:
 1. [x] Add idempotent `nazoauthctl install` using the same signed release
    manifest and immutable artifacts as updates.
 2. [x] Support Podman and Docker through one container-engine transaction.
-3. [x] Support a Linux x86_64 host systemd service with verified binary swaps
+3. [x] Support Linux x86_64 and aarch64 host systemd services with verified binary swaps
    and rollback.
 4. [x] Generate managed PostgreSQL/Valkey credentials and storage by default.
 5. [x] Accept explicit PostgreSQL and Valkey URLs without creating managed

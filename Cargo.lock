@@ -2855,6 +2855,7 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "syn 2.0.118",
  "tokio",
  "uuid",
@@ -2927,6 +2928,7 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek 3.0.0",
+ "hmac 0.13.0",
  "nazo-operator-protocol",
  "rand 0.10.2",
  "rpassword",
@@ -2937,6 +2939,7 @@ dependencies = [
  "tar",
  "url",
  "urlencoding",
+ "uuid",
  "wait-timeout",
 ]
 
