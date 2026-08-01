@@ -25,7 +25,7 @@ jobs:
     name: Validate inventory and active pins
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Validate GitHub Actions workflows
         run: >-
           docker run --rm -v "$PWD:/repo" -w /repo
@@ -46,7 +46,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.13"
