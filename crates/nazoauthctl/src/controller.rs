@@ -212,6 +212,35 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
             )?;
             recover_from_backup(&config)
         }
+        Command::RecoverUpdate { yes } => {
+            require_root()?;
+            let config = load_config_unsettled(&cli.config)?;
+            if crate::operator::identity_recovery_required(&config)? {
+                bail!("identity recovery is pending; run nazoauthctl recover-identity --yes first");
+            }
+            let journal = load_update_journal(&config)?
+                .context("no interrupted update transaction requires recovery")?;
+            require_confirmation(
+                yes,
+                &format!(
+                    "recover update transaction {} from phase {:?}",
+                    journal.transaction_id, journal.phase
+                ),
+            )?;
+            recover_pending_update(&cli.config, &config)?;
+            load_config(&cli.config).map(|_| ())
+        }
+        Command::RecoverIdentity { yes } => {
+            require_root()?;
+            let mut config = load_config_unsettled(&cli.config)?;
+            ensure_no_pending_update(&config)?;
+            if !crate::operator::identity_recovery_required(&config)? {
+                bail!("no interrupted identity transition requires recovery");
+            }
+            require_confirmation(yes, "recover the interrupted identity transition")?;
+            crate::operator::recover_pending_rotation(&cli.config, &mut config)?;
+            load_config(&cli.config).map(|_| ())
+        }
         Command::Migrate { yes } => {
             require_root()?;
             let config = load_config(&cli.config)?;
@@ -280,19 +309,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         Command::BreakGlassControllerAvailability => {
             require_root()?;
             let config = load_config(&cli.config)?;
-            let available = crate::operator::report_controller_availability(&config)?;
-            let release = load_active_release(&config)?;
-            crate::operator::append_management_event(
-                &config,
-                "break-glass-controller-availability",
-                &release.version,
-                if available {
-                    "file-provider-available:copied-key-status-not-provable"
-                } else {
-                    "file-provider-unavailable:copied-key-status-not-provable"
-                },
-            )?;
-            Ok(())
+            crate::operator::report_controller_availability(&config).map(|_| ())
         }
         Command::BreakGlassRehearseControllerLoss { yes } => {
             require_root()?;
@@ -1151,25 +1168,57 @@ fn validate_same_file(_before: &fs::Metadata, _opened: &fs::Metadata) -> anyhow:
     Ok(())
 }
 
-pub(crate) fn acquire_lock() -> anyhow::Result<File> {
+fn command_is_read_only(command: &Command) -> bool {
+    match command {
+        Command::Status
+        | Command::Doctor
+        | Command::Check(_)
+        | Command::AuditVerify
+        | Command::AuditShow { .. }
+        | Command::BreakGlassControllerAvailability => true,
+        Command::Update(options) => options.plan,
+        _ => false,
+    }
+}
+
+pub(crate) fn acquire_lock(command: &Command) -> anyhow::Result<File> {
     // Installation, update, identity rotation and break-glass recovery mutate
     // one lifecycle state machine and therefore must share one lock even when
     // a test or operator overrides its location.
     let path = std::env::var_os("NAZOAUTHCTL_LOCK")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/run/lock/nazoauthctl.lock"));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create lock directory {}", parent.display()))?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("failed to open lifecycle lock {}", path.display()))?;
-    match file.try_lock() {
+    acquire_lock_at(&path, command)
+}
+
+fn acquire_lock_at(path: &Path, command: &Command) -> anyhow::Result<File> {
+    let read_only = command_is_read_only(command);
+    let file = if read_only {
+        OpenOptions::new().read(true).open(path).with_context(|| {
+            format!(
+                "failed to open existing lifecycle lock {} for read-only observation",
+                path.display()
+            )
+        })?
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create lock directory {}", parent.display()))?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .with_context(|| format!("failed to open lifecycle lock {}", path.display()))?
+    };
+    let result = if read_only {
+        file.try_lock_shared()
+    } else {
+        file.try_lock()
+    };
+    match result {
         Ok(()) => Ok(file),
         Err(TryLockError::WouldBlock) => {
             bail!("another nazoauthctl lifecycle operation is already running")
@@ -1827,7 +1876,7 @@ fn handle_update_failure(
             recovery_boundary_name(journal.to_release.rollback.database_restore),
         )?;
         bail!(
-            "update failed across a schema rollback barrier at phase {:?}: {error:#}; retry any nazoauthctl command to continue the persisted transaction; database recovery boundary={:?}; backup={}",
+            "update failed across a schema rollback barrier at phase {:?}: {error:#}; run nazoauthctl recover-update --yes to continue the persisted transaction; database recovery boundary={:?}; backup={}",
             journal.phase,
             journal.to_release.rollback.database_restore,
             journal.backup.as_deref().map_or_else(
@@ -1847,7 +1896,7 @@ fn handle_update_failure(
             "persisted-recovery-required",
         )?;
         bail!(
-            "update failed at phase {:?}: {error:#}; persisted recovery also failed: {recovery_error:#}; retry any nazoauthctl command",
+            "update failed at phase {:?}: {error:#}; persisted recovery also failed: {recovery_error:#}; run nazoauthctl recover-update --yes",
             journal.phase
         );
     }
@@ -2255,7 +2304,7 @@ fn load_active_release(config: &UpdateConfig) -> anyhow::Result<ReleaseManifest>
     Ok(manifest)
 }
 
-fn load_config(path: &Path) -> anyhow::Result<UpdateConfig> {
+fn load_config_unsettled(path: &Path) -> anyhow::Result<UpdateConfig> {
     if !path.is_file() || path.is_symlink() {
         bail!(
             "update config must be a regular non-symlink file: {}",
@@ -2263,11 +2312,28 @@ fn load_config(path: &Path) -> anyhow::Result<UpdateConfig> {
         );
     }
     validate_config_permissions(path)?;
-    let mut config = UpdateConfig::parse(
+    UpdateConfig::parse(
         &fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
-    )?;
-    crate::operator::recover_pending_rotation(path, &mut config)?;
-    recover_pending_update(path, &config)?;
+    )
+}
+
+fn ensure_no_pending_update(config: &UpdateConfig) -> anyhow::Result<()> {
+    if let Some(journal) = load_update_journal(config)? {
+        bail!(
+            "update transaction {} is pending at phase {:?}; run nazoauthctl recover-update --yes",
+            journal.transaction_id,
+            journal.phase
+        )
+    }
+    Ok(())
+}
+
+fn load_config(path: &Path) -> anyhow::Result<UpdateConfig> {
+    let config = load_config_unsettled(path)?;
+    if crate::operator::identity_recovery_required(&config)? {
+        bail!("identity recovery is pending; run nazoauthctl recover-identity --yes")
+    }
+    ensure_no_pending_update(&config)?;
     Ok(config)
 }
 

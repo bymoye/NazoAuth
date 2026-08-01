@@ -111,6 +111,13 @@ fn config(work: &PrivateTempDir) -> UpdateConfig {
     }
 }
 
+fn test_binary_path() -> String {
+    std::env::temp_dir()
+        .join("nazoauth")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn test_runtime_rejects_retired_controller(
     config: &UpdateConfig,
     probe: &str,
@@ -121,7 +128,7 @@ fn test_runtime_rejects_retired_controller(
     }
     Ok(RetirementProbeExecution {
         controller_verified_target: RuntimeTargetClaim::HostBinary {
-            path: "/opt/nazoauth".to_owned(),
+            path: test_binary_path(),
             sha256: "a".repeat(64),
         },
         application_reported_embedded_identity: EmbeddedIdentity {
@@ -141,7 +148,7 @@ fn task_parts() -> (
 ) {
     (
         nazo_operator_protocol::TargetExpectation::HostBinary {
-            path: "/opt/nazoauth".to_owned(),
+            path: test_binary_path(),
             sha256: "a".repeat(64),
         },
         EmbeddedIdentity {
@@ -655,7 +662,7 @@ fn operator_target_and_receipt_bindings_are_closed_over_every_claim() {
     )
     .unwrap();
     let host_claim = RuntimeTargetClaim::HostBinary {
-        path: "/opt/nazoauth".to_owned(),
+        path: test_binary_path(),
         sha256: "a".repeat(64),
     };
     let expected = ExpectedReleaseTarget {
@@ -844,7 +851,7 @@ fn nonempty_receipt_chain_and_public_audit_rendering_are_verified() {
         audit_sequence: 1,
         audit_previous_sha256: "0".repeat(64),
         controller_verified_target: RuntimeTargetClaim::HostBinary {
-            path: "/opt/nazoauth".to_owned(),
+            path: test_binary_path(),
             sha256: "a".repeat(64),
         },
         embedded: task.embedded,
@@ -985,8 +992,10 @@ fn interrupted_rotation_activates_one_complete_staged_generation() {
         serde_json::to_vec(&intent).unwrap(),
     )
     .unwrap();
+    assert!(identity_recovery_required(&config).unwrap());
 
     recover_pending_rotation(&config_path, &mut config).unwrap();
+    assert!(!identity_recovery_required(&config).unwrap());
     assert_eq!(config.operator.controller_key_id, next.controller_key_id);
     assert_eq!(config.operator.audit_key_id, next.audit_key_id);
     assert_eq!(config.operator.break_glass_key_id, next.break_glass_key_id);
@@ -1117,8 +1126,10 @@ fn restart_discards_uncommitted_partial_generation_without_touching_active_ident
     fs::create_dir_all(&abandoned).unwrap();
     fs::write(abandoned.join("controller.key"), b"partial").unwrap();
     let active_before = read_active_identity(&layout.active_file).unwrap();
+    assert!(identity_recovery_required(&config).unwrap());
 
     recover_pending_rotation(&config_path, &mut config).unwrap();
+    assert!(!identity_recovery_required(&config).unwrap());
 
     assert_eq!(
         read_active_identity(&layout.active_file)

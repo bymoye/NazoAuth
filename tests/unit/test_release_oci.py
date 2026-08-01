@@ -20,10 +20,13 @@ def json_bytes(value: Any) -> bytes:
 
 
 class OciFixture:
-    def __init__(self) -> None:
+    def __init__(
+        self, statement_type: str = "https://in-toto.io/Statement/v1"
+    ) -> None:
         self.blobs: dict[str, bytes] = {}
         self.images: dict[str, str] = {}
         self.release_descriptors: list[dict[str, Any]] = []
+        self.statement_type = statement_type
         for architecture in ("amd64", "arm64"):
             self._add_platform(architecture)
 
@@ -65,7 +68,7 @@ class OciFixture:
         attestation_layers = []
         for predicate_type in sorted(validator.ATTESTATION_PREDICATES):
             statement = {
-                "_type": "https://in-toto.io/Statement/v0.1",
+                "_type": self.statement_type,
                 "predicateType": predicate_type,
                 "subject": [
                     {
@@ -208,25 +211,39 @@ class ReleaseOciTests(unittest.TestCase):
         return validator.validate_archive(archive, layout, expected, REPOSITORY)
 
     def test_accepts_nested_buildx_index_and_emits_existing_descriptor_schema(self) -> None:
+        for statement_type in sorted(validator.IN_TOTO_STATEMENT_TYPES):
+            with self.subTest(statement_type=statement_type), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive = root / "candidate.oci.tar"
+                fixture = OciFixture(statement_type)
+                expected = fixture.write(archive)
+
+                descriptor = self.validate(archive, expected, root)
+
+                self.assertEqual(
+                    descriptor,
+                    {
+                        "repository": REPOSITORY,
+                        "index_digest": expected,
+                        "platform_manifests": {
+                            "linux/amd64": fixture.images["amd64"],
+                            "linux/arm64": fixture.images["arm64"],
+                        },
+                    },
+                )
+
+    def test_rejects_unreviewed_in_toto_statement_versions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             archive = root / "candidate.oci.tar"
-            fixture = OciFixture()
+            fixture = OciFixture("https://in-toto.io/Statement/v2")
             expected = fixture.write(archive)
 
-            descriptor = self.validate(archive, expected, root)
-
-            self.assertEqual(
-                descriptor,
-                {
-                    "repository": REPOSITORY,
-                    "index_digest": expected,
-                    "platform_manifests": {
-                        "linux/amd64": fixture.images["amd64"],
-                        "linux/arm64": fixture.images["arm64"],
-                    },
-                },
-            )
+            with self.assertRaisesRegex(
+                validator.OciValidationError,
+                "unsupported in-toto statement type",
+            ):
+                self.validate(archive, expected, root)
 
     def test_binds_buildx_digest_to_the_single_root_release_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

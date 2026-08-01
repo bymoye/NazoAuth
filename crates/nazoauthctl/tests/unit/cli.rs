@@ -331,6 +331,20 @@ fn parses_update_and_recovery_authorization_without_weakening_plan_mode() {
         Command::Recover { yes: true }
     ));
     assert!(matches!(
+        parse(&["nazoauthctl", "recover-update", "--yes"])
+            .unwrap()
+            .unwrap()
+            .command,
+        Command::RecoverUpdate { yes: true }
+    ));
+    assert!(matches!(
+        parse(&["nazoauthctl", "recover-identity", "--yes"])
+            .unwrap()
+            .unwrap()
+            .command,
+        Command::RecoverIdentity { yes: true }
+    ));
+    assert!(matches!(
         parse(&["nazoauthctl", "migrate", "--yes"])
             .unwrap()
             .unwrap()

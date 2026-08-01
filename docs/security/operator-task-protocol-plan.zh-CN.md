@@ -582,6 +582,8 @@ nazoauthctl doctor
 nazoauthctl update [--to VERSION] [--plan] [--yes]
 nazoauthctl rollback [--yes]
 nazoauthctl recover [--yes]
+nazoauthctl recover-update --yes
+nazoauthctl recover-identity --yes
 nazoauthctl migrate [--yes]
 nazoauthctl keys list
 nazoauthctl keys validate

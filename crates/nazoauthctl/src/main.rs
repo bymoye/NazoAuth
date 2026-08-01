@@ -30,7 +30,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let result = controller::acquire_lock().and_then(|_lock| controller::run(cli));
+    let result = controller::acquire_lock(&cli.command).and_then(|_lock| controller::run(cli));
     if let Err(error) = result {
         eprintln!("nazoauthctl: {error:#}");
         std::process::exit(1);
@@ -65,7 +65,9 @@ Commands:
   check         Resolve and verify a candidate Release
   update        Plan or perform a signed transactional update
   rollback      Roll back the application artifact within the declared schema boundary
-  recover       Resume or safely unwind an interrupted update
+  recover       Restore the declared database backup and previous artifact
+  recover-update    Explicitly resume or unwind an interrupted update
+  recover-identity  Explicitly finish an interrupted identity transition
   migrate       Run the signed migration operation
   keys          List, validate, export OpenID4VC trust, generate, or register signing keys
   audit         Show or verify the management audit chain
@@ -118,10 +120,15 @@ configuration, logs, audit records, or command output."
   nazoauthctl [--config PATH] update --yes [--to VERSION] [--accept-migration-barrier]
   nazoauthctl [--config PATH] rollback --yes
   nazoauthctl [--config PATH] recover --yes
+  nazoauthctl [--config PATH] recover-update --yes
+  nazoauthctl [--config PATH] recover-identity --yes
   nazoauthctl [--config PATH] migrate --yes
 
 `update --plan` is read-only and reports artifact rollback, schema-compatible
 rollback, backup/PITR recovery, and any irreversible migration barrier separately.
+`recover` restores a declared database backup; it is not update-journal recovery.
+Interrupted update and identity transitions are changed only by their explicit
+recovery commands. Other commands fail closed while either transition is pending.
 `--yes` skips only the prompt; it never skips verification, backup, health, replay,
 audit, or rollback protection."
         }

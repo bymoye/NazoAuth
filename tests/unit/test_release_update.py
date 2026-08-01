@@ -129,15 +129,21 @@ class FakeUpdate:
         self.operator.mkdir()
         encoded_private = base64.urlsafe_b64encode(bytes([7]) * 32).decode().rstrip("=")
         encoded_public = "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"
+        identity_suffix = hashlib.sha256(
+            base64.urlsafe_b64decode(encoded_public + "=")
+        ).hexdigest()[:16]
+        controller_key_id = f"controller-{identity_suffix}"
+        audit_key_id = f"audit-{identity_suffix}"
+        break_glass_key_id = f"break-glass-{identity_suffix}"
         for name in ("controller", "receipt", "audit", "break-glass"):
             (self.operator / f"{name}.key").write_text(encoded_private, encoding="utf-8")
             (self.operator / f"{name}.pub").write_text(encoded_public, encoding="utf-8")
         for name, value in (
             ("deployment-id", "deployment-test"),
-            ("controller.kid", "controller-test"),
+            ("controller.kid", controller_key_id),
             ("receipt.kid", "receipt-test"),
-            ("audit.kid", "audit-test"),
-            ("break-glass.kid", "break-glass-test"),
+            ("audit.kid", audit_key_id),
+            ("break-glass.kid", break_glass_key_id),
             ("secret-revision", "secret-test"),
         ):
             (self.operator / name).write_text(value, encoding="utf-8")
@@ -157,16 +163,16 @@ class FakeUpdate:
                     "deployment_root": bash_path(self.deployments),
                     "operator": {
                         "deployment_id": "deployment-test",
-                        "controller_key_id": "controller-test",
+                        "controller_key_id": controller_key_id,
                         "controller_private_key": bash_path(self.operator / "controller.key"),
                         "controller_public_key": bash_path(self.operator / "controller.pub"),
                         "receipt_key_id": "receipt-test",
                         "receipt_private_key": bash_path(self.operator / "receipt.key"),
                         "receipt_public_key": bash_path(self.operator / "receipt.pub"),
-                        "audit_key_id": "audit-test",
+                        "audit_key_id": audit_key_id,
                         "audit_private_key": bash_path(self.operator / "audit.key"),
                         "audit_public_key": bash_path(self.operator / "audit.pub"),
-                        "break_glass_key_id": "break-glass-test",
+                        "break_glass_key_id": break_glass_key_id,
                         "break_glass_private_key": bash_path(self.operator / "break-glass.key"),
                         "break_glass_public_key": bash_path(self.operator / "break-glass.pub"),
                         "secret_revision_file": bash_path(self.operator / "secret-revision"),
@@ -302,9 +308,29 @@ class FakeUpdate:
                 ),
                 "FAKE_UI_RELEASES": bash_path(self.ui_releases),
                 "NAZOAUTHCTL_TESTING": "1",
+                "NAZOAUTHCTL_LOCK": bash_path(root / "nazoauthctl.lock"),
                 "MSYS": "winsymlinks:sys",
             }
         )
+        recovered = subprocess.run(
+            [
+                str(updater()),
+                "--config",
+                bash_path(self.config),
+                "recover-identity",
+                "--yes",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+            env=self.env,
+        )
+        if recovered.returncode != 0:
+            raise RuntimeError(
+                f"failed to adopt the legacy fixture identity: {recovered.stderr}"
+            )
 
     def _write_release(self) -> None:
         target = self.target

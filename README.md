@@ -55,7 +55,7 @@ path. The live demo is available at <https://auth.nazo.run/ui/auth>.
 | Item | Value |
 | --- | --- |
 | Package | `nazo-oauth-server` |
-| Workspace version | `0.1.6` release candidate |
+| Workspace version | `0.1.7` release candidate |
 | License | AGPL-3.0-or-later |
 | Language | Rust 2024 |
 | Runtime services | PostgreSQL, Valkey |

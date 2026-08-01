@@ -1,9 +1,9 @@
 # NazoAuth Operator Task Protocol 实施任务书
 
-状态：实施中；远端 Linux focused gate 已通过旧精确 head，原子 identity generation 正在补齐；正式双 Release 与第 18 节唯一远端验收尚未完成
+状态：实施中；远端代码门禁已通过当前候选改动；正式双 Release 与第 18 节唯一远端验收尚未完成
 日期：2026-08-01
 设计计划：[operator-task-protocol-plan.zh-CN.md](../security/operator-task-protocol-plan.zh-CN.md)  
-源代码基线：`codex/cosign-private-staging` 当前工作树；安装/升级验收版本为 `v0.1.5 → v0.1.6`，最终 SHA 只由正式 Release 固定
+源代码基线：`codex/cosign-private-staging` 当前工作树；安装/升级验收版本为 `v0.1.7 → v0.1.8`，最终 SHA 只由正式 Release 固定
 
 ## 1. 任务目标
 
@@ -506,7 +506,7 @@ sudo nazoauthctl audit verify
 
 ```bash
 sudo nazoauthctl update --plan
-sudo nazoauthctl update
+sudo nazoauthctl update --yes
 sudo nazoauthctl status
 sudo nazoauthctl audit show --request-id REQUEST_ID
 ```
@@ -530,7 +530,8 @@ sudo nazoauthctl keys validate
 在候选健康检查前注入可控失败，再执行：
 
 ```bash
-sudo nazoauthctl update
+sudo nazoauthctl update --yes
+sudo nazoauthctl recover-update --yes
 sudo nazoauthctl status
 sudo nazoauthctl audit show --request-id REQUEST_ID
 ```
@@ -539,6 +540,10 @@ sudo nazoauthctl audit show --request-id REQUEST_ID
 schema 是否变化、是否触及 barrier”；审计保留失败候选、双层 target identity 和恢复结果，
 不删除失败证据。另行演练 backup/PITR restore 和不可逆 migration barrier，二者不得显示为
 普通数据库自动回滚。
+
+所有观察命令在持久 update journal 或 identity transition 未收敛时必须保持只读并 fail
+closed，分别指向 `recover-update --yes` 或 `recover-identity --yes`；不得通过读取配置隐式
+继续任务、启动/停止 runtime、归档密钥、写审计或删除 journal。
 
 ### Journey E：离线恢复与身份轮换
 

@@ -171,6 +171,8 @@ sudo nazoauthctl update --plan
 sudo nazoauthctl update --yes --to v1.2.3
 sudo nazoauthctl rollback --yes
 sudo nazoauthctl recover --yes
+sudo nazoauthctl recover-update --yes
+sudo nazoauthctl recover-identity --yes
 sudo nazoauthctl migrate --yes
 sudo nazoauthctl keys list
 sudo nazoauthctl keys validate
@@ -189,6 +191,11 @@ sudo nazoauthctl break-glass recover-controller --reason lost --yes
 
 `install` 是幂等入口：检测到由它管理且已经 ready 的实例时不会重建或升级。
 `check` 只验证可用发布，`update` 更新到最新正式标签，`--to` 固定不可变版本。
+配置读取本身也不允许产生副作用。存在未完成的 update journal 或 identity transition 时，
+`status`、`doctor`、`check`、`update --plan` 和审计查看都会 fail closed；只有显式确认的
+`recover-update --yes` 与 `recover-identity --yes` 可以收敛对应状态。独立的
+`recover --yes` 只负责已声明的数据库备份和上一制品恢复，绝不是隐式 update journal
+恢复入口。
 
 自动化可以依赖退出码：`0` 表示成功，`2` 表示 CLI 用法被拒绝，`1` 表示生命周期、信任、
 授权、健康、备份或恢复的 fail-closed 失败。在 clean-install 验收中，任何非零结果都不得从

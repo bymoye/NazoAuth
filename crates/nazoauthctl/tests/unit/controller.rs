@@ -1130,6 +1130,107 @@ fn no_pending_update_is_an_idempotent_recovery_noop() {
 }
 
 #[test]
+fn observation_lock_never_creates_persistent_state() {
+    let work = PrivateTempDir::new("nazoauth-read-only-lock").unwrap();
+    let missing = work.path().join("missing/lifecycle.lock");
+    let error = acquire_lock_at(&missing, &Command::Status).unwrap_err();
+    assert!(error.to_string().contains("read-only observation"));
+    assert!(!missing.exists());
+    assert!(!missing.parent().unwrap().exists());
+
+    fs::create_dir_all(missing.parent().unwrap()).unwrap();
+    fs::write(&missing, []).unwrap();
+    let lock = acquire_lock_at(&missing, &Command::Status).unwrap();
+    assert_eq!(fs::metadata(&missing).unwrap().len(), 0);
+    drop(lock);
+
+    let created = work.path().join("created/lifecycle.lock");
+    let lock = acquire_lock_at(&created, &Command::Rollback { yes: true }).unwrap();
+    assert!(created.is_file());
+    drop(lock);
+}
+
+#[test]
+fn only_observation_commands_use_the_shared_noncreating_lock() {
+    assert!(command_is_read_only(&Command::Status));
+    assert!(command_is_read_only(&Command::Doctor));
+    assert!(command_is_read_only(&Command::AuditVerify));
+    assert!(command_is_read_only(
+        &Command::BreakGlassControllerAvailability
+    ));
+    assert!(command_is_read_only(&Command::Update(UpdateOptions {
+        version: None,
+        plan: true,
+        yes: false,
+        accept_migration_barrier: false,
+    })));
+    assert!(!command_is_read_only(&Command::Update(UpdateOptions {
+        version: None,
+        plan: false,
+        yes: true,
+        accept_migration_barrier: false,
+    })));
+    assert!(!command_is_read_only(&Command::RecoverUpdate { yes: true }));
+    assert!(!command_is_read_only(&Command::RecoverIdentity {
+        yes: true
+    }));
+}
+
+fn settled_config(work: &PrivateTempDir) -> (PathBuf, UpdateConfig) {
+    let config_path = work.path().join("update.json");
+    let mut config = config(work);
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    crate::operator::initialize_identity_generation(
+        &work.path().join("operator"),
+        &work.path().join("recovery"),
+    )
+    .unwrap();
+    crate::operator::recover_pending_rotation(&config_path, &mut config).unwrap();
+    assert!(!crate::operator::identity_recovery_required(&config).unwrap());
+    (config_path, config)
+}
+
+#[test]
+fn config_loading_rejects_a_pending_update_without_mutating_it() {
+    let work = PrivateTempDir::new("nazoauth-read-only-pending-update").unwrap();
+    let (config_path, config) = settled_config(&work);
+    write_update_journal(&config, &journal(&config, UpdatePhase::Prepared)).unwrap();
+    let config_before = fs::read(&config_path).unwrap();
+    let journal_before = fs::read(update_journal_path(&config)).unwrap();
+
+    let error = load_config(&config_path).unwrap_err();
+
+    assert!(error.to_string().contains("recover-update --yes"));
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(
+        fs::read(update_journal_path(&config)).unwrap(),
+        journal_before
+    );
+}
+
+#[test]
+fn config_loading_rejects_identity_cleanup_without_mutating_it() {
+    let work = PrivateTempDir::new("nazoauth-read-only-pending-identity").unwrap();
+    let (config_path, config) = settled_config(&work);
+    let abandoned = config
+        .operator
+        .identity_generations_directory
+        .join("generation-abandoned");
+    fs::create_dir_all(&abandoned).unwrap();
+    fs::write(abandoned.join("controller.key"), b"pending-secret").unwrap();
+    let config_before = fs::read(&config_path).unwrap();
+
+    let error = load_config(&config_path).unwrap_err();
+
+    assert!(error.to_string().contains("recover-identity --yes"));
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(
+        fs::read(abandoned.join("controller.key")).unwrap(),
+        b"pending-secret"
+    );
+}
+
+#[test]
 fn early_update_faults_leave_the_last_durable_phase_for_restart() {
     for (initial, expected) in [
         (UpdatePhase::Prepared, UpdatePhase::WriterStopping),

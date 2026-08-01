@@ -202,6 +202,8 @@ sudo nazoauthctl update --plan
 sudo nazoauthctl update --yes --to v1.2.3
 sudo nazoauthctl rollback --yes
 sudo nazoauthctl recover --yes
+sudo nazoauthctl recover-update --yes
+sudo nazoauthctl recover-identity --yes
 sudo nazoauthctl migrate --yes
 sudo nazoauthctl keys list
 sudo nazoauthctl keys validate
@@ -224,6 +226,12 @@ break-glass identities; archive the new recovery key before the next incident.
 `install` is idempotent and does not rebuild or upgrade an already ready
 managed installation. `check` is non-mutating; `update` selects the latest
 formal release; and `--to` pins an immutable version.
+Configuration loading is also non-mutating. `status`, `doctor`, `check`,
+`update --plan`, and audit observation fail closed when an update journal or
+identity transition is pending. Only `recover-update --yes` and
+`recover-identity --yes` may converge those persisted transitions. The separate
+`recover --yes` command restores a declared database backup and previous
+artifact; it is never an implicit update-journal recovery path.
 
 Automation can rely on exit code `0` for success, `2` for rejected CLI usage,
 and `1` for any fail-closed lifecycle, trust, authorization, health, backup, or

@@ -36,7 +36,10 @@ pub(crate) fn help_topic(args: &[String]) -> Option<HelpTopic> {
     Some(match command {
         Some("install") => HelpTopic::Install,
         Some("bootstrap-admin") => HelpTopic::BootstrapAdmin,
-        Some("update" | "check" | "rollback" | "recover" | "migrate") => HelpTopic::Update,
+        Some(
+            "update" | "check" | "rollback" | "recover" | "recover-update" | "recover-identity"
+            | "migrate",
+        ) => HelpTopic::Update,
         Some("keys") => HelpTopic::Keys,
         Some("audit") => HelpTopic::Audit,
         Some("identity") => HelpTopic::Identity,
@@ -59,6 +62,8 @@ pub(crate) enum Command {
     Update(UpdateOptions),
     Rollback { yes: bool },
     Recover { yes: bool },
+    RecoverUpdate { yes: bool },
+    RecoverIdentity { yes: bool },
     Migrate { yes: bool },
     Keys(KeysCommand),
     AuditVerify,
@@ -177,6 +182,12 @@ impl Cli {
             },
             "recover" => Command::Recover {
                 yes: parse_yes(values, "recover")?,
+            },
+            "recover-update" => Command::RecoverUpdate {
+                yes: parse_yes(values, "recover-update")?,
+            },
+            "recover-identity" => Command::RecoverIdentity {
+                yes: parse_yes(values, "recover-identity")?,
             },
             "migrate" => Command::Migrate {
                 yes: parse_yes(values, "migrate")?,

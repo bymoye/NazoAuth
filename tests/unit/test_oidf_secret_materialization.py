@@ -95,6 +95,7 @@ class OidfSecretMaterializationTests(unittest.TestCase):
                 json.dumps({"configs": {"plan": {"nazo": {"other": True}}}}),
                 encoding="utf-8",
             )
+            config.chmod(0o600)
             credentials.write_text(
                 json.dumps(
                     {

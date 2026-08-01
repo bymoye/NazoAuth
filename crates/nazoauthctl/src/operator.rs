@@ -1802,6 +1802,57 @@ fn retire_non_active_private_material(
     Ok(())
 }
 
+fn generation_private_material_present(
+    directory: &Path,
+    active_generation: &str,
+    private_names: &[&str],
+) -> anyhow::Result<bool> {
+    if !path_present(directory)? {
+        return Ok(false);
+    }
+    let metadata = fs::symlink_metadata(directory)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("identity generations path must be a regular non-symlink directory")
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("identity generation name is not UTF-8"))?;
+        if !safe_identity_component(&name) || !entry.file_type()?.is_dir() {
+            bail!("identity generations directory contains an unsafe entry")
+        }
+        if name == active_generation {
+            continue;
+        }
+        for private_name in private_names {
+            let path = entry.path().join(private_name);
+            if managed_regular_file_present(&path)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn managed_regular_file_present(path: &Path) -> anyhow::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "managed identity path is not a regular non-symlink file: {}",
+            path.display()
+        )
+    }
+    Ok(true)
+}
+
 fn retire_generation_private_material(
     directory: &Path,
     active_generation: Option<&str>,
@@ -2162,8 +2213,10 @@ fn rotate_controller_with_access(
         &serde_json::to_vec_pretty(&next_config)?,
         0o600,
     )?;
-    fs::remove_file(layout.operator_directory.join("rotation-intent.json"))?;
     retire_non_active_private_material(&layout, &next)?;
+    crate::filesystem::remove_file_durable(
+        &layout.operator_directory.join("rotation-intent.json"),
+    )?;
     println!(
         "controller/audit identity rotated: previous={} next={} previous_audit={} next_audit={} previous_break_glass={} next_break_glass={} authorization={authorization:?} transition={}",
         config.operator.controller_key_id,
@@ -2179,6 +2232,54 @@ fn rotate_controller_with_access(
         previous_controller_public_sha256: old_controller_digest,
         retirement_probe: probe,
     })
+}
+
+/// Inspect whether the identity state needs an explicitly authorized recovery.
+/// This function is deliberately read-only: observation commands use it to fail
+/// closed instead of completing a rotation, adopting legacy identity, or
+/// retiring key material as a side effect of loading configuration.
+pub(crate) fn identity_recovery_required(config: &UpdateConfig) -> anyhow::Result<bool> {
+    let layout = identity_layout(config)?;
+    if !path_present(&layout.active_file)? {
+        return Ok(true);
+    }
+    let active = read_active_identity(&layout.active_file)?;
+    validate_generation_for_break_glass_recovery(&layout, &active)?;
+
+    let mut expected = config.clone();
+    apply_active_identity(&mut expected, &layout, &active);
+    if serde_json::to_vec(&expected)? != serde_json::to_vec(config)? {
+        return Ok(true);
+    }
+    if path_present(&layout.operator_directory.join("legacy-adoption.json"))?
+        || path_present(&layout.operator_directory.join("rotation-intent.json"))?
+        || generation_private_material_present(
+            &layout.generations,
+            &active.generation,
+            &["controller.key", "audit.key"],
+        )?
+        || generation_private_material_present(
+            &layout.recovery_generations,
+            &active.generation,
+            &["break-glass.key"],
+        )?
+    {
+        return Ok(true);
+    }
+    for legacy in [
+        layout.operator_directory.join("controller.key"),
+        layout.operator_directory.join("audit.key"),
+        layout
+            .recovery_generations
+            .parent()
+            .context("recovery generation directory has no parent")?
+            .join("break-glass.key"),
+    ] {
+        if managed_regular_file_present(&legacy)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn recover_pending_rotation(
@@ -2256,7 +2357,6 @@ pub(crate) fn recover_pending_rotation(
         }
         apply_active_identity(config, &layout, &active);
         atomic_write(config_path, &serde_json::to_vec_pretty(config)?, 0o600)?;
-        fs::remove_file(&intent_path)?;
     }
     retire_non_active_private_material(&layout, &active)?;
     if serde_json::to_vec(config)? != config_before_repair {
@@ -2264,6 +2364,9 @@ pub(crate) fn recover_pending_rotation(
     }
     if adoption_pending {
         crate::filesystem::remove_file_durable(&adoption_path)?;
+    }
+    if path_present(&intent_path)? {
+        crate::filesystem::remove_file_durable(&intent_path)?;
     }
     Ok(())
 }

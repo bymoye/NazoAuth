@@ -16,6 +16,10 @@ OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
 OCI_LAYER_GZIP = "application/vnd.oci.image.layer.v1.tar+gzip"
 IN_TOTO = "application/vnd.in-toto+json"
+IN_TOTO_STATEMENT_TYPES = {
+    "https://in-toto.io/Statement/v0.1",
+    "https://in-toto.io/Statement/v1",
+}
 ATTESTATION_TYPE = "attestation-manifest"
 ATTESTATION_PREDICATES = {
     "https://spdx.dev/Document",
@@ -324,12 +328,15 @@ def _manifest(
             {"_type", "predicateType", "subject", "predicate"},
             f"{name}.layers[{position}] statement",
         )
-        if (
-            statement["_type"] != "https://in-toto.io/Statement/v0.1"
-            or statement["predicateType"] != predicate_type
-            or not isinstance(statement["predicate"], dict)
-        ):
-            _fail(f"{name}.layers[{position}] is not the expected in-toto statement")
+        if statement["_type"] not in IN_TOTO_STATEMENT_TYPES:
+            _fail(
+                f"{name}.layers[{position}] has unsupported in-toto statement type "
+                f"{statement['_type']!r}"
+            )
+        if statement["predicateType"] != predicate_type:
+            _fail(f"{name}.layers[{position}] predicate does not match its descriptor")
+        if not isinstance(statement["predicate"], dict):
+            _fail(f"{name}.layers[{position}] predicate is not an object")
         subjects = statement["subject"]
         if (
             attested_image_digest is None
