@@ -225,7 +225,22 @@ fn verify_blob(
     }
     let engine = container_engine.context("Cosign is required when no container engine exists")?;
     Process::new(engine)
-        .args(["run", "--rm", "-v"])
+        .args([
+            "run",
+            "--rm",
+            "--user",
+            "0:0",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--tmpfs",
+            "/root/.sigstore:rw,noexec,nosuid,nodev,size=16m",
+            "-v",
+        ])
         .arg(format!("{}:/work:ro", work.display()))
         .arg(COSIGN_IMAGE)
         .args([

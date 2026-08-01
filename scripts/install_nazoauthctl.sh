@@ -80,7 +80,14 @@ else
     else printf '%s\n' 'cosign, Podman, or Docker is required' >&2; exit 1
     fi
   fi
-  "$engine" run --rm -v "$temporary:/work:ro" \
+  "$engine" run --rm \
+    --user 0:0 \
+    --cap-drop ALL \
+    --read-only \
+    --security-opt no-new-privileges \
+    --pids-limit 64 \
+    --tmpfs /root/.sigstore:rw,noexec,nosuid,nodev,size=16m \
+    -v "$temporary:/work:ro" \
     ghcr.io/sigstore/cosign/cosign@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00 \
     verify-blob --bundle /work/nazoauthctl.bundle \
     --certificate-identity "$identity" \

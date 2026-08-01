@@ -625,6 +625,27 @@ class ReleaseUpdateTests(unittest.TestCase):
         )
         self.assertIn("--certificate-identity", source)
         self.assertIn("--certificate-oidc-issuer", source)
+        bootstrap = (ROOT / "scripts" / "install_nazoauthctl.sh").read_text(
+            encoding="utf-8"
+        )
+        for hardened_argument in (
+            "--user 0:0",
+            "--cap-drop ALL",
+            "--read-only",
+            "--security-opt no-new-privileges",
+            "--pids-limit 64",
+            "--tmpfs /root/.sigstore:rw,noexec,nosuid,nodev,size=16m",
+        ):
+            self.assertIn(hardened_argument, bootstrap)
+        for hardened_argument in (
+            '"0:0"',
+            '"--cap-drop"',
+            '"--read-only"',
+            '"no-new-privileges"',
+            '"--pids-limit"',
+            '"/root/.sigstore:rw,noexec,nosuid,nodev,size=16m"',
+        ):
+            self.assertIn(hardened_argument, source)
         self.assertIn("try_lock()", source)
         self.assertIn("\"pg_restore\"", source)
         self.assertIn("restore_snapshots", source)
