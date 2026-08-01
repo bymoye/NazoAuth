@@ -6,7 +6,7 @@ fn embedded_descriptor_is_closed_and_valid() {
     descriptor.validate().unwrap();
     assert_eq!(
         descriptor.url().unwrap().as_str(),
-        "https://github.com/nazozero/NazoAuthWeb/releases/download/v0.2.0/nazoauth-web.tar.gz"
+        "https://github.com/nazozero/NazoAuthWeb/releases/download/v0.2.2/nazoauth-web.tar.gz"
     );
     let mut value: serde_json::Value = serde_json::from_str(DEFAULT_FRONTEND).unwrap();
     value["unexpected"] = serde_json::json!(true);
@@ -24,7 +24,7 @@ fn archive_paths_reject_parent_absolute_and_platform_prefixes() {
 #[test]
 fn frontend_downloads_stay_on_explicit_github_https_origins() {
     for accepted in [
-        "https://github.com/nazozero/NazoAuthWeb/releases/download/v0.2.0/nazoauth-web.tar.gz",
+        "https://github.com/nazozero/NazoAuthWeb/releases/download/v0.2.2/nazoauth-web.tar.gz",
         "https://objects.githubusercontent.com/object",
         "https://release-assets.githubusercontent.com/object?token=opaque",
     ] {
