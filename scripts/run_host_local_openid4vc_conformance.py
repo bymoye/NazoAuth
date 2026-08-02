@@ -335,20 +335,25 @@ def build_base_input(material: dict[str, object], *, suite_origin: str) -> dict[
     ) or not isinstance(trust_anchor, str):
         fail("generated OpenID4VC material has an invalid configuration shape")
     def issuer_base(wallet: dict[str, object], *, attested: bool) -> dict[str, object]:
+        client_attestation_config = {
+            "key_attestation_jwks": {"keys": [key_attestation]},
+        }
         config: dict[str, object] = {
             "alias": "nazo-openid4vc-vci-haip" if attested else "nazo-openid4vc-vci",
             "client": {"client_id": "generated", "scope": f"openid {VCI_SD_JWT_CONFIGURATION_ID} {VCI_MDOC_CONFIGURATION_ID}", "jwks": {"keys": [wallet]}},
             "client2": {"client_id": "generated-client2", "scope": f"openid {VCI_SD_JWT_CONFIGURATION_ID} {VCI_MDOC_CONFIGURATION_ID}", "jwks": {"keys": [wallet]}},
             "vci": {},
+            # Key attestation is an issuer proof requirement independent of
+            # whether the OAuth client itself uses client attestation.
+            "client_attestation": client_attestation_config,
         }
         if attested:
-            config["client_attestation"] = {
+            client_attestation_config.update({
                 "issuer": f"{suite_origin.rstrip('/')}/",
                 "trust_anchor": trust_anchor,
                 "key_attestation_trust_anchor_pem": trust_anchor,
                 "attester_jwks": {"keys": [attestation]},
-                "key_attestation_jwks": {"keys": [key_attestation]},
-            }
+            })
         return config
     def verifier_base(*, haip: bool) -> dict[str, object]:
         return {

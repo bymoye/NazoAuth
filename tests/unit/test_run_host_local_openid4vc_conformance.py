@@ -224,7 +224,10 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             self.assertNotEqual(first["wallet_private"]["d"], second["wallet_private"]["d"])
             base = self.module.build_base_input(first, suite_origin="https://suite.example")
             self.assertEqual(set(base), {"vci", "vci_haip", "vp", "vp_haip"})
-            self.assertNotIn("client_attestation", base["vci"])
+            self.assertEqual(
+                set(base["vci"]["client_attestation"]),
+                {"key_attestation_jwks"},
+            )
             self.assertIn("client_attestation", base["vci_haip"])
             self.assertIn("trust_anchor", base["vci_haip"]["client_attestation"])
             self.assertIn("signing_jwk", base["vp"]["credential"])
