@@ -295,9 +295,7 @@ impl<'a> Runtime<'a> {
             self.config.runtime.container_name,
             std::process::id()
         );
-        let mut command = Process::new(engine)
-            .timeout(Duration::from_secs(300))
-            .args(["run", "--rm"])
+        let mut command = container_task_process(engine)
             .arg("--name")
             .arg(&task_name)
             .args([
@@ -702,6 +700,15 @@ impl<'a> Runtime<'a> {
         }
         false
     }
+}
+
+fn container_task_process(engine: &str) -> Process {
+    Process::new(engine)
+        .timeout(Duration::from_secs(300))
+        // Container engines attach stdin only when interactive input is
+        // explicitly enabled. The signed operator envelope is delivered on
+        // stdin, so omitting this flag gives the task an empty envelope.
+        .args(["run", "--rm", "--interactive"])
 }
 
 fn mount_argument(source: &Path, target: &Path, mode: &str) -> OsString {

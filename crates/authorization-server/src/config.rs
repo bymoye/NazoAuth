@@ -179,6 +179,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "TLS_CLIENT_CA_FILE",
     "TLS_PRIVATE_KEY_FILE",
     "TRUSTED_PROXY_CIDRS",
+    "UI_CACHE_DIR",
     "UI_STATIC_DIR",
     "VALKEY_COMMAND_TIMEOUT_MS",
     "VALKEY_URL",
@@ -235,8 +236,8 @@ impl ConfigSource {
         Self::load_from_dir_with_env(".", std::env::vars())
     }
 
-    pub(crate) fn load_without_generated_secrets() -> anyhow::Result<Self> {
-        Self::load_from_dir_with_env_mode(".", std::env::vars(), false, true)
+    pub(crate) fn load_for_migrations() -> anyhow::Result<Self> {
+        Self::load_for_migrations_from_dir_with_env(".", std::env::vars())
     }
 
     pub(crate) fn load_without_secret_values() -> anyhow::Result<Self> {
@@ -248,6 +249,16 @@ impl ConfigSource {
         env: impl IntoIterator<Item = (String, String)>,
     ) -> anyhow::Result<Self> {
         Self::load_from_dir_with_env_mode(path, env, true, true)
+    }
+
+    fn load_for_migrations_from_dir_with_env(
+        path: impl AsRef<Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let mut source = Self::load_from_dir_with_env_mode(path, env, false, false)?;
+        source.merge_secret_file_inputs(path, &[("DATABASE_URL", "DATABASE_URL_FILE")])?;
+        Ok(source)
     }
 
     fn load_from_dir_with_env_mode(
@@ -269,7 +280,7 @@ impl ConfigSource {
         }
         source.merge_env(env)?;
         if resolve_secret_files {
-            source.merge_secret_file_inputs(path)?;
+            source.merge_secret_file_inputs(path, SECRET_FILE_INPUTS)?;
         }
         if materialize_generated_secrets {
             source.merge_generated_secrets(path)?;
@@ -364,8 +375,12 @@ impl ConfigSource {
         Ok(())
     }
 
-    fn merge_secret_file_inputs(&mut self, config_dir: &Path) -> anyhow::Result<()> {
-        for (target_key, file_key) in SECRET_FILE_INPUTS {
+    fn merge_secret_file_inputs(
+        &mut self,
+        config_dir: &Path,
+        inputs: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
+        for (target_key, file_key) in inputs {
             if self.env_values.contains_key(*target_key) {
                 continue;
             }

@@ -156,6 +156,13 @@ fn privileged_container_task_mounts_are_operation_scoped_and_file_only() {
 }
 
 #[test]
+fn privileged_container_task_attaches_the_signed_envelope_stdin() {
+    let command = format!("{:?}", container_task_process("podman"));
+
+    assert!(command.contains("--interactive"));
+}
+
+#[test]
 fn privileged_task_fails_closed_without_required_config_mount() {
     let work = PrivateTempDir::new("runtime-missing-mount").unwrap();
     let mut config = config(&work);

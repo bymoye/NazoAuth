@@ -41,7 +41,7 @@ pub(crate) async fn run_migrations() -> anyhow::Result<()> {
     // Migration ownership needs only the database secret. Materializing unrelated
     // application secrets here would couple a least-privilege one-shot task to the
     // long-running runtime's writable data directories.
-    let config = ConfigSource::load_without_generated_secrets()?;
+    let config = ConfigSource::load_for_migrations()?;
     let database_url = database_url(&config);
     nazo_postgres::run_pending_migrations(&database_url).await?;
     nazo_postgres::cleanup_expired_security_state(&database_url).await?;

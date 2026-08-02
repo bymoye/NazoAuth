@@ -110,6 +110,8 @@ pub(crate) struct InstallOptions {
     pub(crate) profile_material: Option<PathBuf>,
     pub(crate) data_root: PathBuf,
     pub(crate) port: u16,
+    pub(crate) network_subnet: Option<String>,
+    pub(crate) runtime_ip: Option<String>,
     pub(crate) database_url: Option<String>,
     pub(crate) migration_database_url: Option<String>,
     pub(crate) valkey_url: Option<String>,
@@ -426,6 +428,8 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
     let mut profile_material = None;
     let mut data_root = PathBuf::from("/var/lib/nazoauth");
     let mut port = 8000;
+    let mut network_subnet = None;
+    let mut runtime_ip = None;
     let database_url = None;
     let migration_database_url = None;
     let valkey_url = None;
@@ -477,6 +481,16 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
                     bail!("--port must be an integer from 1 through 65535");
                 }
             }
+            "--network-subnet" => {
+                validate_network_subnet(&value)?;
+                network_subnet = Some(value);
+            }
+            "--runtime-ip" => {
+                value
+                    .parse::<std::net::IpAddr>()
+                    .context("--runtime-ip must be an IPv4 or IPv6 address")?;
+                runtime_ip = Some(value);
+            }
             "--secret-fd" => {
                 if secret_fd.is_some() {
                     bail!("--secret-fd may be supplied only once");
@@ -512,6 +526,15 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
     if profile != "standards-full" && (profile_secrets_stdin || profile_secret_fd.is_some()) {
         bail!("secure profile secret input requires --profile standards-full");
     }
+    if network_subnet.is_some() != runtime_ip.is_some() {
+        bail!("--network-subnet and --runtime-ip must be supplied together");
+    }
+    if let (Some(subnet), Some(address)) = (&network_subnet, &runtime_ip) {
+        validate_network_assignment(subnet, address)?;
+    }
+    if runtime == "host" && network_subnet.is_some() {
+        bail!("container network options are unavailable with --runtime host");
+    }
     Ok(InstallOptions {
         runtime,
         public_url,
@@ -519,6 +542,8 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
         profile_material,
         data_root,
         port,
+        network_subnet,
+        runtime_ip,
         database_url,
         migration_database_url,
         valkey_url,
@@ -530,6 +555,55 @@ fn parse_install(values: Vec<String>) -> anyhow::Result<InstallOptions> {
         profile_secrets: None,
         version,
     })
+}
+
+fn validate_network_subnet(value: &str) -> anyhow::Result<()> {
+    let (address, prefix) = value
+        .split_once('/')
+        .context("--network-subnet must be an IPv4 or IPv6 CIDR")?;
+    let address: std::net::IpAddr = address
+        .parse()
+        .context("--network-subnet must be an IPv4 or IPv6 CIDR")?;
+    let prefix: u8 = prefix
+        .parse()
+        .context("--network-subnet must be an IPv4 or IPv6 CIDR")?;
+    let maximum = if address.is_ipv4() { 32 } else { 128 };
+    if prefix > maximum {
+        bail!("--network-subnet must be an IPv4 or IPv6 CIDR");
+    }
+    Ok(())
+}
+
+fn validate_network_assignment(subnet: &str, address: &str) -> anyhow::Result<()> {
+    let (network, prefix) = subnet
+        .split_once('/')
+        .context("--network-subnet must be an IPv4 or IPv6 CIDR")?;
+    let network: std::net::IpAddr = network.parse()?;
+    let address: std::net::IpAddr = address.parse()?;
+    let prefix: u8 = prefix.parse()?;
+    let contains = match (network, address) {
+        (std::net::IpAddr::V4(network), std::net::IpAddr::V4(address)) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(network) & mask == u32::from(address) & mask
+        }
+        (std::net::IpAddr::V6(network), std::net::IpAddr::V6(address)) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            u128::from(network) & mask == u128::from(address) & mask
+        }
+        _ => false,
+    };
+    if !contains {
+        bail!("--runtime-ip must belong to --network-subnet");
+    }
+    Ok(())
 }
 
 fn parse_secret_fd(value: &str, flag: &str) -> anyhow::Result<u32> {

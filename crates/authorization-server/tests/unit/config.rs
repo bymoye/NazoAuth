@@ -467,17 +467,19 @@ fn generated_secret_creation_reports_an_invalid_parent_without_partial_state() {
 fn migration_config_does_not_materialize_unrelated_application_secrets() {
     let path = temp_config_dir("migration_config_no_application_secrets");
     let database_url_file = path.join("database-url");
-    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nCLIENT_SECRET_PEPPER_FILE: deliberately-absent\n",
+    )
+    .unwrap();
     std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
 
-    let source = ConfigSource::load_from_dir_with_env_mode(
+    let source = ConfigSource::load_for_migrations_from_dir_with_env(
         &path,
         [(
             "DATABASE_URL_FILE".to_owned(),
             database_url_file.display().to_string(),
         )],
-        false,
-        true,
     )
     .unwrap();
 
@@ -683,6 +685,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TLS_CLIENT_CA_FILE",
             "TLS_PRIVATE_KEY_FILE",
             "TRUSTED_PROXY_CIDRS",
+            "UI_CACHE_DIR",
             "UI_STATIC_DIR",
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_URL",

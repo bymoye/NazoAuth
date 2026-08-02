@@ -87,6 +87,8 @@ Options:
   --profile-material PATH             Required only for standards-full
   --data-root PATH                    Default: /var/lib/nazoauth
   --port PORT                         Default: 8000
+  --network-subnet CIDR               Optional fixed container subnet; requires --runtime-ip
+  --runtime-ip ADDRESS                Optional fixed application IP; requires --network-subnet
   --to VERSION                        Immutable vSemVer Release; default: latest
   --external-dependencies             Use operator-owned PostgreSQL and Valkey
   --secrets-stdin                     Read the three dependency URLs as strict JSON from stdin

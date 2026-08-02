@@ -261,6 +261,66 @@ fn parses_complete_install_contract_and_rejects_invalid_boundaries() {
 }
 
 #[test]
+fn parses_pinned_container_network_and_rejects_incomplete_or_host_assignments() {
+    let command = parse(&[
+        "nazoauthctl",
+        "install",
+        "--runtime",
+        "podman",
+        "--network-subnet",
+        "10.101.0.0/24",
+        "--runtime-ip",
+        "10.101.0.20",
+    ])
+    .unwrap()
+    .unwrap()
+    .command;
+    let Command::Install(options) = command else {
+        panic!("expected install");
+    };
+    assert_eq!(options.network_subnet.as_deref(), Some("10.101.0.0/24"));
+    assert_eq!(options.runtime_ip.as_deref(), Some("10.101.0.20"));
+
+    for arguments in [
+        &[
+            "nazoauthctl",
+            "install",
+            "--network-subnet",
+            "10.101.0.0/24",
+        ][..],
+        &["nazoauthctl", "install", "--runtime-ip", "10.101.0.20"][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--runtime",
+            "host",
+            "--network-subnet",
+            "10.101.0.0/24",
+            "--runtime-ip",
+            "10.101.0.20",
+        ][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--network-subnet",
+            "10.101.0.0/24",
+            "--runtime-ip",
+            "10.102.0.20",
+        ][..],
+        &[
+            "nazoauthctl",
+            "install",
+            "--network-subnet",
+            "10.101.0.0/33",
+            "--runtime-ip",
+            "10.101.0.20",
+        ][..],
+    ] {
+        assert!(parse(arguments).is_err(), "accepted {arguments:?}");
+    }
+}
+
+#[test]
 fn install_secret_channels_and_profile_flags_are_unambiguous() {
     for arguments in [
         &[

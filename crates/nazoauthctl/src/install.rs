@@ -54,11 +54,20 @@ pub(crate) fn prepare(
     normalize_external_dependencies(&mut options)?;
     normalize_profile_secrets(&mut options)?;
     let (runtime_engine, dependency_engine) = select_runtime(&options)?;
+    if runtime_engine == "host" && options.network_subnet.is_some() {
+        bail!("container network options are unavailable with the selected host runtime");
+    }
+    if runtime_engine != "host" {
+        ensure_network(
+            &runtime_engine,
+            "nazo_oauth_net",
+            options.network_subnet.as_deref(),
+        )?;
+    }
     let trusted_proxy_cidr = if options.profile == "standards-full" {
         if runtime_engine == "host" {
             Some("127.0.0.1/32".to_owned())
         } else {
-            ensure_network(&runtime_engine, "nazo_oauth_net")?;
             Some(host_cidr(network_gateway(
                 &runtime_engine,
                 "nazo_oauth_net",
@@ -197,7 +206,7 @@ pub(crate) fn start_managed_dependencies(config: &UpdateConfig) -> anyhow::Resul
     let engine = config
         .container_engine()
         .context("managed dependencies require Podman or Docker")?;
-    ensure_network(engine, &config.runtime.network)?;
+    ensure_network(engine, &config.runtime.network, None)?;
     for volume in ["nazo_oauth_postgres", "nazo_oauth_valkey"] {
         ensure_volume(engine, volume)?;
     }
@@ -278,6 +287,7 @@ pub(crate) fn start_managed_dependencies(config: &UpdateConfig) -> anyhow::Resul
     )?;
     wait_dependencies(config)?;
     configure_managed_database_roles(config)
+        .context("failed to configure managed PostgreSQL roles after final readiness")
 }
 
 pub(crate) fn install_systemd(config: &UpdateConfig) -> anyhow::Result<()> {
@@ -1223,7 +1233,7 @@ fn build_config(
             dependency_engine: dependency_engine.to_owned(),
             container_name: "nazo-oauth-server".to_owned(),
             network: "nazo_oauth_net".to_owned(),
-            ip_address: String::new(),
+            ip_address: options.runtime_ip.clone().unwrap_or_default(),
             publish_address,
             health_url: format!("http://127.0.0.1:{}/ready", options.port),
             readiness_attempts: 60,
@@ -1304,7 +1314,7 @@ fn mount(source: PathBuf, target: &str, mode: &str) -> Mount {
     }
 }
 
-fn ensure_network(engine: &str, name: &str) -> anyhow::Result<()> {
+fn ensure_network(engine: &str, name: &str, subnet: Option<&str>) -> anyhow::Result<()> {
     if Process::new(engine)
         .args(["network", "inspect", name])
         .succeeds()
@@ -1312,15 +1322,12 @@ fn ensure_network(engine: &str, name: &str) -> anyhow::Result<()> {
         assert_managed_label(engine, &["network", "inspect", name])?;
         return Ok(());
     }
-    Process::new(engine)
-        .args([
-            "network",
-            "create",
-            "--label",
-            "io.nazoauth.managed=true",
-            name,
-        ])
-        .run_quiet()
+    let mut command =
+        Process::new(engine).args(["network", "create", "--label", "io.nazoauth.managed=true"]);
+    if let Some(subnet) = subnet {
+        command = command.args(["--subnet", subnet]);
+    }
+    command.arg(name).run_quiet()
 }
 
 fn ensure_volume(engine: &str, name: &str) -> anyhow::Result<()> {
@@ -1366,21 +1373,35 @@ fn ensure_dependency_container(engine: &str, name: &str, create: Process) -> any
     create.run_quiet()
 }
 
+fn postgres_readiness_arguments<'a>(
+    container: &'a str,
+    user: &'a str,
+    database: &'a str,
+) -> [&'a str; 9] {
+    [
+        "exec",
+        container,
+        "pg_isready",
+        "-h",
+        "127.0.0.1",
+        "-U",
+        user,
+        "-d",
+        database,
+    ]
+}
+
 fn wait_dependencies(config: &UpdateConfig) -> anyhow::Result<()> {
     let engine = config
         .container_engine()
         .context("managed dependencies require a container engine")?;
     for _ in 0..60 {
         let postgres = Process::new(engine)
-            .args([
-                "exec",
+            .args(postgres_readiness_arguments(
                 config.postgres.container_name.as_str(),
-                "pg_isready",
-                "-U",
                 config.postgres.user.as_str(),
-                "-d",
                 config.postgres.database.as_str(),
-            ])
+            ))
             .succeeds();
         let valkey = Process::new(engine)
             .args([

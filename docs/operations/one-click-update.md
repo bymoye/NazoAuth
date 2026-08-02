@@ -119,6 +119,12 @@ sudo nazoauthctl install --runtime podman \
   /absolute/oidf-public-onboarding-material/standards-full-profile.json
 ```
 
+When an existing reverse proxy deliberately targets a fixed private container
+address, supply both `--network-subnet CIDR` and `--runtime-ip ADDRESS`. The
+installer creates the labeled managed network with that subnet and assigns the
+application container the requested address. Omit both options when the proxy
+uses the default loopback-published port.
+
 The workflow first proves that `source_commit` is the commit behind the exact
 immutable Release tag. A commit that is not yet on the default branch is
 accepted only after the public non-draft Release and its tag-specific,

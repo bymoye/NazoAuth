@@ -11,6 +11,8 @@ fn install_options(data_root: PathBuf) -> InstallOptions {
         profile_material: None,
         data_root,
         port: 8000,
+        network_subnet: None,
+        runtime_ip: None,
         database_url: None,
         migration_database_url: None,
         valkey_url: None,
@@ -88,6 +90,24 @@ fn systemd_version_parser_is_closed() {
 }
 
 #[test]
+fn managed_postgres_readiness_waits_for_the_final_tcp_server() {
+    assert_eq!(
+        postgres_readiness_arguments("nazo-oauth-postgres", "nazoauth_migrator", "oauth"),
+        [
+            "exec",
+            "nazo-oauth-postgres",
+            "pg_isready",
+            "-h",
+            "127.0.0.1",
+            "-U",
+            "nazoauth_migrator",
+            "-d",
+            "oauth",
+        ]
+    );
+}
+
+#[test]
 fn generated_install_paths_are_safe_for_yaml_systemd_and_container_mounts() {
     validate_install_path(Path::new("/var/lib/nazoauth-0.2/app_data"), "data root").unwrap();
     for path in [
@@ -155,6 +175,8 @@ fn oidf_profile_material_generates_only_file_references_for_secrets() {
         profile_material: Some(material),
         data_root: work.path().join("data"),
         port: 8000,
+        network_subnet: None,
+        runtime_ip: None,
         database_url: None,
         migration_database_url: None,
         valkey_url: None,
