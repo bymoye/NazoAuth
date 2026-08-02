@@ -222,13 +222,33 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             )
             self.assertTrue(all(first[name]["x5c"] for name in key_names))
             self.assertNotEqual(first["wallet_private"]["d"], second["wallet_private"]["d"])
-            base = self.module.build_base_input(first, suite_origin="https://suite.example")
+            deployed_anchor = "-----BEGIN CERTIFICATE-----\ndeployed\n-----END CERTIFICATE-----\n"
+            base = self.module.build_base_input(
+                first,
+                suite_origin="https://suite.example",
+                deployed_trust_anchor=deployed_anchor,
+            )
             self.assertEqual(set(base), {"vci", "vci_haip", "vp", "vp_haip"})
             self.assertNotIn("client_attestation", base["vci"])
             self.assertIn("key_attestation_jwks", base["vci"]["vci"])
             self.assertIn("client_attestation", base["vci_haip"])
             self.assertIn("trust_anchor", base["vci_haip"]["client_attestation"])
+            for key in ("vci", "vci_haip"):
+                self.assertEqual(base[key]["credential"]["trust_anchor_pem"], deployed_anchor)
+                self.assertEqual(
+                    base[key]["credential"]["status_list_trust_anchor_pem"],
+                    deployed_anchor,
+                )
             self.assertIn("signing_jwk", base["vp"]["credential"])
+            for key in ("vp", "vp_haip"):
+                self.assertEqual(
+                    base[key]["credential"]["trust_anchor_pem"],
+                    first["trust_anchor_pem"],
+                )
+                self.assertEqual(
+                    base[key]["credential"]["status_list_trust_anchor_pem"],
+                    first["trust_anchor_pem"],
+                )
             self.module.delete_private_configs(root / "first")
             self.assertFalse((root / "first" / "generated-openid4vc-material").exists())
 

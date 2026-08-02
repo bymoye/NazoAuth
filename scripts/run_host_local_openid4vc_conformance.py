@@ -321,7 +321,12 @@ def public_jwk(key: dict[str, object]) -> dict[str, object]:
     return {field: value for field, value in key.items() if field != "d"}
 
 
-def build_base_input(material: dict[str, object], *, suite_origin: str) -> dict[str, object]:
+def build_base_input(
+    material: dict[str, object],
+    *,
+    suite_origin: str,
+    deployed_trust_anchor: str,
+) -> dict[str, object]:
     validate_generated_material(material)
     wallet_private = material["wallet_private"]
     wallet_attested = material["wallet_attested"]
@@ -334,6 +339,8 @@ def build_base_input(material: dict[str, object], *, suite_origin: str) -> dict[
         for value in (wallet_private, wallet_attested, attestation, key_attestation, credential)
     ) or not isinstance(trust_anchor, str):
         fail("generated OpenID4VC material has an invalid configuration shape")
+    if "-----BEGIN CERTIFICATE-----" not in deployed_trust_anchor:
+        fail("deployed OpenID4VC trust anchor is not a PEM certificate")
     def issuer_base(wallet: dict[str, object], *, attested: bool) -> dict[str, object]:
         config: dict[str, object] = {
             "alias": "nazo-openid4vc-vci-haip" if attested else "nazo-openid4vc-vci",
@@ -344,6 +351,12 @@ def build_base_input(material: dict[str, object], *, suite_origin: str) -> dict[
             # private_key_jwt client supply independent key-attestation proof
             # material without being misclassified as a HAIP client.
             "vci": {"key_attestation_jwks": {"keys": [key_attestation]}},
+            # The Suite is the relying wallet in VCI plans, so it must trust the
+            # deployed issuer's managed signing bundle, not this run's actor CA.
+            "credential": {
+                "trust_anchor_pem": deployed_trust_anchor,
+                "status_list_trust_anchor_pem": deployed_trust_anchor,
+            },
         }
         if attested:
             config["client_attestation"] = {
@@ -358,7 +371,11 @@ def build_base_input(material: dict[str, object], *, suite_origin: str) -> dict[
         return {
             "alias": "nazo-openid4vc-vp-haip" if haip else "nazo-openid4vc-vp",
             "client": {"client_id": "generated"},
-            "credential": {"signing_jwk": credential, "trust_anchor_pem": trust_anchor},
+            "credential": {
+                "signing_jwk": credential,
+                "trust_anchor_pem": trust_anchor,
+                "status_list_trust_anchor_pem": trust_anchor,
+            },
         }
     return {
         "vci": issuer_base(wallet_private, attested=False),
@@ -462,7 +479,11 @@ def materialize_configs(
     material = generate_certificate_material(args.work_dir)
     private_write_json(
         args.work_dir / "base-input.json",
-        build_base_input(material, suite_origin=args.conformance_server),
+        build_base_input(
+            material,
+            suite_origin=args.conformance_server,
+            deployed_trust_anchor=trust_anchor,
+        ),
     )
     private_write_json(
         args.work_dir / "driver-input.json",
@@ -494,11 +515,21 @@ def materialize_configs(
         env=sanitized_environment(),
     )
     protect_directory(args.work_dir)
-    validate_materialized_configs(args.work_dir / "openid4vc-plan-configs.json", material, args.run_namespace)
+    validate_materialized_configs(
+        args.work_dir / "openid4vc-plan-configs.json",
+        material,
+        args.run_namespace,
+        trust_anchor,
+    )
     return material
 
 
-def validate_materialized_configs(path: Path, material: dict[str, object], namespace: str) -> None:
+def validate_materialized_configs(
+    path: Path,
+    material: dict[str, object],
+    namespace: str,
+    deployed_trust_anchor: str,
+) -> None:
     """Prove the private suite inputs and public onboarding will share one fresh identity set."""
     document = json.loads(path.read_text(encoding="utf-8"))
     configs = document.get("configs") if isinstance(document, dict) else None
@@ -511,9 +542,23 @@ def validate_materialized_configs(path: Path, material: dict[str, object], names
     }
     observed_public: dict[str, dict[str, object]] = {}
     observed_private_scalars: set[str] = set()
-    for config in configs.values():
+    run_trust_anchor = material.get("trust_anchor_pem")
+    for filename, config in configs.items():
         if not isinstance(config, dict):
             fail("materialized OpenID4VC config is not an object")
+        credential_config = config.get("credential")
+        if not isinstance(credential_config, dict):
+            fail("materialized OpenID4VC config lacks credential trust settings")
+        expected_anchor = (
+            deployed_trust_anchor
+            if str(filename).startswith("openid4vc-vci-")
+            else run_trust_anchor
+        )
+        if any(
+            credential_config.get(field) != expected_anchor
+            for field in ("trust_anchor_pem", "status_list_trust_anchor_pem")
+        ):
+            fail("materialized OpenID4VC credential trust escaped its issuer boundary")
         nazo = config.get("nazo")
         if not isinstance(nazo, dict):
             continue

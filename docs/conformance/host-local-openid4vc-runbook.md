@@ -11,7 +11,9 @@ Those 17 cases use `private_key_jwt` or client attestation with DPoP. They do no
 The VP request-object trust anchor is different: it is a public certificate used by NazoAuth to validate verifier request-object signatures. Supply `--request-object-trust-anchor-pem`; it must be a regular non-symlink ASCII PEM certificate file, no larger than 1 MiB and with no private key. It is not an ingress client-CA and is never installed with the reverse proxy.
 
 For a standards-full managed installation, create that public file only through
-the control plane immediately before the matrix. This exports the `CA:TRUE`
+the control plane immediately before the matrix. The runner uses it both as the
+VCI credential/status-list trust anchor for the deployed issuer and as the VP
+request-object trust anchor. This exports the `CA:TRUE`
 certificate from the active atomic OpenID4VC bundle; it never exports the leaf
 or any private key:
 

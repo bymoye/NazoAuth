@@ -11,7 +11,9 @@
 VP request-object trust anchor 是 NazoAuth 验证 verifier request-object 签名链使用的公开证书，通过 `--request-object-trust-anchor-pem` 传入。该文件必须是常规、非 symlink、最多 1 MiB 的 ASCII PEM 证书文件，且不得含私钥。它不是 ingress client-CA，不得安装到反向代理。
 
 对 standards-full 的受管安装，矩阵开始前只能通过正式控制面生成此公开文件。该命令从活动的
-原子 OpenID4VC bundle 导出 `CA:TRUE` certificate，绝不导出 leaf 或任何私钥：
+原子 OpenID4VC bundle 导出 `CA:TRUE` certificate。runner 同时将它用作 VCI 计划中
+部署 issuer 的 credential/status-list trust anchor，以及 VP request-object trust anchor；
+它绝不导出 leaf 或任何私钥：
 
 ```bash
 install -d -m 0755 /etc/nazoauth/public
