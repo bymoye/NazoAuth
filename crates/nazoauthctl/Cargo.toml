@@ -30,5 +30,8 @@ wait-timeout.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+uuid = { workspace = true, features = ["v7"] }
+
 [lints]
 workspace = true
