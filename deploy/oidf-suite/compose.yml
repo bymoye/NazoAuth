@@ -1,0 +1,65 @@
+name: nazoauth-oidf-suite
+
+x-suite-build: &suite-build
+  context: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
+  dockerfile: Dockerfile
+
+x-suite-environment: &suite-environment
+  BASE_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
+  BASE_MTLS_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
+  MONGODB_HOST: mongodb
+  OIDC_GOOGLE_CLIENTID: google-client
+  OIDC_GOOGLE_SECRET: google-secret
+  OIDC_GITLAB_CLIENTID: gitlab-client
+  OIDC_GITLAB_SECRET: gitlab-secret
+
+services:
+  mongodb:
+    image: docker.io/library/mongo:6.0.13
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+  server:
+    image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-946451d1}
+    build: *suite-build
+    restart: unless-stopped
+    environment:
+      <<: *suite-environment
+      JAVA_EXTRA_ARGS: -Dfintechlabs.devmode=false
+    ports:
+      - "0.0.0.0:8443:8080"
+    depends_on:
+      - mongodb
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+  server-bootstrap:
+    profiles: [bootstrap]
+    image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-946451d1}
+    build: *suite-build
+    environment:
+      <<: *suite-environment
+      JAVA_EXTRA_ARGS: >-
+        -Dfintechlabs.devmode=true
+        -Dfintechlabs.makeDummyUserAdminInDevMode=false
+    ports:
+      - "127.0.0.1:18443:8080"
+    depends_on:
+      - mongodb
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+volumes:
+  mongodb_data:
