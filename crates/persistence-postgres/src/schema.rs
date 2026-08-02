@@ -287,7 +287,6 @@ diesel::table! {
     oauth_client_conformance_bindings (id) {
         id -> Uuid,
         conformance_lease_id -> Nullable<Uuid>,
-        conformance_expires_at -> Nullable<Timestamptz>,
     }
 }
 

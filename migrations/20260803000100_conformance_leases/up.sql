@@ -32,19 +32,32 @@ CREATE INDEX ix_conformance_leases_pending_cleanup
 
 ALTER TABLE oauth_clients
     ADD COLUMN conformance_lease_id UUID,
-    ADD COLUMN conformance_expires_at TIMESTAMPTZ,
     ADD CONSTRAINT fk_oauth_clients_conformance_lease
         FOREIGN KEY (tenant_id, conformance_lease_id)
-        REFERENCES conformance_leases(tenant_id, id),
-    ADD CONSTRAINT ck_oauth_clients_conformance_lease_shape CHECK (
-        (conformance_lease_id IS NULL AND conformance_expires_at IS NULL)
-        OR
-        (conformance_lease_id IS NOT NULL AND conformance_expires_at IS NOT NULL)
-    );
+        REFERENCES conformance_leases(tenant_id, id);
 
 CREATE INDEX ix_oauth_clients_conformance_lease
     ON oauth_clients (tenant_id, conformance_lease_id)
     WHERE conformance_lease_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION nazo_oauth_conformance_lease_is_active(
+    candidate_tenant_id UUID,
+    candidate_lease_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT candidate_lease_id IS NULL OR EXISTS (
+        SELECT 1
+        FROM conformance_leases lease
+        WHERE lease.tenant_id = candidate_tenant_id
+          AND lease.id = candidate_lease_id
+          AND lease.expires_at > CURRENT_TIMESTAMP
+          AND lease.revoked_at IS NULL
+          AND lease.cleaned_at IS NULL
+    )
+$$;
 
 CREATE OR REPLACE FUNCTION nazo_oauth_validate_conformance_lease_binding()
 RETURNS trigger
@@ -56,7 +69,6 @@ DECLARE
     lease_cleaned_at TIMESTAMPTZ;
 BEGIN
     IF NEW.conformance_lease_id IS NULL THEN
-        NEW.conformance_expires_at := NULL;
         RETURN NEW;
     END IF;
 
@@ -82,7 +94,6 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    NEW.conformance_expires_at := lease_expires_at;
     RETURN NEW;
 END;
 $$;

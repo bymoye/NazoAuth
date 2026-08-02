@@ -91,8 +91,9 @@ pub struct OAuthClientRepository {
 pub(crate) fn conformance_lease_is_effective()
 -> diesel::expression::SqlLiteral<diesel::sql_types::Bool> {
     diesel::dsl::sql(
-        "(oauth_clients.conformance_expires_at IS NULL \
-         OR oauth_clients.conformance_expires_at > CURRENT_TIMESTAMP)",
+        "nazo_oauth_conformance_lease_is_active(\
+            oauth_clients.tenant_id, oauth_clients.conformance_lease_id\
+        )",
     )
 }
 
@@ -638,7 +639,9 @@ impl OAuthClientRepository {
                 security_policy = NULLIF($3->'security_policy', 'null'::jsonb),
                 updated_at = CURRENT_TIMESTAMP
             WHERE tenant_id = $1 AND id = $2 AND is_active = TRUE
-              AND (conformance_expires_at IS NULL OR conformance_expires_at > CURRENT_TIMESTAMP)
+              AND nazo_oauth_conformance_lease_is_active(
+                  tenant_id, conformance_lease_id
+              )
               AND registration_access_token_blake3 = $6
             "#,
                 )
