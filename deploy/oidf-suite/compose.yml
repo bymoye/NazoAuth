@@ -31,7 +31,11 @@ services:
     restart: unless-stopped
     environment:
       <<: *suite-environment
-      JAVA_EXTRA_ARGS: -Dfintechlabs.devmode=false
+      JAVA_EXTRA_ARGS: >-
+        -Dfintechlabs.devmode=false
+        -Doidc.google.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+        -Doidc.gitlab.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+        -Doidc.admin.issuer=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
     ports:
       - "0.0.0.0:8443:8080"
     depends_on:
@@ -51,6 +55,9 @@ services:
       JAVA_EXTRA_ARGS: >-
         -Dfintechlabs.devmode=true
         -Dfintechlabs.makeDummyUserAdminInDevMode=false
+        -Doidc.google.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+        -Doidc.gitlab.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+        -Doidc.admin.issuer=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
     ports:
       - "127.0.0.1:18443:8080"
     depends_on:

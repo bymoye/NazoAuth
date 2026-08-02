@@ -8,6 +8,7 @@ export NAZOAUTH_SOURCE_DIR
 : "${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR}"
 : "${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL}"
 : "${OIDF_SUITE_TOKEN_FILE:?set OIDF_SUITE_TOKEN_FILE}"
+: "${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER}"
 
 actual_revision=$(git -C "$OIDF_SUITE_SOURCE_DIR" rev-parse HEAD)
 test "$actual_revision" = "$expected_revision" || {
@@ -22,24 +23,34 @@ test -f "$OIDF_SUITE_SOURCE_DIR/pom.xml" || {
   echo "official suite pom.xml is absent" >&2
   exit 1
 }
-test ! -e "$OIDF_SUITE_TOKEN_FILE" || {
-  echo "suite token file already exists; refusing to overwrite it" >&2
-  exit 1
-}
-
 token_parent=$(dirname -- "$OIDF_SUITE_TOKEN_FILE")
 install -d -m 0700 "$token_parent"
 compose="docker compose --project-directory $script_dir -f $script_dir/compose.yml"
 
-cleanup_bootstrap() {
-  $compose --profile bootstrap stop server-bootstrap >/dev/null 2>&1 || true
-  $compose --profile bootstrap rm -f server-bootstrap >/dev/null 2>&1 || true
-}
-trap cleanup_bootstrap EXIT HUP INT TERM
+if test -e "$OIDF_SUITE_TOKEN_FILE"; then
+  test -f "$OIDF_SUITE_TOKEN_FILE" || {
+    echo "suite token path is not a regular file" >&2
+    exit 1
+  }
+  test "$(stat -c %a "$OIDF_SUITE_TOKEN_FILE")" = 600 || {
+    echo "suite token file permissions are not 0600" >&2
+    exit 1
+  }
+  test -s "$OIDF_SUITE_TOKEN_FILE" || {
+    echo "suite token file is empty" >&2
+    exit 1
+  }
+  echo "Reusing the existing protected suite token; it will be validated after startup"
+else
+  cleanup_bootstrap() {
+    $compose --profile bootstrap stop server-bootstrap >/dev/null 2>&1 || true
+    $compose --profile bootstrap rm -f server-bootstrap >/dev/null 2>&1 || true
+  }
+  trap cleanup_bootstrap EXIT HUP INT TERM
 
-$compose --profile bootstrap up -d --build mongodb server-bootstrap
+  $compose --profile bootstrap up -d --build mongodb server-bootstrap
 
-python3 - "$OIDF_SUITE_TOKEN_FILE" <<'PY'
+  python3 - "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import json
 import os
 import pathlib
@@ -83,8 +94,10 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
     stream.write("\n")
 PY
 
-cleanup_bootstrap
-trap - EXIT HUP INT TERM
+  cleanup_bootstrap
+  trap - EXIT HUP INT TERM
+fi
+
 $compose up -d server
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'

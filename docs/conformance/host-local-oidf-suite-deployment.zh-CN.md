@@ -49,12 +49,19 @@ GitHub 生成材料。
 export OIDF_SUITE_SOURCE_DIR=/opt/oidf-conformance-suite/source
 export OIDF_SUITE_BASE_URL=https://567t0yglur-8443.cnb.run
 export OIDF_SUITE_TOKEN_FILE=/opt/oidf-conformance-suite/secrets/api-token
+export OIDF_OPERATOR_ISSUER=https://567t0yglur-443.cnb.run
 sh /opt/nazoauth-docker/deploy/oidf-suite/bootstrap-api-token.sh
 ```
 
 脚本的成功条件是公网 `/api/server` 未认证返回 `401`，使用新 Token 返回 `200`。
-MongoDB 状态保存在 Compose 命名卷中；源码、Maven 缓存和 Token 位于上述独立目录，
-不进入 NazoAuth 产品容器或数据卷。
+官方套件在非开发模式启动时必须解析其操作员登录 OIDC issuer；CNB 容器网络无法访问
+Google/GitLab 时，`OIDF_OPERATOR_ISSUER` 必须指向容器可达且 Discovery issuer 自洽的
+HTTPS OIDC 服务。本机测试环境使用正在验收的 NazoAuth issuer，只为满足套件操作员
+登录注册的启动依赖；矩阵仍通过 Suite API Token 驱动，不执行该登录流程。
+若 Token 已生成而后续正式启动或公网核验失败，重新运行脚本只会复用权限为 `0600` 的
+现有文件并重新验证，不会覆盖或打印 Token。
+MongoDB 状态保存在 Compose 命名卷中；源码和 Token 位于上述独立目录，Maven 缓存由
+Docker builder 管理；它们均不进入 NazoAuth 产品容器或数据卷。
 
 ## 4. 部署核验
 
