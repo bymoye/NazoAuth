@@ -330,9 +330,26 @@ async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
             .await
             .unwrap()
     );
+    tokio::fs::write(
+        &certificate,
+        b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !existing_openid4vc_bundle_matches(&paths, &private_key)
+            .await
+            .unwrap()
+    );
 
     let bundle = build_openid4vc_certificate_bundle(&private_key, "auth.example").unwrap();
     tokio::fs::write(&certificate, &bundle).await.unwrap();
+    let different_private_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+    assert!(
+        !existing_openid4vc_bundle_matches(&paths, &different_private_key)
+            .await
+            .unwrap()
+    );
     let wrong_hostname = Openid4vcCertificatePaths {
         chain: certificate.clone(),
         anchors: certificate.clone(),

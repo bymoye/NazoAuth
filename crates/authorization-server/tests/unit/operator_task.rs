@@ -157,6 +157,15 @@ fn incomplete_lifecycle_transition_is_never_deleted_or_recovered_implicitly() {
         )
         .is_err()
     );
+    assert!(
+        write_initial_lifecycle(
+            &lifecycle,
+            &TaskLifecycle::Prepared {
+                request_sha256: "e".repeat(64),
+            },
+        )
+        .is_err()
+    );
     assert!(temporary.exists());
     assert!(ensure_real_state_directory(&directory.join("missing-state")).is_err());
     fs::remove_dir_all(directory).unwrap();
@@ -165,7 +174,7 @@ fn incomplete_lifecycle_transition_is_never_deleted_or_recovered_implicitly() {
 #[cfg(unix)]
 #[test]
 fn operator_state_paths_reject_symlink_roots_files_and_temporaries() {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     let directory = temporary_directory();
     let real_state = directory.join("real-state");
@@ -189,6 +198,14 @@ fn operator_state_paths_reject_symlink_roots_files_and_temporaries() {
     let lock = real_state.join("task.lock");
     symlink(&external, &lock).unwrap();
     assert!(regular_state_file_present(&lock, "operator task lock").is_err());
+
+    let denied = directory.join("denied");
+    fs::create_dir(&denied).unwrap();
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied_child = denied.join("state");
+    assert!(regular_state_file_present(&denied_child, "denied state").is_err());
+    assert!(state_path_present(&denied_child).is_err());
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
     fs::remove_dir_all(directory).unwrap();
 }
 

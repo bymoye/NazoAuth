@@ -284,6 +284,16 @@ fn openid4vc_trust_export_uses_only_the_managed_key_directory() {
         managed_openid4vc_bundle_path(&value).unwrap(),
         keys.join(OPENID4VC_CERTIFICATE_BUNDLE)
     );
+    #[cfg(unix)]
+    {
+        let linked_root = work.path().join("linked-root");
+        fs::create_dir(&linked_root).unwrap();
+        let linked_keys = linked_root.join("keys");
+        std::os::unix::fs::symlink(&keys, &linked_keys).unwrap();
+        value.runtime.snapshot_paths = vec![linked_keys];
+        assert!(managed_openid4vc_bundle_path(&value).is_err());
+        value.runtime.snapshot_paths = vec![keys.clone()];
+    }
     value
         .runtime
         .snapshot_paths
