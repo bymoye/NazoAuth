@@ -1860,12 +1860,8 @@ def inspect_oidf_state(
     return None
 
 
-def ciba_config_has_automated_approval_url(config_json_file: str, env_name: str) -> bool:
-    raw_config = (
-        non_empty_file(config_json_file, "--config-json-file")
-        if config_json_file
-        else os.environ.get(env_name, "")
-    )
+def ciba_config_has_automated_approval_url(config_json_file: str) -> bool:
+    raw_config = non_empty_file(config_json_file, "--config-json-file")
     if not raw_config.strip():
         return False
     try:
@@ -2599,7 +2595,7 @@ def main() -> int:
 
     monitor_aliases = set() if args.list else aliases
     if monitor_aliases and any("ciba" in alias for alias in monitor_aliases):
-        if not ciba_config_has_automated_approval_url(args.config_json_file, args.config_env):
+        if not ciba_config_has_automated_approval_url(args.config_json_file):
             fail(
                 "FAPI-CIBA conformance automation requires automated_ciba_approval_url "
                 "so the official suite controls approve/deny timing"

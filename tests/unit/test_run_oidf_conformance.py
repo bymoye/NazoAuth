@@ -27,6 +27,37 @@ class RunOidfConformanceTests(unittest.TestCase):
         self.assertNotIn('parser.add_argument("--config-env"', source)
         self.assertNotIn("OIDF_PLAN_CONFIG_JSON", source)
 
+    def test_ciba_automation_gate_reads_the_required_private_config_file(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "configs": {
+                            "ciba": {
+                                "alias": "nazo-oauth-oidf-fapi-ciba-private-poll",
+                                "automated_ciba_approval_url": "https://issuer.example/test/ciba",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(module.ciba_config_has_automated_approval_url(str(config)))
+
+    def test_ciba_automation_gate_rejects_a_config_without_approval_url(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text(
+                json.dumps({"configs": {"ciba": {"alias": "nazo-oauth-oidf-fapi-ciba"}}}),
+                encoding="utf-8",
+            )
+
+            self.assertFalse(module.ciba_config_has_automated_approval_url(str(config)))
+
     def test_runtime_secret_environment_cannot_override_private_plan_credentials(self):
         module = load_runner_module()
         config = {
