@@ -75,6 +75,8 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
 
     def test_driver_tokens_subject_and_anchor_only_come_from_declared_boundaries(self):
         secrets = {
+            "applicant_email": "applicant@example.test",
+            "applicant_password": "applicant-secret",
             "issuer_management_token": "issuer-token",
             "verifier_management_token": "verifier-token",
         }
@@ -85,6 +87,13 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
         )
         self.assertEqual(result["issuer"]["management_token"], "issuer-token")
         self.assertEqual(result["verifier"]["management_token"], "verifier-token")
+        self.assertEqual(
+            result["hosted_authorization"],
+            {
+                "email": "applicant@example.test",
+                "password": "applicant-secret",
+            },
+        )
         self.assertEqual(result["issuer"]["subject_id"], "00000000-0000-0000-0000-000000000123")
         self.assertIn("BEGIN CERTIFICATE", result["verifier"]["request_object_trust_anchor_pem"])
         self.assertTrue(result["issuer"]["dedicated_conformance_subject"])

@@ -149,6 +149,11 @@ class Openid4vcOidfTests(unittest.TestCase):
                             "exposed": {
                                 "credential_offer_endpoint": "https://suite.example/credential_offer"
                             },
+                            "browser": {
+                                "urls": [
+                                    "https://issuer.example/authorize?request_uri=urn%3Aexample"
+                                ]
+                            },
                         },
                     ),
                 ],
@@ -160,6 +165,10 @@ class Openid4vcOidfTests(unittest.TestCase):
         self.assertEqual(
             entries[0]["exposed"]["credential_offer_endpoint"],
             "https://suite.example/credential_offer",
+        )
+        self.assertEqual(
+            entries[0]["browser"]["urls"],
+            ["https://issuer.example/authorize?request_uri=urn%3Aexample"],
         )
         self.assertEqual(
             [call.args[2] for call in request.call_args_list],
@@ -210,6 +219,9 @@ class Openid4vcOidfTests(unittest.TestCase):
             },
             module.threading.Event(),
         )
+        driver.completed_hosted_authorizations["finished-module"] = {
+            "https://issuer.example/authorize?request_uri=old"
+        }
         with patch.object(
             module,
             "module_entries",
@@ -225,6 +237,7 @@ class Openid4vcOidfTests(unittest.TestCase):
             driver.drive_once()
 
         self.assertEqual(driver.terminal_modules, {"finished-module"})
+        self.assertNotIn("finished-module", driver.completed_hosted_authorizations)
         self.assertEqual(entries.call_args_list[1].kwargs["ignored_module_ids"], {"finished-module"})
 
     def test_driver_loop_scans_before_first_sleep(self):
@@ -250,6 +263,45 @@ class Openid4vcOidfTests(unittest.TestCase):
             driver.run()
 
         self.assertEqual(calls, 1)
+
+    def test_issuer_initiated_authorization_code_dispatches_offer_and_hosted_login(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "test-token",
+                "aliases": ["issuer-alias"],
+            },
+            module.threading.Event(),
+        )
+        info = {
+            "_driver_module_id": "module-id",
+            "_driver_plan": "oid4vci-1_0-issuer-test-plan",
+            "status": "WAITING",
+            "variant": {
+                "vci_authorization_code_flow_variant": "issuer_initiated",
+                "vci_grant_type": "authorization_code",
+            },
+        }
+
+        def deliver_offer(module_id, *_args):
+            driver.triggered.add(module_id)
+
+        with (
+            patch.object(module, "module_entries", return_value=[info]) as entries,
+            patch.object(driver, "drive_issuer", side_effect=deliver_offer) as drive_issuer,
+            patch.object(driver, "drive_wallet_initiated_issuer") as drive_hosted,
+        ):
+            driver.drive_once()
+            driver.drive_once()
+
+        self.assertEqual(
+            [call.kwargs["ignored_module_ids"] for call in entries.call_args_list],
+            [set(), set()],
+        )
+        drive_issuer.assert_called_once()
+        self.assertEqual(drive_hosted.call_count, 2)
+        drive_hosted.assert_called_with("module-id", info)
 
     def test_issuer_driver_delivers_one_offer_for_preauthorized_module(self):
         module = load("run_openid4vc_conformance.py")
@@ -343,6 +395,447 @@ class Openid4vcOidfTests(unittest.TestCase):
 
         self.assertEqual(create_offer.call_count, 1)
         self.assertIn("module-id", driver.triggered)
+
+    def test_wallet_initiated_issuer_completes_hosted_authorization(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "correct horse battery staple",
+                },
+            },
+            module.threading.Event(),
+        )
+        session = Mock()
+        session.opener = object()
+        session.request_json.return_value = {"csrf_token": "csrf-secret"}
+        with (
+            patch.object(module.ControlPlaneSession, "login", return_value=session) as login,
+            patch.object(module, "capture_control_plane_redirects") as capture_redirects,
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(
+                module,
+                "redirect_location",
+                side_effect=[
+                    "https://issuer.example/ui/consent?request_id=request-1",
+                    "https://suite.example/test/a/issuer/callback?code=one&state=two",
+                ],
+            ) as redirect,
+            patch.object(module, "complete_suite_browser_callback") as complete_callback,
+        ):
+            driver.drive_wallet_initiated_issuer(
+                "module-id",
+                {
+                    "browser": {
+                        "urls": [
+                            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+                        ]
+                    }
+                },
+            )
+
+        login.assert_called_once_with(
+            "https://issuer.example",
+            "user@example.test",
+            "correct horse battery staple",
+        )
+        capture_redirects.assert_called_once_with(session)
+        mark_visited.assert_called_once_with(
+            "https://suite.example",
+            "suite-token",
+            "module-id",
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample",
+        )
+        self.assertEqual(
+            redirect.call_args_list[0].args[1].full_url,
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample",
+        )
+        session.request_json.assert_called_once_with(
+            "GET",
+            "/authorize/consent?request_id=request-1",
+            expected_status=200,
+            csrf=False,
+        )
+        decision = redirect.call_args_list[1].args[1]
+        self.assertEqual(decision.full_url, "https://issuer.example/authorize/decision")
+        self.assertEqual(
+            module.urllib.parse.parse_qs(decision.data.decode("utf-8")),
+            {
+                "request_id": ["request-1"],
+                "decision": ["approve"],
+                "csrf_token": ["csrf-secret"],
+            },
+        )
+        complete_callback.assert_called_once_with(
+            "https://suite.example",
+            "https://suite.example/test/a/issuer/callback?code=one&state=two",
+        )
+        self.assertEqual(driver.triggered, set())
+        self.assertEqual(
+            driver.completed_hosted_authorizations,
+            {
+                "module-id": {
+                    "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+                }
+            },
+        )
+
+    def test_hosted_authorization_preserves_login_cookie_jar_while_capturing_redirects(self):
+        module = load("run_openid4vc_conformance.py")
+        cookie_jar = module.http.cookiejar.CookieJar()
+        session = Mock()
+        session.opener = module.urllib.request.build_opener(
+            module.urllib.request.HTTPCookieProcessor(cookie_jar)
+        )
+
+        module.capture_control_plane_redirects(session)
+
+        processors = [
+            handler
+            for handler in session.opener.handlers
+            if isinstance(handler, module.urllib.request.HTTPCookieProcessor)
+        ]
+        self.assertEqual(len(processors), 1)
+        self.assertIs(processors[0].cookiejar, cookie_jar)
+        self.assertTrue(
+            any(
+                isinstance(handler, module.CaptureRedirectHandler)
+                for handler in session.opener.handlers
+            )
+        )
+
+    def test_hosted_authorization_accepts_direct_suite_error_callback(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "secret",
+                },
+            },
+            module.threading.Event(),
+        )
+        session = Mock()
+        session.opener = object()
+        with (
+            patch.object(module.ControlPlaneSession, "login", return_value=session),
+            patch.object(module, "capture_control_plane_redirects"),
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(
+                module,
+                "redirect_location",
+                return_value=(
+                    "https://suite.example/test/a/issuer/callback?"
+                    "error=invalid_request&state=one"
+                ),
+            ) as redirect,
+            patch.object(module, "complete_suite_browser_callback") as complete_callback,
+        ):
+            driver.drive_wallet_initiated_issuer(
+                "module-id",
+                {
+                    "testName": "negative-module",
+                    "browser": {
+                        "urls": [
+                            "https://issuer.example/authorize?request_uri=urn%3Ainvalid"
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(redirect.call_count, 1)
+        mark_visited.assert_called_once()
+        session.request_json.assert_not_called()
+        complete_callback.assert_called_once_with(
+            "https://suite.example",
+            "https://suite.example/test/a/issuer/callback?error=invalid_request&state=one",
+        )
+        self.assertEqual(driver.completed_trigger_total, 1)
+
+    def test_reused_request_uri_module_visits_anonymously_before_hosted_login(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "secret",
+                },
+            },
+            module.threading.Event(),
+        )
+        authorization_url = (
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+        )
+        info = {
+            "testName": (
+                "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds"
+            ),
+            "browser": {"urls": [authorization_url], "visited": []},
+        }
+        with (
+            patch.object(module, "visit_initial_hosted_login_page") as visit_login,
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(module.ControlPlaneSession, "login") as login,
+        ):
+            driver.drive_wallet_initiated_issuer("module-id", info)
+
+        visit_login.assert_called_once_with("https://issuer.example", authorization_url)
+        mark_visited.assert_called_once_with(
+            "https://suite.example",
+            "suite-token",
+            "module-id",
+            authorization_url,
+        )
+        login.assert_not_called()
+        self.assertEqual(driver.completed_hosted_authorizations, {"module-id": set()})
+
+    def test_consumed_request_uri_module_drives_second_visit_to_error_callback(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "secret",
+                },
+            },
+            module.threading.Event(),
+        )
+        authorization_url = (
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+        )
+        driver.completed_hosted_authorizations["module-id"] = {authorization_url}
+        session = Mock()
+        session.opener = object()
+        with (
+            patch.object(module.ControlPlaneSession, "login", return_value=session),
+            patch.object(module, "capture_control_plane_redirects"),
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(
+                module,
+                "redirect_location",
+                return_value=(
+                    "https://suite.example/test/a/issuer/callback?"
+                    "error=invalid_request_uri&state=one"
+                ),
+            ) as redirect,
+            patch.object(module, "complete_suite_browser_callback") as complete_callback,
+        ):
+            driver.drive_wallet_initiated_issuer(
+                "module-id",
+                {
+                    "testName": "fapi2-security-profile-final-par-attempt-reuse-request_uri",
+                    "browser": {"urls": [authorization_url], "visited": [authorization_url]},
+                },
+            )
+
+        mark_visited.assert_called_once()
+        self.assertEqual(redirect.call_count, 1)
+        complete_callback.assert_called_once_with(
+            "https://suite.example",
+            "https://suite.example/test/a/issuer/callback?error=invalid_request_uri&state=one",
+        )
+        self.assertEqual(driver.completed_trigger_total, 1)
+
+    def test_initial_anonymous_visit_requires_exact_same_origin_login_route(self):
+        module = load("run_openid4vc_conformance.py")
+        opener = object()
+        with (
+            patch.object(module.urllib.request, "build_opener", return_value=opener),
+            patch.object(
+                module,
+                "redirect_location",
+                return_value="https://issuer.example/ui/auth?next=%2Fauthorize%3Fclient_id%3Dwallet",
+            ) as redirect,
+        ):
+            module.visit_initial_hosted_login_page(
+                "https://issuer.example",
+                "https://issuer.example/authorize?client_id=wallet",
+            )
+
+        self.assertIs(redirect.call_args.args[0], opener)
+        for location in (
+            "https://other.example/ui/auth?next=%2Fauthorize",
+            "https://issuer.example/ui/consent?next=%2Fauthorize",
+            "https://issuer.example/ui/auth?next=one&next=two",
+            "https://issuer.example/ui/auth?next=one&extra=two",
+        ):
+            with (
+                self.subTest(location=location),
+                patch.object(module.urllib.request, "build_opener", return_value=opener),
+                patch.object(module, "redirect_location", return_value=location),
+                self.assertRaisesRegex(RuntimeError, "did not reach the login page"),
+            ):
+                module.visit_initial_hosted_login_page(
+                    "https://issuer.example",
+                    "https://issuer.example/authorize?client_id=wallet",
+                )
+
+    def test_suite_browser_visit_uses_authenticated_official_runner_api(self):
+        module = load("run_openid4vc_conformance.py")
+        with patch.object(module.oidf, "oidf_api_request") as request:
+            module.mark_suite_browser_url_visited(
+                "https://suite.example",
+                "suite-token",
+                "module-id",
+                "https://issuer.example/authorize?client_id=wallet",
+            )
+
+        request.assert_called_once_with(
+            "POST",
+            "https://suite.example",
+            "api/runner/browser/module-id/visit",
+            "suite-token",
+            query={"url": "https://issuer.example/authorize?client_id=wallet"},
+            expected_statuses={204},
+        )
+
+    def test_hosted_authorization_rejects_ambiguous_or_cross_origin_urls(self):
+        module = load("run_openid4vc_conformance.py")
+        self.assertIsNone(
+            module.hosted_authorization_url(
+                "https://issuer.example",
+                {"urls": ["https://other.example/authorize?request_uri=one"]},
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+            module.hosted_authorization_url(
+                "https://issuer.example",
+                {
+                    "urls": [
+                        "https://issuer.example/authorize?request_uri=one",
+                        "https://issuer.example/authorize?request_uri=two",
+                    ]
+                },
+            )
+        self.assertEqual(
+            module.hosted_authorization_url(
+                "https://issuer.example",
+                {
+                    "urls": [
+                        "https://issuer.example/authorize?request_uri=one",
+                        "https://issuer.example/authorize?request_uri=two",
+                    ]
+                },
+                {"https://issuer.example/authorize?request_uri=one"},
+            ),
+            "https://issuer.example/authorize?request_uri=two",
+        )
+        for location in (
+            "https://other.example/ui/consent?request_id=one",
+            "https://issuer.example/ui/consent?request_id=one&request_id=two",
+            "https://issuer.example/other?request_id=one",
+        ):
+            with self.subTest(location=location), self.assertRaises(RuntimeError):
+                module.hosted_consent_request_id("https://issuer.example", location)
+        with self.assertRaises(RuntimeError):
+                module.hosted_suite_callback_url(
+                "https://suite.example",
+                "https://other.example/test/a/issuer/callback?code=secret",
+            )
+
+    def test_hosted_authorization_denies_only_exact_user_reject_modules(self):
+        module = load("run_openid4vc_conformance.py")
+        for test_name in module.oidf.FAPI_SECURITY_USER_REJECTS_AUTHENTICATION_MODULES:
+            with self.subTest(test_name=test_name):
+                self.assertEqual(
+                    module.hosted_authorization_decision({"testName": test_name}),
+                    "deny",
+                )
+        for test_name in (
+            "oid4vci-1_0-issuer-happy-flow",
+            "fapi2-security-profile-final-user-rejects-authentication-extra",
+            "",
+        ):
+            with self.subTest(test_name=test_name):
+                self.assertEqual(
+                    module.hosted_authorization_decision({"testName": test_name}),
+                    "approve",
+                )
+
+    def test_suite_implicit_submission_is_unique_and_same_origin(self):
+        module = load("run_openid4vc_conformance.py")
+        html = b"""
+            <script>
+              xhr.open('POST', "https://suite.example/test/a/issuer/implicit/random123", true);
+            </script>
+        """
+        self.assertEqual(
+            module.suite_implicit_submit_url("https://suite.example", html),
+            "https://suite.example/test/a/issuer/implicit/random123",
+        )
+        for invalid in (
+            b"<html>missing</html>",
+            html + html,
+            b"xhr.open('POST', \"https://other.example/test/a/issuer/implicit/random123\", true);",
+            b"xhr.open('POST', \"https://suite.example/admin/implicit/random123\", true);",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                module.suite_implicit_submit_url("https://suite.example", invalid)
+
+    def test_suite_browser_callback_posts_empty_fragment_as_text_plain(self):
+        module = load("run_openid4vc_conformance.py")
+        html = b"""
+            <script>
+              xhr.open('POST', "https://suite.example/test/a/issuer/implicit/random123", true);
+            </script>
+        """
+
+        class Response:
+            def __init__(self, status, content_type, body):
+                self.status = status
+                self.headers = {"Content-Type": content_type}
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self, *_):
+                return self.body
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+                self.responses = [
+                    Response(200, "text/html; charset=utf-8", html),
+                    Response(204, "text/plain", b""),
+                ]
+
+            def open(self, request, **_kwargs):
+                self.requests.append(request)
+                return self.responses.pop(0)
+
+        opener = Opener()
+        with patch.object(module.urllib.request, "build_opener", return_value=opener):
+            module.complete_suite_browser_callback(
+                "https://suite.example",
+                "https://suite.example/test/a/issuer/callback?code=one",
+            )
+
+        self.assertEqual(opener.requests[0].get_method(), "GET")
+        submission = opener.requests[1]
+        self.assertEqual(submission.get_method(), "POST")
+        self.assertEqual(
+            submission.full_url,
+            "https://suite.example/test/a/issuer/implicit/random123",
+        )
+        self.assertEqual(submission.data, b"")
+        self.assertEqual(submission.headers["Content-type"], "text/plain")
 
     def test_wrapper_rejects_tokenless_or_insecure_suite_modes(self):
         module = load("run_openid4vc_conformance.py")

@@ -387,6 +387,10 @@ def build_base_input(
 
 def build_driver_input(secrets: dict[str, str], *, subject_id: str, trust_anchor: str) -> dict[str, object]:
     return {
+        "hosted_authorization": {
+            "email": secrets["applicant_email"],
+            "password": secrets["applicant_password"],
+        },
         "issuer": {
             "management_token": secrets["issuer_management_token"],
             "subject_id": subject_id,
