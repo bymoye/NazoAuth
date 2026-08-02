@@ -516,8 +516,11 @@ impl Openid4vcCredentialCrypto {
                     )
                 })
                 .collect::<Vec<_>>();
+            let session_transcript_sha256 =
+                URL_SAFE_NO_PAD.encode(Sha256::digest(session_transcript));
             tracing::warn!(
                 document_count = verified.mdoc.documents.len(),
+                %session_transcript_sha256,
                 ?assessments,
                 "OpenID4VP mdoc credential failed verification"
             );
