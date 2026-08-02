@@ -24,6 +24,35 @@ def load_module():
 
 
 class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
+    def test_raw_request_sets_explicit_content_type_without_json_encoding(self):
+        module = load_module()
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"avatar_url":"/auth/me/avatar?v=1"}'
+        response.headers = {"Content-Type": "application/json"}
+        response.geturl.return_value = "https://issuer.example/auth/me/avatar"
+        opener = mock.Mock()
+        opener.open.return_value = response
+        session = module.ControlPlaneSession(
+            origin="https://issuer.example",
+            opener=opener,
+            csrf_token="csrf-token",
+        )
+
+        result = session.request_json(
+            "POST",
+            "/auth/me/avatar",
+            expected_status=200,
+            csrf=True,
+            raw_body=b"multipart-body",
+            content_type="multipart/form-data; boundary=test",
+        )
+
+        self.assertEqual(result["avatar_url"], "/auth/me/avatar?v=1")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.data, b"multipart-body")
+        self.assertEqual(request.get_header("Content-type"), "multipart/form-data; boundary=test")
+
     def test_http_failure_does_not_include_response_body_in_error(self):
         module = load_module()
         response_secret = "server-leaked-password"

@@ -41,6 +41,9 @@ class PublicApplicantProvisioningTests(unittest.TestCase):
         administrator = mock.Mock()
         administrator.request_json.return_value = self.account
         applicant = mock.Mock()
+        applicant.request_json.return_value = self.module.OIDF_PROFILE | {
+            "avatar_url": "/auth/me/avatar?v=existing"
+        }
         with mock.patch.object(
             self.module.ControlPlaneSession,
             "login",
@@ -54,6 +57,9 @@ class PublicApplicantProvisioningTests(unittest.TestCase):
         self.assertEqual(login.call_count, 2)
         payload = administrator.request_json.call_args.args[2]
         self.assertEqual(payload["password"], self.credentials["applicant_password"])
+        applicant.request_json.assert_called_once_with(
+            "GET", "/auth/me", expected_status=200
+        )
 
     def test_conflict_is_idempotent_only_when_existing_account_and_login_validate(self):
         administrator = mock.Mock()
@@ -61,16 +67,34 @@ class PublicApplicantProvisioningTests(unittest.TestCase):
             self.module.OnboardingHttpError("POST", "/admin/users", 409),
             {"total": 1, "items": [self.account]},
         ]
+        applicant = mock.Mock()
+        applicant.request_json.side_effect = [
+            {},
+            self.module.OIDF_PROFILE | {"avatar_url": None},
+            {"avatar_url": "/auth/me/avatar?v=created"},
+        ]
         with mock.patch.object(
             self.module.ControlPlaneSession,
             "login",
-            side_effect=[administrator, mock.Mock()],
+            side_effect=[administrator, applicant],
         ):
             result = self.module.provision(
                 "https://issuer.example", self.credentials
             )
 
         self.assertEqual(result, {"status": "existing", "user_id": self.account["id"]})
+        patch_call = applicant.request_json.call_args_list[1]
+        self.assertEqual(patch_call.args, ("PATCH", "/auth/me", self.module.OIDF_PROFILE))
+        self.assertEqual(patch_call.kwargs, {"expected_status": 200, "csrf": True})
+        avatar_call = applicant.request_json.call_args_list[2]
+        self.assertEqual(avatar_call.args, ("POST", "/auth/me/avatar"))
+        self.assertEqual(avatar_call.kwargs["expected_status"], 200)
+        self.assertTrue(avatar_call.kwargs["csrf"])
+        self.assertEqual(
+            avatar_call.kwargs["content_type"],
+            "multipart/form-data; boundary=nazo-oidf-applicant-avatar",
+        )
+        self.assertIn(self.module.AVATAR_PNG, avatar_call.kwargs["raw_body"])
 
     def test_conflict_fails_closed_when_requested_account_is_not_visible(self):
         administrator = mock.Mock()

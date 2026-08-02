@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 import urllib.parse
@@ -30,6 +31,30 @@ REQUIRED_FIELDS = (
     "admin_password",
 )
 MAX_USERS_TO_INSPECT = 10_000
+OIDF_PROFILE = {
+    "display_name": "OIDF Conformance User",
+    "given_name": "OIDF",
+    "family_name": "Conformance",
+    "middle_name": "Public",
+    "nickname": "oidf-user",
+    "profile_url": "https://openid.net/certification/",
+    "website_url": "https://openid.net/",
+    "gender": "not specified",
+    "birthdate": "1990-01-01",
+    "zoneinfo": "Etc/UTC",
+    "locale": "en-US",
+    "address_formatted": "100 Universal City Plaza\nUniversal City, CA 91608\nUS",
+    "address_street_address": "100 Universal City Plaza",
+    "address_locality": "Universal City",
+    "address_region": "CA",
+    "address_postal_code": "91608",
+    "address_country": "US",
+    "phone_number": "+15555550000",
+}
+AVATAR_BOUNDARY = "nazo-oidf-applicant-avatar"
+AVATAR_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+)
 
 
 class ProvisioningError(RuntimeError):
@@ -90,6 +115,51 @@ def find_existing_applicant(
     raise ProvisioningError("public admin user list exceeds the bounded inspection limit")
 
 
+def avatar_multipart_body() -> bytes:
+    prefix = (
+        f"--{AVATAR_BOUNDARY}\r\n"
+        'Content-Disposition: form-data; name="avatar"; filename="oidf-applicant.png"\r\n'
+        "Content-Type: image/png\r\n\r\n"
+    ).encode("ascii")
+    return prefix + AVATAR_PNG + f"\r\n--{AVATAR_BOUNDARY}--\r\n".encode("ascii")
+
+
+def validate_profile(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ProvisioningError("public applicant profile response must be a JSON object")
+    mismatches = [key for key, expected in OIDF_PROFILE.items() if value.get(key) != expected]
+    if mismatches:
+        raise ProvisioningError(
+            "public applicant profile is missing required OIDC conformance claims: "
+            + ", ".join(sorted(mismatches))
+        )
+    return value
+
+
+def ensure_oidf_profile(applicant: ControlPlaneSession) -> None:
+    profile = applicant.request_json("GET", "/auth/me", expected_status=200)
+    if any(profile.get(key) != expected for key, expected in OIDF_PROFILE.items()):
+        profile = applicant.request_json(
+            "PATCH",
+            "/auth/me",
+            OIDF_PROFILE,
+            expected_status=200,
+            csrf=True,
+        )
+    profile = validate_profile(profile)
+    if not isinstance(profile.get("avatar_url"), str) or not profile["avatar_url"].strip():
+        uploaded = applicant.request_json(
+            "POST",
+            "/auth/me/avatar",
+            expected_status=200,
+            csrf=True,
+            raw_body=avatar_multipart_body(),
+            content_type=f"multipart/form-data; boundary={AVATAR_BOUNDARY}",
+        )
+        if not isinstance(uploaded.get("avatar_url"), str) or not uploaded["avatar_url"].strip():
+            raise ProvisioningError("public applicant avatar upload did not establish picture claim")
+
+
 def provision(origin: str, credentials: dict[str, str]) -> dict[str, str]:
     if credentials["applicant_email"].strip().casefold() == credentials[
         "admin_email"
@@ -124,11 +194,12 @@ def provision(origin: str, credentials: dict[str, str]) -> dict[str, str]:
     identifier = validate_user(account, credentials["applicant_email"])
     # A conflict is idempotent only if the supplied credentials still identify
     # the same usable applicant.  This also closes the freshly-created flow.
-    ControlPlaneSession.login(
+    applicant = ControlPlaneSession.login(
         origin,
         credentials["applicant_email"],
         credentials["applicant_password"],
     )
+    ensure_oidf_profile(applicant)
     return {"status": status, "user_id": identifier}
 
 

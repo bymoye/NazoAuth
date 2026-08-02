@@ -240,13 +240,24 @@ class ControlPlaneSession:
         *,
         expected_status: int,
         csrf: bool = False,
+        raw_body: bytes | None = None,
+        content_type: str | None = None,
     ) -> tuple[bytes, str]:
         if not path.startswith("/") or path.startswith("//"):
             raise OnboardingError(f"control-plane path must be origin-relative: {path}")
         url = f"{self.origin}{path}"
         data = None
         headers = {"Accept": "application/json", "User-Agent": "nazo-conformance-onboarding/1"}
-        if payload is not None:
+        if payload is not None and raw_body is not None:
+            raise OnboardingError("control-plane request cannot combine JSON and raw bodies")
+        if raw_body is not None:
+            if not content_type:
+                raise OnboardingError("control-plane raw request requires a content type")
+            data = raw_body
+            headers["Content-Type"] = content_type
+        elif content_type is not None:
+            raise OnboardingError("control-plane content type requires a raw body")
+        elif payload is not None:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if csrf:
@@ -283,6 +294,8 @@ class ControlPlaneSession:
         *,
         expected_status: int,
         csrf: bool = False,
+        raw_body: bytes | None = None,
+        content_type: str | None = None,
     ) -> dict[str, Any]:
         body, content_type = self.request(
             method,
@@ -290,6 +303,8 @@ class ControlPlaneSession:
             payload,
             expected_status=expected_status,
             csrf=csrf,
+            raw_body=raw_body,
+            content_type=content_type,
         )
         if "application/json" not in content_type.lower():
             raise OnboardingError(f"{method} {path} did not return JSON")
