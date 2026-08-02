@@ -1095,7 +1095,7 @@ fn release_target_policy_and_operation_names_are_explicit() {
     );
     assert_eq!(
         operation_name(&TaskOperation::ConformanceLeaseRevoke {
-            lease_id: uuid::Uuid::now_v7().to_string(),
+            lease_id: uuid::Uuid::from_u128(1).to_string(),
         }),
         "conformance-lease-revoke"
     );

@@ -395,7 +395,7 @@ fn bootstrap_credentials_are_closed_bounded_json() {
                 email: "admin@example.com".to_owned(),
                 password: "too-short".to_owned(),
             },
-            &uuid::Uuid::now_v7().to_string(),
+            &uuid::Uuid::from_u128(1).to_string(),
             std::ffi::OsStr::new("unused-curl"),
             None,
         )
@@ -2013,7 +2013,7 @@ fn conformance_commands_build_closed_operator_tasks() {
         TaskOperation::ConformanceLeaseList
     );
 
-    let lease_id = uuid::Uuid::now_v7().to_string();
+    let lease_id = uuid::Uuid::from_u128(1).to_string();
     assert_eq!(
         conformance_operation(ConformanceLeaseCommand::Revoke {
             lease_id: lease_id.clone(),
