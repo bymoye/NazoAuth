@@ -60,6 +60,10 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `CLIENT_SECRET_PEPPER` | generated under `DATA_DIR/secrets` | Explicit values override the persisted generated value; keep it stable and back it up with the database |
 | `PASSWORD_HASH_MAX_CONCURRENCY` | `8` | Maximum concurrent Argon2 password verifications per process; tune from CPU and memory capacity, not by lowering Argon2 cost |
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `100` | Maximum bounded wait for a password-verification slot before returning `temporarily_unavailable` |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window for the broad source-IP admission buckets |
+| `AUTH_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling for authentication endpoints; this is not the failed-login throttle |
+| `TOKEN_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling for token issuance, sized to tolerate shared client egress |
+| `TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling shared by token-management, PAR, and dynamic-registration paths |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |

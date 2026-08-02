@@ -106,6 +106,19 @@ fn default_dpop_nonce_policy_is_required() {
 }
 
 #[test]
+fn shared_ip_admission_defaults_do_not_replace_failed_login_throttling() {
+    let settings = Settings::from_config(&ConfigSource::default()).unwrap();
+    let rate_limit = settings.identity.rate_limit;
+
+    assert_eq!(rate_limit.window_seconds, 60);
+    assert_eq!(rate_limit.auth_max_requests, 100_000);
+    assert_eq!(rate_limit.token_max_requests, 100_000);
+    assert_eq!(rate_limit.token_management_max_requests, 100_000);
+    assert_eq!(rate_limit.login_failure_window_seconds, 900);
+    assert_eq!(rate_limit.login_failure_ip_email_max_attempts, 5);
+}
+
+#[test]
 fn baseline_profile_can_use_optional_dpop_nonce_policy() {
     let config = ConfigSource::from_pairs_for_test([("DPOP_NONCE_POLICY", "optional")]);
     let settings = Settings::from_config(&config).unwrap();

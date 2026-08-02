@@ -2,6 +2,12 @@ use anyhow::bail;
 
 use crate::config::ConfigSource;
 
+// These broad admission-control buckets are keyed by source IP. A high default
+// avoids treating an OIDC conformance runner, enterprise NAT, or shared proxy as
+// one abusive client. Credential guessing remains independently constrained by
+// the much stricter IP-and-email failed-login policy below.
+const DEFAULT_SHARED_IP_MAX_REQUESTS: u64 = 100_000;
+
 #[derive(Clone)]
 pub(crate) struct RateLimitSettings {
     pub(crate) window_seconds: u64,
@@ -16,10 +22,18 @@ impl RateLimitSettings {
     pub(super) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
         let settings = Self {
             window_seconds: config.parse("RATE_LIMIT_WINDOW_SECONDS", 60)?,
-            auth_max_requests: config.parse("AUTH_RATE_LIMIT_MAX_REQUESTS", 30)?,
-            token_max_requests: config.parse("TOKEN_RATE_LIMIT_MAX_REQUESTS", 60)?,
-            token_management_max_requests: config
-                .parse("TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS", 120)?,
+            auth_max_requests: config.parse(
+                "AUTH_RATE_LIMIT_MAX_REQUESTS",
+                DEFAULT_SHARED_IP_MAX_REQUESTS,
+            )?,
+            token_max_requests: config.parse(
+                "TOKEN_RATE_LIMIT_MAX_REQUESTS",
+                DEFAULT_SHARED_IP_MAX_REQUESTS,
+            )?,
+            token_management_max_requests: config.parse(
+                "TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS",
+                DEFAULT_SHARED_IP_MAX_REQUESTS,
+            )?,
             login_failure_window_seconds: config.parse("LOGIN_FAILURE_WINDOW_SECONDS", 900)?,
             login_failure_ip_email_max_attempts: config
                 .parse("LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS", 5)?,

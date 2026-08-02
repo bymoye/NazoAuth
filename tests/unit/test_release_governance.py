@@ -344,6 +344,17 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("cargo clippy --workspace", conformance)
         self.assertNotIn("cargo test --workspace", conformance)
 
+    def test_conformance_workflow_reuses_the_scanned_service_image(self) -> None:
+        conformance = (
+            ROOT / ".github" / "workflows" / "conformance-security.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(conformance.count("file: Containerfile"), 1)
+        self.assertIn("name: Upload scanned service image", conformance)
+        self.assertIn("name: Download scanned service image", conformance)
+        self.assertIn("sha256sum --check nazo-oauth-service.tar.sha256", conformance)
+        self.assertIn("docker load --input target/ci-service-image/nazo-oauth-service.tar", conformance)
+
     def test_official_suite_is_never_patched(self) -> None:
         tracked = [
             *sorted((ROOT / "scripts").rglob("*.py")),

@@ -87,9 +87,6 @@ jobs:
       EMAIL_CODE_DEV_RESPONSE_ENABLED: "false"
       AVATAR_STORAGE_DIR: runtime/ci/avatars
       JWK_KEYS_DIR: runtime/ci/keys
-      AUTH_RATE_LIMIT_MAX_REQUESTS: "100000"
-      TOKEN_RATE_LIMIT_MAX_REQUESTS: "100000"
-      TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS: "100000"
       REQUIRE_PUSHED_AUTHORIZATION_REQUESTS: "false"
       FEDERATION_PROVIDER_CONFIGS: >-
         [{"provider_id":"ci-oidc","enabled":true,"display_name":"CI OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"ci-oidc-client","client_secret":"ci-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/ci-oidc/callback","scopes":"openid email profile"}]

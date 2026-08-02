@@ -113,17 +113,32 @@ jobs:
           cache-to: type=gha,mode=max,scope=nazo-oauth-service
       - name: Scan service image
         run: |
-          docker save nazo-oauth-supply-chain:${{ github.sha }} -o /tmp/nazo-oauth-supply-chain.tar
+          mkdir -p target/ci-service-image
+          docker save nazo-oauth-supply-chain:${{ github.sha }} -o target/ci-service-image/nazo-oauth-service.tar
           docker run --rm \
-            -v /tmp/nazo-oauth-supply-chain.tar:/image.tar:ro \
+            -v "$PWD/target/ci-service-image/nazo-oauth-service.tar:/image.tar:ro" \
             docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f image \
               --format table \
               --exit-code 1 \
               --severity CRITICAL,HIGH \
               --ignore-unfixed \
               --input /image.tar
+          docker image inspect nazo-oauth-supply-chain:${{ github.sha }} --format '{{.Id}}' \
+            > target/ci-service-image/image-id.txt
+          (
+            cd target/ci-service-image
+            sha256sum nazo-oauth-service.tar > nazo-oauth-service.tar.sha256
+          )
+      - name: Upload scanned service image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nazo-oauth-service-image-${{ github.sha }}
+          path: target/ci-service-image
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       - name: Upload SBOM
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nazo-oauth-rust-sbom
           path: target/nazo-oauth-server.cdx.json
@@ -136,16 +151,23 @@ jobs:
       - supply-chain-gate
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: docker/setup-buildx-action@v4.2.0
-      - name: Build service image
-        uses: docker/build-push-action@v7.3.0
+      - name: Download scanned service image
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          context: .
-          file: Containerfile
-          tags: nazo-oauth-e2e:latest
-          load: true
-          cache-from: type=gha,scope=nazo-oauth-service
-          cache-to: type=gha,mode=max,scope=nazo-oauth-service
+          name: nazo-oauth-service-image-${{ github.sha }}
+          path: target/ci-service-image
+      - name: Verify and load scanned service image
+        run: |
+          (
+            cd target/ci-service-image
+            sha256sum --check nazo-oauth-service.tar.sha256
+          )
+          docker load --input target/ci-service-image/nazo-oauth-service.tar
+          expected_image_id="$(cat target/ci-service-image/image-id.txt)"
+          actual_image_id="$(docker image inspect nazo-oauth-supply-chain:${{ github.sha }} --format '{{.Id}}')"
+          test "$actual_image_id" = "$expected_image_id"
+          docker tag nazo-oauth-supply-chain:${{ github.sha }} nazo-oauth-e2e:latest
+      - uses: docker/setup-buildx-action@v4.2.0
       - name: Build E2E runner image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -181,9 +203,6 @@ jobs:
           AVATAR_MAX_BYTES: 2097152
           CLIENT_DELIVERY_TTL_SECONDS: 86400
           RATE_LIMIT_WINDOW_SECONDS: 60
-          AUTH_RATE_LIMIT_MAX_REQUESTS: 100000
-          TOKEN_RATE_LIMIT_MAX_REQUESTS: 100000
-          TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS: 100000
           TRUSTED_PROXY_CIDRS: ""
           CLIENT_IP_HEADER_MODE: "none"
           SUBJECT_TYPE: "public"
