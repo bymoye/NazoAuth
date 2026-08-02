@@ -2,7 +2,7 @@ name: nazoauth-oidf-suite
 
 x-suite-build: &suite-build
   context: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
-  dockerfile: Dockerfile
+  dockerfile: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}/deploy/oidf-suite/Containerfile
 
 x-suite-environment: &suite-environment
   BASE_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}

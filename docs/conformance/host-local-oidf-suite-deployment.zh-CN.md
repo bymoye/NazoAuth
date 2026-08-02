@@ -22,19 +22,21 @@ test -z "$(git -C /opt/oidf-conformance-suite/source status --porcelain)"
 
 已存在目录时不得重新 clone 或覆盖；先分别核验远端 URL、HEAD 和 clean 状态。
 
-## 2. 用官方 builder 生成 JAR
+## 2. 核验远端 Docker context 构建边界
 
 ```sh
-install -d -m 0700 /opt/oidf-conformance-suite/maven-cache
-MAVEN_CACHE=/opt/oidf-conformance-suite/maven-cache \
-  docker compose \
-    -f /opt/oidf-conformance-suite/source/builder-compose.yml \
-    run --rm builder
-test -f /opt/oidf-conformance-suite/source/target/fapi-test-suite.jar
+docker context show
+docker context inspect "$(docker context show)"
+test -f /opt/oidf-conformance-suite/source/pom.xml
 ```
 
-这一步在目标服务器的 Docker 容器中编译固定 revision；不使用本地 Cargo/Docker，
-也不使用 GitHub 生成材料。
+CNB 的 Docker daemon 不一定与 SSH shell 共享宿主机文件系统，因此不得直接执行上游
+`builder-compose.yml`：其中的 `.:/usr/src/mymaven` 是 daemon-side bind mount，在远端
+context 下可能得到空目录。仓库内的 `deploy/oidf-suite/Containerfile` 通过 Docker build
+context 发送固定 suite 源码，并在 Maven build stage 中生成 JAR；其运行时入口保持上游
+Dockerfile 的参数契约。实际构建由下一步脚本调用 `docker compose ... up --build` 完成。
+整个过程只在目标服务器的 Docker builder 中编译；不使用本地 Cargo/Docker，也不使用
+GitHub 生成材料。
 
 ## 3. 生成短期 API Token 并切换到严格鉴权模式
 
@@ -57,6 +59,7 @@ MongoDB 状态保存在 Compose 命名卷中；源码、Maven 缓存和 Token �
 ## 4. 部署核验
 
 ```sh
+export NAZOAUTH_SOURCE_DIR=/opt/nazoauth-docker
 docker compose \
   --project-directory /opt/nazoauth-docker/deploy/oidf-suite \
   -f /opt/nazoauth-docker/deploy/oidf-suite/compose.yml ps

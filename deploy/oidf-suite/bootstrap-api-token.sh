@@ -3,6 +3,8 @@ set -eu
 
 expected_revision=946451d1ce29965c9ab7aee05f5003552233160e
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+NAZOAUTH_SOURCE_DIR=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+export NAZOAUTH_SOURCE_DIR
 : "${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR}"
 : "${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL}"
 : "${OIDF_SUITE_TOKEN_FILE:?set OIDF_SUITE_TOKEN_FILE}"
@@ -16,8 +18,8 @@ test -z "$(git -C "$OIDF_SUITE_SOURCE_DIR" status --porcelain)" || {
   echo "OIDF suite checkout is not clean" >&2
   exit 1
 }
-test -f "$OIDF_SUITE_SOURCE_DIR/target/fapi-test-suite.jar" || {
-  echo "official suite jar is absent; run builder-compose.yml first" >&2
+test -f "$OIDF_SUITE_SOURCE_DIR/pom.xml" || {
+  echo "official suite pom.xml is absent" >&2
   exit 1
 }
 test ! -e "$OIDF_SUITE_TOKEN_FILE" || {
