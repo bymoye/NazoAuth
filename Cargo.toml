@@ -23,7 +23,7 @@ resolver = "3"
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/nazozero/NazoAuth"

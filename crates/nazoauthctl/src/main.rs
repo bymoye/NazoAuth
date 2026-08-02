@@ -70,7 +70,7 @@ Commands:
   recover-identity  Explicitly finish an interrupted identity transition
   migrate       Run the signed migration operation
   keys          List, validate, export OpenID4VC trust, generate, or register signing keys
-  conformance   Manage time-bounded OIDF conformance leases
+  conformance   Manage time-bounded conformance leases
   audit         Show or verify the management audit chain
   identity      Rotate controller and audit identities
   break-glass   Recover after controller-key loss or suspected theft
