@@ -3,13 +3,14 @@
 FROM docker.io/library/maven:3-eclipse-temurin-21 AS builder
 
 WORKDIR /src
-COPY . .
+COPY --from=oidf_suite . .
 RUN --mount=type=cache,id=oidf-suite-maven,target=/root/.m2,sharing=locked \
     mvn -B clean package -DskipTests=true
 
 FROM docker.io/library/eclipse-temurin:21
 
 COPY --from=builder /src/target/fapi-test-suite.jar /server/fapi-test-suite.jar
+COPY --chmod=0555 deploy/oidf-suite/start-suite.sh /usr/local/bin/start-oidf-suite
 
 ENV BASE_URL=https://localhost:8443 \
     BASE_MTLS_URL=https://localhost:8444 \
@@ -18,17 +19,4 @@ ENV BASE_URL=https://localhost:8443 \
 
 EXPOSE 8080
 
-ENTRYPOINT java \
-  -D"fintechlabs.base_url=${BASE_URL}" \
-  -D"fintechlabs.base_mtls_url=${BASE_MTLS_URL}" \
-  -D"spring.data.mongodb.uri=mongodb://${MONGODB_HOST}:27017/test_suite" \
-  ${SIGNING_KEY:+-D"fintechlabs.signingKey=${SIGNING_KEY}"} \
-  ${DEPRECATED_SIGNING_KEY:+-D"fintechlabs.deprecatedSigningKey=${DEPRECATED_SIGNING_KEY}"} \
-  ${PRIVATE_LINK_SIGNING_KEY:+-D"fintechlabs.privateLinkSigningKey=${PRIVATE_LINK_SIGNING_KEY}"} \
-  -D"oidc.google.clientid=${OIDC_GOOGLE_CLIENTID}" \
-  -D"oidc.google.secret=${OIDC_GOOGLE_SECRET}" \
-  -D"oidc.gitlab.clientid=${OIDC_GITLAB_CLIENTID}" \
-  -D"oidc.gitlab.secret=${OIDC_GITLAB_SECRET}" \
-  ${JAVA_EXTRA_ARGS} \
-  -jar /server/fapi-test-suite.jar \
-  -Djdk.tls.maxHandshakeMessageSize=65536
+ENTRYPOINT ["/usr/local/bin/start-oidf-suite"]

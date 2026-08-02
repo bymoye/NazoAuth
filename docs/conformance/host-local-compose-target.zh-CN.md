@@ -28,6 +28,13 @@ CIBA 自动决策和 OpenID4VC 管理 Token；为全新数据库启用 OIDC/FAPI
 所需模块；把 Suite origin 加入受限回调 origin。Token 只通过 `_FILE` 设置由 server
 读取，不进入 argv 或普通环境变量。基础 `compose.yml` 的默认最小沙箱不受影响。
 
+OIDF Suite 必须先按其手册启动，因为 overlay 要求已经存在私有网络
+`nazoauth-oidf-bridge` 和 PKI volume `nazoauth-oidf-proxy-pki`。`mtls-proxy` 不发布
+宿主机端口；它只在该 `/24` 私有网络监听 TLS 443，使用 Suite 信任的短期 server
+certificate，并以 `ssl_verify_client optional` 对实际发送的客户端证书建链。代理覆盖
+全部外来证书 header；NazoAuth 只信任 `172.30.250.0/24` 中的
+`legacy-verified-headers`。CNB 公网流量不会被误当成 mTLS。
+
 ## 首任管理员和 runner 秘密
 
 服务健康后执行：
@@ -52,3 +59,34 @@ onboarding 的输入 schema。输出目录必须事先不存在。
 ES256 credential/presentation-request key、原子 leaf+CA bundle、数据加密密钥、两个管理
 Token、credential metadata 与公开 onboarding trust；在这些边界全部完成前不得启动或
 宣称 17-plan OpenID4VC 矩阵。
+
+## mTLS trust reload 入口
+
+被测端启动后，在 WebIDE 私有目录准备 runner 的可回滚 trust target：
+
+```sh
+install -d -m 0700 /opt/nazoauth-conformance/proxy
+docker cp \
+  nazo-oauth-mtls-proxy-1:/etc/nginx/pki/client-ca.pem \
+  /opt/nazoauth-conformance/proxy/oidf-mtls-ca.crt
+chmod 0644 /opt/nazoauth-conformance/proxy/oidf-mtls-ca.crt
+export NAZOAUTH_OIDF_PROXY_CONTAINER=nazo-oauth-mtls-proxy-1
+export NAZOAUTH_OIDF_PROXY_TRUST_FILE=/opt/nazoauth-conformance/proxy/oidf-mtls-ca.crt
+/opt/nazoauth-docker/deploy/oidf-proxy/docker-nginx-controller.sh -t
+/opt/nazoauth-docker/deploy/oidf-proxy/docker-nginx-controller.sh -s reload
+```
+
+统一 runner 把经公网审批的 CA bundle 原子写入上述 host 文件，然后调用这个 controller
+完成 `docker cp`、容器内 `nginx -t` 和 reload；结束时用同一路径恢复原 bundle。
+controller 不接受 trust 内容参数，也不打印证书或秘密。
+
+验证 split-horizon 时使用临时 curl 容器加入私有网络并显式信任 server CA：
+
+```sh
+docker run --rm \
+  --network nazoauth-oidf-bridge \
+  -v nazoauth-oidf-proxy-pki:/pki:ro \
+  docker.io/curlimages/curl:8.14.1 \
+  --cacert /pki/server-ca.crt \
+  https://567t0yglur-443.cnb.run/.well-known/openid-configuration
+```

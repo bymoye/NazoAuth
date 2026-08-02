@@ -63,6 +63,13 @@ HTTPS OIDC 服务。本机测试环境使用正在验收的 NazoAuth issuer，�
 MongoDB 状态保存在 Compose 命名卷中；源码和 Token 位于上述独立目录，Maven 缓存由
 Docker builder 管理；它们均不进入 NazoAuth 产品容器或数据卷。
 
+部署同时创建私有 Docker 网络 `nazoauth-oidf-bridge` 和独立 PKI volume
+`nazoauth-oidf-proxy-pki`。Suite server 启动时只把该 volume 中的短期 server CA 导入
+自己的 Java trust store；宿主机和公网客户端的信任库不受影响。被测端的 mTLS proxy
+随后在同一网络上以目标公网主机名作为 network alias，使 Suite 内的协议请求走真实
+客户端证书校验，而 WebIDE 上的 onboarding 与公网浏览器仍走 CNB TLS 入口。这是
+split-horizon 测试网络，不修改 issuer 字符串或 Suite plan 配置。
+
 ## 4. 部署核验
 
 ```sh

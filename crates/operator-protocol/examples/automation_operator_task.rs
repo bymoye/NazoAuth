@@ -35,6 +35,12 @@ fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
     let embedded_release = required(&options, "--embedded-release")?;
     let embedded_revision = required(&options, "--embedded-revision")?;
     let embedded_build_id = required(&options, "--embedded-build-id")?;
+    let operation = task_operation(&options)?;
+    let operation_name = match &operation {
+        TaskOperation::MigrateApply => "migrate-apply",
+        TaskOperation::KeysGenerateLocal { .. } => "keys-generate-local",
+        _ => anyhow::bail!("automation helper does not support the requested operation"),
+    };
     fs::create_dir(&output)?;
     fs::create_dir(output.join("state"))?;
     let controller = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
@@ -72,7 +78,7 @@ fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
         version: nazo_operator_protocol::CONFIG_MANIFEST_VERSION,
         entries: BTreeMap::from([
             ("deployment_id".to_owned(), deployment_id.to_owned()),
-            ("operation".to_owned(), "migrate-apply".to_owned()),
+            ("operation".to_owned(), operation_name.to_owned()),
             ("server_config_sha256".to_owned(), file_sha256(&config)?),
         ]),
     };
@@ -111,11 +117,31 @@ fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
                 revision: secret_revision.to_owned(),
             },
         },
-        operation: TaskOperation::MigrateApply,
+        operation,
     };
     let compact = sign_task(&task, &controller_kid, &controller)?;
     write(&output.join("envelope.jws"), &compact)?;
     write(&output.join("request.sha256"), &compact_sha256(&compact))
+}
+
+fn task_operation(options: &BTreeMap<String, String>) -> anyhow::Result<TaskOperation> {
+    match options.get("--operation").map(String::as_str) {
+        None | Some("migrate-apply") => Ok(TaskOperation::MigrateApply),
+        Some("keys-generate-local") => {
+            let alg = required(options, "--alg")?.to_owned();
+            let purposes = required(options, "--purposes")?
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if purposes.is_empty() {
+                anyhow::bail!("--purposes must contain at least one value");
+            }
+            Ok(TaskOperation::KeysGenerateLocal { alg, purposes })
+        }
+        Some(value) => anyhow::bail!("unsupported automation operation {value}"),
+    }
 }
 
 fn verify(options: BTreeMap<String, String>) -> anyhow::Result<()> {

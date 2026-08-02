@@ -1,0 +1,9 @@
+# syntax=docker/dockerfile:1.7
+
+FROM docker.io/library/alpine:3.22 AS pki-init
+RUN apk add --no-cache openssl
+COPY --chmod=0555 deploy/oidf-proxy/initialize-pki.sh /usr/local/libexec/initialize-pki.sh
+ENTRYPOINT ["/bin/sh", "/usr/local/libexec/initialize-pki.sh"]
+
+FROM docker.io/library/nginx:1.28-alpine AS proxy
+COPY deploy/oidf-proxy/nginx.conf /etc/nginx/nginx.conf

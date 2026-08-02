@@ -1,8 +1,10 @@
 name: nazoauth-oidf-suite
 
 x-suite-build: &suite-build
-  context: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
-  dockerfile: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}/deploy/oidf-suite/Containerfile
+  context: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}
+  dockerfile: deploy/oidf-suite/Containerfile
+  additional_contexts:
+    oidf_suite: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
 
 x-suite-environment: &suite-environment
   BASE_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
@@ -14,6 +16,16 @@ x-suite-environment: &suite-environment
   OIDC_GITLAB_SECRET: gitlab-secret
 
 services:
+  pki-init:
+    build:
+      context: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}
+      dockerfile: deploy/oidf-proxy/Containerfile
+      target: pki-init
+    environment:
+      OIDF_TARGET_HOSTNAME: 567t0yglur-443.cnb.run
+    volumes:
+      - oidf_proxy_pki:/pki
+
   mongodb:
     image: docker.io/library/mongo:6.0.13
     restart: unless-stopped
@@ -38,8 +50,16 @@ services:
         -Doidc.admin.issuer=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
     ports:
       - "0.0.0.0:8443:8080"
+    volumes:
+      - oidf_proxy_pki:/oidf-proxy-pki:ro
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_started
+      pki-init:
+        condition: service_completed_successfully
+    networks:
+      - default
+      - oidf_bridge
     logging:
       driver: json-file
       options:
@@ -61,7 +81,10 @@ services:
     ports:
       - "127.0.0.1:18443:8080"
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_started
+      pki-init:
+        condition: service_completed_successfully
     logging:
       driver: json-file
       options:
@@ -70,3 +93,12 @@ services:
 
 volumes:
   mongodb_data:
+  oidf_proxy_pki:
+    name: nazoauth-oidf-proxy-pki
+
+networks:
+  oidf_bridge:
+    name: nazoauth-oidf-bridge
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24
