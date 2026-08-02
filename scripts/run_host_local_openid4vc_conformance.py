@@ -335,25 +335,24 @@ def build_base_input(material: dict[str, object], *, suite_origin: str) -> dict[
     ) or not isinstance(trust_anchor, str):
         fail("generated OpenID4VC material has an invalid configuration shape")
     def issuer_base(wallet: dict[str, object], *, attested: bool) -> dict[str, object]:
-        client_attestation_config = {
-            "key_attestation_jwks": {"keys": [key_attestation]},
-        }
         config: dict[str, object] = {
             "alias": "nazo-openid4vc-vci-haip" if attested else "nazo-openid4vc-vci",
             "client": {"client_id": "generated", "scope": f"openid {VCI_SD_JWT_CONFIGURATION_ID} {VCI_MDOC_CONFIGURATION_ID}", "jwks": {"keys": [wallet]}},
             "client2": {"client_id": "generated-client2", "scope": f"openid {VCI_SD_JWT_CONFIGURATION_ID} {VCI_MDOC_CONFIGURATION_ID}", "jwks": {"keys": [wallet]}},
-            "vci": {},
-            # Key attestation is an issuer proof requirement independent of
-            # whether the OAuth client itself uses client attestation.
-            "client_attestation": client_attestation_config,
+            # The Suite accepts this legacy location during its transition to
+            # a top-level client_attestation object.  Keeping it here lets a
+            # private_key_jwt client supply independent key-attestation proof
+            # material without being misclassified as a HAIP client.
+            "vci": {"key_attestation_jwks": {"keys": [key_attestation]}},
         }
         if attested:
-            client_attestation_config.update({
+            config["client_attestation"] = {
                 "issuer": f"{suite_origin.rstrip('/')}/",
                 "trust_anchor": trust_anchor,
                 "key_attestation_trust_anchor_pem": trust_anchor,
                 "attester_jwks": {"keys": [attestation]},
-            })
+                "key_attestation_jwks": {"keys": [key_attestation]},
+            }
         return config
     def verifier_base(*, haip: bool) -> dict[str, object]:
         return {
@@ -562,6 +561,9 @@ def validate_materialized_configs(path: Path, material: dict[str, object], names
                 candidate = config.get("client_attestation")
                 field = "attester_jwks" if key_name == "client_attestation" else "key_attestation_jwks"
                 jwks = candidate.get(field) if isinstance(candidate, dict) else None
+                if jwks is None and key_name == "key_attestation":
+                    vci = config.get("vci")
+                    jwks = vci.get("key_attestation_jwks") if isinstance(vci, dict) else None
                 keys = jwks.get("keys") if isinstance(jwks, dict) else None
                 observed = keys[0] if isinstance(keys, list) and len(keys) == 1 else None
             if observed == key:
