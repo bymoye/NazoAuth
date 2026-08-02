@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     DbPool,
-    schema::{oauth_clients, oauth_tokens, user_client_grants},
+    schema::{oauth_client_conformance_bindings, oauth_clients, oauth_tokens, user_client_grants},
 };
 
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
@@ -81,12 +81,41 @@ struct OAuthClientRecord {
     sector_identifier_uri: Option<String>,
     sector_identifier_host: Option<String>,
     security_policy: Option<Value>,
-    conformance_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
 pub struct OAuthClientRepository {
     pool: DbPool,
+}
+
+pub(crate) fn conformance_lease_is_effective()
+-> diesel::expression::SqlLiteral<diesel::sql_types::Bool> {
+    diesel::dsl::sql(
+        "(oauth_clients.conformance_expires_at IS NULL \
+         OR oauth_clients.conformance_expires_at > CURRENT_TIMESTAMP)",
+    )
+}
+
+pub(crate) async fn bind_conformance_lease(
+    connection: &mut AsyncPgConnection,
+    client_id: Uuid,
+    lease_id: Option<Uuid>,
+) -> Result<(), diesel::result::Error> {
+    let Some(lease_id) = lease_id else {
+        return Ok(());
+    };
+    let updated = diesel::update(
+        oauth_client_conformance_bindings::table
+            .filter(oauth_client_conformance_bindings::id.eq(client_id)),
+    )
+    .set(oauth_client_conformance_bindings::conformance_lease_id.eq(Some(lease_id)))
+    .execute(connection)
+    .await?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(diesel::result::Error::NotFound)
+    }
 }
 
 impl OAuthClientRepository {
@@ -104,6 +133,7 @@ impl OAuthClientRepository {
         oauth_clients::table
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::client_id.eq(client_id))
+            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
             .await
@@ -117,6 +147,7 @@ impl OAuthClientRepository {
         let mut connection = self.connection().await?;
         oauth_clients::table
             .find(id)
+            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
             .await
@@ -140,11 +171,7 @@ impl OAuthClientRepository {
             )
             .filter(oauth_clients::client_type.eq("confidential"))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(
-                oauth_clients::conformance_expires_at
-                    .is_null()
-                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-            )
+            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .limit(limit)
             .load::<OAuthClientRecord>(&mut connection)
@@ -188,109 +215,122 @@ impl OAuthClientRepository {
         conformance_lease_id: Option<Uuid>,
     ) -> Result<OAuthClient, RepositoryError> {
         let mut connection = self.connection().await?;
-        diesel::insert_into(oauth_clients::table)
-            .values((
-                oauth_clients::id.eq(client.id),
-                oauth_clients::tenant_id.eq(client.tenant_id),
-                oauth_clients::realm_id.eq(client.realm_id),
-                oauth_clients::organization_id.eq(client.organization_id),
-                oauth_clients::client_id.eq(&client.client_id),
-                oauth_clients::client_name.eq(&client.client_name),
-                oauth_clients::client_type.eq(&client.client_type),
-                oauth_clients::client_secret_hash.eq(client_secret_hash),
-                oauth_clients::registration_access_token_blake3
-                    .eq(registration_access_token_blake3),
-                oauth_clients::conformance_lease_id.eq(conformance_lease_id),
-                oauth_clients::redirect_uris.eq(serde_json::json!(&client.redirect_uris)),
-                oauth_clients::post_logout_redirect_uris
-                    .eq(serde_json::json!(&client.post_logout_redirect_uris)),
-                oauth_clients::scopes.eq(serde_json::json!(&client.scopes)),
-                oauth_clients::allowed_audiences.eq(serde_json::json!(&client.allowed_audiences)),
-                oauth_clients::grant_types.eq(serde_json::json!(&client.grant_types)),
-                oauth_clients::token_endpoint_auth_method.eq(&client.token_endpoint_auth_method),
-                oauth_clients::subject_type.eq(&client.subject_type),
-                oauth_clients::sector_identifier_uri.eq(&client.sector_identifier_uri),
-                oauth_clients::sector_identifier_host.eq(&client.sector_identifier_host),
-                oauth_clients::require_dpop_bound_tokens.eq(client.require_dpop_bound_tokens),
-                oauth_clients::require_mtls_bound_tokens.eq(client.require_mtls_bound_tokens),
-                oauth_clients::allow_client_assertion_audience_array
-                    .eq(client.allow_client_assertion_audience_array),
-                oauth_clients::allow_client_assertion_endpoint_audience
-                    .eq(client.allow_client_assertion_endpoint_audience),
-                oauth_clients::require_par_request_object.eq(client.require_par_request_object),
-                oauth_clients::backchannel_logout_uri.eq(&client.backchannel_logout_uri),
-                oauth_clients::backchannel_logout_session_required
-                    .eq(client.backchannel_logout_session_required),
-                oauth_clients::backchannel_token_delivery_mode
-                    .eq(&client.backchannel_token_delivery_mode),
-                oauth_clients::backchannel_client_notification_endpoint
-                    .eq(&client.backchannel_client_notification_endpoint),
-                oauth_clients::backchannel_authentication_request_signing_alg
-                    .eq(&client.backchannel_authentication_request_signing_alg),
-                oauth_clients::backchannel_user_code_parameter
-                    .eq(client.backchannel_user_code_parameter),
-                oauth_clients::frontchannel_logout_uri.eq(&client.frontchannel_logout_uri),
-                oauth_clients::frontchannel_logout_session_required
-                    .eq(client.frontchannel_logout_session_required),
-                oauth_clients::tls_client_auth_subject_dn.eq(&client.tls_client_auth_subject_dn),
-                oauth_clients::tls_client_auth_cert_sha256.eq(&client.tls_client_auth_cert_sha256),
-                oauth_clients::tls_client_auth_san_dns
-                    .eq(serde_json::json!(&client.tls_client_auth_san_dns)),
-                oauth_clients::tls_client_auth_san_uri
-                    .eq(serde_json::json!(&client.tls_client_auth_san_uri)),
-                oauth_clients::tls_client_auth_san_ip
-                    .eq(serde_json::json!(&client.tls_client_auth_san_ip)),
-                oauth_clients::tls_client_auth_san_email
-                    .eq(serde_json::json!(&client.tls_client_auth_san_email)),
-                oauth_clients::jwks_uri.eq(&client.jwks_uri),
-                oauth_clients::jwks.eq(&client.jwks),
-                oauth_clients::request_uris.eq(serde_json::json!(&client.request_uris)),
-                oauth_clients::initiate_login_uri.eq(&client.initiate_login_uri),
-                oauth_clients::logo_uri.eq(&client.presentation.logo_uri),
-                oauth_clients::policy_uri.eq(&client.presentation.policy_uri),
-                oauth_clients::tos_uri.eq(&client.presentation.tos_uri),
-                oauth_clients::id_token_signed_response_alg
-                    .eq(&client.id_token_signed_response_alg),
-                oauth_clients::id_token_encrypted_response_alg
-                    .eq(&client.id_token_encrypted_response_alg),
-                oauth_clients::id_token_encrypted_response_enc
-                    .eq(&client.id_token_encrypted_response_enc),
-                oauth_clients::request_object_signing_alg.eq(&client.request_object_signing_alg),
-                oauth_clients::request_object_encryption_alg
-                    .eq(&client.request_object_encryption_alg),
-                oauth_clients::request_object_encryption_enc
-                    .eq(&client.request_object_encryption_enc),
-                oauth_clients::token_endpoint_auth_signing_alg
-                    .eq(&client.token_endpoint_auth_signing_alg),
-                oauth_clients::introspection_signed_response_alg
-                    .eq(&client.introspection_signed_response_alg),
-                oauth_clients::introspection_encrypted_response_alg
-                    .eq(&client.introspection_encrypted_response_alg),
-                oauth_clients::introspection_encrypted_response_enc
-                    .eq(&client.introspection_encrypted_response_enc),
-                oauth_clients::userinfo_signed_response_alg
-                    .eq(&client.userinfo_signed_response_alg),
-                oauth_clients::userinfo_encrypted_response_alg
-                    .eq(&client.userinfo_encrypted_response_alg),
-                oauth_clients::userinfo_encrypted_response_enc
-                    .eq(&client.userinfo_encrypted_response_enc),
-                oauth_clients::authorization_signed_response_alg
-                    .eq(&client.authorization_signed_response_alg),
-                oauth_clients::authorization_encrypted_response_alg
-                    .eq(&client.authorization_encrypted_response_alg),
-                oauth_clients::authorization_encrypted_response_enc
-                    .eq(&client.authorization_encrypted_response_enc),
-                oauth_clients::security_policy.eq(client
-                    .security_policy
-                    .as_ref()
-                    .map(|policy| serde_json::json!(policy))),
-                oauth_clients::is_active.eq(client.is_active),
-            ))
-            .returning(OAuthClientRecord::as_returning())
-            .get_result::<OAuthClientRecord>(&mut connection)
+        let record = connection
+            .transaction::<OAuthClientRecord, diesel::result::Error, _>(async move |connection| {
+                let record = diesel::insert_into(oauth_clients::table)
+                    .values((
+                        oauth_clients::id.eq(client.id),
+                        oauth_clients::tenant_id.eq(client.tenant_id),
+                        oauth_clients::realm_id.eq(client.realm_id),
+                        oauth_clients::organization_id.eq(client.organization_id),
+                        oauth_clients::client_id.eq(&client.client_id),
+                        oauth_clients::client_name.eq(&client.client_name),
+                        oauth_clients::client_type.eq(&client.client_type),
+                        oauth_clients::client_secret_hash.eq(client_secret_hash),
+                        oauth_clients::registration_access_token_blake3
+                            .eq(registration_access_token_blake3),
+                        oauth_clients::redirect_uris.eq(serde_json::json!(&client.redirect_uris)),
+                        oauth_clients::post_logout_redirect_uris
+                            .eq(serde_json::json!(&client.post_logout_redirect_uris)),
+                        oauth_clients::scopes.eq(serde_json::json!(&client.scopes)),
+                        oauth_clients::allowed_audiences
+                            .eq(serde_json::json!(&client.allowed_audiences)),
+                        oauth_clients::grant_types.eq(serde_json::json!(&client.grant_types)),
+                        oauth_clients::token_endpoint_auth_method
+                            .eq(&client.token_endpoint_auth_method),
+                        oauth_clients::subject_type.eq(&client.subject_type),
+                        oauth_clients::sector_identifier_uri.eq(&client.sector_identifier_uri),
+                        oauth_clients::sector_identifier_host.eq(&client.sector_identifier_host),
+                        oauth_clients::require_dpop_bound_tokens
+                            .eq(client.require_dpop_bound_tokens),
+                        oauth_clients::require_mtls_bound_tokens
+                            .eq(client.require_mtls_bound_tokens),
+                        oauth_clients::allow_client_assertion_audience_array
+                            .eq(client.allow_client_assertion_audience_array),
+                        oauth_clients::allow_client_assertion_endpoint_audience
+                            .eq(client.allow_client_assertion_endpoint_audience),
+                        oauth_clients::require_par_request_object
+                            .eq(client.require_par_request_object),
+                        oauth_clients::backchannel_logout_uri.eq(&client.backchannel_logout_uri),
+                        oauth_clients::backchannel_logout_session_required
+                            .eq(client.backchannel_logout_session_required),
+                        oauth_clients::backchannel_token_delivery_mode
+                            .eq(&client.backchannel_token_delivery_mode),
+                        oauth_clients::backchannel_client_notification_endpoint
+                            .eq(&client.backchannel_client_notification_endpoint),
+                        oauth_clients::backchannel_authentication_request_signing_alg
+                            .eq(&client.backchannel_authentication_request_signing_alg),
+                        oauth_clients::backchannel_user_code_parameter
+                            .eq(client.backchannel_user_code_parameter),
+                        oauth_clients::frontchannel_logout_uri.eq(&client.frontchannel_logout_uri),
+                        oauth_clients::frontchannel_logout_session_required
+                            .eq(client.frontchannel_logout_session_required),
+                        oauth_clients::tls_client_auth_subject_dn
+                            .eq(&client.tls_client_auth_subject_dn),
+                        oauth_clients::tls_client_auth_cert_sha256
+                            .eq(&client.tls_client_auth_cert_sha256),
+                        oauth_clients::tls_client_auth_san_dns
+                            .eq(serde_json::json!(&client.tls_client_auth_san_dns)),
+                        oauth_clients::tls_client_auth_san_uri
+                            .eq(serde_json::json!(&client.tls_client_auth_san_uri)),
+                        oauth_clients::tls_client_auth_san_ip
+                            .eq(serde_json::json!(&client.tls_client_auth_san_ip)),
+                        oauth_clients::tls_client_auth_san_email
+                            .eq(serde_json::json!(&client.tls_client_auth_san_email)),
+                        oauth_clients::jwks_uri.eq(&client.jwks_uri),
+                        oauth_clients::jwks.eq(&client.jwks),
+                        oauth_clients::request_uris.eq(serde_json::json!(&client.request_uris)),
+                        oauth_clients::initiate_login_uri.eq(&client.initiate_login_uri),
+                        oauth_clients::logo_uri.eq(&client.presentation.logo_uri),
+                        oauth_clients::policy_uri.eq(&client.presentation.policy_uri),
+                        oauth_clients::tos_uri.eq(&client.presentation.tos_uri),
+                        oauth_clients::id_token_signed_response_alg
+                            .eq(&client.id_token_signed_response_alg),
+                        oauth_clients::id_token_encrypted_response_alg
+                            .eq(&client.id_token_encrypted_response_alg),
+                        oauth_clients::id_token_encrypted_response_enc
+                            .eq(&client.id_token_encrypted_response_enc),
+                        oauth_clients::request_object_signing_alg
+                            .eq(&client.request_object_signing_alg),
+                        oauth_clients::request_object_encryption_alg
+                            .eq(&client.request_object_encryption_alg),
+                        oauth_clients::request_object_encryption_enc
+                            .eq(&client.request_object_encryption_enc),
+                        oauth_clients::token_endpoint_auth_signing_alg
+                            .eq(&client.token_endpoint_auth_signing_alg),
+                        oauth_clients::introspection_signed_response_alg
+                            .eq(&client.introspection_signed_response_alg),
+                        oauth_clients::introspection_encrypted_response_alg
+                            .eq(&client.introspection_encrypted_response_alg),
+                        oauth_clients::introspection_encrypted_response_enc
+                            .eq(&client.introspection_encrypted_response_enc),
+                        oauth_clients::userinfo_signed_response_alg
+                            .eq(&client.userinfo_signed_response_alg),
+                        oauth_clients::userinfo_encrypted_response_alg
+                            .eq(&client.userinfo_encrypted_response_alg),
+                        oauth_clients::userinfo_encrypted_response_enc
+                            .eq(&client.userinfo_encrypted_response_enc),
+                        oauth_clients::authorization_signed_response_alg
+                            .eq(&client.authorization_signed_response_alg),
+                        oauth_clients::authorization_encrypted_response_alg
+                            .eq(&client.authorization_encrypted_response_alg),
+                        oauth_clients::authorization_encrypted_response_enc
+                            .eq(&client.authorization_encrypted_response_enc),
+                        oauth_clients::security_policy.eq(client
+                            .security_policy
+                            .as_ref()
+                            .map(|policy| serde_json::json!(policy))),
+                        oauth_clients::is_active.eq(client.is_active),
+                    ))
+                    .returning(OAuthClientRecord::as_returning())
+                    .get_result::<OAuthClientRecord>(connection)
+                    .await?;
+                bind_conformance_lease(connection, client.id, conformance_lease_id).await?;
+                Ok(record)
+            })
             .await
-            .map_err(map_error)?
-            .into_domain()
+            .map_err(map_error)?;
+        record.into_domain()
     }
 
     pub async fn upsert(
@@ -645,11 +685,7 @@ impl OAuthClientRepository {
                 .filter(oauth_clients::tenant_id.eq(tenant_id))
                 .filter(oauth_clients::id.eq(id))
                 .filter(oauth_clients::is_active.eq(true))
-                .filter(
-                    oauth_clients::conformance_expires_at
-                        .is_null()
-                        .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-                )
+                .filter(conformance_lease_is_effective())
                 .filter(
                     oauth_clients::registration_access_token_blake3
                         .eq(expected_registration_access_token_blake3),
@@ -682,11 +718,7 @@ impl OAuthClientRepository {
                         .filter(oauth_clients::tenant_id.eq(tenant_id))
                         .filter(oauth_clients::id.eq(id))
                         .filter(oauth_clients::is_active.eq(true))
-                        .filter(
-                            oauth_clients::conformance_expires_at
-                                .is_null()
-                                .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-                        )
+                        .filter(conformance_lease_is_effective())
                         .filter(
                             oauth_clients::registration_access_token_blake3
                                 .eq(expected_registration_access_token_blake3),
@@ -735,11 +767,7 @@ impl OAuthClientRepository {
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(
-                oauth_clients::conformance_expires_at
-                    .is_null()
-                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-            )
+            .filter(conformance_lease_is_effective())
             .filter(oauth_clients::registration_access_token_blake3.eq(access_token_hash))
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
@@ -756,11 +784,7 @@ impl OAuthClientRepository {
             oauth_clients::table
                 .filter(oauth_clients::id.eq(id))
                 .filter(oauth_clients::is_active.eq(true))
-                .filter(
-                    oauth_clients::conformance_expires_at
-                        .is_null()
-                        .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-                )
+                .filter(conformance_lease_is_effective())
                 .filter(oauth_clients::client_secret_hash.is_not_null()),
         ))
         .get_result(&mut connection)
@@ -779,11 +803,7 @@ impl OAuthClientRepository {
             )
             .filter(user_client_grants::user_id.eq(user_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(
-                oauth_clients::conformance_expires_at
-                    .is_null()
-                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-            )
+            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .load::<OAuthClientRecord>(&mut connection)
             .await
@@ -807,11 +827,7 @@ impl OAuthClientRepository {
             .filter(user_client_grants::user_id.eq(user_id))
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(
-                oauth_clients::conformance_expires_at
-                    .is_null()
-                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-            )
+            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .load::<OAuthClientRecord>(&mut connection)
             .await
@@ -864,11 +880,7 @@ impl OAuthClientRepository {
         oauth_clients::table
             .find(id)
             .filter(oauth_clients::is_active.eq(true))
-            .filter(
-                oauth_clients::conformance_expires_at
-                    .is_null()
-                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-            )
+            .filter(conformance_lease_is_effective())
             .filter(oauth_clients::client_secret_hash.like("client-secret-v1:%:%"))
             .select(diesel::dsl::sql::<diesel::sql_types::Text>(
                 "split_part(client_secret_hash, ':', 2)",
@@ -890,11 +902,7 @@ impl OAuthClientRepository {
             oauth_clients::table
                 .find(id)
                 .filter(oauth_clients::is_active.eq(true))
-                .filter(
-                    oauth_clients::conformance_expires_at
-                        .is_null()
-                        .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-                )
+                .filter(conformance_lease_is_effective())
                 .filter(oauth_clients::client_secret_hash.eq(candidate_digest)),
         ))
         .get_result(&mut connection)
@@ -1382,10 +1390,7 @@ impl OAuthClientRecord {
                 security_policy: client_security_policy(self.security_policy)?,
             },
             require_mtls_bound_tokens: self.require_mtls_bound_tokens,
-            is_active: self.is_active
-                && self
-                    .conformance_expires_at
-                    .is_none_or(|expires_at| expires_at > Utc::now()),
+            is_active: self.is_active,
         })
     }
 }

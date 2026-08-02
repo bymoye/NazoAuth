@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     DbPool,
+    repositories::clients::{bind_conformance_lease, conformance_lease_is_effective},
     schema::{client_access_requests, oauth_clients, users},
 };
 
@@ -274,11 +275,7 @@ impl AccessRequestRepository {
             .filter(oauth_clients::id.eq(approved_client_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(
-                oauth_clients::conformance_expires_at
-                    .is_null()
-                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
-            )
+            .filter(conformance_lease_is_effective())
             .select(diesel::dsl::count_star())
             .first::<i64>(&mut connection)
             .await
@@ -469,7 +466,7 @@ async fn insert_client(
     client: &PreparedClientRegistration,
 ) -> Result<ApprovedClient, RepositoryError> {
     let prepared = &client.registration;
-    diesel::insert_into(oauth_clients::table)
+    let approved = diesel::insert_into(oauth_clients::table)
         .values((
             oauth_clients::tenant_id.eq(tenant.tenant_id.as_uuid()),
             oauth_clients::realm_id.eq(tenant.realm_id.as_uuid()),
@@ -480,7 +477,6 @@ async fn insert_client(
             oauth_clients::client_secret_hash.eq(client.client_secret_hash.as_deref()),
             oauth_clients::registration_access_token_blake3
                 .eq(client.registration_access_token_blake3.as_deref()),
-            oauth_clients::conformance_lease_id.eq(client.conformance_lease_id),
             oauth_clients::redirect_uris.eq(json!(&prepared.redirect_uris)),
             oauth_clients::post_logout_redirect_uris.eq(json!(&prepared.post_logout_redirect_uris)),
             oauth_clients::scopes.eq(json!(&prepared.scopes)),
@@ -552,8 +548,14 @@ async fn insert_client(
         .returning((oauth_clients::id, oauth_clients::client_id))
         .get_result::<(Uuid, String)>(connection)
         .await
-        .map(|(id, client_id)| ApprovedClient { id, client_id })
-        .map_err(map_error)
+        .map_err(map_error)?;
+    bind_conformance_lease(connection, approved.0, client.conformance_lease_id)
+        .await
+        .map_err(map_error)?;
+    Ok(ApprovedClient {
+        id: approved.0,
+        client_id: approved.1,
+    })
 }
 
 fn search_pattern(search: Option<&str>) -> Option<String> {

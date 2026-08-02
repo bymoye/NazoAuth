@@ -276,6 +276,16 @@ diesel::table! {
         sector_identifier_uri -> Nullable<Text>,
         sector_identifier_host -> Nullable<Text>,
         security_policy -> Nullable<Jsonb>,
+    }
+}
+
+// Keep lease metadata as a narrow Diesel mapping. `oauth_clients` already has
+// 64 mapped columns; widening its primary mapping would require Diesel's much
+// heavier `128-column-tables` feature in every build.
+diesel::table! {
+    #[sql_name = "oauth_clients"]
+    oauth_client_conformance_bindings (id) {
+        id -> Uuid,
         conformance_lease_id -> Nullable<Uuid>,
         conformance_expires_at -> Nullable<Timestamptz>,
     }

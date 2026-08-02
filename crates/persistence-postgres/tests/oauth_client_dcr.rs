@@ -124,14 +124,14 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
     .unwrap();
     drop(connection);
 
-    let mut expired = clients
-        .by_client_id(client.tenant_id, &client.client_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!expired.is_active);
-    expired.is_active = true;
-    assert!(clients.update_metadata(&expired).await.is_err());
+    assert!(
+        clients
+            .by_client_id(client.tenant_id, &client.client_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(clients.update_metadata(&client).await.is_err());
     let late_client = client(tenant);
     assert!(
         clients
