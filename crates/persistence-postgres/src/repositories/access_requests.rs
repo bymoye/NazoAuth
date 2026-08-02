@@ -274,6 +274,11 @@ impl AccessRequestRepository {
             .filter(oauth_clients::id.eq(approved_client_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
+            .filter(
+                oauth_clients::conformance_expires_at
+                    .is_null()
+                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+            )
             .select(diesel::dsl::count_star())
             .first::<i64>(&mut connection)
             .await
@@ -475,6 +480,7 @@ async fn insert_client(
             oauth_clients::client_secret_hash.eq(client.client_secret_hash.as_deref()),
             oauth_clients::registration_access_token_blake3
                 .eq(client.registration_access_token_blake3.as_deref()),
+            oauth_clients::conformance_lease_id.eq(client.conformance_lease_id),
             oauth_clients::redirect_uris.eq(json!(&prepared.redirect_uris)),
             oauth_clients::post_logout_redirect_uris.eq(json!(&prepared.post_logout_redirect_uris)),
             oauth_clients::scopes.eq(json!(&prepared.scopes)),

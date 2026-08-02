@@ -205,6 +205,28 @@ fn completed_lifecycle_without_its_receipt_is_also_non_replayable() {
 fn embedded_identity_and_operation_names_are_closed() {
     for (operation, expected) in [
         (TaskOperation::MigrateApply, "migrate-apply"),
+        (
+            TaskOperation::ConformanceLeaseCreate {
+                profile: "oidf-full".to_owned(),
+                material_sha256: "a".repeat(64),
+                ttl_seconds: 3_600,
+            },
+            "conformance-lease-create",
+        ),
+        (
+            TaskOperation::ConformanceLeaseList,
+            "conformance-lease-list",
+        ),
+        (
+            TaskOperation::ConformanceLeaseRevoke {
+                lease_id: "018f3f2a-7b55-7a25-8f20-6d526f8f44e1".to_owned(),
+            },
+            "conformance-lease-revoke",
+        ),
+        (
+            TaskOperation::ConformanceLeaseCleanup,
+            "conformance-lease-cleanup",
+        ),
         (TaskOperation::KeysList, "keys-list"),
         (TaskOperation::KeysValidate, "keys-validate"),
         (

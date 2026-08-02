@@ -139,6 +139,18 @@ fn privileged_container_task_mounts_are_operation_scoped_and_file_only() {
     assert!(!migration.contains("/var/lib/nazo_oauth/keys"));
     assert!(!migration.contains("postgresql://"));
 
+    let conformance = runtime
+        .append_task_mounts(
+            Process::new("podman"),
+            &TaskOperation::ConformanceLeaseCleanup,
+            None,
+        )
+        .unwrap();
+    let conformance = format!("{conformance:?}").replace("\\\\", "\\");
+    assert!(conformance.contains("database-url"));
+    assert!(!conformance.contains("database-migration-url"));
+    assert!(!conformance.contains("/var/lib/nazo_oauth/keys"));
+
     let public_jwk = work.path().join("public.jwk");
     let keys = runtime
         .append_task_mounts(

@@ -184,12 +184,24 @@ CA 边界：缺失 `keyCertSign`、扩展非 critical，或 Basic Constraints �
 
 ## 3. 通过生产控制面完成客户端接入
 
-执行：
+先在部署宿主机创建有时效的租约。manifest 是公开接入材料；只把原样文件复制到宿主机，
+不得混入 runner 私钥或已交付的 client secret：
+
+```sh
+sudo nazoauthctl conformance lease create \
+  --profile oidf-full \
+  --material /run/nazoauth/oidf-onboarding-manifest.json \
+  --ttl-seconds 28800 \
+  --yes
+```
+
+记录返回的 `lease_id`，再执行：
 
 ```sh
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
   --delivered-client-material runtime/official-onboarding-apply/oidf-delivered-client-material.json \
@@ -198,7 +210,9 @@ python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin 
   --no-runner-env
 ```
 
-凭据输入是严格 JSON，并且只能包含 `applicant_email`、`applicant_password`、
+签名 Operator Task 只保存 manifest SHA-256 和租约元数据；该命令不会把 runner 私钥或
+明文 client secret 交给服务端。每个通过正式控制面审批创建的客户端都会在同一数据库
+写入语句中绑定有效租约。凭据输入是严格 JSON，并且只能包含 `applicant_email`、`applicant_password`、
 `admin_email` 和 `admin_password`。自动化也可使用 `--credentials-fd N`；工具不提供
 密码环境变量或 argv 回退路径。
 
@@ -287,9 +301,18 @@ plan 由 workflow 自动隔离；OpenID4VC 按有界 group 执行 17 个 plan。
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
   --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
+
+sudo nazoauthctl conformance lease revoke \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" --yes
+sudo nazoauthctl conformance lease cleanup --yes
 ```
 
-清理过程通过公网管理员 API 撤销信任申请并停用本次创建的客户端。只有代理回滚流程确认旧信任配置恢复后，才能删除安装的 CA。留存脱敏后的结果、精确 commit、plan manifest、bundle digest、审批/撤销审计 ID 和官方 run ID；文档中严禁保存密码、私钥、session cookie、CSRF token、client secret 或一次性交付 token。
+公网清理先撤销信任申请并停用本次客户端；租约撤销会原子停用全部绑定客户端，随后删除其
+token、grant、revocation、access request、mTLS 信任事件和客户端记录。若显式清理未能执行，
+服务会在租约期限到达时立即拒绝这些客户端，并由周期性幂等清理器完成相同的数据库删除；
+只保留不含秘密的租约墓碑用于审计。已有 Valkey 协议瞬态状态在客户端过期后不可用，并按
+各自 TTL 到期；当前实现不会扫描共享 Valkey 命名空间。只有代理回滚流程确认旧信任配置恢复后，
+才能删除安装的 CA。留存脱敏后的结果、精确 commit、plan manifest、bundle digest、审批/撤销审计 ID 和官方 run ID；文档中严禁保存密码、私钥、session cookie、CSRF token、client secret 或一次性交付 token。
 
 套件导出的原始 ZIP 不是脱敏证据：其中的 `testInfo.config` 和日志正文可能包含
 浏览器密码、client secret、token 或私钥。仓库 runner 会在正常或可处理的异常退出路径中生成

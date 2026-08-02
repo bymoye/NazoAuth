@@ -105,6 +105,16 @@ pub enum SecretBinding {
 #[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TaskOperation {
     MigrateApply,
+    ConformanceLeaseCreate {
+        profile: String,
+        material_sha256: String,
+        ttl_seconds: u64,
+    },
+    ConformanceLeaseList,
+    ConformanceLeaseRevoke {
+        lease_id: String,
+    },
+    ConformanceLeaseCleanup,
     KeysList,
     KeysValidate,
     KeysGenerateLocal {
@@ -239,6 +249,32 @@ pub enum TaskResult {
         kid: String,
         keyset_revision: String,
     },
+    ConformanceLeaseCreated {
+        lease: ConformanceLeaseSummary,
+    },
+    ConformanceLeaseList {
+        leases: Vec<ConformanceLeaseSummary>,
+    },
+    ConformanceLeaseRevoked {
+        lease_id: String,
+        deactivated_clients: u64,
+    },
+    ConformanceLeaseCleaned {
+        cleaned_leases: u64,
+        deleted_clients: u64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceLeaseSummary {
+    pub lease_id: String,
+    pub profile: String,
+    pub material_sha256: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+    pub cleaned_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -552,7 +588,32 @@ fn validate_final_receipt(receipt: &FinalReceipt) -> Result<(), ProtocolError> {
 
 fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
     match operation {
-        TaskOperation::MigrateApply | TaskOperation::KeysList | TaskOperation::KeysValidate => {}
+        TaskOperation::MigrateApply
+        | TaskOperation::ConformanceLeaseList
+        | TaskOperation::ConformanceLeaseCleanup
+        | TaskOperation::KeysList
+        | TaskOperation::KeysValidate => {}
+        TaskOperation::ConformanceLeaseCreate {
+            profile,
+            material_sha256,
+            ttl_seconds,
+        } => {
+            validate_identifier(profile)?;
+            if profile.len() > 64 {
+                return Err(ProtocolError::Policy(
+                    "conformance lease profile exceeds 64 bytes",
+                ));
+            }
+            validate_lower_hex(material_sha256, 64)?;
+            if !(60..=86_400).contains(ttl_seconds) {
+                return Err(ProtocolError::Policy(
+                    "conformance lease ttl must be between 60 and 86400 seconds",
+                ));
+            }
+        }
+        TaskOperation::ConformanceLeaseRevoke { lease_id } => {
+            validate_file_identifier(lease_id)?;
+        }
         TaskOperation::KeysGenerateLocal { alg, purposes } => {
             validate_identifier(alg)?;
             if purposes.is_empty() || purposes.len() > 8 {

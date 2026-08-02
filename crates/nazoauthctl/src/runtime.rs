@@ -224,15 +224,13 @@ impl<'a> Runtime<'a> {
                         .join(".env.yaml")
                         .display()
                 ));
-            command = if matches!(operation, TaskOperation::MigrateApply) {
+            command = if operation_uses_database(operation) {
+                let database_url_file = operation_database_url_file(self.config, operation);
                 command
                     .arg("--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6")
                     .arg(format!(
-                        "--property=LoadCredential=migration-database-url:{}",
-                        self.config
-                            .dependencies
-                            .migration_database_url_file
-                            .display()
+                        "--property=LoadCredential=operator-database-url:{}",
+                        database_url_file.display()
                     ))
                     .arg(format!(
                         "--property=InaccessiblePaths={}",
@@ -245,7 +243,7 @@ impl<'a> Runtime<'a> {
                         app_root.join("bootstrap").display(),
                         ui_releases.display()
                     ))
-                    .arg("--setenv=DATABASE_URL_FILE=%d/migration-database-url")
+                    .arg("--setenv=DATABASE_URL_FILE=%d/operator-database-url")
             } else {
                 let mut command = command
                     .arg("--property=RestrictAddressFamilies=AF_UNIX")
@@ -313,7 +311,7 @@ impl<'a> Runtime<'a> {
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,nodev,size=16m",
             ]);
-        command = if matches!(operation, TaskOperation::MigrateApply) {
+        command = if operation_uses_database(operation) {
             command.arg("--network").arg(&self.config.runtime.network)
         } else {
             command.args(["--network", "none"])
@@ -586,12 +584,17 @@ impl<'a> Runtime<'a> {
         let config_mount = self.required_mount("/app/.env.yaml")?;
         command = append_mount(command, config_mount);
         match operation {
-            TaskOperation::MigrateApply => {
+            TaskOperation::MigrateApply
+            | TaskOperation::ConformanceLeaseCreate { .. }
+            | TaskOperation::ConformanceLeaseList
+            | TaskOperation::ConformanceLeaseRevoke { .. }
+            | TaskOperation::ConformanceLeaseCleanup => {
+                let database_url_file = operation_database_url_file(self.config, operation);
                 command = command
                     .args(["-e", "DATABASE_URL_FILE=/run/nazoauth-secrets/database-url"])
                     .arg("-v")
                     .arg(mount_argument(
-                        &self.config.dependencies.migration_database_url_file,
+                        database_url_file,
                         Path::new("/run/nazoauth-secrets/database-url"),
                         "ro,Z",
                     ));
@@ -699,6 +702,28 @@ impl<'a> Runtime<'a> {
             }
         }
         false
+    }
+}
+
+fn operation_uses_database(operation: &TaskOperation) -> bool {
+    matches!(
+        operation,
+        TaskOperation::MigrateApply
+            | TaskOperation::ConformanceLeaseCreate { .. }
+            | TaskOperation::ConformanceLeaseList
+            | TaskOperation::ConformanceLeaseRevoke { .. }
+            | TaskOperation::ConformanceLeaseCleanup
+    )
+}
+
+fn operation_database_url_file<'a>(
+    config: &'a UpdateConfig,
+    operation: &TaskOperation,
+) -> &'a Path {
+    if matches!(operation, TaskOperation::MigrateApply) {
+        &config.dependencies.migration_database_url_file
+    } else {
+        &config.dependencies.database_url_file
     }
 }
 

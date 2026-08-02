@@ -3,6 +3,7 @@ mod audit;
 mod authorization;
 mod authorization_flow;
 pub(crate) mod clients;
+mod conformance_leases;
 mod federation;
 mod grants;
 mod initial_admin_bootstrap;
@@ -21,6 +22,10 @@ pub use audit::AuditRepository;
 pub use authorization::AuthorizationRepository;
 pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::OAuthClientRepository;
+pub use conformance_leases::{
+    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeaseRepository,
+    MAX_CONFORMANCE_LEASE_SECONDS, MIN_CONFORMANCE_LEASE_SECONDS,
+};
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};
 pub use initial_admin_bootstrap::{

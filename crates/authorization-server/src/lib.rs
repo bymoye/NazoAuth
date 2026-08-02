@@ -9,6 +9,7 @@ mod adapters;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
+mod conformance_lease;
 mod domain;
 mod http;
 mod keyctl;

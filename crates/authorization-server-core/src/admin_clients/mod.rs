@@ -54,6 +54,7 @@ pub trait AdminClientRepositoryPort: Send + Sync {
         client: &'a OAuthClient,
         client_secret_hash: Option<&'a str>,
         registration_access_token_blake3: Option<&'a str>,
+        conformance_lease_id: Option<Uuid>,
     ) -> AdminClientFuture<'a, OAuthClient>;
 
     fn update<'a>(&'a self, client: &'a OAuthClient) -> AdminClientFuture<'a, OAuthClient>;
@@ -130,6 +131,12 @@ impl std::error::Error for AdminClientError {}
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct CreateClientRequest {
+    /// Optional ownership boundary for short-lived conformance clients.
+    ///
+    /// The persistence adapter validates the lease in the same database statement that creates
+    /// the client. The field contains no key material or client secret.
+    #[serde(default)]
+    pub conformance_lease_id: Option<Uuid>,
     pub client_name: String,
     pub client_type: String,
     pub redirect_uris: Vec<String>,
@@ -283,6 +290,7 @@ fn default_ciba_delivery_mode() -> String {
 #[derive(Clone)]
 pub struct PreparedClientRegistration {
     pub tenant: TenantContext,
+    pub conformance_lease_id: Option<Uuid>,
     pub registration: ValidatedClientRegistration,
     pub require_mtls_bound_tokens: bool,
     pub issued_secret: Option<String>,
@@ -295,6 +303,7 @@ impl std::fmt::Debug for PreparedClientRegistration {
         formatter
             .debug_struct("PreparedClientRegistration")
             .field("tenant", &self.tenant)
+            .field("conformance_lease_id", &self.conformance_lease_id)
             .field("registration", &self.registration)
             .field("require_mtls_bound_tokens", &self.require_mtls_bound_tokens)
             .field(
@@ -464,6 +473,7 @@ pub async fn insert_prepared_client<R: AdminClientRepositoryPort>(
             &client,
             prepared.client_secret_hash.as_deref(),
             prepared.registration_access_token_blake3.as_deref(),
+            prepared.conformance_lease_id,
         )
         .await
         .map_err(AdminClientError::Write)?;
@@ -532,6 +542,7 @@ where
     .await?;
     Ok(PreparedClientRegistration {
         tenant: policy.tenant,
+        conformance_lease_id: request.conformance_lease_id,
         registration: ValidatedClientRegistration {
             client_id: format!("client-{}", Uuid::now_v7()),
             client_name: request.client_name,

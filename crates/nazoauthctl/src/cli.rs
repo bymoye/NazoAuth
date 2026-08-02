@@ -13,6 +13,7 @@ pub(crate) enum HelpTopic {
     BootstrapAdmin,
     Update,
     Keys,
+    Conformance,
     Audit,
     Identity,
     BreakGlass,
@@ -41,6 +42,7 @@ pub(crate) fn help_topic(args: &[String]) -> Option<HelpTopic> {
             | "migrate",
         ) => HelpTopic::Update,
         Some("keys") => HelpTopic::Keys,
+        Some("conformance") => HelpTopic::Conformance,
         Some("audit") => HelpTopic::Audit,
         Some("identity") => HelpTopic::Identity,
         Some("break-glass") => HelpTopic::BreakGlass,
@@ -66,6 +68,7 @@ pub(crate) enum Command {
     RecoverIdentity { yes: bool },
     Migrate { yes: bool },
     Keys(KeysCommand),
+    Conformance(ConformanceLeaseCommand),
     AuditVerify,
     AuditShow { request_id: Option<String> },
     IdentityRotate { yes: bool },
@@ -91,6 +94,24 @@ pub(crate) enum KeysCommand {
         alg: String,
         key_ref: String,
         public_jwk: PathBuf,
+        yes: bool,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum ConformanceLeaseCommand {
+    Create {
+        profile: String,
+        material: PathBuf,
+        ttl_seconds: u64,
+        yes: bool,
+    },
+    List,
+    Revoke {
+        lease_id: String,
+        yes: bool,
+    },
+    Cleanup {
         yes: bool,
     },
 }
@@ -195,6 +216,7 @@ impl Cli {
                 yes: parse_yes(values, "migrate")?,
             },
             "keys" => Command::Keys(parse_keys(values)?),
+            "conformance" => Command::Conformance(parse_conformance(values)?),
             "audit" if values == ["verify"] => Command::AuditVerify,
             "audit" if values.first().is_some_and(|value| value == "show") => {
                 values.remove(0);
@@ -337,6 +359,57 @@ fn parse_keys(values: Vec<String>) -> anyhow::Result<KeysCommand> {
     }
 }
 
+fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceLeaseCommand> {
+    if values.first().map(String::as_str) != Some("lease") {
+        bail!("conformance requires the lease resource");
+    }
+    values.remove(0);
+    let operation = values
+        .first()
+        .cloned()
+        .context("conformance lease requires an operation")?;
+    values.remove(0);
+    match operation.as_str() {
+        "list" => {
+            no_arguments(&values, "conformance lease list")?;
+            Ok(ConformanceLeaseCommand::List)
+        }
+        "create" => {
+            let (values, yes) = take_yes(values)?;
+            let values = parse_named_options_for(
+                values,
+                &["--profile", "--material", "--ttl-seconds"],
+                "conformance lease create",
+            )?;
+            let ttl_seconds = values["--ttl-seconds"]
+                .parse::<u64>()
+                .context("--ttl-seconds must be an integer")?;
+            if !(60..=86_400).contains(&ttl_seconds) {
+                bail!("--ttl-seconds must be between 60 and 86400");
+            }
+            Ok(ConformanceLeaseCommand::Create {
+                profile: values["--profile"].clone(),
+                material: PathBuf::from(&values["--material"]),
+                ttl_seconds,
+                yes,
+            })
+        }
+        "revoke" => {
+            let (values, yes) = take_yes(values)?;
+            let values =
+                parse_named_options_for(values, &["--lease-id"], "conformance lease revoke")?;
+            let lease_id = values["--lease-id"].clone();
+            uuid::Uuid::parse_str(&lease_id).context("--lease-id must be a UUID")?;
+            Ok(ConformanceLeaseCommand::Revoke { lease_id, yes })
+        }
+        "cleanup" => {
+            let yes = parse_yes(values, "conformance lease cleanup")?;
+            Ok(ConformanceLeaseCommand::Cleanup { yes })
+        }
+        _ => bail!("unsupported conformance lease operation or arguments"),
+    }
+}
+
 fn take_yes(mut values: Vec<String>) -> anyhow::Result<(Vec<String>, bool)> {
     let positions = values
         .iter()
@@ -357,15 +430,25 @@ fn parse_named_options(
     values: Vec<String>,
     expected: &[&str],
 ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    parse_named_options_for(values, expected, "keys operation")
+}
+
+fn parse_named_options_for(
+    values: Vec<String>,
+    expected: &[&str],
+    command: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
     if values.len() != expected.len() * 2 {
-        bail!("keys operation has missing or unexpected options");
+        bail!("{command} has missing or unexpected options");
     }
     let mut parsed = std::collections::BTreeMap::new();
     let mut values = values.into_iter();
     while let Some(key) = values.next() {
-        let value = values.next().context("keys option has no value")?;
+        let value = values
+            .next()
+            .with_context(|| format!("{command} option has no value"))?;
         if !expected.contains(&key.as_str()) || parsed.insert(key, value).is_some() {
-            bail!("keys operation has duplicate or unexpected options");
+            bail!("{command} has duplicate or unexpected options");
         }
     }
     Ok(parsed)

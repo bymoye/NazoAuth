@@ -182,6 +182,10 @@ fn help_topics_follow_user_intent_even_with_an_explicit_config() {
         ])),
         Some(HelpTopic::Update)
     );
+    assert_eq!(
+        help_topic(&values(&["nazoauthctl", "conformance", "--help"])),
+        Some(HelpTopic::Conformance)
+    );
     assert_eq!(help_topic(&values(&["nazoauthctl", "status"])), None);
 }
 
@@ -591,4 +595,72 @@ fn parses_key_mutations_identity_rotation_and_break_glass() {
     ] {
         assert!(parse(arguments).is_err(), "accepted {arguments:?}");
     }
+}
+
+#[test]
+fn parses_time_bounded_conformance_lease_operations() {
+    let command = parse(&[
+        "nazoauthctl",
+        "conformance",
+        "lease",
+        "create",
+        "--profile",
+        "oidf-full",
+        "--material",
+        "/run/oidf-onboarding-manifest.json",
+        "--ttl-seconds",
+        "28800",
+        "--yes",
+    ])
+    .unwrap()
+    .unwrap()
+    .command;
+    assert!(matches!(
+        command,
+        Command::Conformance(ConformanceLeaseCommand::Create {
+            profile,
+            material,
+            ttl_seconds: 28_800,
+            yes: true,
+        }) if profile == "oidf-full"
+            && material == std::path::Path::new("/run/oidf-onboarding-manifest.json")
+    ));
+
+    assert!(matches!(
+        parse(&["nazoauthctl", "conformance", "lease", "list"])
+            .unwrap()
+            .unwrap()
+            .command,
+        Command::Conformance(ConformanceLeaseCommand::List)
+    ));
+    assert!(matches!(
+        parse(&[
+            "nazoauthctl",
+            "conformance",
+            "lease",
+            "revoke",
+            "--lease-id",
+            "018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
+            "--yes",
+        ])
+        .unwrap()
+        .unwrap()
+        .command,
+        Command::Conformance(ConformanceLeaseCommand::Revoke { yes: true, .. })
+    ));
+    assert!(
+        parse(&[
+            "nazoauthctl",
+            "conformance",
+            "lease",
+            "create",
+            "--profile",
+            "oidf-full",
+            "--material",
+            "/run/manifest.json",
+            "--ttl-seconds",
+            "86401",
+        ])
+        .is_err()
+    );
 }

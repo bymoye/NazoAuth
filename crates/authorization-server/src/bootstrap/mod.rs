@@ -138,6 +138,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 数据库和 Valkey 客户端在 server factory 外创建，避免每个 worker 重复初始化。
     let diesel_db = create_pool(database_url.clone(), database_max_connections(&config)?)?;
+    crate::conformance_lease::spawn_cleanup(diesel_db.clone());
     #[cfg(not(test))]
     let valkey =
         nazo_valkey::ValkeyConnection::connect(&valkey_url, valkey_command_timeout).await?;

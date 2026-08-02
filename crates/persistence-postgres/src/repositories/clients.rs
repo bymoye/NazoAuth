@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use diesel::{
-    ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, SelectableHelper,
-    TextExpressionMethods,
+    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl,
+    SelectableHelper, TextExpressionMethods,
 };
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_auth::{
@@ -81,6 +81,7 @@ struct OAuthClientRecord {
     sector_identifier_uri: Option<String>,
     sector_identifier_host: Option<String>,
     security_policy: Option<Value>,
+    conformance_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -139,6 +140,11 @@ impl OAuthClientRepository {
             )
             .filter(oauth_clients::client_type.eq("confidential"))
             .filter(oauth_clients::is_active.eq(true))
+            .filter(
+                oauth_clients::conformance_expires_at
+                    .is_null()
+                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+            )
             .select(OAuthClientRecord::as_select())
             .limit(limit)
             .load::<OAuthClientRecord>(&mut connection)
@@ -179,6 +185,7 @@ impl OAuthClientRepository {
         client: &OAuthClient,
         client_secret_hash: Option<&str>,
         registration_access_token_blake3: Option<&str>,
+        conformance_lease_id: Option<Uuid>,
     ) -> Result<OAuthClient, RepositoryError> {
         let mut connection = self.connection().await?;
         diesel::insert_into(oauth_clients::table)
@@ -193,6 +200,7 @@ impl OAuthClientRepository {
                 oauth_clients::client_secret_hash.eq(client_secret_hash),
                 oauth_clients::registration_access_token_blake3
                     .eq(registration_access_token_blake3),
+                oauth_clients::conformance_lease_id.eq(conformance_lease_id),
                 oauth_clients::redirect_uris.eq(serde_json::json!(&client.redirect_uris)),
                 oauth_clients::post_logout_redirect_uris
                     .eq(serde_json::json!(&client.post_logout_redirect_uris)),
@@ -590,6 +598,7 @@ impl OAuthClientRepository {
                 security_policy = NULLIF($3->'security_policy', 'null'::jsonb),
                 updated_at = CURRENT_TIMESTAMP
             WHERE tenant_id = $1 AND id = $2 AND is_active = TRUE
+              AND (conformance_expires_at IS NULL OR conformance_expires_at > CURRENT_TIMESTAMP)
               AND registration_access_token_blake3 = $6
             "#,
                 )
@@ -637,6 +646,11 @@ impl OAuthClientRepository {
                 .filter(oauth_clients::id.eq(id))
                 .filter(oauth_clients::is_active.eq(true))
                 .filter(
+                    oauth_clients::conformance_expires_at
+                        .is_null()
+                        .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+                )
+                .filter(
                     oauth_clients::registration_access_token_blake3
                         .eq(expected_registration_access_token_blake3),
                 ),
@@ -668,6 +682,11 @@ impl OAuthClientRepository {
                         .filter(oauth_clients::tenant_id.eq(tenant_id))
                         .filter(oauth_clients::id.eq(id))
                         .filter(oauth_clients::is_active.eq(true))
+                        .filter(
+                            oauth_clients::conformance_expires_at
+                                .is_null()
+                                .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+                        )
                         .filter(
                             oauth_clients::registration_access_token_blake3
                                 .eq(expected_registration_access_token_blake3),
@@ -716,6 +735,11 @@ impl OAuthClientRepository {
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
+            .filter(
+                oauth_clients::conformance_expires_at
+                    .is_null()
+                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+            )
             .filter(oauth_clients::registration_access_token_blake3.eq(access_token_hash))
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
@@ -731,6 +755,12 @@ impl OAuthClientRepository {
         diesel::select(diesel::dsl::exists(
             oauth_clients::table
                 .filter(oauth_clients::id.eq(id))
+                .filter(oauth_clients::is_active.eq(true))
+                .filter(
+                    oauth_clients::conformance_expires_at
+                        .is_null()
+                        .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+                )
                 .filter(oauth_clients::client_secret_hash.is_not_null()),
         ))
         .get_result(&mut connection)
@@ -749,6 +779,11 @@ impl OAuthClientRepository {
             )
             .filter(user_client_grants::user_id.eq(user_id))
             .filter(oauth_clients::is_active.eq(true))
+            .filter(
+                oauth_clients::conformance_expires_at
+                    .is_null()
+                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+            )
             .select(OAuthClientRecord::as_select())
             .load::<OAuthClientRecord>(&mut connection)
             .await
@@ -772,6 +807,11 @@ impl OAuthClientRepository {
             .filter(user_client_grants::user_id.eq(user_id))
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::is_active.eq(true))
+            .filter(
+                oauth_clients::conformance_expires_at
+                    .is_null()
+                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+            )
             .select(OAuthClientRecord::as_select())
             .load::<OAuthClientRecord>(&mut connection)
             .await
@@ -823,6 +863,12 @@ impl OAuthClientRepository {
         let mut connection = self.connection().await?;
         oauth_clients::table
             .find(id)
+            .filter(oauth_clients::is_active.eq(true))
+            .filter(
+                oauth_clients::conformance_expires_at
+                    .is_null()
+                    .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+            )
             .filter(oauth_clients::client_secret_hash.like("client-secret-v1:%:%"))
             .select(diesel::dsl::sql::<diesel::sql_types::Text>(
                 "split_part(client_secret_hash, ':', 2)",
@@ -843,6 +889,12 @@ impl OAuthClientRepository {
         diesel::select(diesel::dsl::exists(
             oauth_clients::table
                 .find(id)
+                .filter(oauth_clients::is_active.eq(true))
+                .filter(
+                    oauth_clients::conformance_expires_at
+                        .is_null()
+                        .or(oauth_clients::conformance_expires_at.gt(Utc::now())),
+                )
                 .filter(oauth_clients::client_secret_hash.eq(candidate_digest)),
         ))
         .get_result(&mut connection)
@@ -1079,6 +1131,7 @@ impl AdminClientRepositoryPort for OAuthClientRepository {
         client: &'a OAuthClient,
         client_secret_hash: Option<&'a str>,
         registration_access_token_blake3: Option<&'a str>,
+        conformance_lease_id: Option<Uuid>,
     ) -> AdminClientFuture<'a, OAuthClient> {
         Box::pin(async move {
             OAuthClientRepository::insert(
@@ -1086,6 +1139,7 @@ impl AdminClientRepositoryPort for OAuthClientRepository {
                 client,
                 client_secret_hash,
                 registration_access_token_blake3,
+                conformance_lease_id,
             )
             .await
             .map_err(map_admin_client_error)
@@ -1328,7 +1382,10 @@ impl OAuthClientRecord {
                 security_policy: client_security_policy(self.security_policy)?,
             },
             require_mtls_bound_tokens: self.require_mtls_bound_tokens,
-            is_active: self.is_active,
+            is_active: self.is_active
+                && self
+                    .conformance_expires_at
+                    .is_none_or(|expires_at| expires_at > Utc::now()),
         })
     }
 }

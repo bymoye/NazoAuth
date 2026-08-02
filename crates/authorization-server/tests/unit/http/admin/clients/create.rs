@@ -27,6 +27,7 @@ async fn prepare_client_insert_for_test(
 
 fn create_request() -> CreateClientRequest {
     CreateClientRequest {
+        conformance_lease_id: None,
         client_name: "Payments client".to_owned(),
         client_type: "confidential".to_owned(),
         redirect_uris: vec!["https://client.example/callback".to_owned()],

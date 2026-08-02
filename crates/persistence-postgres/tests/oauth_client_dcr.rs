@@ -82,6 +82,83 @@ fn client(tenant: TenantContext) -> OAuthClient {
     }
 }
 
+#[tokio::test]
+async fn expired_conformance_lease_fails_closed_before_idempotent_physical_cleanup() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+            }
+            Err(_) => return,
+        };
+    let pool = create_pool(database_url, 4).unwrap();
+    let clients = OAuthClientRepository::new(pool.clone());
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let tenant = TenantContext::default_system();
+    let lease = leases
+        .create(tenant.tenant_id.as_uuid(), "oidf-test", &"a".repeat(64), 60)
+        .await
+        .unwrap();
+    let client = client(tenant);
+    clients
+        .insert(&client, None, None, Some(lease.id))
+        .await
+        .unwrap();
+    assert!(
+        clients
+            .by_client_id(client.tenant_id, &client.client_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE conformance_leases SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes', expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE id = $1",
+    )
+    .bind::<SqlUuid, _>(lease.id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    let mut expired = clients
+        .by_client_id(client.tenant_id, &client.client_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!expired.is_active);
+    expired.is_active = true;
+    assert!(clients.update_metadata(&expired).await.is_err());
+    let late_client = client(tenant);
+    assert!(
+        clients
+            .insert(&late_client, None, None, Some(lease.id))
+            .await
+            .is_err()
+    );
+    let cleaned = leases.cleanup().await.unwrap();
+    assert!(cleaned.cleaned_leases >= 1);
+    assert!(cleaned.deleted_clients >= 1);
+    assert!(
+        clients
+            .by_client_id(client.tenant_id, &client.client_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let listed = leases.list(client.tenant_id).await.unwrap();
+    let tombstone = listed
+        .iter()
+        .find(|candidate| candidate.id == lease.id)
+        .unwrap();
+    assert!(tombstone.revoked_at.is_some());
+    assert!(tombstone.cleaned_at.is_some());
+    leases.cleanup().await.unwrap();
+}
+
 fn registration_token(client: &OAuthClient, label: &str) -> String {
     format!("{label}-{}", client.id)
 }
@@ -99,7 +176,7 @@ async fn dcr_replace_cannot_resurrect_a_concurrently_deleted_client() {
     let initial_token = registration_token(&client, "registration-token");
     let rotated_token = registration_token(&client, "rotated-token");
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
 
@@ -182,7 +259,7 @@ async fn dynamic_profile_metadata_round_trips_through_postgres() {
     let rotated_token = registration_token(&client, "rotated-registration-token");
 
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
     let persisted = repository.by_id(client.id).await.unwrap().unwrap();
@@ -235,7 +312,7 @@ async fn registration_token_rotation_rejects_a_stale_authenticated_token() {
     let rotated_token = registration_token(&client, "rotated-token");
     let attacker_token = registration_token(&client, "attacker-token");
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
 
@@ -284,7 +361,7 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
     let stale_token = registration_token(&client, "stale-write");
     let replacement_token = registration_token(&client, "replacement-token");
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
 

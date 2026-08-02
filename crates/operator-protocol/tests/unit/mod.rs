@@ -164,6 +164,35 @@ fn canonical_config_digest_is_order_independent() {
 }
 
 #[test]
+fn conformance_lease_task_is_public_material_only_and_time_bounded() {
+    let operation = TaskOperation::ConformanceLeaseCreate {
+        profile: "oidf-full".to_owned(),
+        material_sha256: "a".repeat(64),
+        ttl_seconds: 28_800,
+    };
+    validate_operation(&operation).unwrap();
+
+    for ttl_seconds in [0, 59, 86_401] {
+        assert!(
+            validate_operation(&TaskOperation::ConformanceLeaseCreate {
+                profile: "oidf-full".to_owned(),
+                material_sha256: "a".repeat(64),
+                ttl_seconds,
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-full".to_owned(),
+            material_sha256: "A".repeat(64),
+            ttl_seconds: 60,
+        })
+        .is_err()
+    );
+}
+
+#[test]
 fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
     let runtime_key = SigningKey::from_bytes(&[11; 32]);
     let controller_key = SigningKey::from_bytes(&[12; 32]);

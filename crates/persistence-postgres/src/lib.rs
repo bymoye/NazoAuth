@@ -24,10 +24,12 @@ pub use pool::{
 };
 pub use repositories::{
     AccessRequestRepository, AuditRepository, AuthorizationFlowRepository, AuthorizationRepository,
-    FederationRepository, GrantAuthorization, GrantRepository, InitialAdminBootstrapRepository,
-    InitialAdminBootstrapState, InitialAdminClaimOutcome, ManagedCredentialDataset,
-    ManagedCredentialDatasetWrite, MfaRepository, MtlsTrustAnchorRepository, OAuthClientRepository,
-    Openid4vciDatasetRepository, Openid4vciRepository, Openid4vpRepository, PasskeyRepository,
-    RuntimeModuleEventPage, RuntimeModuleRepository, ScimEventRepository, ScimRepository,
-    TokenIssuanceRepository, TokenRepository, UserRepository,
+    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeaseRepository, FederationRepository,
+    GrantAuthorization, GrantRepository, InitialAdminBootstrapRepository,
+    InitialAdminBootstrapState, InitialAdminClaimOutcome, MAX_CONFORMANCE_LEASE_SECONDS,
+    MIN_CONFORMANCE_LEASE_SECONDS, ManagedCredentialDataset, ManagedCredentialDatasetWrite,
+    MfaRepository, MtlsTrustAnchorRepository, OAuthClientRepository, Openid4vciDatasetRepository,
+    Openid4vciRepository, Openid4vpRepository, PasskeyRepository, RuntimeModuleEventPage,
+    RuntimeModuleRepository, ScimEventRepository, ScimRepository, TokenIssuanceRepository,
+    TokenRepository, UserRepository,
 };

@@ -247,6 +247,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
 
     def test_apply_journals_partial_state_before_remote_approval_failure(self):
         module = load_module()
+        approval_payloads = []
 
         class Applicant:
             def request_json(self, method, path, payload=None, **kwargs):
@@ -261,6 +262,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                 if (method, path) == ("GET", "/auth/me"):
                     return {"id": "admin", "admin_level": 1}
                 if method == "POST" and path.endswith("/approve"):
+                    approval_payloads.append(payload)
                     raise module.OnboardingError("approval rejected")
                 raise AssertionError((method, path, payload, kwargs))
 
@@ -294,6 +296,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
             plan_set.write_text("[]", encoding="utf-8")
             plan_manifest.write_text("{}", encoding="utf-8")
             args = SimpleNamespace(
+                lease_id="018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
                 manifest=manifest,
                 target_issuer="https://issuer.example",
                 state_file=state,
@@ -328,6 +331,15 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
 
             journal = json.loads(state.read_text(encoding="utf-8"))
             self.assertNotIn("complete", journal)
+            self.assertEqual(
+                journal["conformance_lease_id"],
+                "018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
+            )
+            self.assertEqual(len(journal["manifest_sha256"]), 64)
+            self.assertEqual(
+                approval_payloads[0]["conformance_lease_id"],
+                "018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
+            )
             self.assertEqual(
                 journal["clients"],
                 [

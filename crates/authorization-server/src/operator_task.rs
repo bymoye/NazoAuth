@@ -166,6 +166,20 @@ async fn execute(operation: &TaskOperation) -> TaskOutcome {
         TaskOperation::MigrateApply => crate::cli::run_migrations()
             .await
             .map(|()| TaskResult::Migration { applied: true }),
+        TaskOperation::ConformanceLeaseCreate {
+            profile,
+            material_sha256,
+            ttl_seconds,
+        } => {
+            crate::conformance_lease::operator_create(profile, material_sha256, *ttl_seconds).await
+        }
+        TaskOperation::ConformanceLeaseList => crate::conformance_lease::operator_list().await,
+        TaskOperation::ConformanceLeaseRevoke { lease_id } => {
+            crate::conformance_lease::operator_revoke(lease_id).await
+        }
+        TaskOperation::ConformanceLeaseCleanup => {
+            crate::conformance_lease::operator_cleanup().await
+        }
         TaskOperation::KeysList => crate::keyctl::operator_list()
             .await
             .map(|keyset_revision| TaskResult::KeyList { keyset_revision }),
@@ -262,6 +276,10 @@ fn validate_config_manifest_at(
 fn operation_name(operation: &TaskOperation) -> &'static str {
     match operation {
         TaskOperation::MigrateApply => "migrate-apply",
+        TaskOperation::ConformanceLeaseCreate { .. } => "conformance-lease-create",
+        TaskOperation::ConformanceLeaseList => "conformance-lease-list",
+        TaskOperation::ConformanceLeaseRevoke { .. } => "conformance-lease-revoke",
+        TaskOperation::ConformanceLeaseCleanup => "conformance-lease-cleanup",
         TaskOperation::KeysList => "keys-list",
         TaskOperation::KeysValidate => "keys-validate",
         TaskOperation::KeysGenerateLocal { .. } => "keys-generate-local",

@@ -719,6 +719,7 @@ impl PreparedDynamicClientRegistration {
         let allow_client_assertion_endpoint_audience =
             self.token_endpoint_auth_method == "private_key_jwt";
         CreateClientRequest {
+            conformance_lease_id: None,
             client_name: self.client_name,
             client_type: self.client_type,
             redirect_uris: self.redirect_uris,

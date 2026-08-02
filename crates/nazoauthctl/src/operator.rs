@@ -431,6 +431,12 @@ fn execute_test_task(
         TaskOperation::KeysGenerateLocal { .. } | TaskOperation::KeysRegisterExternal { .. } => {
             bail!("test task adapter does not implement key mutation")
         }
+        TaskOperation::ConformanceLeaseCreate { .. }
+        | TaskOperation::ConformanceLeaseList
+        | TaskOperation::ConformanceLeaseRevoke { .. }
+        | TaskOperation::ConformanceLeaseCleanup => {
+            bail!("test task adapter does not implement conformance lease operations")
+        }
     };
     if config.runtime.engine == "host" {
         Process::new(target).args(arguments).run_quiet()?;
@@ -462,7 +468,11 @@ fn execute_test_task(
                 keyset_revision: "test".to_owned(),
             },
             TaskOperation::KeysGenerateLocal { .. }
-            | TaskOperation::KeysRegisterExternal { .. } => unreachable!(),
+            | TaskOperation::KeysRegisterExternal { .. }
+            | TaskOperation::ConformanceLeaseCreate { .. }
+            | TaskOperation::ConformanceLeaseList
+            | TaskOperation::ConformanceLeaseRevoke { .. }
+            | TaskOperation::ConformanceLeaseCleanup => unreachable!(),
         },
         final_receipt: receipt,
     })
@@ -500,6 +510,10 @@ fn canonical_manifest(
 fn operation_name(operation: &TaskOperation) -> &'static str {
     match operation {
         TaskOperation::MigrateApply => "migrate-apply",
+        TaskOperation::ConformanceLeaseCreate { .. } => "conformance-lease-create",
+        TaskOperation::ConformanceLeaseList => "conformance-lease-list",
+        TaskOperation::ConformanceLeaseRevoke { .. } => "conformance-lease-revoke",
+        TaskOperation::ConformanceLeaseCleanup => "conformance-lease-cleanup",
         TaskOperation::KeysList => "keys-list",
         TaskOperation::KeysValidate => "keys-validate",
         TaskOperation::KeysGenerateLocal { .. } => "keys-generate-local",

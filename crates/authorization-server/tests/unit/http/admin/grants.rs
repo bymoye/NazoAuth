@@ -141,6 +141,7 @@ async fn invoke_admin_revoke_grant(
 
 fn create_client_request(client_name: &str) -> CreateClientRequest {
     CreateClientRequest {
+        conformance_lease_id: None,
         client_name: client_name.to_owned(),
         client_type: "confidential".to_owned(),
         redirect_uris: vec!["https://client.example/callback".to_owned()],

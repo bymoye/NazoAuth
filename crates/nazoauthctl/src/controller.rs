@@ -15,7 +15,9 @@ use serde_json::json;
 
 use crate::{
     backup::Backup,
-    cli::{BootstrapAdminOptions, Cli, Command, KeysCommand, UpdateOptions},
+    cli::{
+        BootstrapAdminOptions, Cli, Command, ConformanceLeaseCommand, KeysCommand, UpdateOptions,
+    },
     filesystem::{atomic_write, copy_atomic, remove_file_durable, set_mode, symlink_atomic},
     install::{self, PreparedInstall},
     model::{ReleaseManifest, UpdateConfig},
@@ -281,6 +283,39 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             };
             app_command(&config, operation, public_jwk.as_deref())
+        }
+        Command::Conformance(command) => {
+            require_root()?;
+            let config = load_config(&cli.config)?;
+            let operation = match command {
+                ConformanceLeaseCommand::Create {
+                    profile,
+                    material,
+                    ttl_seconds,
+                    yes,
+                } => {
+                    require_confirmation(yes, "create a temporary conformance lease")?;
+                    let material_sha256 = crate::filesystem::sha256(&material)?;
+                    TaskOperation::ConformanceLeaseCreate {
+                        profile,
+                        material_sha256,
+                        ttl_seconds,
+                    }
+                }
+                ConformanceLeaseCommand::List => TaskOperation::ConformanceLeaseList,
+                ConformanceLeaseCommand::Revoke { lease_id, yes } => {
+                    require_confirmation(
+                        yes,
+                        "revoke the conformance lease and deactivate its clients",
+                    )?;
+                    TaskOperation::ConformanceLeaseRevoke { lease_id }
+                }
+                ConformanceLeaseCommand::Cleanup { yes } => {
+                    require_confirmation(yes, "delete revoked and expired conformance clients")?;
+                    TaskOperation::ConformanceLeaseCleanup
+                }
+            };
+            app_command(&config, operation, None)
         }
         Command::AuditVerify => {
             let config = load_config(&cli.config)?;

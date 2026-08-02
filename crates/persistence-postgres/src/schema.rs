@@ -198,6 +198,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    conformance_leases (id) {
+        id -> Uuid,
+        tenant_id -> Uuid,
+        profile -> Varchar,
+        material_sha256 -> Varchar,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+        revoked_at -> Nullable<Timestamptz>,
+        cleaned_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     oauth_clients (id) {
         id -> Uuid,
         tenant_id -> Uuid,
@@ -263,6 +276,8 @@ diesel::table! {
         sector_identifier_uri -> Nullable<Text>,
         sector_identifier_host -> Nullable<Text>,
         security_policy -> Nullable<Jsonb>,
+        conformance_lease_id -> Nullable<Uuid>,
+        conformance_expires_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -325,6 +340,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     oauth_tokens,
     user_client_grants,
     client_access_requests,
+    conformance_leases,
     oauth_clients,
     access_token_revocations,
     scim_tokens,

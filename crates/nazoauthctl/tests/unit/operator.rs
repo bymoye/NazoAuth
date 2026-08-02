@@ -1046,6 +1046,14 @@ fn release_target_policy_and_operation_names_are_explicit() {
         operation_name(&TaskOperation::MigrateApply),
         "migrate-apply"
     );
+    assert_eq!(
+        operation_name(&TaskOperation::ConformanceLeaseList),
+        "conformance-lease-list"
+    );
+    assert_eq!(
+        operation_name(&TaskOperation::ConformanceLeaseCleanup),
+        "conformance-lease-cleanup"
+    );
     assert_eq!(operation_name(&TaskOperation::KeysList), "keys-list");
     assert_eq!(
         operation_name(&TaskOperation::KeysValidate),

@@ -284,12 +284,25 @@ health endpoint, Discovery issuer, JWKS, UI assets, and rollback record.
 
 ## 3. Onboard clients through the production control plane
 
-Run:
+Create a bounded lease on the deployment host first. The manifest is public
+onboarding material; copy the exact, unmodified file to the host without any
+runner private keys or delivered client secrets:
+
+```sh
+sudo nazoauthctl conformance lease create \
+  --profile oidf-full \
+  --material /run/nazoauth/oidf-onboarding-manifest.json \
+  --ttl-seconds 28800 \
+  --yes
+```
+
+Record the returned `lease_id`, then run:
 
 ```sh
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
   --delivered-client-material runtime/official-onboarding-apply/oidf-delivered-client-material.json \
@@ -298,7 +311,10 @@ python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin 
   --no-runner-env
 ```
 
-The credential payload is strict JSON with exactly `applicant_email`,
+The signed Operator Task stores only the manifest SHA-256 and lease metadata.
+The server never receives a runner private key or plaintext client secret from
+this command. Client creation atomically binds each production-control-plane
+approval to the active lease. The credential payload is strict JSON with exactly `applicant_email`,
 `applicant_password`, `admin_email`, and `admin_password`. Automation may use
 `--credentials-fd N` instead. The tool has no environment-variable or argv
 fallback for passwords.
@@ -435,10 +451,21 @@ Always run:
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
   --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
+
+sudo nazoauthctl conformance lease revoke \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" --yes
+sudo nazoauthctl conformance lease cleanup --yes
 ```
 
 Cleanup revokes approved trust requests and deactivates created clients through
-the public admin API. Remove installed CA bytes only after the proxy rollback
+the public admin API. Lease revocation atomically disables all bound clients;
+the cleanup task deletes their tokens, grants, revocations, access requests,
+mTLS trust events and client records. If explicit cleanup cannot run, the server
+rejects the clients at the lease deadline and its periodic idempotent cleaner
+performs the same database deletion. The non-secret lease tombstone remains for
+audit. Existing TTL-bound Valkey protocol state is unusable after client expiry
+and expires on its own schedule; this implementation does not scan the shared
+Valkey namespace. Remove installed CA bytes only after the proxy rollback
 procedure confirms the previous trust configuration. Retain redacted results,
 the exact commit, plan manifest, bundle digest, approval/revocation audit IDs,
 and official run IDs. Never retain passwords, private keys, session cookies,

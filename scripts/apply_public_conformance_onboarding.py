@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -421,6 +422,11 @@ def delivered_client_for_request(
 
 
 def apply_onboarding(args: argparse.Namespace) -> int:
+    try:
+        lease_id = str(uuid.UUID(args.lease_id))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise OnboardingError("apply requires --lease-id UUID") from error
+    manifest_sha256 = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
     manifest = require_manifest(args.manifest)
     origin = canonical_https_origin(str(manifest.get("target_issuer", "")), label="target_issuer")
     configured = canonical_https_origin(args.target_issuer, label="--target-issuer")
@@ -455,6 +461,8 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     state: dict[str, Any] = {
         "schema": 1,
         "target_issuer": origin,
+        "conformance_lease_id": lease_id,
+        "manifest_sha256": manifest_sha256,
         "applicant_user_id": applicant_me.get("id"),
         "approver_user_id": admin_me.get("id"),
         "clients": [],
@@ -483,10 +491,12 @@ def apply_onboarding(args: argparse.Namespace) -> int:
             raise OnboardingError(f"access request for {logical_id} returned no id")
         state_entry["access_request_id"] = request_id
         persist_onboarding_state(args.state_file, state)
+        client_request = dict(item["request"])
+        client_request["conformance_lease_id"] = lease_id
         approval = admin.request_json(
             "POST",
             f"/admin/access-requests/{urllib.parse.quote(request_id, safe='')}/approve",
-            item["request"],
+            client_request,
             expected_status=200,
             csrf=True,
         )
@@ -557,6 +567,8 @@ def apply_onboarding(args: argparse.Namespace) -> int:
             "schema": 1,
             "target_issuer": origin,
             "suite_base_url": manifest["suite_base_url"],
+            "conformance_lease_id": lease_id,
+            "manifest_sha256": manifest_sha256,
             "clients": delivered_clients,
         },
     )
@@ -655,6 +667,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("apply", "cleanup"))
     parser.add_argument("--target-issuer", required=True)
+    parser.add_argument("--lease-id")
     credentials = parser.add_mutually_exclusive_group(required=True)
     credentials.add_argument("--credentials-stdin", action="store_true")
     credentials.add_argument("--credentials-fd", type=int)

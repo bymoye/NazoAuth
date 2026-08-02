@@ -70,6 +70,7 @@ Commands:
   recover-identity  Explicitly finish an interrupted identity transition
   migrate       Run the signed migration operation
   keys          List, validate, export OpenID4VC trust, generate, or register signing keys
+  conformance   Manage time-bounded OIDF conformance leases
   audit         Show or verify the management audit chain
   identity      Rotate controller and audit identities
   break-glass   Recover after controller-key loss or suspected theft
@@ -147,6 +148,19 @@ audit, or rollback protection."
 It verifies the managed atomic OpenID4VC bundle and writes only its CA:TRUE trust
 anchor(s) to a regular absolute destination using an fsync+rename transition. It
 never exports a leaf certificate or private key."
+        }
+        cli::HelpTopic::Conformance => {
+            "Usage:
+  nazoauthctl [--config PATH] conformance lease create --profile PROFILE \
+    --material PUBLIC_MANIFEST --ttl-seconds SECONDS --yes
+  nazoauthctl [--config PATH] conformance lease list
+  nazoauthctl [--config PATH] conformance lease revoke --lease-id UUID --yes
+  nazoauthctl [--config PATH] conformance lease cleanup --yes
+
+The lease stores only the SHA-256 digest of the public onboarding manifest. Private
+keys and plaintext client secrets remain with the conformance runner. Expired or
+revoked clients fail closed immediately; cleanup physically deletes their database
+records and retains only the non-secret lease tombstone. TTL is 60 through 86400 seconds."
         }
         cli::HelpTopic::Audit => {
             "Usage:
