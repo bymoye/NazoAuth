@@ -146,7 +146,25 @@ class ReleaseGovernanceTests(unittest.TestCase):
 
     def test_compose_quick_start_is_self_contained_and_project_scoped(self) -> None:
         source = (ROOT / "compose.yml").read_text(encoding="utf-8")
-        self.assertIn("${NAZOAUTH_CONFIG:-./.env.yaml.example}", source)
+        containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertNotIn("./deploy/compose/initialize-secrets.sh:", source)
+        self.assertNotIn("${NAZOAUTH_CONFIG:-./.env.yaml.example}", source)
+        self.assertIn("target: compose-secrets-init", source)
+        self.assertIn(
+            "COPY --chmod=0555 deploy/compose/initialize-secrets.sh", containerfile
+        )
+        self.assertIn(
+            "COPY --from=product-builder /app/.env.yaml.example /app/.env.yaml",
+            containerfile,
+        )
+        self.assertIn(
+            "PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}",
+            source,
+        )
+        self.assertIn(
+            "NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}",
+            source,
+        )
         self.assertIn('"127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"', source)
         self.assertIn("condition: service_completed_successfully", source)
         self.assertIn("keys_data:/var/lib/nazo_oauth/keys", source)

@@ -17,6 +17,20 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Compose 将初始化脚本和安全默认配置随构建上下文放入镜像，不要求 Docker daemon
+能够直接读取 CLI 所在主机的源码绝对路径。使用远端 Docker context 或容器化 WebIDE
+时仍不得添加手工秘密初始化步骤。需要改变宿主机端口和浏览器看到的公开 origin 时执行：
+
+```sh
+NAZOAUTH_PORT=443 \
+NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
+NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
+NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
+docker compose up -d --build
+```
+
+这仍是源码开发沙箱，不是经过签名 attestation 验证的正式 Release 安装。
+
 Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务，并用
 短生命周期的开发 operator identity 通过同一个签名 `nazoauth operator-task` 入口执行
 迁移。该 identity 明确不是生产信任根。可直接打开：

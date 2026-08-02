@@ -18,6 +18,23 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Compose bakes the secret initializer and safe default configuration into images
+through the build context, so the Docker daemon does not need direct access to
+the CLI host's absolute source paths. Do not add a manual secret initialization
+step when using a remote Docker context or a containerized Web IDE. To change
+both the host port and the public origin seen by browsers, run:
+
+```sh
+NAZOAUTH_PORT=443 \
+NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
+NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
+NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
+docker compose up -d --build
+```
+
+This remains a source development sandbox, not a signed, attested Release
+installation.
+
 Compose generates private PostgreSQL and Valkey credentials in a named volume,
 starts both services, and uses a short-lived development operator identity to
 run the same signed `nazoauth operator-task` migration entry point before the

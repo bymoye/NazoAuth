@@ -2,11 +2,12 @@ name: nazo-oauth
 
 services:
   secrets-init:
-    image: docker.io/library/alpine:3.22
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: compose-secrets-init
     volumes:
       - runtime_secrets:/run/nazoauth-secrets
-      - ./deploy/compose/initialize-secrets.sh:/usr/local/libexec/nazoauth-initialize-secrets.sh:ro
-    command: ["/bin/sh", "/usr/local/libexec/nazoauth-initialize-secrets.sh"]
     networks:
       nazo_oauth_net:
 
@@ -28,13 +29,17 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
+      args:
+        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
+        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
+        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     restart: unless-stopped
     environment:
       DATA_DIR: /var/lib/nazo_oauth
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
       VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
+      PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
     volumes:
-      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
       - keys_data:/var/lib/nazo_oauth/keys
       - avatars_data:/var/lib/nazo_oauth/avatars
       - generated_secrets:/var/lib/nazo_oauth/secrets
@@ -62,10 +67,14 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
+      args:
+        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
+        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
+        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     environment:
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
+      PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
     volumes:
-      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
       - runtime_secrets:/run/nazoauth-secrets:ro
       - operator_state:/var/lib/nazoauth/operator-state
     depends_on:

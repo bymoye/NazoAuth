@@ -65,6 +65,13 @@ COPY --from=product-builder /out/nazoauthctl /usr/local/bin/nazoauthctl
 FROM runtime AS development-runtime
 
 COPY --from=product-builder /out/ci_operator_task /usr/local/bin/ci_operator_task
+COPY --from=product-builder /app/.env.yaml.example /app/.env.yaml
+
+FROM docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS compose-secrets-init
+
+COPY --chmod=0555 deploy/compose/initialize-secrets.sh /usr/local/libexec/nazoauth-initialize-secrets.sh
+
+ENTRYPOINT ["/bin/sh", "/usr/local/libexec/nazoauth-initialize-secrets.sh"]
 
 FROM development-runtime AS perf-runtime
 
