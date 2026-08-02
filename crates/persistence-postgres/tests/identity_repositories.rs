@@ -257,6 +257,7 @@ async fn seed_upsert_is_atomic_and_preserves_unmanaged_client_state() {
             &original,
             Some("old-secret"),
             Some("keep-registration-token"),
+            None,
         )
         .await
         .unwrap();
