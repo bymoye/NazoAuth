@@ -70,7 +70,7 @@ SECRET_FIELDS = (
     "verifier_management_token",
 )
 MAX_PUBLIC_PEM_BYTES = 1024 * 1024
-VCI_SD_JWT_CONFIGURATION_ID = "pid-sd-jwt"
+VCI_SD_JWT_CONFIGURATION_ID = "eu.europa.ec.eudi.pid.1"
 VCI_MDOC_CONFIGURATION_ID = "org.iso.18013.5.1.mDL"
 PRIVATE_CONFIG_NAMES = frozenset(
     {

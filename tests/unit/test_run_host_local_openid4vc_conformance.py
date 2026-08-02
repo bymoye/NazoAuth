@@ -88,7 +88,10 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
         self.assertEqual(result["issuer"]["subject_id"], "00000000-0000-0000-0000-000000000123")
         self.assertIn("BEGIN CERTIFICATE", result["verifier"]["request_object_trust_anchor_pem"])
         self.assertTrue(result["issuer"]["dedicated_conformance_subject"])
-        self.assertEqual(result["issuer"]["credential_configuration_ids"]["sd_jwt_vc"], "pid-sd-jwt")
+        self.assertEqual(
+            result["issuer"]["credential_configuration_ids"]["sd_jwt_vc"],
+            "eu.europa.ec.eudi.pid.1",
+        )
         self.assertEqual(result["issuer"]["credential_configuration_ids"]["mdoc"], "org.iso.18013.5.1.mDL")
         self.assertEqual(len(result["issuer"]["tx_code"]), 6)
 
