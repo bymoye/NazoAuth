@@ -1946,3 +1946,63 @@ fn frontend_cache_marker_must_exactly_match_the_signed_release() {
     .unwrap();
     assert!(!target_ui_is_active(&value));
 }
+
+#[test]
+fn conformance_commands_build_closed_operator_tasks() {
+    let work = PrivateTempDir::new("nazoauth-conformance-operation").unwrap();
+    let material = work.path().join("public-manifest.json");
+    fs::write(&material, b"public conformance manifest").unwrap();
+    let expected_sha256 = crate::filesystem::sha256(&material).unwrap();
+
+    let create = conformance_operation(ConformanceLeaseCommand::Create {
+        profile: "oidf-fapi2".to_owned(),
+        material: material.clone(),
+        ttl_seconds: 28_800,
+        yes: true,
+    })
+    .unwrap();
+    assert_eq!(
+        create,
+        TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-fapi2".to_owned(),
+            material_sha256: expected_sha256,
+            ttl_seconds: 28_800,
+        }
+    );
+    assert_eq!(
+        conformance_operation(ConformanceLeaseCommand::List).unwrap(),
+        TaskOperation::ConformanceLeaseList
+    );
+
+    let lease_id = uuid::Uuid::now_v7().to_string();
+    assert_eq!(
+        conformance_operation(ConformanceLeaseCommand::Revoke {
+            lease_id: lease_id.clone(),
+            yes: true,
+        })
+        .unwrap(),
+        TaskOperation::ConformanceLeaseRevoke { lease_id }
+    );
+    assert_eq!(
+        conformance_operation(ConformanceLeaseCommand::Cleanup { yes: true }).unwrap(),
+        TaskOperation::ConformanceLeaseCleanup
+    );
+
+    assert!(
+        conformance_operation(ConformanceLeaseCommand::Create {
+            profile: "oidf-fapi2".to_owned(),
+            material,
+            ttl_seconds: 60,
+            yes: false,
+        })
+        .is_err()
+    );
+    assert!(
+        conformance_operation(ConformanceLeaseCommand::Revoke {
+            lease_id: uuid::Uuid::nil().to_string(),
+            yes: false,
+        })
+        .is_err()
+    );
+    assert!(conformance_operation(ConformanceLeaseCommand::Cleanup { yes: false }).is_err());
+}

@@ -161,6 +161,37 @@ impl std::fmt::Display for BootstrapOutcomeUnknown {
 
 impl std::error::Error for BootstrapOutcomeUnknown {}
 
+fn conformance_operation(command: ConformanceLeaseCommand) -> anyhow::Result<TaskOperation> {
+    Ok(match command {
+        ConformanceLeaseCommand::Create {
+            profile,
+            material,
+            ttl_seconds,
+            yes,
+        } => {
+            require_confirmation(yes, "create a temporary conformance lease")?;
+            let material_sha256 = crate::filesystem::sha256(&material)?;
+            TaskOperation::ConformanceLeaseCreate {
+                profile,
+                material_sha256,
+                ttl_seconds,
+            }
+        }
+        ConformanceLeaseCommand::List => TaskOperation::ConformanceLeaseList,
+        ConformanceLeaseCommand::Revoke { lease_id, yes } => {
+            require_confirmation(
+                yes,
+                "revoke the conformance lease and deactivate its clients",
+            )?;
+            TaskOperation::ConformanceLeaseRevoke { lease_id }
+        }
+        ConformanceLeaseCommand::Cleanup { yes } => {
+            require_confirmation(yes, "delete revoked and expired conformance clients")?;
+            TaskOperation::ConformanceLeaseCleanup
+        }
+    })
+}
+
 pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Install(options) => install(cli.config, *options),
@@ -287,34 +318,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Conformance(command) => {
             require_root()?;
             let config = load_config(&cli.config)?;
-            let operation = match command {
-                ConformanceLeaseCommand::Create {
-                    profile,
-                    material,
-                    ttl_seconds,
-                    yes,
-                } => {
-                    require_confirmation(yes, "create a temporary conformance lease")?;
-                    let material_sha256 = crate::filesystem::sha256(&material)?;
-                    TaskOperation::ConformanceLeaseCreate {
-                        profile,
-                        material_sha256,
-                        ttl_seconds,
-                    }
-                }
-                ConformanceLeaseCommand::List => TaskOperation::ConformanceLeaseList,
-                ConformanceLeaseCommand::Revoke { lease_id, yes } => {
-                    require_confirmation(
-                        yes,
-                        "revoke the conformance lease and deactivate its clients",
-                    )?;
-                    TaskOperation::ConformanceLeaseRevoke { lease_id }
-                }
-                ConformanceLeaseCommand::Cleanup { yes } => {
-                    require_confirmation(yes, "delete revoked and expired conformance clients")?;
-                    TaskOperation::ConformanceLeaseCleanup
-                }
-            };
+            let operation = conformance_operation(command)?;
             app_command(&config, operation, None)
         }
         Command::AuditVerify => {

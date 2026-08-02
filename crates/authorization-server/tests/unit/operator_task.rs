@@ -382,3 +382,66 @@ fn mounted_public_material_and_operator_keys_are_digest_bound() {
     assert_eq!(first.len(), "operation-failed-".len() + 8);
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn conformance_operations_execute_through_the_closed_task_dispatch() {
+    if std::env::var_os("DATABASE_URL").is_none() {
+        if std::env::var_os("CI").is_some() {
+            panic!("CI requires DATABASE_URL for conformance task dispatch coverage");
+        }
+        return;
+    }
+
+    let nonce = uuid::Uuid::now_v7().simple().to_string();
+    let profile = format!("task-coverage-{nonce}");
+    let material_sha256 = format!("{nonce}{nonce}");
+    let created = execute(&TaskOperation::ConformanceLeaseCreate {
+        profile: profile.clone(),
+        material_sha256: material_sha256.clone(),
+        ttl_seconds: 60,
+    })
+    .await;
+    let lease_id = match created {
+        TaskOutcome::Succeeded {
+            result: TaskResult::ConformanceLeaseCreated { lease },
+        } => {
+            assert_eq!(lease.profile, profile);
+            assert_eq!(lease.material_sha256, material_sha256);
+            lease.lease_id
+        }
+        other => panic!("unexpected create outcome: {other:?}"),
+    };
+
+    match execute(&TaskOperation::ConformanceLeaseList).await {
+        TaskOutcome::Succeeded {
+            result: TaskResult::ConformanceLeaseList { leases },
+        } => assert!(leases.iter().any(|lease| lease.lease_id == lease_id)),
+        other => panic!("unexpected list outcome: {other:?}"),
+    }
+
+    assert_eq!(
+        execute(&TaskOperation::ConformanceLeaseRevoke {
+            lease_id: lease_id.clone(),
+        })
+        .await,
+        TaskOutcome::Succeeded {
+            result: TaskResult::ConformanceLeaseRevoked {
+                lease_id: lease_id.clone(),
+                deactivated_clients: 0,
+            },
+        }
+    );
+    assert!(matches!(
+        execute(&TaskOperation::ConformanceLeaseCleanup).await,
+        TaskOutcome::Succeeded {
+            result: TaskResult::ConformanceLeaseCleaned { .. }
+        }
+    ));
+    assert!(matches!(
+        execute(&TaskOperation::ConformanceLeaseRevoke {
+            lease_id: "not-a-uuid".to_owned(),
+        })
+        .await,
+        TaskOutcome::Failed { .. }
+    ));
+}

@@ -93,3 +93,7 @@ pub(crate) fn spawn_cleanup(pool: nazo_postgres::DbPool) {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/conformance_lease.rs"]
+mod tests;
