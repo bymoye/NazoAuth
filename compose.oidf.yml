@@ -37,6 +37,8 @@ services:
         condition: service_started
     networks:
       oidf_bridge:
+        aliases:
+          - 567t0yglur-443.cnb.run
 
 volumes:
   oidf_proxy_pki:
