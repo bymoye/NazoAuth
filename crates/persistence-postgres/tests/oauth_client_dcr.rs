@@ -100,14 +100,14 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
         .create(tenant.tenant_id.as_uuid(), "oidf-test", &"a".repeat(64), 60)
         .await
         .unwrap();
-    let client = client(tenant);
+    let leased_client = client(tenant);
     clients
-        .insert(&client, None, None, Some(lease.id))
+        .insert(&leased_client, None, None, Some(lease.id))
         .await
         .unwrap();
     assert!(
         clients
-            .by_client_id(client.tenant_id, &client.client_id)
+            .by_client_id(leased_client.tenant_id, &leased_client.client_id)
             .await
             .unwrap()
             .unwrap()
@@ -126,12 +126,12 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
 
     assert!(
         clients
-            .by_client_id(client.tenant_id, &client.client_id)
+            .by_client_id(leased_client.tenant_id, &leased_client.client_id)
             .await
             .unwrap()
             .is_none()
     );
-    assert!(clients.update_metadata(&client).await.is_err());
+    assert!(clients.update_metadata(&leased_client).await.is_err());
     let late_client = client(tenant);
     assert!(
         clients
@@ -144,12 +144,12 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
     assert!(cleaned.deleted_clients >= 1);
     assert!(
         clients
-            .by_client_id(client.tenant_id, &client.client_id)
+            .by_client_id(leased_client.tenant_id, &leased_client.client_id)
             .await
             .unwrap()
             .is_none()
     );
-    let listed = leases.list(client.tenant_id).await.unwrap();
+    let listed = leases.list(leased_client.tenant_id).await.unwrap();
     let tombstone = listed
         .iter()
         .find(|candidate| candidate.id == lease.id)
