@@ -43,9 +43,10 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 
 首次源码构建需要联网下载 Rust 依赖；后续构建会复用本地容器缓存。
 
-默认配置只用于 loopback 本地体验。PostgreSQL、Valkey、签名密钥和头像均使用
-命名卷，执行 `docker compose down` 后仍会保留。除非明确要删除全部本地数据，
-不要执行 `docker compose down -v`。
+默认配置只用于 loopback 本地体验。PostgreSQL、Valkey 和应用状态（包括签名密钥、头像、
+生成的秘密、bootstrap 状态及 UI release 缓存）均使用命名卷，执行
+`docker compose down` 后仍会保留。除非明确要删除全部本地数据，不要执行
+`docker compose down -v`。
 
 新数据库没有管理员时，服务会在私有 bootstrap 状态中创建限时、单次使用的 token，
 但不会打印 token 或携带 token 的 URL。正式受管流程通过 `nazoauthctl bootstrap-admin`

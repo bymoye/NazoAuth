@@ -184,6 +184,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("condition: service_completed_successfully", source)
         self.assertIn("keys_data:/var/lib/nazo_oauth/keys", source)
         self.assertIn("avatars_data:/var/lib/nazo_oauth/avatars", source)
+        self.assertIn("ui_releases:/state/ui-releases", source)
+        self.assertIn("ui_releases:/var/lib/nazo_oauth/ui-releases", source)
         self.assertNotIn("container_name:", source)
         self.assertNotIn("ipv4_address:", source)
         self.assertNotIn("name: nazo_oauth_net", source)

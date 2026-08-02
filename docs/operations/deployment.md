@@ -51,8 +51,9 @@ Open:
 The first source build requires network access to download Rust dependencies.
 Later builds reuse the local container cache.
 
-The default is a loopback-only evaluation deployment. PostgreSQL, Valkey,
-signing keys, and avatars use named volumes and survive
+The default is a loopback-only evaluation deployment. PostgreSQL, Valkey, and
+application state—including signing keys, avatars, generated secrets,
+bootstrap state, and the UI release cache—use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
 
