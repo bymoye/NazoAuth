@@ -70,9 +70,15 @@ export NAZOAUTH_SOURCE_DIR=/opt/nazoauth-docker
 docker compose \
   --project-directory /opt/nazoauth-docker/deploy/oidf-suite \
   -f /opt/nazoauth-docker/deploy/oidf-suite/compose.yml ps
-ss -ltnp '( sport = :8443 )'
+docker compose \
+  --project-directory /opt/nazoauth-docker/deploy/oidf-suite \
+  -f /opt/nazoauth-docker/deploy/oidf-suite/compose.yml port server 8080
 curl -fsS https://567t0yglur-8443.cnb.run/login.html >/dev/null
 ```
+
+端口命令必须返回 `0.0.0.0:8443`。CNB WebIDE 通过外部 Docker daemon socket
+运行容器时，WebIDE 自己的 network namespace 看不到 daemon 宿主机的监听器，因此
+不得用 WebIDE 内的 `ss` 代替 Docker published-port 证据。
 
 不得把开发身份注入模式留在公开端口，不得把 API Token 打印到终端。若 JAR 构建、
 临时 Token 启动、CNB 转发、401/200 边界或固定 revision 核验中任一步失败，本次部署
