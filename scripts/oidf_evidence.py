@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import zipfile
 from collections import Counter
@@ -29,6 +30,8 @@ SAFE_TEST_INFO_FIELDS = (
     "publish",
     "result",
 )
+PROBLEM_RESULTS = frozenset({"FAILURE", "WARNING", "REVIEW"})
+SAFE_CONDITION_SOURCE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:$-]{0,127}$")
 
 
 class EvidenceError(RuntimeError):
@@ -55,6 +58,31 @@ def result_counts(results: object) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def problem_conditions(results: object) -> list[dict[str, str]]:
+    """Retain diagnostic condition identities without messages or arguments."""
+    if not isinstance(results, list):
+        raise EvidenceError("OIDF export results must be an array")
+    observed: set[tuple[str, str]] = set()
+    problems: list[dict[str, str]] = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            raise EvidenceError("OIDF export result entry must be an object")
+        result = entry.get("result")
+        source = entry.get("src")
+        if (
+            result not in PROBLEM_RESULTS
+            or not isinstance(source, str)
+            or SAFE_CONDITION_SOURCE.fullmatch(source) is None
+        ):
+            continue
+        identity = (result, source)
+        if identity in observed:
+            continue
+        observed.add(identity)
+        problems.append({"result": result, "src": source})
+    return problems
+
+
 def summarize_archive(path: Path, root: Path) -> dict[str, object]:
     modules: list[dict[str, object]] = []
     try:
@@ -75,12 +103,14 @@ def summarize_archive(path: Path, root: Path) -> dict[str, object]:
                     for field in SAFE_TEST_INFO_FIELDS
                     if field in test_info
                 }
+                results = payload.get("results")
                 modules.append(
                     {
                         "file": name,
                         "signature_present": name.removesuffix(".json") + ".sig" in names,
                         "test_info": safe_info,
-                        "condition_results": result_counts(payload.get("results")),
+                        "condition_results": result_counts(results),
+                        "problem_conditions": problem_conditions(results),
                     }
                 )
     except (OSError, zipfile.BadZipFile, json.JSONDecodeError) as error:

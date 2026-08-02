@@ -40,6 +40,17 @@ class OidfEvidenceTests(unittest.TestCase):
             "results": [
                 {"result": "SUCCESS", "msg": f"access_token={secret}"},
                 {"result": "INFO", "config": {"private_key": secret}},
+                {
+                    "result": "FAILURE",
+                    "src": "ValidateCredentialTrust",
+                    "msg": f"credential={secret}",
+                    "args": {"credential": secret},
+                },
+                {
+                    "result": "WARNING",
+                    "src": f"unsafe source {secret}",
+                    "msg": secret,
+                },
             ],
         }
         with zipfile.ZipFile(path, "w") as archive:
@@ -65,10 +76,14 @@ class OidfEvidenceTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["module_results"], {"PASSED": 1})
             self.assertEqual(
                 payload["summary"]["condition_results"],
-                {"INFO": 1, "SUCCESS": 1},
+                {"FAILURE": 1, "INFO": 1, "SUCCESS": 1, "WARNING": 1},
             )
             module = payload["archives"][0]["modules"][0]
             self.assertTrue(module["signature_present"])
+            self.assertEqual(
+                module["problem_conditions"],
+                [{"result": "FAILURE", "src": "ValidateCredentialTrust"}],
+            )
             self.assertNotIn("config", module["test_info"])
             self.assertNotIn("owner", module["test_info"])
 
