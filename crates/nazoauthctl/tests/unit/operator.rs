@@ -471,9 +471,15 @@ fn host_task_uses_transient_credentials_and_hides_unrelated_state() {
     fs::create_dir(&dependency_secrets).unwrap();
     config.dependencies.migration_database_url_file =
         dependency_secrets.join("database-migration-url");
+    config.dependencies.database_url_file = dependency_secrets.join("database-runtime-url");
     fs::write(
         &config.dependencies.migration_database_url_file,
         "postgresql://migration.invalid/db",
+    )
+    .unwrap();
+    fs::write(
+        &config.dependencies.database_url_file,
+        "postgresql://runtime.invalid/db",
     )
     .unwrap();
     let binary = work.path().join("nazoauth");
@@ -491,17 +497,46 @@ fn host_task_uses_transient_credentials_and_hides_unrelated_state() {
 
     assert!(joined.contains("--property=PrivateMounts=yes"));
     assert!(joined.contains("--property=LoadCredential=operator-receipt-key:"));
-    assert!(joined.contains("--property=LoadCredential=migration-database-url:"));
+    assert!(joined.contains(&format!(
+        "--property=LoadCredential=operator-database-url:{}",
+        config.dependencies.migration_database_url_file.display()
+    )));
     assert!(
         joined.contains(
             "--setenv=NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=%d/operator-receipt-key"
         )
     );
-    assert!(joined.contains("--setenv=DATABASE_URL_FILE=%d/migration-database-url"));
+    assert!(joined.contains("--setenv=DATABASE_URL_FILE=%d/operator-database-url"));
     assert!(joined.contains(&app.join("avatars").display().to_string()));
     assert!(joined.contains(&app.join("secrets").display().to_string()));
     assert!(joined.contains(&app.join("bootstrap").display().to_string()));
     assert!(!joined.contains("postgresql://migration.invalid/db"));
+    assert!(!joined.contains(&config.dependencies.database_url_file.display().to_string()));
+
+    let prepared = Runtime::new(&config)
+        .prepare_app_task(
+            &binary.to_string_lossy(),
+            &TaskOperation::ConformanceLeaseCleanup,
+            None,
+            b"{}",
+        )
+        .unwrap();
+    let joined = format!("{prepared:?}").replace("\\\\", "\\");
+    assert!(joined.contains(&format!(
+        "--property=LoadCredential=operator-database-url:{}",
+        config.dependencies.database_url_file.display()
+    )));
+    assert!(joined.contains("--setenv=DATABASE_URL_FILE=%d/operator-database-url"));
+    assert!(!joined.contains("postgresql://runtime.invalid/db"));
+    assert!(
+        !joined.contains(
+            &config
+                .dependencies
+                .migration_database_url_file
+                .display()
+                .to_string()
+        )
+    );
 }
 
 #[test]
