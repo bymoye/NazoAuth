@@ -4,13 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
-    canonical_config_sha256, compact_sha256, sign_task, verify_runtime_receipt, Actor, ActorKind,
-    CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, SecretBinding, TargetExpectation,
-    TaskEnvelope, TaskOperation, TaskOutcome,
+    Actor, ActorKind, CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, SecretBinding,
+    TargetExpectation, TaskEnvelope, TaskOperation, TaskOutcome, canonical_config_sha256,
+    compact_sha256, sign_task, verify_runtime_receipt,
 };
 use sha2::{Digest as _, Sha256};
 
