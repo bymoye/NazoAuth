@@ -132,7 +132,7 @@ jobs:
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
           test "$CONFORMANCE_SERVER" = "https://www.certification.openid.net"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -568,7 +568,7 @@ jobs:
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
           test "$CONFORMANCE_SERVER" = "https://www.certification.openid.net"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
