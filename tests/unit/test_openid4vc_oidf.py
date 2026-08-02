@@ -1314,6 +1314,24 @@ class Openid4vcOidfTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "valid client namespace"):
             module.vci_client_ids("operator-black-box", "official")
 
+    def test_operator_plan_aliases_are_namespaced_without_changing_official_aliases(self):
+        module = load("materialize_openid4vc_oidf_config.py")
+
+        self.assertEqual(
+            module.plan_alias("nazo-openid4vc-vci", "vci-sd-preauth", None),
+            "nazo-openid4vc-vci-vci-sd-preauth",
+        )
+        self.assertEqual(
+            module.plan_alias(
+                "nazo-openid4vc-vci", "vci-sd-preauth", "stage-84e35c03-0802y"
+            ),
+            "nazo-openid4vc-vci-stage-84e35c03-0802y-vci-sd-preauth",
+        )
+        self.assertNotEqual(
+            module.plan_alias("nazo-openid4vc-vci", "vci-sd-preauth", "run-a"),
+            module.plan_alias("nazo-openid4vc-vci", "vci-sd-preauth", "run-b"),
+        )
+
     def test_operator_subject_id_is_explicitly_bound_to_current_user(self):
         module = load("materialize_openid4vc_oidf_config.py")
         issuer = {"subject_id": "00000000-0000-0000-0000-000000000001"}

@@ -108,6 +108,13 @@ def vci_client_ids(onboarding_profile: str, run_namespace: str | None) -> dict[s
     }
 
 
+def plan_alias(prefix: str, slug: str, run_namespace: str | None) -> str:
+    """Keep official aliases stable and isolate every operator run."""
+    return "-".join(
+        part for part in (prefix, run_namespace, slug) if isinstance(part, str) and part
+    )
+
+
 def bind_subject_id(
     issuer_settings: dict[str, object],
     onboarding_profile: str,
@@ -497,7 +504,7 @@ def main() -> int:
             if plan == VP_HAIP or variants.get("request_method") == "request_uri_signed":
                 client["request_object_trust_anchor_pem"] = request_object_trust_anchor_pem
         prefix = str(config.get("alias", "nazo-openid4vc"))
-        alias = f"{prefix}-{slug}"
+        alias = plan_alias(prefix, slug, namespace)
         config["alias"] = alias
         config["description"] = f"NazoAuth {slug} OpenID4VC Final regression"
         filename = f"openid4vc-{slug}.json"
