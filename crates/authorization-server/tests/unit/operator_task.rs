@@ -148,7 +148,17 @@ fn incomplete_lifecycle_transition_is_never_deleted_or_recovered_implicitly() {
     fs::write(&temporary, br#"{\"phase\":\"executing\"}"#).unwrap();
 
     assert!(load_or_prepare_lifecycle(&lifecycle, &"e".repeat(64)).is_err());
+    assert!(
+        write_lifecycle_atomic(
+            &lifecycle,
+            &TaskLifecycle::Prepared {
+                request_sha256: "e".repeat(64),
+            },
+        )
+        .is_err()
+    );
     assert!(temporary.exists());
+    assert!(ensure_real_state_directory(&directory.join("missing-state")).is_err());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -196,6 +206,17 @@ fn completed_lifecycle_without_its_receipt_is_also_non_replayable() {
     .unwrap();
 
     let completed = load_or_prepare_lifecycle(&lifecycle, &digest).unwrap();
+    assert!(load_or_prepare_lifecycle(&lifecycle, &"0".repeat(64)).is_err());
+    assert!(
+        write_initial_lifecycle(
+            &lifecycle,
+            &TaskLifecycle::Prepared {
+                request_sha256: digest.clone(),
+            },
+        )
+        .is_err()
+    );
+    assert!(!lifecycle_temporary_path(&lifecycle).exists());
     let error = mark_task_executing(&lifecycle, &completed, &digest).unwrap_err();
     assert!(error.to_string().contains("completed without a receipt"));
     fs::remove_dir_all(directory).unwrap();

@@ -1086,8 +1086,30 @@ fn release_target_policy_and_operation_names_are_explicit() {
         "conformance-lease-list"
     );
     assert_eq!(
+        operation_name(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-full".to_owned(),
+            material_sha256: "a".repeat(64),
+            ttl_seconds: 3_600,
+        }),
+        "conformance-lease-create"
+    );
+    assert_eq!(
+        operation_name(&TaskOperation::ConformanceLeaseRevoke {
+            lease_id: uuid::Uuid::now_v7().to_string(),
+        }),
+        "conformance-lease-revoke"
+    );
+    assert_eq!(
         operation_name(&TaskOperation::ConformanceLeaseCleanup),
         "conformance-lease-cleanup"
+    );
+    assert!(
+        execute_test_task(
+            &config,
+            "unused-test-target",
+            TaskOperation::ConformanceLeaseList,
+        )
+        .is_err()
     );
     assert_eq!(operation_name(&TaskOperation::KeysList), "keys-list");
     assert_eq!(

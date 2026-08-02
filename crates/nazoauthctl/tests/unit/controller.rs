@@ -228,8 +228,15 @@ fn openid4vc_trust_export_keeps_only_the_ca_certificate() {
         )
         .is_err()
     );
+    let (_, leaf) = x509_parser::pem::parse_x509_pem(OPENID4VC_TEST_LEAF.as_bytes()).unwrap();
+    let mut leaf_with_trailing_data = leaf.contents;
+    leaf_with_trailing_data.push(0);
+    let mut invalid_bundle = Vec::new();
+    append_pem_certificate(&mut invalid_bundle, &leaf_with_trailing_data);
+    assert!(extract_openid4vc_trust_anchors(&invalid_bundle).is_err());
     let oversized = vec![b' '; MAX_OPENID4VC_CERTIFICATE_BUNDLE_BYTES + 1];
     assert!(extract_openid4vc_trust_anchors(&oversized).is_err());
+    assert_eq!(trim_ascii_whitespace(b" \n\tcertificate"), b"certificate");
 }
 
 #[test]
@@ -256,6 +263,12 @@ fn openid4vc_trust_export_destination_is_absolute_regular_and_atomic() {
         let link = work.path().join("link.pem");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(safe_export_destination(&link).is_err());
+
+        let real_parent = work.path().join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        let linked_parent = work.path().join("linked-parent");
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+        assert!(safe_export_destination(&linked_parent.join("output.pem")).is_err());
     }
 }
 
@@ -361,6 +374,22 @@ fn bootstrap_credentials_are_closed_bounded_json() {
     assert!(
         parse_bootstrap_admin_credentials(&vec![b'x'; MAX_BOOTSTRAP_CREDENTIAL_BYTES as usize + 1])
             .is_err()
+    );
+
+    let work = PrivateTempDir::new("nazoauth-bootstrap-short-password").unwrap();
+    let value = config(&work);
+    assert!(
+        claim_bootstrap_admin(
+            &value,
+            &BootstrapAdminCredentials {
+                email: "admin@example.com".to_owned(),
+                password: "too-short".to_owned(),
+            },
+            &uuid::Uuid::now_v7().to_string(),
+            std::ffi::OsStr::new("unused-curl"),
+            None,
+        )
+        .is_err()
     );
 }
 

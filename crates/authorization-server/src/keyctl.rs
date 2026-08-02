@@ -37,6 +37,15 @@ fn load_key_task_config() -> anyhow::Result<(
     Option<Openid4vcCertificatePaths>,
 )> {
     let config = ConfigSource::load_without_secret_values()?;
+    key_task_config_from(&config)
+}
+
+fn key_task_config_from(
+    config: &ConfigSource,
+) -> anyhow::Result<(
+    nazo_key_management::KeySettings,
+    Option<Openid4vcCertificatePaths>,
+)> {
     let chain = config
         .optional_string("OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE")
         .map(PathBuf::from);
@@ -70,7 +79,7 @@ fn load_key_task_config() -> anyhow::Result<(
             "OpenID4VC certificate generation requires both OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE and OPENID4VC_TRUST_ANCHORS_FILE"
         ),
     };
-    Ok((key_settings_from_config(&config)?, certificate_paths))
+    Ok((key_settings_from_config(config)?, certificate_paths))
 }
 
 #[derive(Debug)]
