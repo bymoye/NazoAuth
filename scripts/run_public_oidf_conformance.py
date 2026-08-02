@@ -759,8 +759,12 @@ def inspect_complete_matrix(
 def run(args: argparse.Namespace) -> None:
     if args.final_stabilization_seconds < 0:
         raise PublicRunError("--final-stabilization-seconds must be zero or greater")
-    args.safe_group_workers = getattr(args, "safe_group_workers", 1)
-    args.browser_group_workers = getattr(args, "browser_group_workers", 1)
+    args.safe_group_workers = getattr(
+        args, "safe_group_workers", MAX_SAFE_GROUP_WORKERS
+    )
+    args.browser_group_workers = getattr(
+        args, "browser_group_workers", MAX_BROWSER_GROUP_WORKERS
+    )
     if not 1 <= args.safe_group_workers <= MAX_SAFE_GROUP_WORKERS:
         raise PublicRunError(
             f"--safe-group-workers must be between 1 and {MAX_SAFE_GROUP_WORKERS}"
@@ -902,13 +906,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--safe-group-workers",
         type=int,
-        default=1,
+        default=MAX_SAFE_GROUP_WORKERS,
         help="parallel workers for independent OIDC/FAPI plan groups (1-4)",
     )
     parser.add_argument(
         "--browser-group-workers",
         type=int,
-        default=1,
+        default=MAX_BROWSER_GROUP_WORKERS,
         help="parallel workers for isolated logout/session plan groups (1-2)",
     )
     parser.add_argument(

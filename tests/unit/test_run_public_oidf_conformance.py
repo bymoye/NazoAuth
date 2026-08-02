@@ -33,6 +33,37 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 with self.assertRaises(self.module.PublicRunError):
                     self.module.origin(invalid, "--suite")
 
+    def test_cli_defaults_to_the_validated_group_concurrency(self):
+        args = self.module.parse_args(
+            [
+                "--deployed-sha",
+                "a" * 40,
+                "--target-issuer",
+                "https://issuer.example",
+                "--conformance-server",
+                "https://suite.example",
+                "--suite-dir",
+                "suite",
+                "--suite-revision",
+                "b" * 40,
+                "--work-dir",
+                "work",
+                "--export-dir",
+                "export",
+                "--run-namespace",
+                "validated-concurrency",
+                "--proxy-trust-bundle",
+                "proxy-ca.pem",
+                "--proxy-executable",
+                "proxy",
+                "--secret-file",
+                "secrets.json",
+            ]
+        )
+
+        self.assertEqual(args.safe_group_workers, 4)
+        self.assertEqual(args.browser_group_workers, 2)
+
     def test_child_environment_strips_secret_shaped_variables(self):
         with mock.patch.dict(
             os.environ,

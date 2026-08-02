@@ -81,12 +81,16 @@ class OidfWorkflowTests(unittest.TestCase):
             '--ciba-notification-base-url "$SUITE_BASE_URL"',
             workflow,
         )
-        self.assertIn("suite_base_url:", workflow)
+        self.assertNotIn("suite_base_url:", workflow)
         self.assertIn(
             '--suite-base-url "$SUITE_BASE_URL"',
             workflow,
         )
-        self.assertNotIn("https://www.certification.openid.net", workflow)
+        self.assertIn(
+            "SUITE_BASE_URL: https://www.certification.openid.net",
+            workflow,
+        )
+        self.assertNotIn("OIDF_CONFORMANCE_SERVER", workflow)
         self.assertIn("materialize_openid4vc_oidf_config.py", workflow)
         self.assertIn(
             "--config-json-file runtime/openid4vc/materialized/openid4vc-plan-configs.json",
@@ -185,6 +189,25 @@ class OidfWorkflowTests(unittest.TestCase):
             self.assertIn("apply_oidf_delivered_client_material.py", workflow)
             self.assertIn("--expected-target-issuer", workflow)
             self.assertIn("--expected-suite-base-url", workflow)
+
+    def test_github_oidf_workflows_only_target_the_official_service(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in (
+            "oidf-conformance.yml",
+            "oidf-conformance-full.yml",
+            "oidf-public-onboarding-material.yml",
+            "openid4vc-conformance.yml",
+        ):
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                self.assertIn(
+                    "https://www.certification.openid.net",
+                    workflow,
+                )
+                self.assertNotIn("vars.OIDF_CONFORMANCE_SERVER", workflow)
+                self.assertNotIn("oauth-test.nazo.run", workflow)
 
     def test_public_onboarding_artifacts_include_a_validated_mtls_ca_bundle(self):
         root = Path(__file__).resolve().parents[2]

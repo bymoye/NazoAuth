@@ -15,10 +15,6 @@ on:
         description: Public HTTPS issuer that will receive the onboarding material
         required: true
         type: string
-      suite_base_url:
-        description: HTTPS origin of the conformance suite that owns these clients
-        required: true
-        type: string
       credential_holder_email_sha256:
         description: SHA-256 commitment of the fresh deployment applicant email
         required: true
@@ -35,10 +31,6 @@ on:
         type: string
       target_issuer:
         description: Public HTTPS issuer that will receive the onboarding material
-        required: true
-        type: string
-      suite_base_url:
-        description: HTTPS origin of the conformance suite that owns these clients
         required: true
         type: string
       credential_holder_email_sha256:
@@ -70,9 +62,8 @@ jobs:
       SOURCE_COMMIT: ${{ inputs.source_commit }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       TARGET_ISSUER: ${{ inputs.target_issuer }}
-      SUITE_BASE_URL: ${{ inputs.suite_base_url }}
+      SUITE_BASE_URL: https://www.certification.openid.net
       TRUSTED_TARGET_ISSUER: ${{ vars.OIDF_TARGET_ISSUER }}
-      TRUSTED_SUITE_BASE_URL: ${{ vars.OIDF_CONFORMANCE_SERVER }}
     steps:
       - uses: actions/checkout@v7.0.0
         with:
@@ -123,9 +114,8 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$TRUSTED_TARGET_ISSUER"
-          test -n "$TRUSTED_SUITE_BASE_URL"
           test "$TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
-          test "$SUITE_BASE_URL" = "$TRUSTED_SUITE_BASE_URL"
+          test "$SUITE_BASE_URL" = "https://www.certification.openid.net"
 
       - uses: actions/setup-python@v6.3.0
         with:
