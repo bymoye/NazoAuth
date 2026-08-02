@@ -10,8 +10,8 @@ HTTP 端口 `8080` 映射到宿主机 `0.0.0.0:8443`。
 ## 1. 获取并核验官方源码
 
 ```sh
-sudo install -d -m 0755 /opt/oidf-conformance-suite
-sudo chown "$(id -u):$(id -g)" /opt/oidf-conformance-suite
+install -d -m 0755 /opt/oidf-conformance-suite
+chown "$(id -u):$(id -g)" /opt/oidf-conformance-suite
 git clone https://gitlab.com/openid/conformance-suite.git /opt/oidf-conformance-suite/source
 git -C /opt/oidf-conformance-suite/source checkout --detach \
   946451d1ce29965c9ab7aee05f5003552233160e
