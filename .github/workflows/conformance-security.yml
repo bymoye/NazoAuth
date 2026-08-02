@@ -257,10 +257,16 @@ jobs:
       - name: Migrate and start server
         run: |
           image_digest="$(docker image inspect nazo-oauth-e2e:latest --format '{{.Id}}')"
-          cargo run --locked --quiet -p nazo-operator-protocol --example ci_operator_task -- prepare \
+          cargo run --locked --quiet -p nazo-operator-protocol --example automation_operator_task -- prepare \
             --config runtime/e2e/.env.yaml \
+            --deployment-id deployment-ci \
+            --actor-id github-actions \
+            --secret-revision ci-secret-revision \
             --image-ref nazo-oauth-e2e:latest \
             --image-digest "$image_digest" \
+            --embedded-release development \
+            --embedded-revision development \
+            --embedded-build-id local:development \
             --output runtime/e2e/operator
           docker run --rm -i --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges --read-only \
@@ -273,7 +279,7 @@ jobs:
             -v "$PWD/runtime/e2e/operator/state:/var/lib/nazoauth/operator-state" \
             nazo-oauth-e2e:latest nazoauth operator-task \
             <runtime/e2e/operator/envelope.jws >runtime/e2e/operator/receipt.jws
-          cargo run --locked --quiet -p nazo-operator-protocol --example ci_operator_task -- verify \
+          cargo run --locked --quiet -p nazo-operator-protocol --example automation_operator_task -- verify \
             --receipt runtime/e2e/operator/receipt.jws \
             --public-key runtime/e2e/operator/receipt.pub \
             --request-sha256 runtime/e2e/operator/request.sha256

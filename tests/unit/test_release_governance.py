@@ -165,6 +165,21 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}",
             source,
         )
+        self.assertNotIn("ci_operator_task", source)
+        self.assertIn("automation_operator_task prepare", source)
+        self.assertIn("--deployment-id development-compose", source)
+        self.assertIn("--actor-id docker-compose", source)
+        self.assertIn("--embedded-release", source)
+        self.assertIn("--embedded-revision", source)
+        self.assertIn("--embedded-build-id", source)
+        self.assertIn("$$(cat /run/nazoauth-secrets/revision)", source)
+        self.assertIn('generate_hex_secret "$secret_dir/revision"', (
+            ROOT / "deploy" / "compose" / "initialize-secrets.sh"
+        ).read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "ci_operator_task",
+            (ROOT / "docker-compose.perf.yml").read_text(encoding="utf-8"),
+        )
         self.assertIn('"127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"', source)
         self.assertIn("condition: service_completed_successfully", source)
         self.assertIn("keys_data:/var/lib/nazo_oauth/keys", source)

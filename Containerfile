@@ -32,10 +32,10 @@ RUN --mount=type=cache,id=nazoauth-cargo-registry,target=/usr/local/cargo/regist
     cargo build --release --locked \
       --package nazo-oauth-server --bin nazoauth \
       --package nazoauthctl --bin nazoauthctl \
-      --package nazo-operator-protocol --example ci_operator_task \
+      --package nazo-operator-protocol --example automation_operator_task \
     && install -Dm755 target/release/nazoauth /out/nazoauth \
     && install -Dm755 target/release/nazoauthctl /out/nazoauthctl \
-    && install -Dm755 target/release/examples/ci_operator_task /out/ci_operator_task
+    && install -Dm755 target/release/examples/automation_operator_task /out/automation_operator_task
 
 FROM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS runtime-base
 
@@ -64,7 +64,7 @@ COPY --from=product-builder /out/nazoauthctl /usr/local/bin/nazoauthctl
 
 FROM runtime AS development-runtime
 
-COPY --from=product-builder /out/ci_operator_task /usr/local/bin/ci_operator_task
+COPY --from=product-builder /out/automation_operator_task /usr/local/bin/automation_operator_task
 COPY --from=product-builder /app/.env.yaml.example /app/.env.yaml
 
 FROM docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS compose-secrets-init

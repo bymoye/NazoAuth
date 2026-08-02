@@ -39,7 +39,10 @@ Compose generates private PostgreSQL and Valkey credentials in a named volume,
 starts both services, and uses a short-lived development operator identity to
 run the same signed `nazoauth operator-task` migration entry point before the
 server accepts traffic. This identity is deliberately not a production trust
-root. Open:
+root. The task identifies its local automation actor as `docker-compose` and
+binds the expected embedded release, revision, and build ID to the same values
+used to compile the image; it does not contact or impersonate GitHub Actions.
+Open:
 
 - `http://127.0.0.1:8000/ready` for dependency readiness
 - `http://127.0.0.1:8000/live` for process liveness

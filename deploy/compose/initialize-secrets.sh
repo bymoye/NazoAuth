@@ -27,6 +27,7 @@ generate_hex_secret() {
 
 generate_hex_secret "$secret_dir/postgres-password"
 generate_hex_secret "$secret_dir/valkey-password"
+generate_hex_secret "$secret_dir/revision"
 
 postgres_password=$(cat "$secret_dir/postgres-password")
 valkey_password=$(cat "$secret_dir/valkey-password")
@@ -53,7 +54,7 @@ elif [ "$(cat "$secret_dir/valkey.acl")" != "$expected_valkey_acl" ]; then
     exit 1
 fi
 
-for required in database-url postgres-password valkey-url valkey-password valkey.acl; do
+for required in database-url postgres-password revision valkey-url valkey-password valkey.acl; do
     test -s "$secret_dir/$required" || {
         echo "persisted secret is missing or empty: $secret_dir/$required" >&2
         exit 1
@@ -66,6 +67,7 @@ done
 # shared numeric group.
 chmod 0444 "$secret_dir"/database-url \
     "$secret_dir"/postgres-password \
+    "$secret_dir"/revision \
     "$secret_dir"/valkey-url \
     "$secret_dir"/valkey-password \
     "$secret_dir"/valkey.acl

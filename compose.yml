@@ -74,6 +74,9 @@ services:
     environment:
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
       PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      NAZOAUTH_EXPECTED_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
+      NAZOAUTH_EXPECTED_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
+      NAZOAUTH_EXPECTED_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     volumes:
       - runtime_secrets:/run/nazoauth-secrets:ro
       - operator_state:/var/lib/nazoauth/operator-state
@@ -92,18 +95,24 @@ services:
       - sh
       - -euc
       - |
-        ci_operator_task prepare \
+        automation_operator_task prepare \
           --config /app/.env.yaml \
           --output /tmp/operator \
+          --deployment-id development-compose \
+          --actor-id docker-compose \
+          --secret-revision "$$(cat /run/nazoauth-secrets/revision)" \
           --image-ref localhost/nazoauth-development:local \
-          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
+          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+          --embedded-release "$$NAZOAUTH_EXPECTED_BUILD_RELEASE" \
+          --embedded-revision "$$NAZOAUTH_EXPECTED_BUILD_REVISION" \
+          --embedded-build-id "$$NAZOAUTH_EXPECTED_BUILD_ID"
         NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
         NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
         NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
         NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
         NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
           nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws
-        ci_operator_task verify \
+        automation_operator_task verify \
           --receipt /tmp/operator/receipt.jws \
           --public-key /tmp/operator/receipt.pub \
           --request-sha256 /tmp/operator/request.sha256

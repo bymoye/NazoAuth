@@ -4,13 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
-    Actor, ActorKind, CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, SecretBinding,
-    TargetExpectation, TaskEnvelope, TaskOperation, TaskOutcome, canonical_config_sha256,
-    compact_sha256, sign_task, verify_runtime_receipt,
+    canonical_config_sha256, compact_sha256, sign_task, verify_runtime_receipt, Actor, ActorKind,
+    CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, SecretBinding, TargetExpectation,
+    TaskEnvelope, TaskOperation, TaskOutcome,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     match args.next().as_deref() {
         Some("prepare") => prepare(parse_options(args)?)?,
         Some("verify") => verify(parse_options(args)?)?,
-        _ => anyhow::bail!("usage: ci_operator_task <prepare|verify> --name value ..."),
+        _ => anyhow::bail!("usage: automation_operator_task <prepare|verify> --name value ..."),
     }
     Ok(())
 }
@@ -27,8 +27,14 @@ fn main() -> anyhow::Result<()> {
 fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
     let config = required_path(&options, "--config")?;
     let output = required_path(&options, "--output")?;
+    let deployment_id = required(&options, "--deployment-id")?;
+    let actor_id = required(&options, "--actor-id")?;
+    let secret_revision = required(&options, "--secret-revision")?;
     let image_ref = required(&options, "--image-ref")?;
     let image_digest = required(&options, "--image-digest")?;
+    let embedded_release = required(&options, "--embedded-release")?;
+    let embedded_revision = required(&options, "--embedded-revision")?;
+    let embedded_build_id = required(&options, "--embedded-build-id")?;
     fs::create_dir(&output)?;
     fs::create_dir(output.join("state"))?;
     let controller = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
@@ -36,10 +42,13 @@ fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
     let controller_public = controller.verifying_key().to_bytes();
     let receipt_public = receipt.verifying_key().to_bytes();
     let controller_kid = format!(
-        "ci-controller-{}",
+        "automation-controller-{}",
         &hex(&Sha256::digest(controller_public))[..16]
     );
-    let receipt_kid = format!("ci-receipt-{}", &hex(&Sha256::digest(receipt_public))[..16]);
+    let receipt_kid = format!(
+        "automation-receipt-{}",
+        &hex(&Sha256::digest(receipt_public))[..16]
+    );
     write(
         &output.join("controller.pub"),
         &URL_SAFE_NO_PAD.encode(controller_public),
@@ -62,7 +71,7 @@ fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
     let manifest = CanonicalConfigManifest {
         version: nazo_operator_protocol::CONFIG_MANIFEST_VERSION,
         entries: BTreeMap::from([
-            ("deployment_id".to_owned(), "deployment-ci".to_owned()),
+            ("deployment_id".to_owned(), deployment_id.to_owned()),
             ("operation".to_owned(), "migrate-apply".to_owned()),
             ("server_config_sha256".to_owned(), file_sha256(&config)?),
         ]),
@@ -74,32 +83,32 @@ fn prepare(options: BTreeMap<String, String>) -> anyhow::Result<()> {
     let now = Utc::now().timestamp();
     let task = TaskEnvelope {
         ver: nazo_operator_protocol::PROTOCOL_VERSION,
-        iss: "controller:deployment-ci".to_owned(),
-        aud: "runtime:deployment-ci".to_owned(),
-        jti: format!("request-ci-{}", hex(&rand::random::<[u8; 16]>())),
+        iss: format!("controller:{deployment_id}"),
+        aud: format!("runtime:{deployment_id}"),
+        jti: format!("request-automation-{}", hex(&rand::random::<[u8; 16]>())),
         iat: now,
         nbf: now,
         exp: now + nazo_operator_protocol::MAX_TASK_LIFETIME_SECONDS,
-        deployment_id: "deployment-ci".to_owned(),
+        deployment_id: deployment_id.to_owned(),
         actor: Actor {
             kind: ActorKind::Automation,
-            id: "github-actions".to_owned(),
+            id: actor_id.to_owned(),
         },
         target: TargetExpectation::OciImage {
             image_ref: image_ref.to_owned(),
             image_digest: image_digest.to_owned(),
         },
         embedded: EmbeddedIdentity {
-            release: "development".to_owned(),
-            revision: "development".to_owned(),
+            release: embedded_release.to_owned(),
+            revision: embedded_revision.to_owned(),
             protocol: nazo_operator_protocol::PROTOCOL_VERSION,
-            build_id: "local:development".to_owned(),
+            build_id: embedded_build_id.to_owned(),
         },
         config: ConfigBinding {
             manifest_version: nazo_operator_protocol::CONFIG_MANIFEST_VERSION,
             config_sha256: canonical_config_sha256(&manifest)?,
             secret_binding: SecretBinding::OpaqueRevision {
-                revision: "ci-secret-revision".to_owned(),
+                revision: secret_revision.to_owned(),
             },
         },
         operation: TaskOperation::MigrateApply,
@@ -127,7 +136,7 @@ fn verify(options: BTreeMap<String, String>) -> anyhow::Result<()> {
     if receipt.request_sha256 != fs::read_to_string(request_path)?.trim()
         || !matches!(receipt.outcome, TaskOutcome::Succeeded { .. })
     {
-        anyhow::bail!("runtime receipt is not bound to the successful CI request");
+        anyhow::bail!("runtime receipt is not bound to the successful automation request");
     }
     Ok(())
 }
@@ -151,7 +160,8 @@ fn required<'a>(options: &'a BTreeMap<String, String>, name: &str) -> anyhow::Re
     options
         .get(name)
         .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing {name}"))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing or empty {name}"))
 }
 
 fn required_path(options: &BTreeMap<String, String>, name: &str) -> anyhow::Result<PathBuf> {
