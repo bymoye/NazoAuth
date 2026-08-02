@@ -180,7 +180,10 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "ci_operator_task",
             (ROOT / "docker-compose.perf.yml").read_text(encoding="utf-8"),
         )
-        self.assertIn('"127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"', source)
+        self.assertIn(
+            '"${NAZOAUTH_BIND_ADDRESS:-127.0.0.1}:${NAZOAUTH_PORT:-8000}:8000"',
+            source,
+        )
         self.assertIn("condition: service_completed_successfully", source)
         self.assertIn("keys_data:/var/lib/nazo_oauth/keys", source)
         self.assertIn("avatars_data:/var/lib/nazo_oauth/avatars", source)

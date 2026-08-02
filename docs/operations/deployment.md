@@ -26,6 +26,7 @@ both the host port and the public origin seen by browsers, run:
 
 ```sh
 NAZOAUTH_PORT=443 \
+NAZOAUTH_BIND_ADDRESS=0.0.0.0 \
 NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
 NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
 NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
@@ -34,6 +35,12 @@ docker compose up -d --build
 
 This remains a source development sandbox, not a signed, attested Release
 installation.
+
+`NAZOAUTH_BIND_ADDRESS=0.0.0.0` is required when a containerized Web IDE or
+platform port mapper reaches the published host port through a non-loopback
+interface. Keep the default `127.0.0.1` when a reverse proxy on the same host
+terminates TLS. Do not bind all interfaces unless the platform or firewall
+controls direct access to the plaintext port.
 
 Compose generates private PostgreSQL and Valkey credentials in a named volume,
 starts both services, and uses a short-lived development operator identity to
