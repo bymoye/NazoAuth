@@ -392,7 +392,7 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceComma
     let lease = match operation.as_str() {
         "list" => {
             no_arguments(&values, "conformance lease list")?;
-            Ok(ConformanceLeaseCommand::List)
+            ConformanceLeaseCommand::List
         }
         "create" => {
             let (values, yes) = take_yes(values)?;
@@ -407,12 +407,12 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceComma
             if !(60..=86_400).contains(&ttl_seconds) {
                 bail!("--ttl-seconds must be between 60 and 86400");
             }
-            Ok(ConformanceLeaseCommand::Create {
+            ConformanceLeaseCommand::Create {
                 profile: values["--profile"].clone(),
                 material: PathBuf::from(&values["--material"]),
                 ttl_seconds,
                 yes,
-            })
+            }
         }
         "revoke" => {
             let (values, yes) = take_yes(values)?;
@@ -420,14 +420,14 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceComma
                 parse_named_options_for(values, &["--lease-id"], "conformance lease revoke")?;
             let lease_id = values["--lease-id"].clone();
             uuid::Uuid::parse_str(&lease_id).context("--lease-id must be a UUID")?;
-            Ok(ConformanceLeaseCommand::Revoke { lease_id, yes })
+            ConformanceLeaseCommand::Revoke { lease_id, yes }
         }
         "cleanup" => {
             let yes = parse_yes(values, "conformance lease cleanup")?;
-            Ok(ConformanceLeaseCommand::Cleanup { yes })
+            ConformanceLeaseCommand::Cleanup { yes }
         }
         _ => bail!("unsupported conformance lease operation or arguments"),
-    }?;
+    };
     Ok(ConformanceCommand { lease, candidate })
 }
 
