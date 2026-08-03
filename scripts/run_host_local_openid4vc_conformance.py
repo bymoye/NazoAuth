@@ -40,6 +40,8 @@ import apply_public_conformance_onboarding as onboarding  # noqa: E402
 import build_oidf_full_install_profile as install_profile  # noqa: E402
 from conformance_lease_control import (  # noqa: E402
     ConformanceLeaseControlError,
+    add_candidate_target_arguments,
+    candidate_target_from_args,
     create as create_lease,
     revoke_and_cleanup,
 )
@@ -916,13 +918,19 @@ def create_conformance_lease(args: argparse.Namespace) -> str:
         profile="openid4vc",
         material=args.prepared_install_dir / PREPARED_TRUST_FILE,
         ttl_seconds=args.lease_ttl_seconds,
+        candidate=getattr(args, "candidate_target", None),
     )
     consume_prepared_trust(args.prepared_install_dir, args.prepared_trust_digest)
     return lease_id
 
 
 def revoke_conformance_lease(args: argparse.Namespace, lease_id: str) -> None:
-    revoke_and_cleanup(args.nazoauthctl, args.nazoauthctl_config, lease_id)
+    revoke_and_cleanup(
+        args.nazoauthctl,
+        args.nazoauthctl_config,
+        lease_id,
+        candidate=getattr(args, "candidate_target", None),
+    )
 
 
 def aliases_from_configs(path: Path) -> dict[str, str]:
@@ -1095,6 +1103,7 @@ def write_receipt(
 
 
 def run(args: argparse.Namespace) -> None:
+    args.candidate_target = candidate_target_from_args(args)
     if args.plan_group_size < 1:
         fail("--plan-group-size must be greater than zero")
     if not 60 <= args.lease_ttl_seconds <= 86_400:
@@ -1250,6 +1259,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--nazoauthctl", type=Path, required=True)
     parser.add_argument("--nazoauthctl-config", type=Path)
+    add_candidate_target_arguments(parser)
     parser.add_argument("--lease-ttl-seconds", type=int, default=28_800)
     parser.add_argument(
         "--request-object-trust-anchor-pem",

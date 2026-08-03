@@ -385,9 +385,15 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             profile="openid4vc",
             material=args.prepared_install_dir / self.module.PREPARED_TRUST_FILE,
             ttl_seconds=28_800,
+            candidate=None,
         )
         consume.assert_called_once_with(args.prepared_install_dir, "a" * 64)
-        revoke.assert_called_once_with(args.nazoauthctl, args.nazoauthctl_config, lease_id)
+        revoke.assert_called_once_with(
+            args.nazoauthctl,
+            args.nazoauthctl_config,
+            lease_id,
+            candidate=None,
+        )
 
     def test_final_receipt_is_credential_free_and_states_no_proxy_trust(self):
         with tempfile.TemporaryDirectory() as directory:

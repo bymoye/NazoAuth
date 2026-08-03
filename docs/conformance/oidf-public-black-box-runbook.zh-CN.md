@@ -95,6 +95,14 @@ stdin 或继承 FD。所有秘密都没有 argv 或环境变量回退。
 
 该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，并先通过 `nazoauthctl` 创建有时效的 conformance lease，把本轮全部临时 client 绑定到该租约。它通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并按并发、CIBA、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout 和 Session Management 隔离组执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销并物理清理租约数据、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
 
+私有预发布门禁可以在同一 runner 中同时传入
+`--candidate-release`、`--candidate-revision`、`--candidate-build-id` 和
+`--candidate-oci-digest`。四项缺一即失败；运行中的容器必须使用同一
+digest 固定的镜像引用，二进制内嵌身份也必须逐项匹配。该例外只作用于
+`conformance lease`，不会改写已签名 active Release，也不能作为发布、
+provenance 或官方认证证据。未传这些参数时，所有控制器命令仍严格绑定
+已签名 Release manifest。
+
 最后一组完成后，驱动会立即复查本轮全部 alias 的全部模块，等待 45 秒让异步回调与投递 worker 稳定，再复查一次完整矩阵。早期分组的任何晚到状态变化都会令整轮失败；单个分组的导出结果本身不能作为全矩阵成功证据。
 
 审批仍是正式、可审计的授权事件；自动化只消除文件复制、路径推断、命令拼接和恢复操作，不绕过申请人与审批人分离。

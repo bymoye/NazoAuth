@@ -9,14 +9,15 @@ use std::{
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
-use nazo_operator_protocol::TaskOperation;
+use nazo_operator_protocol::{EmbeddedIdentity, TaskOperation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
     backup::Backup,
     cli::{
-        BootstrapAdminOptions, Cli, Command, ConformanceLeaseCommand, KeysCommand, UpdateOptions,
+        BootstrapAdminOptions, Cli, Command, ConformanceCandidateTarget,
+        ConformanceLeaseCommand, KeysCommand, UpdateOptions,
     },
     filesystem::{atomic_write, copy_atomic, remove_file_durable, set_mode, symlink_atomic},
     install::{self, PreparedInstall},
@@ -340,8 +341,8 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Conformance(command) => {
             require_root()?;
             let config = load_config(&cli.config)?;
-            let operation = conformance_operation(command)?;
-            app_command(&config, operation, None)
+            let operation = conformance_operation(command.lease)?;
+            conformance_app_command(&config, operation, command.candidate.as_ref())
         }
         Command::AuditVerify => {
             let config = load_config(&cli.config)?;
@@ -2285,6 +2286,41 @@ fn app_command(
     if migration {
         install::grant_runtime_database(config)?;
     }
+    println!("{}", operation_result_json(&result)?);
+    Ok(())
+}
+
+fn conformance_app_command(
+    config: &UpdateConfig,
+    operation: TaskOperation,
+    candidate: Option<&ConformanceCandidateTarget>,
+) -> anyhow::Result<()> {
+    let runtime = Runtime::new(config);
+    let target = if config.runtime.engine == "host" {
+        config.runtime.binary_path.to_string_lossy().into_owned()
+    } else {
+        runtime.active_image()?
+    };
+    let expected = if let Some(candidate) = candidate {
+        if config.runtime.engine == "host" {
+            bail!("conformance candidate targets currently require an OCI runtime");
+        }
+        operator::expected_release_target(
+            config,
+            EmbeddedIdentity {
+                release: candidate.release.clone(),
+                revision: candidate.revision.clone(),
+                protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+                build_id: candidate.build_id.clone(),
+            },
+            candidate.oci_digest.clone(),
+            String::new(),
+        )?
+    } else {
+        let release = load_active_release(config)?;
+        expected_target(config, &release)?
+    };
+    let result = operator::execute(config, &target, &expected, operation, None)?;
     println!("{}", operation_result_json(&result)?);
     Ok(())
 }

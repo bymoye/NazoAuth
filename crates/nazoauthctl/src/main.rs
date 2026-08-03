@@ -157,10 +157,17 @@ never exports a leaf certificate or private key."
   nazoauthctl [--config PATH] conformance lease revoke --lease-id UUID --yes
   nazoauthctl [--config PATH] conformance lease cleanup --yes
 
+For an unreleased OCI candidate, insert all four target bindings before `lease`:
+  --candidate-release vX.Y.Z --candidate-revision GIT_SHA \
+  --candidate-build-id BUILD_ID --candidate-oci-digest sha256:HEX
+
 The lease stores only the SHA-256 digest of the public onboarding manifest. Private
 keys and plaintext client secrets remain with the conformance runner. Expired or
 revoked clients fail closed immediately; cleanup physically deletes their database
-records and retains only the non-secret lease tombstone. TTL is 60 through 86400 seconds."
+records and retains only the non-secret lease tombstone. Candidate mode is limited
+to conformance operations and binds the operator task to the exact active OCI digest
+and embedded identity; ordinary operations still require the signed active Release.
+TTL is 60 through 86400 seconds."
         }
         cli::HelpTopic::Audit => {
             "Usage:

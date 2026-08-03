@@ -68,13 +68,27 @@ pub(crate) enum Command {
     RecoverIdentity { yes: bool },
     Migrate { yes: bool },
     Keys(KeysCommand),
-    Conformance(ConformanceLeaseCommand),
+    Conformance(ConformanceCommand),
     AuditVerify,
     AuditShow { request_id: Option<String> },
     IdentityRotate { yes: bool },
     BreakGlassControllerAvailability,
     BreakGlassRehearseControllerLoss { yes: bool },
     BreakGlassRecover { yes: bool, reason: String },
+}
+
+#[derive(Debug)]
+pub(crate) struct ConformanceCommand {
+    pub(crate) lease: ConformanceLeaseCommand,
+    pub(crate) candidate: Option<ConformanceCandidateTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConformanceCandidateTarget {
+    pub(crate) release: String,
+    pub(crate) revision: String,
+    pub(crate) build_id: String,
+    pub(crate) oci_digest: String,
 }
 
 #[derive(Debug)]
@@ -359,7 +373,13 @@ fn parse_keys(values: Vec<String>) -> anyhow::Result<KeysCommand> {
     }
 }
 
-fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceLeaseCommand> {
+fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceCommand> {
+    let lease_index = values
+        .iter()
+        .position(|value| value == "lease")
+        .context("conformance requires the lease resource")?;
+    let candidate_values = values.drain(..lease_index).collect::<Vec<_>>();
+    let candidate = parse_conformance_candidate(candidate_values)?;
     if values.first().map(String::as_str) != Some("lease") {
         bail!("conformance requires the lease resource");
     }
@@ -369,7 +389,7 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceLease
         .cloned()
         .context("conformance lease requires an operation")?;
     values.remove(0);
-    match operation.as_str() {
+    let lease = match operation.as_str() {
         "list" => {
             no_arguments(&values, "conformance lease list")?;
             Ok(ConformanceLeaseCommand::List)
@@ -407,7 +427,65 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceLease
             Ok(ConformanceLeaseCommand::Cleanup { yes })
         }
         _ => bail!("unsupported conformance lease operation or arguments"),
+    }?;
+    Ok(ConformanceCommand { lease, candidate })
+}
+
+fn parse_conformance_candidate(
+    values: Vec<String>,
+) -> anyhow::Result<Option<ConformanceCandidateTarget>> {
+    if values.is_empty() {
+        return Ok(None);
     }
+    let values = parse_named_options_for(
+        values,
+        &[
+            "--candidate-release",
+            "--candidate-revision",
+            "--candidate-build-id",
+            "--candidate-oci-digest",
+        ],
+        "conformance candidate target",
+    )?;
+    let release = values["--candidate-release"].clone();
+    if !semantic_tag(&release) {
+        bail!("--candidate-release must be a canonical v-prefixed semantic version");
+    }
+    let revision = values["--candidate-revision"].clone();
+    if !matches!(revision.len(), 40 | 64)
+        || !revision
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    {
+        bail!("--candidate-revision must be a lowercase hexadecimal Git object ID");
+    }
+    let build_id = values["--candidate-build-id"].clone();
+    if build_id.is_empty()
+        || build_id.len() > 256
+        || !build_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".:_@/+-".contains(character))
+    {
+        bail!("--candidate-build-id is unsafe");
+    }
+    let oci_digest = values["--candidate-oci-digest"].clone();
+    if !oci_digest
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        })
+    {
+        bail!("--candidate-oci-digest must be a lowercase sha256 digest");
+    }
+    Ok(Some(ConformanceCandidateTarget {
+        release,
+        revision,
+        build_id,
+        oci_digest,
+    }))
 }
 
 fn take_yes(mut values: Vec<String>) -> anyhow::Result<(Vec<String>, bool)> {

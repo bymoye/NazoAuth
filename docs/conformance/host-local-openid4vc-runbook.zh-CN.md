@@ -86,6 +86,11 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
 
 `secret_provider_for_this_host` 由运营者维护，只能把这一份文档写到 stdout，不得记录内容、导出到环境变量或写入 shell history。FD 方式等价：传入 `--secret-fd N` 并确保 `N >= 3` 被 Python 继承。
 
+私有预发布门禁应同时传入 `oidf-public-black-box-runbook.zh-CN.md` 所述四个
+candidate target 参数。runner 会把同一组 release、revision、build ID 和 OCI
+manifest digest 绑定到租约创建、撤销与清理；已发布部署不传这些参数，继续
+严格绑定已签名 active Release。
+
 ## 完成与失败
 
 开始前会验证 runner/deployed commit 都干净且精确、本地 Suite revision 干净且精确、Suite API 的认证边界、17 个唯一 alias 及固定 registry/expected-record。官方 runner 完成后还会再次完整检查 Suite state。

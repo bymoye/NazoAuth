@@ -25,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
 from conformance_lease_control import (  # noqa: E402
     ConformanceLeaseControlError,
+    add_candidate_target_arguments,
+    candidate_target_from_args,
     create as create_lease,
     revoke_and_cleanup,
 )
@@ -770,6 +772,7 @@ def inspect_complete_matrix(
 
 
 def run(args: argparse.Namespace) -> None:
+    candidate_target = candidate_target_from_args(args)
     if args.final_stabilization_seconds < 0:
         raise PublicRunError("--final-stabilization-seconds must be zero or greater")
     if not 60 <= args.lease_ttl_seconds <= 86_400:
@@ -856,6 +859,7 @@ def run(args: argparse.Namespace) -> None:
             profile="oidc-fapi-ciba",
             material=args.work_dir / "oidf-onboarding-manifest.json",
             ttl_seconds=args.lease_ttl_seconds,
+            candidate=candidate_target,
         )
         command(
             onboarding_args(
@@ -908,6 +912,7 @@ def run(args: argparse.Namespace) -> None:
                     args.nazoauthctl,
                     args.nazoauthctl_config,
                     active_lease_id,
+                    candidate=candidate_target,
                 )
             except BaseException as error:
                 cleanup_errors.append(error)
@@ -946,6 +951,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--proxy-executable", type=Path, required=True)
     parser.add_argument("--nazoauthctl", type=Path, required=True)
     parser.add_argument("--nazoauthctl-config", type=Path)
+    add_candidate_target_arguments(parser)
     parser.add_argument("--lease-ttl-seconds", type=int, default=28_800)
     add_secret_source_arguments(parser)
     parser.add_argument("--timeout-seconds", type=int, default=14400)

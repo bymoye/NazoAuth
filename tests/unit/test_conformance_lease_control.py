@@ -92,6 +92,34 @@ class ConformanceLeaseControlTests(unittest.TestCase):
                 ttl_seconds=60,
             )
 
+    @mock.patch("subprocess.run")
+    def test_candidate_target_is_bound_before_lease_operation(self, run):
+        lease_id = "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d"
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps({"lease_id": lease_id}), stderr=""
+        )
+        candidate = self.module.CandidateTarget(
+            "v0.1.19",
+            "a" * 40,
+            "private-pre-release:" + "a" * 40,
+            "sha256:" + "b" * 64,
+        )
+
+        self.module.create(
+            Path("/ctl"),
+            None,
+            profile="oidc-fapi-ciba",
+            material=Path("/manifest.json"),
+            ttl_seconds=28_800,
+            candidate=candidate,
+        )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[1], "conformance")
+        self.assertEqual(command[command.index("--candidate-release") + 1], "v0.1.19")
+        self.assertEqual(command[command.index("--candidate-oci-digest") + 1], "sha256:" + "b" * 64)
+        self.assertEqual(command[-9:-7], ["lease", "create"])
+
 
 if __name__ == "__main__":
     unittest.main()

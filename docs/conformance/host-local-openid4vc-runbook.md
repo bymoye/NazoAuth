@@ -76,6 +76,12 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
 
 `secret_provider_for_this_host` is operator-owned and writes only this document to stdout without logging it, exporting it into the environment, or appending it to shell history. The FD equivalent is `--secret-fd N` with inherited `N >= 3`.
 
+When this is a private pre-release gate, add the four candidate target options
+documented in `oidf-public-black-box-runbook.md`. The runner forwards the same
+exact release, revision, build ID, and OCI manifest digest to lease creation,
+revocation, and cleanup; released deployments omit them and remain bound to the
+signed active Release.
+
 ## Completion and failure
 
 Before starting, the command verifies clean runner/deployed commits, a clean exact Suite revision, authenticated versus unauthenticated Suite API behavior, 17 unique aliases, and the fixed registry/expected-record files. After the official runner it performs another complete Suite-state inspection.

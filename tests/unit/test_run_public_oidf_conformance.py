@@ -289,6 +289,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 profile="oidc-fapi-ciba",
                 material=work.resolve() / "oidf-onboarding-manifest.json",
                 ttl_seconds=28_800,
+                candidate=None,
             )
             onboarding_calls = [
                 call.args[0]
@@ -303,7 +304,9 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 onboarding_calls[0][onboarding_calls[0].index("--lease-id") + 1],
                 lease_id,
             )
-            revoke.assert_called_once_with(ctl.resolve(), None, lease_id)
+            revoke.assert_called_once_with(
+                ctl.resolve(), None, lease_id, candidate=None
+            )
 
     def test_plan_groups_use_explicit_inputs_and_isolate_browser_state(self):
         with tempfile.TemporaryDirectory() as directory:

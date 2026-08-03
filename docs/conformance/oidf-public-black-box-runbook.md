@@ -138,6 +138,23 @@ single-link, current-user/root-owned mode-`0600` `--secret-file` on POSIX.
 Windows operators must use stdin or an inherited descriptor because POSIX mode
 bits do not prove a Windows DACL. No secret has an argv or environment fallback.
 
+For a private pre-release gate, the same runner may bind every lease operation
+to an unreleased container by adding all four options below. The active
+container must itself use the matching digest-pinned image reference, and its
+embedded identity must match every value. Omitting any option fails closed.
+
+```text
+--candidate-release vX.Y.Z
+--candidate-revision <exact-git-object-id>
+--candidate-build-id <exact-embedded-build-id>
+--candidate-oci-digest sha256:<manifest-digest>
+```
+
+This exception exists only for `conformance lease` operations. It neither
+changes the signed active Release nor counts as release, provenance, or official
+certification evidence. Normal `nazoauthctl` operations continue to require the
+signed active Release manifest.
+
 The entry point verifies the deployed product commit, the explicitly selected
 official-suite commit, and clean tracked source trees. It then generates source-bound material,
 performs application, approval, one-time delivery, and trust approval under

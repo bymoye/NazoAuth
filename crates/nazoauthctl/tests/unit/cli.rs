@@ -617,11 +617,14 @@ fn parses_time_bounded_conformance_lease_operations() {
     .command;
     assert!(matches!(
         command,
-        Command::Conformance(ConformanceLeaseCommand::Create {
-            profile,
-            material,
-            ttl_seconds: 28_800,
-            yes: true,
+        Command::Conformance(ConformanceCommand {
+            lease: ConformanceLeaseCommand::Create {
+                profile,
+                material,
+                ttl_seconds: 28_800,
+                yes: true,
+            },
+            candidate: None,
         }) if profile == "oidf-full"
             && material == std::path::Path::new("/run/oidf-onboarding-manifest.json")
     ));
@@ -631,7 +634,10 @@ fn parses_time_bounded_conformance_lease_operations() {
             .unwrap()
             .unwrap()
             .command,
-        Command::Conformance(ConformanceLeaseCommand::List)
+        Command::Conformance(ConformanceCommand {
+            lease: ConformanceLeaseCommand::List,
+            candidate: None,
+        })
     ));
     assert!(matches!(
         parse(&[
@@ -646,7 +652,10 @@ fn parses_time_bounded_conformance_lease_operations() {
         .unwrap()
         .unwrap()
         .command,
-        Command::Conformance(ConformanceLeaseCommand::Revoke { yes: true, .. })
+        Command::Conformance(ConformanceCommand {
+            lease: ConformanceLeaseCommand::Revoke { yes: true, .. },
+            candidate: None,
+        })
     ));
     assert!(
         parse(&[
@@ -660,6 +669,42 @@ fn parses_time_bounded_conformance_lease_operations() {
             "/run/manifest.json",
             "--ttl-seconds",
             "86401",
+        ])
+        .is_err()
+    );
+
+    let candidate = parse(&[
+        "nazoauthctl",
+        "conformance",
+        "--candidate-release",
+        "v0.1.19",
+        "--candidate-revision",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--candidate-build-id",
+        "private-pre-release:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--candidate-oci-digest",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "lease",
+        "list",
+    ])
+    .unwrap()
+    .unwrap()
+    .command;
+    assert!(matches!(
+        candidate,
+        Command::Conformance(ConformanceCommand {
+            lease: ConformanceLeaseCommand::List,
+            candidate: Some(ConformanceCandidateTarget { release, .. }),
+        }) if release == "v0.1.19"
+    ));
+    assert!(
+        parse(&[
+            "nazoauthctl",
+            "conformance",
+            "--candidate-release",
+            "v0.1.19",
+            "lease",
+            "list",
         ])
         .is_err()
     );
