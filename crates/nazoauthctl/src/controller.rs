@@ -16,8 +16,8 @@ use serde_json::json;
 use crate::{
     backup::Backup,
     cli::{
-        BootstrapAdminOptions, Cli, Command, ConformanceCandidateTarget, ConformanceLeaseCommand,
-        KeysCommand, UpdateOptions,
+        BootstrapAdminOptions, CandidateTarget, Cli, Command, ConformanceLeaseCommand, KeysCommand,
+        UpdateOptions,
     },
     filesystem::{atomic_write, copy_atomic, remove_file_durable, set_mode, symlink_atomic},
     install::{self, PreparedInstall},
@@ -297,11 +297,16 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
             crate::operator::recover_pending_rotation(&cli.config, &mut config)?;
             load_config(&cli.config).map(|_| ())
         }
-        Command::Migrate { yes } => {
+        Command::Migrate { yes, candidate } => {
             require_root()?;
             let config = load_config(&cli.config)?;
             require_confirmation(yes, "apply pending database migrations")?;
-            app_command(&config, TaskOperation::MigrateApply, None)
+            if let Some(candidate) = candidate.as_ref() {
+                candidate_app_command(&config, TaskOperation::MigrateApply, candidate)?;
+                install::grant_runtime_database(&config)
+            } else {
+                app_command(&config, TaskOperation::MigrateApply, None)
+            }
         }
         Command::Keys(command) => {
             require_root()?;
@@ -2293,7 +2298,7 @@ fn app_command(
 fn conformance_app_command(
     config: &UpdateConfig,
     operation: TaskOperation,
-    candidate: Option<&ConformanceCandidateTarget>,
+    candidate: Option<&CandidateTarget>,
 ) -> anyhow::Result<()> {
     let runtime = Runtime::new(config);
     let target = if config.runtime.engine == "host" {
@@ -2302,20 +2307,7 @@ fn conformance_app_command(
         runtime.active_image()?
     };
     let expected = if let Some(candidate) = candidate {
-        if config.runtime.engine == "host" {
-            bail!("conformance candidate targets currently require an OCI runtime");
-        }
-        operator::expected_release_target(
-            config,
-            EmbeddedIdentity {
-                release: candidate.release.clone(),
-                revision: candidate.revision.clone(),
-                protocol: nazo_operator_protocol::PROTOCOL_VERSION,
-                build_id: candidate.build_id.clone(),
-            },
-            candidate.oci_digest.clone(),
-            String::new(),
-        )?
+        candidate_expected_target(config, candidate)?
     } else {
         let release = load_active_release(config)?;
         expected_target(config, &release)?
@@ -2323,6 +2315,38 @@ fn conformance_app_command(
     let result = operator::execute(config, &target, &expected, operation, None)?;
     println!("{}", operation_result_json(&result)?);
     Ok(())
+}
+
+fn candidate_app_command(
+    config: &UpdateConfig,
+    operation: TaskOperation,
+    candidate: &CandidateTarget,
+) -> anyhow::Result<()> {
+    let target = Runtime::new(config).active_image()?;
+    let expected = candidate_expected_target(config, candidate)?;
+    let result = operator::execute(config, &target, &expected, operation, None)?;
+    println!("{}", operation_result_json(&result)?);
+    Ok(())
+}
+
+fn candidate_expected_target(
+    config: &UpdateConfig,
+    candidate: &CandidateTarget,
+) -> anyhow::Result<ExpectedReleaseTarget> {
+    if config.runtime.engine == "host" {
+        bail!("candidate targets require an OCI runtime");
+    }
+    operator::expected_release_target(
+        config,
+        EmbeddedIdentity {
+            release: candidate.release.clone(),
+            revision: candidate.revision.clone(),
+            protocol: nazo_operator_protocol::PROTOCOL_VERSION,
+            build_id: candidate.build_id.clone(),
+        },
+        candidate.oci_digest.clone(),
+        String::new(),
+    )
 }
 
 fn operation_result_json(result: &operator::OperationResult) -> anyhow::Result<String> {

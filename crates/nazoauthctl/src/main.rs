@@ -125,14 +125,16 @@ configuration, logs, audit records, or command output."
   nazoauthctl [--config PATH] recover --yes
   nazoauthctl [--config PATH] recover-update --yes
   nazoauthctl [--config PATH] recover-identity --yes
-  nazoauthctl [--config PATH] migrate --yes
+  nazoauthctl [--config PATH] migrate [candidate target options] --yes
 
 `update --plan` is read-only and reports artifact rollback, schema-compatible
 rollback, backup/PITR recovery, and any irreversible migration barrier separately.
 `recover` restores a declared database backup; it is not update-journal recovery.
 Interrupted update and identity transitions are changed only by their explicit
 recovery commands. Other commands fail closed while either transition is pending.
-`--yes` skips only the prompt; it never skips verification, backup, health, replay,
+An unreleased OCI candidate migration requires all four candidate target bindings
+shown by `nazoauthctl conformance --help`; the active digest and embedded identity
+must match exactly. `--yes` skips only the prompt; it never skips verification, backup, health, replay,
 audit, or rollback protection."
         }
         cli::HelpTopic::Keys => {
@@ -165,8 +167,9 @@ The lease stores only the SHA-256 digest of the public onboarding manifest. Priv
 keys and plaintext client secrets remain with the conformance runner. Expired or
 revoked clients fail closed immediately; cleanup physically deletes their database
 records and retains only the non-secret lease tombstone. Candidate mode is limited
-to conformance operations and binds the operator task to the exact active OCI digest
-and embedded identity; ordinary operations still require the signed active Release.
+to explicit migration and conformance operations and binds the operator task to the
+exact active OCI digest and embedded identity; ordinary operations still require the
+signed active Release.
 TTL is 60 through 86400 seconds."
         }
         cli::HelpTopic::Audit => {

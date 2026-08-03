@@ -62,29 +62,49 @@ pub(crate) enum Command {
     Doctor,
     Check(Option<String>),
     Update(UpdateOptions),
-    Rollback { yes: bool },
-    Recover { yes: bool },
-    RecoverUpdate { yes: bool },
-    RecoverIdentity { yes: bool },
-    Migrate { yes: bool },
+    Rollback {
+        yes: bool,
+    },
+    Recover {
+        yes: bool,
+    },
+    RecoverUpdate {
+        yes: bool,
+    },
+    RecoverIdentity {
+        yes: bool,
+    },
+    Migrate {
+        yes: bool,
+        candidate: Option<CandidateTarget>,
+    },
     Keys(KeysCommand),
     Conformance(ConformanceCommand),
     AuditVerify,
-    AuditShow { request_id: Option<String> },
-    IdentityRotate { yes: bool },
+    AuditShow {
+        request_id: Option<String>,
+    },
+    IdentityRotate {
+        yes: bool,
+    },
     BreakGlassControllerAvailability,
-    BreakGlassRehearseControllerLoss { yes: bool },
-    BreakGlassRecover { yes: bool, reason: String },
+    BreakGlassRehearseControllerLoss {
+        yes: bool,
+    },
+    BreakGlassRecover {
+        yes: bool,
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
 pub(crate) struct ConformanceCommand {
     pub(crate) lease: ConformanceLeaseCommand,
-    pub(crate) candidate: Option<ConformanceCandidateTarget>,
+    pub(crate) candidate: Option<CandidateTarget>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ConformanceCandidateTarget {
+pub(crate) struct CandidateTarget {
     pub(crate) release: String,
     pub(crate) revision: String,
     pub(crate) build_id: String,
@@ -226,9 +246,13 @@ impl Cli {
             "recover-identity" => Command::RecoverIdentity {
                 yes: parse_yes(values, "recover-identity")?,
             },
-            "migrate" => Command::Migrate {
-                yes: parse_yes(values, "migrate")?,
-            },
+            "migrate" => {
+                let (values, yes) = take_yes(values)?;
+                Command::Migrate {
+                    yes,
+                    candidate: parse_candidate_target(values)?,
+                }
+            }
             "keys" => Command::Keys(parse_keys(values)?),
             "conformance" => Command::Conformance(parse_conformance(values)?),
             "audit" if values == ["verify"] => Command::AuditVerify,
@@ -379,7 +403,7 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceComma
         .position(|value| value == "lease")
         .context("conformance requires the lease resource")?;
     let candidate_values = values.drain(..lease_index).collect::<Vec<_>>();
-    let candidate = parse_conformance_candidate(candidate_values)?;
+    let candidate = parse_candidate_target(candidate_values)?;
     if values.first().map(String::as_str) != Some("lease") {
         bail!("conformance requires the lease resource");
     }
@@ -431,9 +455,7 @@ fn parse_conformance(mut values: Vec<String>) -> anyhow::Result<ConformanceComma
     Ok(ConformanceCommand { lease, candidate })
 }
 
-fn parse_conformance_candidate(
-    values: Vec<String>,
-) -> anyhow::Result<Option<ConformanceCandidateTarget>> {
+fn parse_candidate_target(values: Vec<String>) -> anyhow::Result<Option<CandidateTarget>> {
     if values.is_empty() {
         return Ok(None);
     }
@@ -445,7 +467,7 @@ fn parse_conformance_candidate(
             "--candidate-build-id",
             "--candidate-oci-digest",
         ],
-        "conformance candidate target",
+        "candidate target",
     )?;
     let release = values["--candidate-release"].clone();
     if !semantic_tag(&release) {
@@ -477,7 +499,7 @@ fn parse_conformance_candidate(
     }) {
         bail!("--candidate-oci-digest must be a lowercase sha256 digest");
     }
-    Ok(Some(ConformanceCandidateTarget {
+    Ok(Some(CandidateTarget {
         release,
         revision,
         build_id,

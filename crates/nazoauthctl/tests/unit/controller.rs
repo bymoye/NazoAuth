@@ -1375,7 +1375,10 @@ fn public_command_dispatch_fails_closed_before_every_confirmed_mutation() {
         }),
         Command::Rollback { yes: false },
         Command::Recover { yes: false },
-        Command::Migrate { yes: false },
+        Command::Migrate {
+            yes: false,
+            candidate: None,
+        },
         Command::Keys(KeysCommand::GenerateLocal {
             alg: "ES256".to_owned(),
             purposes: vec!["credential".to_owned()],
@@ -2014,6 +2017,27 @@ fn frontend_cache_marker_must_exactly_match_the_signed_release() {
     )
     .unwrap();
     assert!(!target_ui_is_active(&value));
+}
+
+#[test]
+fn candidate_target_is_oci_only_and_keeps_exact_embedded_identity() {
+    let work = PrivateTempDir::new("nazoauth-candidate-target").unwrap();
+    let mut config = config(&work);
+    let candidate = CandidateTarget {
+        release: "v0.1.19".to_owned(),
+        revision: "a".repeat(40),
+        build_id: format!("private-pre-release:{}", "a".repeat(40)),
+        oci_digest: format!("sha256:{}", "b".repeat(64)),
+    };
+    assert!(candidate_expected_target(&config, &candidate).is_err());
+
+    config.runtime.engine = "podman".to_owned();
+    let expected = candidate_expected_target(&config, &candidate).unwrap();
+    assert_eq!(expected.embedded.release, candidate.release);
+    assert_eq!(expected.embedded.revision, candidate.revision);
+    assert_eq!(expected.embedded.build_id, candidate.build_id);
+    assert_eq!(expected.image_digest, candidate.oci_digest);
+    assert!(expected.binary_digest.is_empty());
 }
 
 #[test]

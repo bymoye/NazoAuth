@@ -99,7 +99,9 @@ stdin 或继承 FD。所有秘密都没有 argv 或环境变量回退。
 `--candidate-release`、`--candidate-revision`、`--candidate-build-id` 和
 `--candidate-oci-digest`。四项缺一即失败；运行中的容器必须使用同一
 digest 固定的镜像引用，二进制内嵌身份也必须逐项匹配。该例外只作用于
-`conformance lease`，不会改写已签名 active Release，也不能作为发布、
+`conformance lease` 和显式 `nazoauthctl migrate --yes` 候选迁移。候选迁移同样
+必须同时传入四项绑定，并且只能通过签名 operator task 执行；不得使用原始 SQL
+或旧服务端命令。它不会改写已签名 active Release，也不能作为发布、
 provenance 或官方认证证据。未传这些参数时，所有控制器命令仍严格绑定
 已签名 Release manifest。
 

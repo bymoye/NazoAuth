@@ -455,9 +455,42 @@ fn parses_update_and_recovery_authorization_without_weakening_plan_mode() {
             .unwrap()
             .unwrap()
             .command,
-        Command::Migrate { yes: true }
+        Command::Migrate {
+            yes: true,
+            candidate: None
+        }
     ));
     assert!(parse(&["nazoauthctl", "rollback", "unexpected"]).is_err());
+}
+
+#[test]
+fn parses_exact_candidate_migration_target() {
+    let command = parse(&[
+        "nazoauthctl",
+        "migrate",
+        "--candidate-release",
+        "v0.1.19",
+        "--candidate-revision",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--candidate-build-id",
+        "private-pre-release:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--candidate-oci-digest",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "--yes",
+    ])
+    .unwrap()
+    .unwrap()
+    .command;
+    let Command::Migrate {
+        yes: true,
+        candidate: Some(candidate),
+    } = command
+    else {
+        panic!("expected candidate migration");
+    };
+    assert_eq!(candidate.release, "v0.1.19");
+    assert_eq!(candidate.revision, "a".repeat(40));
+    assert_eq!(candidate.oci_digest, format!("sha256:{}", "b".repeat(64)));
 }
 
 #[test]
@@ -694,7 +727,7 @@ fn parses_time_bounded_conformance_lease_operations() {
         candidate,
         Command::Conformance(ConformanceCommand {
             lease: ConformanceLeaseCommand::List,
-            candidate: Some(ConformanceCandidateTarget { release, .. }),
+            candidate: Some(CandidateTarget { release, .. }),
         }) if release == "v0.1.19"
     ));
     assert!(

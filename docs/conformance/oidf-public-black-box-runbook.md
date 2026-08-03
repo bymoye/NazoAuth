@@ -150,7 +150,19 @@ embedded identity must match every value. Omitting any option fails closed.
 --candidate-oci-digest sha256:<manifest-digest>
 ```
 
-This exception exists only for `conformance lease` operations. It neither
+Before testing a schema-changing private candidate, apply its migrations through
+the same exact target binding (never through raw SQL or a legacy server command):
+
+```text
+sudo nazoauthctl migrate --yes \
+  --candidate-release vX.Y.Z \
+  --candidate-revision <exact-git-object-id> \
+  --candidate-build-id <exact-embedded-build-id> \
+  --candidate-oci-digest sha256:<manifest-digest>
+```
+
+The exception exists only for this signed candidate migration and
+`conformance lease` operations. It neither
 changes the signed active Release nor counts as release, provenance, or official
 certification evidence. Normal `nazoauthctl` operations continue to require the
 signed active Release manifest.
