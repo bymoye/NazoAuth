@@ -107,8 +107,11 @@ composite score:
 
 ## Quick start
 
-Install the signed `nazoauthctl` from an immutable GitHub Release using the
-[verified bootstrap procedure](docs/operations/one-click-update.md), then run:
+Install the independently signed `nazoauthctl` from
+[`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl). The legacy
+source remains in this repository only until the cross-repository validation
+gate is complete; it is no longer a server Release asset. See the
+[repository split boundary](docs/operations/controller-repository-split.md), then run:
 
 ```sh
 sudo nazoauthctl install --runtime auto

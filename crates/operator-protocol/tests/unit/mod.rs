@@ -42,6 +42,85 @@ fn task() -> TaskEnvelope {
     }
 }
 
+fn discovery_statement() -> DiscoveryStatement {
+    DiscoveryStatement {
+        schema: CONTROL_DISCOVERY_SCHEMA,
+        product: CONTROL_DISCOVERY_PRODUCT.to_owned(),
+        deployment_id: "deployment-1".to_owned(),
+        runtime_instance_id: "runtime-1".to_owned(),
+        issuer: "https://auth.example".to_owned(),
+        release: "v0.1.19".to_owned(),
+        revision: "a".repeat(40),
+        build_id: "github:123".to_owned(),
+        control_protocol_versions: vec![CONTROL_DISCOVERY_SCHEMA],
+        operator_protocol_versions: vec![PROTOCOL_VERSION],
+        instance_key_id: "instance-1".to_owned(),
+        nonce: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8".to_owned(),
+        issued_at: 1_000,
+        expires_at: 1_060,
+    }
+}
+
+#[test]
+fn golden_control_discovery_vector_is_stable_and_nonce_bound() {
+    let key = SigningKey::from_bytes(&[17; 32]);
+    let compact = sign_discovery_statement(&discovery_statement(), "instance-1", &key).unwrap();
+    assert_eq!(
+        compact,
+        "eyJhbGciOiJFZERTQSIsImtpZCI6Imluc3RhbmNlLTEiLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLWRpc2NvdmVyeStqd3QifQ.eyJzY2hlbWEiOjEsInByb2R1Y3QiOiJuYXpvYXV0aCIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJydW50aW1lX2luc3RhbmNlX2lkIjoicnVudGltZS0xIiwiaXNzdWVyIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUiLCJyZWxlYXNlIjoidjAuMS4xOSIsInJldmlzaW9uIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImJ1aWxkX2lkIjoiZ2l0aHViOjEyMyIsImNvbnRyb2xfcHJvdG9jb2xfdmVyc2lvbnMiOlsxXSwib3BlcmF0b3JfcHJvdG9jb2xfdmVyc2lvbnMiOlsxXSwiaW5zdGFuY2Vfa2V5X2lkIjoiaW5zdGFuY2UtMSIsIm5vbmNlIjoiQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOCIsImlzc3VlZF9hdCI6MTAwMCwiZXhwaXJlc19hdCI6MTA2MH0.vhgW-rjLNlNkKqGvmGtvTOSyMgmrLTHbFo6m3ZMP_Hho7V5ME41CVgzz9S3HRB6WEDPVizGSWTP7nIODBkhQBg"
+    );
+    assert_eq!(
+        verify_discovery_statement(
+            &compact,
+            "instance-1",
+            &key.verifying_key(),
+            &discovery_statement().nonce,
+            1_030,
+        )
+        .unwrap(),
+        discovery_statement()
+    );
+    assert!(
+        verify_discovery_statement(
+            &compact,
+            "instance-1",
+            &key.verifying_key(),
+            "AQECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+            1_030,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn offline_deployment_statement_is_identity_evidence_not_artifact_trust() {
+    let key = SigningKey::from_bytes(&[17; 32]);
+    let online = discovery_statement();
+    let offline = DeploymentStatement {
+        schema: online.schema,
+        product: online.product,
+        deployment_id: online.deployment_id,
+        runtime_instance_id: online.runtime_instance_id,
+        issuer: online.issuer,
+        release: online.release,
+        revision: online.revision,
+        build_id: online.build_id,
+        control_protocol_versions: online.control_protocol_versions,
+        operator_protocol_versions: online.operator_protocol_versions,
+        instance_key_id: online.instance_key_id,
+        issued_at: online.issued_at,
+    };
+    let compact = sign_deployment_statement(&offline, "instance-1", &key).unwrap();
+    assert_eq!(
+        verify_deployment_statement(&compact, "instance-1", &key.verifying_key()).unwrap(),
+        offline
+    );
+    assert_eq!(
+        protected_header(&compact).unwrap().typ,
+        DEPLOYMENT_STATEMENT_JWS_TYPE
+    );
+}
+
 #[test]
 fn golden_task_vector_is_stable_and_verifies() {
     let key = SigningKey::from_bytes(&[7; 32]);

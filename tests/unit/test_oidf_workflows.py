@@ -266,11 +266,11 @@ class OidfWorkflowTests(unittest.TestCase):
                     workflow,
                 )
                 self.assertIn(
-                    'bootstrap_subject="nazoauthctl-x86_64-unknown-linux-gnu"',
+            'bootstrap_subject="nazoauth-x86_64-unknown-linux-gnu"',
                     workflow,
                 )
                 self.assertIn(
-                    'bootstrap_subject="nazoauthctl-aarch64-unknown-linux-gnu"',
+            'bootstrap_subject="nazoauth-aarch64-unknown-linux-gnu"',
                     workflow,
                 )
                 self.assertIn('gh release download "$RELEASE_TAG"', workflow)

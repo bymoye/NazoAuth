@@ -150,6 +150,18 @@ pub async fn run() -> anyhow::Result<()> {
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
 
     let settings = Arc::new(Settings::from_config(&config)?);
+    let instance_identity_dir = config
+        .optional_string("INSTANCE_IDENTITY_DIR")
+        .map(PathBuf::from);
+    let control_discovery = web::Data::new(
+        crate::control_discovery::ControlDiscoveryEndpoint::initialize(
+            &settings.storage.data_dir,
+            instance_identity_dir.as_deref(),
+            config.optional_string("DEPLOYMENT_ID").as_deref(),
+            config.optional_string("RUNTIME_INSTANCE_ID").as_deref(),
+            &settings.endpoint.issuer,
+        )?,
+    );
     let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
         settings.endpoint.mtls_certificate_source,
     ));
@@ -905,6 +917,7 @@ pub async fn run() -> anyhow::Result<()> {
         let app = app
             .app_data(mtls_certificate_source.clone())
             .app_data(readiness_dependencies.clone())
+            .app_data(control_discovery.clone())
             .app_data(initial_admin_bootstrap.clone())
             .app_data(token_endpoint_handles.clone())
             .app_data(ciba_service.clone())

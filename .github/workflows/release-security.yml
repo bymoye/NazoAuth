@@ -108,10 +108,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazoauth.cdx
-          cargo cyclonedx --manifest-path crates/nazoauthctl/Cargo.toml --format json --override-filename nazoauthctl.cdx
           mkdir -p target/release-evidence/sbom
           mv crates/authorization-server/nazoauth.cdx.json target/release-evidence/sbom/nazoauth.cdx.json
-          mv crates/nazoauthctl/nazoauthctl.cdx.json target/release-evidence/sbom/nazoauthctl.cdx.json
       - name: Upload internal supply-chain evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -223,23 +221,17 @@ jobs:
           $nmake = Get-ChildItem -LiteralPath "$installation\VC\Tools\MSVC" -Recurse -Filter nmake.exe | Select-Object -First 1
           if (-not $nmake) { throw "nmake is unavailable" }
           "MSVC_INSTALLATION=$installation" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Test lifecycle controller on the native target
-        run: cargo test --locked --package nazoauthctl --all-targets --target ${{ matrix.target }}
-      - name: Build platform binaries
+      - name: Build the server binary once for this platform
         run: >-
           cargo build --release --locked --target ${{ matrix.target }}
           --package nazo-oauth-server --bin nazoauth
-          --package nazoauthctl --bin nazoauthctl
-      - name: Smoke binaries and verify embedded build identity
+      - name: Smoke the server binary and verify embedded build identity
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $server = Resolve-Path "target/${{ matrix.target }}/release/nazoauth${{ matrix.executable_suffix }}"
-          $controller = Resolve-Path "target/${{ matrix.target }}/release/nazoauthctl${{ matrix.executable_suffix }}"
           & $server --help
           if ($LASTEXITCODE -ne 0) { throw "nazoauth help smoke failed" }
-          & $controller
-          if ($LASTEXITCODE -ne 0) { throw "nazoauthctl help smoke failed" }
           $identity = (& $server build-identity | ConvertFrom-Json)
           if ($LASTEXITCODE -ne 0) { throw "nazoauth build identity smoke failed" }
           if ($identity.release -ne $env:NAZOAUTH_BUILD_RELEASE) { throw "embedded release mismatch" }
@@ -251,9 +243,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for binary in \
-            "target/${{ matrix.target }}/release/nazoauth" \
-            "target/${{ matrix.target }}/release/nazoauthctl"; do
+          for binary in "target/${{ matrix.target }}/release/nazoauth"; do
             dynamic="$(readelf -d "$binary")"
             if grep -Eiq 'NEEDED.*(libpq|libssl|libcrypto)' <<<"$dynamic"; then
               echo "$binary depends on a non-system database or TLS library" >&2
@@ -271,9 +261,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for binary in \
-            "target/${{ matrix.target }}/release/nazoauth" \
-            "target/${{ matrix.target }}/release/nazoauthctl"; do
+          for binary in "target/${{ matrix.target }}/release/nazoauth"; do
             if otool -L "$binary" | grep -Eiq '(libpq|libssl|libcrypto)'; then
               echo "$binary depends on a non-system database or TLS library" >&2
               exit 1
@@ -287,10 +275,7 @@ jobs:
           if (-not $env:MSVC_INSTALLATION) { throw "verified MSVC installation is unavailable" }
           $dumpbin = Get-ChildItem -LiteralPath "$env:MSVC_INSTALLATION\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin is unavailable" }
-          foreach ($binary in @(
-            "target/${{ matrix.target }}/release/nazoauth.exe",
-            "target/${{ matrix.target }}/release/nazoauthctl.exe"
-          )) {
+          foreach ($binary in @("target/${{ matrix.target }}/release/nazoauth.exe")) {
             $dependencies = & $dumpbin.FullName /DEPENDENTS $binary
             if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
             if ($dependencies -match "(?i)(libpq|libssl|libcrypto|ssleay|libeay).*\.dll") {
@@ -303,7 +288,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path "target/release-binaries" | Out-Null
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/nazoauth${{ matrix.executable_suffix }}" -Destination "target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}"
-          Copy-Item -LiteralPath "target/${{ matrix.target }}/release/nazoauthctl${{ matrix.executable_suffix }}" -Destination "target/release-binaries/nazoauthctl-${{ matrix.target }}${{ matrix.executable_suffix }}"
       - name: Upload platform binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -478,7 +462,7 @@ jobs:
             --backend-commit "$GITHUB_SHA" \
             --build-id "$NAZOAUTH_BUILD_ID" \
             --binary "target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}" \
-            --updater "target/release-binaries/nazoauthctl-${{ matrix.target }}${{ matrix.executable_suffix }}" \
+            --operator-compatibility release/operator-compatibility.json \
             --frontend release/frontend.json \
             --oci target/release-evidence/oci/descriptor.json \
             --policy release/update-policy.json \
@@ -489,18 +473,10 @@ jobs:
           subject-path: target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}
           predicate-type: https://nazo.run/attestations/release-manifest/v1
           predicate-path: target/release-evidence/release-manifest-${{ matrix.target }}.json
-      - name: Attest nazoauthctl ReleaseManifest
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-path: target/release-binaries/nazoauthctl-${{ matrix.target }}${{ matrix.executable_suffix }}
-          predicate-type: https://nazo.run/attestations/release-manifest/v1
-          predicate-path: target/release-evidence/release-manifest-${{ matrix.target }}.json
       - name: Attest standard binary build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: |
-            target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}
-            target/release-binaries/nazoauthctl-${{ matrix.target }}${{ matrix.executable_suffix }}
+          subject-path: target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
@@ -510,13 +486,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/release-evidence/signatures
-          for binary in \
-            "target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}" \
-            "target/release-binaries/nazoauthctl-${{ matrix.target }}${{ matrix.executable_suffix }}"; do
-            cosign sign-blob --yes \
-              --bundle "target/release-evidence/signatures/$(basename "$binary").bundle" \
-              "$binary"
-          done
+          binary="target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}"
+          cosign sign-blob --yes \
+            --bundle "target/release-evidence/signatures/$(basename "$binary").bundle" \
+            "$binary"
       - name: Upload platform attestation evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -613,35 +586,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(find target/release-binaries -maxdepth 1 -type f | wc -l)" -eq 16
+          test "$(find target/release-binaries -maxdepth 1 -type f | wc -l)" -eq 8
           for target in \
             x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
             x86_64-apple-darwin aarch64-apple-darwin; do
             test -f "target/release-binaries/nazoauth-$target"
-            test -f "target/release-binaries/nazoauthctl-$target"
           done
           for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
             test -f "target/release-binaries/nazoauth-$target.exe"
-            test -f "target/release-binaries/nazoauthctl-$target.exe"
           done
           unexpected="$(find target/release-binaries -maxdepth 1 -type f \
             ! -name 'nazoauth-x86_64-unknown-linux-gnu' \
-            ! -name 'nazoauthctl-x86_64-unknown-linux-gnu' \
             ! -name 'nazoauth-aarch64-unknown-linux-gnu' \
-            ! -name 'nazoauthctl-aarch64-unknown-linux-gnu' \
             ! -name 'nazoauth-x86_64-unknown-linux-musl' \
-            ! -name 'nazoauthctl-x86_64-unknown-linux-musl' \
             ! -name 'nazoauth-aarch64-unknown-linux-musl' \
-            ! -name 'nazoauthctl-aarch64-unknown-linux-musl' \
             ! -name 'nazoauth-x86_64-pc-windows-msvc.exe' \
-            ! -name 'nazoauthctl-x86_64-pc-windows-msvc.exe' \
             ! -name 'nazoauth-aarch64-pc-windows-msvc.exe' \
-            ! -name 'nazoauthctl-aarch64-pc-windows-msvc.exe' \
             ! -name 'nazoauth-x86_64-apple-darwin' \
-            ! -name 'nazoauthctl-x86_64-apple-darwin' \
             ! -name 'nazoauth-aarch64-apple-darwin' \
-            ! -name 'nazoauthctl-aarch64-apple-darwin' -print -quit)"
+            -print -quit)"
           test -z "$unexpected"
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" \
@@ -672,7 +636,7 @@ jobs:
           done
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '.assets[].name' > "$remote_names"
-          test "$(wc -l < "$remote_names")" -eq 16
+          test "$(wc -l < "$remote_names")" -eq 8
           for binary in target/release-binaries/*; do
             grep -Fxq "$(basename "$binary")" "$remote_names"
           done

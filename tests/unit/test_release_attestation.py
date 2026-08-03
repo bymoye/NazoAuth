@@ -29,9 +29,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.target = "x86_64-unknown-linux-gnu"
         self.binary = self.root / f"nazoauth-{self.target}"
-        self.updater = self.root / f"nazoauthctl-{self.target}"
         self.binary.write_bytes(b"server-binary")
-        self.updater.write_bytes(b"controller-binary")
         self.frontend = self.root / "frontend.json"
         self.frontend.write_text(
             json.dumps(
@@ -87,8 +85,8 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             "github:123:1",
             "--binary",
             str(self.binary),
-            "--updater",
-            str(self.updater),
+            "--operator-compatibility",
+            str(ROOT / "release" / "operator-compatibility.json"),
             "--frontend",
             str(self.frontend),
             "--oci",
@@ -100,7 +98,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             *extra,
         ]
 
-    def test_builds_the_closed_schema_four_predicate(self) -> None:
+    def test_builds_the_closed_schema_five_server_predicate(self) -> None:
         subprocess.run(self.command(), cwd=ROOT, check=True, capture_output=True, text=True)
         value = json.loads(self.output.read_text(encoding="utf-8"))
 
@@ -113,15 +111,16 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
                 "backend_commit",
                 "release_identity",
                 "embedded",
+                "operator_protocol",
                 "artifacts",
                 "frontend",
                 "oci",
                 "rollback",
             },
         )
-        self.assertEqual(value["schema"], 4)
+        self.assertEqual(value["schema"], 5)
         self.assertEqual(value["target"], self.target)
-        self.assertEqual(set(value["artifacts"]), {"binary", "updater"})
+        self.assertEqual(set(value["artifacts"]), {"binary"})
         self.assertEqual(value["artifacts"]["binary"]["repository"], "nazozero/NazoAuth")
         self.assertEqual(
             value["artifacts"]["binary"]["sha256"],
@@ -130,6 +129,14 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
         self.assertEqual(value["embedded"]["release"], "v0.2.0")
         self.assertEqual(value["embedded"]["revision"], "e" * 40)
         self.assertEqual(value["embedded"]["protocol"], 1)
+        self.assertEqual(
+            value["operator_protocol"],
+            {
+                "version": 1,
+                "minimum_ctl_version": "0.1.19",
+                "maximum_ctl_version_exclusive": "0.2.0",
+            },
+        )
         self.assertEqual(set(value["oci"]["platform_manifests"]), {"linux/amd64", "linux/arm64"})
 
     def test_repository_frontend_descriptor_is_accepted_without_rewriting(self) -> None:

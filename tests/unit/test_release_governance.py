@@ -206,7 +206,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
             self.assertRegex(source, r"does not require GitHub CLI|不需要 GitHub CLI")
             self.assertRegex(source, r"public non-draft Release|公开非草稿 Release")
 
-    def test_release_builds_one_application_and_one_lifecycle_executable(self) -> None:
+    def test_server_release_builds_only_the_application_executable(self) -> None:
         server_manifest = (
             ROOT / "crates" / "authorization-server" / "Cargo.toml"
         ).read_text(encoding="utf-8")
@@ -223,9 +223,9 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("cargo build --release --locked --target ${{ matrix.target }}", release)
         self.assertIn("--package nazo-oauth-server --bin nazoauth", release)
-        self.assertIn("--package nazoauthctl --bin nazoauthctl", release)
+        self.assertNotIn("--package nazoauthctl --bin nazoauthctl", release)
         self.assertIn("nazoauth-${{ matrix.target }}", release)
-        self.assertIn("nazoauthctl-${{ matrix.target }}", release)
+        self.assertNotIn("nazoauthctl-${{ matrix.target }}", release)
         self.assertNotRegex(
             release,
             r"target/release/nazo-oauth-(?:server|migrate|keyctl)",
@@ -303,7 +303,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "macos-15",
         ):
             self.assertIn(f"runner: {runner}", release)
-        self.assertIn("cargo test --locked --package nazoauthctl --all-targets", release)
+        self.assertNotIn("cargo test --locked --package nazoauthctl --all-targets", release)
         self.assertIn("& $server build-identity | ConvertFrom-Json", release)
         self.assertIn("Verify Linux single-file native dependency boundary", release)
         self.assertIn("Bind musl builds to the native musl compiler", release)
@@ -356,15 +356,16 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(
             release.count("uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"),
-            2,
+            1,
         )
         self.assertEqual(
             release.count("predicate-type: https://nazo.run/attestations/release-manifest/v1"),
-            2,
+            1,
         )
         self.assertIn("scripts/build_release_attestation.py", release)
         self.assertIn("--frontend release/frontend.json", release)
         self.assertIn("--oci target/release-evidence/oci/descriptor.json", release)
+        self.assertIn("--operator-compatibility release/operator-compatibility.json", release)
 
     def test_conformance_workflow_does_not_repeat_the_rust_quality_gate(self) -> None:
         quality = (

@@ -15,8 +15,14 @@ pub const RUNTIME_RECEIPT_JWS_TYPE: &str = "nazoauth-runtime-receipt+jwt";
 pub const FINAL_RECEIPT_JWS_TYPE: &str = "nazoauth-operator-receipt+jwt";
 pub const TRUST_TRANSITION_JWS_TYPE: &str = "nazoauth-controller-trust-transition+jwt";
 pub const MANAGEMENT_EVENT_JWS_TYPE: &str = "nazoauth-management-event+jwt";
+pub const CONTROL_DISCOVERY_JWS_TYPE: &str = "nazoauth-control-discovery+jwt";
+pub const DEPLOYMENT_STATEMENT_JWS_TYPE: &str = "nazoauth-deployment-statement+jwt";
+pub const ADOPTION_RECEIPT_JWS_TYPE: &str = "nazoauth-adoption-receipt+jwt";
+pub const CONTROL_DISCOVERY_SCHEMA: u32 = 1;
+pub const CONTROL_DISCOVERY_PRODUCT: &str = "nazoauth";
 pub const MAX_COMPACT_JWS_BYTES: usize = 64 * 1024;
 pub const MAX_TASK_LIFETIME_SECONDS: i64 = 60;
+pub const MAX_DISCOVERY_LIFETIME_SECONDS: i64 = 60;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +90,94 @@ pub struct EmbeddedIdentity {
     pub revision: String,
     pub protocol: u32,
     pub build_id: String,
+}
+
+/// Unauthenticated, bounded challenge for the read-only control discovery endpoint.
+///
+/// The nonce is 32 random bytes encoded as unpadded base64url.  It provides
+/// freshness, not trust; callers still have to bind the returned instance key
+/// to runtime evidence and a trusted release.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryRequest {
+    pub schema: u32,
+    pub nonce: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryResponse {
+    pub statement: String,
+    pub instance_public_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryStatement {
+    pub schema: u32,
+    pub product: String,
+    pub deployment_id: String,
+    pub runtime_instance_id: String,
+    pub issuer: String,
+    pub release: String,
+    pub revision: String,
+    pub build_id: String,
+    pub control_protocol_versions: Vec<u32>,
+    pub operator_protocol_versions: Vec<u32>,
+    pub instance_key_id: String,
+    pub nonce: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+/// Long-lived identity evidence written beside the instance public key.
+///
+/// This statement deliberately has no freshness claim.  It identifies an
+/// offline deployment but never proves that its named artifact is trusted;
+/// recovery controllers must independently verify the mounted binary or OCI
+/// digest against a cached trusted release.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentStatement {
+    pub schema: u32,
+    pub product: String,
+    pub deployment_id: String,
+    pub runtime_instance_id: String,
+    pub issuer: String,
+    pub release: String,
+    pub revision: String,
+    pub build_id: String,
+    pub control_protocol_versions: Vec<u32>,
+    pub operator_protocol_versions: Vec<u32>,
+    pub instance_key_id: String,
+    pub issued_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptionReceipt {
+    pub schema: u32,
+    pub deployment_id: String,
+    pub issuer: String,
+    pub runtime_instances: Vec<AdoptedRuntimeIdentity>,
+    pub verified_release: String,
+    pub release_manifest_sha256: String,
+    pub instance_key_ids: Vec<String>,
+    pub resource_references: BTreeMap<String, String>,
+    pub capabilities: BTreeMap<String, String>,
+    pub recovery_proven: bool,
+    pub recovery_evidence: Vec<String>,
+    pub plan_sha256: String,
+    pub adopted_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptedRuntimeIdentity {
+    pub runtime_instance_id: String,
+    pub backend: String,
+    pub object_reference: String,
+    pub artifact_identity: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -314,6 +408,120 @@ pub enum ProtocolError {
     Policy(&'static str),
 }
 
+pub fn validate_discovery_request(request: &DiscoveryRequest) -> Result<(), ProtocolError> {
+    if request.schema != CONTROL_DISCOVERY_SCHEMA {
+        return Err(ProtocolError::Policy(
+            "unsupported control discovery schema",
+        ));
+    }
+    validate_discovery_nonce(&request.nonce)
+}
+
+pub fn sign_discovery_statement(
+    statement: &DiscoveryStatement,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_discovery_statement(statement, statement.issued_at, None)?;
+    if statement.instance_key_id != key_id {
+        return Err(ProtocolError::Policy(
+            "instance key id does not match signer",
+        ));
+    }
+    sign_compact(statement, key_id, CONTROL_DISCOVERY_JWS_TYPE, key)
+}
+
+pub fn verify_discovery_statement(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    expected_nonce: &str,
+    now: i64,
+) -> Result<DiscoveryStatement, ProtocolError> {
+    validate_discovery_nonce(expected_nonce)?;
+    let statement: DiscoveryStatement =
+        verify_compact(compact, expected_key_id, CONTROL_DISCOVERY_JWS_TYPE, key)?;
+    if statement.instance_key_id != expected_key_id {
+        return Err(ProtocolError::Policy(
+            "instance key id does not match signer",
+        ));
+    }
+    validate_discovery_statement(&statement, now, Some(expected_nonce))?;
+    Ok(statement)
+}
+
+pub fn sign_deployment_statement(
+    statement: &DeploymentStatement,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_deployment_statement(statement)?;
+    if statement.instance_key_id != key_id {
+        return Err(ProtocolError::Policy(
+            "instance key id does not match signer",
+        ));
+    }
+    sign_compact(statement, key_id, DEPLOYMENT_STATEMENT_JWS_TYPE, key)
+}
+
+pub fn verify_deployment_statement(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+) -> Result<DeploymentStatement, ProtocolError> {
+    let statement: DeploymentStatement =
+        verify_compact(compact, expected_key_id, DEPLOYMENT_STATEMENT_JWS_TYPE, key)?;
+    if statement.instance_key_id != expected_key_id {
+        return Err(ProtocolError::Policy(
+            "instance key id does not match signer",
+        ));
+    }
+    validate_deployment_statement(&statement)?;
+    Ok(statement)
+}
+
+pub fn sign_adoption_receipt(
+    receipt: &AdoptionReceipt,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_adoption_receipt(receipt)?;
+    sign_compact(receipt, key_id, ADOPTION_RECEIPT_JWS_TYPE, key)
+}
+
+pub fn verify_adoption_receipt(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+) -> Result<AdoptionReceipt, ProtocolError> {
+    let receipt = verify_compact(compact, expected_key_id, ADOPTION_RECEIPT_JWS_TYPE, key)?;
+    validate_adoption_receipt(&receipt)?;
+    Ok(receipt)
+}
+
+pub fn encode_instance_public_key(key: &VerifyingKey) -> String {
+    URL_SAFE_NO_PAD.encode(key.to_bytes())
+}
+
+pub fn decode_instance_public_key(encoded: &str) -> Result<VerifyingKey, ProtocolError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| ProtocolError::Base64)?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::Policy("invalid instance public key"))?;
+    VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| ProtocolError::Policy("invalid instance public key"))
+}
+
+pub fn instance_key_id(key: &VerifyingKey) -> String {
+    format!("instance-{}", &hex_sha256(&key.to_bytes())[..32])
+}
+
+pub fn validate_file_identifier_value(value: &str) -> Result<(), ProtocolError> {
+    validate_file_identifier(value)
+}
+
 pub fn sign_task(
     task: &TaskEnvelope,
     key_id: &str,
@@ -533,6 +741,190 @@ fn decode_protected_header(protected: &str) -> Result<ProtectedHeader, ProtocolE
         return Err(ProtocolError::Header);
     }
     Ok(header)
+}
+
+fn validate_discovery_statement(
+    statement: &DiscoveryStatement,
+    now: i64,
+    expected_nonce: Option<&str>,
+) -> Result<(), ProtocolError> {
+    validate_discovery_identity(
+        statement.schema,
+        &statement.product,
+        &statement.deployment_id,
+        &statement.runtime_instance_id,
+        &statement.issuer,
+        &statement.release,
+        &statement.revision,
+        &statement.build_id,
+        &statement.control_protocol_versions,
+        &statement.operator_protocol_versions,
+        &statement.instance_key_id,
+    )?;
+    validate_discovery_nonce(&statement.nonce)?;
+    if expected_nonce.is_some_and(|expected| statement.nonce != expected) {
+        return Err(ProtocolError::Policy("control discovery nonce mismatch"));
+    }
+    if statement.expires_at < statement.issued_at
+        || statement.expires_at - statement.issued_at > MAX_DISCOVERY_LIFETIME_SECONDS
+        || now < statement.issued_at
+        || now > statement.expires_at
+    {
+        return Err(ProtocolError::Policy(
+            "control discovery statement is outside its validity window",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_deployment_statement(statement: &DeploymentStatement) -> Result<(), ProtocolError> {
+    validate_discovery_identity(
+        statement.schema,
+        &statement.product,
+        &statement.deployment_id,
+        &statement.runtime_instance_id,
+        &statement.issuer,
+        &statement.release,
+        &statement.revision,
+        &statement.build_id,
+        &statement.control_protocol_versions,
+        &statement.operator_protocol_versions,
+        &statement.instance_key_id,
+    )?;
+    if statement.issued_at <= 0 {
+        return Err(ProtocolError::Policy(
+            "deployment statement has an invalid issuance time",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_adoption_receipt(receipt: &AdoptionReceipt) -> Result<(), ProtocolError> {
+    if receipt.schema != CONTROL_DISCOVERY_SCHEMA {
+        return Err(ProtocolError::Policy("unsupported adoption receipt schema"));
+    }
+    validate_file_identifier(&receipt.deployment_id)?;
+    validate_identifier(&receipt.issuer)?;
+    validate_identifier(&receipt.verified_release)?;
+    validate_lower_hex(&receipt.release_manifest_sha256, 64)?;
+    validate_lower_hex(&receipt.plan_sha256, 64)?;
+    if receipt.adopted_at <= 0 || receipt.runtime_instances.is_empty() {
+        return Err(ProtocolError::Policy("invalid adoption receipt"));
+    }
+    if receipt.runtime_instances.len() > 128 || receipt.instance_key_ids.len() > 128 {
+        return Err(ProtocolError::Policy(
+            "adoption receipt exceeds instance limit",
+        ));
+    }
+    for runtime in &receipt.runtime_instances {
+        validate_file_identifier(&runtime.runtime_instance_id)?;
+        for value in [
+            &runtime.backend,
+            &runtime.object_reference,
+            &runtime.artifact_identity,
+        ] {
+            validate_audit_boundary(value)?;
+        }
+    }
+    for key_id in &receipt.instance_key_ids {
+        validate_file_identifier(key_id)?;
+    }
+    if receipt.resource_references.len() > 64 || receipt.capabilities.len() > 16 {
+        return Err(ProtocolError::Policy(
+            "adoption receipt exceeds policy limit",
+        ));
+    }
+    for (name, value) in receipt
+        .resource_references
+        .iter()
+        .chain(receipt.capabilities.iter())
+    {
+        validate_identifier(name)?;
+        validate_audit_boundary(value)?;
+    }
+    if receipt.recovery_evidence.len() > 64 {
+        return Err(ProtocolError::Policy(
+            "adoption receipt exceeds recovery evidence limit",
+        ));
+    }
+    for evidence in &receipt.recovery_evidence {
+        validate_audit_boundary(evidence)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_discovery_identity(
+    schema: u32,
+    product: &str,
+    deployment_id: &str,
+    runtime_instance_id: &str,
+    issuer: &str,
+    release: &str,
+    revision: &str,
+    build_id: &str,
+    control_protocol_versions: &[u32],
+    operator_protocol_versions: &[u32],
+    instance_key_id: &str,
+) -> Result<(), ProtocolError> {
+    if schema != CONTROL_DISCOVERY_SCHEMA {
+        return Err(ProtocolError::Policy(
+            "unsupported control discovery schema",
+        ));
+    }
+    if product != CONTROL_DISCOVERY_PRODUCT {
+        return Err(ProtocolError::Policy(
+            "unexpected control discovery product",
+        ));
+    }
+    validate_file_identifier(deployment_id)?;
+    validate_file_identifier(runtime_instance_id)?;
+    validate_file_identifier(instance_key_id)?;
+    for value in [issuer, release, revision, build_id] {
+        validate_identifier(value)?;
+    }
+    validate_protocol_versions(
+        control_protocol_versions,
+        CONTROL_DISCOVERY_SCHEMA,
+        "unsupported control discovery protocol",
+    )?;
+    validate_protocol_versions(
+        operator_protocol_versions,
+        PROTOCOL_VERSION,
+        "unsupported operator protocol",
+    )
+}
+
+fn validate_protocol_versions(
+    versions: &[u32],
+    required: u32,
+    error: &'static str,
+) -> Result<(), ProtocolError> {
+    if versions.is_empty()
+        || versions.len() > 16
+        || !versions.windows(2).all(|pair| pair[0] < pair[1])
+        || !versions.contains(&required)
+    {
+        return Err(ProtocolError::Policy(error));
+    }
+    Ok(())
+}
+
+fn validate_discovery_nonce(nonce: &str) -> Result<(), ProtocolError> {
+    if nonce.len() != 43 {
+        return Err(ProtocolError::Policy(
+            "control discovery nonce must encode 32 bytes",
+        ));
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(nonce)
+        .map_err(|_| ProtocolError::Policy("control discovery nonce is not base64url"))?;
+    if bytes.len() != 32 {
+        return Err(ProtocolError::Policy(
+            "control discovery nonce must encode 32 bytes",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {

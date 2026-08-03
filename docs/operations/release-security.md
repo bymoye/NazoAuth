@@ -45,29 +45,31 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
 
 - builds eight platform targets on native x86-64 and Arm64 Linux, Windows, and
   macOS runners with the pinned Rust toolchain
-- runs the `nazoauthctl` tests and executes both binaries on every target
-- verifies the application binary's embedded tag, commit, protocol, and build ID
+- executes the server binary on every native target and verifies its embedded
+  tag, commit, protocol, and build ID
 - reruns `cargo audit` and `cargo deny` for the exact tag
 - builds one `linux/amd64` plus `linux/arm64` OCI index
 - scans the exact OCI archive with Trivy and publishes that archive without a
   second build
-- generates separate CycloneDX SBOMs for both Rust binaries
-- binds each binary to the closed schema-4 ReleaseManifest with the custom
+- generates the server CycloneDX SBOM
+- binds each server binary to the closed schema-5 ReleaseManifest with the custom
   `https://nazo.run/attestations/release-manifest/v1` GitHub attestation
+- declares the operator protocol version and supported NazoAuthCtl SemVer range
 - binds the independently released and attested NazoAuthWeb descriptor rather
   than embedding or republishing UI files
 - signs the OCI index; a rerun accepts an existing tag only when it resolves to
   the exact scanned digest and rejects every mismatch
 - retains SBOMs, OCI archives, predicates, and Sigstore bundles as internal CI
   evidence
-- publishes exactly 16 platform-suffixed executable files as persistent GitHub
+- publishes exactly 8 platform-suffixed server executable files as persistent GitHub
   Release assets; JSON, tar, bundle, script, and SBOM files are not Release assets
 - resumes partial publication only when every existing Release asset is
   byte-identical, and never overwrites a mismatching tag or asset
 - emits standard provenance attestations in addition to the custom manifest
   predicates
 
-Standalone production deployments consume the binaries through `nazoauthctl`.
+Standalone production deployments consume the server binaries through the
+independently released `nazoauthctl` from `nazozero/NazoAuthCtl`.
 The lifecycle tool retrieves the subject's GitHub attestation, verifies the
 tag-specific workflow identity and closed predicate before parsing artifact
 names or changing runtime state, and separately verifies the attested frontend
@@ -84,7 +86,7 @@ match; an unrelated successful HTTP response is not sufficient.
 All controller GitHub requests are HTTPS-only across redirects and have
 connection, redirect-count, total-time, and response-size bounds. Once an
 attested artifact size is known, that exact size is the curl transfer ceiling;
-only the first updater fetch uses a fixed bootstrap ceiling because its digest
+the first server-binary fetch uses a fixed bootstrap ceiling because its digest
 is the subject used to retrieve the attestation. When host Cosign is absent,
 the private temporary staging directory is mounted into the pinned Cosign
 container as `ro,Z`: read-only with a private SELinux relabel, compatible with
@@ -100,9 +102,9 @@ For each production release, preserve:
 - Git tag and commit SHA
 - `conformance-security` workflow URL and conclusion
 - `release-security` workflow URL and conclusion
-- all 16 binary asset names and digests
+- all 8 server binary asset names and digests
 - each target's custom ReleaseManifest attestation URL
-- both internal SBOM artifact names and digests
+- the internal server SBOM artifact name and digest
 - Trivy scan result
 - Sigstore certificate identity and issuer
 - OCI index digest and both platform-manifest digests

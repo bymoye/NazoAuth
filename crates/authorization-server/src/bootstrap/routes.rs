@@ -20,6 +20,7 @@ use nazo_openid4vc_http_actix::{
     presentation_request, presentation_response, presentation_result,
 };
 
+use crate::control_discovery::control_discovery;
 use crate::http::admin::{
     access_requests::{
         admin_access_requests, admin_approve_access_request, admin_reject_access_request,
@@ -92,6 +93,11 @@ pub(crate) fn configure(
     // in this single scope so later top-level resources cannot be shadowed.
     let well_known = web::scope("/.well-known")
         .wrap(cors::cors_well_known(settings))
+        .service(
+            web::resource("/nazoauth-control")
+                .app_data(web::JsonConfig::default().limit(2 * 1024))
+                .route(web::post().to(control_discovery)),
+        )
         .route("/openid-configuration", web::get().to(discovery))
         .route(
             "/oauth-authorization-server",

@@ -209,6 +209,36 @@ def validate_policy(path: Path) -> dict[str, Any]:
     }
 
 
+def validate_operator_compatibility(path: Path) -> dict[str, Any]:
+    value = load_closed_json(
+        path,
+        {"schema", "version", "minimum_ctl_version", "maximum_ctl_version_exclusive"},
+        "operator protocol compatibility",
+    )
+    if value["schema"] != 1 or value["version"] != PROTOCOL_VERSION:
+        raise SystemExit("operator protocol compatibility version is unsupported")
+    minimum = require_string(value["minimum_ctl_version"], "minimum_ctl_version", 32)
+    maximum = require_string(
+        value["maximum_ctl_version_exclusive"],
+        "maximum_ctl_version_exclusive",
+        32,
+    )
+    semver = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+    minimum_match = semver.fullmatch(minimum)
+    maximum_match = semver.fullmatch(maximum)
+    if minimum_match is None or maximum_match is None:
+        raise SystemExit("controller compatibility bounds must be stable SemVer")
+    minimum_tuple = tuple(int(part) for part in minimum_match.groups())
+    maximum_tuple = tuple(int(part) for part in maximum_match.groups())
+    if minimum_tuple >= maximum_tuple:
+        raise SystemExit("controller compatibility range must be non-empty")
+    return {
+        "version": PROTOCOL_VERSION,
+        "minimum_ctl_version": minimum,
+        "maximum_ctl_version_exclusive": maximum,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
@@ -216,7 +246,7 @@ def main() -> None:
     parser.add_argument("--backend-commit", required=True)
     parser.add_argument("--build-id", required=True)
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--updater", type=Path, required=True)
+    parser.add_argument("--operator-compatibility", type=Path, required=True)
     parser.add_argument("--frontend", type=Path, required=True)
     parser.add_argument("--oci", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
@@ -234,9 +264,8 @@ def main() -> None:
         raise SystemExit("build id is invalid")
     extension = ".exe" if "windows" in args.target else ""
     binary_name = f"nazoauth-{args.target}{extension}"
-    updater_name = f"nazoauthctl-{args.target}{extension}"
     manifest = {
-        "schema": 4,
+        "schema": 5,
         "version": args.version,
         "target": args.target,
         "backend_commit": backend_commit,
@@ -250,9 +279,9 @@ def main() -> None:
             "protocol": PROTOCOL_VERSION,
             "build_id": args.build_id,
         },
+        "operator_protocol": validate_operator_compatibility(args.operator_compatibility),
         "artifacts": {
             "binary": local_artifact(args.binary, binary_name),
-            "updater": local_artifact(args.updater, updater_name),
         },
         "frontend": validate_frontend(args.frontend),
         "oci": validate_oci(args.oci),

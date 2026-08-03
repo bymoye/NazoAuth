@@ -85,8 +85,8 @@ jobs:
             test "$(jq -r '.tagName' <<<"$release_json")" = "$RELEASE_TAG"
             test "$(jq -r '.isDraft' <<<"$release_json")" = false
             case "$(uname -m)" in
-              x86_64) bootstrap_subject="nazoauthctl-x86_64-unknown-linux-gnu" ;;
-              aarch64) bootstrap_subject="nazoauthctl-aarch64-unknown-linux-gnu" ;;
+              x86_64) bootstrap_subject="nazoauth-x86_64-unknown-linux-gnu" ;;
+              aarch64) bootstrap_subject="nazoauth-aarch64-unknown-linux-gnu" ;;
               *) echo "unsupported Linux runner architecture: $(uname -m)" >&2; exit 1 ;;
             esac
             proof_dir="$RUNNER_TEMP/nazoauth-source-release-proof"
