@@ -1,13 +1,5 @@
 name: nazoauth-oidf-suite
 
-x-suite-build: &suite-build
-  context: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}
-  dockerfile: deploy/oidf-suite/Containerfile
-  args:
-    OIDF_SUITE_UPSTREAM_REVISION: ${OIDF_SUITE_UPSTREAM_REVISION:-946451d1ce29965c9ab7aee05f5003552233160e}
-  additional_contexts:
-    oidf_suite: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
-
 x-suite-environment: &suite-environment
   BASE_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
   BASE_MTLS_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
@@ -19,10 +11,7 @@ x-suite-environment: &suite-environment
 
 services:
   pki-init:
-    build:
-      context: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}
-      dockerfile: deploy/oidf-proxy/Containerfile
-      target: pki-init
+    image: nazoauth-oidf-proxy-pki-init:${OIDF_SUITE_IMAGE_TAG:-946451d1}
     environment:
       OIDF_TARGET_HOSTNAME: ${OIDF_TARGET_HOSTNAME:?set OIDF_TARGET_HOSTNAME to the target issuer hostname}
     volumes:
@@ -41,7 +30,6 @@ services:
 
   server:
     image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-946451d1}
-    build: *suite-build
     restart: unless-stopped
     environment:
       <<: *suite-environment
@@ -71,7 +59,6 @@ services:
   server-bootstrap:
     profiles: [bootstrap]
     image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-946451d1}
-    build: *suite-build
     environment:
       <<: *suite-environment
       JAVA_EXTRA_ARGS: >-

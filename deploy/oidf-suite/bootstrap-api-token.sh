@@ -33,6 +33,47 @@ test -f "$OIDF_SUITE_SOURCE_DIR/pom.xml" || {
   echo "official suite pom.xml is absent" >&2
   exit 1
 }
+source_revision=$(git -C "$NAZOAUTH_SOURCE_DIR" rev-parse HEAD)
+test -z "$(git -C "$NAZOAUTH_SOURCE_DIR" status --porcelain)" || {
+  echo "NazoAuth source checkout is not clean" >&2
+  exit 1
+}
+suite_image_tag=${OIDF_SUITE_IMAGE_TAG:-946451d1}
+export OIDF_SUITE_IMAGE_TAG=$suite_image_tag
+suite_image="nazoauth-oidf-suite:$suite_image_tag"
+pki_init_image="nazoauth-oidf-proxy-pki-init:$suite_image_tag"
+
+image_label() {
+  image=$1
+  label=$2
+  "$container_runtime" image inspect "$image" \
+    --format "{{ index .Config.Labels \"$label\" }}" 2>/dev/null || true
+}
+
+if test "$(image_label "$suite_image" org.opencontainers.image.revision)" != "$expected_revision" || \
+   test "$(image_label "$suite_image" run.nazoauth.source.revision)" != "$source_revision"; then
+  "$container_runtime" build \
+    --build-context "oidf_suite=$OIDF_SUITE_SOURCE_DIR" \
+    --build-arg "OIDF_SUITE_UPSTREAM_REVISION=$expected_revision" \
+    --build-arg "NAZOAUTH_SOURCE_REVISION=$source_revision" \
+    --file "$script_dir/Containerfile" \
+    --tag "$suite_image" \
+    "$NAZOAUTH_SOURCE_DIR"
+else
+  echo "Reusing exact OIDF Suite image $suite_image"
+fi
+
+if test "$(image_label "$pki_init_image" run.nazoauth.source.revision)" != "$source_revision"; then
+  "$container_runtime" build \
+    --target pki-init \
+    --label "run.nazoauth.source.revision=$source_revision" \
+    --file "$NAZOAUTH_SOURCE_DIR/deploy/oidf-proxy/Containerfile" \
+    --tag "$pki_init_image" \
+    "$NAZOAUTH_SOURCE_DIR"
+else
+  echo "Reusing exact OIDF proxy PKI initializer image $pki_init_image"
+fi
+
 token_parent=$(dirname -- "$OIDF_SUITE_TOKEN_FILE")
 install -d -m 0700 "$token_parent"
 compose() {
@@ -60,7 +101,7 @@ else
   }
   trap cleanup_bootstrap EXIT HUP INT TERM
 
-  compose --profile bootstrap up -d --build mongodb server-bootstrap
+  compose --profile bootstrap up -d --no-build mongodb server-bootstrap
 
   python3 - "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import json
@@ -110,7 +151,7 @@ PY
   trap - EXIT HUP INT TERM
 fi
 
-compose up -d server
+compose up -d --no-build server
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import pathlib

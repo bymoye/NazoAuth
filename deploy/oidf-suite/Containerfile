@@ -14,11 +14,13 @@ RUN --mount=type=cache,id=oidf-suite-maven,target=/root/.m2,sharing=locked \
 FROM docker.io/library/eclipse-temurin:21
 
 ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
+ARG NAZOAUTH_SOURCE_REVISION
 
 COPY --from=builder /src/target/fapi-test-suite.jar /server/fapi-test-suite.jar
 COPY --chmod=0555 deploy/oidf-suite/start-suite.sh /usr/local/bin/start-oidf-suite
 
-LABEL org.opencontainers.image.revision="${OIDF_SUITE_UPSTREAM_REVISION}"
+LABEL org.opencontainers.image.revision="${OIDF_SUITE_UPSTREAM_REVISION}" \
+      run.nazoauth.source.revision="${NAZOAUTH_SOURCE_REVISION}"
 
 ENV BASE_URL=https://localhost:8443 \
     BASE_MTLS_URL=https://localhost:8444 \

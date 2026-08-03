@@ -35,9 +35,11 @@ test -f /opt/nazo-oauth/conformance/operator-suite/pom.xml
 不得直接运行上游 `builder-compose.yml`，也不得在宿主机安装 Maven 来绕过容器构建。
 仓库内的 `deploy/oidf-suite/Containerfile` 通过具名 build context 读取固定 suite 源码，
 先验证 revision 与 clean 状态，再在 Maven build stage 中生成 JAR；运行时入口保持
-上游容器入口参数契约。实际构建由下一步脚本调用 `podman compose ... up --build`
-完成。整个过程只在私有服务器的 Podman builder 中编译；不使用开发机 Cargo 或容器构建，
-也不使用 GitHub 生成材料。
+上游容器入口参数契约。下一步脚本先用 `podman build --build-context` 构建 Suite 与
+PKI 初始化镜像各一次，再用 `podman compose ... up --no-build` 启动；Compose 不得再次
+触发构建。镜像标签同时绑定 Suite revision 与 NazoAuth 源码 revision，精确标签一致时
+才允许复用。整个过程只在私有服务器的 Podman builder 中编译；不使用开发机 Cargo 或
+容器构建，也不使用 GitHub 生成材料。
 
 当前固定 revision 的 OpenID4VP mdoc fixture 未读取计划中的
 `credential.signing_jwk`，而是使用已过期的源码内固定 Document Signer 证书。该问题
@@ -49,7 +51,8 @@ test -f /opt/nazo-oauth/conformance/operator-suite/pom.xml
 将同一 NazoAuth 精确源码提交放在 `/opt/nazoauth/source`。脚本先只在
 `127.0.0.1:18443` 启动官方套件的开发身份，且明确把该身份设为非管理员；它生成一个
 24 小时 API Token 后立即删除临时容器，再以 `devmode=false` 在
-`0.0.0.0:8443` 启动正式测试进程。Token 不进入 argv、普通环境变量或日志。
+`0.0.0.0:8443` 启动正式测试进程。脚本要求 NazoAuth 与 Suite 两个 checkout 都 clean，
+并在启动前完成上述单次镜像构建或精确镜像复用。Token 不进入 argv、普通环境变量或日志。
 
 ```sh
 export OIDF_SUITE_SOURCE_DIR=/opt/nazo-oauth/conformance/operator-suite
