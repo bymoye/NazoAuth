@@ -99,7 +99,9 @@ impl Backup {
             let restore = (|| -> anyhow::Result<()> {
                 let file = File::open(&archive_path)
                     .with_context(|| format!("failed to open {}", archive_path.display()))?;
-                Archive::new(file)
+                let mut archive = Archive::new(file);
+                archive.set_preserve_ownerships(true);
+                archive
                     .unpack(parent)
                     .with_context(|| format!("failed to restore {}", target.display()))
             })();

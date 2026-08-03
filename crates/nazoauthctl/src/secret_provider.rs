@@ -29,11 +29,11 @@ impl PostgresProvider {
         let port = url.port().unwrap_or(5432).to_string();
         let work = PrivateTempDir::new("nazoauth-pg-provider")?;
         let mut service = format!(
-            "[nazoauth]\nhost='{}'\nport='{}'\ndbname='{}'\nuser='{}'\n",
-            service_escape(host),
-            service_escape(&port),
-            service_escape(&database),
-            service_escape(&user)
+            "[nazoauth]\nhost={}\nport={}\ndbname={}\nuser={}\n",
+            service_value(host, "PostgreSQL host")?,
+            service_value(&port, "PostgreSQL port")?,
+            service_value(&database, "PostgreSQL database")?,
+            service_value(&user, "PostgreSQL user")?
         );
         for (key, value) in url.query_pairs() {
             if key == "password"
@@ -44,7 +44,11 @@ impl PostgresProvider {
             {
                 bail!("PostgreSQL URL contains an unsafe service option");
             }
-            service.push_str(&format!("{}='{}'\n", key, service_escape(&value)));
+            service.push_str(&format!(
+                "{}={}\n",
+                key,
+                service_value(&value, "PostgreSQL service option")?
+            ));
         }
         let service_path = work.path().join("pg_service.conf");
         let pass_path = work.path().join("pgpass");
@@ -132,8 +136,13 @@ fn decode(value: &str, label: &str) -> anyhow::Result<String> {
         .with_context(|| format!("{label} has invalid percent encoding"))
 }
 
-fn service_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('\'', "\\'")
+fn service_value<'a>(value: &'a str, label: &str) -> anyhow::Result<&'a str> {
+    if value.contains(['\0', '\r', '\n'])
+        || value.chars().next_back().is_some_and(char::is_whitespace)
+    {
+        bail!("{label} cannot be represented safely in a PostgreSQL service file");
+    }
+    Ok(value)
 }
 
 fn pgpass_escape(value: &str) -> String {

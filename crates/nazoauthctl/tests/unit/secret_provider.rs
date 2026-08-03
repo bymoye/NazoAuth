@@ -15,7 +15,11 @@ fn providers_split_secrets_from_non_secret_connection_parameters() {
     let service = fs::read_to_string(provider.service_file()).unwrap();
     let pass = fs::read_to_string(provider.password_file()).unwrap();
     assert!(!service.contains("p@ss"));
-    assert!(service.contains("sslmode='require'"));
+    assert!(service.contains("host=db.example\n"));
+    assert!(service.contains("port=5544\n"));
+    assert!(service.contains("dbname=oauth\n"));
+    assert!(service.contains("user=alice\n"));
+    assert!(service.contains("sslmode=require\n"));
     assert!(pass.ends_with(":p@ss\n"));
 
     let valkey = work.path().join("valkey");
@@ -24,4 +28,28 @@ fn providers_split_secrets_from_non_secret_connection_parameters() {
     assert_eq!(provider.host, "cache.example");
     assert_eq!(provider.password_stdin(), b"s:ecret\n");
     assert!(provider.tls);
+}
+
+#[test]
+fn postgres_provider_rejects_values_service_files_cannot_represent() {
+    let work = PrivateTempDir::new("nazoauth-provider-invalid-service-test").unwrap();
+    for (name, url) in [
+        (
+            "newline",
+            "postgresql://alice:p%40ss@db.example/oauth?application_name=line%0Abreak",
+        ),
+        (
+            "trailing-space",
+            "postgresql://alice%20:p%40ss@db.example/oauth",
+        ),
+        (
+            "nul",
+            "postgresql://alice:p%40ss@db.example/oauth?application_name=a%00b",
+        ),
+    ] {
+        let path = work.path().join(name);
+        fs::write(&path, url).unwrap();
+        let error = PostgresProvider::from_url_file(&path).err().unwrap();
+        assert!(error.to_string().contains("cannot be represented safely"));
+    }
 }
