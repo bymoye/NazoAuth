@@ -54,17 +54,12 @@ public onboarding JWKS 与同一批私钥逐一对应。不接受仓库、历史
 FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation、
 key-attestation 和 credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
 
-VP mdoc 的 Document Signer 证书来自同一批 run-local `credential.signing_jwk`，包含
-ISO/IEC 18013-5 mDL Document Signer EKU `1.0.18013.5.1.2`，并由本轮 CA 签发。
-固定 revision 的 Suite 上游 mdoc fixture 不读取计划中已经配置的
-`credential.signing_jwk`，而是使用源码内的固定证书。私有服务器的 Suite 镜像因此只在
-构建阶段应用
-`deploy/oidf-suite/patches/0001-vp-mdoc-use-configured-issuer.patch`，让 fixture 使用该
-标准计划字段；上游 checkout 本身必须保持精确 revision 且 clean。Containerfile 在编译前
-校验上游 revision、clean 状态、补丁 SHA-256 和 `git apply --check`，运行镜像也记录两项
-identity label。该 overlay 不改变 plan、判定或 expected result，也不会被 GitHub 上的官方
-Suite workflow 使用。服务端仍按证书有效期、用途、签发链和 mdoc 签名进行完整验证，不能
-通过接受过期 fixture 或关闭验证来替代该边界修复。
+本轮 `credential.signing_jwk` 包含由本轮 CA 签发、带 ISO/IEC 18013-5 mDL Document
+Signer EKU `1.0.18013.5.1.2` 的证书。固定 revision 的 Suite 在 VP mdoc 路径上没有读取
+该计划字段，而是生成使用源码内固定证书的凭据；该证书已于 2026-07-30 过期。私有 Suite
+保持官方源码不修改。上游 fixture 修复并完成新 revision 复核前，受影响的 mdoc plans
+必须报告为上游阻塞且未验证，不能改成 expected skip 或伪装为通过。NazoAuth 继续完整
+验证证书有效期、用途、签发链和 mdoc 签名；Suite 更新后必须重跑这些 plans。
 
 ## 私有服务器命令
 

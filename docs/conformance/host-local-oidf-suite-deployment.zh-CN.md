@@ -1,9 +1,9 @@
 # 宿主机本地 OIDF Conformance Suite 部署
 
-本手册在私有服务器上部署固定 revision 的官方 OIDF Conformance Suite，以及下述有
-哈希约束的运行时 fixture overlay。它独立于 NazoAuth 产品镜像，也不通过 GitHub
-Actions。公网入口负责终止 TLS；套件只把 Spring Boot 的明文 HTTP 端口 `8080`
-映射到宿主机 `0.0.0.0:8443`。本部署只使用 Podman。
+本手册在私有服务器上部署固定 revision、未修改的官方 OIDF Conformance Suite。它
+独立于 NazoAuth 产品镜像，也不通过 GitHub Actions。公网入口负责终止 TLS；套件只把
+Spring Boot 的明文 HTTP 端口 `8080` 映射到宿主机 `0.0.0.0:8443`。本部署只使用
+Podman。
 
 固定套件 revision：
 `946451d1ce29965c9ab7aee05f5003552233160e`。
@@ -34,18 +34,15 @@ test -f /opt/nazo-oauth/conformance/operator-suite/pom.xml
 
 不得直接运行上游 `builder-compose.yml`，也不得在宿主机安装 Maven 来绕过容器构建。
 仓库内的 `deploy/oidf-suite/Containerfile` 通过具名 build context 读取固定 suite 源码，
-在 Maven build stage 中应用 overlay、运行聚焦单测并生成 JAR；运行时入口保持上游
-容器入口参数契约。实际构建由下一步脚本调用 `podman compose ... up --build`
+先验证 revision 与 clean 状态，再在 Maven build stage 中生成 JAR；运行时入口保持
+上游容器入口参数契约。实际构建由下一步脚本调用 `podman compose ... up --build`
 完成。整个过程只在私有服务器的 Podman builder 中编译；不使用开发机 Cargo 或容器构建，
 也不使用 GitHub 生成材料。
 
-上游 OpenID4VP mdoc fixture 未读取计划中的 `credential.signing_jwk`，而是使用源码内的
-固定 Document Signer 证书。该固定证书不属于被测端信任材料，也不能通过放宽服务端的
-证书时效/链验证来接受。因此 Containerfile 在保持上游 checkout clean 的前提下，验证并
-应用 `deploy/oidf-suite/patches/0001-vp-mdoc-use-configured-issuer.patch`，只让 fixture 使用
-计划已提供的签名 JWK，并保留其完整 `x5c` 链。构建时会执行对应的 Suite 聚焦单测。
-补丁哈希和上游 revision 同时写入镜像 label；任何哈希、revision、clean、apply 或单测
-校验失败都会停止构建。GitHub 的官方 Suite workflows 不引用此 overlay。
+当前固定 revision 的 OpenID4VP mdoc fixture 未读取计划中的
+`credential.signing_jwk`，而是使用已过期的源码内固定 Document Signer 证书。该问题
+由上游 Suite 修复；本地不修改 Suite，也不放宽服务端证书时效、用途或链验证。受影响的
+计划在上游更新前记录为阻塞并留待重测，不能记为通过或 expected skip。
 
 ## 3. 生成短期 API Token 并切换到严格鉴权模式
 

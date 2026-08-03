@@ -43,20 +43,16 @@ There is deliberately no OpenID4VC base or driver configuration field. Before th
 
 The preparation directory is `0700` and its four files are `0600`. Immediately after it successfully materializes the private Suite configurations, the runner rechecks the digest and deletes `openid4vc-run-material.json`. It then creates an eight-hour lease from `openid4vc-conformance-trust.json`, rechecks that digest, and deletes the file after the server stores it. The public baseline profile and manifest remain as installation-source evidence. The server resolves the attestation keys only for clients bound to that lease and binds the run-local credential CA to verifier transactions created for the same Suite origin. Revocation or expiry rejects all of that trust immediately; periodic cleanup deletes the clients and bound verifier transactions and clears the stored public material. Every private work-directory configuration is removed in `finally`. Each official runner invocation receives the Suite token through a new inherited FD, never a token file. The run-local CA is for client-attestation/key-attestation/credential test material only; it is not an ingress client CA and is never installed with the reverse proxy.
 
-The VP mdoc Document Signer certificate comes from the same run-local
-`credential.signing_jwk`, carries the ISO/IEC 18013-5 mDL Document Signer EKU
-`1.0.18013.5.1.2`, and is signed by that run's CA. The pinned Suite revision's
-mdoc fixture ignores its configured `credential.signing_jwk` and instead uses a
-source-embedded certificate. The private-server Suite image therefore applies
-`deploy/oidf-suite/patches/0001-vp-mdoc-use-configured-issuer.patch` only while
-building the image so the fixture consumes the standard plan field; the
-upstream checkout itself must remain at the exact clean revision. The
-Containerfile verifies the upstream revision, clean state, overlay SHA-256, and
-`git apply --check` before compiling and records both identities as image
-labels. The overlay does not change plans, verdicts, or expected results and is
-not referenced by the public GitHub official-Suite workflows. The server still
-validates certificate time, purpose, chain, and mdoc signatures; accepting the
-stale fixture or disabling validation is not an alternative.
+The run-local `credential.signing_jwk` contains a Document Signer certificate
+with the ISO/IEC 18013-5 mDL Document Signer EKU `1.0.18013.5.1.2`, signed by
+that run's CA. The pinned Suite revision currently ignores this plan field for
+VP mdoc and emits credentials with a source-embedded certificate that expired
+on 2026-07-30. The private Suite must remain unmodified. Until the upstream
+fixture is corrected and a reviewed revision is pinned, report the affected
+mdoc plans as upstream-blocked and unverified; do not convert them to expected
+skips or passes. NazoAuth continues to validate certificate time, purpose,
+chain, and mdoc signatures, and the affected plans must be rerun after the
+Suite update.
 
 ## Private-server command
 
