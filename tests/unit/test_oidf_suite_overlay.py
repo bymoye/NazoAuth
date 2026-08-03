@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM_REVISION = "946451d1ce29965c9ab7aee05f5003552233160e"
-OVERLAY_SHA256 = "1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce"
+OVERLAY_SHA256 = "111831ea9c949b36f05fafe5599afae4ffd022050659f77864b24e90e75e8704"
 
 
 class OidfSuiteOverlayTests(unittest.TestCase):
@@ -50,10 +50,13 @@ class OidfSuiteOverlayTests(unittest.TestCase):
             {
                 "src/main/java/net/openid/conformance/condition/as/CreateMdocCredential.java",
                 "src/main/kotlin/com/android/identity/testapp/TestAppUtils.kt",
+                "src/test/java/net/openid/conformance/condition/as/CreateMdocCredential_UnitTest.java",
             },
         )
         self.assertIn('env.getElementFromObject("config", "credential.signing_jwk")', patch)
         self.assertIn("JWK.parse(issuerSigningJwk).toECKey()", patch)
+        self.assertIn("x509CertChain.map", patch)
+        self.assertIn("assertConfiguredIssuerCertificateWasUsed", patch)
         self.assertNotIn("expected_failure", patch.lower())
         self.assertNotIn("disable", patch.lower())
 
@@ -75,6 +78,11 @@ class OidfSuiteOverlayTests(unittest.TestCase):
         self.assertIn('container_runtime=${OIDF_CONTAINER_RUNTIME:-podman}', bootstrap)
         self.assertIn('OIDF_TARGET_HOSTNAME: ${OIDF_TARGET_HOSTNAME:', compose)
         self.assertNotIn("567t0yglur-443.cnb.run", compose)
+
+        containerfile = (ROOT / "deploy" / "oidf-suite" / "Containerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("-Dtest=CreateMdocCredential_UnitTest", containerfile)
 
 
 if __name__ == "__main__":

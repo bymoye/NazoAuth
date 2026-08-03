@@ -5,7 +5,7 @@ x-suite-build: &suite-build
   dockerfile: deploy/oidf-suite/Containerfile
   args:
     OIDF_SUITE_UPSTREAM_REVISION: ${OIDF_SUITE_UPSTREAM_REVISION:-946451d1ce29965c9ab7aee05f5003552233160e}
-    OIDF_SUITE_OVERLAY_SHA256: ${OIDF_SUITE_OVERLAY_SHA256:-1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce}
+    OIDF_SUITE_OVERLAY_SHA256: ${OIDF_SUITE_OVERLAY_SHA256:-111831ea9c949b36f05fafe5599afae4ffd022050659f77864b24e90e75e8704}
   additional_contexts:
     oidf_suite: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
 

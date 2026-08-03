@@ -3,7 +3,7 @@
 FROM docker.io/library/maven:3-eclipse-temurin-21 AS builder
 
 ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
-ARG OIDF_SUITE_OVERLAY_SHA256=1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce
+ARG OIDF_SUITE_OVERLAY_SHA256=111831ea9c949b36f05fafe5599afae4ffd022050659f77864b24e90e75e8704
 
 WORKDIR /src
 COPY --from=oidf_suite . .
@@ -15,12 +15,12 @@ RUN --mount=type=cache,id=oidf-suite-maven,target=/root/.m2,sharing=locked \
     git apply --check /tmp/oidf-suite.patch && \
     git apply /tmp/oidf-suite.patch && \
     git diff --check && \
-    mvn -B clean package -DskipTests=true
+    mvn -B clean package -Dtest=CreateMdocCredential_UnitTest
 
 FROM docker.io/library/eclipse-temurin:21
 
 ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
-ARG OIDF_SUITE_OVERLAY_SHA256=1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce
+ARG OIDF_SUITE_OVERLAY_SHA256=111831ea9c949b36f05fafe5599afae4ffd022050659f77864b24e90e75e8704
 
 COPY --from=builder /src/target/fapi-test-suite.jar /server/fapi-test-suite.jar
 COPY --chmod=0555 deploy/oidf-suite/start-suite.sh /usr/local/bin/start-oidf-suite
