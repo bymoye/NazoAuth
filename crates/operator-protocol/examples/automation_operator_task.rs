@@ -159,10 +159,11 @@ fn verify(options: BTreeMap<String, String>) -> anyhow::Result<()> {
         &header.kid,
         &ed25519_dalek::VerifyingKey::from_bytes(&public)?,
     )?;
-    if receipt.request_sha256 != fs::read_to_string(request_path)?.trim()
-        || !matches!(receipt.outcome, TaskOutcome::Succeeded { .. })
-    {
-        anyhow::bail!("runtime receipt is not bound to the successful automation request");
+    if receipt.request_sha256 != fs::read_to_string(request_path)?.trim() {
+        anyhow::bail!("runtime receipt is not bound to the automation request");
+    }
+    if let TaskOutcome::Failed { code } = receipt.outcome {
+        anyhow::bail!("automation operator task failed with stable code {code}");
     }
     Ok(())
 }

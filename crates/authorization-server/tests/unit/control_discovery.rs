@@ -2,6 +2,7 @@ use nazo_operator_protocol::{
     CONTROL_DISCOVERY_SCHEMA, DiscoveryRequest, decode_instance_public_key,
     verify_deployment_statement, verify_discovery_statement,
 };
+use std::path::PathBuf;
 
 use super::*;
 
