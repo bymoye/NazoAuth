@@ -278,11 +278,12 @@ async fn revoking_a_conformance_lease_deletes_its_presentation_transactions() {
 
     leases.revoke(tenant_id, lease.id).await.unwrap();
     let mut connection = get_conn(&pool).await.unwrap();
-    let count = sql_query("SELECT COUNT(*)::BIGINT AS count FROM openid4vp_transactions WHERE id = $1")
-        .bind::<SqlUuid, _>(transaction_id)
-        .get_result::<CountRow>(&mut connection)
-        .await
-        .unwrap();
+    let count =
+        sql_query("SELECT COUNT(*)::BIGINT AS count FROM openid4vp_transactions WHERE id = $1")
+            .bind::<SqlUuid, _>(transaction_id)
+            .get_result::<CountRow>(&mut connection)
+            .await
+            .unwrap();
     assert_eq!(count.count, 0);
 }
 

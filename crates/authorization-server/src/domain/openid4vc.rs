@@ -42,12 +42,12 @@ pub(crate) struct Openid4vcCredentialCrypto {
     trust_anchors: Arc<Vec<Vec<u8>>>,
 }
 
-pub(crate) fn parse_conformance_credential_trust_anchor(
-    pem: &str,
-) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn parse_conformance_credential_trust_anchor(pem: &str) -> anyhow::Result<Vec<u8>> {
     let certificates = X509::stack_from_pem(pem.as_bytes())?;
     if certificates.len() != 1 {
-        anyhow::bail!("OpenID4VC conformance credential trust must contain exactly one certificate");
+        anyhow::bail!(
+            "OpenID4VC conformance credential trust must contain exactly one certificate"
+        );
     }
     let der = certificates[0].to_der()?;
     let (remainder, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
@@ -504,8 +504,7 @@ impl Openid4vcCredentialCrypto {
             .mdoc_session_transcript
             .as_ref()
             .ok_or(CredentialTrustError::InvalidHolderBinding)?;
-        let trust_anchors =
-            self.combined_trust_anchors(&presentation.additional_trust_anchors)?;
+        let trust_anchors = self.combined_trust_anchors(&presentation.additional_trust_anchors)?;
         let verifier = mdoc_rs::Verifier::new(trust_anchors.clone());
         let verified = verifier
             .verify(

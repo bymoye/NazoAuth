@@ -1526,20 +1526,12 @@ impl ServerPresentationOperations {
         for entry in materials {
             let material: nazo_operator_protocol::Openid4vcConformanceTrust =
                 serde_json::from_value(entry.public_material).map_err(|_| {
-                    vp_error(
-                        503,
-                        "server_error",
-                        "Conformance trust state is invalid.",
-                    )
+                    vp_error(503, "server_error", "Conformance trust state is invalid.")
                 })?;
             let issuer_origin = url::Url::parse(&material.client_attestation_issuer)
                 .map(|url| url.origin().ascii_serialization())
                 .map_err(|_| {
-                    vp_error(
-                        503,
-                        "server_error",
-                        "Conformance trust state is invalid.",
-                    )
+                    vp_error(503, "server_error", "Conformance trust state is invalid.")
                 })?;
             if issuer_origin == wallet_origin {
                 matches.push(entry.lease_id);
@@ -1583,11 +1575,7 @@ impl ServerPresentationOperations {
             })?;
         let material: nazo_operator_protocol::Openid4vcConformanceTrust =
             serde_json::from_value(material).map_err(|_| {
-                vp_error(
-                    503,
-                    "server_error",
-                    "Conformance trust state is invalid.",
-                )
+                vp_error(503, "server_error", "Conformance trust state is invalid.")
             })?;
         crate::domain::openid4vc::parse_conformance_credential_trust_anchor(
             &material.credential_trust_anchor_pem,
