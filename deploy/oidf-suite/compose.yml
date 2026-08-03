@@ -59,28 +59,6 @@ services:
         max-size: 500k
         max-file: "5"
 
-  server-bootstrap:
-    profiles: [bootstrap]
-    image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-946451d1}
-    environment:
-      <<: *suite-environment
-      JAVA_EXTRA_ARGS: >-
-        -Dfintechlabs.devmode=true
-        -Dfintechlabs.makeDummyUserAdminInDevMode=false
-        -Doidc.google.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
-        -Doidc.gitlab.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
-        -Doidc.admin.issuer=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
-    ports:
-      - "127.0.0.1:18443:8080"
-    depends_on:
-      mongodb:
-        condition: service_started
-    logging:
-      driver: json-file
-      options:
-        max-size: 500k
-        max-file: "5"
-
 volumes:
   mongodb_data:
   oidf_proxy_pki:
@@ -88,6 +66,7 @@ volumes:
 
 networks:
   default:
+    name: nazoauth-oidf-suite-default
   oidf_bridge:
     name: nazoauth-oidf-bridge
     ipam:

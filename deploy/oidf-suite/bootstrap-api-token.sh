@@ -98,6 +98,7 @@ install -d -m 0700 "$token_parent"
 compose() {
   "$container_runtime" compose -f "$script_dir/compose.yml" "$@"
 }
+bootstrap_container=nazoauth-oidf-suite-bootstrap
 
 if test -e "$OIDF_SUITE_TOKEN_FILE"; then
   test -f "$OIDF_SUITE_TOKEN_FILE" || {
@@ -115,12 +116,25 @@ if test -e "$OIDF_SUITE_TOKEN_FILE"; then
   echo "Reusing the existing protected suite token; it will be validated after startup"
 else
   cleanup_bootstrap() {
-    compose --profile bootstrap stop server-bootstrap >/dev/null 2>&1 || true
-    compose --profile bootstrap rm -f server-bootstrap >/dev/null 2>&1 || true
+    "$container_runtime" rm -f "$bootstrap_container" >/dev/null 2>&1 || true
   }
   trap cleanup_bootstrap EXIT HUP INT TERM
 
-  compose --profile bootstrap up -d --no-build mongodb server-bootstrap
+  compose up -d --no-build mongodb
+  cleanup_bootstrap
+  "$container_runtime" run -d \
+    --name "$bootstrap_container" \
+    --network nazoauth-oidf-suite-default \
+    --publish 127.0.0.1:18443:8080 \
+    --env "BASE_URL=$OIDF_SUITE_BASE_URL" \
+    --env "BASE_MTLS_URL=$OIDF_SUITE_BASE_URL" \
+    --env MONGODB_HOST=mongodb \
+    --env OIDC_GOOGLE_CLIENTID=google-client \
+    --env OIDC_GOOGLE_SECRET=google-secret \
+    --env OIDC_GITLAB_CLIENTID=gitlab-client \
+    --env OIDC_GITLAB_SECRET=gitlab-secret \
+    --env "JAVA_EXTRA_ARGS=-Dfintechlabs.devmode=true -Dfintechlabs.makeDummyUserAdminInDevMode=false -Doidc.google.iss=$OIDF_OPERATOR_ISSUER -Doidc.gitlab.iss=$OIDF_OPERATOR_ISSUER -Doidc.admin.issuer=$OIDF_OPERATOR_ISSUER" \
+    "$suite_image" >/dev/null
 
   python3 - "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import json
@@ -170,7 +184,7 @@ PY
   trap - EXIT HUP INT TERM
 fi
 
-compose up -d --no-build nginx
+compose up -d --no-build
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import pathlib

@@ -56,6 +56,10 @@ test -f /opt/nazo-oauth/conformance/operator-suite/pom.xml
 脚本要求 NazoAuth 与 Suite 两个 checkout 都 clean，并在启动前完成上述单次镜像构建或
 精确镜像复用。Token 不进入 argv、普通环境变量或日志。
 
+Compose 只管理 MongoDB、正式 Suite server 和 Nginx 三个长期服务。临时 Token 进程
+由脚本直接接入固定私有网络 `nazoauth-oidf-suite-default`，生成 Token 后立即删除；它不
+作为 Compose profile 或依赖服务存在，避免一次性容器与长期服务发生生命周期冲突。
+
 ```sh
 export OIDF_SUITE_SOURCE_DIR=/opt/nazo-oauth/conformance/operator-suite
 export OIDF_SUITE_BASE_URL=https://oauth-test.nazo.run
