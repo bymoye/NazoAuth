@@ -235,40 +235,71 @@ class ProxyTrust:
         self.executable = executable.resolve()
         self.backup = work_dir / "proxy-trust-bundle.before.pem"
         self.installed = False
+        self.original_mode: int | None = None
 
     def _validate_and_reload(self) -> None:
         command([str(self.executable), "-t"])
         command([str(self.executable), "-s", "reload"])
 
+    def _atomic_replace(self, source: Path, mode: int) -> None:
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.target.parent,
+                prefix=f".{self.target.name}.",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                with source.open("rb") as input_file:
+                    shutil.copyfileobj(input_file, temporary)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            temporary_path.chmod(mode)
+            if os.name == "posix":
+                descriptor = os.open(temporary_path, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            os.replace(temporary_path, self.target)
+            temporary_path = None
+            if os.name == "posix":
+                descriptor = os.open(self.target.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    def _restore_backup(self) -> None:
+        if self.original_mode is None:
+            raise PublicRunError("proxy trust backup mode is unavailable")
+        self._atomic_replace(self.backup, self.original_mode)
+        self._validate_and_reload()
+        self.backup.unlink()
+
     def install(self, approved_bundle: Path) -> None:
         if not self.target.is_file() or not self.executable.is_file():
             raise PublicRunError("proxy trust target and executable must already exist")
+        self.original_mode = self.target.stat().st_mode & 0o777
         shutil.copyfile(self.target, self.backup)
         self.backup.chmod(0o600)
         trust_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         trust_context.load_verify_locations(cafile=str(approved_bundle))
-        self.target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=self.target.parent, delete=False) as temporary:
-            temporary_path = Path(temporary.name)
-            with approved_bundle.open("rb") as source:
-                shutil.copyfileobj(source, temporary)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        temporary_path.chmod(0o644)
-        os.replace(temporary_path, self.target)
+        self._atomic_replace(approved_bundle, 0o644)
         try:
             self._validate_and_reload()
         except BaseException:
-            os.replace(self.backup, self.target)
-            self._validate_and_reload()
+            self._restore_backup()
             raise
         self.installed = True
 
     def restore(self) -> None:
         if not self.installed:
             return
-        os.replace(self.backup, self.target)
-        self._validate_and_reload()
+        self._restore_backup()
         self.installed = False
 
 

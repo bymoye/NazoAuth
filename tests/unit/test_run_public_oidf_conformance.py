@@ -602,10 +602,21 @@ class PublicOidfRunnerTests(unittest.TestCase):
             work = root / "work"
             work.mkdir()
             trust = self.module.ProxyTrust(target, executable, work)
+            replace = self.module.os.replace
+
+            def same_directory_replace(source, destination):
+                if Path(source).parent != Path(destination).parent:
+                    raise OSError(18, "Invalid cross-device link")
+                return replace(source, destination)
 
             with (
                 mock.patch.object(self.module, "command") as command,
                 mock.patch.object(self.module.ssl, "SSLContext"),
+                mock.patch.object(
+                    self.module.os,
+                    "replace",
+                    side_effect=same_directory_replace,
+                ),
             ):
                 trust.install(approved)
                 self.assertEqual(target.read_text(encoding="utf-8"), "new\n")
