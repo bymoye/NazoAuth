@@ -127,7 +127,13 @@ where
                 ))?;
             let validated = self
                 .proofs
-                .validate(proofs, &self.issuer, expected_nonce, proof_metadata)
+                .validate(
+                    proofs,
+                    &access.client_id,
+                    &self.issuer,
+                    expected_nonce,
+                    proof_metadata,
+                )
                 .await?;
             if validated.is_empty()
                 || !self

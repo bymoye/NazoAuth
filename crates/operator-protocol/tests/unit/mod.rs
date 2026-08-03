@@ -168,6 +168,7 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
     let operation = TaskOperation::ConformanceLeaseCreate {
         profile: "oidf-full".to_owned(),
         material_sha256: "a".repeat(64),
+        public_material: None,
         ttl_seconds: 28_800,
     };
     validate_operation(&operation).unwrap();
@@ -177,6 +178,7 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
             validate_operation(&TaskOperation::ConformanceLeaseCreate {
                 profile: "oidf-full".to_owned(),
                 material_sha256: "a".repeat(64),
+                public_material: None,
                 ttl_seconds,
             })
             .is_err()
@@ -186,10 +188,33 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
         validate_operation(&TaskOperation::ConformanceLeaseCreate {
             profile: "oidf-full".to_owned(),
             material_sha256: "A".repeat(64),
+            public_material: None,
             ttl_seconds: 60,
         })
         .is_err()
     );
+}
+
+#[test]
+fn openid4vc_lease_accepts_only_closed_public_trust_material() {
+    let material = Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example/".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
+        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+    };
+    let operation = |material| TaskOperation::ConformanceLeaseCreate {
+        profile: "openid4vc".to_owned(),
+        material_sha256: "a".repeat(64),
+        public_material: material,
+        ttl_seconds: 28_800,
+    };
+    validate_operation(&operation(Some(material.clone()))).unwrap();
+    assert!(validate_operation(&operation(None)).is_err());
+
+    let mut private = material;
+    private.client_attestation_jwks["keys"][0]["d"] = serde_json::json!("secret");
+    assert!(validate_operation(&operation(Some(private))).is_err());
 }
 
 #[test]

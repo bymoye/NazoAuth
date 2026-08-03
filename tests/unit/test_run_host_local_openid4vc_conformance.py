@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,64 @@ def load_module():
 class HostLocalOpenid4vcTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
+
+    def fake_material(self) -> dict[str, object]:
+        material: dict[str, object] = {
+            "trust_anchor_pem": "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n"
+        }
+        for index, name in enumerate(
+            ("wallet_private", "wallet_attested", "client_attestation", "key_attestation", "credential")
+        ):
+            material[name] = {
+                "kty": "EC",
+                "crv": "P-256",
+                "alg": "ES256",
+                "use": "sig",
+                "kid": f"kid-{index}",
+                "x": f"x-{index}",
+                "y": f"y-{index}",
+                "d": f"d-{index}",
+                "x5c": [f"certificate-{index}"],
+            }
+        return material
+
+    def write_prepared_directory(self, directory: Path) -> tuple[object, str, str]:
+        directory.mkdir(mode=0o700)
+        directory.chmod(0o700)
+        material = self.fake_material()
+        profile = self.module.build_prepared_install_profile(
+            material, "https://suite.example"
+        )
+
+        def write(name: str, value: object) -> str:
+            payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+            path = directory / name
+            path.write_bytes(payload)
+            path.chmod(0o600)
+            return hashlib.sha256(payload).hexdigest()
+
+        profile_digest = write(self.module.PREPARED_PROFILE_FILE, profile)
+        trust_digest = write(
+            self.module.PREPARED_TRUST_FILE,
+            self.module.build_prepared_conformance_trust(
+                material, "https://suite.example"
+            ),
+        )
+        material_digest = write(self.module.PREPARED_MATERIAL_FILE, material)
+        write(
+            self.module.PREPARED_MANIFEST_FILE,
+            {
+                "schema": 1,
+                "source_commit": "a" * 40,
+                "suite_origin": "https://suite.example",
+                "files": {
+                    self.module.PREPARED_PROFILE_FILE: profile_digest,
+                    self.module.PREPARED_TRUST_FILE: trust_digest,
+                    self.module.PREPARED_MATERIAL_FILE: material_digest,
+                },
+            },
+        )
+        return material, material_digest, trust_digest
 
     def test_secret_schema_is_closed_and_has_no_secret_file_option(self):
         with self.assertRaises(SystemExit):
@@ -261,6 +320,71 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             self.module.delete_private_configs(root / "first")
             self.assertFalse((root / "first" / "generated-openid4vc-material").exists())
 
+    def test_prepared_install_material_is_source_bound_and_consumed_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "prepared"
+            material, expected_digest, trust_digest = self.write_prepared_directory(directory)
+            args = self.module.argparse.Namespace(
+                prepared_install_dir=directory.resolve(),
+                deployed_sha="a" * 40,
+                conformance_server="https://suite.example",
+            )
+
+            loaded = self.module.prepared_material(args)
+
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded, (material, expected_digest, trust_digest))
+            self.module.consume_prepared_material(directory, expected_digest)
+            self.assertFalse((directory / self.module.PREPARED_MATERIAL_FILE).exists())
+            self.assertTrue((directory / self.module.PREPARED_PROFILE_FILE).is_file())
+            self.assertTrue((directory / self.module.PREPARED_MANIFEST_FILE).is_file())
+
+    def test_prepared_install_rejects_digest_or_profile_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "prepared"
+            self.write_prepared_directory(directory)
+            profile_path = directory / self.module.PREPARED_PROFILE_FILE
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["client_attestation_issuer"] = "https://other.example/"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            profile_path.chmod(0o600)
+            args = self.module.argparse.Namespace(
+                prepared_install_dir=directory.resolve(),
+                deployed_sha="a" * 40,
+                conformance_server="https://suite.example",
+            )
+            with self.assertRaisesRegex(
+                self.module.HostLocalOpenid4vcError, "manifest does not match"
+            ):
+                self.module.prepared_material(args)
+
+    def test_ctl_lease_is_created_from_public_trust_and_revoked(self):
+        lease_id = "018f3f2a-7b55-7a25-8f20-6d526f8f44e1"
+        args = self.module.argparse.Namespace(
+            nazoauthctl=Path("/usr/local/bin/nazoauthctl"),
+            nazoauthctl_config=Path("/etc/nazoauth/update.json"),
+            prepared_install_dir=Path("/run/nazoauth-host-local-oidf-install"),
+            prepared_trust_digest="a" * 64,
+            lease_ttl_seconds=28_800,
+        )
+        with (
+            mock.patch.object(
+                self.module,
+                "ctl_receipt",
+                side_effect=[{"outcome": {"lease": {"lease_id": lease_id}}}, {} , {}],
+            ) as ctl,
+            mock.patch.object(self.module, "consume_prepared_trust") as consume,
+        ):
+            self.assertEqual(self.module.create_conformance_lease(args), lease_id)
+            self.module.revoke_conformance_lease(args, lease_id)
+
+        create = ctl.call_args_list[0].args[1]
+        self.assertIn("openid4vc", create)
+        self.assertIn(str(args.prepared_install_dir / self.module.PREPARED_TRUST_FILE), create)
+        consume.assert_called_once_with(args.prepared_install_dir, "a" * 64)
+        self.assertIn("revoke", ctl.call_args_list[1].args[1])
+        self.assertIn("cleanup", ctl.call_args_list[2].args[1])
+
     def test_final_receipt_is_credential_free_and_states_no_proxy_trust(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -368,6 +492,10 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 runner_sha="a" * 40,
                 suite_revision="b" * 40,
                 request_object_trust_anchor_pem=anchor,
+                prepared_install_dir=root / "prepared",
+                nazoauthctl=ROOT / "scripts" / "run_host_local_openid4vc_conformance.py",
+                nazoauthctl_config=None,
+                lease_ttl_seconds=28_800,
                 run_namespace="receipt-window",
                 secrets_stdin=True,
                 secret_fd=None,
@@ -395,6 +523,15 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 mock.patch.object(self.module, "validate_output_paths"),
                 mock.patch.object(self.module, "verify_source"),
                 mock.patch.object(self.module, "verify_suite"),
+                mock.patch.object(
+                    self.module,
+                    "prepared_material",
+                    return_value=(
+                        self.fake_material(),
+                        "prepared-digest",
+                        "prepared-trust-digest",
+                    ),
+                ),
                 mock.patch.object(self.module, "read_public_trust_anchor", return_value="public"),
                 mock.patch.object(self.module, "read_secret_document", return_value=secret_values),
                 mock.patch.object(self.module, "verify_suite_boundary"),
@@ -404,6 +541,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                     return_value={"user_id": "00000000-0000-0000-0000-000000000123"},
                 ),
                 mock.patch.object(self.module, "materialize_configs"),
+                mock.patch.object(self.module, "consume_prepared_material"),
                 mock.patch.object(self.module, "apply_public_onboarding"),
                 mock.patch.object(self.module, "run_matrix"),
                 mock.patch.object(

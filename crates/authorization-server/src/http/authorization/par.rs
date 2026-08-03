@@ -326,12 +326,15 @@ async fn par_after_rate_limit_inner(
                 "Client attestation is not configured.",
             );
         };
-        let validated = match validator.validate(
-            attestation,
-            proof,
-            &context.config.issuer,
-            Utc::now().timestamp(),
-        ) {
+        let validated = match validator
+            .validate_for_client(
+                attestation,
+                proof,
+                &context.config.issuer,
+                Utc::now().timestamp(),
+            )
+            .await
+        {
             Ok(validated) if validated.client_id == client.client_id => validated,
             _ => {
                 return oauth_error(

@@ -203,6 +203,7 @@ diesel::table! {
         tenant_id -> Uuid,
         profile -> Varchar,
         material_sha256 -> Varchar,
+        public_material -> Nullable<Jsonb>,
         created_at -> Timestamptz,
         expires_at -> Timestamptz,
         revoked_at -> Nullable<Timestamptz>,

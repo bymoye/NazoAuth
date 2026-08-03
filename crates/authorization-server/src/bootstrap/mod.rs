@@ -383,18 +383,29 @@ pub async fn run() -> anyhow::Result<()> {
     } else {
         None
     };
+    let static_client_attestation =
+        settings
+            .openid4vc
+            .client_attestation_issuer
+            .as_ref()
+            .map(|issuer| {
+                (
+                    issuer.clone(),
+                    settings
+                        .openid4vc
+                        .client_attestation_jwks
+                        .clone()
+                        .expect("configured client attestation requires trust keys"),
+                )
+            });
     let client_attestation_validator = settings
-        .openid4vc
-        .client_attestation_issuer
-        .as_ref()
-        .map(|issuer| {
-            Openid4vcClientAttestationValidator::new(
-                issuer,
-                settings
-                    .openid4vc
-                    .client_attestation_jwks
-                    .clone()
-                    .expect("configured client attestation requires trust keys"),
+        .modules
+        .enable_openid4vci_issuer
+        .then(|| {
+            Openid4vcClientAttestationValidator::with_conformance_leases(
+                static_client_attestation,
+                nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
+                DEFAULT_TENANT_ID,
             )
             .map(Arc::new)
         })
@@ -411,7 +422,11 @@ pub async fn run() -> anyhow::Result<()> {
                     .key_attestation_jwks
                     .clone()
                     .unwrap_or_else(|| serde_json::json!({"keys": []})),
-            )?;
+            )?
+            .with_conformance_leases(
+                nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
+                DEFAULT_TENANT_ID,
+            );
             let operations = Arc::new(ServerCredentialIssuerOperations::new(
                 diesel_db.clone(),
                 DEFAULT_TENANT_ID,

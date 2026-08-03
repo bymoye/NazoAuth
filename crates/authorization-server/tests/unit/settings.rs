@@ -7,7 +7,7 @@ const KEY_ATTESTATION_JWKS: &str =
 const ATTESTATION_CREDENTIAL_CONFIGURATIONS: &str = r#"{"pid":{"format":"dc+sd-jwt","scope":"pid","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"attestation":{"proof_signing_alg_values_supported":["ES256"],"key_attestations_required":{"key_storage":["iso_18045_moderate"]}}},"vct":"https://issuer.example/credentials/pid"}}"#;
 
 #[test]
-fn key_attestation_policy_requires_its_own_trust_store() {
+fn key_attestation_policy_can_defer_trust_to_a_scoped_conformance_lease() {
     let config = ConfigSource::from_pairs_for_test([
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
         (
@@ -36,15 +36,9 @@ fn key_attestation_policy_requires_its_own_trust_store() {
         ),
     ]);
 
-    let error = settings_error(
-        &config,
-        "holder key attestation needs an independent trust store",
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("OPENID4VC_KEY_ATTESTATION_JWKS_JSON is required")
-    );
+    let settings =
+        Settings::from_config(&config).expect("lease-scoped trust is resolved at request time");
+    assert!(settings.openid4vc.key_attestation_jwks.is_none());
 }
 
 #[test]

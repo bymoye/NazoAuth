@@ -30,6 +30,7 @@ import stat
 import subprocess
 import sys
 from typing import Iterator
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import apply_oidf_browser_credentials as browser_credentials  # noqa: E402
 import apply_public_conformance_onboarding as onboarding  # noqa: E402
+import build_oidf_full_install_profile as install_profile  # noqa: E402
 import materialize_openid4vc_oidf_config as materializer  # noqa: E402
 import prepare_openid4vc_public_onboarding as public_onboarding  # noqa: E402
 import provision_public_oidf_applicant as applicant_provisioning  # noqa: E402
@@ -70,6 +72,11 @@ SECRET_FIELDS = (
     "verifier_management_token",
 )
 MAX_PUBLIC_PEM_BYTES = 1024 * 1024
+MAX_PREPARED_FILE_BYTES = 1024 * 1024
+PREPARED_PROFILE_FILE = "standards-full-profile.json"
+PREPARED_TRUST_FILE = "openid4vc-conformance-trust.json"
+PREPARED_MATERIAL_FILE = "openid4vc-run-material.json"
+PREPARED_MANIFEST_FILE = "host-local-oidf-install-manifest.json"
 VCI_SD_JWT_CONFIGURATION_ID = "eu.europa.ec.eudi.pid.1"
 VCI_MDOC_CONFIGURATION_ID = "org.iso.18013.5.1.mDL"
 PRIVATE_CONFIG_NAMES = frozenset(
@@ -94,6 +101,51 @@ class HostLocalOpenid4vcError(RuntimeError):
 
 def fail(message: str) -> None:
     raise HostLocalOpenid4vcError(message)
+
+
+def canonical_suite_origin(value: str) -> str:
+    try:
+        return install_profile.origin(value, "suite origin")
+    except install_profile.ProfileError as error:
+        raise HostLocalOpenid4vcError(str(error)) from error
+
+
+def build_prepared_install_profile(
+    material: dict[str, object], suite_origin: str
+) -> dict[str, object]:
+    """Build a standards-full baseline without persisting conformance trust keys."""
+    validate_generated_material(material)
+    suite = canonical_suite_origin(suite_origin)
+    return {
+        "credential_configurations": {
+            VCI_SD_JWT_CONFIGURATION_ID: install_profile.credential_configuration(
+                VCI_SD_JWT_CONFIGURATION_ID, "dc+sd-jwt"
+            ),
+            VCI_MDOC_CONFIGURATION_ID: install_profile.credential_configuration(
+                VCI_MDOC_CONFIGURATION_ID, "mso_mdoc"
+            ),
+        },
+        "wallet_authorization_origins": [suite],
+        "ciba_notification_private_origins": [suite],
+        "backchannel_logout_private_origins": [suite],
+    }
+
+
+def build_prepared_conformance_trust(
+    material: dict[str, object], suite_origin: str
+) -> dict[str, object]:
+    validate_generated_material(material)
+    suite = canonical_suite_origin(suite_origin)
+    client_attestation = material["client_attestation"]
+    key_attestation = material["key_attestation"]
+    if not isinstance(client_attestation, dict) or not isinstance(key_attestation, dict):
+        fail("generated OpenID4VC attestation material has an invalid shape")
+    return {
+        "schema": 1,
+        "client_attestation_issuer": f"{suite}/",
+        "client_attestation_jwks": {"keys": [public_jwk(client_attestation)]},
+        "key_attestation_jwks": {"keys": [public_jwk(key_attestation)]},
+    }
 
 
 def read_public_trust_anchor(path: Path) -> str:
@@ -321,6 +373,153 @@ def public_jwk(key: dict[str, object]) -> dict[str, object]:
     return {field: value for field, value in key.items() if field != "d"}
 
 
+def read_protected_json(path: Path, label: str) -> tuple[dict[str, object], str]:
+    """Read a bounded 0600 JSON object from one stable, non-symlink inode."""
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise HostLocalOpenid4vcError(f"{label} is not readable") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        fail(f"{label} must be a regular non-symlink file")
+    if metadata.st_size <= 0 or metadata.st_size > MAX_PREPARED_FILE_BYTES:
+        fail(f"{label} must contain 1 through {MAX_PREPARED_FILE_BYTES} bytes")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600:
+        fail(f"{label} must have mode 0600")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise HostLocalOpenid4vcError(f"{label} is not readable") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_size != metadata.st_size
+        ):
+            fail(f"{label} changed while it was opened")
+        payload = b""
+        while len(payload) <= MAX_PREPARED_FILE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, MAX_PREPARED_FILE_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload += chunk
+        completed = os.fstat(descriptor)
+        if (
+            (completed.st_dev, completed.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(completed.st_mode)
+            or completed.st_size != opened.st_size
+            or len(payload) != completed.st_size
+        ):
+            fail(f"{label} changed while it was read")
+    finally:
+        os.close(descriptor)
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HostLocalOpenid4vcError(f"{label} must be strict JSON") from error
+    if not isinstance(document, dict):
+        fail(f"{label} must be a JSON object")
+    return document, hashlib.sha256(payload).hexdigest()
+
+
+def prepared_material(
+    args: argparse.Namespace,
+) -> tuple[dict[str, object], str, str]:
+    directory = args.prepared_install_dir
+    if directory is None:
+        fail("--prepared-install-dir is required for the host-local matrix")
+    if not directory.is_absolute():
+        fail("--prepared-install-dir must be absolute")
+    directory = directory.resolve()
+    try:
+        metadata = directory.lstat()
+    except OSError as error:
+        raise HostLocalOpenid4vcError("prepared install directory is not readable") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        fail("prepared install directory must be a non-symlink directory")
+    if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o700:
+        fail("prepared install directory must have mode 0700")
+    expected_names = {
+        PREPARED_PROFILE_FILE,
+        PREPARED_TRUST_FILE,
+        PREPARED_MATERIAL_FILE,
+        PREPARED_MANIFEST_FILE,
+    }
+    try:
+        observed_names = {path.name for path in directory.iterdir()}
+    except OSError as error:
+        raise HostLocalOpenid4vcError("prepared install directory is not readable") from error
+    if observed_names != expected_names:
+        fail("prepared install directory does not contain the exact expected file set")
+    manifest, _ = read_protected_json(
+        directory / PREPARED_MANIFEST_FILE, "prepared install manifest"
+    )
+    profile, profile_digest = read_protected_json(
+        directory / PREPARED_PROFILE_FILE, "prepared standards-full profile"
+    )
+    trust, trust_digest = read_protected_json(
+        directory / PREPARED_TRUST_FILE, "prepared OpenID4VC conformance trust"
+    )
+    material, material_digest = read_protected_json(
+        directory / PREPARED_MATERIAL_FILE, "prepared OpenID4VC material"
+    )
+    expected_manifest = {
+        "schema": 1,
+        "source_commit": args.deployed_sha,
+        "suite_origin": args.conformance_server,
+        "files": {
+            PREPARED_PROFILE_FILE: profile_digest,
+            PREPARED_TRUST_FILE: trust_digest,
+            PREPARED_MATERIAL_FILE: material_digest,
+        },
+    }
+    if manifest != expected_manifest:
+        fail("prepared install manifest does not match this source, Suite, and file set")
+    validate_generated_material(material)
+    if profile != build_prepared_install_profile(material, args.conformance_server):
+        fail("prepared standards-full profile does not match the private run identity")
+    if trust != build_prepared_conformance_trust(material, args.conformance_server):
+        fail("prepared conformance trust does not match the private run identity")
+    args.prepared_install_dir = directory
+    return material, material_digest, trust_digest
+
+
+def consume_prepared_material(directory: Path, expected_digest: str) -> None:
+    path = directory / PREPARED_MATERIAL_FILE
+    _, digest = read_protected_json(path, "prepared OpenID4VC material")
+    if digest != expected_digest:
+        fail("prepared OpenID4VC material changed before consumption")
+    path.unlink()
+    if os.name == "posix":
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def consume_prepared_trust(directory: Path, expected_digest: str) -> None:
+    path = directory / PREPARED_TRUST_FILE
+    _, digest = read_protected_json(path, "prepared OpenID4VC conformance trust")
+    if digest != expected_digest:
+        fail("prepared OpenID4VC conformance trust changed before consumption")
+    path.unlink()
+    if os.name == "posix":
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def build_base_input(
     material: dict[str, object],
     *,
@@ -441,10 +640,17 @@ def admin_credentials_fd(secrets: dict[str, str]) -> Iterator[int]:
         yield descriptor
 
 
-def onboarding_args(action: str, work_dir: Path, issuer: str, descriptor: int) -> argparse.Namespace:
+def onboarding_args(
+    action: str,
+    work_dir: Path,
+    issuer: str,
+    descriptor: int,
+    lease_id: str | None = None,
+) -> argparse.Namespace:
     return argparse.Namespace(
         command=action,
         target_issuer=issuer,
+        lease_id=lease_id,
         credentials_stdin=False,
         credentials_fd=descriptor,
         manifest=work_dir / "oidf-onboarding-manifest.json",
@@ -479,8 +685,10 @@ def materialize_configs(
     secrets: dict[str, str],
     subject_id: str,
     trust_anchor: str,
+    supplied_material: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    material = generate_certificate_material(args.work_dir)
+    material = supplied_material or generate_certificate_material(args.work_dir)
+    validate_generated_material(material)
     private_write_json(
         args.work_dir / "base-input.json",
         build_base_input(
@@ -675,8 +883,18 @@ def apply_public_onboarding(args: argparse.Namespace, secrets: dict[str, str]) -
         args.work_dir / "oidf-onboarding-manifest.json",
         args.work_dir / "openid4vc-plan-configs.json",
     )
+    lease_id = create_conformance_lease(args)
+    args.active_lease_id = lease_id
     with onboarding_credentials_fd(secrets) as descriptor:
-        onboarding.apply_onboarding(onboarding_args("apply", args.work_dir, args.target_issuer, descriptor))
+        onboarding.apply_onboarding(
+            onboarding_args(
+                "apply",
+                args.work_dir,
+                args.target_issuer,
+                descriptor,
+                lease_id,
+            )
+        )
     browser_credentials.apply_credentials(
         args.work_dir / "openid4vc-plan-configs.json",
         {
@@ -685,6 +903,86 @@ def apply_public_onboarding(args: argparse.Namespace, secrets: dict[str, str]) -
         },
     )
     protect_directory(args.work_dir)
+
+
+def ctl_receipt(args: argparse.Namespace, arguments: list[str]) -> dict[str, object]:
+    command_line = [str(args.nazoauthctl)]
+    if args.nazoauthctl_config is not None:
+        command_line.extend(["--config", str(args.nazoauthctl_config)])
+    completed = subprocess.run(
+        [*command_line, *arguments],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=sanitized_environment(),
+        check=False,
+    )
+    if completed.returncode != 0:
+        fail(f"nazoauthctl {' '.join(arguments[:3])} failed")
+    try:
+        receipt = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise HostLocalOpenid4vcError("nazoauthctl returned a non-JSON receipt") from error
+    if not isinstance(receipt, dict):
+        fail("nazoauthctl receipt must be a JSON object")
+    return receipt
+
+
+def find_lease_id(value: object) -> str | None:
+    if isinstance(value, dict):
+        candidate = value.get("lease_id")
+        if isinstance(candidate, str):
+            try:
+                return str(uuid.UUID(candidate))
+            except ValueError:
+                return None
+        for child in value.values():
+            if found := find_lease_id(child):
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            if found := find_lease_id(child):
+                return found
+    return None
+
+
+def create_conformance_lease(args: argparse.Namespace) -> str:
+    receipt = ctl_receipt(
+        args,
+        [
+            "conformance",
+            "lease",
+            "create",
+            "--profile",
+            "openid4vc",
+            "--material",
+            str(args.prepared_install_dir / PREPARED_TRUST_FILE),
+            "--ttl-seconds",
+            str(args.lease_ttl_seconds),
+            "--yes",
+        ],
+    )
+    lease_id = find_lease_id(receipt)
+    if lease_id is None:
+        fail("nazoauthctl create receipt contains no valid lease_id")
+    consume_prepared_trust(args.prepared_install_dir, args.prepared_trust_digest)
+    return lease_id
+
+
+def revoke_conformance_lease(args: argparse.Namespace, lease_id: str) -> None:
+    ctl_receipt(
+        args,
+        [
+            "conformance",
+            "lease",
+            "revoke",
+            "--lease-id",
+            lease_id,
+            "--yes",
+        ],
+    )
+    ctl_receipt(args, ["conformance", "lease", "cleanup", "--yes"])
 
 
 def aliases_from_configs(path: Path) -> dict[str, str]:
@@ -859,14 +1157,22 @@ def write_receipt(
 def run(args: argparse.Namespace) -> None:
     if args.plan_group_size < 1:
         fail("--plan-group-size must be greater than zero")
+    if not 60 <= args.lease_ttl_seconds <= 86_400:
+        fail("--lease-ttl-seconds must be between 60 and 86400")
     args.target_issuer = onboarding.canonical_https_origin(args.target_issuer, label="--target-issuer")
-    args.conformance_server = onboarding.canonical_https_origin(
-        args.conformance_server, label="--conformance-server"
-    )
+    args.conformance_server = canonical_suite_origin(args.conformance_server)
+    args.prepared_install_dir = getattr(args, "prepared_install_dir", None)
     args.work_dir = args.work_dir.resolve()
     args.export_dir = args.export_dir.resolve()
     args.suite_dir = args.suite_dir.resolve()
     args.deployed_source_dir = (args.deployed_source_dir or ROOT).resolve()
+    args.nazoauthctl = args.nazoauthctl.resolve()
+    if not args.nazoauthctl.is_file():
+        fail("--nazoauthctl must resolve to a regular file")
+    if args.nazoauthctl_config is not None:
+        if not args.nazoauthctl_config.is_absolute():
+            fail("--nazoauthctl-config must be absolute")
+        args.nazoauthctl_config = args.nazoauthctl_config.resolve()
     args.runner_sha = args.runner_sha or args.deployed_sha
     if args.work_dir.exists() or args.export_dir.exists():
         fail("--work-dir and --export-dir must not already exist")
@@ -875,6 +1181,9 @@ def run(args: argparse.Namespace) -> None:
     if args.deployed_source_dir != ROOT or args.deployed_sha != args.runner_sha:
         verify_source(args.deployed_source_dir, args.deployed_sha, "deployed")
     verify_suite(args.suite_dir, args.suite_revision)
+    supplied = prepared_material(args)
+    args.prepared_trust_digest = supplied[2]
+    args.active_lease_id = None
     namespace = onboarding_namespace(args)
     args.run_namespace = namespace
     trust_anchor = read_public_trust_anchor(args.request_object_trust_anchor_pem)
@@ -899,7 +1208,14 @@ def run(args: argparse.Namespace) -> None:
     try:
         provisioned = applicant_provisioning.provision(args.target_issuer, credential_document(secrets))
         subject_id = provisioned["user_id"]
-        materialize_configs(args, secrets, subject_id, trust_anchor)
+        materialize_configs(
+            args,
+            secrets,
+            subject_id,
+            trust_anchor,
+            supplied_material=supplied[0],
+        )
+        consume_prepared_material(args.prepared_install_dir, supplied[1])
         apply_public_onboarding(args, secrets)
         run_matrix(args, secrets)
     except BaseException as error:
@@ -937,6 +1253,12 @@ def run(args: argparse.Namespace) -> None:
                 cleanup_errors.append(error)
         else:
             cleanup_complete = True
+        if args.active_lease_id is not None:
+            try:
+                revoke_conformance_lease(args, args.active_lease_id)
+            except BaseException as error:
+                cleanup_complete = False
+                cleanup_errors.append(error)
         try:
             manifest_path = sanitize_evidence_tree(args.export_dir)
             if manifest_path is None and failure is None:
@@ -980,6 +1302,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--export-dir", type=Path, required=True)
     parser.add_argument("--run-namespace", required=True)
+    parser.add_argument(
+        "--prepared-install-dir",
+        type=Path,
+        required=True,
+        help="source-bound output from prepare_host_local_oidf_install.py",
+    )
+    parser.add_argument("--nazoauthctl", type=Path, required=True)
+    parser.add_argument("--nazoauthctl-config", type=Path)
+    parser.add_argument("--lease-ttl-seconds", type=int, default=28_800)
     parser.add_argument(
         "--request-object-trust-anchor-pem",
         type=Path,

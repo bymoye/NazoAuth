@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Context as _;
-use nazo_operator_protocol::{ConformanceLeaseSummary, TaskResult};
+use nazo_operator_protocol::{ConformanceLeaseSummary, Openid4vcConformanceTrust, TaskResult};
 use nazo_postgres::{ConformanceLease, ConformanceLeaseRepository};
 use uuid::Uuid;
 
@@ -13,12 +13,21 @@ use crate::{
 pub(crate) async fn operator_create(
     profile: &str,
     material_sha256: &str,
+    public_material: Option<Openid4vcConformanceTrust>,
     ttl_seconds: u64,
 ) -> anyhow::Result<TaskResult> {
     let repository = repository()?;
     let ttl_seconds = i64::try_from(ttl_seconds).context("conformance lease ttl is too large")?;
     let lease = repository
-        .create(DEFAULT_TENANT_ID, profile, material_sha256, ttl_seconds)
+        .create(
+            DEFAULT_TENANT_ID,
+            profile,
+            material_sha256,
+            public_material.map(|material| {
+                serde_json::to_value(material).expect("serialize conformance trust")
+            }),
+            ttl_seconds,
+        )
         .await?;
     Ok(TaskResult::ConformanceLeaseCreated {
         lease: summary(lease),

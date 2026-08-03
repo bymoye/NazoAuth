@@ -1089,6 +1089,7 @@ fn release_target_policy_and_operation_names_are_explicit() {
         operation_name(&TaskOperation::ConformanceLeaseCreate {
             profile: "oidf-full".to_owned(),
             material_sha256: "a".repeat(64),
+            public_material: None,
             ttl_seconds: 3_600,
         }),
         "conformance-lease-create"

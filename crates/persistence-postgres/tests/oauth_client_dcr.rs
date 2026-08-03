@@ -96,8 +96,15 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
     let clients = OAuthClientRepository::new(pool.clone());
     let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
     let tenant = TenantContext::default_system();
+    let public_material = serde_json::json!({"schema": 1, "keys": ["public-only"]});
     let lease = leases
-        .create(tenant.tenant_id.as_uuid(), "oidf-test", &"a".repeat(64), 60)
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidf-test",
+            &"a".repeat(64),
+            Some(public_material.clone()),
+            60,
+        )
         .await
         .unwrap();
     let leased_client = client(tenant);
@@ -105,6 +112,13 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
         .insert(&leased_client, None, None, Some(lease.id))
         .await
         .unwrap();
+    assert_eq!(
+        leases
+            .active_public_material_for_client(leased_client.tenant_id, &leased_client.client_id,)
+            .await
+            .unwrap(),
+        Some(public_material),
+    );
     assert!(
         clients
             .by_client_id(leased_client.tenant_id, &leased_client.client_id)
@@ -156,6 +170,7 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
         .unwrap();
     assert!(tombstone.revoked_at.is_some());
     assert!(tombstone.cleaned_at.is_some());
+    assert!(tombstone.public_material.is_none());
     leases.cleanup().await.unwrap();
 }
 

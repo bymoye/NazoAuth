@@ -108,6 +108,8 @@ pub enum TaskOperation {
     ConformanceLeaseCreate {
         profile: String,
         material_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_material: Option<Openid4vcConformanceTrust>,
         ttl_seconds: u64,
     },
     ConformanceLeaseList,
@@ -127,6 +129,15 @@ pub enum TaskOperation {
         key_ref: String,
         public_jwk_sha256: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vcConformanceTrust {
+    pub schema: u32,
+    pub client_attestation_issuer: String,
+    pub client_attestation_jwks: serde_json::Value,
+    pub key_attestation_jwks: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -596,6 +607,7 @@ fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
         TaskOperation::ConformanceLeaseCreate {
             profile,
             material_sha256,
+            public_material,
             ttl_seconds,
         } => {
             validate_identifier(profile)?;
@@ -605,6 +617,20 @@ fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
                 ));
             }
             validate_lower_hex(material_sha256, 64)?;
+            match (profile.as_str(), public_material) {
+                ("openid4vc", Some(material)) => validate_openid4vc_conformance_trust(material)?,
+                ("openid4vc", None) => {
+                    return Err(ProtocolError::Policy(
+                        "openid4vc conformance lease requires public trust material",
+                    ));
+                }
+                (_, Some(_)) => {
+                    return Err(ProtocolError::Policy(
+                        "public trust material is accepted only by the openid4vc profile",
+                    ));
+                }
+                (_, None) => {}
+            }
             if !(60..=86_400).contains(ttl_seconds) {
                 return Err(ProtocolError::Policy(
                     "conformance lease ttl must be between 60 and 86400 seconds",
@@ -645,6 +671,49 @@ fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
                     "external key reference must be a non-secret provider locator",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_openid4vc_conformance_trust(
+    material: &Openid4vcConformanceTrust,
+) -> Result<(), ProtocolError> {
+    if material.schema != 1
+        || material.client_attestation_issuer.len() > 2048
+        || !material.client_attestation_issuer.starts_with("https://")
+    {
+        return Err(ProtocolError::Policy(
+            "invalid OpenID4VC conformance trust material",
+        ));
+    }
+    let encoded = serde_json::to_vec(material).map_err(|_| ProtocolError::Json)?;
+    if encoded.len() > 32 * 1024 {
+        return Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust material exceeds 32 KiB",
+        ));
+    }
+    for jwks in [
+        &material.client_attestation_jwks,
+        &material.key_attestation_jwks,
+    ] {
+        let keys = jwks
+            .get("keys")
+            .and_then(serde_json::Value::as_array)
+            .filter(|keys| !keys.is_empty())
+            .ok_or(ProtocolError::Policy(
+                "OpenID4VC conformance trust requires non-empty JWK Sets",
+            ))?;
+        if keys.iter().any(|key| {
+            key.as_object().is_none_or(|object| {
+                ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+                    .iter()
+                    .any(|name| object.contains_key(*name))
+            })
+        }) {
+            return Err(ProtocolError::Policy(
+                "OpenID4VC conformance trust must contain public keys only",
+            ));
         }
     }
     Ok(())

@@ -372,12 +372,6 @@ impl Settings {
                 "OPENID4VCI_DEFERRED_CREDENTIAL_CONFIGURATIONS must reference configured credentials"
             );
         }
-        let credential_configuration_requires_attestation = credential_configurations
-            .values()
-            .flat_map(|configuration| configuration.proof_types_supported.iter())
-            .any(|(proof_type, metadata)| {
-                proof_type == "attestation" || metadata.key_attestations_required.is_some()
-            });
         let wallet_authorization_origins = config
             .optional_string("OPENID4VP_WALLET_AUTHORIZATION_ORIGINS")
             .map(|value| {
@@ -430,12 +424,9 @@ impl Settings {
         if enable_openid4vci_issuer && openid4vci_issuer_management_token.is_none() {
             bail!("OPENID4VCI_ISSUER_MANAGEMENT_TOKEN is required when the VCI issuer is enabled");
         }
-        if enable_openid4vci_issuer
-            && credential_configuration_requires_attestation
-            && openid4vc_key_attestation_jwks.is_none()
-        {
-            bail!("OPENID4VC_KEY_ATTESTATION_JWKS_JSON is required by configured VCI proof policy");
-        }
+        // A standards-full installation may leave attestation trust empty at rest.
+        // Active conformance leases can supply public verification keys scoped to
+        // their own temporary clients; ordinary clients never inherit that trust.
         if openid4vc_client_attestation_issuer.is_some()
             && openid4vc_client_attestation_jwks.is_none()
         {

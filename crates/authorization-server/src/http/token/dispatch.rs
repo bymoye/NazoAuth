@@ -568,12 +568,15 @@ pub(crate) async fn token_with_service(
                 false,
             );
         };
-        let validated = match validator.validate(
-            attestation,
-            proof,
-            issuance_config.issuer(),
-            chrono::Utc::now().timestamp(),
-        ) {
+        let validated = match validator
+            .validate_for_client(
+                attestation,
+                proof,
+                issuance_config.issuer(),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+        {
             Ok(validated) if validated.client_id == client.client_id => validated,
             _ => {
                 return oauth_token_error(

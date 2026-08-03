@@ -16,6 +16,7 @@ pub trait ProofValidatorPort: Send + Sync {
     fn validate<'a>(
         &'a self,
         proofs: &'a Proofs,
+        client_id: &'a str,
         expected_issuer: &'a str,
         expected_nonce: &'a str,
         metadata: &'a ProofTypeMetadata,

@@ -39,9 +39,9 @@ The runner accepts one strict UTF-8 JSON object only through non-interactive std
 }
 ```
 
-There is deliberately no OpenID4VC base or driver configuration field. After the release, Suite, network and output boundaries are verified, the runner creates a new `0700` material directory and generates unique P-256 wallet, client-attestation, key-attestation and credential-signing keys for that run, plus a short-lived run-local CA and leaf `x5c` certificates. It builds the four fixed configuration families from the pinned Suite configuration shape, binds the freshly provisioned subject ID, management tokens and public request-object trust anchor, then verifies that the four public onboarding JWKS records exactly match the generated private suite configuration. No repository, historical, shared, or caller-supplied private key is accepted.
+There is deliberately no OpenID4VC base or driver configuration field. Before the fresh installation, `prepare_host_local_oidf_install.py` must create a new `0700` directory during the same continuous acceptance run. It contains a `standards-full-profile.json` with no test trust keys, public conformance trust, matching private run material, and a manifest binding the exact source commit, Suite origin, and file SHA-256 values. Installation reads only the baseline profile. The runner revalidates the entire binding through `--prepared-install-dir`, builds the four fixed configuration families from the pinned Suite shape, binds the freshly provisioned subject ID, management tokens and public request-object trust anchor, and proves that the four public onboarding JWKS records match those same private keys. It accepts no repository, historical, shared, or independently generated private key.
 
-The material directory and every generated private configuration are `0600` and removed in `finally`, including when a prior setup step fails. Each official runner invocation receives the Suite token through a new inherited FD, never a token file. The run-local CA is for client-attestation/key-attestation/credential test material only; it is not an ingress client CA and is never installed with the reverse proxy.
+The preparation directory is `0700` and its four files are `0600`. Immediately after it successfully materializes the private Suite configurations, the runner rechecks the digest and deletes `openid4vc-run-material.json`. It then creates an eight-hour lease from `openid4vc-conformance-trust.json`, rechecks that digest, and deletes the file after the server stores it. The public baseline profile and manifest remain as installation-source evidence. The server resolves those public verification keys only for clients bound to that lease. Revocation or expiry rejects them immediately; periodic cleanup deletes the clients and clears the stored public material. Every private work-directory configuration is removed in `finally`. Each official runner invocation receives the Suite token through a new inherited FD, never a token file. The run-local CA is for client-attestation/key-attestation/credential test material only; it is not an ingress client CA and is never installed with the reverse proxy.
 
 ## Hostinger command
 
@@ -64,6 +64,10 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
   --work-dir "$work_dir" \
   --export-dir "$export_dir" \
   --run-namespace "$run_id" \
+  --prepared-install-dir /run/nazoauth-host-local-oidf-install \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800 \
   --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
   --plan-group-size 4 \
   --timeout-seconds 4800 \
@@ -76,4 +80,4 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
 
 Before starting, the command verifies clean runner/deployed commits, a clean exact Suite revision, authenticated versus unauthenticated Suite API behavior, 17 unique aliases, and the fixed registry/expected-record files. After the official runner it performs another complete Suite-state inspection.
 
-`finally` removes generated Suite configs and dedicated datasets, then deactivates the four public clients through the same public control plane. This runner creates no mTLS trust request. It reduces Suite archives to `evidence-manifest.json` and writes the credential-free `host-local-openid4vc-receipt.json`. A cleanup, Suite-pristineness, or final-state error fails the operation; do not repair state through a database or internal endpoint.
+`finally` removes generated Suite configs and dedicated datasets, deactivates the four public clients through the same public control plane, then invokes `nazoauthctl conformance lease revoke` and `cleanup`. This runner creates no mTLS trust request. It reduces Suite archives to `evidence-manifest.json` and writes the credential-free `host-local-openid4vc-receipt.json`. A cleanup, lease-revocation, Suite-pristineness, or final-state error fails the operation; do not repair state through a database or internal endpoint.

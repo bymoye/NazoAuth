@@ -20,6 +20,7 @@ use nazo_digital_credentials::{
 };
 use nazo_key_management::KeyManager;
 use nazo_openid4vci::{ProofError, ProofValidatorPort, Proofs, ValidatedProof};
+use nazo_operator_protocol::Openid4vcConformanceTrust;
 use openssl::{
     bn::{BigNum, BigNumContext},
     ec::{EcGroup, EcKey, EcPoint},
@@ -778,6 +779,7 @@ impl CoseSigner for AsyncCoseSigner {
 #[derive(Clone)]
 pub(crate) struct Openid4vcProofValidator {
     key_attestation_jwks: Arc<Value>,
+    conformance: Option<(nazo_postgres::ConformanceLeaseRepository, uuid::Uuid)>,
 }
 
 #[derive(Clone, Copy)]
@@ -797,7 +799,35 @@ impl Openid4vcProofValidator {
         }
         Ok(Self {
             key_attestation_jwks: Arc::new(key_attestation_jwks),
+            conformance: None,
         })
+    }
+
+    pub(crate) fn with_conformance_leases(
+        mut self,
+        repository: nazo_postgres::ConformanceLeaseRepository,
+        tenant_id: uuid::Uuid,
+    ) -> Self {
+        self.conformance = Some((repository, tenant_id));
+        self
+    }
+
+    async fn effective_key_attestation_jwks(
+        &self,
+        client_id: &str,
+    ) -> Result<Arc<Value>, ProofError> {
+        if let Some((repository, tenant_id)) = &self.conformance {
+            let material = repository
+                .active_public_material_for_client(*tenant_id, client_id)
+                .await
+                .map_err(|_| ProofError::InvalidKeyAttestation)?;
+            if let Some(material) = material {
+                let material: Openid4vcConformanceTrust = serde_json::from_value(material)
+                    .map_err(|_| ProofError::InvalidKeyAttestation)?;
+                return Ok(Arc::new(material.key_attestation_jwks));
+            }
+        }
+        Ok(self.key_attestation_jwks.clone())
     }
 }
 
@@ -805,11 +835,13 @@ impl ProofValidatorPort for Openid4vcProofValidator {
     fn validate<'a>(
         &'a self,
         proofs: &'a Proofs,
+        client_id: &'a str,
         expected_audience: &'a str,
         expected_nonce: &'a str,
         metadata: &'a nazo_openid4vci::ProofTypeMetadata,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ValidatedProof>, ProofError>> + Send + 'a>> {
         Box::pin(async move {
+            let trust_jwks = self.effective_key_attestation_jwks(client_id).await?;
             if proofs.0.len() != 1 {
                 return Err(ProofError::UnsupportedType);
             }
@@ -818,7 +850,8 @@ impl ProofValidatorPort for Openid4vcProofValidator {
                 let mut validated = Vec::new();
                 for encoded in attestations {
                     let encoded = encoded.as_str().ok_or(ProofError::InvalidKeyAttestation)?;
-                    let claims = self.validate_key_attestation(
+                    let claims = self.validate_key_attestation_with(
+                        &trust_jwks,
                         encoded,
                         expected_nonce,
                         metadata,
@@ -882,7 +915,8 @@ impl ProofValidatorPort for Openid4vcProofValidator {
                     .get("key_attestation")
                     .and_then(Value::as_str)
                     .map(|encoded| {
-                        self.validate_key_attestation(
+                        self.validate_key_attestation_with(
+                            &trust_jwks,
                             encoded,
                             expected_nonce,
                             metadata,
@@ -916,8 +950,28 @@ impl ProofValidatorPort for Openid4vcProofValidator {
 }
 
 impl Openid4vcProofValidator {
+    #[cfg(test)]
     fn validate_key_attestation(
         &self,
+        encoded: &str,
+        expected_nonce: &str,
+        metadata: &nazo_openid4vci::ProofTypeMetadata,
+        now: chrono::DateTime<Utc>,
+        context: KeyAttestationContext,
+    ) -> Result<Value, ProofError> {
+        self.validate_key_attestation_with(
+            &self.key_attestation_jwks,
+            encoded,
+            expected_nonce,
+            metadata,
+            now,
+            context,
+        )
+    }
+
+    fn validate_key_attestation_with(
+        &self,
+        trust_jwks: &Value,
         encoded: &str,
         expected_nonce: &str,
         metadata: &nazo_openid4vci::ProofTypeMetadata,
@@ -933,8 +987,7 @@ impl Openid4vcProofValidator {
             .kid
             .as_deref()
             .ok_or(ProofError::InvalidKeyAttestation)?;
-        let key = self
-            .key_attestation_jwks
+        let key = trust_jwks
             .get("keys")
             .and_then(Value::as_array)
             .and_then(|keys| {
@@ -1027,8 +1080,8 @@ struct ProofClaims {
 
 #[derive(Clone)]
 pub(crate) struct Openid4vcClientAttestationValidator {
-    attester_issuer: Arc<str>,
-    trust_jwks: Arc<Value>,
+    static_trust: Option<(Arc<str>, Arc<Value>)>,
+    conformance: Option<(nazo_postgres::ConformanceLeaseRepository, uuid::Uuid)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1069,9 +1122,26 @@ impl Openid4vcClientAttestationValidator {
             anyhow::bail!("client attestation requires an issuer and a non-empty trust JWK Set");
         }
         Ok(Self {
-            attester_issuer: attester_issuer.into(),
-            trust_jwks: Arc::new(trust_jwks),
+            static_trust: Some((attester_issuer.into(), Arc::new(trust_jwks))),
+            conformance: None,
         })
+    }
+
+    pub(crate) fn with_conformance_leases(
+        static_trust: Option<(String, Value)>,
+        repository: nazo_postgres::ConformanceLeaseRepository,
+        tenant_id: uuid::Uuid,
+    ) -> anyhow::Result<Self> {
+        let mut validator = if let Some((issuer, jwks)) = static_trust {
+            Self::new(issuer, jwks)?
+        } else {
+            Self {
+                static_trust: None,
+                conformance: None,
+            }
+        };
+        validator.conformance = Some((repository, tenant_id));
+        Ok(validator)
     }
 
     pub(crate) fn unverified_client_id(attestation: &str) -> Option<String> {
@@ -1091,6 +1161,10 @@ impl Openid4vcClientAttestationValidator {
         audience: &str,
         now: i64,
     ) -> anyhow::Result<ValidatedClientAttestation> {
+        let (attester_issuer, trust_jwks) = self
+            .static_trust
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("client attestation is not statically configured"))?;
         let parsed_attestation = decode_compact_jwt(attestation)?;
         if parsed_attestation.header.typ.as_deref() != Some("oauth-client-attestation+jwt")
             || parsed_attestation.header.alg != "ES256"
@@ -1098,12 +1172,12 @@ impl Openid4vcClientAttestationValidator {
             anyhow::bail!("invalid client attestation protected header");
         }
         let trust_key = select_jwk(
-            &self.trust_jwks,
+            trust_jwks,
             parsed_attestation.header.kid.as_deref(),
             "ES256",
         )?;
         let mut attestation_validation = Validation::new(Algorithm::ES256);
-        attestation_validation.set_issuer(&[self.attester_issuer.as_ref()]);
+        attestation_validation.set_issuer(&[attester_issuer.as_ref()]);
         // OpenID4VCI 1.0 fixes Attestation-Based Client Authentication at
         // draft-07: iat and nbf are optional in the Client Attestation JWT.
         attestation_validation.set_required_spec_claims(&["iss", "sub", "exp"]);
@@ -1180,6 +1254,30 @@ impl Openid4vcClientAttestationValidator {
                 .saturating_sub(age.max(0))
                 .max(1) as u64,
         })
+    }
+
+    pub(crate) async fn validate_for_client(
+        &self,
+        attestation: &str,
+        proof: &str,
+        audience: &str,
+        now: i64,
+    ) -> anyhow::Result<ValidatedClientAttestation> {
+        let client_id = Self::unverified_client_id(attestation)
+            .ok_or_else(|| anyhow::anyhow!("client attestation subject is missing"))?;
+        if let Some((repository, tenant_id)) = &self.conformance
+            && let Some(material) = repository
+                .active_public_material_for_client(*tenant_id, &client_id)
+                .await?
+        {
+            let material: Openid4vcConformanceTrust = serde_json::from_value(material)?;
+            return Self::new(
+                material.client_attestation_issuer,
+                material.client_attestation_jwks,
+            )?
+            .validate(attestation, proof, audience, now);
+        }
+        self.validate(attestation, proof, audience, now)
     }
 }
 

@@ -15,6 +15,36 @@ use crate::{
     },
 };
 
+#[test]
+fn operation_results_are_machine_readable_json() {
+    let value: serde_json::Value = serde_json::from_str(
+        &operation_result_json(&operator::OperationResult {
+            request_id: "request-test".to_owned(),
+            result: nazo_operator_protocol::TaskResult::ConformanceLeaseCreated {
+                lease: nazo_operator_protocol::ConformanceLeaseSummary {
+                    lease_id: "0198f5df-4df8-7d9f-8f6a-5c2b2917cc8a".to_owned(),
+                    profile: "openid4vc".to_owned(),
+                    material_sha256: "a".repeat(64),
+                    created_at: 1,
+                    expires_at: 2,
+                    revoked_at: None,
+                    cleaned_at: None,
+                },
+            },
+            final_receipt: PathBuf::from("/audit/request-test.json"),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(value["request_id"], "request-test");
+    assert_eq!(value["receipt"], "/audit/request-test.json");
+    assert_eq!(
+        value["result"]["lease"]["lease_id"],
+        "0198f5df-4df8-7d9f-8f6a-5c2b2917cc8a"
+    );
+}
+
 fn manifest(version: &str, revision: char) -> ReleaseManifest {
     let target = crate::model::release_target().unwrap().to_owned();
     let suffix = if target.contains("windows") {
@@ -2005,6 +2035,7 @@ fn conformance_commands_build_closed_operator_tasks() {
         TaskOperation::ConformanceLeaseCreate {
             profile: "oidf-fapi2".to_owned(),
             material_sha256: expected_sha256,
+            public_material: None,
             ttl_seconds: 28_800,
         }
     );
@@ -2012,6 +2043,28 @@ fn conformance_commands_build_closed_operator_tasks() {
         conformance_operation(ConformanceLeaseCommand::List).unwrap(),
         TaskOperation::ConformanceLeaseList
     );
+
+    let openid4vc_material = work.path().join("openid4vc-public-trust.json");
+    let trust = nazo_operator_protocol::Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example/".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
+        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+    };
+    fs::write(&openid4vc_material, serde_json::to_vec(&trust).unwrap()).unwrap();
+    assert!(matches!(
+        conformance_operation(ConformanceLeaseCommand::Create {
+            profile: "openid4vc".to_owned(),
+            material: openid4vc_material,
+            ttl_seconds: 28_800,
+            yes: true,
+        })
+        .unwrap(),
+        TaskOperation::ConformanceLeaseCreate {
+            public_material: Some(_),
+            ..
+        }
+    ));
 
     let lease_id = uuid::Uuid::now_v7().to_string();
     assert_eq!(

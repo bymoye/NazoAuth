@@ -37,9 +37,21 @@ runner 只从非交互 stdin 或已继承 FD 接受一个严格 UTF-8 JSON 对�
 }
 ```
 
-刻意不提供 OpenID4VC base 或 driver configuration 字段。完成 release、Suite、网络和输出边界验证后，runner 在新的 `0700` material directory 内为**本次运行**生成彼此唯一的 P-256 wallet、client-attestation、key-attestation 与 credential-signing key，以及短期 run-local CA 和 leaf `x5c` 证书；随后按已固定的 Suite 配置形状构建四类固定配置，绑定新建 subject ID、management token 与公开 request-object trust anchor，并验证四个 public onboarding JWKS 与生成的私有 Suite 配置逐一精确对应。不接受仓库、历史、共享或调用者提供的任何私钥。
+刻意不提供 OpenID4VC base 或 driver configuration 字段。全新安装前必须由
+`prepare_host_local_oidf_install.py` 在本次连续验收中生成新的 `0700` 目录：公开
+不含测试信任密钥的 `standards-full-profile.json`、公开 conformance trust、对应的私有
+run material，以及绑定精确源码 commit、Suite origin、文件 SHA-256 的 manifest。安装
+只读取 baseline profile；runner 通过 `--prepared-install-dir` 重新验证整个绑定，然后按固定 Suite 配置形状构建四类配置，
+绑定新建 subject ID、management token 与公开 request-object trust anchor，并验证四个
+public onboarding JWKS 与同一批私钥逐一对应。不接受仓库、历史、共享或任意另一批私钥。
 
-material directory 与所有生成的私有配置均为 `0600`，并在 `finally` 中删除（包括更早的 setup 步骤失败时）。每次官方 runner 只通过新的继承 FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation/key-attestation/credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
+准备目录为 `0700`，四个文件为 `0600`。runner 成功物化私有 Suite 配置后立即校验哈希并
+删除 `openid4vc-run-material.json`；随后以 `openid4vc-conformance-trust.json` 创建 8 小时
+租约，成功写入后再次校验并删除该文件。公开 profile 与 manifest 保留作安装来源证据。
+服务只为绑定该租约的 client 解析这些公开验证密钥；撤销或到期后立即失效，周期清理器
+删除 client 并清空租约公开材料。work directory 内的全部私有配置在 `finally` 删除。每次官方 runner 只通过新的继承
+FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation、
+key-attestation 和 credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
 
 ## Hostinger 命令
 
@@ -62,6 +74,10 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
   --work-dir "$work_dir" \
   --export-dir "$export_dir" \
   --run-namespace "$run_id" \
+  --prepared-install-dir /run/nazoauth-host-local-oidf-install \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800 \
   --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
   --plan-group-size 4 \
   --timeout-seconds 4800 \
@@ -74,4 +90,8 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
 
 开始前会验证 runner/deployed commit 都干净且精确、本地 Suite revision 干净且精确、Suite API 的认证边界、17 个唯一 alias 及固定 registry/expected-record。官方 runner 完成后还会再次完整检查 Suite state。
 
-`finally` 删除生成的 Suite config 和专用 dataset，再经同一公开控制面停用四个 client；此 runner 不创建 mTLS trust request。随后将 Suite archive 归约为 `evidence-manifest.json`，并写入无凭据的 `host-local-openid4vc-receipt.json`。清理、Suite 洁净性或终态检查有错误即整个操作失败；不得通过数据库或内部入口修复状态。
+`finally` 删除生成的 Suite config 和专用 dataset，再经同一公开控制面停用四个 client，
+随后调用 `nazoauthctl conformance lease revoke` 与 `cleanup`；此 runner 不创建 mTLS trust
+request。随后将 Suite archive 归约为 `evidence-manifest.json`，并写入无凭据的
+`host-local-openid4vc-receipt.json`。清理、租约撤销、Suite 洁净性或终态检查有错误即整个
+操作失败；不得通过数据库或内部入口修复状态。

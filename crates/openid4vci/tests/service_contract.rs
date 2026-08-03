@@ -121,6 +121,7 @@ impl ProofValidatorPort for FixedProofs {
         _: &'a Proofs,
         _: &'a str,
         _: &'a str,
+        _: &'a str,
         _: &'a ProofTypeMetadata,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Vec<ValidatedProof>, ProofError>> + Send + 'a>,

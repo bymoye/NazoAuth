@@ -20,12 +20,18 @@
    退出码、时间和证据路径。
 2. 仅删除清单中的 NazoAuth 应用/依赖容器、volume、配置、部署记录、应用状态、
    controller/receipt/audit/break-glass identity 和审计链；再次盘点证明无关服务未变化。
-3. 从同一不可变 Release 安装已验证的 `nazoauthctl`，执行：
+3. 在本次连续验收内，为该精确 commit 和宿主机本地 Suite 新建一次性材料，然后从同一
+   不可变 Release 安装已验证的 `nazoauthctl`：
 
    ```sh
+   sudo python3 /opt/nazoauth/source/scripts/prepare_host_local_oidf_install.py \
+     --source-dir /opt/nazoauth/source \
+     --source-commit "$DEPLOYED_SOURCE_SHA" \
+     --suite-origin https://oauth-test.nazo.run \
+     --output-dir /run/nazoauth-host-local-oidf-install
    sudo nazoauthctl install --runtime auto --public-url https://auth.example.com \
      --profile standards-full \
-     --profile-material /absolute/oidf-public-onboarding-material/standards-full-profile.json \
+     --profile-material /run/nazoauth-host-local-oidf-install/standards-full-profile.json \
      --to vX.Y.Z
    secret-provider read nazoauth/initial-admin | \
      sudo nazoauthctl bootstrap-admin --credentials-stdin --yes
@@ -33,9 +39,14 @@
    sudo nazoauthctl doctor
    ```
 
-   使用正式 public onboarding workflow 针对该精确源码 commit、issuer 和套件 origin
-   生成并校验过的 `standards-full-profile.json`。它只含公开信任/配置材料，不来自被删除
-   的旧部署；全部安装秘密和匹配的本地签名身份都由正式安装流程重新生成。
+   宿主机本地 Suite 路径不得经过 GitHub。上述独立入口一次生成不含测试信任密钥的
+   `standards-full-profile.json`、有时效租约使用的公开 attestation trust、对应的私有
+   Suite run material；manifest 绑定源码 commit、Suite origin 和全部文件 SHA-256。
+   它们不来自旧部署或历史制品。GitHub public
+   onboarding workflow 仅用于 GitHub 上运行的官方公开 Suite 路径。安装只读取公开
+   baseline profile；后续宿主机 runner 通过 `nazoauthctl conformance lease create` 把
+   公开验证密钥只授予该租约绑定的临时 client，并一次性消费公开信任文件与私有材料。
+   撤销或到期立即停止使用这些密钥，周期清理器删除 client 并清空数据库中的公开材料。
    首任管理员 token 只从本轮生成的私有 runtime-owned mount 定位，不打印、不复用旧状态，
    也不进入 argv 或普通环境变量。
 

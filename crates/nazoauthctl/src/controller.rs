@@ -171,9 +171,31 @@ fn conformance_operation(command: ConformanceLeaseCommand) -> anyhow::Result<Tas
         } => {
             require_confirmation(yes, "create a temporary conformance lease")?;
             let material_sha256 = crate::filesystem::sha256(&material)?;
+            let public_material = if profile == "openid4vc" {
+                let metadata = fs::symlink_metadata(&material)
+                    .context("failed to inspect OpenID4VC conformance material")?;
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || metadata.len() == 0
+                    || metadata.len() > 32 * 1024
+                {
+                    bail!(
+                        "OpenID4VC conformance material must be a regular file from 1 through 32768 bytes"
+                    );
+                }
+                Some(
+                    serde_json::from_slice::<nazo_operator_protocol::Openid4vcConformanceTrust>(
+                        &fs::read(&material)?,
+                    )
+                    .context("OpenID4VC conformance material must be strict JSON")?,
+                )
+            } else {
+                None
+            };
             TaskOperation::ConformanceLeaseCreate {
                 profile,
                 material_sha256,
+                public_material,
                 ttl_seconds,
             }
         }
@@ -2263,13 +2285,16 @@ fn app_command(
     if migration {
         install::grant_runtime_database(config)?;
     }
-    println!(
-        "request_id={} receipt={} result={:?}",
-        result.request_id,
-        result.final_receipt.display(),
-        result.result
-    );
+    println!("{}", operation_result_json(&result)?);
     Ok(())
+}
+
+fn operation_result_json(result: &operator::OperationResult) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "request_id": result.request_id,
+        "receipt": result.final_receipt,
+        "result": result.result,
+    }))?)
 }
 
 fn execute_release_task(

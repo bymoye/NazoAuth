@@ -854,9 +854,12 @@ fn write_server_config(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StandardsFullProfileMaterial {
-    client_attestation_issuer: String,
-    client_attestation_jwks: serde_json::Value,
-    key_attestation_jwks: serde_json::Value,
+    #[serde(default)]
+    client_attestation_issuer: Option<String>,
+    #[serde(default)]
+    client_attestation_jwks: Option<serde_json::Value>,
+    #[serde(default)]
+    key_attestation_jwks: Option<serde_json::Value>,
     credential_configurations: serde_json::Value,
     wallet_authorization_origins: Vec<String>,
     ciba_notification_private_origins: Vec<String>,
@@ -882,12 +885,20 @@ fn write_install_profile(
     }
     let material: StandardsFullProfileMaterial = serde_json::from_slice(&fs::read(source)?)
         .context("standards-full profile material must be strict JSON")?;
-    validate_https_origin(
+    match (
         &material.client_attestation_issuer,
-        "client attestation issuer",
-    )?;
-    validate_public_jwks(&material.client_attestation_jwks, "client attestation JWKS")?;
-    validate_public_jwks(&material.key_attestation_jwks, "key attestation JWKS")?;
+        &material.client_attestation_jwks,
+    ) {
+        (Some(issuer), Some(jwks)) => {
+            validate_https_origin(issuer, "client attestation issuer")?;
+            validate_public_jwks(jwks, "client attestation JWKS")?;
+        }
+        (None, None) => {}
+        _ => bail!("client attestation issuer and JWKS must be supplied together"),
+    }
+    if let Some(jwks) = &material.key_attestation_jwks {
+        validate_public_jwks(jwks, "key attestation JWKS")?;
+    }
     let credential_configurations = material
         .credential_configurations
         .as_object()
@@ -958,7 +969,7 @@ fn write_install_profile(
     }
 
     let scalar = |value: &str| serde_json::to_string(value).expect("serialize YAML scalar");
-    let lines = [
+    let mut lines = vec![
         "ENABLE_REQUEST_OBJECT: true".to_owned(),
         "ENABLE_PAR_REQUEST_OBJECT: true".to_owned(),
         "ENABLE_AUTHORIZATION_DETAILS: true".to_owned(),
@@ -983,18 +994,27 @@ fn write_install_profile(
         "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN_FILE: \"${PROFILE_SECRET_ROOT}/openid4vp-management-token\"".to_owned(),
         "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE: \"${PROFILE_APP_ROOT}/keys/openid4vc-certificate-bundle.pem\"".to_owned(),
         "OPENID4VC_TRUST_ANCHORS_FILE: \"${PROFILE_APP_ROOT}/keys/openid4vc-certificate-bundle.pem\"".to_owned(),
-        format!(
+    ];
+    if let (Some(issuer), Some(jwks)) = (
+        &material.client_attestation_issuer,
+        &material.client_attestation_jwks,
+    ) {
+        lines.push(format!(
             "OPENID4VC_CLIENT_ATTESTATION_ISSUER: {}",
-            scalar(&material.client_attestation_issuer)
-        ),
-        format!(
+            scalar(issuer)
+        ));
+        lines.push(format!(
             "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON: {}",
-            scalar(&serde_json::to_string(&material.client_attestation_jwks)?)
-        ),
-        format!(
+            scalar(&serde_json::to_string(jwks)?)
+        ));
+    }
+    if let Some(jwks) = &material.key_attestation_jwks {
+        lines.push(format!(
             "OPENID4VC_KEY_ATTESTATION_JWKS_JSON: {}",
-            scalar(&serde_json::to_string(&material.key_attestation_jwks)?)
-        ),
+            scalar(&serde_json::to_string(jwks)?)
+        ));
+    }
+    lines.extend([
         format!(
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON: {}",
             scalar(&serde_json::to_string(&material.credential_configurations)?)
@@ -1011,7 +1031,7 @@ fn write_install_profile(
             "BACKCHANNEL_LOGOUT_PRIVATE_ORIGINS: {}",
             scalar(&material.backchannel_logout_private_origins.join(","))
         ),
-    ];
+    ]);
     Ok(Some(format!("{}\n", lines.join("\n"))))
 }
 

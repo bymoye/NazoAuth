@@ -863,7 +863,13 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
                         )
                     })?;
                     let validated = validator
-                        .validate(attestation, proof, &self.issuer, Utc::now().timestamp())
+                        .validate_for_client(
+                            attestation,
+                            proof,
+                            &self.issuer,
+                            Utc::now().timestamp(),
+                        )
+                        .await
                         .map_err(|_| {
                             vci_error(
                                 401,

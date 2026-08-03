@@ -247,6 +247,7 @@ fn embedded_identity_and_operation_names_are_closed() {
             TaskOperation::ConformanceLeaseCreate {
                 profile: "oidf-full".to_owned(),
                 material_sha256: "a".repeat(64),
+                public_material: None,
                 ttl_seconds: 3_600,
             },
             "conformance-lease-create",
@@ -436,6 +437,7 @@ async fn conformance_operations_execute_through_the_closed_task_dispatch() {
     let created = execute(&TaskOperation::ConformanceLeaseCreate {
         profile: profile.clone(),
         material_sha256: material_sha256.clone(),
+        public_material: None,
         ttl_seconds: 60,
     })
     .await;

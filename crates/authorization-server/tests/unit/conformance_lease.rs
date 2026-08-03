@@ -18,7 +18,7 @@ async fn operator_lifecycle_uses_the_authoritative_tenant_lease() {
     let nonce = Uuid::now_v7().simple().to_string();
     let profile = format!("coverage-{nonce}");
     let material_sha256 = format!("{nonce}{nonce}");
-    let created = operator_create(&profile, &material_sha256, 60)
+    let created = operator_create(&profile, &material_sha256, None, 60)
         .await
         .unwrap();
     let lease_id = match created {
@@ -69,7 +69,7 @@ async fn operator_rejects_invalid_identifiers_and_ttl_overflow() {
     assert!(operator_revoke("not-a-uuid").await.is_err());
     if database_is_available() {
         assert!(
-            operator_create("coverage-overflow", &"a".repeat(64), u64::MAX)
+            operator_create("coverage-overflow", &"a".repeat(64), None, u64::MAX)
                 .await
                 .is_err()
         );

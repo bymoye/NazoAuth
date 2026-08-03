@@ -169,9 +169,16 @@ async fn execute(operation: &TaskOperation) -> TaskOutcome {
         TaskOperation::ConformanceLeaseCreate {
             profile,
             material_sha256,
+            public_material,
             ttl_seconds,
         } => {
-            crate::conformance_lease::operator_create(profile, material_sha256, *ttl_seconds).await
+            crate::conformance_lease::operator_create(
+                profile,
+                material_sha256,
+                public_material.clone(),
+                *ttl_seconds,
+            )
+            .await
         }
         TaskOperation::ConformanceLeaseList => crate::conformance_lease::operator_list().await,
         TaskOperation::ConformanceLeaseRevoke { lease_id } => {

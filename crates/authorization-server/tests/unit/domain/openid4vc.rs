@@ -147,6 +147,7 @@ async fn proof_port_accepts_one_attestation_set_and_returns_each_attested_public
     let validated = validator
         .validate(
             &proofs,
+            "wallet-client",
             "https://issuer.example",
             "expected-nonce",
             &metadata,

@@ -1,7 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
-use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::RunQueryDsl;
 use nazo_identity::ports::RepositoryError;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{DbPool, get_conn, schema::conformance_leases};
@@ -16,6 +17,7 @@ pub struct ConformanceLease {
     pub tenant_id: Uuid,
     pub profile: String,
     pub material_sha256: String,
+    pub public_material: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -44,6 +46,7 @@ impl ConformanceLeaseRepository {
         tenant_id: Uuid,
         profile: &str,
         material_sha256: &str,
+        public_material: Option<Value>,
         ttl_seconds: i64,
     ) -> Result<ConformanceLease, RepositoryError> {
         if !(MIN_CONFORMANCE_LEASE_SECONDS..=MAX_CONFORMANCE_LEASE_SECONDS).contains(&ttl_seconds) {
@@ -79,6 +82,7 @@ impl ConformanceLeaseRepository {
                 conformance_leases::tenant_id.eq(tenant_id),
                 conformance_leases::profile.eq(profile),
                 conformance_leases::material_sha256.eq(material_sha256),
+                conformance_leases::public_material.eq(public_material),
                 conformance_leases::created_at.eq(now),
                 conformance_leases::expires_at.eq(expires_at),
             ))
@@ -106,7 +110,8 @@ impl ConformanceLeaseRepository {
             r#"
             WITH revoked AS (
                 UPDATE conformance_leases
-                SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+                SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
+                    public_material = NULL
                 WHERE tenant_id = $1 AND id = $2
                 RETURNING id, tenant_id
             ), deactivated AS (
@@ -134,7 +139,7 @@ impl ConformanceLeaseRepository {
 
     pub async fn cleanup(&self) -> Result<ConformanceLeaseCleanup, RepositoryError> {
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
-        diesel::sql_query(
+        let result = diesel::sql_query(
             "SELECT cleaned_leases, deleted_clients FROM nazo_oauth_cleanup_expired_conformance_leases()",
         )
         .get_result::<CleanupRow>(&mut connection)
@@ -143,6 +148,45 @@ impl ConformanceLeaseRepository {
             cleaned_leases: row.cleaned_leases,
             deleted_clients: row.deleted_clients,
         })
+        .map_err(map_diesel_error)?;
+        diesel::update(
+            conformance_leases::table.filter(conformance_leases::cleaned_at.is_not_null()),
+        )
+        .set(conformance_leases::public_material.eq::<Option<Value>>(None))
+        .execute(&mut connection)
+        .await
+        .map_err(map_diesel_error)?;
+        Ok(result)
+    }
+
+    pub async fn active_public_material_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> Result<Option<Value>, RepositoryError> {
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        diesel::sql_query(
+            r#"
+            SELECT lease.public_material
+            FROM oauth_clients client
+            JOIN conformance_leases lease
+              ON lease.tenant_id = client.tenant_id
+             AND lease.id = client.conformance_lease_id
+            WHERE client.tenant_id = $1
+              AND client.client_id = $2
+              AND client.is_active = TRUE
+              AND lease.expires_at > CURRENT_TIMESTAMP
+              AND lease.revoked_at IS NULL
+              AND lease.cleaned_at IS NULL
+              AND lease.public_material IS NOT NULL
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(client_id)
+        .get_result::<PublicMaterialRow>(&mut connection)
+        .await
+        .optional()
+        .map(|row| row.and_then(|row| row.public_material))
         .map_err(map_diesel_error)
     }
 }
@@ -161,6 +205,12 @@ struct CleanupRow {
     cleaned_leases: i32,
     #[diesel(sql_type = diesel::sql_types::Integer)]
     deleted_clients: i32,
+}
+
+#[derive(diesel::QueryableByName)]
+struct PublicMaterialRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
+    public_material: Option<Value>,
 }
 
 fn map_pool_error(error: anyhow::Error) -> RepositoryError {
