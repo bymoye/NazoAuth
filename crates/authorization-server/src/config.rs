@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore as _;
+use rand::Rng as _;
 use yaml_serde::Value as YamlValue;
 
 const CONFIG_FILE: &str = ".env.yaml";
