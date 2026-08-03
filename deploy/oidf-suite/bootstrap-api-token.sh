@@ -51,18 +51,28 @@ image_label() {
     --format "{{ index .Config.Labels \"$label\" }}" 2>/dev/null || true
 }
 
+require_image_label() {
+  actual=$(image_label "$1" "$2")
+  test "$actual" = "$3" || {
+    echo "image $1 has $2=$actual, expected $3" >&2
+    exit 1
+  }
+}
+
 if test "$(image_label "$suite_image" org.opencontainers.image.revision)" != "$expected_revision" || \
    test "$(image_label "$suite_image" run.nazoauth.source.revision)" != "$source_revision"; then
   "$container_runtime" build \
     --build-context "oidf_suite=$OIDF_SUITE_SOURCE_DIR" \
     --build-arg "OIDF_SUITE_UPSTREAM_REVISION=$expected_revision" \
-    --build-arg "NAZOAUTH_SOURCE_REVISION=$source_revision" \
+    --label "run.nazoauth.source.revision=$source_revision" \
     --file "$script_dir/Containerfile" \
     --tag "$suite_image" \
     "$NAZOAUTH_SOURCE_DIR"
 else
   echo "Reusing exact OIDF Suite image $suite_image"
 fi
+require_image_label "$suite_image" org.opencontainers.image.revision "$expected_revision"
+require_image_label "$suite_image" run.nazoauth.source.revision "$source_revision"
 
 if test "$(image_label "$nginx_image" org.opencontainers.image.revision)" != "$expected_revision" || \
    test "$(image_label "$nginx_image" run.nazoauth.source.revision)" != "$source_revision"; then
@@ -75,6 +85,8 @@ if test "$(image_label "$nginx_image" org.opencontainers.image.revision)" != "$e
 else
   echo "Reusing exact OIDF Suite TLS ingress image $nginx_image"
 fi
+require_image_label "$nginx_image" org.opencontainers.image.revision "$expected_revision"
+require_image_label "$nginx_image" run.nazoauth.source.revision "$source_revision"
 
 if test "$(image_label "$pki_init_image" run.nazoauth.source.revision)" != "$source_revision"; then
   "$container_runtime" build \
@@ -86,6 +98,7 @@ if test "$(image_label "$pki_init_image" run.nazoauth.source.revision)" != "$sou
 else
   echo "Reusing exact OIDF proxy PKI initializer image $pki_init_image"
 fi
+require_image_label "$pki_init_image" run.nazoauth.source.revision "$source_revision"
 
 "$container_runtime" volume create nazoauth-oidf-proxy-pki >/dev/null
 "$container_runtime" run --rm \

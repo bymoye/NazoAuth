@@ -16,6 +16,9 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         compose = (ROOT / "deploy" / "oidf-suite" / "compose.yml").read_text(
             encoding="utf-8"
         )
+        bootstrap = (
+            ROOT / "deploy" / "oidf-suite" / "bootstrap-api-token.sh"
+        ).read_text(encoding="utf-8")
 
         self.assertEqual(containerfile.count(UPSTREAM_REVISION), 2)
         self.assertEqual(compose.count(UPSTREAM_REVISION), 0)
@@ -24,7 +27,14 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
             containerfile,
         )
         self.assertIn('test -z "$(git status --porcelain)"', containerfile)
-        self.assertIn('run.nazoauth.source.revision="${NAZOAUTH_SOURCE_REVISION}"', containerfile)
+        self.assertNotIn("NAZOAUTH_SOURCE_REVISION", containerfile)
+        self.assertIn(
+            '--label "run.nazoauth.source.revision=$source_revision"', bootstrap
+        )
+        self.assertIn(
+            "require_image_label \"$suite_image\" run.nazoauth.source.revision",
+            bootstrap,
+        )
         self.assertNotIn("git apply", containerfile)
         self.assertNotIn("OIDF_SUITE_OVERLAY", containerfile)
         self.assertNotIn("OIDF_SUITE_OVERLAY", compose)
