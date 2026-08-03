@@ -5,6 +5,6 @@
   "database_restore": "backup",
   "irreversible_migration": false,
   "minimum_supported_version": "0.1.8",
-  "migration_floor": "20260803000200",
-  "rationale": "All migrations through the declared floor are additive and the immediately previous application can restart without a schema downgrade. Artifact rollback does not run down migrations. The initial administrator receipt migration refuses schema downgrade after new receipt or audit evidence exists; the conformance lease migration adds isolated nullable ownership metadata and database functions that the previous application ignores. Database recovery remains the separately declared verified-backup boundary."
+  "migration_floor": "20260803000300",
+  "rationale": "All migrations through this floor are additive, and the previous application ignores the nullable conformance ownership and public-trust fields. Artifact rollback does not run down migrations. The initial administrator receipt refuses schema downgrade after evidence exists. Lease triggers bind and clean temporary clients and verifier transactions without changing permanent records. Database recovery remains the separately verified-backup boundary."
 }

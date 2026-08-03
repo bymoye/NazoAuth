@@ -994,7 +994,7 @@ class ReleaseUpdateTests(unittest.TestCase):
         self.assertFalse(manifest["rollback"]["irreversible_migration"])
         self.assertEqual(manifest["target"], target)
         self.assertEqual(manifest["embedded"]["build_id"], "github:123:1")
-        self.assertEqual(manifest["rollback"]["migration_floor"], "20260803000200")
+        self.assertEqual(manifest["rollback"]["migration_floor"], "20260803000300")
         self.assertIn(
             "refuses schema downgrade",
             manifest["rollback"]["rationale"],
