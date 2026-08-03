@@ -39,13 +39,37 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         )
 
         self.assertIn('container_runtime=${OIDF_CONTAINER_RUNTIME:-podman}', bootstrap)
-        self.assertIn('OIDF_TARGET_HOSTNAME: ${OIDF_TARGET_HOSTNAME:', compose)
+        self.assertIn(': "${OIDF_TARGET_HOSTNAME:?set OIDF_TARGET_HOSTNAME}"', bootstrap)
+        self.assertIn(
+            '--env "OIDF_TARGET_HOSTNAME=$OIDF_TARGET_HOSTNAME"', bootstrap
+        )
         self.assertIn('--build-context "oidf_suite=$OIDF_SUITE_SOURCE_DIR"', bootstrap)
         self.assertIn('git -C "$NAZOAUTH_SOURCE_DIR" status --porcelain', bootstrap)
         self.assertIn("run.nazoauth.source.revision", bootstrap)
         self.assertIn("up -d --no-build mongodb server-bootstrap", bootstrap)
-        self.assertIn("up -d --no-build server", bootstrap)
+        self.assertIn("up -d --no-build nginx", bootstrap)
         self.assertIn("Reusing exact OIDF Suite image", bootstrap)
+
+    def test_tls_ingress_and_pki_initialization_are_explicit_podman_steps(self):
+        bootstrap = (
+            ROOT / "deploy" / "oidf-suite" / "bootstrap-api-token.sh"
+        ).read_text(encoding="utf-8")
+        compose = (ROOT / "deploy" / "oidf-suite" / "compose.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-946451d1}",
+            compose,
+        )
+        self.assertIn('"0.0.0.0:8443:8443"', compose)
+        self.assertNotIn('"0.0.0.0:8443:8080"', compose)
+        self.assertNotIn("  pki-init:\n", compose)
+        self.assertIn('"$container_runtime" volume create nazoauth-oidf-proxy-pki', bootstrap)
+        self.assertIn("--volume nazoauth-oidf-proxy-pki:/pki", bootstrap)
+        self.assertIn('"$container_runtime" run --rm', bootstrap)
+        self.assertIn('"$OIDF_SUITE_SOURCE_DIR/nginx/Dockerfile"', bootstrap)
+        self.assertIn("Reusing exact OIDF Suite TLS ingress image", bootstrap)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ test -z "$(git -C "$NAZOAUTH_SOURCE_DIR" status --porcelain)" || {
 suite_image_tag=${OIDF_SUITE_IMAGE_TAG:-946451d1}
 export OIDF_SUITE_IMAGE_TAG=$suite_image_tag
 suite_image="nazoauth-oidf-suite:$suite_image_tag"
+nginx_image="nazoauth-oidf-suite-nginx:$suite_image_tag"
 pki_init_image="nazoauth-oidf-proxy-pki-init:$suite_image_tag"
 
 image_label() {
@@ -63,6 +64,18 @@ else
   echo "Reusing exact OIDF Suite image $suite_image"
 fi
 
+if test "$(image_label "$nginx_image" org.opencontainers.image.revision)" != "$expected_revision" || \
+   test "$(image_label "$nginx_image" run.nazoauth.source.revision)" != "$source_revision"; then
+  "$container_runtime" build \
+    --label "org.opencontainers.image.revision=$expected_revision" \
+    --label "run.nazoauth.source.revision=$source_revision" \
+    --file "$OIDF_SUITE_SOURCE_DIR/nginx/Dockerfile" \
+    --tag "$nginx_image" \
+    "$OIDF_SUITE_SOURCE_DIR/nginx"
+else
+  echo "Reusing exact OIDF Suite TLS ingress image $nginx_image"
+fi
+
 if test "$(image_label "$pki_init_image" run.nazoauth.source.revision)" != "$source_revision"; then
   "$container_runtime" build \
     --target pki-init \
@@ -73,6 +86,12 @@ if test "$(image_label "$pki_init_image" run.nazoauth.source.revision)" != "$sou
 else
   echo "Reusing exact OIDF proxy PKI initializer image $pki_init_image"
 fi
+
+"$container_runtime" volume create nazoauth-oidf-proxy-pki >/dev/null
+"$container_runtime" run --rm \
+  --env "OIDF_TARGET_HOSTNAME=$OIDF_TARGET_HOSTNAME" \
+  --volume nazoauth-oidf-proxy-pki:/pki \
+  "$pki_init_image"
 
 token_parent=$(dirname -- "$OIDF_SUITE_TOKEN_FILE")
 install -d -m 0700 "$token_parent"
@@ -151,7 +170,7 @@ PY
   trap - EXIT HUP INT TERM
 fi
 
-compose up -d --no-build server
+compose up -d --no-build nginx
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import pathlib

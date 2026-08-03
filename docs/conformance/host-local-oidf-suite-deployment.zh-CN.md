@@ -1,9 +1,9 @@
 # 宿主机本地 OIDF Conformance Suite 部署
 
 本手册在私有服务器上部署固定 revision、未修改的官方 OIDF Conformance Suite。它
-独立于 NazoAuth 产品镜像，也不通过 GitHub Actions。公网入口负责终止 TLS；套件只把
-Spring Boot 的明文 HTTP 端口 `8080` 映射到宿主机 `0.0.0.0:8443`。本部署只使用
-Podman。
+独立于 NazoAuth 产品镜像，也不通过 GitHub Actions。套件自带的 Nginx 在容器内终止
+TLS，并把 `8443` 映射到宿主机 `0.0.0.0:8443`；Spring Boot 的明文 HTTP 端口不向
+宿主机公开。本部署只使用 Podman。
 
 固定套件 revision：
 `946451d1ce29965c9ab7aee05f5003552233160e`。
@@ -35,8 +35,9 @@ test -f /opt/nazo-oauth/conformance/operator-suite/pom.xml
 不得直接运行上游 `builder-compose.yml`，也不得在宿主机安装 Maven 来绕过容器构建。
 仓库内的 `deploy/oidf-suite/Containerfile` 通过具名 build context 读取固定 suite 源码，
 先验证 revision 与 clean 状态，再在 Maven build stage 中生成 JAR；运行时入口保持
-上游容器入口参数契约。下一步脚本先用 `podman build --build-context` 构建 Suite 与
-PKI 初始化镜像各一次，再用 `podman compose ... up --no-build` 启动；Compose 不得再次
+上游容器入口参数契约。下一步脚本用 `podman build --build-context` 构建 Suite 镜像，
+并从同一固定、未修改的官方 checkout 构建其 Nginx 镜像；PKI 初始化镜像单独构建。
+三个镜像均只构建一次，再用 `podman compose ... up --no-build` 启动，Compose 不得再次
 触发构建。镜像标签同时绑定 Suite revision 与 NazoAuth 源码 revision，精确标签一致时
 才允许复用。整个过程只在私有服务器的 Podman builder 中编译；不使用开发机 Cargo 或
 容器构建，也不使用 GitHub 生成材料。
@@ -51,8 +52,9 @@ PKI 初始化镜像各一次，再用 `podman compose ... up --no-build` 启动�
 将同一 NazoAuth 精确源码提交放在 `/opt/nazoauth/source`。脚本先只在
 `127.0.0.1:18443` 启动官方套件的开发身份，且明确把该身份设为非管理员；它生成一个
 24 小时 API Token 后立即删除临时容器，再以 `devmode=false` 在
-`0.0.0.0:8443` 启动正式测试进程。脚本要求 NazoAuth 与 Suite 两个 checkout 都 clean，
-并在启动前完成上述单次镜像构建或精确镜像复用。Token 不进入 argv、普通环境变量或日志。
+内部 HTTP 网络启动正式测试进程，并通过套件 Nginx 把 TLS `8443` 发布到宿主机。
+脚本要求 NazoAuth 与 Suite 两个 checkout 都 clean，并在启动前完成上述单次镜像构建或
+精确镜像复用。Token 不进入 argv、普通环境变量或日志。
 
 ```sh
 export OIDF_SUITE_SOURCE_DIR=/opt/nazo-oauth/conformance/operator-suite
@@ -75,8 +77,10 @@ MongoDB 状态保存在 Compose 命名卷中；源码和 Token 位于上述独�
 Podman builder 管理；它们均不进入 NazoAuth 产品容器或数据卷。
 
 部署同时创建私有容器网络 `nazoauth-oidf-bridge` 和独立 PKI volume
-`nazoauth-oidf-proxy-pki`。Suite server 启动时只把该 volume 中的短期 server CA 导入
-自己的 Java trust store；宿主机和公网客户端的信任库不受影响。被测端的 mTLS proxy
+`nazoauth-oidf-proxy-pki`。脚本在 Compose 启动前通过一次性、自动删除的 Podman 容器
+初始化或核验该 volume，避免把一次性任务交给 Compose 的服务生命周期。Suite server
+启动时只把该 volume 中的短期 server CA 导入自己的 Java trust store；宿主机和公网
+客户端的信任库不受影响。被测端的 mTLS proxy
 随后在同一网络上以目标公网主机名作为 network alias，使 Suite 内的协议请求走真实
 客户端证书校验，而 onboarding 与公网浏览器仍走公开 TLS 入口。这是
 split-horizon 测试网络，不修改 issuer 字符串或 Suite plan 配置。
@@ -88,7 +92,7 @@ export NAZOAUTH_SOURCE_DIR=/opt/nazoauth/source
 podman compose \
   -f /opt/nazoauth/source/deploy/oidf-suite/compose.yml ps
 podman compose \
-  -f /opt/nazoauth/source/deploy/oidf-suite/compose.yml port server 8080
+  -f /opt/nazoauth/source/deploy/oidf-suite/compose.yml port nginx 8443
 curl -fsS https://oauth-test.nazo.run/login.html >/dev/null
 ```
 

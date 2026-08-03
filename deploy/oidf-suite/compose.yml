@@ -10,13 +10,6 @@ x-suite-environment: &suite-environment
   OIDC_GITLAB_SECRET: gitlab-secret
 
 services:
-  pki-init:
-    image: nazoauth-oidf-proxy-pki-init:${OIDF_SUITE_IMAGE_TAG:-946451d1}
-    environment:
-      OIDF_TARGET_HOSTNAME: ${OIDF_TARGET_HOSTNAME:?set OIDF_TARGET_HOSTNAME to the target issuer hostname}
-    volumes:
-      - oidf_proxy_pki:/pki
-
   mongodb:
     image: docker.io/library/mongo:6.0.13
     restart: unless-stopped
@@ -38,18 +31,28 @@ services:
         -Doidc.google.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
         -Doidc.gitlab.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
         -Doidc.admin.issuer=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
-    ports:
-      - "0.0.0.0:8443:8080"
     volumes:
       - oidf_proxy_pki:/oidf-proxy-pki:ro
     depends_on:
       mongodb:
         condition: service_started
-      pki-init:
-        condition: service_completed_successfully
     networks:
       - default
       - oidf_bridge
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+  nginx:
+    image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-946451d1}
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8443:8443"
+    depends_on:
+      server:
+        condition: service_started
     logging:
       driver: json-file
       options:
@@ -72,8 +75,6 @@ services:
     depends_on:
       mongodb:
         condition: service_started
-      pki-init:
-        condition: service_completed_successfully
     logging:
       driver: json-file
       options:
