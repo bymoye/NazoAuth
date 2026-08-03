@@ -19,7 +19,7 @@ pub(crate) async fn operator_create(
     let repository = repository()?;
     let ttl_seconds = i64::try_from(ttl_seconds).context("conformance lease ttl is too large")?;
     if let Some(material) = public_material.as_ref() {
-        crate::domain::openid4vc::parse_conformance_credential_trust_anchor(
+        crate::domain::parse_conformance_credential_trust_anchor(
             &material.credential_trust_anchor_pem,
         )
         .context("invalid OpenID4VC conformance credential trust anchor")?;
