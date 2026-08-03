@@ -17,7 +17,7 @@ use nazo_operator_protocol::{
     sign_discovery_statement, validate_discovery_request, verify_deployment_statement,
 };
 
-use crate::{config::read_or_create_runtime_secret, operator_task::embedded_identity};
+use crate::{config::read_or_create_instance_identity_key, operator_task::embedded_identity};
 
 const INSTANCE_DIRECTORY: &str = "instance";
 const IDENTITY_KEY_FILE: &str = "identity.key";
@@ -72,7 +72,7 @@ impl ControlDiscoveryEndpoint {
             configured_runtime_instance_id,
         )?;
         let (_, encoded_private_key) =
-            read_or_create_runtime_secret(&identity_dir, IDENTITY_KEY_FILE)?;
+            read_or_create_instance_identity_key(&identity_dir, IDENTITY_KEY_FILE)?;
         let private_key = URL_SAFE_NO_PAD
             .decode(encoded_private_key)
             .context("instance identity key is not valid base64url")?;

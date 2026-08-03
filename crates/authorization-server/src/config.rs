@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::RngCore as _;
 use yaml_serde::Value as YamlValue;
 
 const CONFIG_FILE: &str = ".env.yaml";
@@ -460,6 +461,13 @@ fn resolve_from_config_dir(config_dir: &Path, path: &Path) -> PathBuf {
 }
 
 fn read_or_create_generated_secret(path: &Path) -> anyhow::Result<String> {
+    read_or_create_generated_secret_with_size(path, GENERATED_SECRET_BYTES)
+}
+
+fn read_or_create_generated_secret_with_size(
+    path: &Path,
+    generated_bytes: usize,
+) -> anyhow::Result<String> {
     if path.exists() {
         return read_generated_secret(path);
     }
@@ -473,7 +481,9 @@ fn read_or_create_generated_secret(path: &Path) -> anyhow::Result<String> {
         )
     })?;
 
-    let value = URL_SAFE_NO_PAD.encode(rand::random::<[u8; GENERATED_SECRET_BYTES]>());
+    let mut generated = vec![0_u8; generated_bytes];
+    rand::rng().fill_bytes(&mut generated);
+    let value = URL_SAFE_NO_PAD.encode(generated);
     let temporary_path = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name()
@@ -525,6 +535,15 @@ pub(crate) fn read_or_create_runtime_secret(
 ) -> anyhow::Result<(PathBuf, String)> {
     let path = data_dir.join(relative_path);
     let value = read_or_create_generated_secret(&path)?;
+    Ok((path, value))
+}
+
+pub(crate) fn read_or_create_instance_identity_key(
+    identity_dir: &Path,
+    relative_path: impl AsRef<Path>,
+) -> anyhow::Result<(PathBuf, String)> {
+    let path = identity_dir.join(relative_path);
+    let value = read_or_create_generated_secret_with_size(&path, 32)?;
     Ok((path, value))
 }
 

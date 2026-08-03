@@ -444,6 +444,25 @@ fn runtime_secret_helper_returns_the_stable_persisted_path_and_value() {
 }
 
 #[test]
+fn instance_identity_helper_persists_an_ed25519_seed_without_reusing_token_size() {
+    let path = temp_config_dir("instance_identity_helper");
+    let (created_path, first) =
+        read_or_create_instance_identity_key(&path, "instance/identity.key").unwrap();
+    let (_, second) = read_or_create_instance_identity_key(&path, "instance/identity.key").unwrap();
+
+    assert_eq!(created_path, path.join("instance/identity.key"));
+    assert_eq!(first, second);
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(first)
+            .unwrap()
+            .len(),
+        32
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn generated_secret_creation_reports_an_invalid_parent_without_partial_state() {
     let path = temp_config_dir("invalid_secret_parent");
     let blocking_file = path.join("not-a-directory");
