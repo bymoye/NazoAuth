@@ -30,6 +30,14 @@ pub struct ConformanceLeaseCleanup {
     pub deleted_clients: i32,
 }
 
+#[derive(Clone, Debug, diesel::QueryableByName)]
+pub struct ConformanceLeasePublicMaterial {
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    pub lease_id: Uuid,
+    #[diesel(sql_type = diesel::sql_types::Jsonb)]
+    pub public_material: Value,
+}
+
 #[derive(Clone)]
 pub struct ConformanceLeaseRepository {
     pool: DbPool,
@@ -183,6 +191,59 @@ impl ConformanceLeaseRepository {
         )
         .bind::<diesel::sql_types::Uuid, _>(tenant_id)
         .bind::<diesel::sql_types::Text, _>(client_id)
+        .get_result::<PublicMaterialRow>(&mut connection)
+        .await
+        .optional()
+        .map(|row| row.and_then(|row| row.public_material))
+        .map_err(map_diesel_error)
+    }
+
+    pub async fn active_public_materials_for_profile(
+        &self,
+        tenant_id: Uuid,
+        profile: &str,
+    ) -> Result<Vec<ConformanceLeasePublicMaterial>, RepositoryError> {
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        diesel::sql_query(
+            r#"
+            SELECT id AS lease_id, public_material
+            FROM conformance_leases
+            WHERE tenant_id = $1
+              AND profile = $2
+              AND expires_at > CURRENT_TIMESTAMP
+              AND revoked_at IS NULL
+              AND cleaned_at IS NULL
+              AND public_material IS NOT NULL
+            ORDER BY created_at, id
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .load(&mut connection)
+        .await
+        .map_err(map_diesel_error)
+    }
+
+    pub async fn active_public_material_for_lease(
+        &self,
+        tenant_id: Uuid,
+        lease_id: Uuid,
+    ) -> Result<Option<Value>, RepositoryError> {
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        diesel::sql_query(
+            r#"
+            SELECT public_material
+            FROM conformance_leases
+            WHERE tenant_id = $1
+              AND id = $2
+              AND expires_at > CURRENT_TIMESTAMP
+              AND revoked_at IS NULL
+              AND cleaned_at IS NULL
+              AND public_material IS NOT NULL
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Uuid, _>(lease_id)
         .get_result::<PublicMaterialRow>(&mut connection)
         .await
         .optional()

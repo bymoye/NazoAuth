@@ -45,8 +45,10 @@
    它们不来自旧部署或历史制品。GitHub public
    onboarding workflow 仅用于 GitHub 上运行的官方公开 Suite 路径。安装只读取公开
    baseline profile；后续宿主机 runner 通过 `nazoauthctl conformance lease create` 把
-   公开验证密钥只授予该租约绑定的临时 client，并一次性消费公开信任文件与私有材料。
-   撤销或到期立即停止使用这些密钥，周期清理器删除 client 并清空数据库中的公开材料。
+   attestation 公钥只授予该租约绑定的临时 client，并把 run-local credential CA 只绑定到
+   同一 Suite origin 的 verifier transaction，再一次性消费公开信任文件与私有材料。
+   撤销或到期立即停止使用这些信任，周期清理器删除 client、绑定的 verifier transaction
+   并清空数据库中的公开材料。
    首任管理员 token 只从本轮生成的私有 runtime-owned mount 定位，不打印、不复用旧状态，
    也不进入 argv 或普通环境变量。
 

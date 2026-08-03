@@ -119,6 +119,19 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
             .unwrap(),
         Some(public_material),
     );
+    let active_profile_material = leases
+        .active_public_materials_for_profile(leased_client.tenant_id, "oidf-test")
+        .await
+        .unwrap();
+    assert_eq!(active_profile_material.len(), 1);
+    assert_eq!(active_profile_material[0].lease_id, lease.id);
+    assert_eq!(
+        leases
+            .active_public_material_for_lease(leased_client.tenant_id, lease.id)
+            .await
+            .unwrap(),
+        Some(active_profile_material[0].public_material.clone()),
+    );
     assert!(
         clients
             .by_client_id(leased_client.tenant_id, &leased_client.client_id)
@@ -141,6 +154,20 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
     assert!(
         clients
             .by_client_id(leased_client.tenant_id, &leased_client.client_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        leases
+            .active_public_materials_for_profile(leased_client.tenant_id, "oidf-test")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        leases
+            .active_public_material_for_lease(leased_client.tenant_id, lease.id)
             .await
             .unwrap()
             .is_none()

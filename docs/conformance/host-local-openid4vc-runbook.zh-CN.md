@@ -48,8 +48,9 @@ public onboarding JWKS 与同一批私钥逐一对应。不接受仓库、历史
 准备目录为 `0700`，四个文件为 `0600`。runner 成功物化私有 Suite 配置后立即校验哈希并
 删除 `openid4vc-run-material.json`；随后以 `openid4vc-conformance-trust.json` 创建 8 小时
 租约，成功写入后再次校验并删除该文件。公开 profile 与 manifest 保留作安装来源证据。
-服务只为绑定该租约的 client 解析这些公开验证密钥；撤销或到期后立即失效，周期清理器
-删除 client 并清空租约公开材料。work directory 内的全部私有配置在 `finally` 删除。每次官方 runner 只通过新的继承
+服务只为绑定该租约的 client 解析 attestation 公钥，并把 run-local credential CA 绑定到
+同一 Suite origin 创建的 verifier transaction；撤销或到期后全部立即失效，周期清理器
+删除 client、绑定的 verifier transaction 并清空租约公开材料。work directory 内的全部私有配置在 `finally` 删除。每次官方 runner 只通过新的继承
 FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation、
 key-attestation 和 credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
 

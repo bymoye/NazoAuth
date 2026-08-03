@@ -24,8 +24,9 @@ pub use pool::{
 };
 pub use repositories::{
     AccessRequestRepository, AuditRepository, AuthorizationFlowRepository, AuthorizationRepository,
-    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeaseRepository, FederationRepository,
-    GrantAuthorization, GrantRepository, InitialAdminBootstrapRepository,
+    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeasePublicMaterial,
+    ConformanceLeaseRepository, FederationRepository, GrantAuthorization, GrantRepository,
+    InitialAdminBootstrapRepository,
     InitialAdminBootstrapState, InitialAdminClaimOutcome, MAX_CONFORMANCE_LEASE_SECONDS,
     MIN_CONFORMANCE_LEASE_SECONDS, ManagedCredentialDataset, ManagedCredentialDatasetWrite,
     MfaRepository, MtlsTrustAnchorRepository, OAuthClientRepository, Openid4vciDatasetRepository,

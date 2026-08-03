@@ -163,6 +163,18 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
         self.assertEqual(result["issuer"]["credential_configuration_ids"]["mdoc"], "org.iso.18013.5.1.mDL")
         self.assertEqual(len(result["issuer"]["tx_code"]), 6)
 
+    def test_conformance_lease_carries_only_the_public_run_credential_anchor(self):
+        material = self.fake_material()
+        trust = self.module.build_prepared_conformance_trust(
+            material, "https://suite.example"
+        )
+        self.assertEqual(
+            trust["credential_trust_anchor_pem"], material["trust_anchor_pem"]
+        )
+        self.assertNotIn("PRIVATE KEY", trust["credential_trust_anchor_pem"])
+        self.assertNotIn("d", trust["client_attestation_jwks"]["keys"][0])
+        self.assertNotIn("d", trust["key_attestation_jwks"]["keys"][0])
+
     def test_manifest_refuses_mtls_trust_requests_for_the_17_plan_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "manifest.json"

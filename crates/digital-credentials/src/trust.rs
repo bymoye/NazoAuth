@@ -30,6 +30,7 @@ pub struct PresentedCredential {
     pub expected_audience: String,
     pub response_uri: String,
     pub mdoc_session_transcript: Option<Vec<u8>>,
+    pub additional_trust_anchors: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

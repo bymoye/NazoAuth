@@ -194,6 +194,8 @@ pub struct PresentationTransaction {
     pub request_object: Option<String>,
     pub request_uri: Option<String>,
     #[serde(skip)]
+    pub conformance_lease_id: Option<Uuid>,
+    #[serde(skip)]
     pub response_encryption_private_key: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,

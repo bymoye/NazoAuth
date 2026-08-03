@@ -66,7 +66,10 @@ impl PresentationStorePort for RecordingStore {
 }
 
 #[derive(Clone)]
-struct RecordingVerifier(Arc<Mutex<Option<Vec<u8>>>>);
+struct RecordingVerifier {
+    transcript: Arc<Mutex<Option<Vec<u8>>>>,
+    trust_anchors: Arc<Mutex<Vec<Vec<u8>>>>,
+}
 
 impl CredentialVerifierPort for RecordingVerifier {
     fn verify<'a>(
@@ -74,9 +77,12 @@ impl CredentialVerifierPort for RecordingVerifier {
         presentation: &'a PresentedCredential,
     ) -> CredentialFuture<'a, Result<VerifiedCredential, CredentialTrustError>> {
         let transcript = presentation.mdoc_session_transcript.clone();
-        let output = self.0.clone();
+        let trust_anchors = presentation.additional_trust_anchors.clone();
+        let output = self.transcript.clone();
+        let trust_output = self.trust_anchors.clone();
         Box::pin(async move {
             *output.lock().expect("recording verifier lock") = transcript;
+            *trust_output.lock().expect("recording trust lock") = trust_anchors;
             Ok(VerifiedCredential {
                 format: CredentialFormat::MsoMdoc,
                 issuer: "trusted-issuer".to_owned(),
@@ -163,12 +169,20 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
         request,
         request_object: None,
         request_uri: None,
+        conformance_lease_id: None,
         response_encryption_private_key: None,
         created_at: now,
         expires_at: now + Duration::minutes(5),
     };
     let recorded = Arc::new(Mutex::new(None));
-    let service = PresentationService::new(RecordingStore, RecordingVerifier(recorded.clone()));
+    let recorded_trust = Arc::new(Mutex::new(Vec::new()));
+    let service = PresentationService::new(
+        RecordingStore,
+        RecordingVerifier {
+            transcript: recorded.clone(),
+            trust_anchors: recorded_trust.clone(),
+        },
+    );
 
     service
         .verify_response(
@@ -179,6 +193,7 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
                 error: None,
                 error_description: None,
             },
+            &[vec![1, 2, 3]],
             now,
         )
         .await
@@ -207,14 +222,23 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
         ],
         "OpenID4VP 1.0 Appendix B.2.6.2 encrypted-response vector"
     );
+    assert_eq!(
+        *recorded_trust.lock().expect("recording trust lock"),
+        vec![vec![1, 2, 3]],
+        "transaction-bound trust reaches credential verification"
+    );
 
     let mut unencrypted_transaction = transaction.clone();
     unencrypted_transaction.response_mode = ResponseMode::DirectPost;
     unencrypted_transaction.request.response_mode = "direct_post".to_owned();
     let unencrypted_recorded = Arc::new(Mutex::new(None));
+    let unencrypted_trust = Arc::new(Mutex::new(Vec::new()));
     PresentationService::new(
         RecordingStore,
-        RecordingVerifier(unencrypted_recorded.clone()),
+        RecordingVerifier {
+            transcript: unencrypted_recorded.clone(),
+            trust_anchors: unencrypted_trust,
+        },
     )
     .verify_response(
         &unencrypted_transaction,
@@ -224,6 +248,7 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
             error: None,
             error_description: None,
         },
+        &[],
         now,
     )
     .await
@@ -269,6 +294,7 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
                 error: None,
                 error_description: None,
             },
+            &[],
             now,
         )
         .await

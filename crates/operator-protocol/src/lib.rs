@@ -138,6 +138,7 @@ pub struct Openid4vcConformanceTrust {
     pub client_attestation_issuer: String,
     pub client_attestation_jwks: serde_json::Value,
     pub key_attestation_jwks: serde_json::Value,
+    pub credential_trust_anchor_pem: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -682,6 +683,14 @@ fn validate_openid4vc_conformance_trust(
     if material.schema != 1
         || material.client_attestation_issuer.len() > 2048
         || !material.client_attestation_issuer.starts_with("https://")
+        || material.credential_trust_anchor_pem.len() > 16 * 1024
+        || !material
+            .credential_trust_anchor_pem
+            .starts_with("-----BEGIN CERTIFICATE-----\n")
+        || !material
+            .credential_trust_anchor_pem
+            .ends_with("-----END CERTIFICATE-----\n")
+        || material.credential_trust_anchor_pem.contains("PRIVATE KEY")
     {
         return Err(ProtocolError::Policy(
             "invalid OpenID4VC conformance trust material",

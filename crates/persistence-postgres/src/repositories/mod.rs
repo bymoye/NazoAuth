@@ -23,7 +23,8 @@ pub use authorization::AuthorizationRepository;
 pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::OAuthClientRepository;
 pub use conformance_leases::{
-    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeaseRepository,
+    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeasePublicMaterial,
+    ConformanceLeaseRepository,
     MAX_CONFORMANCE_LEASE_SECONDS, MIN_CONFORMANCE_LEASE_SECONDS,
 };
 pub use federation::FederationRepository;

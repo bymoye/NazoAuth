@@ -2050,6 +2050,8 @@ fn conformance_commands_build_closed_operator_tasks() {
         client_attestation_issuer: "https://suite.example/".to_owned(),
         client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
         key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
     };
     fs::write(&openid4vc_material, serde_json::to_vec(&trust).unwrap()).unwrap();
     assert!(matches!(

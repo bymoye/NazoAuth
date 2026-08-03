@@ -42,6 +42,25 @@ pub(crate) struct Openid4vcCredentialCrypto {
     trust_anchors: Arc<Vec<Vec<u8>>>,
 }
 
+pub(crate) fn parse_conformance_credential_trust_anchor(
+    pem: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let certificates = X509::stack_from_pem(pem.as_bytes())?;
+    if certificates.len() != 1 {
+        anyhow::bail!("OpenID4VC conformance credential trust must contain exactly one certificate");
+    }
+    let der = certificates[0].to_der()?;
+    let (remainder, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
+        anyhow::anyhow!("failed to parse OpenID4VC conformance credential trust anchor: {error}")
+    })?;
+    if !remainder.is_empty() || !parsed.is_ca() || !parsed.validity().is_valid() {
+        anyhow::bail!(
+            "OpenID4VC conformance credential trust anchor must be a currently valid CA certificate"
+        );
+    }
+    Ok(der)
+}
+
 impl Openid4vcCredentialCrypto {
     pub(crate) fn new(
         keyset: KeyManager,
@@ -331,6 +350,7 @@ impl Openid4vcCredentialCrypto {
                 .x5c
                 .as_deref()
                 .ok_or(CredentialTrustError::UntrustedIssuer)?,
+            &presentation.additional_trust_anchors,
         )?;
         let mut validation = Validation::new(header.alg);
         validation.required_spec_claims = ["exp", "iss"].into_iter().map(str::to_owned).collect();
@@ -427,7 +447,11 @@ impl Openid4vcCredentialCrypto {
         })
     }
 
-    fn validate_sd_jwt_chain(&self, x5c: &[String]) -> Result<DecodingKey, CredentialTrustError> {
+    fn validate_sd_jwt_chain(
+        &self,
+        x5c: &[String],
+        additional_trust_anchors: &[Vec<u8>],
+    ) -> Result<DecodingKey, CredentialTrustError> {
         let certificates = x5c
             .iter()
             .map(|value| {
@@ -443,9 +467,9 @@ impl Openid4vcCredentialCrypto {
             .first()
             .ok_or(CredentialTrustError::UntrustedIssuer)?;
         let mut store = X509StoreBuilder::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        for anchor in self.trust_anchors.iter() {
+        for anchor in self.combined_trust_anchors(additional_trust_anchors)? {
             store
-                .add_cert(X509::from_der(anchor).map_err(|_| CredentialTrustError::Unavailable)?)
+                .add_cert(X509::from_der(&anchor).map_err(|_| CredentialTrustError::Unavailable)?)
                 .map_err(|_| CredentialTrustError::Unavailable)?;
         }
         let store = store.build();
@@ -480,7 +504,9 @@ impl Openid4vcCredentialCrypto {
             .mdoc_session_transcript
             .as_ref()
             .ok_or(CredentialTrustError::InvalidHolderBinding)?;
-        let verifier = mdoc_rs::Verifier::new(self.trust_anchors.as_ref().clone());
+        let trust_anchors =
+            self.combined_trust_anchors(&presentation.additional_trust_anchors)?;
+        let verifier = mdoc_rs::Verifier::new(trust_anchors.clone());
         let verified = verifier
             .verify(
                 &bytes,
@@ -497,8 +523,7 @@ impl Openid4vcCredentialCrypto {
             })?;
         let standard_device_authentication_valid =
             verify_standard_mdoc_device_signatures(&verified, session_transcript)?;
-        let issuer_chain_valid =
-            verify_mdoc_issuer_certificate_chains(&verified, self.trust_anchors.as_ref())?;
+        let issuer_chain_valid = verify_mdoc_issuer_certificate_chains(&verified, &trust_anchors)?;
         if !mdoc_assessments_accepted(
             &verified,
             standard_device_authentication_valid,
@@ -567,6 +592,24 @@ impl Openid4vcCredentialCrypto {
                 .map(|status| cbor_to_json(&status.raw))
                 .transpose()?,
         })
+    }
+
+    fn combined_trust_anchors(
+        &self,
+        additional: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, CredentialTrustError> {
+        let mut anchors = self.trust_anchors.as_ref().clone();
+        for anchor in additional {
+            let (_, certificate) = x509_parser::parse_x509_certificate(anchor)
+                .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+            if !certificate.is_ca() {
+                return Err(CredentialTrustError::UntrustedIssuer);
+            }
+            if !anchors.contains(anchor) {
+                anchors.push(anchor.clone());
+            }
+        }
+        Ok(anchors)
     }
 }
 

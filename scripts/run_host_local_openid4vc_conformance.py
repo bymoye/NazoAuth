@@ -151,6 +151,7 @@ def build_prepared_conformance_trust(
         "client_attestation_issuer": f"{suite}/",
         "client_attestation_jwks": {"keys": [public_jwk(client_attestation)]},
         "key_attestation_jwks": {"keys": [public_jwk(key_attestation)]},
+        "credential_trust_anchor_pem": material["trust_anchor_pem"],
     }
 
 

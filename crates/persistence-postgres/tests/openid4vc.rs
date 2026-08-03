@@ -237,6 +237,56 @@ async fn credential_dataset_mutations_require_an_active_admin_and_are_audited_at
 }
 
 #[tokio::test]
+async fn revoking_a_conformance_lease_deletes_its_presentation_transactions() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .unwrap();
+    let pool = create_pool(&database_url, 4).unwrap();
+    let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let lease = leases
+        .create(
+            tenant_id,
+            "openid4vc",
+            &"b".repeat(64),
+            Some(serde_json::json!({"schema": 1})),
+            60,
+        )
+        .await
+        .unwrap();
+    let transaction_id = Uuid::now_v7();
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "INSERT INTO openid4vp_transactions \
+         (id,tenant_id,client_id_prefix,request_method,response_mode,\
+          wallet_authorization_endpoint,state_hash,request,conformance_lease_id,expires_at) \
+         VALUES ($1,$2,'redirect_uri','url_query','direct_post',\
+                 'https://wallet.example/authorize',$3,$4,$5,CURRENT_TIMESTAMP + INTERVAL '5 minutes')",
+    )
+    .bind::<SqlUuid, _>(transaction_id)
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<Text, _>("c".repeat(64))
+    .bind::<diesel::sql_types::Jsonb, _>(serde_json::json!({"request": "bounded"}))
+    .bind::<SqlUuid, _>(lease.id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    leases.revoke(tenant_id, lease.id).await.unwrap();
+    let mut connection = get_conn(&pool).await.unwrap();
+    let count = sql_query("SELECT COUNT(*)::BIGINT AS count FROM openid4vp_transactions WHERE id = $1")
+        .bind::<SqlUuid, _>(transaction_id)
+        .get_result::<CountRow>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(count.count, 0);
+}
+
+#[tokio::test]
 async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and_encrypted_at_rest()
 {
     let Some(database_url) = database_url() else {
@@ -445,6 +495,7 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         request,
         request_object: None,
         request_uri: None,
+        conformance_lease_id: None,
         response_encryption_private_key: Some(vec![7_u8; 32]),
         created_at: now,
         expires_at: now + Duration::minutes(5),

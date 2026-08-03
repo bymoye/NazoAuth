@@ -777,8 +777,8 @@ impl PresentationStorePort for Openid4vpRepository {
                 "INSERT INTO openid4vp_transactions \
                  (id, tenant_id, client_id_prefix, request_method, response_mode, \
                   wallet_authorization_endpoint, state_hash, request, request_object, request_uri, \
-                  ephemeral_private_key_ciphertext, expires_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                  conformance_lease_id, ephemeral_private_key_ciphertext, expires_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
             )
             .bind::<sql_types::Uuid, _>(transaction.id)
             .bind::<sql_types::Uuid, _>(self.tenant_id)
@@ -793,6 +793,7 @@ impl PresentationStorePort for Openid4vpRepository {
             )
             .bind::<sql_types::Nullable<sql_types::Text>, _>(transaction.request_object.as_deref())
             .bind::<sql_types::Nullable<sql_types::Text>, _>(transaction.request_uri.as_deref())
+            .bind::<sql_types::Nullable<sql_types::Uuid>, _>(transaction.conformance_lease_id)
             .bind::<sql_types::Nullable<sql_types::Binary>, _>(protected_private_key)
             .bind::<sql_types::Timestamptz, _>(transaction.expires_at)
             .execute(&mut connection)
@@ -1089,6 +1090,8 @@ struct PresentationRow {
     request_object: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     request_uri: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+    conformance_lease_id: Option<Uuid>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Binary>)]
     ephemeral_private_key_ciphertext: Option<Vec<u8>>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Binary>)]
@@ -1116,6 +1119,7 @@ impl PresentationRow {
                 .map_err(|_| PresentationStoreError::InvalidTransition)?,
             request_object: self.request_object.clone(),
             request_uri: self.request_uri.clone(),
+            conformance_lease_id: self.conformance_lease_id,
             response_encryption_private_key: None,
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -1173,8 +1177,10 @@ async fn load_presentation(
 ) -> Result<Option<PresentationRow>, diesel::result::Error> {
     sql_query(
         "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
-         request, request_object, request_uri, ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
-         FROM openid4vp_transactions WHERE id = $1 AND expires_at > $2",
+         request, request_object, request_uri, conformance_lease_id, ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
+         FROM openid4vp_transactions WHERE id = $1 AND expires_at > $2 \
+           AND (conformance_lease_id IS NULL OR \
+                nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
     )
     .bind::<sql_types::Uuid, _>(id)
     .bind::<sql_types::Timestamptz, _>(now)

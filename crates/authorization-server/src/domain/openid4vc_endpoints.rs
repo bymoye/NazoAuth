@@ -1425,12 +1425,14 @@ fn bounded_json(value: &Value, depth: usize, nodes: &mut usize) -> bool {
 
 pub(crate) struct ServerPresentationOperations {
     store: nazo_postgres::Openid4vpRepository,
+    conformance: nazo_postgres::ConformanceLeaseRepository,
     service: PresentationService<nazo_postgres::Openid4vpRepository, Openid4vcCredentialCrypto>,
     crypto: Openid4vcCredentialCrypto,
     runtime: Arc<ServerRuntimeModuleRegistry>,
     issuer: String,
     wallet_origins: Vec<String>,
     transaction_ttl_seconds: u64,
+    tenant_id: Uuid,
 }
 
 pub(crate) struct PresentationVerifierConfig {
@@ -1448,16 +1450,18 @@ impl ServerPresentationOperations {
         runtime: Arc<ServerRuntimeModuleRegistry>,
         config: PresentationVerifierConfig,
     ) -> Self {
-        let store = nazo_postgres::Openid4vpRepository::new(pool, tenant_id, data_key);
+        let store = nazo_postgres::Openid4vpRepository::new(pool.clone(), tenant_id, data_key);
         let service = PresentationService::new(store.clone(), crypto.clone());
         Self {
             store,
+            conformance: nazo_postgres::ConformanceLeaseRepository::new(pool),
             service,
             crypto,
             runtime,
             issuer: config.issuer,
             wallet_origins: config.wallet_origins,
             transaction_ttl_seconds: config.transaction_ttl_seconds.max(30),
+            tenant_id,
         }
     }
     fn enabled(&self, admission: nazo_auth::CapabilityAdmission) -> bool {
@@ -1492,6 +1496,110 @@ impl ServerPresentationOperations {
             .sign_request_object(&claims)
             .await
             .map_err(|_| vp_error(503, "server_error", "Presentation request signing failed."))
+    }
+
+    async fn conformance_lease_for_wallet(
+        &self,
+        wallet_authorization_endpoint: &str,
+    ) -> Result<Option<Uuid>, PresentationHttpError> {
+        let wallet_origin = url::Url::parse(wallet_authorization_endpoint)
+            .map(|url| url.origin().ascii_serialization())
+            .map_err(|_| {
+                vp_error(
+                    400,
+                    "invalid_request",
+                    "Wallet authorization endpoint is invalid.",
+                )
+            })?;
+        let materials = self
+            .conformance
+            .active_public_materials_for_profile(self.tenant_id, "openid4vc")
+            .await
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Conformance trust state is unavailable.",
+                )
+            })?;
+        let mut matches = Vec::new();
+        for entry in materials {
+            let material: nazo_operator_protocol::Openid4vcConformanceTrust =
+                serde_json::from_value(entry.public_material).map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Conformance trust state is invalid.",
+                    )
+                })?;
+            let issuer_origin = url::Url::parse(&material.client_attestation_issuer)
+                .map(|url| url.origin().ascii_serialization())
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Conformance trust state is invalid.",
+                    )
+                })?;
+            if issuer_origin == wallet_origin {
+                matches.push(entry.lease_id);
+            }
+        }
+        match matches.as_slice() {
+            [] => Ok(None),
+            [lease_id] => Ok(Some(*lease_id)),
+            _ => Err(vp_error(
+                503,
+                "server_error",
+                "Conformance trust state is ambiguous.",
+            )),
+        }
+    }
+
+    async fn conformance_credential_trust_anchors(
+        &self,
+        lease_id: Option<Uuid>,
+    ) -> Result<Vec<Vec<u8>>, PresentationHttpError> {
+        let Some(lease_id) = lease_id else {
+            return Ok(Vec::new());
+        };
+        let material = self
+            .conformance
+            .active_public_material_for_lease(self.tenant_id, lease_id)
+            .await
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Conformance trust state is unavailable.",
+                )
+            })?
+            .ok_or_else(|| {
+                vp_error(
+                    400,
+                    "invalid_request",
+                    "Presentation transaction is invalid.",
+                )
+            })?;
+        let material: nazo_operator_protocol::Openid4vcConformanceTrust =
+            serde_json::from_value(material).map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Conformance trust state is invalid.",
+                )
+            })?;
+        crate::domain::openid4vc::parse_conformance_credential_trust_anchor(
+            &material.credential_trust_anchor_pem,
+        )
+        .map(|anchor| vec![anchor])
+        .map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "Conformance credential trust anchor is invalid.",
+            )
+        })
     }
 }
 
@@ -1628,6 +1736,9 @@ impl PresentationOperations for ServerPresentationOperations {
             } else {
                 Some(self.request_object(&request).await?)
             };
+            let conformance_lease_id = self
+                .conformance_lease_for_wallet(&input.wallet_authorization_endpoint)
+                .await?;
             let now = Utc::now();
             let transaction = PresentationTransaction {
                 id,
@@ -1638,6 +1749,7 @@ impl PresentationOperations for ServerPresentationOperations {
                 request: request.clone(),
                 request_object,
                 request_uri: request_uri.clone(),
+                conformance_lease_id,
                 response_encryption_private_key: response_key
                     .map(|key| key.secret_bytes().to_vec()),
                 created_at: now,
@@ -1824,8 +1936,16 @@ impl PresentationOperations for ServerPresentationOperations {
                     ));
                 }
             };
+            let additional_trust_anchors = self
+                .conformance_credential_trust_anchors(transaction.conformance_lease_id)
+                .await?;
             self.service
-                .verify_response(&transaction, &response, Utc::now())
+                .verify_response(
+                    &transaction,
+                    &response,
+                    &additional_trust_anchors,
+                    Utc::now(),
+                )
                 .await
                 .map_err(|error| {
                     tracing::warn!(

@@ -33,6 +33,7 @@ where
         &self,
         transaction: &PresentationTransaction,
         response: &AuthorizationResponse,
+        additional_trust_anchors: &[Vec<u8>],
         now: DateTime<Utc>,
     ) -> Result<PresentationResult, PresentationServiceError> {
         if now >= transaction.expires_at
@@ -71,6 +72,7 @@ where
                         mdoc_session_transcript: (query.format == CredentialFormat::MsoMdoc)
                             .then(|| mdoc_session_transcript.clone())
                             .flatten(),
+                        additional_trust_anchors: additional_trust_anchors.to_vec(),
                     })
                     .await
                     .map_err(|_| PresentationError::UntrustedPresentation)?;

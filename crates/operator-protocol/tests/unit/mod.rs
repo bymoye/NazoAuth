@@ -202,6 +202,8 @@ fn openid4vc_lease_accepts_only_closed_public_trust_material() {
         client_attestation_issuer: "https://suite.example/".to_owned(),
         client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
         key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
     };
     let operation = |material| TaskOperation::ConformanceLeaseCreate {
         profile: "openid4vc".to_owned(),
@@ -215,6 +217,18 @@ fn openid4vc_lease_accepts_only_closed_public_trust_material() {
     let mut private = material;
     private.client_attestation_jwks["keys"][0]["d"] = serde_json::json!("secret");
     assert!(validate_operation(&operation(Some(private))).is_err());
+
+    let mut private_anchor = Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example/".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
+        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
+    };
+    private_anchor.credential_trust_anchor_pem =
+        "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n".to_owned();
+    assert!(validate_operation(&operation(Some(private_anchor))).is_err());
 }
 
 #[test]

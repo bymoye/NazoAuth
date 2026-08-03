@@ -55,11 +55,12 @@ The normal first-install and upgrade interface remains
    the deleted deployment or a historical artifact. The GitHub public onboarding
    workflow is only for the official public Suite path run on GitHub. Installation
    reads only the baseline profile. The host-local runner uses
-   `nazoauthctl conformance lease create` to grant the public verification keys
-   only to clients bound to that lease, then consumes both the public trust file
-   and private material once. Revocation or expiry stops using those keys
-   immediately; periodic cleanup deletes the clients and clears the stored public
-   material.
+   `nazoauthctl conformance lease create` to grant attestation keys only to
+   clients bound to that lease and bind the run-local credential CA only to
+   verifier transactions for the same Suite origin, then consumes both the public
+   trust file and private material once. Revocation or expiry stops using that
+   trust immediately; periodic cleanup deletes the clients and bound verifier
+   transactions and clears the stored public material.
    The initial administrator token is resolved from the new private runtime-owned
    mount and is never printed, copied from old state, or placed in argv or the
    ordinary environment.
