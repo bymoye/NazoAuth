@@ -53,7 +53,7 @@ futures-util = "0.3.32"
 futures-executor = "0.3.32"
 hmac = "0.13.0"
 jsonwebtoken = { version = "11.0.0", default-features = false }
-mdoc-rs = { version = "0.2.0", default-features = false, features = ["issue"] }
+mdoc-rs = { version = "0.2.0", default-features = false, features = ["issue", "tsp"] }
 coset = "0.3.8"
 ciborium = "0.2.2"
 lettre = { version = "0.11.22", default-features = false }

@@ -1,0 +1,69 @@
+diff --git a/src/main/java/net/openid/conformance/condition/as/CreateMdocCredential.java b/src/main/java/net/openid/conformance/condition/as/CreateMdocCredential.java
+index adbeac0..60caf57 100644
+--- a/src/main/java/net/openid/conformance/condition/as/CreateMdocCredential.java
++++ b/src/main/java/net/openid/conformance/condition/as/CreateMdocCredential.java
+@@ -30,8 +30,12 @@ public class CreateMdocCredential extends AbstractCondition {
+ 	public Environment evaluate(Environment env) {
+ 		byte[] sessionTranscript = Base64.getDecoder().decode(env.getString("session_transcript"));
+ 
++		JsonElement credentialSigningJwk = env.getElementFromObject("config", "credential.signing_jwk");
++		if (credentialSigningJwk == null || !credentialSigningJwk.isJsonObject()) {
++			throw error("credential.signing_jwk must be configured for mdoc presentations");
++		}
+ 		TestAppUtils testAppUtils = TestAppUtils.INSTANCE;
+-		testAppUtils.initialise();
++		testAppUtils.initialise(credentialSigningJwk.toString());
+ 
+ 		String requestedDocType = null;
+ 		Map<String, Set<String>> requestedClaims = null;
+diff --git a/src/main/kotlin/com/android/identity/testapp/TestAppUtils.kt b/src/main/kotlin/com/android/identity/testapp/TestAppUtils.kt
+index 6d735ef..c2f8702 100644
+--- a/src/main/kotlin/com/android/identity/testapp/TestAppUtils.kt
++++ b/src/main/kotlin/com/android/identity/testapp/TestAppUtils.kt
+@@ -191,15 +191,16 @@ object TestAppUtils {
+         UtopiaMovieTicket.getDocumentType()
+     )
+ 
+-	fun initialise() {
++	@JvmOverloads
++	fun initialise(issuerSigningJwk: String? = null) {
+ 		runBlocking {
+-			documentStoreInit();
++			documentStoreInit(issuerSigningJwk);
+ 		}
+ 	}
+ 
+ 	var documentStore: DocumentStore? = null
+ 
+-	private suspend fun documentStoreInit() {
++	private suspend fun documentStoreInit(issuerSigningJwk: String?) {
+ 		docTypeToDocumentId.clear()
+ 		val storage = EphemeralStorage()
+ 		val softwareSecureArea = SoftwareSecureArea.create(storage)
+@@ -280,10 +281,22 @@ TvFLVc4ESGy3AtdC+g==
+ -----END CERTIFICATE-----""""
+ 		)
+ 
+-		val dsKey = AsymmetricKey.X509CertifiedExplicit(
+-			X509CertChain(listOf(documentSignerCert)),
+-			documentSignerKey,
+-		)
++		val dsKey = if (issuerSigningJwk != null) {
++			val issuerJwk = JWK.parse(issuerSigningJwk).toECKey()
++			val certificateChain = issuerJwk.x509CertChain
++			require(!certificateChain.isNullOrEmpty()) {
++				"credential.signing_jwk must contain an x5c certificate chain"
++			}
++			AsymmetricKey.X509CertifiedExplicit(
++				X509CertChain(listOf(X509Cert(ByteString(certificateChain[0].decode())))),
++				convertToEcPrivateKey(issuerJwk),
++			)
++		} else {
++			AsymmetricKey.X509CertifiedExplicit(
++				X509CertChain(listOf(documentSignerCert)),
++				documentSignerKey,
++			)
++		}
+ 		provisionTestDocuments(
+ 			documentStore = documentStore!!,
+ 			secureArea = softwareSecureArea,

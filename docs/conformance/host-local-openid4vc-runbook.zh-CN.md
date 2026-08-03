@@ -54,6 +54,18 @@ public onboarding JWKS 与同一批私钥逐一对应。不接受仓库、历史
 FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation、
 key-attestation 和 credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
 
+VP mdoc 的 Document Signer 证书来自同一批 run-local `credential.signing_jwk`，包含
+ISO/IEC 18013-5 mDL Document Signer EKU `1.0.18013.5.1.2`，并由本轮 CA 签发。
+固定 revision 的 Suite 上游 mdoc fixture 不读取计划中已经配置的
+`credential.signing_jwk`，而是使用源码内的固定证书。私有服务器的 Suite 镜像因此只在
+构建阶段应用
+`deploy/oidf-suite/patches/0001-vp-mdoc-use-configured-issuer.patch`，让 fixture 使用该
+标准计划字段；上游 checkout 本身必须保持精确 revision 且 clean。Containerfile 在编译前
+校验上游 revision、clean 状态、补丁 SHA-256 和 `git apply --check`，运行镜像也记录两项
+identity label。该 overlay 不改变 plan、判定或 expected result，也不会被 GitHub 上的官方
+Suite workflow 使用。服务端仍按证书有效期、用途、签发链和 mdoc 签名进行完整验证，不能
+通过接受过期 fixture 或关闭验证来替代该边界修复。
+
 ## 私有服务器命令
 
 使用与部署 release identity 一致的干净 checkout，以及精确 revision 的干净本地 Suite checkout。不得添加 filter、临时 expected skip、`--disable-ssl-verify` 或未固定 revision。

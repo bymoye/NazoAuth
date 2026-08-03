@@ -1,7 +1,8 @@
 # 宿主机本地 OIDF Conformance Suite 部署
 
-本手册只部署官方 OIDF Conformance Suite。它独立于 NazoAuth 产品镜像，也不通过
-GitHub Actions。CNB WebIDE 在公网侧终止 TLS，因此套件只需把 Spring Boot 的明文
+本手册部署固定 revision 的官方 OIDF Conformance Suite，以及下述有哈希约束的私有
+运行时 fixture overlay。它独立于 NazoAuth 产品镜像，也不通过 GitHub Actions。CNB
+WebIDE 在公网侧终止 TLS，因此套件只需把 Spring Boot 的明文
 HTTP 端口 `8080` 映射到宿主机 `0.0.0.0:8443`。
 
 固定套件 revision：
@@ -38,6 +39,13 @@ Dockerfile 的参数契约。实际构建由下一步脚本调用 `docker compos
 整个过程只在目标服务器的 Docker builder 中编译；不使用本地 Cargo/Docker，也不使用
 GitHub 生成材料。
 
+上游 OpenID4VP mdoc fixture 未读取计划中的 `credential.signing_jwk`，而是使用源码内的
+固定 Document Signer 证书。该固定证书不属于被测端信任材料，也不能通过放宽服务端的
+证书时效/链验证来接受。因此 Containerfile 在保持上游 checkout clean 的前提下，验证并
+应用 `deploy/oidf-suite/patches/0001-vp-mdoc-use-configured-issuer.patch`，只让 fixture 使用
+计划已提供的签名 JWK。补丁哈希和上游 revision 同时写入镜像 label；任何哈希、revision、
+clean 或 apply 校验失败都会停止构建。GitHub 的官方 Suite workflows 不引用此 overlay。
+
 ## 3. 生成短期 API Token 并切换到严格鉴权模式
 
 将同一 NazoAuth 精确源码提交放在 `/opt/nazoauth-docker`。脚本先只在
@@ -50,6 +58,8 @@ export OIDF_SUITE_SOURCE_DIR=/opt/oidf-conformance-suite/source
 export OIDF_SUITE_BASE_URL=https://567t0yglur-8443.cnb.run
 export OIDF_SUITE_TOKEN_FILE=/opt/oidf-conformance-suite/secrets/api-token
 export OIDF_OPERATOR_ISSUER=https://567t0yglur-443.cnb.run
+export OIDF_TARGET_HOSTNAME=567t0yglur-443.cnb.run
+export OIDF_CONTAINER_RUNTIME=docker
 sh /opt/nazoauth-docker/deploy/oidf-suite/bootstrap-api-token.sh
 ```
 
@@ -95,7 +105,7 @@ curl -fsS https://567t0yglur-8443.cnb.run/login.html >/dev/null
 
 先按公开黑盒 runner 运行 27 个 OIDC/FAPI/CIBA/logout/session plans：safe group
 workers 为 `2`，browser group workers 为 `2`，CIBA 组保持串行。完成并清理 suite
-worktree 后，再运行 17 个 OpenID4VC plans，`--plan-group-size 17`。具体参数和秘密输入
+worktree 后，再运行 17 个 OpenID4VC plans，`--plan-group-size 4`。具体参数和秘密输入
 契约分别见[公开黑盒手册](oidf-public-black-box-runbook.zh-CN.md)、
 [OpenID4VC 宿主机手册](host-local-openid4vc-runbook.zh-CN.md)和
 [并发调优记录](../operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md)。

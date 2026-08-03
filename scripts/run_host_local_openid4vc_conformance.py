@@ -325,6 +325,16 @@ def generate_certificate_material(work_dir: Path) -> dict[str, object]:
         encoding="ascii",
     )
     extension_file.chmod(0o600)
+    credential_extension_file = directory / "credential.ext"
+    credential_extension_file.write_text(
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature\n"
+        "extendedKeyUsage=1.0.18013.5.1.2\n"
+        "subjectKeyIdentifier=hash\n"
+        "authorityKeyIdentifier=keyid,issuer\n",
+        encoding="ascii",
+    )
+    credential_extension_file.chmod(0o600)
     generated: dict[str, object] = {"trust_anchor_pem": root_certificate.read_text(encoding="ascii")}
     for name in ("wallet_private", "wallet_attested", "client_attestation", "key_attestation", "credential"):
         key = directory / f"{name}.key"
@@ -335,7 +345,9 @@ def generate_certificate_material(work_dir: Path) -> dict[str, object]:
         run_openssl(
             [
                 "x509", "-req", "-in", str(request), "-CA", str(root_certificate), "-CAkey", str(root_key),
-                "-CAcreateserial", "-days", "2", "-sha256", "-extfile", str(extension_file), "-out", str(certificate),
+                "-CAcreateserial", "-days", "2", "-sha256", "-extfile",
+                str(credential_extension_file if name == "credential" else extension_file),
+                "-out", str(certificate),
             ],
             cwd=directory,
         )

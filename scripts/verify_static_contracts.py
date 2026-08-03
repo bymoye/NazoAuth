@@ -345,6 +345,9 @@ def check_rust_test_structure() -> None:
         "crates/authorization-server/src/http/auth/federation.rs": (
             "let builder = builder.no_proxy();",
         ),
+        "crates/authorization-server/src/domain/openid4vc.rs": (
+            "fn validate_key_attestation(",
+        ),
         "crates/key-management/src/lifecycle.rs": (
             'panic!("signing key lifecycle refresh failed: {error:#}");',
         ),

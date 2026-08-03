@@ -2,15 +2,31 @@
 
 FROM docker.io/library/maven:3-eclipse-temurin-21 AS builder
 
+ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
+ARG OIDF_SUITE_OVERLAY_SHA256=1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce
+
 WORKDIR /src
 COPY --from=oidf_suite . .
+COPY deploy/oidf-suite/patches/0001-vp-mdoc-use-configured-issuer.patch /tmp/oidf-suite.patch
 RUN --mount=type=cache,id=oidf-suite-maven,target=/root/.m2,sharing=locked \
+    test "$(git rev-parse HEAD)" = "${OIDF_SUITE_UPSTREAM_REVISION}" && \
+    test -z "$(git status --porcelain)" && \
+    printf '%s  %s\n' "${OIDF_SUITE_OVERLAY_SHA256}" /tmp/oidf-suite.patch | sha256sum -c - && \
+    git apply --check /tmp/oidf-suite.patch && \
+    git apply /tmp/oidf-suite.patch && \
+    git diff --check && \
     mvn -B clean package -DskipTests=true
 
 FROM docker.io/library/eclipse-temurin:21
 
+ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
+ARG OIDF_SUITE_OVERLAY_SHA256=1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce
+
 COPY --from=builder /src/target/fapi-test-suite.jar /server/fapi-test-suite.jar
 COPY --chmod=0555 deploy/oidf-suite/start-suite.sh /usr/local/bin/start-oidf-suite
+
+LABEL org.opencontainers.image.revision="${OIDF_SUITE_UPSTREAM_REVISION}" \
+      run.nazoauth.oidf-suite.overlay-sha256="${OIDF_SUITE_OVERLAY_SHA256}"
 
 ENV BASE_URL=https://localhost:8443 \
     BASE_MTLS_URL=https://localhost:8444 \

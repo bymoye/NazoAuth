@@ -3,6 +3,9 @@ name: nazoauth-oidf-suite
 x-suite-build: &suite-build
   context: ${NAZOAUTH_SOURCE_DIR:?set NAZOAUTH_SOURCE_DIR to the NazoAuth checkout}
   dockerfile: deploy/oidf-suite/Containerfile
+  args:
+    OIDF_SUITE_UPSTREAM_REVISION: ${OIDF_SUITE_UPSTREAM_REVISION:-946451d1ce29965c9ab7aee05f5003552233160e}
+    OIDF_SUITE_OVERLAY_SHA256: ${OIDF_SUITE_OVERLAY_SHA256:-1e17e43bfc019196f45b14f58bf07ffa3363f4746b9e8a51de6dfc7b334253ce}
   additional_contexts:
     oidf_suite: ${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR to the pinned suite checkout}
 
@@ -22,7 +25,7 @@ services:
       dockerfile: deploy/oidf-proxy/Containerfile
       target: pki-init
     environment:
-      OIDF_TARGET_HOSTNAME: 567t0yglur-443.cnb.run
+      OIDF_TARGET_HOSTNAME: ${OIDF_TARGET_HOSTNAME:?set OIDF_TARGET_HOSTNAME to the target issuer hostname}
     volumes:
       - oidf_proxy_pki:/pki
 
@@ -97,6 +100,7 @@ volumes:
     name: nazoauth-oidf-proxy-pki
 
 networks:
+  default:
   oidf_bridge:
     name: nazoauth-oidf-bridge
     ipam:

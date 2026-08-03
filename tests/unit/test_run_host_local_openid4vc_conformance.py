@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -302,6 +304,26 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             )
             self.assertTrue(all(first[name]["x5c"] for name in key_names))
             self.assertNotEqual(first["wallet_private"]["d"], second["wallet_private"]["d"])
+            credential_certificate = root / "credential.der"
+            credential_certificate.write_bytes(
+                base64.b64decode(first["credential"]["x5c"][0], validate=True)
+            )
+            credential_text = subprocess.run(
+                [
+                    "openssl",
+                    "x509",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    str(credential_certificate),
+                    "-noout",
+                    "-text",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertIn("1.0.18013.5.1.2", credential_text)
             deployed_anchor = "-----BEGIN CERTIFICATE-----\ndeployed\n-----END CERTIFICATE-----\n"
             base = self.module.build_base_input(
                 first,

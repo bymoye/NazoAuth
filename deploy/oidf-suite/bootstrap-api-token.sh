@@ -9,6 +9,16 @@ export NAZOAUTH_SOURCE_DIR
 : "${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL}"
 : "${OIDF_SUITE_TOKEN_FILE:?set OIDF_SUITE_TOKEN_FILE}"
 : "${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER}"
+: "${OIDF_TARGET_HOSTNAME:?set OIDF_TARGET_HOSTNAME}"
+
+container_runtime=${OIDF_CONTAINER_RUNTIME:-podman}
+case "$container_runtime" in
+  podman|docker) ;;
+  *)
+    echo "OIDF_CONTAINER_RUNTIME must be podman or docker" >&2
+    exit 1
+    ;;
+esac
 
 actual_revision=$(git -C "$OIDF_SUITE_SOURCE_DIR" rev-parse HEAD)
 test "$actual_revision" = "$expected_revision" || {
@@ -25,7 +35,9 @@ test -f "$OIDF_SUITE_SOURCE_DIR/pom.xml" || {
 }
 token_parent=$(dirname -- "$OIDF_SUITE_TOKEN_FILE")
 install -d -m 0700 "$token_parent"
-compose="docker compose --project-directory $script_dir -f $script_dir/compose.yml"
+compose() {
+  "$container_runtime" compose -f "$script_dir/compose.yml" "$@"
+}
 
 if test -e "$OIDF_SUITE_TOKEN_FILE"; then
   test -f "$OIDF_SUITE_TOKEN_FILE" || {
@@ -43,12 +55,12 @@ if test -e "$OIDF_SUITE_TOKEN_FILE"; then
   echo "Reusing the existing protected suite token; it will be validated after startup"
 else
   cleanup_bootstrap() {
-    $compose --profile bootstrap stop server-bootstrap >/dev/null 2>&1 || true
-    $compose --profile bootstrap rm -f server-bootstrap >/dev/null 2>&1 || true
+    compose --profile bootstrap stop server-bootstrap >/dev/null 2>&1 || true
+    compose --profile bootstrap rm -f server-bootstrap >/dev/null 2>&1 || true
   }
   trap cleanup_bootstrap EXIT HUP INT TERM
 
-  $compose --profile bootstrap up -d --build mongodb server-bootstrap
+  compose --profile bootstrap up -d --build mongodb server-bootstrap
 
   python3 - "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import json
@@ -98,7 +110,7 @@ PY
   trap - EXIT HUP INT TERM
 fi
 
-$compose up -d server
+compose up -d server
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import pathlib
