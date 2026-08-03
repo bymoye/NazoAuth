@@ -490,6 +490,37 @@ fn migration_config_does_not_materialize_unrelated_application_secrets() {
 }
 
 #[test]
+fn migration_config_accepts_deployment_identity_without_materializing_state() {
+    let path = temp_config_dir("migration_config_deployment_identity");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        concat!(
+            "DEPLOYMENT_ID: deployment-ci\n",
+            "RUNTIME_INSTANCE_ID: runtime-ci\n",
+            "INSTANCE_IDENTITY_DIR: /var/lib/nazoauth/runtime-instance\n",
+        ),
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_for_migrations_from_dir_with_env(&path, []).unwrap();
+
+    assert_eq!(
+        source.get("DEPLOYMENT_ID").as_deref(),
+        Some("deployment-ci")
+    );
+    assert_eq!(
+        source.get("RUNTIME_INSTANCE_ID").as_deref(),
+        Some("runtime-ci")
+    );
+    assert_eq!(
+        source.get("INSTANCE_IDENTITY_DIR").as_deref(),
+        Some("/var/lib/nazoauth/runtime-instance")
+    );
+    assert!(!path.join("runtime-instance").exists());
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn metadata_only_config_does_not_read_secret_files_or_expose_secret_values() {
     let path = temp_config_dir("metadata_config_no_secret_reads");
     std::fs::write(
@@ -587,6 +618,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "DATABASE_MAX_CONNECTIONS",
             "DATA_DIR",
             "DEFAULT_AUDIENCE",
+            "DEPLOYMENT_ID",
             "DEVICE_AUTHORIZATION_POLL_INTERVAL_SECONDS",
             "DEVICE_AUTHORIZATION_TTL_SECONDS",
             "DPOP_NONCE_POLICY",
@@ -625,6 +657,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS",
             "FAPI_RESOURCE_DPOP_NONCE_POLICY",
             "ID_TOKEN_TTL_SECONDS",
+            "INSTANCE_IDENTITY_DIR",
             "ISSUER",
             "JWK_KEYS_DIR",
             "LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS",
@@ -672,6 +705,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "REMOTE_CLIENT_DOCUMENT_PRIVATE_ORIGINS",
             "REQUIRE_PUSHED_AUTHORIZATION_REQUESTS",
             "RUST_LOG",
+            "RUNTIME_INSTANCE_ID",
             "SCIM_EVENT_RETENTION_SECONDS",
             "SESSION_COOKIE_NAME",
             "SESSION_TTL_SECONDS",
