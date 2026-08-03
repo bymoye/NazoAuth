@@ -20,6 +20,11 @@ DATA_DIR/instance/identity.pub
 DATA_DIR/instance/deployment-statement.jws
 ```
 
+For a replicated deployment, `DATA_DIR/instance/deployment-id` is the shared
+logical deployment identity. Each replica must set `INSTANCE_IDENTITY_DIR` to
+its own persistent mount; its `identity.key`, `identity.pub`, runtime ID and
+signed statement live there and must never be shared with another replica.
+
 `deployment-statement.jws` uses the distinct
 `nazoauth-deployment-statement+jwt` type and has no freshness claim. It permits
 offline identification when the server cannot start; it is not proof that the

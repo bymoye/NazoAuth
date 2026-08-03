@@ -179,11 +179,14 @@ jobs:
           file: .github/e2e-runner.Containerfile
       - name: Prepare isolated runtime config
         run: |
-          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap runtime/e2e/ui-releases
+          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap runtime/e2e/ui-releases runtime/e2e/instance runtime/e2e/runtime-primary runtime/e2e/runtime-signed
           python scripts/ensure_runtime_keyset.py --key-dir runtime/e2e/keys --active-alg RS256 --required-alg RS256 --required-alg PS256
           cat > runtime/e2e/.env.yaml <<'YAML'
           BIND: "0.0.0.0:8000"
           DATA_DIR: "/var/lib/nazo_oauth"
+          DEPLOYMENT_ID: "deployment-ci"
+          RUNTIME_INSTANCE_ID: "e2e-primary"
+          INSTANCE_IDENTITY_DIR: "/var/lib/nazo_oauth/runtime-instance"
           DATABASE_URL: "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth"
           VALKEY_URL: "redis://nazo-oauth-e2e-valkey:6379/0"
           VALKEY_COMMAND_TIMEOUT_MS: 1000
@@ -237,6 +240,7 @@ jobs:
           RUST_LOG: "info"
           YAML
           cp runtime/e2e/.env.yaml runtime/e2e/.env-signed.yaml
+          sed -i 's/RUNTIME_INSTANCE_ID: "e2e-primary"/RUNTIME_INSTANCE_ID: "e2e-signed"/' runtime/e2e/.env-signed.yaml
           sed -i 's/ENABLE_FAPI_HTTP_SIGNATURES: false/ENABLE_FAPI_HTTP_SIGNATURES: true/' runtime/e2e/.env-signed.yaml
       - name: Start PostgreSQL and Valkey
         run: |
@@ -292,6 +296,8 @@ jobs:
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
+            -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
+            -v "$PWD/runtime/e2e/runtime-primary:/var/lib/nazo_oauth/runtime-instance" \
             nazo-oauth-e2e:latest nazoauth server
           docker run -d --name nazo-oauth-e2e-server-signed --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
@@ -302,6 +308,8 @@ jobs:
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
+            -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
+            -v "$PWD/runtime/e2e/runtime-signed:/var/lib/nazo_oauth/runtime-instance" \
             nazo-oauth-e2e:latest nazoauth server
       - name: Require both non-root servers to become ready
         run: |

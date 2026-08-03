@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 

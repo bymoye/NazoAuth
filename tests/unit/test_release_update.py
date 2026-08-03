@@ -911,9 +911,7 @@ class ReleaseUpdateTests(unittest.TestCase):
             root = Path(directory)
             target = "x86_64-unknown-linux-gnu"
             binary = root / f"nazoauth-{target}"
-            updater_artifact = root / f"nazoauthctl-{target}"
             binary.write_bytes(b"server\n")
-            updater_artifact.write_bytes(b"controller\n")
             frontend = root / "frontend.json"
             frontend.write_text(
                 json.dumps(
@@ -964,8 +962,8 @@ class ReleaseUpdateTests(unittest.TestCase):
                 "github:123:1",
                 "--binary",
                 str(binary),
-                "--updater",
-                str(updater_artifact),
+                "--operator-compatibility",
+                str(ROOT / "release" / "operator-compatibility.json"),
                 "--frontend",
                 str(frontend),
                 "--oci",
@@ -981,13 +979,14 @@ class ReleaseUpdateTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), first)
             manifest = json.loads(first)
 
-        self.assertEqual(manifest["schema"], 4)
+        self.assertEqual(manifest["schema"], 5)
         self.assertEqual(manifest["version"], "v1.2.3")
         self.assertEqual(
             manifest["oci"]["index_digest"],
             "sha256:" + "c" * 64,
         )
-        self.assertEqual(set(manifest["artifacts"]), {"binary", "updater"})
+        self.assertEqual(set(manifest["artifacts"]), {"binary"})
+        self.assertEqual(manifest["operator_protocol"]["version"], 1)
         self.assertTrue(manifest["rollback"]["artifact"])
         self.assertTrue(manifest["rollback"]["schema_compatible"])
         self.assertEqual(manifest["rollback"]["database_restore"], "backup")
@@ -1024,8 +1023,8 @@ class ReleaseUpdateTests(unittest.TestCase):
                     "github:123:1",
                     "--binary",
                     str(artifact),
-                    "--updater",
-                    str(artifact),
+                    "--operator-compatibility",
+                    str(ROOT / "release" / "operator-compatibility.json"),
                     "--frontend",
                     str(frontend),
                     "--oci",
