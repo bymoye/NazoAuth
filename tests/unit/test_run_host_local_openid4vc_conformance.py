@@ -370,20 +370,24 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
         with (
             mock.patch.object(
                 self.module,
-                "ctl_receipt",
-                side_effect=[{"outcome": {"lease": {"lease_id": lease_id}}}, {} , {}],
-            ) as ctl,
+                "create_lease",
+                return_value=lease_id,
+            ) as create,
+            mock.patch.object(self.module, "revoke_and_cleanup") as revoke,
             mock.patch.object(self.module, "consume_prepared_trust") as consume,
         ):
             self.assertEqual(self.module.create_conformance_lease(args), lease_id)
             self.module.revoke_conformance_lease(args, lease_id)
 
-        create = ctl.call_args_list[0].args[1]
-        self.assertIn("openid4vc", create)
-        self.assertIn(str(args.prepared_install_dir / self.module.PREPARED_TRUST_FILE), create)
+        create.assert_called_once_with(
+            args.nazoauthctl,
+            args.nazoauthctl_config,
+            profile="openid4vc",
+            material=args.prepared_install_dir / self.module.PREPARED_TRUST_FILE,
+            ttl_seconds=28_800,
+        )
         consume.assert_called_once_with(args.prepared_install_dir, "a" * 64)
-        self.assertIn("revoke", ctl.call_args_list[1].args[1])
-        self.assertIn("cleanup", ctl.call_args_list[2].args[1])
+        revoke.assert_called_once_with(args.nazoauthctl, args.nazoauthctl_config, lease_id)
 
     def test_final_receipt_is_credential_free_and_states_no_proxy_trust(self):
         with tempfile.TemporaryDirectory() as directory:

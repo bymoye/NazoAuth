@@ -56,6 +56,8 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 "proxy-ca.pem",
                 "--proxy-executable",
                 "proxy",
+                "--nazoauthctl",
+                "nazoauthctl",
                 "--secret-file",
                 "secrets.json",
             ]
@@ -63,6 +65,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
 
         self.assertEqual(args.safe_group_workers, 4)
         self.assertEqual(args.browser_group_workers, 2)
+        self.assertEqual(args.lease_ttl_seconds, 28_800)
 
     def test_child_environment_strips_secret_shaped_variables(self):
         with mock.patch.dict(
@@ -93,9 +96,16 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 "admin_password": "admin-password",
             },
         )
-        self.assertIn(
-            "--credentials-stdin",
-            self.module.onboarding_args("apply", Path("work"), "https://issuer.example"),
+        arguments = self.module.onboarding_args(
+            "apply",
+            Path("work"),
+            "https://issuer.example",
+            "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d",
+        )
+        self.assertIn("--credentials-stdin", arguments)
+        self.assertEqual(
+            arguments[arguments.index("--lease-id") + 1],
+            "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d",
         )
 
     def test_suite_runner_config_cleanup_removes_only_generated_untracked_files(self):
@@ -157,6 +167,9 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 run_namespace="failure-cleanup",
                 proxy_trust_bundle=root / "trust.pem",
                 proxy_executable=root / "proxy",
+                nazoauthctl=root / "nazoauthctl",
+                nazoauthctl_config=None,
+                lease_ttl_seconds=28_800,
                 secrets_stdin=True,
                 secret_fd=None,
                 secret_file=None,
@@ -164,6 +177,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 monitor_interval_seconds=5,
                 final_stabilization_seconds=45,
             )
+            args.nazoauthctl.write_text("binary", encoding="utf-8")
 
             with (
                 mock.patch.object(self.module, "verify_source"),
@@ -196,6 +210,100 @@ class PublicOidfRunnerTests(unittest.TestCase):
 
             cleanup.assert_called_once_with(suite.resolve(), work.resolve())
             proxy_trust.return_value.restore.assert_called_once_with()
+
+    def test_run_binds_onboarding_to_a_time_bounded_lease_and_retires_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite = root / "suite"
+            suite.mkdir()
+            work = root / "work"
+            export = root / "export"
+            ctl = root / "nazoauthctl"
+            ctl.write_text("binary", encoding="utf-8")
+            args = Namespace(
+                target_issuer="https://issuer.example",
+                conformance_server="https://suite.example",
+                work_dir=work,
+                export_dir=export,
+                suite_dir=suite,
+                deployed_sha="a" * 40,
+                suite_revision="b" * 40,
+                run_namespace="lease-bound-run",
+                proxy_trust_bundle=root / "trust.pem",
+                proxy_executable=root / "proxy",
+                nazoauthctl=ctl,
+                nazoauthctl_config=None,
+                lease_ttl_seconds=28_800,
+                secrets_stdin=True,
+                secret_fd=None,
+                secret_file=None,
+                timeout_seconds=100,
+                monitor_interval_seconds=5,
+                final_stabilization_seconds=0,
+            )
+            lease_id = "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d"
+
+            def command_side_effect(arguments, **_kwargs):
+                if any(str(value).endswith("prepare_oidf_black_box.py") for value in arguments):
+                    work.mkdir()
+                    (work / "oidf-onboarding-manifest.json").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+
+            with (
+                mock.patch.object(self.module, "verify_source"),
+                mock.patch.object(self.module, "verify_suite"),
+                mock.patch.object(
+                    self.module,
+                    "read_secret_document",
+                    return_value={
+                        "oidf_applicant_email": "applicant@example.com",
+                        "oidf_applicant_password": "applicant-password",
+                        "oidf_admin_email": "admin@example.com",
+                        "oidf_admin_password": "admin-password",
+                        "oidf_dynamic_registration_initial_access_token": "d" * 48,
+                        "oidf_ciba_automated_decision_token": "c" * 48,
+                        "oidf_conformance_token": "token",
+                    },
+                ),
+                mock.patch.object(
+                    self.module, "command", side_effect=command_side_effect
+                ) as command,
+                mock.patch.object(
+                    self.module, "create_lease", return_value=lease_id
+                ) as create,
+                mock.patch.object(self.module, "revoke_and_cleanup") as revoke,
+                mock.patch.object(self.module, "ProxyTrust"),
+                mock.patch.object(self.module, "verify_suite_boundary"),
+                mock.patch.object(self.module, "run_plan_groups"),
+                mock.patch.object(self.module, "inspect_complete_matrix"),
+                mock.patch.object(self.module, "cleanup_suite_runner_configs"),
+                mock.patch.object(self.module, "sanitize_evidence_tree"),
+                mock.patch.object(self.module, "protect_directory"),
+            ):
+                self.module.run(args)
+
+            create.assert_called_once_with(
+                ctl.resolve(),
+                None,
+                profile="oidc-fapi-ciba",
+                material=work.resolve() / "oidf-onboarding-manifest.json",
+                ttl_seconds=28_800,
+            )
+            onboarding_calls = [
+                call.args[0]
+                for call in command.call_args_list
+                if any(
+                    str(value).endswith("apply_public_conformance_onboarding.py")
+                    for value in call.args[0]
+                )
+            ]
+            self.assertEqual(len(onboarding_calls), 1)
+            self.assertEqual(
+                onboarding_calls[0][onboarding_calls[0].index("--lease-id") + 1],
+                lease_id,
+            )
+            revoke.assert_called_once_with(ctl.resolve(), None, lease_id)
 
     def test_plan_groups_use_explicit_inputs_and_isolate_browser_state(self):
         with tempfile.TemporaryDirectory() as directory:

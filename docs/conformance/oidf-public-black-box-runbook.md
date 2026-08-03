@@ -123,7 +123,10 @@ python scripts/run_public_oidf_conformance.py --secrets-stdin \
   --export-dir /var/lib/nazo-oidf/results/<run-id> \
   --run-namespace <run-id> \
   --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
-  --proxy-executable /usr/sbin/nginx
+  --proxy-executable /usr/sbin/nginx \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
 ```
 
 The input is strict JSON with exactly `oidf_applicant_email`,
@@ -141,9 +144,11 @@ performs application, approval, one-time delivery, and trust approval under
 separate identities, atomically installs the approved trust bundle, verifies
 the suite API's `401/200` boundary, and runs all 27 plans in concurrent, CIBA,
 RP-Initiated Logout, Back-Channel Logout, Front-Channel Logout, and Session
-Management groups. Success and failure both
-deactivate the run's clients, revoke trust through the public control plane,
-and restore the proxy configuration. Private inputs remain in unique work
+Management groups. Before onboarding it creates a time-bounded conformance
+lease through `nazoauthctl` and binds every temporary client to that lease.
+Success and failure both deactivate the run's clients, revoke and physically
+clean the lease-owned data, revoke trust through the public control plane, and
+restore the proxy configuration. Private inputs remain in unique work
 directories. Raw suite ZIPs are reduced to `evidence-manifest.json` and deleted,
 so credentials and log bodies are not retained as evidence.
 

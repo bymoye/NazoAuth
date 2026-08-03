@@ -30,7 +30,6 @@ import stat
 import subprocess
 import sys
 from typing import Iterator
-import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +38,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import apply_oidf_browser_credentials as browser_credentials  # noqa: E402
 import apply_public_conformance_onboarding as onboarding  # noqa: E402
 import build_oidf_full_install_profile as install_profile  # noqa: E402
+from conformance_lease_control import (  # noqa: E402
+    ConformanceLeaseControlError,
+    create as create_lease,
+    revoke_and_cleanup,
+)
 import materialize_openid4vc_oidf_config as materializer  # noqa: E402
 import prepare_openid4vc_public_onboarding as public_onboarding  # noqa: E402
 import provision_public_oidf_applicant as applicant_provisioning  # noqa: E402
@@ -905,84 +909,20 @@ def apply_public_onboarding(args: argparse.Namespace, secrets: dict[str, str]) -
     protect_directory(args.work_dir)
 
 
-def ctl_receipt(args: argparse.Namespace, arguments: list[str]) -> dict[str, object]:
-    command_line = [str(args.nazoauthctl)]
-    if args.nazoauthctl_config is not None:
-        command_line.extend(["--config", str(args.nazoauthctl_config)])
-    completed = subprocess.run(
-        [*command_line, *arguments],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=sanitized_environment(),
-        check=False,
-    )
-    if completed.returncode != 0:
-        fail(f"nazoauthctl {' '.join(arguments[:3])} failed")
-    try:
-        receipt = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise HostLocalOpenid4vcError("nazoauthctl returned a non-JSON receipt") from error
-    if not isinstance(receipt, dict):
-        fail("nazoauthctl receipt must be a JSON object")
-    return receipt
-
-
-def find_lease_id(value: object) -> str | None:
-    if isinstance(value, dict):
-        candidate = value.get("lease_id")
-        if isinstance(candidate, str):
-            try:
-                return str(uuid.UUID(candidate))
-            except ValueError:
-                return None
-        for child in value.values():
-            if found := find_lease_id(child):
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            if found := find_lease_id(child):
-                return found
-    return None
-
-
 def create_conformance_lease(args: argparse.Namespace) -> str:
-    receipt = ctl_receipt(
-        args,
-        [
-            "conformance",
-            "lease",
-            "create",
-            "--profile",
-            "openid4vc",
-            "--material",
-            str(args.prepared_install_dir / PREPARED_TRUST_FILE),
-            "--ttl-seconds",
-            str(args.lease_ttl_seconds),
-            "--yes",
-        ],
+    lease_id = create_lease(
+        args.nazoauthctl,
+        args.nazoauthctl_config,
+        profile="openid4vc",
+        material=args.prepared_install_dir / PREPARED_TRUST_FILE,
+        ttl_seconds=args.lease_ttl_seconds,
     )
-    lease_id = find_lease_id(receipt)
-    if lease_id is None:
-        fail("nazoauthctl create receipt contains no valid lease_id")
     consume_prepared_trust(args.prepared_install_dir, args.prepared_trust_digest)
     return lease_id
 
 
 def revoke_conformance_lease(args: argparse.Namespace, lease_id: str) -> None:
-    ctl_receipt(
-        args,
-        [
-            "conformance",
-            "lease",
-            "revoke",
-            "--lease-id",
-            lease_id,
-            "--yes",
-        ],
-    )
-    ctl_receipt(args, ["conformance", "lease", "cleanup", "--yes"])
+    revoke_and_cleanup(args.nazoauthctl, args.nazoauthctl_config, lease_id)
 
 
 def aliases_from_configs(path: Path) -> dict[str, str]:
@@ -1331,6 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
         run(parse_args(argv))
     except (
         HostLocalOpenid4vcError,
+        ConformanceLeaseControlError,
         PublicRunError,
         SecretInputError,
         onboarding.OnboardingError,

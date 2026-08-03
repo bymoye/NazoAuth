@@ -23,6 +23,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
+from conformance_lease_control import (  # noqa: E402
+    ConformanceLeaseControlError,
+    create as create_lease,
+    revoke_and_cleanup,
+)
 from oidf_secret_input import (  # noqa: E402
     SecretInputError,
     add_secret_source_arguments,
@@ -265,8 +270,13 @@ class ProxyTrust:
         self.installed = False
 
 
-def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
-    return [
+def onboarding_args(
+    action: str,
+    work_dir: Path,
+    issuer: str,
+    lease_id: str | None = None,
+) -> list[str]:
+    arguments = [
         sys.executable,
         str(ROOT / "scripts" / "apply_public_conformance_onboarding.py"),
         action,
@@ -290,6 +300,9 @@ def onboarding_args(action: str, work_dir: Path, issuer: str) -> list[str]:
         "--trust-bundle",
         str(work_dir / "approved-mtls-trust-anchors.pem"),
     ]
+    if lease_id is not None:
+        arguments.extend(["--lease-id", lease_id])
+    return arguments
 
 
 def onboarding_credentials(secrets: dict[str, str]) -> bytes:
@@ -759,6 +772,8 @@ def inspect_complete_matrix(
 def run(args: argparse.Namespace) -> None:
     if args.final_stabilization_seconds < 0:
         raise PublicRunError("--final-stabilization-seconds must be zero or greater")
+    if not 60 <= args.lease_ttl_seconds <= 86_400:
+        raise PublicRunError("--lease-ttl-seconds must be between 60 and 86400")
     args.safe_group_workers = getattr(
         args, "safe_group_workers", MAX_SAFE_GROUP_WORKERS
     )
@@ -778,6 +793,13 @@ def run(args: argparse.Namespace) -> None:
     args.work_dir = args.work_dir.resolve()
     args.export_dir = args.export_dir.resolve()
     args.suite_dir = args.suite_dir.resolve()
+    args.nazoauthctl = args.nazoauthctl.resolve()
+    if not args.nazoauthctl.is_file():
+        raise PublicRunError("--nazoauthctl must resolve to a regular file")
+    if args.nazoauthctl_config is not None:
+        if not args.nazoauthctl_config.is_absolute():
+            raise PublicRunError("--nazoauthctl-config must be absolute")
+        args.nazoauthctl_config = args.nazoauthctl_config.resolve()
     args.runner_sha = getattr(args, "runner_sha", None) or args.deployed_sha
     args.deployed_source_dir = getattr(args, "deployed_source_dir", None) or ROOT
     args.deployed_source_dir = args.deployed_source_dir.resolve()
@@ -804,6 +826,7 @@ def run(args: argparse.Namespace) -> None:
     args.export_dir.parent.mkdir(parents=True, exist_ok=True)
     proxy = ProxyTrust(args.proxy_trust_bundle, args.proxy_executable, args.work_dir)
     state_file = args.work_dir / "oidf-onboarding-state.json"
+    active_lease_id: str | None = None
     failure: BaseException | None = None
     try:
         command(provisioning_args(args.target_issuer), env=env, stdin=credentials)
@@ -827,8 +850,20 @@ def run(args: argparse.Namespace) -> None:
                 env=env,
             )
         protect_directory(args.work_dir)
+        active_lease_id = create_lease(
+            args.nazoauthctl,
+            args.nazoauthctl_config,
+            profile="oidc-fapi-ciba",
+            material=args.work_dir / "oidf-onboarding-manifest.json",
+            ttl_seconds=args.lease_ttl_seconds,
+        )
         command(
-            onboarding_args("apply", args.work_dir, args.target_issuer),
+            onboarding_args(
+                "apply",
+                args.work_dir,
+                args.target_issuer,
+                active_lease_id,
+            ),
             env=env,
             stdin=credentials,
         )
@@ -867,6 +902,15 @@ def run(args: argparse.Namespace) -> None:
             proxy.restore()
         except BaseException as error:
             cleanup_errors.append(error)
+        if active_lease_id is not None:
+            try:
+                revoke_and_cleanup(
+                    args.nazoauthctl,
+                    args.nazoauthctl_config,
+                    active_lease_id,
+                )
+            except BaseException as error:
+                cleanup_errors.append(error)
         try:
             sanitize_evidence_tree(args.export_dir)
         except BaseException as error:
@@ -900,6 +944,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-namespace", required=True)
     parser.add_argument("--proxy-trust-bundle", type=Path, required=True)
     parser.add_argument("--proxy-executable", type=Path, required=True)
+    parser.add_argument("--nazoauthctl", type=Path, required=True)
+    parser.add_argument("--nazoauthctl-config", type=Path)
+    parser.add_argument("--lease-ttl-seconds", type=int, default=28_800)
     add_secret_source_arguments(parser)
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--monitor-interval-seconds", type=int, default=30)
@@ -927,7 +974,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     try:
         run(parse_args(argv))
-    except (PublicRunError, SecretInputError, subprocess.CalledProcessError) as error:
+    except (
+        ConformanceLeaseControlError,
+        PublicRunError,
+        SecretInputError,
+        subprocess.CalledProcessError,
+    ) as error:
         raise SystemExit(str(error)) from error
     return 0
 

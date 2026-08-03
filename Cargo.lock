@@ -2372,7 +2372,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libredox"
-version = "0.1.18"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-auth"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "base64",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-digital-credentials"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -2618,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-http-actix"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-http-signatures"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "ed25519-dalek 3.0.0",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-identity"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "argon2",
  "base64",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-key-management"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-oauth-server"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vc-http-actix"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "actix-web",
  "chrono",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vci"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "blake3",
  "chrono",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vp"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "blake3",
  "chrono",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-operator-protocol"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "base64",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-postgres"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-resource-server"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "chrono",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-runtime-modules"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "arc-swap",
  "futures-util",
@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-scim-events"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "chrono",
  "serde",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-valkey"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "blake3",
  "chrono",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "nazoauthctl"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "base64",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "tokio-stream"
-version = "0.1.18"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
 dependencies = [
