@@ -375,7 +375,7 @@ fn mdoc_device_signature_uses_tagged_device_authentication_bytes() {
 }
 
 #[test]
-fn mdoc_fallback_accepts_only_standard_device_signature_failure() {
+fn mdoc_fallback_accepts_only_independently_verified_checks() {
     let issuer = assessment(
         mdoc_rs::verifier::CheckId::IssuerCertificateValidity,
         mdoc_rs::verifier::VerificationStatus::Failed,
@@ -392,20 +392,33 @@ fn mdoc_fallback_accepts_only_standard_device_signature_failure() {
     assert!(mdoc_failed_assessments_accepted(
         [&device].into_iter(),
         true,
+        true,
     ));
     assert!(!mdoc_failed_assessments_accepted(
         [&device].into_iter(),
         false,
+        true,
     ));
-    assert!(!mdoc_failed_assessments_accepted(
+    assert!(mdoc_failed_assessments_accepted(
         [&issuer, &device].into_iter(),
+        true,
         true,
     ));
     assert!(!mdoc_failed_assessments_accepted(
         [&issuer, &issuer_signature].into_iter(),
         true,
+        true,
     ));
-    assert!(!mdoc_failed_assessments_accepted(std::iter::empty(), true,));
+    assert!(!mdoc_failed_assessments_accepted(
+        [&issuer].into_iter(),
+        true,
+        false,
+    ));
+    assert!(!mdoc_failed_assessments_accepted(
+        std::iter::empty(),
+        true,
+        true,
+    ));
 }
 
 fn assessment(
