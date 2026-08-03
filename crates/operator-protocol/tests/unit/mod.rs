@@ -61,6 +61,56 @@ fn discovery_statement() -> DiscoveryStatement {
     }
 }
 
+fn deployment_statement() -> DeploymentStatement {
+    let online = discovery_statement();
+    DeploymentStatement {
+        schema: online.schema,
+        product: online.product,
+        deployment_id: online.deployment_id,
+        runtime_instance_id: online.runtime_instance_id,
+        issuer: online.issuer,
+        release: online.release,
+        revision: online.revision,
+        build_id: online.build_id,
+        control_protocol_versions: online.control_protocol_versions,
+        operator_protocol_versions: online.operator_protocol_versions,
+        instance_key_id: online.instance_key_id,
+        issued_at: online.issued_at,
+    }
+}
+
+fn adoption_receipt() -> AdoptionReceipt {
+    AdoptionReceipt {
+        schema: CONTROL_DISCOVERY_SCHEMA,
+        deployment_id: "deployment-1".to_owned(),
+        issuer: "https://auth.example".to_owned(),
+        runtime_instances: vec![AdoptedRuntimeIdentity {
+            runtime_instance_id: "runtime-1".to_owned(),
+            backend: "podman".to_owned(),
+            object_reference: "container/nazoauth-manual".to_owned(),
+            artifact_identity: format!("sha256:{}", "a".repeat(64)),
+        }],
+        verified_release: "v0.1.19".to_owned(),
+        release_manifest_sha256: "b".repeat(64),
+        instance_key_ids: vec!["instance-1".to_owned()],
+        resource_references: BTreeMap::from([
+            (
+                "database".to_owned(),
+                "provider/postgresql-primary".to_owned(),
+            ),
+            ("runtime".to_owned(), "container/nazoauth-manual".to_owned()),
+        ]),
+        capabilities: BTreeMap::from([
+            ("database".to_owned(), "external:shared".to_owned()),
+            ("runtime".to_owned(), "managed:deployment".to_owned()),
+        ]),
+        recovery_proven: true,
+        recovery_evidence: vec!["snapshot/backup-1".to_owned()],
+        plan_sha256: "c".repeat(64),
+        adopted_at: 1_000,
+    }
+}
+
 #[test]
 fn golden_control_discovery_vector_is_stable_and_nonce_bound() {
     let key = SigningKey::from_bytes(&[17; 32]);
@@ -95,21 +145,7 @@ fn golden_control_discovery_vector_is_stable_and_nonce_bound() {
 #[test]
 fn offline_deployment_statement_is_identity_evidence_not_artifact_trust() {
     let key = SigningKey::from_bytes(&[17; 32]);
-    let online = discovery_statement();
-    let offline = DeploymentStatement {
-        schema: online.schema,
-        product: online.product,
-        deployment_id: online.deployment_id,
-        runtime_instance_id: online.runtime_instance_id,
-        issuer: online.issuer,
-        release: online.release,
-        revision: online.revision,
-        build_id: online.build_id,
-        control_protocol_versions: online.control_protocol_versions,
-        operator_protocol_versions: online.operator_protocol_versions,
-        instance_key_id: online.instance_key_id,
-        issued_at: online.issued_at,
-    };
+    let offline = deployment_statement();
     let compact = sign_deployment_statement(&offline, "instance-1", &key).unwrap();
     assert_eq!(
         verify_deployment_statement(&compact, "instance-1", &key.verifying_key()).unwrap(),
@@ -119,6 +155,104 @@ fn offline_deployment_statement_is_identity_evidence_not_artifact_trust() {
         protected_header(&compact).unwrap().typ,
         DEPLOYMENT_STATEMENT_JWS_TYPE
     );
+}
+
+#[test]
+fn adoption_receipt_roundtrips_and_enforces_bounded_recovery_evidence() {
+    let key = SigningKey::from_bytes(&[19; 32]);
+    let receipt = adoption_receipt();
+    let compact = sign_adoption_receipt(&receipt, "receipt-1", &key).unwrap();
+    assert_eq!(
+        verify_adoption_receipt(&compact, "receipt-1", &key.verifying_key()).unwrap(),
+        receipt
+    );
+    assert_eq!(
+        protected_header(&compact).unwrap().typ,
+        ADOPTION_RECEIPT_JWS_TYPE
+    );
+
+    let mut invalid = adoption_receipt();
+    invalid.schema += 1;
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid.runtime_instances.clear();
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid.runtime_instances = vec![invalid.runtime_instances[0].clone(); 129];
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid.resource_references = (0..65)
+        .map(|index| (format!("resource-{index}"), "external/shared".to_owned()))
+        .collect();
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid.recovery_evidence = vec!["snapshot/evidence".to_owned(); 65];
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid.runtime_instances[0].object_reference = "secret={must-not-be-recorded}".to_owned();
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+}
+
+#[test]
+fn discovery_and_offline_identity_fail_closed_on_invalid_claims() {
+    let key = SigningKey::from_bytes(&[17; 32]);
+    let nonce = discovery_statement().nonce;
+    assert!(
+        validate_discovery_request(&DiscoveryRequest {
+            schema: CONTROL_DISCOVERY_SCHEMA + 1,
+            nonce: nonce.clone(),
+        })
+        .is_err()
+    );
+    for invalid_nonce in ["short".to_owned(), "!".repeat(43)] {
+        assert!(
+            validate_discovery_request(&DiscoveryRequest {
+                schema: CONTROL_DISCOVERY_SCHEMA,
+                nonce: invalid_nonce,
+            })
+            .is_err()
+        );
+    }
+    assert!(decode_instance_public_key("AA").is_err());
+
+    let mut online = discovery_statement();
+    online.instance_key_id = "instance-other".to_owned();
+    assert!(sign_discovery_statement(&online, "instance-1", &key).is_err());
+    let forged = sign_compact(&online, "instance-1", CONTROL_DISCOVERY_JWS_TYPE, &key).unwrap();
+    assert!(
+        verify_discovery_statement(&forged, "instance-1", &key.verifying_key(), &nonce, 1_030,)
+            .is_err()
+    );
+
+    let mutations: [fn(&mut DiscoveryStatement); 5] = [
+        |statement: &mut DiscoveryStatement| statement.schema += 1,
+        |statement: &mut DiscoveryStatement| statement.product = "other".to_owned(),
+        |statement: &mut DiscoveryStatement| statement.control_protocol_versions.clear(),
+        |statement: &mut DiscoveryStatement| {
+            statement.operator_protocol_versions = vec![PROTOCOL_VERSION, PROTOCOL_VERSION]
+        },
+        |statement: &mut DiscoveryStatement| statement.expires_at = statement.issued_at + 61,
+    ];
+    for mutate in mutations {
+        let mut invalid = discovery_statement();
+        mutate(&mut invalid);
+        assert!(sign_discovery_statement(&invalid, "instance-1", &key).is_err());
+    }
+
+    let mut offline = deployment_statement();
+    offline.instance_key_id = "instance-other".to_owned();
+    assert!(sign_deployment_statement(&offline, "instance-1", &key).is_err());
+    let forged = sign_compact(&offline, "instance-1", DEPLOYMENT_STATEMENT_JWS_TYPE, &key).unwrap();
+    assert!(verify_deployment_statement(&forged, "instance-1", &key.verifying_key()).is_err());
+
+    let mut offline = deployment_statement();
+    offline.issued_at = 0;
+    assert!(sign_deployment_statement(&offline, "instance-1", &key).is_err());
 }
 
 #[test]
