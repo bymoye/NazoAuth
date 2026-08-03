@@ -469,15 +469,12 @@ fn parse_conformance_candidate(
         bail!("--candidate-build-id is unsafe");
     }
     let oci_digest = values["--candidate-oci-digest"].clone();
-    if !oci_digest
-        .strip_prefix("sha256:")
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .chars()
-                    .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
-        })
-    {
+    if !oci_digest.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    }) {
         bail!("--candidate-oci-digest must be a lowercase sha256 digest");
     }
     Ok(Some(ConformanceCandidateTarget {

@@ -16,8 +16,8 @@ use serde_json::json;
 use crate::{
     backup::Backup,
     cli::{
-        BootstrapAdminOptions, Cli, Command, ConformanceCandidateTarget,
-        ConformanceLeaseCommand, KeysCommand, UpdateOptions,
+        BootstrapAdminOptions, Cli, Command, ConformanceCandidateTarget, ConformanceLeaseCommand,
+        KeysCommand, UpdateOptions,
     },
     filesystem::{atomic_write, copy_atomic, remove_file_durable, set_mode, symlink_atomic},
     install::{self, PreparedInstall},
