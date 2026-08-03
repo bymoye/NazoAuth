@@ -1,6 +1,6 @@
-# Hostinger 本地 OpenID4VC 黑盒矩阵
+# 私有服务器本地 OpenID4VC 黑盒矩阵
 
-此流程在运行 NazoAuth 和本地 OIDF Conformance Suite 的同一台 Hostinger 主机上执行。它只使用公开 NazoAuth 控制面、公开发行方端点和 Suite HTTP API；不读取 PostgreSQL、Valkey、运行时文件或内部管理入口。
+此流程在运行 NazoAuth 和本地 OIDF Conformance Suite 的同一台私有服务器上执行。它只使用公开 NazoAuth 控制面、公开发行方端点和 Suite HTTP API；不读取 PostgreSQL、Valkey、运行时文件或内部管理入口。
 
 ## 能力与信任边界
 
@@ -53,7 +53,7 @@ public onboarding JWKS 与同一批私钥逐一对应。不接受仓库、历史
 FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-attestation、
 key-attestation 和 credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
 
-## Hostinger 命令
+## 私有服务器命令
 
 使用与部署 release identity 一致的干净 checkout，以及精确 revision 的干净本地 Suite checkout。不得添加 filter、临时 expected skip、`--disable-ssl-verify` 或未固定 revision。
 

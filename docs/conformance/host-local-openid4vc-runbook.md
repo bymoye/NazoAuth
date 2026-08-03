@@ -1,6 +1,6 @@
 # Host-local OpenID4VC black-box matrix
 
-Run the OpenID4VC Final/HAIP matrix on the same Hostinger host that runs the deployment and its local OIDF Conformance Suite. It uses only the public NazoAuth control plane, public issuer endpoints, and Suite HTTP API; it never reads PostgreSQL, Valkey, runtime files, or internal management endpoints.
+Run the OpenID4VC Final/HAIP matrix on the same private server that runs the deployment and its local OIDF Conformance Suite. It uses only the public NazoAuth control plane, public issuer endpoints, and Suite HTTP API; it never reads PostgreSQL, Valkey, runtime files, or internal management endpoints.
 
 ## Boundary and accounting
 
@@ -43,7 +43,7 @@ There is deliberately no OpenID4VC base or driver configuration field. Before th
 
 The preparation directory is `0700` and its four files are `0600`. Immediately after it successfully materializes the private Suite configurations, the runner rechecks the digest and deletes `openid4vc-run-material.json`. It then creates an eight-hour lease from `openid4vc-conformance-trust.json`, rechecks that digest, and deletes the file after the server stores it. The public baseline profile and manifest remain as installation-source evidence. The server resolves those public verification keys only for clients bound to that lease. Revocation or expiry rejects them immediately; periodic cleanup deletes the clients and clears the stored public material. Every private work-directory configuration is removed in `finally`. Each official runner invocation receives the Suite token through a new inherited FD, never a token file. The run-local CA is for client-attestation/key-attestation/credential test material only; it is not an ingress client CA and is never installed with the reverse proxy.
 
-## Hostinger command
+## Private-server command
 
 Use a clean checkout matching the deployed release identity and a clean local Suite checkout at the exact revision. Do not add filters, ad-hoc expected skips, `--disable-ssl-verify`, or an unpinned Suite revision.
 

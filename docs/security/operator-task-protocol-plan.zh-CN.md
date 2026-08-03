@@ -825,7 +825,7 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
 
 ### 18.7 唯一远端最终验收
 
-本次任务只有一次最终验收入口，目标为 `ssh hostinger` 上的 `https://auth.nazo.run`。本地代码
+本次任务只有一次最终验收入口，目标为私有部署服务器上的 `https://auth.nazo.run`。本地代码
 和验证完成后必须依次执行：
 
 1. 以只读方式记录远端当前 NazoAuth 服务、容器、镜像、网络、volume、systemd、进程、端口、
@@ -841,7 +841,7 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
    接口，但不得跳过签名、授权、防重放、审计、备份、健康检查或回滚/barrier 保护。
 5. 验证实际最小权限、推荐秘密通道无 argv/env/inspect/journal/log/audit 泄漏、managed runtime
    无 DDL 权限、legacy mutation 不可绕过、防重放/幂等恢复、审计链及签名检查点。
-6. 以上全部通过后，使用 hostinger 本地 OIDF Conformance Suite，针对刚部署的实例串行运行
+6. 以上全部通过后，使用同机私有 OIDF Conformance Suite，针对刚部署的实例串行运行
    项目正式声明支持的完整 plan/variant 矩阵。不得抽样、只跑失败项、关闭声明能力、修改套件
    判定或添加无规范依据的 expected skip。
 

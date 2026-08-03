@@ -3,7 +3,7 @@
 状态：实施中；远端代码门禁已通过当前候选改动；正式双 Release 与第 18 节唯一远端验收尚未完成
 日期：2026-08-01
 设计计划：[operator-task-protocol-plan.zh-CN.md](../security/operator-task-protocol-plan.zh-CN.md)  
-源代码基线：`codex/cosign-private-staging` 当前工作树；`v0.1.8`、`v0.1.9` 测试发布均被 `release-security` 封闭拒绝，`v0.1.10` 的 Hostinger 零状态安装在受管 Valkey 备份检查中封闭失败，修复后的安装验收版本为 `v0.1.11`，最终 SHA 只由正式 Release 固定
+源代码基线：`codex/cosign-private-staging` 当前工作树；`v0.1.8`、`v0.1.9` 测试发布均被 `release-security` 封闭拒绝，`v0.1.10` 的私有服务器零状态安装在受管 Valkey 备份检查中封闭失败，修复后的安装验收版本为 `v0.1.11`，最终 SHA 只由正式 Release 固定
 
 ## 1. 任务目标
 
@@ -458,7 +458,7 @@ OTP-000 基线与契约
   前后版本、request ID 和 rollback 准备证据。
 - [ ] `OTP-1110` 编写最终验收报告，逐项映射计划书第 18 节和 `INV-01` 至 `INV-18`，列出实际
   数量、环境、版本、失败、跳过与未验证边界。
-- [ ] `OTP-1113` 通过 `ssh hostinger` 只读盘点 NazoAuth 服务、容器、镜像、network、volume、
+- [ ] `OTP-1113` 通过私有部署服务器的 SSH 别名只读盘点 NazoAuth 服务、容器、镜像、network、volume、
   systemd、端口、反向代理引用、配置/数据/identity/keys/audit 路径和本地 OIDF suite；保存
   非秘密现状与归属证据。
 - [ ] `OTP-1114` 逐个验证绝对路径和资源标签后，彻底删除且只删除 `auth.nazo.run` 的现有
@@ -470,7 +470,7 @@ OTP-000 基线与契约
 - [ ] `OTP-1116` 从远端清理开始的任一错误、卡住、超时、人工内部修复、扩大权限或安全绕过
   都将该轮标记 FAILED；修复代码并完成本地门后，重新删除全部 NazoAuth 专属状态，从 install
   重新执行，不从失败步骤续跑。
-- [ ] `OTP-1117` 管理与安全旅程全部通过后，使用 hostinger 本地 OIDF suite 串行运行项目当前
+- [ ] `OTP-1117` 管理与安全旅程全部通过后，使用同机私有 OIDF suite 串行运行项目当前
   正式声明的完整 plan/variant 矩阵；不得抽样、关闭能力、改判定或添加无规范依据 skip。
 - [ ] `OTP-1118` 最终报告包含 commit、Release/build identity、artifact/OCI/binary digest、完整
   命令、退出码、request IDs、远端证据、OIDF suite 版本、全部 plan/variant/module 结果和路径，
