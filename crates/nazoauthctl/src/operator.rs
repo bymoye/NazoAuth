@@ -632,9 +632,9 @@ fn append_audit(
 pub(crate) fn verify_audit(config: &UpdateConfig) -> anyhow::Result<()> {
     let (sequence, head) = verify_audit_chain(config)?;
     if sequence == 0 {
-        println!("audit: empty chain verified");
+        eprintln!("audit: empty chain verified");
     } else {
-        println!("audit: verified {sequence} signed checkpoints; head={head}");
+        eprintln!("audit: verified {sequence} signed checkpoints; head={head}");
     }
     Ok(())
 }
