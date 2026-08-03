@@ -271,14 +271,19 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", release)
         self.assertIn("    needs: policy", platform_binaries)
         self.assertNotIn("github.ref_type == 'tag'", platform_binaries)
-        for job in ("attest-platform-binaries", "publish-container", "publish-release"):
+        for job in (
+            "attest-platform-binaries",
+            "attest-operator-protocol",
+            "publish-container",
+            "publish-release",
+        ):
             self.assertRegex(
                 release,
                 rf"(?m)^  {re.escape(job)}:\n    if: github\.ref_type == 'tag'$",
                 job,
             )
 
-    def test_release_matrix_is_native_smoked_and_binary_only(self) -> None:
+    def test_release_matrix_is_native_smoked_and_server_only(self) -> None:
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
@@ -345,10 +350,45 @@ class ReleaseGovernanceTests(unittest.TestCase):
         for action_ref in action_refs:
             self.assertRegex(action_ref, r"^[0-9a-f]{40}$")
 
-        publish = release.split("name: Publish immutable binary-only GitHub Release assets", 1)[1]
+        publish = release.split(
+            "name: Publish immutable server and protocol GitHub Release assets", 1
+        )[1]
         self.assertIn("target/release-binaries/*", publish)
         for forbidden in (".tar", ".json", ".bundle", "SBOM", "install_nazoauthctl"):
             self.assertNotIn(forbidden, publish)
+
+    def test_operator_protocol_is_packaged_attested_and_published_once(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+
+        package_job = release.split("  operator-protocol-package:", 1)[1].split(
+            "  platform-binaries:", 1
+        )[0]
+        self.assertIn(
+            "cargo package --locked --package nazo-operator-protocol", package_job
+        )
+        self.assertNotIn("--no-verify", package_job)
+        self.assertIn("release-operator-protocol-package", package_job)
+
+        attest_job = release.split("  attest-operator-protocol:", 1)[1].split(
+            "  publish-container:", 1
+        )[0]
+        self.assertIn("needs: operator-protocol-package", attest_job)
+        self.assertIn("actions/attest-build-provenance@", attest_job)
+        self.assertIn("steps.protocol_package.outputs.path", attest_job)
+
+        publish = release.split(
+            "name: Publish immutable server and protocol GitHub Release assets", 1
+        )[1]
+        self.assertIn(
+            'protocol_asset="nazo-operator-protocol-${GITHUB_REF_NAME#v}.crate"',
+            publish,
+        )
+        self.assertIn('test "$(wc -l < "$allowed_names")" -eq 9', publish)
+        self.assertIn(
+            'diff -u "$allowed_names" <(sort "$remote_names")', publish
+        )
 
     def test_each_release_binary_gets_the_closed_custom_attestation(self) -> None:
         release = (

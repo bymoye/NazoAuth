@@ -267,14 +267,20 @@ and the export attempt is recorded in the signed management audit chain.
 
 ## Trust and transaction boundary
 
-For each tag, `release-security` publishes only the platform-suffixed
-`nazoauth` and `nazoauthctl` executables as GitHub Release assets. Each subject
-has a schema-4 GitHub attestation binding both executable digests, the signed
-multi-platform OCI index, the independently attested NazoAuthWeb descriptor,
-and the rollback boundary. Verification requires the exact
+For each tag, `release-security` publishes the eight platform-suffixed
+`nazoauth` executables and the matching versioned `nazo-operator-protocol`
+package as GitHub Release assets. Each server subject has a schema-5 GitHub
+attestation binding its executable digest, the signed multi-platform OCI index,
+the independently attested NazoAuthWeb descriptor, the operator protocol and
+controller compatibility range, and the rollback boundary. Verification
+requires the exact
 `release-security.yml@refs/tags/<version>` workflow identity before any subject
 or predicate is trusted. SBOMs, predicates, signature bundles, and OCI archives
 remain CI evidence rather than public Release assets.
+
+NazoAuthCtl is built, signed, updated, and rolled back by its independent
+`nazozero/NazoAuthCtl` release domain. The retained legacy ctl source in this
+repository is transition evidence, not a coupled publication contract.
 
 Container modes can run the reviewed, OCI-digest-pinned Cosign image when a
 local executable is unavailable. A container-free host deployment requires a

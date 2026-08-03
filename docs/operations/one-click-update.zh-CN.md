@@ -218,12 +218,16 @@ chain。
 
 ## 信任与事务边界
 
-每个正式标签的 GitHub Release 只发布带平台后缀的 `nazoauth` 和 `nazoauthctl`
-可执行文件。每个 subject 的 schema 4 GitHub attestation 同时绑定两个二进制 digest、
-已签名多架构 OCI index、独立 attestation 的 NazoAuthWeb descriptor 和回滚边界。
+每个正式标签的 GitHub Release 发布 8 个带平台后缀的 `nazoauth` 可执行文件和匹配
+版本的 `nazo-operator-protocol` 包。每个 server subject 的 schema 5 GitHub
+attestation 绑定其二进制 digest、已签名多架构 OCI index、独立 attestation 的
+NazoAuthWeb descriptor、operator protocol 与 ctl 兼容范围，以及回滚边界。
 控制器必须先验证证书身份精确匹配
 `release-security.yml@refs/tags/<version>`，再解析封闭 predicate 和下载制品。SBOM、
 predicate、签名 bundle 和 OCI archive 只作为 CI evidence 保留，不进入 GitHub Release。
+
+NazoAuthCtl 的构建、签名、自更新和回退属于独立的 `nazozero/NazoAuthCtl` 发布域。
+本仓库暂时保留的旧 ctl 源码只用于迁移核对，不再构成耦合发布契约。
 
 容器模式在没有本地 Cosign 时，使用按 OCI digest 固定的官方多架构 Cosign
 镜像；完全不使用容器的宿主机模式必须预先安装 Cosign。

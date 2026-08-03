@@ -7,10 +7,11 @@ The normal first-install and upgrade interface remains
 
 ## Preconditions
 
-- A reviewed commit has produced an immutable binary-only tagged Release,
-  exact-workflow schema-4 GitHub attestations for its platform binaries, and a
-  signed multi-platform OCI index. The bound NazoAuthWeb descriptor identifies
-  a separately attested frontend Release.
+- A reviewed commit has produced an immutable tagged Release containing the
+  server binaries and versioned protocol package, exact-workflow schema-5
+  GitHub attestations for its platform binaries, and a signed multi-platform
+  OCI index. The bound NazoAuthWeb descriptor identifies a separately attested
+  frontend Release.
 - The operator has inventoried the exact NazoAuth containers, volumes, files,
   proxy references, ports, and local OIDF Suite state. Unrelated host resources
   are out of scope.

@@ -54,13 +54,16 @@ attestation binds the independently attested NazoAuthWeb Release descriptor;
 the runtime obtains and verifies that UI artifact through the documented
 control-plane flow.
 
-## Binary-Only GitHub Releases
+## Server and Protocol GitHub Releases
 
 Persistent GitHub Release assets contain exactly the 8 platform-suffixed server
-executables in the table. Manifests, signatures, SBOMs, OCI archives, bootstrap
-scripts, and other JSON or tar files are not Release assets. Supply-chain
-evidence remains in GitHub Actions, GitHub artifact attestations, Sigstore, and
-the signed GHCR image.
+executables in the table and the matching
+`nazo-operator-protocol-<version>.crate`. The crate is produced once from the
+unique protocol source, package-verified, digest-checked, and given standard
+build provenance before publication. Manifests, signatures, checksum files,
+SBOMs, OCI archives, bootstrap scripts, and other JSON or tar files are not
+Release assets. Supply-chain evidence remains in GitHub Actions, GitHub artifact
+attestations, Sigstore, and the signed GHCR image.
 
 Each executable has a custom GitHub attestation with predicate type
 `https://nazo.run/attestations/release-manifest/v1`. Its closed schema binds the

@@ -47,6 +47,9 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
   macOS runners with the pinned Rust toolchain
 - executes the server binary on every native target and verifies its embedded
   tag, commit, protocol, and build ID
+- packages `nazo-operator-protocol` once from its unique source, verifies the
+  package build, records its digest, and gives the exact `.crate` standard
+  build-provenance attestation
 - reruns `cargo audit` and `cargo deny` for the exact tag
 - builds one `linux/amd64` plus `linux/arm64` OCI index
 - scans the exact OCI archive with Trivy and publishes that archive without a
@@ -61,8 +64,9 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
   the exact scanned digest and rejects every mismatch
 - retains SBOMs, OCI archives, predicates, and Sigstore bundles as internal CI
   evidence
-- publishes exactly 8 platform-suffixed server executable files as persistent GitHub
-  Release assets; JSON, tar, bundle, script, and SBOM files are not Release assets
+- publishes exactly 8 platform-suffixed server executable files plus the exact
+  versioned `nazo-operator-protocol` crate as persistent GitHub Release assets;
+  JSON, tar, bundle, script, checksum, and SBOM files are not Release assets
 - resumes partial publication only when every existing Release asset is
   byte-identical, and never overwrites a mismatching tag or asset
 - emits standard provenance attestations in addition to the custom manifest
@@ -103,6 +107,7 @@ For each production release, preserve:
 - `conformance-security` workflow URL and conclusion
 - `release-security` workflow URL and conclusion
 - all 8 server binary asset names and digests
+- the operator protocol package name, digest, and provenance attestation URL
 - each target's custom ReleaseManifest attestation URL
 - the internal server SBOM artifact name and digest
 - Trivy scan result

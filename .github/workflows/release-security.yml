@@ -120,6 +120,33 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  operator-protocol-package:
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - name: Package the unique operator protocol source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --locked --package nazo-operator-protocol
+          mkdir -p target/release-protocol
+          mapfile -t packages < <(find target/package -maxdepth 1 -type f \
+            -name 'nazo-operator-protocol-*.crate' -print)
+          test "${#packages[@]}" -eq 1
+          cp -- "${packages[0]}" target/release-protocol/
+          (cd target/release-protocol && \
+            sha256sum "$(basename "${packages[0]}")" > SHA256SUMS)
+      - name: Upload immutable operator protocol package input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-operator-protocol-package
+          path: target/release-protocol
+          if-no-files-found: error
+          retention-days: 30
+
   platform-binaries:
     needs: policy
     strategy:
@@ -498,6 +525,35 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  attest-operator-protocol:
+    if: github.ref_type == 'tag'
+    needs: operator-protocol-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the exact packaged protocol crate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-operator-protocol-package
+          path: target/release-protocol
+      - name: Verify the protocol package name and digest record
+        id: protocol_package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="target/release-protocol/nazo-operator-protocol-${GITHUB_REF_NAME#v}.crate"
+          test -f "$package"
+          (cd target/release-protocol && sha256sum --check SHA256SUMS)
+          echo "path=$package" >> "$GITHUB_OUTPUT"
+      - name: Attest operator protocol package provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.protocol_package.outputs.path }}
+
   publish-container:
     if: github.ref_type == 'tag'
     needs: [attest-platform-binaries, container-image]
@@ -568,7 +624,7 @@ jobs:
 
   publish-release:
     if: github.ref_type == 'tag'
-    needs: [attest-platform-binaries, publish-container]
+    needs: [attest-platform-binaries, attest-operator-protocol, publish-container]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -580,7 +636,12 @@ jobs:
           pattern: release-binaries-*
           path: target/release-binaries
           merge-multiple: true
-      - name: Publish immutable binary-only GitHub Release assets
+      - name: Download the attested operator protocol package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-operator-protocol-package
+          path: target/release-protocol
+      - name: Publish immutable server and protocol GitHub Release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -596,17 +657,15 @@ jobs:
           for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
             test -f "target/release-binaries/nazoauth-$target.exe"
           done
-          unexpected="$(find target/release-binaries -maxdepth 1 -type f \
-            ! -name 'nazoauth-x86_64-unknown-linux-gnu' \
-            ! -name 'nazoauth-aarch64-unknown-linux-gnu' \
-            ! -name 'nazoauth-x86_64-unknown-linux-musl' \
-            ! -name 'nazoauth-aarch64-unknown-linux-musl' \
-            ! -name 'nazoauth-x86_64-pc-windows-msvc.exe' \
-            ! -name 'nazoauth-aarch64-pc-windows-msvc.exe' \
-            ! -name 'nazoauth-x86_64-apple-darwin' \
-            ! -name 'nazoauth-aarch64-apple-darwin' \
-            -print -quit)"
-          test -z "$unexpected"
+          protocol_asset="nazo-operator-protocol-${GITHUB_REF_NAME#v}.crate"
+          test -f "target/release-protocol/$protocol_asset"
+          (cd target/release-protocol && sha256sum --check SHA256SUMS)
+          allowed_names="$(mktemp)"
+          find target/release-binaries -maxdepth 1 -type f -printf '%f\n' \
+            | sort > "$allowed_names"
+          printf '%s\n' "$protocol_asset" >> "$allowed_names"
+          sort -u -o "$allowed_names" "$allowed_names"
+          test "$(wc -l < "$allowed_names")" -eq 9
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
@@ -614,29 +673,27 @@ jobs:
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '.assets[].name' > "$remote_names"
           while IFS= read -r name; do
-            test -z "$name" || test -f "target/release-binaries/$name" || {
-              echo "GitHub Release contains a non-binary or unexpected asset: $name" >&2
+            test -z "$name" || grep -Fxq "$name" "$allowed_names" || {
+              echo "GitHub Release contains an unexpected asset: $name" >&2
               exit 1
             }
           done < "$remote_names"
           existing="$(mktemp -d)"
-          for binary in target/release-binaries/*; do
-            name="$(basename "$binary")"
+          for asset in target/release-binaries/* "target/release-protocol/$protocol_asset"; do
+            name="$(basename "$asset")"
             if grep -Fxq "$name" "$remote_names"; then
               gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
                 --pattern "$name" --dir "$existing"
-              cmp --silent "$binary" "$existing/$name" || {
+              cmp --silent "$asset" "$existing/$name" || {
                 echo "existing GitHub Release asset differs: $name" >&2
                 exit 1
               }
               echo "GitHub Release already has the exact asset: $name"
             else
-              gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" "$binary"
+              gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" "$asset"
             fi
           done
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '.assets[].name' > "$remote_names"
-          test "$(wc -l < "$remote_names")" -eq 8
-          for binary in target/release-binaries/*; do
-            grep -Fxq "$(basename "$binary")" "$remote_names"
-          done
+          test "$(wc -l < "$remote_names")" -eq 9
+          diff -u "$allowed_names" <(sort "$remote_names")

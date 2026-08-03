@@ -9,7 +9,10 @@ verification, controller audit state, backup lifecycle, recovery, diagnostics,
 the bootstrap-admin client, and controller self-update/rollback.
 
 `crates/operator-protocol` remains only in this repository. NazoAuthCtl pins its
-package version and a full Git commit. The server Release manifest schema 5
+package version and a full Git commit. Tagged server Releases additionally
+publish that exact package with provenance so later controller dependency
+updates have an immutable review subject; the compiled controller never
+downloads it during recovery. The server Release manifest schema 5
 contains `operator_protocol.version`, `minimum_ctl_version`, and
 `maximum_ctl_version_exclusive`; missing, malformed, or unsupported contracts
 fail closed.
