@@ -19,7 +19,7 @@ that tag pinned:
 
 ```sh
 # Replace vX.Y.Z with the exact immutable Release tag you selected.
-version=v0.1.21
+version=v0.1.22
 curl --fail --silent --show-error --location --proto '=https' \
   --output install_nazoauthctl.sh \
   "https://raw.githubusercontent.com/nazozero/NazoAuthCtl/$version/scripts/install_nazoauthctl.sh"

@@ -16,7 +16,7 @@ build-provenance attestation 与精确 tag、控制器 Release 工作流和托�
 
 ```sh
 # 将 vX.Y.Z 替换为你选择的精确不可变 Release tag。
-version=v0.1.21
+version=v0.1.22
 curl --fail --silent --show-error --location --proto '=https' \
   --output install_nazoauthctl.sh \
   "https://raw.githubusercontent.com/nazozero/NazoAuthCtl/$version/scripts/install_nazoauthctl.sh"
