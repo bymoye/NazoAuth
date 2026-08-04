@@ -8,13 +8,13 @@ they are not divided one crate per RFC. Calls between crates remain ordinary
 in-process Rust calls. The design does not use a dynamic-library plugin ABI,
 RPC, an event bus, a command bus, or layers whose only job is forwarding.
 
-The root manifest is a virtual workspace with resolver 3. Releases contain two
-executables with different authority boundaries. `nazoauth` is the application
-composition root; its `server`, `migrate`, and `keyctl` subcommands keep
-version-coupled application behavior in the target runtime. `nazoauthctl` is
-the host lifecycle controller for installation, backup, runtime orchestration,
-health verification, update, and rollback. It delegates migrations and key
-operations to the target `nazoauth` binary instead of reimplementing them.
+The root manifest is a virtual workspace with resolver 3. This repository
+releases the `nazoauth` application composition root; its `server`,
+`operator-task`, and `build-identity` subcommands keep version-coupled domain
+execution in the target runtime. The independently released host lifecycle
+controller lives in [`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl)
+and consumes the exact versioned `nazo-operator-protocol` contract from this
+repository.
 
 Every direct child of `crates/` is named for its bounded responsibility.
 Technology names appear only where the crate is a concrete adapter. Cargo
@@ -34,7 +34,6 @@ package names retain the `nazo-` namespace and do not determine directory names.
 | `http-actix` | `nazo-http-actix` | Actix extraction, request context, CORS, middleware, security headers, protocol response presentation, and Actix-specific integration. It does not query Diesel or Fred and does not construct token claims. |
 | `runtime-capabilities` | `nazo-runtime-modules` | Runtime-controllable protocol capability identifiers, desired and actual lifecycle state, revision rules, immutable active snapshots, dependency checks, disable policy, request leases, and audit event types. It is not a generic plugin or miscellaneous-module crate. |
 | `authorization-server` | `nazo-oauth-server` | Deployable authorization-server application and composition root: validates configuration, creates focused services and adapters, starts background tasks, registers static routes, and starts Actix. Ordinary handlers must receive only the focused handles they use. |
-| `nazoauthctl` | `nazoauthctl` | Host lifecycle control plane: verifies signed releases, owns deployment topology and persistent host paths, invokes target-version application tasks in one-shot containers or as the systemd service user, and commits or rolls back runtime/UI changes. It does not implement OAuth/OIDC behavior, migrations, or key lifecycle rules. |
 
 The historical Axum/Tower and tonic adapters are removed. Only Actix transport
 integration is maintained. The generic resource-server core may use the

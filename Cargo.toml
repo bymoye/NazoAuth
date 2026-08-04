@@ -8,7 +8,6 @@ members = [
     "crates/openid4vc-http-actix",
     "crates/persistence-postgres",
     "crates/authorization-server",
-    "crates/nazoauthctl",
     "crates/operator-protocol",
     "crates/http-signatures",
     "crates/http-actix",

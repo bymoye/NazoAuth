@@ -2,32 +2,31 @@
 
 `nazoauthctl` 是独立 Linux 部署的正式生命周期入口。它只消费不可变的标签发布
 制品，不在生产主机克隆源码，也不要求 Rust、Node.js 或镜像构建环境。它本身是
-Rust 二进制，与 `nazoauth` 在同一个发布中分别构建、签名和出具 SBOM。
+Rust 二进制，由独立的
+[`NazoAuthCtl` 仓库](https://github.com/nazozero/NazoAuthCtl)构建、签名和发布。
 
 ## 首次安装
 
-公开 GitHub Release 只包含可执行文件。仓库中的 bootstrap 脚本通过匿名的公开 Release
-和 artifact attestation API 下载本机对应的控制器，用 digest 固定的 Cosign 镜像校验
-封闭 manifest，之后才安装已验证文件。验证同时绑定制品、tag ref、源提交、签名工作流、
-仓库和 GitHub-hosted runner；不使用 GitHub 登录，也不读取 `GH_TOKEN`。公开 Release
-不包含 shell 安装器或独立 bundle；出于信任自举原因，正式文档不提供 `curl | sh` 路径。
+控制器仓库中的 bootstrap 脚本使用 GitHub CLI 下载精确 Release，验证其 GitHub
+build-provenance attestation 与精确 tag、控制器 Release 工作流和托管 runner 的绑定，
+执行 help 冒烟测试，之后才原子安装为普通非符号链接文件。正式文档不提供
+`curl | sh` 信任路径。
 
 从同一个不可变源码 tag 下载并审阅这个小型 bootstrap，然后固定该 tag 执行：
 
 ```sh
 # 将 vX.Y.Z 替换为你选择的精确不可变 Release tag。
-version=vX.Y.Z
+version=v0.1.21
 curl --fail --silent --show-error --location --proto '=https' \
   --output install_nazoauthctl.sh \
-  "https://raw.githubusercontent.com/nazozero/NazoAuth/$version/scripts/install_nazoauthctl.sh"
+  "https://raw.githubusercontent.com/nazozero/NazoAuthCtl/$version/scripts/install_nazoauthctl.sh"
 less install_nazoauthctl.sh
 sudo sh install_nazoauthctl.sh --version "$version"
 ```
 
-bootstrap 需要 `curl`、`python3`、`sha256sum` 和 `install`，并优先使用 Podman 或
-Docker 运行 digest 固定的 Cosign。只有两个容器引擎都不存在时，才接受由运维方另行
-可信安装的本地 `cosign`。匿名 GitHub API 仍受公开速率限制；触发限制时安装会封闭失败，
-不会要求或探测账户 token。
+bootstrap 需要 `gh`、`install` 和标准 POSIX 工具。GitHub CLI 必须已经完成认证，
+或能以其他方式读取公开 Release 与 attestation API。验证失败或触发速率限制时，
+安装会在替换现有文件前封闭失败。
 
 默认只需要选择运行方式。`auto` 优先使用已安装的 Podman，其次使用 Docker：
 

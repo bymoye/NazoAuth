@@ -2935,31 +2935,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nazoauthctl"
-version = "0.1.20"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "ed25519-dalek 3.0.0",
- "hmac 0.13.0",
- "nazo-operator-protocol",
- "rand 0.10.2",
- "rpassword",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tar",
- "url",
- "urlencoding",
- "uuid",
- "wait-timeout",
- "x509-parser",
- "zeroize",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3898,27 +3873,6 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rpassword"
-version = "7.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
-dependencies = [
- "libc",
- "rtoolbox",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rtoolbox"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

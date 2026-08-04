@@ -145,50 +145,6 @@ def check_documentation_boundaries() -> None:
                 )
 
 
-def check_operator_lifecycle_platforms() -> None:
-    install = (ROOT / "crates" / "nazoauthctl" / "src" / "install.rs").read_text(
-        encoding="utf-8"
-    )
-    supported = re.search(
-        r'fn install_platform_supported\(os: &str, arch: &str\) -> bool \{\s*'
-        r'matches!\(\(os, arch\), \("linux", "x86_64" \| "aarch64"\)\)\s*\}',
-        install,
-    )
-    if supported is None:
-        raise SystemExit(
-            "nazoauthctl lifecycle platform boundary must be Linux x86_64 plus aarch64"
-        )
-    prepare = install.index("pub(crate) fn prepare")
-    platform_check = install.index("require_supported_install_platform()?", prepare)
-    first_mutating_precondition = install.index("require_root()?", prepare)
-    if platform_check > first_mutating_precondition:
-        raise SystemExit("install platform must be rejected before privileged preparation")
-    if "standalone installation currently supports Linux x86_64" in install:
-        raise SystemExit("nazoauthctl still advertises an x86_64-only lifecycle")
-
-    model = (ROOT / "crates" / "nazoauthctl" / "src" / "model.rs").read_text(
-        encoding="utf-8"
-    )
-    for marker in (
-        '("linux", "x86_64") => Ok("linux/amd64")',
-        '("linux", "aarch64") => Ok("linux/arm64")',
-        '("aarch64", "linux", _) => Some("aarch64-unknown-linux-gnu")',
-    ):
-        if marker not in model:
-            raise SystemExit(f"nazoauthctl ARM64 Release mapping is missing: {marker}")
-
-    english = (ROOT / "docs" / "operations" / "platform-support.md").read_text(
-        encoding="utf-8"
-    )
-    chinese = (
-        ROOT / "docs" / "operations" / "platform-support.zh-CN.md"
-    ).read_text(encoding="utf-8")
-    for text, label in ((english, "English"), (chinese, "Chinese")):
-        for marker in ("Linux", "x86_64", "aarch64", "linux/amd64", "linux/arm64"):
-            if marker not in text:
-                raise SystemExit(f"{label} platform support document omits {marker}")
-
-
 def check_authorization_server_import_boundaries() -> None:
     for path in sorted((ROOT / "crates" / "authorization-server" / "src").rglob("*.rs")):
         text = path.read_text(encoding="utf-8")
@@ -1273,9 +1229,6 @@ def check_bootstrap_secret_log_boundary() -> None:
         / "bootstrap"
         / "routes.rs"
     ).read_text(encoding="utf-8")
-    controller = (
-        ROOT / "crates" / "nazoauthctl" / "src" / "controller.rs"
-    ).read_text(encoding="utf-8")
     repository = (
         ROOT
         / "crates"
@@ -1283,12 +1236,6 @@ def check_bootstrap_secret_log_boundary() -> None:
         / "src"
         / "repositories"
         / "initial_admin_bootstrap.rs"
-    ).read_text(encoding="utf-8")
-    cli = (ROOT / "crates" / "nazoauthctl" / "src" / "cli.rs").read_text(
-        encoding="utf-8"
-    )
-    entrypoint = (
-        ROOT / "crates" / "nazoauthctl" / "src" / "main.rs"
     ).read_text(encoding="utf-8")
     operations = "\n".join(
         path.read_text(encoding="utf-8")
@@ -1308,37 +1255,13 @@ def check_bootstrap_secret_log_boundary() -> None:
             )
     if 'route("/setup"' in routes:
         raise SystemExit("authorization server still exposes the legacy setup route")
-    for source in (server, controller, cli, entrypoint, operations):
+    for source in (server, routes, operations):
         if "/setup?token=" in source or "setup URL" in source:
             raise SystemExit(
                 "initial administrator bootstrap exposes a query-token URL"
             )
     if "use the operator workflow to read the private runtime-owned token file" not in server:
         raise SystemExit("initial administrator bootstrap lacks a non-secret recovery hint")
-    for marker in (
-        '"bootstrap-admin" => Command::BootstrapAdmin',
-        'const BOOTSTRAP_MOUNT_TARGET: &str = "/var/lib/nazo_oauth/bootstrap"',
-        'endpoint.set_path("/auth/bootstrap-admin")',
-        '"--data-binary"',
-        '"@-"',
-        ".stdin_stdout(&request)",
-        'response.next != "/ui/auth"',
-        "remove_file_durable(&token_path)",
-        'return Ok(10_001)',
-        '"bootstrap-admin-intent"',
-        '"bootstrap-admin-succeeded"',
-        '"bootstrap-admin-failed"',
-        '"bootstrap-admin-outcome-unknown"',
-        "load_or_create_bootstrap_pending(config, &normalized_email)",
-        "bootstrap_email_hmac(config, normalized_email)",
-        "current_bootstrap_recovery_epoch(config)?",
-        "rotate_bootstrap_recovery_epoch(config)",
-        'bootstrap_state_hmac(config, b"token-v1", token.as_bytes())',
-        "receipt.claimed_user_id",
-        "config.operator.secret_revision_file",
-    ):
-        if marker not in controller and marker not in cli:
-            raise SystemExit(f"secure bootstrap-admin boundary is missing: {marker}")
     for marker in (
         "request_id: String",
         ".claim(&payload.request_id, &token_hash, &email, password_hash)",
@@ -1359,21 +1282,6 @@ def check_bootstrap_secret_log_boundary() -> None:
     ):
         if marker not in repository:
             raise SystemExit(f"database-owned bootstrap receipt boundary is missing: {marker}")
-    for forbidden in (
-        ".arg(&token)",
-        ".arg(token)",
-        ".env(\"BOOTSTRAP",
-    ):
-        if forbidden in controller:
-            raise SystemExit(
-                f"bootstrap credentials cross an argv/env/audit boundary: {forbidden}"
-            )
-    if "Create the first administrator with: nazoauthctl bootstrap-admin" not in controller:
-        raise SystemExit("install output lacks the non-secret bootstrap-admin handoff")
-    if "nazoauthctl [--config PATH] bootstrap-admin" not in entrypoint:
-        raise SystemExit("bootstrap-admin is absent from public help")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-migrations", action="store_true")
@@ -1388,7 +1296,6 @@ def main() -> None:
         check_migration_checksums()
         check_route_fixture()
         check_documentation_boundaries()
-        check_operator_lifecycle_platforms()
         check_authorization_server_import_boundaries()
         check_toolchain_pins()
         check_crate_dependency_boundaries()

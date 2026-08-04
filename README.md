@@ -108,10 +108,11 @@ composite score:
 ## Quick start
 
 Install the independently signed `nazoauthctl` from
-[`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl). The legacy
-source remains in this repository only until the cross-repository validation
-gate is complete; it is no longer a server Release asset. See the
-[repository split boundary](docs/operations/controller-repository-split.md), then run:
+[`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl). Controller
+source, CI, installation, and Releases now live only in that repository; the
+NazoAuth `v0.1.20` tag retains the pre-removal source as a review and rollback
+point. See the [repository split boundary](docs/operations/controller-repository-split.md),
+then run:
 
 ```sh
 sudo nazoauthctl install --runtime auto

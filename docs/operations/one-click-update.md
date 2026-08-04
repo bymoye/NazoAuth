@@ -3,37 +3,33 @@
 `nazoauthctl` is the supported lifecycle entry point for standalone Linux
 deployments. It consumes immutable tagged release artifacts without cloning
 source or requiring Rust, Node.js, or an image build toolchain on the host.
-It is a Rust executable built and signed in the same release as `nazoauth`.
+It is independently built, signed, and released by the
+[`NazoAuthCtl` repository](https://github.com/nazozero/NazoAuthCtl).
 
 ## First installation
 
-The public GitHub Release contains executables only. The repository's bootstrap
-script downloads the matching controller through the anonymous public Release
-and artifact-attestation APIs, verifies the closed manifest with the digest-pinned
-Cosign image, and only then installs the verified file. It binds the artifact,
-tag ref, source commit, signer workflow, repository, and GitHub-hosted runner.
-Neither a GitHub login nor `GH_TOKEN` is used. No shell installer or detached
-bundle is part of the public Release, and `curl | sh` is intentionally not a
-trusted bootstrap path.
+The controller repository's bootstrap script downloads the selected controller
+Release with GitHub CLI, verifies its GitHub build-provenance attestation against
+the exact tag and hosted controller Release workflow, executes a help smoke test,
+and only then atomically installs a regular non-symlink file. `curl | sh` is not
+a trusted bootstrap path.
 
 Review the small bootstrap from the same immutable source tag, then run it with
 that tag pinned:
 
 ```sh
 # Replace vX.Y.Z with the exact immutable Release tag you selected.
-version=vX.Y.Z
+version=v0.1.21
 curl --fail --silent --show-error --location --proto '=https' \
   --output install_nazoauthctl.sh \
-  "https://raw.githubusercontent.com/nazozero/NazoAuth/$version/scripts/install_nazoauthctl.sh"
+  "https://raw.githubusercontent.com/nazozero/NazoAuthCtl/$version/scripts/install_nazoauthctl.sh"
 less install_nazoauthctl.sh
 sudo sh install_nazoauthctl.sh --version "$version"
 ```
 
-Bootstrap requires `curl`, `python3`, `sha256sum`, and `install`, plus Podman or
-Docker for the pinned Cosign verifier. A separately provisioned local `cosign`
-is accepted only when neither container engine is available. Anonymous GitHub
-API rate limits apply; a rate-limit response fails closed instead of asking for
-or discovering an account token.
+Bootstrap requires `gh`, `install`, and standard POSIX utilities. GitHub CLI
+must already be authenticated or otherwise able to read the public Release and
+attestation APIs. Verification or rate-limit failure stops before replacement.
 
 `auto` selects an installed Podman runtime first and Docker second:
 

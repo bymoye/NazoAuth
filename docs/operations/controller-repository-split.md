@@ -28,11 +28,12 @@ standard provenance, signing evidence, and publication. It never builds or
 publishes NazoAuthCtl. Cross-repository integration downloads signed server
 Release/OCI artifacts and does not rebuild the server.
 
-The legacy `crates/nazoauthctl` directory remains temporarily to preserve a
-reviewable transition and to support cross-repository comparison. It must not be
-deleted until the NazoAuthCtl PR has passed controller-only CI and the signed
-current/previous server matrix. Its presence is not authority to resume coupled
-server/ctl publication.
+The legacy `crates/nazoauthctl` directory was removed only after NazoAuthCtl PR
+[#1](https://github.com/nazozero/NazoAuthCtl/pull/1) passed controller-only CI,
+the signed current/previous server matrix, and real Docker, Podman, and systemd
+recovery scenarios, and after independent NazoAuthCtl `v0.1.20` publication.
+The NazoAuth `v0.1.20` tag retains the pre-removal source and remains the exact
+review/rollback point. Coupled server/ctl publication must not be reintroduced.
 
 Recovery commands are not application operations. Rollback, backup recovery,
 interrupted-update recovery, identity recovery, and previous trusted activation
