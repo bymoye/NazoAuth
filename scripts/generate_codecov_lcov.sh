@@ -300,11 +300,6 @@ cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
 cargo test --locked --workspace --all-features --lib --bins --tests
 
-# The retained legacy controller remains covered by workspace Rust tests until
-# cross-repository acceptance permits deletion. Its schema-4 release lifecycle
-# fixture is intentionally not executed against the server-only schema-5
-# Release contract; independent controller integration runs in NazoAuthCtl.
-
 # Let cargo-llvm-cov resolve the complete workspace object graph as an
 # independent report. `show-env` deliberately points cargo-llvm-cov at the
 # Cargo target root so it can discover every instrumented object there, while

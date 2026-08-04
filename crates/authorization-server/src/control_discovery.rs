@@ -264,8 +264,40 @@ fn publish_new_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     file.sync_all()
         .with_context(|| format!("failed to persist {}", temporary.display()))?;
     drop(file);
-    let result = fs::hard_link(&temporary, path)
-        .with_context(|| format!("failed to publish {}", path.display()));
+    let result = match fs::hard_link(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (|| {
+            let metadata = fs::symlink_metadata(path).with_context(|| {
+                format!(
+                    "failed to inspect concurrently published identity {}",
+                    path.display()
+                )
+            })?;
+            if !metadata.file_type().is_file() {
+                bail!(
+                    "refusing concurrently published identity at {} because it is not a regular file",
+                    path.display()
+                );
+            }
+            let existing = fs::read(path).with_context(|| {
+                format!(
+                    "failed to read concurrently published identity {}",
+                    path.display()
+                )
+            })?;
+            if existing == contents {
+                Ok(())
+            } else {
+                Err(error).with_context(|| {
+                    format!(
+                        "refusing concurrently published identity with different contents at {}",
+                        path.display()
+                    )
+                })
+            }
+        })(),
+        Err(error) => Err(error).with_context(|| format!("failed to publish {}", path.display())),
+    };
     let _ = fs::remove_file(&temporary);
     result
 }

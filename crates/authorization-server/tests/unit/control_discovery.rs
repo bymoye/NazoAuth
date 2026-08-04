@@ -199,6 +199,45 @@ fn public_identity_key_cannot_be_substituted_independently() {
 }
 
 #[test]
+fn concurrent_immutable_publication_accepts_only_identical_contents() {
+    let root = temporary_root();
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("immutable-identity");
+
+    publish_new_file(&path, b"first").unwrap();
+    publish_new_file(&path, b"first").unwrap();
+    let error = publish_new_file(&path, b"substitute")
+        .err()
+        .unwrap()
+        .to_string();
+
+    assert!(error.contains("different contents"));
+    assert_eq!(fs::read(&path).unwrap(), b"first");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_immutable_publication_rejects_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let root = temporary_root();
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("attacker-controlled");
+    let path = root.join("immutable-identity");
+    fs::write(&target, b"first").unwrap();
+    symlink(&target, &path).unwrap();
+
+    let error = publish_new_file(&path, b"first").err().unwrap().to_string();
+
+    assert!(error.contains("not a regular file"));
+    assert_eq!(fs::read(&target).unwrap(), b"first");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn changed_public_deployment_claim_preserves_the_previous_signed_statement() {
     let root = temporary_root();
     let first = ControlDiscoveryEndpoint::initialize(
