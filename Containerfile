@@ -31,10 +31,8 @@ RUN --mount=type=cache,id=nazoauth-cargo-registry,target=/usr/local/cargo/regist
     --mount=type=cache,id=nazoauth-target,target=/app/target,sharing=locked \
     cargo build --release --locked \
       --package nazo-oauth-server --bin nazoauth \
-      --package nazoauthctl --bin nazoauthctl \
       --package nazo-operator-protocol --example automation_operator_task \
     && install -Dm755 target/release/nazoauth /out/nazoauth \
-    && install -Dm755 target/release/nazoauthctl /out/nazoauthctl \
     && install -Dm755 target/release/examples/automation_operator_task /out/automation_operator_task
 
 FROM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS runtime-base
@@ -60,7 +58,6 @@ CMD ["nazoauth", "server"]
 FROM runtime-base AS release-export
 
 COPY --from=product-builder /out/nazoauth /usr/local/bin/nazoauth
-COPY --from=product-builder /out/nazoauthctl /usr/local/bin/nazoauthctl
 
 FROM runtime AS development-runtime
 
