@@ -210,13 +210,10 @@ class ReleaseGovernanceTests(unittest.TestCase):
         server_manifest = (
             ROOT / "crates" / "authorization-server" / "Cargo.toml"
         ).read_text(encoding="utf-8")
-        ctl_manifest = (
-            ROOT / "crates" / "nazoauthctl" / "Cargo.toml"
-        ).read_text(encoding="utf-8")
+        ctl_manifest = ROOT / "crates" / "nazoauthctl" / "Cargo.toml"
         self.assertEqual(server_manifest.count("[[bin]]"), 1)
         self.assertIn('name = "nazoauth"', server_manifest)
-        self.assertEqual(ctl_manifest.count("[[bin]]"), 1)
-        self.assertIn('name = "nazoauthctl"', ctl_manifest)
+        self.assertFalse(ctl_manifest.exists())
 
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
