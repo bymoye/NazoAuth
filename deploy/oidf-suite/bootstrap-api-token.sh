@@ -8,8 +8,15 @@ export NAZOAUTH_SOURCE_DIR
 : "${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR}"
 : "${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL}"
 : "${OIDF_SUITE_TOKEN_FILE:?set OIDF_SUITE_TOKEN_FILE}"
+: "${OIDF_SUITE_TOKEN_METADATA_FILE:=${OIDF_SUITE_TOKEN_ID_FILE:-${OIDF_SUITE_TOKEN_FILE}.metadata}}"
 : "${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER}"
 : "${OIDF_TARGET_HOSTNAME:?set OIDF_TARGET_HOSTNAME}"
+
+# Keep the historical variable name as an alias while storing id + expiry as
+# JSON.  A bare id cannot distinguish an expired token after an interrupted
+# run, whereas the upstream expiry gives SIGKILL a bounded 24-hour lifetime.
+OIDF_SUITE_TOKEN_ID_FILE=$OIDF_SUITE_TOKEN_METADATA_FILE
+export OIDF_SUITE_TOKEN_METADATA_FILE OIDF_SUITE_TOKEN_ID_FILE
 
 container_runtime=${OIDF_CONTAINER_RUNTIME:-podman}
 case "$container_runtime" in
@@ -109,52 +116,48 @@ fi
   "$pki_init_image"
 
 token_parent=$(dirname -- "$OIDF_SUITE_TOKEN_FILE")
+metadata_parent=$(dirname -- "$OIDF_SUITE_TOKEN_METADATA_FILE")
 install -d -m 0700 "$token_parent"
+test "$metadata_parent" = "$token_parent" || install -d -m 0700 "$metadata_parent"
 compose() {
   "$container_runtime" compose -f "$script_dir/compose.yml" "$@"
 }
 bootstrap_container=nazoauth-oidf-suite-bootstrap
 
-if test -e "$OIDF_SUITE_TOKEN_FILE"; then
-  test -f "$OIDF_SUITE_TOKEN_FILE" || {
-    echo "suite token path is not a regular file" >&2
-    exit 1
-  }
-  test "$(stat -c %a "$OIDF_SUITE_TOKEN_FILE")" = 600 || {
-    echo "suite token file permissions are not 0600" >&2
-    exit 1
-  }
-  test -s "$OIDF_SUITE_TOKEN_FILE" || {
-    echo "suite token file is empty" >&2
-    exit 1
-  }
-  echo "Reusing the existing protected suite token; it will be validated after startup"
-else
-  cleanup_bootstrap() {
-    "$container_runtime" rm -f "$bootstrap_container" >/dev/null 2>&1 || true
-  }
-  trap cleanup_bootstrap EXIT HUP INT TERM
+OIDF_SUITE_BASE_URL="$OIDF_SUITE_BASE_URL" \
+OIDF_SUITE_TOKEN_FILE="$OIDF_SUITE_TOKEN_FILE" \
+OIDF_SUITE_TOKEN_METADATA_FILE="$OIDF_SUITE_TOKEN_METADATA_FILE" \
+  sh "$script_dir/revoke-api-token.sh"
 
-  compose up -d --no-build mongodb
-  cleanup_bootstrap
-  "$container_runtime" run -d \
-    --name "$bootstrap_container" \
-    --network nazoauth-oidf-suite-default \
-    --publish 127.0.0.1:18443:8080 \
-    --env "BASE_URL=$OIDF_SUITE_BASE_URL" \
-    --env "BASE_MTLS_URL=$OIDF_SUITE_BASE_URL" \
-    --env MONGODB_HOST=mongodb \
-    --env OIDC_GOOGLE_CLIENTID=google-client \
-    --env OIDC_GOOGLE_SECRET=google-secret \
-    --env OIDC_GITLAB_CLIENTID=gitlab-client \
-    --env OIDC_GITLAB_SECRET=gitlab-secret \
-    --env "JAVA_EXTRA_ARGS=-Dfintechlabs.devmode=true -Dfintechlabs.makeDummyUserAdminInDevMode=false -Doidc.google.iss=$OIDF_OPERATOR_ISSUER -Doidc.gitlab.iss=$OIDF_OPERATOR_ISSUER -Doidc.admin.issuer=$OIDF_OPERATOR_ISSUER" \
-    "$suite_image" >/dev/null
+# This is deliberately a one-shot container on the private suite network.  It
+# can coexist with an already-running main suite and never binds the nginx
+# port; each invocation therefore gets a newly issued non-permanent token.
+cleanup_bootstrap() {
+  "$container_runtime" rm -f "$bootstrap_container" >/dev/null 2>&1 || true
+}
+trap cleanup_bootstrap EXIT HUP INT TERM
 
-  python3 - "$OIDF_SUITE_TOKEN_FILE" <<'PY'
+compose up -d --no-build mongodb
+cleanup_bootstrap
+"$container_runtime" run -d \
+  --name "$bootstrap_container" \
+  --network nazoauth-oidf-suite-default \
+  --publish 127.0.0.1:18443:8080 \
+  --env "BASE_URL=$OIDF_SUITE_BASE_URL" \
+  --env "BASE_MTLS_URL=$OIDF_SUITE_BASE_URL" \
+  --env MONGODB_HOST=mongodb \
+  --env OIDC_GOOGLE_CLIENTID=google-client \
+  --env OIDC_GOOGLE_SECRET=google-secret \
+  --env OIDC_GITLAB_CLIENTID=gitlab-client \
+  --env OIDC_GITLAB_SECRET=gitlab-secret \
+  --env "JAVA_EXTRA_ARGS=-Dfintechlabs.devmode=true -Dfintechlabs.makeDummyUserAdminInDevMode=false -Doidc.google.iss=$OIDF_OPERATOR_ISSUER -Doidc.gitlab.iss=$OIDF_OPERATOR_ISSUER -Doidc.admin.issuer=$OIDF_OPERATOR_ISSUER" \
+  "$suite_image" >/dev/null
+
+python3 - "$OIDF_SUITE_TOKEN_FILE" "$OIDF_SUITE_TOKEN_METADATA_FILE" <<'PY'
 import json
 import os
 import pathlib
+import stat
 import sys
 import time
 import urllib.error
@@ -186,30 +189,127 @@ else:
     raise SystemExit(f"OIDF bootstrap endpoint did not become ready: {last_error}")
 
 token = payload.get("token") if isinstance(payload, dict) else None
-if not isinstance(token, str) or not token:
-    raise SystemExit("OIDF token endpoint returned no token")
-path = pathlib.Path(sys.argv[1])
-descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-    stream.write(token)
-    stream.write("\n")
+token_id = payload.get("_id") if isinstance(payload, dict) else None
+expires = payload.get("expires") if isinstance(payload, dict) else None
+now_ms = int(time.time() * 1000)
+if not isinstance(token, str) or not token or any(character.isspace() for character in token):
+    raise SystemExit("OIDF token endpoint returned no valid token")
+if not isinstance(token_id, str) or not token_id.isalnum() or len(token_id) > 128:
+    raise SystemExit("OIDF token endpoint returned no valid token id")
+if (
+    isinstance(expires, bool)
+    or not isinstance(expires, int)
+    or expires <= now_ms
+    or expires > now_ms + 24 * 60 * 60 * 1000 + 5 * 60 * 1000
+):
+    raise SystemExit("OIDF token endpoint returned no valid temporary expiry")
+
+
+def write_protected(path: pathlib.Path, value: str, label: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise SystemExit(f"{label} cannot be created safely") from error
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(value)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    metadata = path.lstat()
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise SystemExit(f"{label} security properties are unsafe")
+
+
+token_path = pathlib.Path(sys.argv[1])
+metadata_path = pathlib.Path(sys.argv[2])
+if os.path.abspath(token_path) == os.path.abspath(metadata_path):
+    raise SystemExit("suite token and token metadata files must be different paths")
+created: list[pathlib.Path] = []
+try:
+    write_protected(token_path, token, "suite token file")
+    created.append(token_path)
+    write_protected(
+        metadata_path,
+        json.dumps({"id": token_id, "expires": expires}, separators=(",", ":"), sort_keys=True),
+        "suite token metadata file",
+    )
+    created.append(metadata_path)
+except BaseException:
+    for path in reversed(created):
+        try:
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+                path.unlink()
+        except OSError:
+            pass
+    raise
 PY
 
-  cleanup_bootstrap
-  trap - EXIT HUP INT TERM
-fi
+cleanup_bootstrap
+trap - EXIT HUP INT TERM
 
 compose up -d --no-build
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'
+import os
 import pathlib
+import stat
 import sys
 import time
 import urllib.error
 import urllib.request
 
 base_url = sys.argv[1].rstrip("/")
-token = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip()
+token_path = pathlib.Path(sys.argv[2])
+metadata = token_path.lstat()
+if (
+    stat.S_ISLNK(metadata.st_mode)
+    or not stat.S_ISREG(metadata.st_mode)
+    or stat.S_IMODE(metadata.st_mode) != 0o600
+    or metadata.st_nlink != 1
+):
+    raise SystemExit("suite token file is not a protected regular file")
+flags = os.O_RDONLY
+if hasattr(os, "O_CLOEXEC"):
+    flags |= os.O_CLOEXEC
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    descriptor = os.open(token_path, flags)
+except OSError as error:
+    raise SystemExit("suite token file cannot be opened safely") from error
+try:
+    opened = os.fstat(descriptor)
+    if (
+        (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        or stat.S_ISLNK(opened.st_mode)
+        or not stat.S_ISREG(opened.st_mode)
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_nlink != 1
+    ):
+        raise SystemExit("suite token file changed security properties while opening")
+    token = os.read(descriptor, 64 * 1024 + 1).decode("utf-8").strip()
+finally:
+    os.close(descriptor)
+if not token or any(character.isspace() for character in token):
+    raise SystemExit("suite token file is empty or malformed")
 
 def status(authenticated):
     headers = {"Accept": "application/json"}

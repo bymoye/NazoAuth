@@ -64,6 +64,7 @@ Compose 只管理 MongoDB、正式 Suite server 和 Nginx 三个长期服务。�
 export OIDF_SUITE_SOURCE_DIR=/opt/nazo-oauth/conformance/operator-suite
 export OIDF_SUITE_BASE_URL=https://oauth-test.nazo.run
 export OIDF_SUITE_TOKEN_FILE=/opt/nazo-oauth/conformance/secrets/api-token
+export OIDF_SUITE_TOKEN_METADATA_FILE=/opt/nazo-oauth/conformance/secrets/api-token.metadata
 export OIDF_OPERATOR_ISSUER=https://auth.nazo.run
 export OIDF_TARGET_HOSTNAME=auth.nazo.run
 export OIDF_CONTAINER_RUNTIME=podman
@@ -75,8 +76,11 @@ sh /opt/nazoauth/source/deploy/oidf-suite/bootstrap-api-token.sh
 `OIDF_OPERATOR_ISSUER` 必须指向容器可达且 Discovery issuer 自洽的 HTTPS OIDC
 服务。本测试环境使用正在验收的 NazoAuth issuer，只为满足套件操作员登录注册的启动
 依赖；矩阵仍通过 Suite API Token 驱动，不执行该登录流程。
-若 Token 已生成而后续正式启动或公网核验失败，重新运行脚本只会复用权限为 `0600` 的
-现有文件并重新验证，不会覆盖或打印 Token。
+脚本每次运行都会先吊销上一轮仍可识别的 Token，再签发新的 24 小时临时 Token；Token
+本体与包含 id/expiry 的 metadata 均为 `0600`，不会输出到日志。正常测试结束后应使用相同
+三个变量调用 `deploy/oidf-suite/revoke-api-token.sh` 显式吊销；异常强杀时，未吊销 Token
+仍会在上游 TTL 到期后失效。旧版只有 Token、没有 metadata 的文件在 24 小时 TTL 内会
+失败关闭，超过 TTL 后才允许清除并换新。
 MongoDB 状态保存在 Compose 命名卷中；源码和 Token 位于上述独立目录，Maven 缓存由
 Podman builder 管理；它们均不进入 NazoAuth 产品容器或数据卷。
 

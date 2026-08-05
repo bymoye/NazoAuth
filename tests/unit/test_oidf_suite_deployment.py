@@ -60,6 +60,29 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         self.assertIn("compose up -d --no-build\n", bootstrap)
         self.assertIn("Reusing exact OIDF Suite image", bootstrap)
 
+    def test_suite_token_is_a_fresh_temporary_lease_with_protected_metadata(self):
+        bootstrap = (
+            ROOT / "deploy" / "oidf-suite" / "bootstrap-api-token.sh"
+        ).read_text(encoding="utf-8")
+        revoke = (
+            ROOT / "deploy" / "oidf-suite" / "revoke-api-token.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("OIDF_SUITE_TOKEN_METADATA_FILE", bootstrap)
+        self.assertIn('data=b\'{"permanent":false}\'', bootstrap)
+        self.assertIn('payload.get("_id")', bootstrap)
+        self.assertIn('payload.get("expires")', bootstrap)
+        self.assertIn("os.O_EXCL", bootstrap)
+        self.assertIn("os.O_NOFOLLOW", bootstrap)
+        self.assertIn("stat.S_IMODE(metadata.st_mode) != 0o600", bootstrap)
+        self.assertIn('sh "$script_dir/revoke-api-token.sh"', bootstrap)
+        self.assertNotIn("Reusing the existing protected suite token", bootstrap)
+        self.assertIn('method="DELETE"', revoke)
+        self.assertIn("status not in {200, 404}", revoke)
+        self.assertIn("retaining protected token files", revoke)
+        self.assertIn("legacy suite token file", revoke)
+        self.assertIn("TOKEN_TTL_MS", revoke)
+
     def test_tls_ingress_and_pki_initialization_are_explicit_podman_steps(self):
         bootstrap = (
             ROOT / "deploy" / "oidf-suite" / "bootstrap-api-token.sh"
