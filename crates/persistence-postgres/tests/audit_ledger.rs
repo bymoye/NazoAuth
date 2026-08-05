@@ -73,6 +73,21 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         .expect("audit ledger migration should apply");
     let pool = create_pool(database_url.clone(), 4).expect("audit pool should create");
     let repository = AuditLedgerRepository::new(pool);
+    loop {
+        let existing = repository
+            .claim_due(256, 60)
+            .await
+            .expect("existing audit deliveries should be claimable");
+        if existing.is_empty() {
+            break;
+        }
+        for delivery in existing {
+            repository
+                .mark_exported(delivery.event_id, delivery.attempts)
+                .await
+                .expect("existing audit delivery should be drainable");
+        }
+    }
     let first_id = Uuid::now_v7();
     let second_id = Uuid::now_v7();
     let first = repository
