@@ -181,7 +181,7 @@ async fn call_ciba_token_for_test(
     let ciba_service = ServerCibaService::new(CibaStore::new(&connection));
     let users = nazo_postgres::UserRepository::new(state.diesel_db.clone());
     let token_service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
         state.keyset.clone(),
     );

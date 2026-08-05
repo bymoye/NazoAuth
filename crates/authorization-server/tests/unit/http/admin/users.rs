@@ -199,10 +199,12 @@ impl LiveAdminUsersFixture {
         });
         let valkey = valkey_builder.build().expect("valkey client should build");
         valkey.init().await.expect("valkey should connect");
+        let diesel_db = create_pool(database_url, 4).expect("database pool should build");
+        crate::test_support::initialize_audit_dependencies(&diesel_db);
 
         Some(Self {
             state: Data::new(TestInfrastructure {
-                diesel_db: create_pool(database_url, 4).expect("database pool should build"),
+                diesel_db,
                 valkey,
                 settings: Arc::new(settings),
                 keyset: crate::test_support::test_key_manager(),

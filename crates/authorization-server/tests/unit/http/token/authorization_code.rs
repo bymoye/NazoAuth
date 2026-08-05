@@ -48,7 +48,7 @@ fn authorization_code_audiences(
 
 fn test_token_service(state: &TestInfrastructure) -> ServerTokenService {
     ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     )

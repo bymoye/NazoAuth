@@ -35,7 +35,7 @@ pub(crate) async fn token_client_credentials(
 ) -> HttpResponse {
     let connection = state.valkey_connection();
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
         state.keyset.clone(),
     );

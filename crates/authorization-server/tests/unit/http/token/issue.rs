@@ -16,11 +16,7 @@ pub(crate) async fn issue_token_response(
     issue: TokenIssue,
 ) -> HttpResponse {
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
-            state.diesel_db.clone(),
-            nazo_postgres::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
-                .expect("test response key ring is valid"),
-        ),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     );

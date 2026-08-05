@@ -368,7 +368,7 @@ async fn device_token_rejects_client_policy_before_polling_state() {
     });
     let connection = state.valkey_connection();
     let token_service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
         state.keyset.clone(),
     );

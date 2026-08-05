@@ -129,7 +129,7 @@ async fn native_sso_id_token_decoder_accepts_configured_issuer() {
     let state = native_sso_state_with_signing_key();
     let token = signed_native_sso_id_token(&state, state.settings.endpoint.issuer.as_str()).await;
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     );
@@ -153,7 +153,7 @@ async fn native_sso_id_token_decoder_rejects_wrong_issuer() {
     let state = native_sso_state_with_signing_key();
     let token = signed_native_sso_id_token(&state, "https://attacker.example").await;
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     );

@@ -234,14 +234,14 @@ fn requested_prompt(q: &HashMap<String, String>) -> Result<PromptDirectives, ()>
 }
 
 fn authorization_pkce(q: &HashMap<String, String>) -> Result<(Option<String>, Option<String>), ()> {
-    normalize_pkce_case(q, "confidential")
+    normalize_pkce_case(q, false)
         .map(|normalized| (normalized.code_challenge, normalized.code_challenge_method))
         .map_err(|_| ())
 }
 
 fn normalize_pkce_case(
     supplied: &HashMap<String, String>,
-    client_type: &str,
+    pkce_required: bool,
 ) -> Result<NormalizedAuthorizationRequest, AuthorizationPolicyError> {
     let mut parameters = query(&[("response_type", "code"), ("scope", "openid")]);
     parameters.extend(supplied.clone());
@@ -249,7 +249,7 @@ fn normalize_pkce_case(
     normalize_authorization_request(
         &parameters,
         AuthorizationClientPolicy {
-            client_type,
+            client_type: "confidential",
             allowed_scopes: &scopes,
             allowed_audiences: &[],
             require_dpop_bound_tokens: false,
@@ -263,7 +263,7 @@ fn normalize_pkce_case(
         },
         AuthorizationProfilePolicy {
             signed_authorization_response_required: false,
-            pkce_required: false,
+            pkce_required,
         },
         false,
     )
@@ -860,7 +860,8 @@ fn prompt_parsing_accepts_oidc_values_and_rejects_invalid_combinations() {
 }
 
 #[test]
-fn authorization_pkce_compatibility_exception_requires_confidential_oidc_nonce() {
+fn authorization_pkce_compatibility_keeps_oidc_nonce_optional() {
+    assert_eq!(authorization_pkce(&HashMap::new()).unwrap(), (None, None));
     assert_eq!(
         authorization_pkce(&query(&[("nonce", "fresh-nonce")])).unwrap(),
         (None, None)
@@ -885,14 +886,11 @@ fn authorization_pkce_compatibility_exception_requires_confidential_oidc_nonce()
 }
 
 #[test]
-fn authorization_request_pkce_policy_preserves_client_profile_boundary() {
+fn authorization_request_pkce_policy_preserves_effective_profile_boundary() {
+    assert!(normalize_pkce_case(&HashMap::new(), false).is_ok());
+    assert!(normalize_pkce_case(&query(&[("nonce", "fresh-nonce")]), false).is_ok());
     assert_eq!(
-        normalize_pkce_case(&HashMap::new(), "confidential"),
-        Err(AuthorizationPolicyError::InvalidRequest),
-    );
-    assert!(normalize_pkce_case(&query(&[("nonce", "fresh-nonce")]), "confidential").is_ok());
-    assert_eq!(
-        normalize_pkce_case(&HashMap::new(), "public"),
+        normalize_pkce_case(&HashMap::new(), true),
         Err(AuthorizationPolicyError::InvalidRequest),
     );
 }

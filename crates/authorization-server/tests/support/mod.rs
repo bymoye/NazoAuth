@@ -81,6 +81,35 @@ pub(crate) struct TestInfrastructure {
     pub(crate) keyset: nazo_key_management::KeyManager,
 }
 
+pub(crate) fn token_issuance_repository(
+    pool: nazo_postgres::DbPool,
+) -> nazo_postgres::TokenIssuanceRepository {
+    initialize_audit_dependencies(&pool);
+    nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
+        pool,
+        nazo_postgres::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
+            .expect("test response key ring is valid"),
+    )
+}
+
+pub(crate) fn initialize_audit_dependencies(pool: &nazo_postgres::DbPool) {
+    crate::adapters::audit::configure_audit_anchor_preflight(
+        crate::adapters::audit_anchor::AuditAnchorPreflightConfig {
+            mode: crate::adapters::audit_anchor::AuditAnchorMode::Disabled,
+            deployment_id: "unit-test".to_owned(),
+            status_file: std::path::PathBuf::from("runtime/test/audit-anchor-health.json"),
+            freshness: std::time::Duration::from_secs(1),
+            max_lag: std::time::Duration::from_secs(1),
+        },
+    )
+    .expect("test audit anchor preflight config is valid");
+    crate::adapters::audit::install_persistent_audit_sink(
+        nazo_postgres::AuditLedgerRepository::new(pool.clone()),
+        false,
+    )
+    .expect("test durable audit repository should install");
+}
+
 impl TestInfrastructure {
     pub(crate) fn active_module_snapshot(&self) -> nazo_runtime_modules::ActiveModuleSnapshot {
         nazo_runtime_modules::ActiveModuleSnapshot {

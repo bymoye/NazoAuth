@@ -34,7 +34,7 @@ pub(crate) async fn token(
     body: Bytes,
 ) -> HttpResponse {
     let service = Data::new(ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     ));
@@ -132,7 +132,7 @@ fn authorization_service(state: &TestInfrastructure) -> Data<ServerAuthorization
 
 fn token_service(state: &TestInfrastructure) -> Data<ServerTokenService> {
     Data::new(ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     ))
@@ -141,7 +141,7 @@ fn token_service(state: &TestInfrastructure) -> Data<ServerTokenService> {
 async fn userinfo(state: Data<TestInfrastructure>, req: HttpRequest, body: Bytes) -> HttpResponse {
     let connection = state.valkey_connection();
     let token_service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
         state.keyset.clone(),
     );
