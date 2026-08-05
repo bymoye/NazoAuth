@@ -900,7 +900,6 @@ async fn write_private_key_temp(path: &Path, bytes: &[u8]) -> anyhow::Result<()>
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options.open(path).await?;
@@ -942,15 +941,6 @@ async fn write_file_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
             path.display()
         )
     })?;
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn set_private_key_permissions(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let permissions = std::fs::Permissions::from_mode(0o600);
-    tokio::fs::set_permissions(path, permissions).await?;
     Ok(())
 }
 
