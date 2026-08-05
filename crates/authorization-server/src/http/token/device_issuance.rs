@@ -22,10 +22,7 @@ use super::client_auth::consume_token_client_assertion_with_authorization_servic
 use super::{
     ServerTokenService, TokenForm,
     device::ServerDeviceGrantService,
-    issue::{
-        TokenIssuanceContext, issue_token_response_with_service_and_grant,
-        recover_token_issuance_response,
-    },
+    issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant},
 };
 
 fn device_grant_key(
@@ -110,11 +107,6 @@ pub(crate) async fn token_device_code_with_service(
     };
     let device_grant_key =
         device_grant_key(device_code, dpop_jkt.as_deref(), mtls_x5t_s256.as_deref());
-    if let Some(response) =
-        recover_token_issuance_response(token_service, client, &device_grant_key).await
-    {
-        return response;
-    }
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,

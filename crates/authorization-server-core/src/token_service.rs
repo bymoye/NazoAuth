@@ -265,6 +265,7 @@ pub struct IssuedAuthorizationCodeTokens<'a> {
     pub tenant_id: Uuid,
     pub client_id: Uuid,
     pub code_hash: &'a str,
+    pub redemption_binding: &'a str,
     pub access_token_jti: &'a str,
     pub access_token_expires_at: i64,
     pub refresh_token_family_id: Option<Uuid>,
@@ -669,6 +670,7 @@ where
         let marker = AuthorizationCodeState::Consumed {
             marker: ConsumedAuthorizationCode {
                 client_id: issued.client_id,
+                redemption_binding: Some(issued.redemption_binding.to_owned()),
                 access_token_jti: issued.access_token_jti.to_owned(),
                 access_token_expires_at: issued.access_token_expires_at,
                 refresh_token_family_id: issued.refresh_token_family_id,

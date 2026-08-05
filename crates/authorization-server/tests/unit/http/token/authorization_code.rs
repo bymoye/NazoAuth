@@ -115,6 +115,39 @@ use crate::test_support::DatabaseUserFixture;
 use nazo_auth::pairwise_subject as oidc_subject;
 use nazo_postgres::{create_pool, get_conn};
 
+#[test]
+fn authorization_code_replay_requires_same_client_and_exact_redemption_binding() {
+    let client_id = Uuid::now_v7();
+    let binding = "authorization_code:binding";
+    let mut marker = ConsumedAuthorizationCode {
+        client_id,
+        redemption_binding: Some(binding.to_owned()),
+        access_token_jti: "access-jti".to_owned(),
+        access_token_expires_at: Utc::now().timestamp() + 300,
+        refresh_token_family_id: None,
+        consumed_at: Utc::now(),
+    };
+
+    assert!(replay_matches_original_redemption(
+        &marker, client_id, binding
+    ));
+    assert!(!replay_matches_original_redemption(
+        &marker,
+        Uuid::now_v7(),
+        binding
+    ));
+    assert!(!replay_matches_original_redemption(
+        &marker,
+        client_id,
+        "authorization_code:different"
+    ));
+
+    marker.redemption_binding = None;
+    assert!(!replay_matches_original_redemption(
+        &marker, client_id, binding
+    ));
+}
+
 fn unavailable_valkey_client() -> fred::prelude::Client {
     let mut builder = ValkeyBuilder::from_config(
         ValkeyConfig::from_url("redis://127.0.0.1:1").expect("unavailable Valkey URL should parse"),
@@ -1494,6 +1527,12 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
     let code = format!("code-{}", Uuid::now_v7());
     let marker = ConsumedAuthorizationCode {
         client_id: client.id,
+        redemption_binding: Some(authorization_code_grant_key(
+            &blake3_hex(&code),
+            &form_for_code(&code),
+            None,
+            None,
+        )),
         access_token_jti: format!("access-jti-{}", Uuid::now_v7()),
         access_token_expires_at: Utc::now().timestamp() + 300,
         refresh_token_family_id: Some(family_id),
@@ -1537,6 +1576,7 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
             &AuthorizationCodeState::Consumed {
                 marker: ConsumedAuthorizationCode {
                     client_id: Uuid::now_v7(),
+                    redemption_binding: None,
                     access_token_jti: "access-jti-2".to_owned(),
                     access_token_expires_at: Utc::now().timestamp() + 300,
                     refresh_token_family_id: None,
@@ -1580,7 +1620,13 @@ async fn token_authorization_code_replay_fails_closed_when_replayed_client_looku
             &code,
             &AuthorizationCodeState::Consumed {
                 marker: ConsumedAuthorizationCode {
-                    client_id: Uuid::now_v7(),
+                    client_id: client.id,
+                    redemption_binding: Some(authorization_code_grant_key(
+                        &blake3_hex(&code),
+                        &form_for_code(&code),
+                        None,
+                        None,
+                    )),
                     access_token_jti: format!("access-jti-{}", Uuid::now_v7()),
                     access_token_expires_at: Utc::now().timestamp() + 300,
                     refresh_token_family_id: Some(Uuid::now_v7()),

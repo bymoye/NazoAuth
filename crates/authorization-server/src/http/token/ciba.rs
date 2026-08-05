@@ -54,10 +54,7 @@ use super::client_auth::{
     consume_token_management_client_assertion_with_authorization_service,
 };
 use super::issue::TokenIssuanceConfig;
-use super::issue::{
-    TokenIssuanceContext, issue_token_response_with_service_and_grant,
-    recover_token_issuance_response,
-};
+use super::issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant};
 
 use super::{
     ServerTokenService, TokenForm, TokenManagementClientAuthError, client_auth_request_facts,
@@ -1700,12 +1697,6 @@ pub(crate) async fn token_ciba(
         Err(response) => return response,
     };
     let ciba_grant_key = ciba_grant_key(auth_req_id, dpop_jkt.as_deref(), mtls_x5t_s256.as_deref());
-    if initial.is_none()
-        && let Some(response) =
-            recover_token_issuance_response(token_service, client, &ciba_grant_key).await
-    {
-        return response;
-    }
     let Some(initial) = initial else {
         return oauth_token_error(
             StatusCode::BAD_REQUEST,

@@ -1,10 +1,7 @@
 //! RFC 7523 JWT bearer authorization grant.
 use nazo_http_actix::oauth_token_error;
 
-use super::issue::{
-    TokenIssuanceContext, issue_token_response_with_service_and_grant,
-    recover_token_issuance_response,
-};
+use super::issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant};
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
 };
@@ -256,11 +253,6 @@ pub(crate) async fn token_jwt_bearer_with_service(
         dpop_jkt.as_deref(),
         mtls_x5t_s256.as_deref(),
     );
-    if let Some(response) =
-        recover_token_issuance_response(token_service, client, &jwt_bearer_grant_key).await
-    {
-        return response;
-    }
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,

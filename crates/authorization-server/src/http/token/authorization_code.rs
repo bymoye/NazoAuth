@@ -31,10 +31,7 @@ use serde_json::json;
 use super::issue::TokenIssuanceConfig;
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
-    issue::{
-        TokenIssuanceContext, issue_token_response_with_service_and_grant,
-        recover_token_issuance_response,
-    },
+    issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant},
     native_sso_requested, new_native_sso_token_binding, revoke_issued_authorization_code_tokens,
 };
 
@@ -148,6 +145,20 @@ fn authorization_code_grant_key(
         "mtls_x5t_s256": mtls_x5t_s256,
     });
     format!("authorization_code:{}", blake3_hex(&proof.to_string()))
+}
+
+fn replay_matches_original_redemption(
+    marker: &ConsumedAuthorizationCode,
+    client_id: uuid::Uuid,
+    redemption_binding: &str,
+) -> bool {
+    marker.client_id == client_id
+        && marker
+            .redemption_binding
+            .as_deref()
+            .is_some_and(|expected| {
+                constant_time_eq(expected.as_bytes(), redemption_binding.as_bytes())
+            })
 }
 
 struct AuthorizationCodeIssueInput {
@@ -384,13 +395,6 @@ pub(crate) async fn token_authorization_code_with_service(
         dpop_jkt.as_deref(),
         mtls_x5t_s256.as_deref(),
     );
-    if expected_payload.is_none()
-        && let Some(response) =
-            recover_token_issuance_response(token_service, client, &authorization_code_grant_key)
-                .await
-    {
-        return response;
-    }
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -404,10 +408,16 @@ pub(crate) async fn token_authorization_code_with_service(
         match begin_authorization_code_consumption_with_service(token_service, &code_hash).await {
             Ok(AuthorizationCodeConsumption::Consuming(payload)) => payload,
             Ok(AuthorizationCodeConsumption::Consumed(marker)) => {
-                // A mismatched replay must not revoke a response that belongs
-                // to a different PKCE/holder proof.  A matching proof was
-                // already recovered above.
-                if expected_payload.is_none() {
+                // Authorization codes are single-use even when the original
+                // HTTP response may have been lost. Only an exact replay by
+                // the same client and proof set can trigger revocation; all
+                // other attempts are rejected without becoming a revocation
+                // oracle for another client's tokens.
+                if !replay_matches_original_redemption(
+                    &marker,
+                    client.id,
+                    &authorization_code_grant_key,
+                ) {
                     return oauth_token_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_grant",

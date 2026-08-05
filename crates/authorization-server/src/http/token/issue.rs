@@ -1009,6 +1009,7 @@ pub(crate) async fn issue_token_response_with_service_and_grant(
                 tenant_id: client.tenant_id,
                 client_id: client.id,
                 code_hash,
+                redemption_binding: &grant_key,
                 access_token_jti: &issued_access_token.jti,
                 access_token_expires_at: issued_access_token.expires_at,
                 refresh_token_family_id,
