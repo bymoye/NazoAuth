@@ -374,10 +374,11 @@ fn response_from_token_issuance(record: &TokenIssuanceRecord) -> Option<HttpResp
     )
 }
 
-/// Recover a response that was durably persisted before the previous request
-/// lost its HTTP connection.  This intentionally says nothing about socket
-/// delivery: only the database-backed response handoff is recoverable.
-pub(crate) async fn recover_token_issuance_response(
+/// Recover only after this request lost the signed-response CAS to the same
+/// issuance transaction. This is intentionally private: one-time grant
+/// handlers must consume their grant before reaching issuance and must never
+/// turn a later replay into a successful response recovery.
+async fn recover_conflicting_token_issuance_response(
     token_service: &ServerTokenService,
     client: &ClientRow,
     grant_key: &str,
@@ -1065,7 +1066,7 @@ pub(crate) async fn issue_token_response_with_service_and_grant(
             // A concurrent request may have won the transition.  Recover its
             // durable response rather than minting a second credential.
             if let Some(response) =
-                recover_token_issuance_response(token_service, client, &grant_key).await
+                recover_conflicting_token_issuance_response(token_service, client, &grant_key).await
             {
                 return response;
             }
