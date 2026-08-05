@@ -513,7 +513,13 @@ async fn insert_client(
             oauth_clients::tls_client_auth_san_uri.eq(json!(&prepared.tls_client_auth_san_uri)),
             oauth_clients::tls_client_auth_san_ip.eq(json!(&prepared.tls_client_auth_san_ip)),
             oauth_clients::tls_client_auth_san_email.eq(json!(&prepared.tls_client_auth_san_email)),
+            oauth_clients::jwks_uri.eq(&prepared.jwks_uri),
             oauth_clients::jwks.eq(&prepared.jwks),
+            oauth_clients::request_uris.eq(json!(&prepared.request_uris)),
+            oauth_clients::initiate_login_uri.eq(&prepared.initiate_login_uri),
+            oauth_clients::logo_uri.eq(&prepared.presentation.logo_uri),
+            oauth_clients::policy_uri.eq(&prepared.presentation.policy_uri),
+            oauth_clients::tos_uri.eq(&prepared.presentation.tos_uri),
             oauth_clients::id_token_signed_response_alg.eq(&prepared.id_token_signed_response_alg),
             oauth_clients::id_token_encrypted_response_alg
                 .eq(&prepared.id_token_encrypted_response_alg),
@@ -543,6 +549,10 @@ async fn insert_client(
                 .eq(&prepared.authorization_encrypted_response_alg),
             oauth_clients::authorization_encrypted_response_enc
                 .eq(&prepared.authorization_encrypted_response_enc),
+            oauth_clients::security_policy.eq(prepared
+                .security_policy
+                .as_ref()
+                .map(|policy| json!(policy))),
             oauth_clients::is_active.eq(true),
         ))
         .returning((oauth_clients::id, oauth_clients::client_id))
