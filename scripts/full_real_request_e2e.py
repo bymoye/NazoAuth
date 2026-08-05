@@ -2908,34 +2908,11 @@ def run() -> None:
             allow_redirects=False,
             timeout=10,
         )
-        expect_status(
+        expect_authorization_error_redirect(
             "GET /authorize confidential client missing PKCE",
             confidential_without_pkce,
-            302,
-        )
-        confidential_without_pkce_request_id = consent_request_from_redirect(
-            confidential_without_pkce,
-            "GET /authorize confidential client missing PKCE",
-        )
-        confidential_without_pkce_code, _ = approve_authorization(
-            user,
-            confidential_without_pkce_request_id,
-            "",
+            "invalid_request",
             state="confidential-no-pkce",
-        )
-        confidential_without_pkce_tokens = token_basic(
-            secret_auth_client_id,
-            secret_auth_client_secret,
-            {
-                "grant_type": "authorization_code",
-                "code": confidential_without_pkce_code,
-                "redirect_uri": CLIENT_REDIRECT_URI,
-            },
-            "POST /token confidential client missing PKCE",
-        )
-        check(
-            "confidential_without_pkce_token_issued",
-            bool(confidential_without_pkce_tokens.get("access_token")),
         )
 
         post_authorize_request_id, post_authorize_verifier = authorize_request(
