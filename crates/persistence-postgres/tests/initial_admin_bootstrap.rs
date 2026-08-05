@@ -7,9 +7,13 @@ use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl, SimpleA
 use nazo_identity::ports::PasswordHashInput;
 use nazo_postgres::{
     InitialAdminBootstrapRepository, InitialAdminBootstrapState, InitialAdminClaimOutcome,
-    create_pool, run_pending_migrations,
+    create_pool,
 };
 use uuid::Uuid;
+
+mod support;
+
+use support::{run_isolated_application_migrations, schema_database_url};
 
 const RECEIPT_MIGRATION_UP: &str =
     include_str!("../../../migrations/20260801000100_initial_admin_bootstrap_receipt/up.sql");
@@ -38,11 +42,6 @@ fn database_url() -> Option<String> {
     url
 }
 
-fn schema_database_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}%2Cpublic")
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() {
     let Some(database_url) = database_url() else {
@@ -57,9 +56,7 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
         .await
         .expect("isolated schema should create");
     let isolated_url = schema_database_url(&database_url, &schema);
-    run_pending_migrations(&isolated_url)
-        .await
-        .expect("isolated schema migrations should apply");
+    run_isolated_application_migrations(&isolated_url).await;
     let repository = InitialAdminBootstrapRepository::new(
         create_pool(isolated_url.clone(), 4).expect("pool should create"),
     );
@@ -287,7 +284,7 @@ async fn legacy_consumed_claim_is_closed_without_becoming_replayable() {
         .await
         .unwrap();
     let isolated_url = schema_database_url(&database_url, &schema);
-    run_pending_migrations(&isolated_url).await.unwrap();
+    run_isolated_application_migrations(&isolated_url).await;
     let repository =
         InitialAdminBootstrapRepository::new(create_pool(isolated_url.clone(), 2).unwrap());
     let mut isolated = AsyncPgConnection::establish(&isolated_url).await.unwrap();
@@ -339,7 +336,7 @@ async fn bootstrap_audit_failure_rolls_back_user_receipt_and_consumption() {
         .await
         .unwrap();
     let isolated_url = schema_database_url(&database_url, &schema);
-    run_pending_migrations(&isolated_url).await.unwrap();
+    run_isolated_application_migrations(&isolated_url).await;
     let repository =
         InitialAdminBootstrapRepository::new(create_pool(isolated_url.clone(), 2).unwrap());
     let token_hash = "d".repeat(64);

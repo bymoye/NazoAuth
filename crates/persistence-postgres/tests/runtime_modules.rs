@@ -14,6 +14,10 @@ use nazo_runtime_modules::{
 };
 use uuid::Uuid;
 
+mod support;
+
+use support::{run_isolated_application_migrations, schema_database_url};
+
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -128,11 +132,6 @@ fn tagged_database_url(database_url: &str, application_name: &str) -> String {
     format!("{database_url}{separator}application_name={application_name}")
 }
 
-fn schema_database_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}%2Cpublic")
-}
-
 async fn wait_for_lock_wait(connection: &mut AsyncPgConnection) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -182,9 +181,7 @@ async fn composable_default_policy_migration_materializes_legacy_and_missing_row
         .await
         .expect("isolated schema should create");
     let isolated_url = schema_database_url(&database_url, &schema);
-    nazo_postgres::run_pending_migrations(&isolated_url)
-        .await
-        .expect("isolated schema migrations should apply");
+    run_isolated_application_migrations(&isolated_url).await;
     let mut fixture = AsyncPgConnection::establish(&isolated_url)
         .await
         .expect("isolated fixture database should connect");
