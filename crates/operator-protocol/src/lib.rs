@@ -202,6 +202,18 @@ pub enum TaskOperation {
     ConformanceLeaseCreate {
         profile: String,
         material_sha256: String,
+        /// SHA-256 of the per-run dynamic-registration initial-access token.
+        ///
+        /// The token itself is deliberately never part of the operator
+        /// protocol.  This digest is only used to bind a short-lived
+        /// conformance lease to the registration guard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic_registration_initial_access_token_sha256: Option<String>,
+        /// SHA-256 of the per-run CIBA automated-decision token.
+        ///
+        /// The token itself never crosses the operator protocol boundary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ciba_automated_decision_token_sha256: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_material: Option<Openid4vcConformanceTrust>,
         ttl_seconds: u64,
@@ -1043,6 +1055,8 @@ fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
         TaskOperation::ConformanceLeaseCreate {
             profile,
             material_sha256,
+            dynamic_registration_initial_access_token_sha256,
+            ciba_automated_decision_token_sha256,
             public_material,
             ttl_seconds,
         } => {
@@ -1053,6 +1067,23 @@ fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
                 ));
             }
             validate_lower_hex(material_sha256, 64)?;
+            if (dynamic_registration_initial_access_token_sha256.is_some()
+                || ciba_automated_decision_token_sha256.is_some())
+                && profile != "oidc-fapi-ciba"
+            {
+                return Err(ProtocolError::Policy(
+                    "conformance token bindings are only allowed for the oidc-fapi-ciba profile",
+                ));
+            }
+            for digest in [
+                dynamic_registration_initial_access_token_sha256,
+                ciba_automated_decision_token_sha256,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_lower_hex(digest, 64)?;
+            }
             match (profile.as_str(), public_material) {
                 ("openid4vc", Some(material)) => validate_openid4vc_conformance_trust(material)?,
                 ("openid4vc", None) => {

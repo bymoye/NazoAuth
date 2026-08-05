@@ -9,6 +9,7 @@ use crate::{DbPool, get_conn, schema::conformance_leases};
 
 pub const MIN_CONFORMANCE_LEASE_SECONDS: i64 = 60;
 pub const MAX_CONFORMANCE_LEASE_SECONDS: i64 = 24 * 60 * 60;
+const LEASED_DYNAMIC_REGISTRATION_PROFILE: &str = "oidc-fapi-ciba";
 
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::conformance_leases)]
@@ -17,11 +18,19 @@ pub struct ConformanceLease {
     pub tenant_id: Uuid,
     pub profile: String,
     pub material_sha256: String,
+    pub dynamic_registration_initial_access_token_sha256: Option<String>,
+    pub ciba_automated_decision_token_sha256: Option<String>,
     pub public_material: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub cleaned_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConformanceLeaseTokenDigests<'a> {
+    pub dynamic_registration_initial_access_token_sha256: Option<&'a str>,
+    pub ciba_automated_decision_token_sha256: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,9 +63,14 @@ impl ConformanceLeaseRepository {
         tenant_id: Uuid,
         profile: &str,
         material_sha256: &str,
+        token_digests: ConformanceLeaseTokenDigests<'_>,
         public_material: Option<Value>,
         ttl_seconds: i64,
     ) -> Result<ConformanceLease, RepositoryError> {
+        let ConformanceLeaseTokenDigests {
+            dynamic_registration_initial_access_token_sha256,
+            ciba_automated_decision_token_sha256,
+        } = token_digests;
         if !(MIN_CONFORMANCE_LEASE_SECONDS..=MAX_CONFORMANCE_LEASE_SECONDS).contains(&ttl_seconds) {
             return Err(RepositoryError::Consistency(format!(
                 "conformance lease ttl_seconds must be between {MIN_CONFORMANCE_LEASE_SECONDS} and {MAX_CONFORMANCE_LEASE_SECONDS}"
@@ -77,6 +91,36 @@ impl ConformanceLeaseRepository {
                 "conformance lease material_sha256 must be a lowercase SHA-256 digest".to_owned(),
             ));
         }
+        for (digest, purpose) in [
+            (
+                dynamic_registration_initial_access_token_sha256,
+                "dynamic registration initial access token",
+            ),
+            (
+                ciba_automated_decision_token_sha256,
+                "CIBA automated decision token",
+            ),
+        ] {
+            if digest.is_some_and(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }) {
+                return Err(RepositoryError::Consistency(format!(
+                    "conformance lease {purpose} must be a lowercase SHA-256 digest"
+                )));
+            }
+        }
+        if (dynamic_registration_initial_access_token_sha256.is_some()
+            || ciba_automated_decision_token_sha256.is_some())
+            && profile != LEASED_DYNAMIC_REGISTRATION_PROFILE
+        {
+            return Err(RepositoryError::Consistency(
+                "conformance lease token bindings are only valid for the oidc-fapi-ciba profile"
+                    .to_owned(),
+            ));
+        }
 
         let now = Utc::now();
         let expires_at = now
@@ -90,6 +134,10 @@ impl ConformanceLeaseRepository {
                 conformance_leases::tenant_id.eq(tenant_id),
                 conformance_leases::profile.eq(profile),
                 conformance_leases::material_sha256.eq(material_sha256),
+                conformance_leases::dynamic_registration_initial_access_token_sha256
+                    .eq(dynamic_registration_initial_access_token_sha256),
+                conformance_leases::ciba_automated_decision_token_sha256
+                    .eq(ciba_automated_decision_token_sha256),
                 conformance_leases::public_material.eq(public_material),
                 conformance_leases::created_at.eq(now),
                 conformance_leases::expires_at.eq(expires_at),
@@ -165,6 +213,140 @@ impl ConformanceLeaseRepository {
         .await
         .map_err(map_diesel_error)?;
         Ok(result)
+    }
+
+    /// Resolves exactly one effective lease for the tenant, profile, and
+    /// dynamic-registration credential digest. Duplicate matches indicate a
+    /// corrupt capability boundary and fail closed.
+    pub async fn active_dynamic_registration_lease_id(
+        &self,
+        tenant_id: Uuid,
+        profile: &str,
+        initial_access_token_sha256: &str,
+    ) -> Result<Option<Uuid>, RepositoryError> {
+        if profile != LEASED_DYNAMIC_REGISTRATION_PROFILE {
+            return Err(RepositoryError::Consistency(
+                "dynamic registration conformance lease lookup is only valid for the oidc-fapi-ciba profile"
+                    .to_owned(),
+            ));
+        }
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        let matches = diesel::sql_query(
+            r#"
+            SELECT id AS lease_id
+            FROM conformance_leases
+            WHERE tenant_id = $1
+              AND profile = $2
+              AND dynamic_registration_initial_access_token_sha256 = $3
+              AND expires_at > CURRENT_TIMESTAMP
+              AND revoked_at IS NULL
+              AND cleaned_at IS NULL
+            ORDER BY id
+            LIMIT 2
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .bind::<diesel::sql_types::Text, _>(initial_access_token_sha256)
+        .load::<LeaseIdRow>(&mut connection)
+        .await
+        .map_err(map_diesel_error)?;
+        match matches.as_slice() {
+            [] => Ok(None),
+            [lease] => Ok(Some(lease.lease_id)),
+            _ => Err(RepositoryError::Consistency(
+                "multiple active conformance leases matched one dynamic registration credential"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    /// Resolves exactly one effective lease for the tenant, profile, and
+    /// per-run CIBA automated-decision credential digest. The caller must
+    /// still verify that the transaction client is bound to the returned
+    /// lease after loading the transaction state.
+    pub async fn active_ciba_automated_decision_lease_id(
+        &self,
+        tenant_id: Uuid,
+        profile: &str,
+        token_sha256: &str,
+    ) -> Result<Option<Uuid>, RepositoryError> {
+        if profile != LEASED_DYNAMIC_REGISTRATION_PROFILE {
+            return Err(RepositoryError::Consistency(
+                "CIBA automated-decision token lookup is only valid for the oidc-fapi-ciba profile"
+                    .to_owned(),
+            ));
+        }
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        let matches = diesel::sql_query(
+            r#"
+            SELECT id AS lease_id
+            FROM conformance_leases
+            WHERE tenant_id = $1
+              AND profile = $2
+              AND ciba_automated_decision_token_sha256 = $3
+              AND expires_at > CURRENT_TIMESTAMP
+              AND revoked_at IS NULL
+              AND cleaned_at IS NULL
+            ORDER BY id
+            LIMIT 2
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .bind::<diesel::sql_types::Text, _>(token_sha256)
+        .load::<LeaseIdRow>(&mut connection)
+        .await
+        .map_err(map_diesel_error)?;
+        match matches.as_slice() {
+            [] => Ok(None),
+            [lease] => Ok(Some(lease.lease_id)),
+            _ => Err(RepositoryError::Consistency(
+                "multiple active conformance leases matched one CIBA automated-decision credential"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    /// Returns whether the exact tenant-scoped client is active and bound to
+    /// the exact effective lease and profile resolved before transaction state
+    /// access. This second check prevents one lease credential from approving
+    /// another lease's client transaction.
+    pub async fn active_for_client_lease_profile(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        lease_id: Uuid,
+        profile: &str,
+    ) -> Result<bool, RepositoryError> {
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        diesel::sql_query(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM oauth_clients client
+                JOIN conformance_leases lease
+                  ON lease.tenant_id = client.tenant_id
+                 AND lease.id = client.conformance_lease_id
+                WHERE client.tenant_id = $1
+                  AND client.client_id = $2
+                  AND client.is_active = TRUE
+                  AND lease.id = $3
+                  AND lease.profile = $4
+                  AND lease.expires_at > CURRENT_TIMESTAMP
+                  AND lease.revoked_at IS NULL
+                  AND lease.cleaned_at IS NULL
+            ) AS active
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(client_id)
+        .bind::<diesel::sql_types::Uuid, _>(lease_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .get_result::<ActiveLeaseRow>(&mut connection)
+        .await
+        .map(|row| row.active)
+        .map_err(map_diesel_error)
     }
 
     pub async fn active_public_material_for_client(
@@ -316,6 +498,12 @@ struct PublicMaterialRow {
 struct ActiveLeaseRow {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     active: bool,
+}
+
+#[derive(diesel::QueryableByName)]
+struct LeaseIdRow {
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    lease_id: Uuid,
 }
 
 fn map_pool_error(error: anyhow::Error) -> RepositoryError {

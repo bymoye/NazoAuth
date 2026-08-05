@@ -509,6 +509,14 @@ def base_client_request(
         # default when the related session-required metadata is omitted.
         "backchannel_logout_session_required": False,
         "frontchannel_logout_session_required": False,
+        # OIDC Core does not require PKCE for a confidential client. These
+        # clients are short-lived and lease-owned; production clients retain
+        # the secure PKCE-required default unless an operator explicitly opts
+        # them into the same compatibility policy.
+        "security_policy": {
+            "version": 1,
+            "allow_confidential_oidc_without_pkce": True,
+        },
         "jwks": None,
     }
 
@@ -596,15 +604,14 @@ def onboarding_clients(configs: dict[str, dict[str, object]]) -> list[dict[str, 
     add(FRONTCHANNEL_CLIENT_ID, frontchannel_request)
 
     session_alias = f"{BASIC_ALIAS}-session-management"
-    add(
-        SESSION_CLIENT_ID,
-        base_client_request(
-            name="OIDF Session Management Client",
-            auth_method="client_secret_basic",
-            redirect_uris=[callback_for(session_alias)],
-            post_logout_redirect_uris=[test_endpoint_for(session_alias, "post_logout_redirect")],
-        ),
+    session_request = base_client_request(
+        name="OIDF Session Management Client",
+        auth_method="client_secret_basic",
+        redirect_uris=[callback_for(session_alias)],
+        post_logout_redirect_uris=[test_endpoint_for(session_alias, "post_logout_redirect")],
     )
+    session_request["security_policy"]["session_management"] = True
+    add(SESSION_CLIENT_ID, session_request)
 
     for file_name, config in sorted(configs.items()):
         if not file_name.startswith("oidf-fapi-"):
@@ -663,6 +670,13 @@ def onboarding_clients(configs: dict[str, dict[str, object]]) -> list[dict[str, 
             request["backchannel_authentication_request_signing_alg"] = client.get(
                 "backchannel_authentication_request_signing_alg"
             )
+            request["security_policy"] = {
+                "version": 1,
+                "assurance": "fapi2",
+                "require_signed_authorization_request": "-message-" in file_name,
+                "require_signed_authorization_response": response_mode == "jarm",
+                "allow_cross_device_flows": ciba,
+            }
             certificate_pem = str(mtls["cert"])
             ca_pem = str(mtls["ca"])
             if auth_method == "tls_client_auth":

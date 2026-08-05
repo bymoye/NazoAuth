@@ -5,6 +5,6 @@
   "database_restore": "backup",
   "irreversible_migration": true,
   "minimum_supported_version": "0.1.8",
-  "migration_floor": "20260805000500",
+  "migration_floor": "20260805000600",
   "rationale": "The TOTP envelope migration clears plaintext secrets after encrypting them, and durable token-issuance records prevent a safe schema downgrade once used. The previous application therefore cannot resume on the migrated database. Recovery requires the controller-created, separately verified pre-update database backup; artifact-only rollback is intentionally blocked across this migration barrier."
 }

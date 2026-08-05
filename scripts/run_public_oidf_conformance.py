@@ -9,6 +9,8 @@ import contextlib
 import json
 import os
 import queue
+import secrets as py_secrets
+import signal
 import shutil
 import ssl
 import subprocess
@@ -51,18 +53,89 @@ REQUIRED_SECRET_FIELDS = (
     "OIDF_ADMIN_EMAIL",
     "OIDF_ADMIN_PASSWORD",
     "OIDF_ADMIN_TOTP_SECRET",
-    "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
-    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
     "OIDF_CONFORMANCE_TOKEN",
 )
 SECRET_INPUT_FIELDS = tuple(name.lower() for name in REQUIRED_SECRET_FIELDS)
 OFFICIAL_INGRESS_ONLY_WARNING_CONDITIONS = frozenset({"EnsureIncomingTls13"})
-MAX_SAFE_GROUP_WORKERS = 4
-MAX_BROWSER_GROUP_WORKERS = 2
+MAX_SAFE_GROUP_WORKERS = 1
+MAX_BROWSER_GROUP_WORKERS = 1
 
 
 class PublicRunError(RuntimeError):
     pass
+
+
+class TerminationRequested(BaseException):
+    def __init__(self, signum: int):
+        super().__init__(f"termination requested by signal {signum}")
+        self.signum = signum
+
+
+_TERMINATION_EVENT = threading.Event()
+_CLEANUP_MODE = threading.Event()
+_TERMINATION_LOCK = threading.Lock()
+_TERMINATION_SIGNUM: int | None = None
+
+
+def termination_signum() -> int:
+    return _TERMINATION_SIGNUM or signal.SIGTERM
+
+
+def request_termination(signum: int, _frame) -> None:
+    global _TERMINATION_SIGNUM
+    with _TERMINATION_LOCK:
+        first = not _TERMINATION_EVENT.is_set()
+        if first:
+            _TERMINATION_SIGNUM = signum
+            _TERMINATION_EVENT.set()
+    if first and not _CLEANUP_MODE.is_set():
+        raise TerminationRequested(signum)
+
+
+@contextlib.contextmanager
+def termination_signal_handlers():
+    global _TERMINATION_SIGNUM
+    _TERMINATION_EVENT.clear()
+    _CLEANUP_MODE.clear()
+    _TERMINATION_SIGNUM = None
+    installed: dict[int, object] = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        installed[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_termination)
+    try:
+        yield
+    finally:
+        for signum, handler in installed.items():
+            signal.signal(signum, handler)
+        _TERMINATION_EVENT.clear()
+        _CLEANUP_MODE.clear()
+        _TERMINATION_SIGNUM = None
+
+
+def terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+        return
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        pass
+    if process.poll() is None:
+        try:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise PublicRunError("managed OIDF child process did not terminate") from error
 
 
 def origin(value: str, option: str) -> str:
@@ -79,14 +152,37 @@ def command(
     stdin: bytes | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> None:
-    subprocess.run(
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(
         args,
         cwd=ROOT,
         env=env,
-        input=stdin,
+        stdin=subprocess.PIPE if stdin is not None else None,
         pass_fds=pass_fds,
-        check=True,
+        start_new_session=os.name != "nt",
+        creationflags=creationflags,
     )
+    try:
+        if stdin is not None:
+            assert process.stdin is not None
+            process.stdin.write(stdin)
+            process.stdin.close()
+            process.stdin = None
+        while True:
+            if _TERMINATION_EVENT.is_set() and not _CLEANUP_MODE.is_set():
+                raise TerminationRequested(termination_signum())
+            try:
+                returncode = process.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        terminate_process_tree(process)
+        raise
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, args)
 
 
 def output(args: list[str], *, cwd: Path = ROOT) -> str:
@@ -383,6 +479,27 @@ def private_secret_file(directory: Path, document: dict[str, str]):
         path.unlink(missing_ok=True)
 
 
+@contextlib.contextmanager
+def private_token_file(directory: Path, token: str):
+    descriptor, name = tempfile.mkstemp(dir=directory, prefix=".oidf-dcr-token-")
+    path = Path(name)
+    try:
+        payload = token.encode("utf-8")
+        if len(payload) < 32:
+            raise PublicRunError("leased dynamic registration token is too short")
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        path.chmod(0o600)
+        yield path
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
+
+
 def filter_problem_records(
     source: Path,
     plan_set: Path,
@@ -429,7 +546,7 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
         return [plan for plan in concurrent if all(needle in plan for needle in needles)]
 
     grouped: list[tuple[str, list[str], bool]] = [
-        ("01-oidc-core", matches("oidcc-basic-certification-test-plan"), False),
+        ("01-oidc-core", matches("oidcc-basic-certification-test-plan"), True),
         (
             "02-oidc-formpost-thirdparty-config",
             [
@@ -437,7 +554,7 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
                 *matches("oidcc-3rdparty-init-login-certification-test-plan"),
                 *matches("oidcc-config-certification-test-plan"),
             ],
-            False,
+            True,
         ),
     ]
 
@@ -473,7 +590,7 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
                         "sender_constrain=dpop",
                     ),
                 ],
-                False,
+                True,
             ),
             (
                 "05-fapi-mtls-mtls",
@@ -482,7 +599,7 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
                     "client_auth_type=mtls",
                     "sender_constrain=mtls",
                 ),
-                False,
+                True,
             ),
             (
                 "06-fapi-private-dpop",
@@ -491,7 +608,7 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
                     "client_auth_type=private_key_jwt",
                     "sender_constrain=dpop",
                 ),
-                False,
+                True,
             ),
             (
                 "07-fapi-private-mtls",
@@ -500,7 +617,7 @@ def split_plan_groups(work_dir: Path) -> tuple[tuple[str, Path, bool], ...]:
                     "client_auth_type=private_key_jwt",
                     "sender_constrain=mtls",
                 ),
-                False,
+                True,
             ),
             (
                 "08-rp-initiated",
@@ -678,6 +795,8 @@ def run_group_phase(
             except BaseException as error:
                 error.add_note(f"OIDF {phase} group failed: {futures[future]}")
                 failures.append(error)
+    if _TERMINATION_EVENT.is_set():
+        raise TerminationRequested(termination_signum())
     if failures:
         raise ExceptionGroup(f"OIDF {phase} group execution failed", failures)
 
@@ -866,34 +985,52 @@ def run(args: argparse.Namespace) -> None:
     failure: BaseException | None = None
     try:
         command(provisioning_args(args.target_issuer), env=env, stdin=credentials)
+        leased_dynamic_registration_token = py_secrets.token_urlsafe(32)
+        leased_ciba_automated_decision_token = py_secrets.token_urlsafe(32)
         preparation_secrets = {
             field: secret_document[field]
             for field in (
                 "oidf_applicant_email",
                 "oidf_applicant_password",
-                "oidf_dynamic_registration_initial_access_token",
-                "oidf_ciba_automated_decision_token",
             )
         }
-        with private_secret_file(args.work_dir.parent, preparation_secrets) as secret_file:
-            command(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts" / "prepare_oidf_black_box.py"),
-                    "--secret-file",
-                    str(secret_file),
-                ],
-                env=env,
-            )
-        protect_directory(args.work_dir)
-        active_lease_id = create_lease(
-            args.nazoauthctl,
-            args.nazoauthctl_config,
-            profile="oidc-fapi-ciba",
-            material=args.work_dir / "oidf-onboarding-manifest.json",
-            ttl_seconds=args.lease_ttl_seconds,
-            candidate=candidate_target,
+        preparation_secrets["oidf_dynamic_registration_initial_access_token"] = (
+            leased_dynamic_registration_token
         )
+        preparation_secrets["oidf_ciba_automated_decision_token"] = (
+            leased_ciba_automated_decision_token
+        )
+        with private_token_file(
+            args.work_dir.parent, leased_dynamic_registration_token
+        ) as dynamic_registration_token_file:
+            with private_token_file(
+                args.work_dir.parent, leased_ciba_automated_decision_token
+            ) as ciba_automated_decision_token_file:
+                with private_secret_file(
+                    args.work_dir.parent, preparation_secrets
+                ) as secret_file:
+                    command(
+                        [
+                            sys.executable,
+                            str(ROOT / "scripts" / "prepare_oidf_black_box.py"),
+                            "--secret-file",
+                            str(secret_file),
+                        ],
+                        env=env,
+                    )
+                protect_directory(args.work_dir)
+                active_lease_id = create_lease(
+                    args.nazoauthctl,
+                    args.nazoauthctl_config,
+                    profile="oidc-fapi-ciba",
+                    material=args.work_dir / "oidf-onboarding-manifest.json",
+                    dynamic_registration_token_file=dynamic_registration_token_file,
+                    ciba_automated_decision_token_file=(
+                        ciba_automated_decision_token_file
+                    ),
+                    ttl_seconds=args.lease_ttl_seconds,
+                    candidate=candidate_target,
+                )
         command(
             onboarding_args(
                 "apply",
@@ -920,6 +1057,7 @@ def run(args: argparse.Namespace) -> None:
     except BaseException as error:
         failure = error
     finally:
+        _CLEANUP_MODE.set()
         cleanup_errors: list[BaseException] = []
         try:
             cleanup_suite_runner_configs(args.suite_dir, args.work_dir)
@@ -955,6 +1093,7 @@ def run(args: argparse.Namespace) -> None:
             cleanup_errors.append(error)
         protect_directory(args.work_dir)
         protect_directory(args.export_dir)
+        _CLEANUP_MODE.clear()
         if cleanup_errors:
             raise ExceptionGroup("public OIDF cleanup failed", cleanup_errors) from failure
     if failure is not None:
@@ -993,13 +1132,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--safe-group-workers",
         type=int,
         default=MAX_SAFE_GROUP_WORKERS,
-        help="parallel workers for independent OIDC/FAPI plan groups (1-4)",
+        help="OIDC/FAPI plan group workers; browser state safety requires 1",
     )
     parser.add_argument(
         "--browser-group-workers",
         type=int,
         default=MAX_BROWSER_GROUP_WORKERS,
-        help="parallel workers for isolated logout/session plan groups (1-2)",
+        help="logout/session plan group workers; browser state safety requires 1",
     )
     parser.add_argument(
         "--final-stabilization-seconds",
@@ -1011,15 +1150,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    try:
-        run(parse_args(argv))
-    except (
-        ConformanceLeaseControlError,
-        PublicRunError,
-        SecretInputError,
-        subprocess.CalledProcessError,
-    ) as error:
-        raise SystemExit(str(error)) from error
+    with termination_signal_handlers():
+        try:
+            run(parse_args(argv))
+        except TerminationRequested as error:
+            return 128 + error.signum
+        except (
+            ConformanceLeaseControlError,
+            PublicRunError,
+            SecretInputError,
+            subprocess.CalledProcessError,
+        ) as error:
+            raise SystemExit(str(error)) from error
     return 0
 
 

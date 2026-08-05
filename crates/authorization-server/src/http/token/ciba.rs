@@ -45,6 +45,7 @@ use nazo_http_actix::{cookie_value, csrf_error, has_valid_csrf_token_for_cookies
 use nazo_valkey::CibaStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::client_auth::{
@@ -69,7 +70,7 @@ use actix_web::web::Payload;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_auth::ClientAuthenticationContext;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Write as _};
 
 pub(crate) const CIBA_GRANT_TYPE: &str = "urn:openid:params:grant-type:ciba";
 const CIBA_AUTOMATED_DECISION_PROFILE: &str = "oidc-fapi-ciba";
@@ -1268,62 +1269,88 @@ pub(crate) async fn ciba_automated_decision(
     ) {
         return empty_response(StatusCode::NOT_FOUND);
     }
-    let Some(expected_token) = config.automated_decision_token.as_deref() else {
-        return empty_response(StatusCode::NOT_FOUND);
-    };
-    let Some(actual_token) = ciba_automated_decision_request_token(&config, &req, &query) else {
-        return empty_response(StatusCode::NOT_FOUND);
-    };
-    if !constant_time_eq(expected_token.as_bytes(), actual_token.as_bytes()) {
-        return empty_response(StatusCode::NOT_FOUND);
-    }
-    let Some(auth_req_id) = query
-        .auth_req_id
-        .as_deref()
-        .or(query.token.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "CIBA auth_req_id is required.",
-        );
-    };
-    if config.automated_decision_mode == CibaAutomatedDecisionMode::Disabled {
-        let Some(conformance_leases) = conformance_leases else {
-            // The production composition root always installs this repository;
-            // a missing dependency must fail closed rather than opening every
-            // CIBA transaction when the default mode is disabled.
-            return empty_response(StatusCode::NOT_FOUND);
-        };
-        let state_payload = match load_ciba_request_payload(&ciba_service, auth_req_id).await {
-            Ok(Some(value)) => value,
-            Ok(None) => return empty_response(StatusCode::NOT_FOUND),
-            Err(response) => return response,
-        };
-        let lease_active = match conformance_leases
-            .active_for_client_profile(
-                config.tenant_id,
-                &state_payload.client_id,
-                CIBA_AUTOMATED_DECISION_PROFILE,
-            )
-            .await
-        {
-            Ok(active) => active,
-            Err(error) => {
-                tracing::warn!(%error, "failed to query CIBA automated-decision conformance lease");
-                return ciba_error_no_store(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "server_error",
-                    "CIBA automated decision unavailable.",
-                );
+    let auth_req_id = match config.automated_decision_mode {
+        CibaAutomatedDecisionMode::Disabled => {
+            let Some(actual_token) = ciba_automated_decision_request_token(&config, &req, &query)
+            else {
+                return empty_response(StatusCode::NOT_FOUND);
+            };
+            let actual_token_sha256 = sha256_hex(actual_token.as_bytes());
+            let Some(conformance_leases) = conformance_leases else {
+                // The production composition root always installs this repository;
+                // a missing dependency must fail closed rather than opening every
+                // CIBA transaction when the default mode is disabled.
+                return empty_response(StatusCode::NOT_FOUND);
+            };
+            let lease_id = match conformance_leases
+                .active_ciba_automated_decision_lease_id(
+                    config.tenant_id,
+                    CIBA_AUTOMATED_DECISION_PROFILE,
+                    &actual_token_sha256,
+                )
+                .await
+            {
+                Ok(Some(lease_id)) => lease_id,
+                Ok(None) => return empty_response(StatusCode::NOT_FOUND),
+                Err(_error) => {
+                    tracing::warn!(
+                        "failed to query CIBA automated-decision conformance lease token"
+                    );
+                    return ciba_error_no_store(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "CIBA automated decision unavailable.",
+                    );
+                }
+            };
+            let auth_req_id = match ciba_automated_decision_auth_req_id(&query) {
+                Ok(auth_req_id) => auth_req_id,
+                Err(response) => return response,
+            };
+            let state_payload = match load_ciba_request_payload(&ciba_service, auth_req_id).await {
+                Ok(Some(value)) => value,
+                Ok(None) => return empty_response(StatusCode::NOT_FOUND),
+                Err(response) => return response,
+            };
+            match conformance_leases
+                .active_for_client_lease_profile(
+                    config.tenant_id,
+                    &state_payload.client_id,
+                    lease_id,
+                    CIBA_AUTOMATED_DECISION_PROFILE,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return empty_response(StatusCode::NOT_FOUND),
+                Err(_error) => {
+                    tracing::warn!("failed to verify CIBA automated-decision client lease binding");
+                    return ciba_error_no_store(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "CIBA automated decision unavailable.",
+                    );
+                }
             }
-        };
-        if !lease_active {
-            return empty_response(StatusCode::NOT_FOUND);
+            auth_req_id
         }
-    }
+        CibaAutomatedDecisionMode::Header | CibaAutomatedDecisionMode::QueryParameter => {
+            let Some(expected_token) = config.automated_decision_token.as_deref() else {
+                return empty_response(StatusCode::NOT_FOUND);
+            };
+            let Some(actual_token) = ciba_automated_decision_request_token(&config, &req, &query)
+            else {
+                return empty_response(StatusCode::NOT_FOUND);
+            };
+            if !constant_time_eq(expected_token.as_bytes(), actual_token.as_bytes()) {
+                return empty_response(StatusCode::NOT_FOUND);
+            }
+            match ciba_automated_decision_auth_req_id(&query) {
+                Ok(auth_req_id) => auth_req_id,
+                Err(response) => return response,
+            }
+        }
+    };
     let decision = match query
         .action
         .as_deref()
@@ -1354,6 +1381,33 @@ pub(crate) async fn ciba_automated_decision(
         ))),
     )
     .await
+}
+
+fn ciba_automated_decision_auth_req_id(
+    query: &CibaAutomatedDecisionQuery,
+) -> Result<&str, HttpResponse> {
+    query
+        .auth_req_id
+        .as_deref()
+        .or(query.token.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "CIBA auth_req_id is required.",
+            )
+        })
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    Sha256::digest(value)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        })
 }
 
 fn ciba_automated_decision_request_token(

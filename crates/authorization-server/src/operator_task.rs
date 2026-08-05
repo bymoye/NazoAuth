@@ -190,12 +190,16 @@ async fn execute(operation: &TaskOperation) -> TaskOutcome {
         TaskOperation::ConformanceLeaseCreate {
             profile,
             material_sha256,
+            dynamic_registration_initial_access_token_sha256,
+            ciba_automated_decision_token_sha256,
             public_material,
             ttl_seconds,
         } => {
             crate::conformance_lease::operator_create(
                 profile,
                 material_sha256,
+                dynamic_registration_initial_access_token_sha256.as_deref(),
+                ciba_automated_decision_token_sha256.as_deref(),
                 public_material.clone(),
                 *ttl_seconds,
             )

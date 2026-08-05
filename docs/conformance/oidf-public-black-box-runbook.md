@@ -108,8 +108,9 @@ provider account.
 
 Use the unified runner for the operator-run public OIDC/FAPI/FAPI-CIBA matrix
 instead of assembling the internal commands below by hand. Provide only the
-two separate production identities, the dynamic-registration/CIBA tokens, and
-a short-lived public-suite API token:
+two separate production identities, the CIBA decision token, and a short-lived
+public-suite API token. The runner generates a distinct dynamic-registration
+initial access token for each lease:
 
 ```sh
 secret-provider read nazoauth/oidf-run-secrets | \
@@ -131,8 +132,7 @@ python scripts/run_public_oidf_conformance.py --secrets-stdin \
 
 The input is strict JSON with exactly `oidf_applicant_email`,
 `oidf_applicant_password`, `oidf_admin_email`, `oidf_admin_password`,
-`oidf_dynamic_registration_initial_access_token`,
-`oidf_ciba_automated_decision_token`, and `oidf_conformance_token`. The same
+`oidf_admin_totp_secret`, and `oidf_conformance_token`. The same
 document may instead be supplied through `--secret-fd N` or a regular,
 single-link, current-user/root-owned mode-`0600` `--secret-file` on POSIX.
 Windows operators must use stdin or an inherited descriptor because POSIX mode
@@ -174,7 +174,12 @@ separate identities, atomically installs the approved trust bundle, verifies
 the suite API's `401/200` boundary, and runs all 27 plans in concurrent, CIBA,
 RP-Initiated Logout, Back-Channel Logout, Front-Channel Logout, and Session
 Management groups. Before onboarding it creates a time-bounded conformance
-lease through `nazoauthctl` and binds every temporary client to that lease.
+lease through `nazoauthctl`, binds the SHA-256 of the generated registration
+and CIBA automated-decision tokens to that lease, and binds every temporary
+client to the same lease. These independently generated tokens open only their
+lease-owned DCR and CIBA transactions and become unusable immediately on expiry
+or revocation. Browser-driving modules and plan groups run serially because the
+official suite shares browser cookie/session state across parallel modules.
 Success and failure both deactivate the run's clients, revoke and physically
 clean the lease-owned data, revoke trust through the public control plane, and
 restore the proxy configuration. Private inputs remain in unique work

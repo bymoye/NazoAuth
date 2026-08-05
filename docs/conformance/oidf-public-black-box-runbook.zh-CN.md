@@ -65,7 +65,7 @@ issuer、账号、客户端材料和 suite token；仓库不提供共享被测�
 
 ## 推荐入口：单次可逆运行
 
-操作者公网 OIDC/FAPI/FAPI-CIBA 矩阵应使用统一入口，不应手工拼接后续各节的内部命令。运行前只准备两个彼此独立的生产身份、动态注册/CIBA 令牌和公网套件短期 API token：
+操作者公网 OIDC/FAPI/FAPI-CIBA 矩阵应使用统一入口，不应手工拼接后续各节的内部命令。运行前只准备两个彼此独立的生产身份、CIBA 决策令牌和公网套件短期 API token；动态注册初始 token 由 runner 为每条租约单独生成：
 
 ```sh
 secret-provider read nazoauth/oidf-run-secrets | \
@@ -87,13 +87,12 @@ python scripts/run_public_oidf_conformance.py --secrets-stdin \
 
 输入必须是严格 JSON，且字段恰好为 `oidf_applicant_email`、
 `oidf_applicant_password`、`oidf_admin_email`、`oidf_admin_password`、
-`oidf_dynamic_registration_initial_access_token`、
-`oidf_ciba_automated_decision_token` 和 `oidf_conformance_token`。也可通过
+`oidf_admin_totp_secret` 和 `oidf_conformance_token`。也可通过
 `--secret-fd N` 或当前用户/root 所有、单硬链接、权限为 `0600` 的
 `--secret-file` 提供（仅 POSIX）。Windows 的 mode bits 不能证明 DACL，因此必须使用
 stdin 或继承 FD。所有秘密都没有 argv 或环境变量回退。
 
-该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，并先通过 `nazoauthctl` 创建有时效的 conformance lease，把本轮全部临时 client 绑定到该租约。它通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并按并发、CIBA、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout 和 Session Management 隔离组执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销并物理清理租约数据、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
+该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，并先通过 `nazoauthctl` 创建有时效的 conformance lease，把本轮分别随机生成的动态注册 token、CIBA 自动决策 token 的 SHA-256 与全部临时 client 绑定到同一租约。两个 token 只能操作该租约拥有的 DCR/CIBA 事务，并在租约过期或吊销后立即失效。官方套件会在并发模块间共享浏览器 cookie/session，因此所有驱动浏览器的模块和 plan 组均串行执行。它通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销并物理清理租约数据、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
 
 私有预发布门禁可以在同一 runner 中同时传入
 `--candidate-release`、`--candidate-revision`、`--candidate-build-id` 和

@@ -252,6 +252,7 @@ async fn revoking_a_conformance_lease_deletes_its_presentation_transactions() {
             tenant_id,
             "openid4vc",
             &"b".repeat(64),
+            nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(serde_json::json!({"schema": 1})),
             60,
         )

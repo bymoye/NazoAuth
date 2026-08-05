@@ -35,12 +35,14 @@ const RP_METADATA_CHOICE_FIELDS: &[&str] = &[
 #[derive(Clone)]
 struct FakeStore {
     client: Arc<Mutex<Option<OAuthClient>>>,
+    conformance_lease_id: Arc<Mutex<Option<Uuid>>>,
 }
 
 impl FakeStore {
     fn new() -> Self {
         Self {
             client: Arc::new(Mutex::new(Some(client()))),
+            conformance_lease_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -59,6 +61,10 @@ impl DynamicRegistrationClientStore for FakeStore {
             require_mtls_bound_tokens: prepared.require_mtls_bound_tokens,
             is_active: true,
         };
+        *self
+            .conformance_lease_id
+            .lock()
+            .expect("conformance lease lock") = prepared.conformance_lease_id;
         *self.client.lock().expect("client lock") = Some(inserted.clone());
         Box::pin(async move { Ok(inserted) })
     }
@@ -203,6 +209,7 @@ impl ClientSecretDigesterPort for FakeSecurity {
 struct FakeGuard {
     enabled: bool,
     rate_limit: Option<DynamicRegistrationRateLimitError>,
+    initial_access_lease: Result<Option<Uuid>, DynamicRegistrationDependencyError>,
 }
 
 impl DynamicRegistrationRequestGuard for FakeGuard {
@@ -219,6 +226,14 @@ impl DynamicRegistrationRequestGuard for FakeGuard {
         Box::pin(async move { result })
     }
 
+    fn conformance_lease_for_initial_access_token<'a>(
+        &'a self,
+        _token: &'a str,
+    ) -> DynamicRegistrationFuture<'a, Option<Uuid>> {
+        let result = self.initial_access_lease;
+        Box::pin(async move { result })
+    }
+
     fn audit(&self, _event: &'static str, _client: &OAuthClient, _source_ip: &str) {}
 }
 
@@ -227,6 +242,14 @@ fn endpoint(enabled: bool) -> DynamicRegistrationEndpoint {
 }
 
 fn endpoint_with_store(enabled: bool, store: FakeStore) -> DynamicRegistrationEndpoint {
+    endpoint_with_store_and_lease_lookup(enabled, store, Ok(None))
+}
+
+fn endpoint_with_store_and_lease_lookup(
+    enabled: bool,
+    store: FakeStore,
+    initial_access_lease: Result<Option<Uuid>, DynamicRegistrationDependencyError>,
+) -> DynamicRegistrationEndpoint {
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
             issuer: "https://issuer.example".to_owned(),
@@ -252,6 +275,7 @@ fn endpoint_with_store(enabled: bool, store: FakeStore) -> DynamicRegistrationEn
         Arc::new(FakeGuard {
             enabled,
             rate_limit: None,
+            initial_access_lease,
         }),
     )
 }
@@ -391,6 +415,228 @@ async fn registration_authentication_error_keeps_bearer_and_no_store_contract() 
     );
     let body: Value = test::read_body_json(response).await;
     assert_eq!(body["error"], "invalid_token");
+}
+
+#[actix_web::test]
+async fn configured_initial_access_token_keeps_secure_unleased_policy() {
+    let store = FakeStore::new();
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
+                true,
+                store.clone(),
+                Ok(Some(Uuid::now_v7())),
+            )))
+            .configure(configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/register")
+            .insert_header((header::AUTHORIZATION, "Bearer initial-token"))
+            .set_json(json!({
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        *store
+            .conformance_lease_id
+            .lock()
+            .expect("conformance lease lock"),
+        None
+    );
+    let stored = store
+        .client
+        .lock()
+        .expect("client lock")
+        .clone()
+        .expect("registered client");
+    assert!(
+        stored
+            .security_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allow_confidential_oidc_without_pkce)
+    );
+}
+
+#[actix_web::test]
+async fn leased_initial_access_token_binds_exception_and_update_preserves_both() {
+    let lease_id = Uuid::now_v7();
+    let store = FakeStore::new();
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
+                true,
+                store.clone(),
+                Ok(Some(lease_id)),
+            )))
+            .configure(configure),
+    )
+    .await;
+
+    let created = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/register")
+            .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
+            .set_json(json!({
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = test::read_body_json(created).await;
+    let client_id = created["client_id"].as_str().expect("client id");
+    assert_eq!(
+        *store
+            .conformance_lease_id
+            .lock()
+            .expect("conformance lease lock"),
+        Some(lease_id)
+    );
+    assert!(
+        store
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .and_then(|client| client.security_policy.as_ref())
+            .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
+    );
+
+    let updated = test::call_service(
+        &service,
+        test::TestRequest::put()
+            .uri(&format!("/register/{client_id}"))
+            .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+            .set_json(json!({
+                "client_id": client_id,
+                "client_secret": "current-secret",
+                "client_name": "Updated leased client",
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    assert_eq!(
+        *store
+            .conformance_lease_id
+            .lock()
+            .expect("conformance lease lock"),
+        Some(lease_id)
+    );
+    assert!(
+        store
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .and_then(|client| client.security_policy.as_ref())
+            .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
+    );
+}
+
+#[actix_web::test]
+async fn leased_public_client_is_bound_without_confidential_pkce_exception() {
+    let lease_id = Uuid::now_v7();
+    let store = FakeStore::new();
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
+                true,
+                store.clone(),
+                Ok(Some(lease_id)),
+            )))
+            .configure(configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/register")
+            .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
+            .set_json(json!({
+                "token_endpoint_auth_method": "none",
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        *store
+            .conformance_lease_id
+            .lock()
+            .expect("conformance lease lock"),
+        Some(lease_id)
+    );
+    assert!(
+        store
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .and_then(|client| client.security_policy.as_ref())
+            .is_some_and(|policy| !policy.allow_confidential_oidc_without_pkce)
+    );
+}
+
+#[actix_web::test]
+async fn unknown_leased_initial_access_token_remains_invalid() {
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint(true)))
+            .configure(configure),
+    )
+    .await;
+    let response = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/register")
+            .insert_header((header::AUTHORIZATION, "Bearer unknown-token"))
+            .set_json(json!({}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["error"], "invalid_token");
+}
+
+#[actix_web::test]
+async fn leased_initial_access_lookup_failure_fails_closed() {
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
+                true,
+                FakeStore::new(),
+                Err(DynamicRegistrationDependencyError::Unavailable),
+            )))
+            .configure(configure),
+    )
+    .await;
+    let response = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/register")
+            .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
+            .set_json(json!({}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["error"], "server_error");
 }
 
 #[actix_web::test]
@@ -632,6 +878,96 @@ async fn client_configuration_update_preserves_server_managed_security_policy() 
 }
 
 #[actix_web::test]
+async fn client_configuration_update_preserves_absent_server_managed_policy() {
+    let store = FakeStore::new();
+    store
+        .client
+        .lock()
+        .expect("client lock")
+        .as_mut()
+        .expect("fixture client")
+        .registration
+        .security_policy = None;
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
+            .configure(configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &service,
+        test::TestRequest::put()
+            .uri("/register/client-test")
+            .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+            .set_json(json!({
+                "client_id": "client-test",
+                "client_secret": "current-secret",
+                "client_name": "Updated Client",
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        store
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .is_some_and(|client| client.security_policy.is_none())
+    );
+}
+
+#[actix_web::test]
+async fn client_configuration_update_validates_current_server_managed_policy() {
+    let store = FakeStore::new();
+    store
+        .client
+        .lock()
+        .expect("client lock")
+        .as_mut()
+        .expect("fixture client")
+        .registration
+        .security_policy
+        .as_mut()
+        .expect("explicit fixture policy")
+        .version = u16::MAX;
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
+            .configure(configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &service,
+        test::TestRequest::put()
+            .uri("/register/client-test")
+            .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+            .set_json(json!({
+                "client_id": "client-test",
+                "client_secret": "current-secret",
+                "client_name": "Updated Client",
+                "redirect_uris": ["https://client.example/callback"]
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let stored = store
+        .client
+        .lock()
+        .expect("client lock")
+        .clone()
+        .expect("unchanged client");
+    assert_eq!(stored.client_name, "Client");
+}
+
+#[actix_web::test]
 async fn client_configuration_read_preserves_authenticated_registration_token() {
     let service = test::init_service(
         App::new()
@@ -667,6 +1003,7 @@ async fn rate_limit_error_keeps_oauth_code_and_retry_after() {
         rate_limit: Some(DynamicRegistrationRateLimitError::Limited {
             retry_after_seconds: 30,
         }),
+        initial_access_lease: Ok(None),
     });
     let service = test::init_service(
         App::new()

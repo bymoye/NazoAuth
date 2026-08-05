@@ -33,6 +33,8 @@ class ConformanceLeaseControlTests(unittest.TestCase):
             Path("/etc/nazoauth/update.json"),
             profile="oidc-fapi-ciba",
             material=Path("/run/oidf-onboarding-manifest.json"),
+            dynamic_registration_token_file=Path("/run/dcr-token"),
+            ciba_automated_decision_token_file=Path("/run/ciba-token"),
             ttl_seconds=28_800,
         )
 
@@ -45,6 +47,14 @@ class ConformanceLeaseControlTests(unittest.TestCase):
         ])
         self.assertEqual(command[3:6], ["conformance", "lease", "create"])
         self.assertEqual(command[command.index("--profile") + 1], "oidc-fapi-ciba")
+        self.assertEqual(
+            command[command.index("--dynamic-registration-token-file") + 1],
+            str(Path("/run/dcr-token")),
+        )
+        self.assertEqual(
+            command[command.index("--ciba-automated-decision-token-file") + 1],
+            str(Path("/run/ciba-token")),
+        )
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
     @mock.patch("subprocess.run")

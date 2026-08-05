@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -63,9 +64,22 @@ class PublicOidfRunnerTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args.safe_group_workers, 4)
-        self.assertEqual(args.browser_group_workers, 2)
+        self.assertEqual(args.safe_group_workers, 1)
+        self.assertEqual(args.browser_group_workers, 1)
         self.assertEqual(args.lease_ttl_seconds, 28_800)
+
+    def test_secret_input_excludes_per_run_capability_tokens(self):
+        self.assertEqual(
+            self.module.SECRET_INPUT_FIELDS,
+            (
+                "oidf_applicant_email",
+                "oidf_applicant_password",
+                "oidf_admin_email",
+                "oidf_admin_password",
+                "oidf_admin_totp_secret",
+                "oidf_conformance_token",
+            ),
+        )
 
     def test_child_environment_strips_secret_shaped_variables(self):
         with mock.patch.dict(
@@ -75,6 +89,16 @@ class PublicOidfRunnerTests(unittest.TestCase):
         ):
             environment = self.module.sanitized_environment()
         self.assertEqual(environment, {"PATH": "safe"})
+
+    def test_private_leased_token_file_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.module.private_token_file(root, "t" * 43) as token_file:
+                self.assertEqual(token_file.read_text(encoding="utf-8"), "t" * 43)
+                if os.name != "nt":
+                    self.assertEqual(token_file.stat().st_mode & 0o777, 0o600)
+                retained_path = token_file
+            self.assertFalse(retained_path.exists())
 
     def test_onboarding_child_receives_credentials_only_through_stdin(self):
         environment = {
@@ -193,8 +217,6 @@ class PublicOidfRunnerTests(unittest.TestCase):
                         "oidf_admin_email": "admin@example.com",
                         "oidf_admin_password": "admin-password",
                         "oidf_admin_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
-                        "oidf_dynamic_registration_initial_access_token": "d" * 48,
-                        "oidf_ciba_automated_decision_token": "c" * 48,
                         "oidf_conformance_token": "token",
                     },
                 ),
@@ -245,6 +267,8 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 final_stabilization_seconds=0,
             )
             lease_id = "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d"
+            leased_dynamic_registration_tokens = []
+            leased_ciba_automated_decision_tokens = []
 
             def command_side_effect(arguments, **_kwargs):
                 if any(str(value).endswith("prepare_oidf_black_box.py") for value in arguments):
@@ -252,6 +276,29 @@ class PublicOidfRunnerTests(unittest.TestCase):
                     (work / "oidf-onboarding-manifest.json").write_text(
                         "{}\n", encoding="utf-8"
                     )
+                if (
+                    any(
+                        str(value).endswith("apply_public_conformance_onboarding.py")
+                        for value in arguments
+                    )
+                    and "apply" in arguments
+                ):
+                    (work / "oidf-onboarding-state.json").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+
+            def create_side_effect(*_args, **kwargs):
+                leased_dynamic_registration_tokens.append(
+                    kwargs["dynamic_registration_token_file"].read_text(
+                        encoding="utf-8"
+                    )
+                )
+                leased_ciba_automated_decision_tokens.append(
+                    kwargs["ciba_automated_decision_token_file"].read_text(
+                        encoding="utf-8"
+                    )
+                )
+                return lease_id
 
             with (
                 mock.patch.object(self.module, "verify_source"),
@@ -265,8 +312,6 @@ class PublicOidfRunnerTests(unittest.TestCase):
                         "oidf_admin_email": "admin@example.com",
                         "oidf_admin_password": "admin-password",
                         "oidf_admin_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
-                        "oidf_dynamic_registration_initial_access_token": "d" * 48,
-                        "oidf_ciba_automated_decision_token": "c" * 48,
                         "oidf_conformance_token": "token",
                     },
                 ),
@@ -274,7 +319,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                     self.module, "command", side_effect=command_side_effect
                 ) as command,
                 mock.patch.object(
-                    self.module, "create_lease", return_value=lease_id
+                    self.module, "create_lease", side_effect=create_side_effect
                 ) as create,
                 mock.patch.object(self.module, "revoke_and_cleanup") as revoke,
                 mock.patch.object(self.module, "ProxyTrust"),
@@ -292,8 +337,18 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 None,
                 profile="oidc-fapi-ciba",
                 material=work.resolve() / "oidf-onboarding-manifest.json",
+                dynamic_registration_token_file=mock.ANY,
+                ciba_automated_decision_token_file=mock.ANY,
                 ttl_seconds=28_800,
                 candidate=None,
+            )
+            self.assertEqual(len(leased_dynamic_registration_tokens), 1)
+            self.assertEqual(len(leased_ciba_automated_decision_tokens), 1)
+            self.assertGreaterEqual(len(leased_dynamic_registration_tokens[0]), 32)
+            self.assertGreaterEqual(len(leased_ciba_automated_decision_tokens[0]), 32)
+            self.assertNotEqual(
+                leased_dynamic_registration_tokens[0],
+                leased_ciba_automated_decision_tokens[0],
             )
             onboarding_calls = [
                 call.args[0]
@@ -302,6 +357,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                     str(value).endswith("apply_public_conformance_onboarding.py")
                     for value in call.args[0]
                 )
+                and "apply" in call.args[0]
             ]
             self.assertEqual(len(onboarding_calls), 1)
             self.assertEqual(
@@ -311,6 +367,126 @@ class PublicOidfRunnerTests(unittest.TestCase):
             revoke.assert_called_once_with(
                 ctl.resolve(), None, lease_id, candidate=None
             )
+
+    def test_sigterm_after_lease_creation_runs_all_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite = root / "suite"
+            suite.mkdir()
+            work = root / "work"
+            export = root / "export"
+            ctl = root / "nazoauthctl"
+            ctl.write_text("binary", encoding="utf-8")
+            args = Namespace(
+                target_issuer="https://issuer.example",
+                conformance_server="https://suite.example",
+                work_dir=work,
+                export_dir=export,
+                suite_dir=suite,
+                deployed_sha="a" * 40,
+                suite_revision="b" * 40,
+                run_namespace="terminated-run",
+                proxy_trust_bundle=root / "trust.pem",
+                proxy_executable=root / "proxy",
+                nazoauthctl=ctl,
+                nazoauthctl_config=None,
+                lease_ttl_seconds=28_800,
+                secrets_stdin=True,
+                secret_fd=None,
+                secret_file=None,
+                timeout_seconds=100,
+                monitor_interval_seconds=5,
+                final_stabilization_seconds=0,
+            )
+            lease_id = "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d"
+
+            def command_side_effect(arguments, **_kwargs):
+                if any(str(value).endswith("prepare_oidf_black_box.py") for value in arguments):
+                    work.mkdir()
+                    (work / "oidf-onboarding-manifest.json").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+                if (
+                    any(
+                        str(value).endswith("apply_public_conformance_onboarding.py")
+                        for value in arguments
+                    )
+                    and "apply" in arguments
+                ):
+                    (work / "oidf-onboarding-state.json").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+
+            def terminate_during_plans(*_args, **_kwargs):
+                self.module.request_termination(signal.SIGTERM, None)
+
+            with (
+                mock.patch.object(self.module, "verify_source"),
+                mock.patch.object(self.module, "verify_suite"),
+                mock.patch.object(
+                    self.module,
+                    "read_secret_document",
+                    return_value={
+                        "oidf_applicant_email": "applicant@example.com",
+                        "oidf_applicant_password": "applicant-password",
+                        "oidf_admin_email": "admin@example.com",
+                        "oidf_admin_password": "admin-password",
+                        "oidf_admin_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+                        "oidf_conformance_token": "token",
+                    },
+                ),
+                mock.patch.object(
+                    self.module, "command", side_effect=command_side_effect
+                ) as command,
+                mock.patch.object(
+                    self.module, "create_lease", return_value=lease_id
+                ),
+                mock.patch.object(self.module, "revoke_and_cleanup") as revoke,
+                mock.patch.object(self.module, "ProxyTrust") as proxy_trust,
+                mock.patch.object(self.module, "verify_suite_boundary"),
+                mock.patch.object(
+                    self.module,
+                    "run_plan_groups",
+                    side_effect=terminate_during_plans,
+                ),
+                mock.patch.object(self.module, "inspect_complete_matrix"),
+                mock.patch.object(
+                    self.module, "cleanup_suite_runner_configs"
+                ) as suite_cleanup,
+                mock.patch.object(self.module, "sanitize_evidence_tree"),
+                mock.patch.object(self.module, "protect_directory"),
+                self.module.termination_signal_handlers(),
+                self.assertRaises(self.module.TerminationRequested) as raised,
+            ):
+                self.module.run(args)
+
+            self.assertEqual(raised.exception.signum, signal.SIGTERM)
+            suite_cleanup.assert_called_once_with(suite.resolve(), work.resolve())
+            proxy_trust.return_value.restore.assert_called_once_with()
+            revoke.assert_called_once_with(
+                ctl.resolve(), None, lease_id, candidate=None
+            )
+            onboarding_cleanup = [
+                call.args[0]
+                for call in command.call_args_list
+                if any(
+                    str(value).endswith("apply_public_conformance_onboarding.py")
+                    for value in call.args[0]
+                )
+                and "cleanup" in call.args[0]
+            ]
+            self.assertEqual(len(onboarding_cleanup), 1)
+
+    def test_main_maps_sigterm_to_exit_code_143(self):
+        with (
+            mock.patch.object(self.module, "parse_args", return_value=Namespace()),
+            mock.patch.object(
+                self.module,
+                "run",
+                side_effect=self.module.TerminationRequested(signal.SIGTERM),
+            ),
+        ):
+            self.assertEqual(self.module.main([]), 143)
 
     def test_plan_groups_use_explicit_inputs_and_isolate_browser_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -376,11 +552,8 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 ).stem.removeprefix("oidf-plan-set-"): invocation
                 for invocation in invocations
             }
-            for name, invocation in by_group.items():
-                if name.startswith(("03", "08", "09", "10", "11")):
-                    self.assertIn("--no-parallel", invocation)
-                else:
-                    self.assertNotIn("--no-parallel", invocation)
+            for invocation in by_group.values():
+                self.assertIn("--no-parallel", invocation)
             self.assertTrue(all("--no-api-token" not in invocation for invocation in invocations))
             self.assertTrue(
                 all(

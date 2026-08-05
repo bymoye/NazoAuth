@@ -18,7 +18,7 @@ async fn operator_lifecycle_uses_the_authoritative_tenant_lease() {
     let nonce = Uuid::now_v7().simple().to_string();
     let profile = format!("coverage-{nonce}");
     let material_sha256 = format!("{nonce}{nonce}");
-    let created = operator_create(&profile, &material_sha256, None, 60)
+    let created = operator_create(&profile, &material_sha256, None, None, None, 60)
         .await
         .unwrap();
     let lease_id = match created {
@@ -67,11 +67,54 @@ async fn operator_lifecycle_uses_the_authoritative_tenant_lease() {
 #[tokio::test]
 async fn operator_rejects_invalid_identifiers_and_ttl_overflow() {
     assert!(operator_revoke("not-a-uuid").await.is_err());
+    assert!(
+        operator_create(
+            "oidf-full",
+            &"a".repeat(64),
+            Some(&"b".repeat(64)),
+            None,
+            None,
+            60,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        operator_create(
+            "oidc-fapi-ciba",
+            &"a".repeat(64),
+            Some(&"B".repeat(64)),
+            None,
+            None,
+            60,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        operator_create(
+            "oidc-fapi-ciba",
+            &"a".repeat(64),
+            None,
+            Some(&"C".repeat(64)),
+            None,
+            60,
+        )
+        .await
+        .is_err()
+    );
     if database_is_available() {
         assert!(
-            operator_create("coverage-overflow", &"a".repeat(64), None, u64::MAX)
-                .await
-                .is_err()
+            operator_create(
+                "coverage-overflow",
+                &"a".repeat(64),
+                None,
+                None,
+                None,
+                u64::MAX,
+            )
+            .await
+            .is_err()
         );
     }
 }

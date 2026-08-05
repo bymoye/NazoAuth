@@ -382,6 +382,8 @@ fn embedded_identity_and_operation_names_are_closed() {
             TaskOperation::ConformanceLeaseCreate {
                 profile: "oidf-full".to_owned(),
                 material_sha256: "a".repeat(64),
+                dynamic_registration_initial_access_token_sha256: None,
+                ciba_automated_decision_token_sha256: None,
                 public_material: None,
                 ttl_seconds: 3_600,
             },
@@ -572,6 +574,8 @@ async fn conformance_operations_execute_through_the_closed_task_dispatch() {
     let created = execute(&TaskOperation::ConformanceLeaseCreate {
         profile: profile.clone(),
         material_sha256: material_sha256.clone(),
+        dynamic_registration_initial_access_token_sha256: None,
+        ciba_automated_decision_token_sha256: None,
         public_material: None,
         ttl_seconds: 60,
     })

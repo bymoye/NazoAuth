@@ -140,24 +140,39 @@ def create(
     *,
     profile: str,
     material: Path,
+    dynamic_registration_token_file: Path | None = None,
+    ciba_automated_decision_token_file: Path | None = None,
     ttl_seconds: int,
     candidate: CandidateTarget | None = None,
 ) -> str:
+    arguments = [
+        "lease",
+        "create",
+        "--profile",
+        profile,
+        "--material",
+        str(material),
+    ]
+    if dynamic_registration_token_file is not None:
+        arguments.extend(
+            [
+                "--dynamic-registration-token-file",
+                str(dynamic_registration_token_file),
+            ]
+        )
+    if ciba_automated_decision_token_file is not None:
+        arguments.extend(
+            [
+                "--ciba-automated-decision-token-file",
+                str(ciba_automated_decision_token_file),
+            ]
+        )
+    arguments.extend(["--ttl-seconds", str(ttl_seconds), "--yes"])
     document = receipt(
         nazoauthctl,
         config,
         candidate,
-        [
-            "lease",
-            "create",
-            "--profile",
-            profile,
-            "--material",
-            str(material),
-            "--ttl-seconds",
-            str(ttl_seconds),
-            "--yes",
-        ],
+        arguments,
     )
     lease_id = _find_lease_id(document)
     if lease_id is None:

@@ -5,7 +5,7 @@ use nazo_auth::{
     ValidatedClientRegistration,
 };
 use nazo_identity::{TenantContext, ports::RepositoryError};
-use nazo_postgres::{OAuthClientRepository, create_pool, get_conn};
+use nazo_postgres::{ConformanceLeaseTokenDigests, OAuthClientRepository, create_pool, get_conn};
 use uuid::Uuid;
 
 fn test_repository() -> Option<OAuthClientRepository> {
@@ -102,6 +102,7 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
             tenant.tenant_id.as_uuid(),
             "oidf-test",
             &"a".repeat(64),
+            ConformanceLeaseTokenDigests::default(),
             Some(public_material.clone()),
             60,
         )
@@ -245,26 +246,162 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
     let clients = OAuthClientRepository::new(pool.clone());
     let leases = nazo_postgres::ConformanceLeaseRepository::new(pool);
     let tenant = TenantContext::default_system();
+    let initial_access_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    let unknown_initial_access_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    let ciba_decision_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    let other_ciba_decision_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    assert!(matches!(
+        leases
+            .create(
+                tenant.tenant_id.as_uuid(),
+                "openid4vc",
+                &"d".repeat(64),
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: Some(
+                        &initial_access_token_sha256,
+                    ),
+                    ciba_automated_decision_token_sha256: None,
+                },
+                None,
+                60,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
     let lease = leases
         .create(
             tenant.tenant_id.as_uuid(),
             "oidc-fapi-ciba",
             &"b".repeat(64),
+            ConformanceLeaseTokenDigests {
+                dynamic_registration_initial_access_token_sha256: Some(
+                    &initial_access_token_sha256,
+                ),
+                ciba_automated_decision_token_sha256: Some(&ciba_decision_token_sha256),
+            },
             None,
             60,
         )
         .await
         .unwrap();
+    assert_eq!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                "oidc-fapi-ciba",
+                &initial_access_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(lease.id)
+    );
+    assert!(matches!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                "openid4vc",
+                &initial_access_token_sha256,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+    assert_eq!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                "oidc-fapi-ciba",
+                &unknown_initial_access_token_sha256,
+            )
+            .await
+            .unwrap(),
+        None
+    );
     let leased_client = client(tenant);
     clients
         .insert(&leased_client, None, None, Some(lease.id))
         .await
         .unwrap();
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                leased_client.tenant_id,
+                "oidc-fapi-ciba",
+                &ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(lease.id)
+    );
+    let other_lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidc-fapi-ciba",
+            &format!("{:064x}", Uuid::now_v7().as_u128()),
+            ConformanceLeaseTokenDigests {
+                dynamic_registration_initial_access_token_sha256: None,
+                ciba_automated_decision_token_sha256: Some(&other_ciba_decision_token_sha256),
+            },
+            None,
+            60,
+        )
+        .await
+        .unwrap();
+    let other_leased_client = client(tenant);
+    clients
+        .insert(&other_leased_client, None, None, Some(other_lease.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                other_leased_client.tenant_id,
+                "oidc-fapi-ciba",
+                &other_ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(other_lease.id)
+    );
+    assert_ne!(ciba_decision_token_sha256, other_ciba_decision_token_sha256);
     assert!(
         leases
-            .active_for_client_profile(
+            .active_for_client_lease_profile(
                 leased_client.tenant_id,
                 &leased_client.client_id,
+                lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !leases
+            .active_for_client_lease_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                other_lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !leases
+            .active_for_client_lease_profile(
+                other_leased_client.tenant_id,
+                &other_leased_client.client_id,
+                lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        leases
+            .active_for_client_lease_profile(
+                other_leased_client.tenant_id,
+                &other_leased_client.client_id,
+                other_lease.id,
                 "oidc-fapi-ciba",
             )
             .await
@@ -275,6 +412,31 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         .revoke(leased_client.tenant_id, lease.id)
         .await
         .unwrap();
+    assert_eq!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                "oidc-fapi-ciba",
+                &initial_access_token_sha256,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        leases
+            .list(leased_client.tenant_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == lease.id)
+            .is_some_and(|candidate| {
+                candidate
+                    .dynamic_registration_initial_access_token_sha256
+                    .is_none()
+                    && candidate.ciba_automated_decision_token_sha256.is_none()
+            })
+    );
     assert!(
         !leases
             .active_for_client_profile(
@@ -285,6 +447,33 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
             .await
             .unwrap()
     );
+
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                leased_client.tenant_id,
+                "oidc-fapi-ciba",
+                &ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                other_leased_client.tenant_id,
+                "oidc-fapi-ciba",
+                &other_ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(other_lease.id)
+    );
+    leases
+        .revoke(other_leased_client.tenant_id, other_lease.id)
+        .await
+        .unwrap();
 
     leases.cleanup().await.unwrap();
 }

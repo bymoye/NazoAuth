@@ -422,6 +422,8 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
     let operation = TaskOperation::ConformanceLeaseCreate {
         profile: "oidf-full".to_owned(),
         material_sha256: "a".repeat(64),
+        dynamic_registration_initial_access_token_sha256: None,
+        ciba_automated_decision_token_sha256: None,
         public_material: None,
         ttl_seconds: 28_800,
     };
@@ -432,6 +434,8 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
             validate_operation(&TaskOperation::ConformanceLeaseCreate {
                 profile: "oidf-full".to_owned(),
                 material_sha256: "a".repeat(64),
+                dynamic_registration_initial_access_token_sha256: None,
+                ciba_automated_decision_token_sha256: None,
                 public_material: None,
                 ttl_seconds,
             })
@@ -442,11 +446,129 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
         validate_operation(&TaskOperation::ConformanceLeaseCreate {
             profile: "oidf-full".to_owned(),
             material_sha256: "A".repeat(64),
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: None,
             public_material: None,
             ttl_seconds: 60,
         })
         .is_err()
     );
+}
+
+#[test]
+fn dynamic_registration_initial_access_token_binding_is_lowercase_and_profile_scoped() {
+    let digest = "b".repeat(64);
+    let operation = TaskOperation::ConformanceLeaseCreate {
+        profile: "oidc-fapi-ciba".to_owned(),
+        material_sha256: "a".repeat(64),
+        dynamic_registration_initial_access_token_sha256: Some(digest.clone()),
+        ciba_automated_decision_token_sha256: None,
+        public_material: None,
+        ttl_seconds: 300,
+    };
+    validate_operation(&operation).unwrap();
+
+    let mut uppercase = digest.clone();
+    uppercase.replace_range(..1, "B");
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidc-fapi-ciba".to_owned(),
+            material_sha256: "a".repeat(64),
+            dynamic_registration_initial_access_token_sha256: Some(uppercase),
+            ciba_automated_decision_token_sha256: None,
+            public_material: None,
+            ttl_seconds: 300,
+        })
+        .is_err()
+    );
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-full".to_owned(),
+            material_sha256: "a".repeat(64),
+            dynamic_registration_initial_access_token_sha256: Some(digest),
+            ciba_automated_decision_token_sha256: None,
+            public_material: None,
+            ttl_seconds: 300,
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn ciba_automated_decision_token_binding_is_lowercase_and_profile_scoped() {
+    let digest = "c".repeat(64);
+    validate_operation(&TaskOperation::ConformanceLeaseCreate {
+        profile: "oidc-fapi-ciba".to_owned(),
+        material_sha256: "a".repeat(64),
+        dynamic_registration_initial_access_token_sha256: None,
+        ciba_automated_decision_token_sha256: Some(digest.clone()),
+        public_material: None,
+        ttl_seconds: 300,
+    })
+    .unwrap();
+
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidc-fapi-ciba".to_owned(),
+            material_sha256: "a".repeat(64),
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: Some("C".repeat(64)),
+            public_material: None,
+            ttl_seconds: 300,
+        })
+        .is_err()
+    );
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-full".to_owned(),
+            material_sha256: "a".repeat(64),
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: Some(digest),
+            public_material: None,
+            ttl_seconds: 300,
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn conformance_lease_protocol_keeps_legacy_create_tasks_compatible() {
+    let operation: TaskOperation = serde_json::from_value(serde_json::json!({
+        "name": "conformance-lease-create",
+        "profile": "oidf-full",
+        "material_sha256": "a".repeat(64),
+        "ttl_seconds": 300,
+    }))
+    .unwrap();
+    assert!(matches!(
+        operation,
+        TaskOperation::ConformanceLeaseCreate {
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: None,
+            ..
+        }
+    ));
+    validate_operation(&operation).unwrap();
+}
+
+#[test]
+fn conformance_lease_receipts_do_not_echo_token_digests() {
+    let digest = "b".repeat(64);
+    let result = TaskResult::ConformanceLeaseCreated {
+        lease: ConformanceLeaseSummary {
+            lease_id: "018f3f2a-7b55-7a25-8f20-6d526f8f44e1".to_owned(),
+            profile: "oidc-fapi-ciba".to_owned(),
+            material_sha256: "a".repeat(64),
+            created_at: 1,
+            expires_at: 301,
+            revoked_at: None,
+            cleaned_at: None,
+        },
+    };
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains(&digest));
+    assert!(!encoded.contains("dynamic_registration_initial_access_token_sha256"));
+    assert!(!encoded.contains("ciba_automated_decision_token_sha256"));
 }
 
 #[test]
@@ -462,6 +584,8 @@ fn openid4vc_lease_accepts_only_closed_public_trust_material() {
     let operation = |material| TaskOperation::ConformanceLeaseCreate {
         profile: "openid4vc".to_owned(),
         material_sha256: "a".repeat(64),
+        dynamic_registration_initial_access_token_sha256: None,
+        ciba_automated_decision_token_sha256: None,
         public_material: material,
         ttl_seconds: 28_800,
     };

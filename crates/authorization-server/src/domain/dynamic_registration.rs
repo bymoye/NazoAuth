@@ -1,18 +1,23 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{fmt::Write as _, future::Future, pin::Pin, sync::Arc};
 
 use nazo_http_actix::{
-    DynamicRegistrationEndpoint, DynamicRegistrationEndpointConfig,
+    DynamicRegistrationDependencyError, DynamicRegistrationEndpoint,
+    DynamicRegistrationEndpointConfig, DynamicRegistrationFuture,
     DynamicRegistrationRateLimitError, DynamicRegistrationRequestGuard,
 };
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 
 use crate::adapters::audit::{audit_event, audit_fields};
 use crate::adapters::security::{blake3_hex, constant_time_eq, random_urlsafe_token};
 use crate::domain::remote_client_documents::RemoteClientDocumentResolver;
+use crate::domain::tenancy::DEFAULT_TENANT_ID;
 use crate::http::admin::clients::ServerSectorIdentifierResolver;
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use crate::settings::Settings;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
+
+const CONFORMANCE_DCR_PROFILE: &str = "oidc-fapi-ciba";
 
 #[derive(Clone)]
 #[cfg_attr(test, allow(dead_code))]
@@ -77,6 +82,7 @@ pub(crate) struct ServerDynamicRegistrationRequestGuard {
     window_seconds: u64,
     max_requests: u64,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
+    conformance_leases: nazo_postgres::ConformanceLeaseRepository,
 }
 
 impl ServerDynamicRegistrationRequestGuard {
@@ -84,12 +90,14 @@ impl ServerDynamicRegistrationRequestGuard {
         rate_limits: nazo_valkey::RateLimitStore,
         config: &DynamicRegistrationConfig,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
+        conformance_leases: nazo_postgres::ConformanceLeaseRepository,
     ) -> Self {
         Self {
             rate_limits,
             window_seconds: config.rate_limit_window_seconds,
             max_requests: config.rate_limit_max_requests,
             runtime_modules,
+            conformance_leases,
         }
     }
 }
@@ -130,6 +138,26 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
         })
     }
 
+    fn conformance_lease_for_initial_access_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> DynamicRegistrationFuture<'a, Option<uuid::Uuid>> {
+        Box::pin(async move {
+            let token_sha256 = sha256_hex(token.as_bytes());
+            self.conformance_leases
+                .active_dynamic_registration_lease_id(
+                    DEFAULT_TENANT_ID,
+                    CONFORMANCE_DCR_PROFILE,
+                    &token_sha256,
+                )
+                .await
+                .map_err(|_error| {
+                    tracing::warn!("dynamic registration conformance lease lookup failed");
+                    DynamicRegistrationDependencyError::Unavailable
+                })
+        })
+    }
+
     fn audit(&self, event: &'static str, client: &nazo_auth::OAuthClient, source_ip: &str) {
         audit_event(
             event,
@@ -150,6 +178,7 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
 pub(crate) fn dynamic_registration_endpoint(
     config: DynamicRegistrationConfig,
     clients: nazo_postgres::OAuthClientRepository,
+    conformance_leases: nazo_postgres::ConformanceLeaseRepository,
     rate_limits: nazo_valkey::RateLimitStore,
     keyset: nazo_key_management::KeyManager,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
@@ -161,6 +190,7 @@ pub(crate) fn dynamic_registration_endpoint(
         rate_limits,
         &config,
         runtime_modules,
+        conformance_leases,
     ));
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
@@ -186,4 +216,22 @@ pub(crate) fn dynamic_registration_endpoint(
         ),
         request_guard,
     )
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    Sha256::digest(value)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        })
+}
+
+#[cfg(test)]
+#[test]
+fn dynamic_registration_initial_access_digest_is_lowercase_sha256() {
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
 }

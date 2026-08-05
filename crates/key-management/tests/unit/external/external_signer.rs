@@ -119,7 +119,7 @@ fn descendant_signer_command(pid_path: &Path, response: Option<&str>) -> Arc<Vec
         "sh".to_owned(),
         "-c".to_owned(),
         format!(
-            "cat >/dev/null; (sleep 30 </dev/null >/dev/null 2>&1) & child=$!; printf '%s' \"$child\" > {pid_path}; {action}",
+            "(sleep 30 </dev/null >/dev/null 2>&1) & child=$!; printf '%s' \"$child\" > {pid_path}; cat >/dev/null; {action}",
         ),
     ])
 }
@@ -147,7 +147,7 @@ fn descendant_signer_command(pid_path: &Path, response: Option<&str>) -> Arc<Vec
         "-NonInteractive".to_owned(),
         "-Command".to_owned(),
         format!(
-            "$null=[Console]::In.ReadToEnd(); $child=Start-Process -FilePath 'pwsh' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden; Set-Content -LiteralPath {pid_path} -Value $child.Id -NoNewline; {action}",
+            "$child=Start-Process -FilePath 'pwsh' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden; Set-Content -LiteralPath {pid_path} -Value $child.Id -NoNewline; $null=[Console]::In.ReadToEnd(); {action}",
         ),
     ])
 }
@@ -596,7 +596,10 @@ async fn external_signer_timeout_terminates_owned_descendant() {
     let (_private_key, public_jwk) = eddsa_fixture(kid);
     let external = external_signing_key_with_command(
         descendant_signer_command(&fixture.pid_path, None),
-        2_000,
+        // Windows PowerShell cold start can exceed two seconds under a full
+        // workspace test load. Keep the timeout well below the fixture's
+        // thirty-second sleep while allowing the descendant to be observed.
+        8_000,
     );
     let task = tokio::spawn(async move {
         sign_external_jwt_input(

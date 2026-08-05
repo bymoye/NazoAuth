@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use nazo_operator_protocol::{ConformanceLeaseSummary, Openid4vcConformanceTrust, TaskResult};
-use nazo_postgres::{ConformanceLease, ConformanceLeaseRepository};
+use nazo_postgres::{ConformanceLease, ConformanceLeaseRepository, ConformanceLeaseTokenDigests};
 use uuid::Uuid;
 
 use crate::{
@@ -13,22 +13,55 @@ use crate::{
 pub(crate) async fn operator_create(
     profile: &str,
     material_sha256: &str,
+    dynamic_registration_initial_access_token_sha256: Option<&str>,
+    ciba_automated_decision_token_sha256: Option<&str>,
     public_material: Option<Openid4vcConformanceTrust>,
     ttl_seconds: u64,
 ) -> anyhow::Result<TaskResult> {
-    let repository = repository()?;
     let ttl_seconds = i64::try_from(ttl_seconds).context("conformance lease ttl is too large")?;
+    if (dynamic_registration_initial_access_token_sha256.is_some()
+        || ciba_automated_decision_token_sha256.is_some())
+        && profile != "oidc-fapi-ciba"
+    {
+        anyhow::bail!("conformance token bindings are only allowed for the oidc-fapi-ciba profile");
+    }
+    for (digest, purpose) in [
+        (
+            dynamic_registration_initial_access_token_sha256,
+            "dynamic registration initial-access-token",
+        ),
+        (
+            ciba_automated_decision_token_sha256,
+            "CIBA automated-decision token",
+        ),
+    ] {
+        let Some(digest) = digest else {
+            continue;
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            anyhow::bail!("{purpose} binding must be a lowercase SHA-256 digest");
+        }
+    }
     if let Some(material) = public_material.as_ref() {
         crate::domain::parse_conformance_credential_trust_anchor(
             &material.credential_trust_anchor_pem,
         )
         .context("invalid OpenID4VC conformance credential trust anchor")?;
     }
+    let repository = repository()?;
     let lease = repository
         .create(
             DEFAULT_TENANT_ID,
             profile,
             material_sha256,
+            ConformanceLeaseTokenDigests {
+                dynamic_registration_initial_access_token_sha256,
+                ciba_automated_decision_token_sha256,
+            },
             public_material.map(|material| {
                 serde_json::to_value(material).expect("serialize conformance trust")
             }),

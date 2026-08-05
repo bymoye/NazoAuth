@@ -263,6 +263,7 @@ pub async fn run() -> anyhow::Result<()> {
     let dynamic_registration_handles = web::Data::new(dynamic_registration_endpoint(
         dynamic_registration_config,
         nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
+        nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
         nazo_valkey::RateLimitStore::new(&valkey_connection),
         keyset.clone(),
         runtime_modules.registry.clone(),

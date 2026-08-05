@@ -225,6 +225,8 @@ diesel::table! {
         tenant_id -> Uuid,
         profile -> Varchar,
         material_sha256 -> Varchar,
+        dynamic_registration_initial_access_token_sha256 -> Nullable<Varchar>,
+        ciba_automated_decision_token_sha256 -> Nullable<Varchar>,
         public_material -> Nullable<Jsonb>,
         created_at -> Timestamptz,
         expires_at -> Timestamptz,

@@ -22,6 +22,7 @@ use nazo_auth::{
 };
 use nazo_identity::TenantContext;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     authorization_error_response, empty_response, empty_response_no_store, json_response_no_store,
@@ -52,6 +53,14 @@ pub trait DynamicRegistrationRequestGuard: Send + Sync {
         &'a self,
         source_ip: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), DynamicRegistrationRateLimitError>> + Send + 'a>>;
+
+    /// Resolves a non-configured initial access token to one effective
+    /// conformance lease. Implementations must derive and compare a
+    /// non-reversible digest rather than persist or log the bearer token.
+    fn conformance_lease_for_initial_access_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> DynamicRegistrationFuture<'a, Option<Uuid>>;
 
     fn audit(&self, event: &'static str, client: &OAuthClient, source_ip: &str);
 }
@@ -243,20 +252,10 @@ pub async fn dynamic_client_registration(
         Ok(source_ip) => source_ip,
         Err(response) => return response,
     };
-    if !initial_access_token_authorized(
-        endpoint.security.registration_tokens.as_ref(),
-        request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok()),
-        endpoint.config.initial_access_token.as_deref(),
-    ) {
-        return oauth_bearer_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Initial access token is missing or invalid.",
-        );
-    }
+    let initial_access = match authorize_initial_access(&endpoint, &request).await {
+        Ok(grant) => grant,
+        Err(response) => return response,
+    };
 
     let prepared = match prepare_dynamic_client_registration(
         payload,
@@ -274,20 +273,27 @@ pub async fn dynamic_client_registration(
     };
     let response_types = prepared.response_types.clone();
     let registration_access_token = endpoint.security.registration_tokens.random_token();
-    let prepared_insert =
-        match prepare_insert(&endpoint, prepared, &registration_access_token).await {
-            Ok(prepared) => prepared,
-            Err(AdminClientError::InvalidRequest(message)) => {
-                return dynamic_registration_error_response(map_insert_error(message));
-            }
-            Err(_error) => {
-                return oauth_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "server_error",
-                    "Dynamic client registration failed.",
-                );
-            }
-        };
+    let prepared_insert = match prepare_insert(
+        &endpoint,
+        prepared,
+        &registration_access_token,
+        initial_access.conformance_lease_id(),
+        None,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(AdminClientError::InvalidRequest(message)) => {
+            return dynamic_registration_error_response(map_insert_error(message));
+        }
+        Err(_error) => {
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "Dynamic client registration failed.",
+            );
+        }
+    };
     let issued_secret = prepared_insert.issued_secret.clone();
     match endpoint.clients.insert(&prepared_insert).await {
         Ok(client) => {
@@ -396,7 +402,15 @@ pub async fn client_configuration_put(
     };
     let response_types = registration.response_types.clone();
     let registration_access_token = endpoint.security.registration_tokens.random_token();
-    let prepared = match prepare_insert(&endpoint, registration, &registration_access_token).await {
+    let prepared = match prepare_insert(
+        &endpoint,
+        registration,
+        &registration_access_token,
+        None,
+        current.security_policy.as_ref(),
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(AdminClientError::InvalidRequest(message)) => {
             return dynamic_registration_error_response(map_insert_error(message));
@@ -499,6 +513,8 @@ async fn prepare_insert(
     endpoint: &DynamicRegistrationEndpoint,
     mut registration: nazo_auth::PreparedDynamicClientRegistration,
     registration_access_token: &str,
+    conformance_lease_id: Option<Uuid>,
+    security_policy_override: Option<&nazo_auth::ClientSecurityPolicy>,
 ) -> Result<PreparedClientRegistration, AdminClientError> {
     if let Some(uri) = registration.jwks_uri.as_deref() {
         registration.jwks = Some(endpoint.security.remote_jwks.resolve(uri).await.map_err(
@@ -507,13 +523,21 @@ async fn prepare_insert(
             },
         )?);
     }
+    let mut request = registration.into_create_client_request();
+    request.conformance_lease_id = conformance_lease_id;
+    if let Some(security_policy) = security_policy_override {
+        request.security_policy = security_policy.clone();
+    }
+    if conformance_lease_id.is_some() && request.client_type == "confidential" {
+        request.security_policy.allow_confidential_oidc_without_pkce = true;
+    }
     let policy = AdminClientPolicy {
         tenant: TenantContext::default_system(),
         pairwise_subject_secret: endpoint.config.pairwise_subject_secret.clone(),
         client_secret_pepper: endpoint.config.client_secret_pepper.clone(),
     };
     let mut prepared = nazo_auth::prepare_client_registration(
-        registration.into_create_client_request(),
+        request,
         &policy,
         endpoint.sector_identifiers.as_ref(),
         endpoint.security.crypto.as_ref(),
@@ -526,6 +550,56 @@ async fn prepare_insert(
             .token_hash(registration_access_token),
     );
     Ok(prepared)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicRegistrationInitialAccessGrant {
+    Configured,
+    ConformanceLease(Uuid),
+}
+
+impl DynamicRegistrationInitialAccessGrant {
+    fn conformance_lease_id(self) -> Option<Uuid> {
+        match self {
+            Self::Configured => None,
+            Self::ConformanceLease(lease_id) => Some(lease_id),
+        }
+    }
+}
+
+async fn authorize_initial_access(
+    endpoint: &DynamicRegistrationEndpoint,
+    request: &HttpRequest,
+) -> Result<DynamicRegistrationInitialAccessGrant, HttpResponse> {
+    let authorization_header = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if initial_access_token_authorized(
+        endpoint.security.registration_tokens.as_ref(),
+        authorization_header,
+        endpoint.config.initial_access_token.as_deref(),
+    ) {
+        return Ok(DynamicRegistrationInitialAccessGrant::Configured);
+    }
+    let Some(actual) = bearer_token(request) else {
+        return Err(initial_access_denied());
+    };
+    match endpoint
+        .request_guard
+        .conformance_lease_for_initial_access_token(actual)
+        .await
+    {
+        Ok(Some(lease_id)) => Ok(DynamicRegistrationInitialAccessGrant::ConformanceLease(
+            lease_id,
+        )),
+        Ok(None) => Err(initial_access_denied()),
+        Err(_) => Err(oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "Dynamic client registration authentication failed.",
+        )),
+    }
 }
 
 async fn authenticate_registration_client(
@@ -764,6 +838,14 @@ fn parse_bearer(value: &str) -> Option<&str> {
         && !token.is_empty()
         && token.split_whitespace().count() == 1)
         .then_some(token)
+}
+
+fn initial_access_denied() -> HttpResponse {
+    oauth_bearer_error(
+        StatusCode::UNAUTHORIZED,
+        "invalid_token",
+        "Initial access token is missing or invalid.",
+    )
 }
 
 fn registration_access_denied() -> HttpResponse {
