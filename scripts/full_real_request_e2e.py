@@ -2506,6 +2506,35 @@ def run() -> None:
         exercise_saml_federation()
 
         login(admin, ADMIN_EMAIL, ADMIN_PASSWORD, "POST /auth/login admin")
+        admin_totp_begin = expect_json(
+            expect_status(
+                "POST /auth/me/mfa/totp/begin admin",
+                admin.post(
+                    f"{BASE_URL}/auth/me/mfa/totp/begin",
+                    headers=csrf_header(admin),
+                    timeout=10,
+                ),
+                200,
+            )
+        )
+        admin_totp_confirm = expect_json(
+            expect_status(
+                "POST /auth/me/mfa/totp/confirm admin",
+                admin.post(
+                    f"{BASE_URL}/auth/me/mfa/totp/confirm",
+                    json={"code": totp_code(admin_totp_begin["secret_base32"])},
+                    headers=csrf_header(admin),
+                    timeout=10,
+                ),
+                200,
+            )
+        )
+        check(
+            "admin_mfa_step_up_is_interactive",
+            admin_totp_confirm.get("mfa_enabled") is True
+            and len(admin_totp_confirm.get("backup_codes", [])) == 10,
+            admin_totp_confirm,
+        )
         admin_users = expect_json(
             expect_status(
                 "GET /admin/users",
