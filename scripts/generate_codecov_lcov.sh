@@ -131,6 +131,12 @@ export REQUIRE_PUSHED_AUTHORIZATION_REQUESTS='false'
 # explicitly selecting the documented non-strict repository preflight for
 # this disposable functional-test fixture.
 export SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE='false'
+# Exercise the real encrypted TOTP persistence boundary with a fresh key that
+# exists only for this coverage run.  Both server processes inherit the same
+# value so they can read each other's envelopes without weakening the
+# production fail-closed requirement.
+export MFA_TOTP_ENCRYPTION_KEY_ID='codecov-ephemeral-v1'
+export MFA_TOTP_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 export ENABLE_REQUEST_OBJECT='true'
 export ENABLE_PAR_REQUEST_OBJECT='true'
 export ENABLE_AUTHORIZATION_DETAILS='true'
