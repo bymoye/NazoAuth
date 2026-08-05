@@ -128,6 +128,19 @@ pub fn db_pool_metrics() -> DbPoolMetrics {
 }
 
 pub async fn run_pending_migrations(database_url: &str) -> anyhow::Result<bool> {
+    let database_url = database_url.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+        runtime.block_on(run_pending_migrations_inner(&database_url))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("migration runtime task failed: {error}"))?
+}
+
+async fn run_pending_migrations_inner(database_url: &str) -> anyhow::Result<bool> {
     use diesel_async::RunQueryDsl as _;
 
     let mut connection = establish_connection(database_url).await?;
