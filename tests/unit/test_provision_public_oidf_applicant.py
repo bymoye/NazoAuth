@@ -28,6 +28,7 @@ class PublicApplicantProvisioningTests(unittest.TestCase):
             "applicant_password": "applicant-password",
             "admin_email": "admin@example.test",
             "admin_password": "administrator-password",
+            "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
         }
         self.account = {
             "id": str(uuid.uuid4()),

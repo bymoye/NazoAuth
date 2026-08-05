@@ -50,6 +50,7 @@ REQUIRED_SECRET_FIELDS = (
     "OIDF_APPLICANT_PASSWORD",
     "OIDF_ADMIN_EMAIL",
     "OIDF_ADMIN_PASSWORD",
+    "OIDF_ADMIN_TOTP_SECRET",
     "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
     "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
     "OIDF_CONFORMANCE_TOKEN",
@@ -344,6 +345,7 @@ def onboarding_credentials(secrets: dict[str, str]) -> bytes:
         "applicant_password": secrets["OIDF_APPLICANT_PASSWORD"],
         "admin_email": secrets["OIDF_ADMIN_EMAIL"],
         "admin_password": secrets["OIDF_ADMIN_PASSWORD"],
+        "admin_mfa_totp_secret": secrets["OIDF_ADMIN_TOTP_SECRET"],
     }
     return json.dumps(document, separators=(",", ":")).encode("utf-8")
 

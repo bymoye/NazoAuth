@@ -9,11 +9,15 @@ and mTLS trust review steps available to ordinary operators.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import http.cookiejar
 import hashlib
+import hmac
 import json
 import os
 import ssl
+import struct
 import sys
 import tempfile
 import time
@@ -29,6 +33,9 @@ MAX_CREDENTIAL_BYTES = 16 * 1024
 DEFAULT_TIMEOUT_SECONDS = 20.0
 LOGIN_TRANSPORT_ATTEMPTS = 3
 LOGIN_RETRY_BASE_SECONDS = 1.0
+MFA_VERIFICATION_ATTEMPTS = 2
+TOTP_PERIOD_SECONDS = 30
+TOTP_DIGITS = 6
 
 
 class OnboardingError(RuntimeError):
@@ -88,10 +95,11 @@ def read_operator_credentials(args: argparse.Namespace) -> dict[str, str]:
         "applicant_password",
         "admin_email",
         "admin_password",
+        "admin_mfa_totp_secret",
     }
     if not isinstance(value, dict) or set(value) != required:
         raise OnboardingError(
-            "operator credentials must contain exactly applicant_email, applicant_password, admin_email, and admin_password"
+            "operator credentials must contain exactly applicant_email, applicant_password, admin_email, admin_password, and admin_mfa_totp_secret"
         )
     if any(
         not isinstance(value[field], str)
@@ -110,6 +118,24 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise OnboardingError(
             f"unexpected redirect from control-plane request: HTTP {code}"
         )
+
+
+def totp_code(secret_base32: str, timestamp: float | None = None) -> str:
+    normalized = "".join(secret_base32.split()).upper()
+    if not normalized or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for character in normalized):
+        raise OnboardingError("administrator TOTP secret is not canonical base32")
+    padded = normalized + "=" * ((8 - len(normalized) % 8) % 8)
+    try:
+        secret = base64.b32decode(padded, casefold=False)
+    except binascii.Error as error:
+        raise OnboardingError("administrator TOTP secret is not canonical base32") from error
+    if len(secret) < 16:
+        raise OnboardingError("administrator TOTP secret is too short")
+    counter = int(time.time() if timestamp is None else timestamp) // TOTP_PERIOD_SECONDS
+    digest = hmac.new(secret, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFF_FFFF
+    return f"{value % (10**TOTP_DIGITS):0{TOTP_DIGITS}d}"
 
 
 def canonical_https_origin(value: str, *, label: str) -> str:
@@ -194,7 +220,14 @@ class ControlPlaneSession:
         self.csrf_token = csrf_token
 
     @classmethod
-    def login(cls, origin: str, email: str, password: str) -> "ControlPlaneSession":
+    def login(
+        cls,
+        origin: str,
+        email: str,
+        password: str,
+        *,
+        mfa_totp_secret: str | None = None,
+    ) -> "ControlPlaneSession":
         for attempt in range(LOGIN_TRANSPORT_ATTEMPTS):
             cookie_jar = http.cookiejar.CookieJar()
             opener = urllib.request.build_opener(
@@ -224,11 +257,36 @@ class ControlPlaneSession:
             csrf_token = body.get("csrf_token") if isinstance(body, dict) else None
             if not isinstance(csrf_token, str) or not csrf_token:
                 raise OnboardingError("login did not establish a CSRF token")
-            if body.get("mfa_required") is True:
-                raise OnboardingError(
-                    "login requires interactive MFA; use an approved automation identity"
-                )
             session.csrf_token = csrf_token
+            if body.get("mfa_required") is True:
+                if mfa_totp_secret is None:
+                    raise OnboardingError(
+                        "login requires interactive MFA and no TOTP secret was supplied"
+                    )
+                for mfa_attempt in range(MFA_VERIFICATION_ATTEMPTS):
+                    try:
+                        session.request_json(
+                            "POST",
+                            "/auth/mfa/verify",
+                            {"code": totp_code(mfa_totp_secret), "remember_device": False},
+                            expected_status=200,
+                            csrf=True,
+                        )
+                        break
+                    except OnboardingHttpError as error:
+                        if error.status not in {400, 401} or mfa_attempt + 1 == MFA_VERIFICATION_ATTEMPTS:
+                            raise
+                        wait_seconds = TOTP_PERIOD_SECONDS - (time.time() % TOTP_PERIOD_SECONDS) + 1
+                        time.sleep(wait_seconds)
+                refreshed = session.request_json(
+                    "GET",
+                    "/auth/csrf",
+                    expected_status=200,
+                )
+                refreshed_token = refreshed.get("csrf_token") if isinstance(refreshed, dict) else None
+                if not isinstance(refreshed_token, str) or not refreshed_token:
+                    raise OnboardingError("MFA verification did not refresh the CSRF token")
+                session.csrf_token = refreshed_token
             return session
 
         raise AssertionError("login retry loop exhausted without returning or raising")
@@ -443,6 +501,7 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     applicant_password = credentials["applicant_password"]
     admin_email = credentials["admin_email"]
     admin_password = credentials["admin_password"]
+    admin_mfa_totp_secret = credentials["admin_mfa_totp_secret"]
     if args.state_file.exists():
         raise OnboardingError(f"state file already exists; clean up the prior onboarding first: {args.state_file}")
 
@@ -450,7 +509,12 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     if not isinstance(plan_document, dict) or not isinstance(plan_document.get("configs"), dict):
         raise OnboardingError("plan config document must contain a configs object")
     applicant = ControlPlaneSession.login(origin, applicant_email, applicant_password)
-    admin = ControlPlaneSession.login(origin, admin_email, admin_password)
+    admin = ControlPlaneSession.login(
+        origin,
+        admin_email,
+        admin_password,
+        mfa_totp_secret=admin_mfa_totp_secret,
+    )
     applicant_me = applicant.request_json("GET", "/auth/me", expected_status=200)
     admin_me = admin.request_json("GET", "/auth/me", expected_status=200)
     if applicant_me.get("id") == admin_me.get("id"):
@@ -591,8 +655,14 @@ def cleanup_onboarding(args: argparse.Namespace) -> int:
     applicant_password = credentials["applicant_password"]
     admin_email = credentials["admin_email"]
     admin_password = credentials["admin_password"]
+    admin_mfa_totp_secret = credentials["admin_mfa_totp_secret"]
     applicant = ControlPlaneSession.login(origin, applicant_email, applicant_password)
-    admin = ControlPlaneSession.login(origin, admin_email, admin_password)
+    admin = ControlPlaneSession.login(
+        origin,
+        admin_email,
+        admin_password,
+        mfa_totp_secret=admin_mfa_totp_secret,
+    )
     for item in reversed(state.get("clients", [])):
         if not isinstance(item, dict):
             raise OnboardingError("cleanup state contains an invalid client record")

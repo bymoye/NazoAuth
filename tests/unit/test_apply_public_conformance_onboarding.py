@@ -96,6 +96,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     }
                 ).encode("utf-8"),
             )
@@ -197,6 +198,42 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
             )
         request_json.assert_called_once()
         sleep.assert_not_called()
+
+    def test_totp_uses_the_rfc6238_sha1_six_digit_profile(self):
+        module = load_module()
+
+        self.assertEqual(
+            module.totp_code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59),
+            "287082",
+        )
+
+    def test_login_completes_mfa_challenge_and_refreshes_csrf(self):
+        module = load_module()
+
+        with (
+            mock.patch.object(
+                module.ControlPlaneSession,
+                "request_json",
+                side_effect=[
+                    {"csrf_token": "pending-csrf", "mfa_required": True},
+                    {"success": True, "method": "totp"},
+                    {"csrf_token": "fresh-csrf"},
+                ],
+            ) as request_json,
+            mock.patch.object(module, "totp_code", return_value="123456"),
+        ):
+            session = module.ControlPlaneSession.login(
+                "https://issuer.example",
+                "operator@example.com",
+                "password",
+                mfa_totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+            )
+
+        self.assertEqual(session.csrf_token, "fresh-csrf")
+        self.assertEqual(request_json.call_count, 3)
+        self.assertEqual(request_json.call_args_list[1].args[:2], ("POST", "/auth/mfa/verify"))
+        self.assertEqual(request_json.call_args_list[1].args[2]["code"], "123456")
+        self.assertEqual(request_json.call_args_list[2].args[:2], ("GET", "/auth/csrf"))
 
     def test_access_request_site_name_is_stable_unique_and_within_product_limit(self):
         module = load_module()
@@ -318,6 +355,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     },
                 ),
                 mock.patch.object(
@@ -399,6 +437,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     },
                 ),
                 mock.patch.object(
@@ -445,6 +484,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     },
                 ),
                 mock.patch.object(

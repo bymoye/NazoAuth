@@ -82,6 +82,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
             "OIDF_APPLICANT_PASSWORD": "applicant-password",
             "OIDF_ADMIN_EMAIL": "admin@example.com",
             "OIDF_ADMIN_PASSWORD": "admin-password",
+            "OIDF_ADMIN_TOTP_SECRET": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
             "OIDF_CONFORMANCE_TOKEN": "suite-token",
         }
 
@@ -94,6 +95,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 "applicant_password": "applicant-password",
                 "admin_email": "admin@example.com",
                 "admin_password": "admin-password",
+                "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
             },
         )
         arguments = self.module.onboarding_args(
@@ -190,6 +192,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                         "oidf_applicant_password": "applicant-password",
                         "oidf_admin_email": "admin@example.com",
                         "oidf_admin_password": "admin-password",
+                        "oidf_admin_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                         "oidf_dynamic_registration_initial_access_token": "d" * 48,
                         "oidf_ciba_automated_decision_token": "c" * 48,
                         "oidf_conformance_token": "token",
@@ -261,6 +264,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
                         "oidf_applicant_password": "applicant-password",
                         "oidf_admin_email": "admin@example.com",
                         "oidf_admin_password": "admin-password",
+                        "oidf_admin_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                         "oidf_dynamic_registration_initial_access_token": "d" * 48,
                         "oidf_ciba_automated_decision_token": "c" * 48,
                         "oidf_conformance_token": "token",

@@ -29,6 +29,7 @@ REQUIRED_FIELDS = (
     "applicant_password",
     "admin_email",
     "admin_password",
+    "admin_mfa_totp_secret",
 )
 MAX_USERS_TO_INSPECT = 10_000
 OIDF_PROFILE = {
@@ -169,6 +170,7 @@ def provision(origin: str, credentials: dict[str, str]) -> dict[str, str]:
         origin,
         credentials["admin_email"],
         credentials["admin_password"],
+        mfa_totp_secret=credentials["admin_mfa_totp_secret"],
     )
     status = "created"
     try:
