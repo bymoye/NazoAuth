@@ -125,15 +125,15 @@ fn authorization_code_client_mismatch_response() -> HttpResponse {
     )
 }
 
-/// Bind a recoverable authorization-code response to the one-time request
-/// proofs that the caller must present again.  The code hash alone is not a
-/// sufficient recovery key: it would let a consumed public/PKCE code bypass
-/// `code_verifier` validation after the pending state was removed.
+/// Bind the one-time authorization-code redemption to the request proofs that
+/// produced its tokens. The binding is retained only to decide whether a
+/// later replay may revoke those tokens; a replay never recovers a response.
 fn authorization_code_grant_key(
     code_hash: &str,
     form: &TokenForm,
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
+    client_attestation_jkt: Option<&str>,
 ) -> String {
     let proof = json!({
         "code_hash": code_hash,
@@ -143,6 +143,7 @@ fn authorization_code_grant_key(
         "audiences": &form.audiences,
         "dpop_jkt": dpop_jkt,
         "mtls_x5t_s256": mtls_x5t_s256,
+        "client_attestation_jkt": client_attestation_jkt,
     });
     format!("authorization_code:{}", blake3_hex(&proof.to_string()))
 }
@@ -394,6 +395,7 @@ pub(crate) async fn token_authorization_code_with_service(
         form,
         dpop_jkt.as_deref(),
         mtls_x5t_s256.as_deref(),
+        client_attestation_jkt,
     );
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
@@ -479,6 +481,21 @@ pub(crate) async fn token_authorization_code_with_service(
             Err(response) => return response,
         };
     let payload = *payload;
+    if payload.expires_at <= Utc::now() {
+        mark_failed_authorization_code(
+            token_service,
+            issuance.config.auth_code_ttl_seconds(),
+            &code_hash,
+            "authorization_code_expired",
+        )
+        .await;
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "授权码无效或已过期.",
+            false,
+        );
+    }
     if payload.client_id != client.client_id
         || !redirect_uri_matches_authorization_request(&payload, form.redirect_uri.as_deref())
     {

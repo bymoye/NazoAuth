@@ -1532,6 +1532,7 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
             &form_for_code(&code),
             None,
             None,
+            None,
         )),
         access_token_jti: format!("access-jti-{}", Uuid::now_v7()),
         access_token_expires_at: Utc::now().timestamp() + 300,
@@ -1626,6 +1627,7 @@ async fn token_authorization_code_replay_fails_closed_when_replayed_client_looku
                         &form_for_code(&code),
                         None,
                         None,
+                        None,
                     )),
                     access_token_jti: format!("access-jti-{}", Uuid::now_v7()),
                     access_token_expires_at: Utc::now().timestamp() + 300,
@@ -1676,6 +1678,34 @@ async fn token_authorization_code_reports_busy_failed_and_missing_states() {
     .await;
     assert_eq!(consuming_response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&consuming_response), "invalid_grant");
+
+    let expired_code = format!("code-{}", Uuid::now_v7());
+    let mut expired_payload = payload_for_client(&client);
+    expired_payload.expires_at = Utc::now() - Duration::seconds(1);
+    fixture
+        .store_code_state(
+            &expired_code,
+            &AuthorizationCodeState::Pending {
+                payload: expired_payload,
+            },
+        )
+        .await;
+    let expired_response = token_authorization_code(
+        &fixture.state,
+        &req,
+        &client,
+        &form_for_code(&expired_code),
+        None,
+    )
+    .await;
+    assert_eq!(expired_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&expired_response), "invalid_grant");
+    match fixture.code_state(&expired_code).await {
+        AuthorizationCodeState::Failed { error, .. } => {
+            assert_eq!(error, "authorization_code_expired");
+        }
+        _ => panic!("expired authorization code should be failed closed"),
+    }
 
     let failed_code = format!("code-{}", Uuid::now_v7());
     fixture
