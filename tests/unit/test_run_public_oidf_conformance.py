@@ -34,6 +34,92 @@ class PublicOidfRunnerTests(unittest.TestCase):
                 with self.assertRaises(self.module.PublicRunError):
                     self.module.origin(invalid, "--suite")
 
+    def test_target_metadata_must_match_the_requested_issuer_and_browser_routes(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = (
+            "https://issuer.example/.well-known/openid-configuration"
+        )
+        response.read.return_value = json.dumps(
+            {
+                "issuer": "https://issuer.example",
+                "authorization_endpoint": "https://issuer.example/authorize",
+                "token_endpoint": "https://issuer.example/token",
+                "jwks_uri": "https://issuer.example/jwks",
+                "registration_endpoint": "https://issuer.example/register",
+                "end_session_endpoint": "https://issuer.example/logout",
+                "check_session_iframe": "https://issuer.example/check_session",
+                "mtls_endpoint_aliases": {
+                    "token_endpoint": "https://issuer.example/token",
+                },
+            }
+        ).encode()
+        with mock.patch.object(self.module.urllib.request, "urlopen", return_value=response):
+            self.module.verify_target_metadata("https://issuer.example")
+
+        response.read.return_value = json.dumps(
+            {
+                "issuer": "https://other.example",
+                "authorization_endpoint": "https://other.example/authorize",
+                "end_session_endpoint": "https://other.example/logout",
+                "check_session_iframe": "https://other.example/check_session",
+            }
+        ).encode()
+        with (
+            mock.patch.object(self.module.urllib.request, "urlopen", return_value=response),
+            self.assertRaisesRegex(self.module.PublicRunError, "issuer does not match"),
+        ):
+            self.module.verify_target_metadata("https://issuer.example")
+
+        response.read.return_value = json.dumps(
+            {
+                "issuer": "https://issuer.example",
+                "authorization_endpoint": "https://issuer.example/wrong-authorize",
+                "end_session_endpoint": "https://issuer.example/logout",
+                "check_session_iframe": "https://issuer.example/check_session",
+            }
+        ).encode()
+        with (
+            mock.patch.object(self.module.urllib.request, "urlopen", return_value=response),
+            self.assertRaisesRegex(
+                self.module.PublicRunError, "authorization_endpoint does not match"
+            ),
+        ):
+            self.module.verify_target_metadata("https://issuer.example")
+
+    def test_target_metadata_rejects_cross_origin_protocol_and_mtls_endpoints(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.geturl.return_value = (
+            "https://issuer.example/.well-known/openid-configuration"
+        )
+        base = {
+            "issuer": "https://issuer.example",
+            "authorization_endpoint": "https://issuer.example/authorize",
+            "end_session_endpoint": "https://issuer.example/logout",
+            "check_session_iframe": "https://issuer.example/check_session",
+        }
+        for field, value in (
+            ("token_endpoint", "https://other.example/token"),
+            (
+                "mtls_endpoint_aliases",
+                {"token_endpoint": "https://other.example/token"},
+            ),
+        ):
+            with self.subTest(field=field):
+                response.read.return_value = json.dumps(
+                    {**base, field: value}
+                ).encode()
+                with (
+                    mock.patch.object(
+                        self.module.urllib.request, "urlopen", return_value=response
+                    ),
+                    self.assertRaisesRegex(
+                        self.module.PublicRunError, "must remain on --target-issuer"
+                    ),
+                ):
+                    self.module.verify_target_metadata("https://issuer.example")
+
     def test_cli_defaults_to_the_validated_group_concurrency(self):
         args = self.module.parse_args(
             [
@@ -208,6 +294,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
             with (
                 mock.patch.object(self.module, "verify_source"),
                 mock.patch.object(self.module, "verify_suite"),
+                mock.patch.object(self.module, "verify_target_metadata"),
                 mock.patch.object(
                     self.module,
                     "read_secret_document",
@@ -303,6 +390,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
             with (
                 mock.patch.object(self.module, "verify_source"),
                 mock.patch.object(self.module, "verify_suite"),
+                mock.patch.object(self.module, "verify_target_metadata"),
                 mock.patch.object(
                     self.module,
                     "read_secret_document",
@@ -423,6 +511,7 @@ class PublicOidfRunnerTests(unittest.TestCase):
             with (
                 mock.patch.object(self.module, "verify_source"),
                 mock.patch.object(self.module, "verify_suite"),
+                mock.patch.object(self.module, "verify_target_metadata"),
                 mock.patch.object(
                     self.module,
                     "read_secret_document",
@@ -487,6 +576,35 @@ class PublicOidfRunnerTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(self.module.main([]), 143)
+
+    def test_termination_prevents_queued_groups_from_starting(self):
+        invocations = (
+            ("01-first", ["runner", "first"]),
+            ("02-queued", ["runner", "queued"]),
+        )
+
+        def terminate_first(*_args, **_kwargs):
+            self.module.request_termination(signal.SIGTERM, None)
+
+        with (
+            self.module.termination_signal_handlers(),
+            mock.patch.object(
+                self.module,
+                "command",
+                side_effect=terminate_first,
+            ) as command,
+            self.assertRaises(self.module.TerminationRequested),
+        ):
+            self.module.run_group_phase(
+                "safe",
+                invocations,
+                (Path("suite"),),
+                1,
+                {},
+                "suite-token",
+            )
+
+        command.assert_called_once()
 
     def test_plan_groups_use_explicit_inputs_and_isolate_browser_state(self):
         with tempfile.TemporaryDirectory() as directory:

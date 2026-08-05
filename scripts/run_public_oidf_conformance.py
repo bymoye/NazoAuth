@@ -59,6 +59,21 @@ SECRET_INPUT_FIELDS = tuple(name.lower() for name in REQUIRED_SECRET_FIELDS)
 OFFICIAL_INGRESS_ONLY_WARNING_CONDITIONS = frozenset({"EnsureIncomingTls13"})
 MAX_SAFE_GROUP_WORKERS = 1
 MAX_BROWSER_GROUP_WORKERS = 1
+MAX_DISCOVERY_METADATA_BYTES = 1024 * 1024
+SENSITIVE_DISCOVERY_URL_FIELDS = (
+    "authorization_endpoint",
+    "token_endpoint",
+    "userinfo_endpoint",
+    "jwks_uri",
+    "registration_endpoint",
+    "pushed_authorization_request_endpoint",
+    "backchannel_authentication_endpoint",
+    "revocation_endpoint",
+    "introspection_endpoint",
+    "device_authorization_endpoint",
+    "end_session_endpoint",
+    "check_session_iframe",
+)
 
 
 class PublicRunError(RuntimeError):
@@ -143,6 +158,76 @@ def origin(value: str, option: str) -> str:
     if parsed.scheme != "https" or not parsed.netloc or parsed.path not in ("", "/"):
         raise PublicRunError(f"{option} must be an HTTPS origin without a path")
     return parsed._replace(path="", query="", fragment="").geturl()
+
+
+def verify_target_metadata(target_issuer: str) -> None:
+    discovery_url = f"{target_issuer}/.well-known/openid-configuration"
+    request = urllib.request.Request(
+        discovery_url,
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.geturl() != discovery_url:
+                raise PublicRunError("target discovery endpoint must not redirect")
+            payload = response.read(MAX_DISCOVERY_METADATA_BYTES + 1)
+    except PublicRunError:
+        raise
+    except (OSError, UnicodeError, urllib.error.URLError) as error:
+        raise PublicRunError("target discovery endpoint is unavailable") from error
+    if len(payload) > MAX_DISCOVERY_METADATA_BYTES:
+        raise PublicRunError("target discovery metadata exceeds the size limit")
+    try:
+        metadata = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise PublicRunError("target discovery metadata is not valid JSON") from error
+    if not isinstance(metadata, dict):
+        raise PublicRunError("target discovery metadata must be a JSON object")
+    if metadata.get("issuer") != target_issuer:
+        raise PublicRunError("target discovery issuer does not match --target-issuer")
+
+    def require_target_origin(value: object, field: str) -> None:
+        if not isinstance(value, str):
+            raise PublicRunError(f"target discovery {field} must be an HTTPS URL")
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed._replace(path="", query="", fragment="").geturl()
+            != target_issuer
+        ):
+            raise PublicRunError(
+                f"target discovery {field} must remain on --target-issuer"
+            )
+
+    for field in SENSITIVE_DISCOVERY_URL_FIELDS:
+        if field in metadata:
+            require_target_origin(metadata[field], field)
+    aliases = metadata.get("mtls_endpoint_aliases")
+    if aliases is not None:
+        if not isinstance(aliases, dict):
+            raise PublicRunError(
+                "target discovery mtls_endpoint_aliases must be a JSON object"
+            )
+        for field, value in aliases.items():
+            if not isinstance(field, str):
+                raise PublicRunError(
+                    "target discovery mtls_endpoint_aliases contains an invalid field"
+                )
+            require_target_origin(value, f"mtls_endpoint_aliases.{field}")
+    for field, path in (
+        ("authorization_endpoint", "/authorize"),
+        ("end_session_endpoint", "/logout"),
+        ("check_session_iframe", "/check_session"),
+    ):
+        if metadata.get(field) != f"{target_issuer}{path}":
+            raise PublicRunError(
+                f"target discovery {field} does not match NazoAuth browser automation"
+            )
 
 
 def command(
@@ -766,6 +851,8 @@ def run_group_phase(
         available.put(suite_dir)
 
     def run_one(name: str, invocation: list[str]) -> None:
+        if _TERMINATION_EVENT.is_set():
+            raise TerminationRequested(termination_signum())
         suite_dir = available.get()
         try:
             resolved = [
@@ -965,6 +1052,7 @@ def run(args: argparse.Namespace) -> None:
     if args.deployed_source_dir != ROOT or args.deployed_sha != args.runner_sha:
         verify_source(args.deployed_source_dir, args.deployed_sha, "deployed")
     verify_suite(args.suite_dir, args.suite_revision)
+    verify_target_metadata(args.target_issuer)
     secret_document = read_secret_document(args, required_fields=SECRET_INPUT_FIELDS)
     secrets = normalized_secrets(secret_document)
     env = sanitized_environment(
