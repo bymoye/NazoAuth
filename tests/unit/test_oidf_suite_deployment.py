@@ -79,6 +79,7 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         self.assertIn("name: nazoauth-oidf-suite-default", compose)
         self.assertIn('"$container_runtime" volume create nazoauth-oidf-proxy-pki', bootstrap)
         self.assertIn("--volume nazoauth-oidf-proxy-pki:/pki", bootstrap)
+        self.assertIn("external: true", compose)
         self.assertIn('"$container_runtime" run --rm', bootstrap)
         self.assertIn("--network nazoauth-oidf-suite-default", bootstrap)
         self.assertIn("--publish 127.0.0.1:18443:8080", bootstrap)

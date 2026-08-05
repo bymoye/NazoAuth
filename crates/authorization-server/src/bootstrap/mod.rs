@@ -345,6 +345,9 @@ pub async fn run() -> anyhow::Result<()> {
     }
     let ciba_users = web::Data::new(nazo_postgres::UserRepository::new(diesel_db.clone()));
     let ciba_config = web::Data::new(CibaHttpConfig::from(settings.as_ref()));
+    let conformance_leases = web::Data::new(nazo_postgres::ConformanceLeaseRepository::new(
+        diesel_db.clone(),
+    ));
     let token_issuance_config = web::Data::new(TokenIssuanceConfig::from(settings.as_ref()));
     let device_service = web::Data::new(ServerDeviceGrantService::new(
         nazo_valkey::DeviceStore::new(&valkey_connection),
@@ -978,6 +981,7 @@ pub async fn run() -> anyhow::Result<()> {
             .app_data(ciba_service.clone())
             .app_data(ciba_users.clone())
             .app_data(ciba_config.clone())
+            .app_data(conformance_leases.clone())
             .app_data(token_issuance_config.clone())
             .app_data(device_service.clone())
             .app_data(device_grants.clone())

@@ -258,7 +258,18 @@ OTP-000 基线与契约
 - [ ] `OTP-504` 测试 private-key-created/keyset-not-committed 等中间崩溃状态，清理孤儿或安全
   完成，不把半状态作为成功。
 - [ ] `OTP-505` migration 使用 PostgreSQL advisory lock、Diesel ledger 和 ctl intent；并发执行
-  有界等待或明确冲突，已完成迁移返回结构化 no-op。
+  有界等待或明确冲突，数据库 session 的 `lock_timeout`/`statement_timeout` 必须小于 ctl
+  transport timeout，并在成功、失败和取消路径释放 advisory lock；已完成迁移返回结构化
+  `applied=false` no-op。
+- [ ] `OTP-505a` task lock 也必须有界（不超过 30 秒）；claim 前的锁竞争必须在 ctl 300 秒
+  kill 前以 transport 失败返回并保留 intent，不能写一个未持久化的 final receipt（锁持有者
+  可能随后发布同一 JTI 的成功 receipt）。锁已取得后的数据库锁/语句超时属于已 claim 请求的
+  执行失败，必须输出可验证 `RuntimeReceipt` 的 `TaskOutcome::Failed`，而不是让 transport
+  进程因业务失败退出非零。
+- [ ] `OTP-505b` 同一 JTI 的 `migrate-apply` 在 `Executing` 且无 receipt 时只允许依据 Diesel
+  migration ledger 幂等重入；其他 operation 仍 fail closed。完整可验签且绑定 request/deployment
+  的 receipt 临时文件可以原子收敛；不完整或不匹配的临时文件必须保留并拒绝恢复。Prepared
+  生命周期与等价临时副本可清理后继续。
 - [ ] `OTP-506` migration 完成后写应用收据；首次创建收据 schema 的 bootstrap 例外按计划书
   明确处理，不伪造跨数据库/宿主机事务。
 - [ ] `OTP-507` update/rollback lifecycle journal 可以从最后提交阶段恢复，收据永不因 rollback
@@ -271,6 +282,11 @@ OTP-000 基线与契约
 - [ ] 重放返回原结果或稳定 replay/in-progress 状态，并产生审计事件。
 - [ ] key store、migration ledger、ctl journal 三者没有相互冒充状态所有者。
 - [ ] 对应 `INV-06`、`INV-09`、`INV-11`、`INV-12`、`INV-13` 有证据。
+
+任务 transport 退出码与签名结果状态必须分别记录：有效请求的业务失败应由 stdout
+`TaskOutcome::Failed` 表达并保持 transport 成功退出；验签/绑定/签名密钥等前置失败才是
+没有可验证 receipt 的 transport 失败。ctl 超时或 kill 只说明未收到 transport 结果，不能据此
+断言迁移未执行。
 
 ## 10. OTP-600：Docker、Podman 与 systemd 操作级沙箱
 

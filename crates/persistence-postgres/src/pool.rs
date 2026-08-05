@@ -1,6 +1,6 @@
 use diesel::ConnectionError;
 use diesel_async::{
-    AsyncMigrationHarness, AsyncPgConnection,
+    AsyncMigrationHarness, AsyncPgConnection, SimpleAsyncConnection,
     pooled_connection::{
         AsyncDieselConnectionManager, ManagerConfig, deadpool::Object, deadpool::Pool,
     },
@@ -11,10 +11,15 @@ use serde::Serialize;
 use std::{
     str::FromStr as _,
     sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../../migrations");
+
+const MIGRATION_ADVISORY_LOCK: i64 = 564196923451771041;
+const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
+const MIGRATION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const MIGRATION_STATEMENT_TIMEOUT: &str = "240s";
 
 pub type DbPool = Pool<AsyncPgConnection>;
 pub type DbConnection = Object<AsyncPgConnection>;
@@ -28,6 +33,12 @@ pub struct DbPoolMetrics {
     pub acquire_count: u64,
     pub wait_nanos_total: u64,
     pub wait_nanos_max: u64,
+}
+
+#[derive(diesel::QueryableByName)]
+struct AdvisoryLockStatus {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    acquired: bool,
 }
 
 pub fn create_pool(
@@ -116,25 +127,76 @@ pub fn db_pool_metrics() -> DbPoolMetrics {
     }
 }
 
-pub async fn run_pending_migrations(database_url: &str) -> anyhow::Result<()> {
+pub async fn run_pending_migrations(database_url: &str) -> anyhow::Result<bool> {
     use diesel_async::RunQueryDsl as _;
 
     let mut connection = establish_connection(database_url).await?;
-    // Serialize application-managed migrations across concurrent first
-    // starts. PostgreSQL releases this session lock if the process exits.
-    diesel::sql_query("SELECT pg_advisory_lock(564196923451771041)")
-        .execute(&mut connection)
+    // Keep every database wait below the outer ctl/task timeout.  These are
+    // session settings, so they cover Diesel's DDL and migration-ledger
+    // statements without changing the server-wide PostgreSQL policy.
+    connection
+        .batch_execute(&format!(
+            "SET SESSION lock_timeout = '25s'; SET SESSION statement_timeout = '{MIGRATION_STATEMENT_TIMEOUT}';"
+        ))
         .await?;
-    AsyncMigrationHarness::new(connection)
+
+    let deadline = tokio::time::Instant::now() + MIGRATION_LOCK_TIMEOUT;
+    loop {
+        let status = diesel::sql_query(format!(
+            "SELECT pg_try_advisory_lock({MIGRATION_ADVISORY_LOCK}) AS acquired"
+        ))
+        .get_result::<AdvisoryLockStatus>(&mut connection)
+        .await?;
+        if status.acquired {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("migration advisory lock acquisition timed out");
+        }
+        tokio::time::sleep(MIGRATION_LOCK_RETRY_INTERVAL).await;
+    }
+
+    // The harness owns the connection while it runs its synchronous Diesel
+    // migration driver.  Recover the session afterward so the advisory lock
+    // is explicitly released on both success and migration failure.
+    let mut harness = AsyncMigrationHarness::new(connection);
+    let migration_result = harness
         .run_pending_migrations(MIGRATIONS)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    Ok(())
+        .map(|applied| !applied.is_empty())
+        .map_err(|error| anyhow::anyhow!(error.to_string()));
+    let mut connection = harness.into_inner();
+    let unlock_result: anyhow::Result<()> = match diesel::sql_query(format!(
+        "SELECT pg_advisory_unlock({MIGRATION_ADVISORY_LOCK}) AS acquired"
+    ))
+    .get_result::<AdvisoryLockStatus>(&mut connection)
+    .await
+    {
+        Ok(status) if status.acquired => Ok(()),
+        Ok(_) => anyhow::bail!("migration advisory lock release returned false"),
+        Err(error) => Err(error.into()),
+    };
+
+    match (migration_result, unlock_result) {
+        (Ok(applied), Ok(())) => Ok(applied),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => {
+            anyhow::bail!("migration advisory lock release failed: {error}")
+        }
+        (Err(migration_error), Err(unlock_error)) => anyhow::bail!(
+            "migration failed: {migration_error}; advisory lock release failed: {unlock_error}"
+        ),
+    }
 }
 
 pub async fn cleanup_expired_security_state(database_url: &str) -> anyhow::Result<()> {
     use diesel_async::RunQueryDsl as _;
 
     let mut connection = establish_connection(database_url).await?;
+    connection
+        .batch_execute(&format!(
+            "SET SESSION lock_timeout = '25s'; SET SESSION statement_timeout = '{MIGRATION_STATEMENT_TIMEOUT}';"
+        ))
+        .await?;
     diesel::sql_query("SELECT * FROM nazo_oauth_cleanup_expired_security_state()")
         .execute(&mut connection)
         .await?;

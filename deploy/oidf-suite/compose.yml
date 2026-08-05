@@ -63,6 +63,7 @@ volumes:
   mongodb_data:
   oidf_proxy_pki:
     name: nazoauth-oidf-proxy-pki
+    external: true
 
 networks:
   default:

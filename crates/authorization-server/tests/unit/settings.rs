@@ -465,7 +465,15 @@ fn ciba_automated_decision_requires_explicit_transport_and_secret() {
         "CIBA_AUTOMATED_DECISION_TOKEN",
         "test-ciba-automated-decision-token-32",
     )]);
-    assert!(Settings::from_config(&token_only).is_err());
+    let lease_gated = Settings::from_config(&token_only).unwrap();
+    assert_eq!(
+        lease_gated.ciba.ciba_automated_decision_mode,
+        CibaAutomatedDecisionMode::Disabled
+    );
+    assert_eq!(
+        lease_gated.ciba.ciba_automated_decision_token.as_deref(),
+        Some("test-ciba-automated-decision-token-32")
+    );
 
     let mode_only = ConfigSource::from_pairs_for_test([("CIBA_AUTOMATED_DECISION_MODE", "header")]);
     assert!(Settings::from_config(&mode_only).is_err());

@@ -12,9 +12,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
-    Actor, ActorKind, CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, SecretBinding,
-    TargetExpectation, TaskEnvelope, TaskOperation, TaskOutcome, canonical_config_sha256,
-    compact_sha256, sign_task, verify_runtime_receipt,
+    Actor, ActorKind, CanonicalConfigManifest, ConfigBinding, EmbeddedIdentity, RuntimeReceipt,
+    SecretBinding, TargetExpectation, TaskEnvelope, TaskOperation, TaskOutcome,
+    canonical_config_sha256, compact_sha256, sign_runtime_receipt, sign_task,
+    verify_runtime_receipt,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -282,8 +283,8 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
     );
 
     // Kill a second real child after the signed receipt temporary file was
-    // fsynced but before publication.  Restart must retain that evidence and
-    // refuse to replay the operation.
+    // fsynced but before publication. Restart must validate and publish that
+    // authoritative receipt without replaying the operation.
     let mut killed_before_receipt_publish = task.clone();
     killed_before_receipt_publish.jti = "request-killed-before-receipt-publish".to_owned();
     let killed_before_receipt_compact = sign_task(
@@ -306,9 +307,16 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         root.join("state/request-killed-before-receipt-publish.receipt.receipt.jws.tmp");
     assert!(receipt_temporary.is_file());
     let restarted = run_operator_task(&root, &killed_before_receipt_compact);
-    assert!(!restarted.status.success());
-    assert!(String::from_utf8_lossy(&restarted.stderr).contains("incomplete durable publication"));
-    assert!(receipt_temporary.is_file());
+    assert!(
+        restarted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert!(!receipt_temporary.exists());
+    assert!(
+        root.join("state/request-killed-before-receipt-publish.receipt.jws")
+            .is_file()
+    );
 
     // This is the restart boundary after a SIGKILL.  There is intentionally
     // no receipt, but the durable executing state means the operation might
@@ -356,9 +364,8 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         .unwrap()
     );
 
-    // This is the second SIGKILL boundary: a receipt temporary file can only
-    // exist after the operation returned.  It must remain on disk and reject
-    // recovery before the binary can invoke the operation again.
+    // An invalid receipt temporary must remain on disk and fail closed before
+    // the binary can invoke the operation again.
     let mut partial = task.clone();
     partial.jti = "request-partial-process-test".to_owned();
     let partial_compact = sign_task(&partial, "controller-test", &controller).unwrap();
@@ -381,7 +388,7 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
     fs::write(&partial_temporary, b"partial").unwrap();
     let partial = run_operator_task(&root, &partial_compact);
     assert!(!partial.status.success());
-    assert!(String::from_utf8_lossy(&partial.stderr).contains("incomplete durable publication"));
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("operator task receipt is invalid"));
     assert!(partial_temporary.exists());
     assert!(matches!(
         serde_json::from_slice::<serde_json::Value>(
@@ -390,6 +397,53 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         .unwrap()["phase"],
         serde_json::Value::String(ref phase) if phase == "executing"
     ));
+
+    // A complete, signed receipt temporary is recoverable.  It is validated
+    // against the request and deployment before being renamed into place;
+    // arbitrary or partial temporary bytes remain fail-closed.
+    let mut completed_temporary = task.clone();
+    completed_temporary.jti = "request-complete-receipt-temporary".to_owned();
+    let completed_digest =
+        compact_sha256(&sign_task(&completed_temporary, "controller-test", &controller).unwrap());
+    let completed_receipt = RuntimeReceipt {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        iss: "runtime:deployment-test".to_owned(),
+        aud: completed_temporary.iss.clone(),
+        jti: completed_temporary.jti.clone(),
+        request_sha256: completed_digest.clone(),
+        deployment_id: completed_temporary.deployment_id.clone(),
+        actor: completed_temporary.actor.clone(),
+        operation: "keys-register-external".to_owned(),
+        started_at: Utc::now().timestamp(),
+        completed_at: Utc::now().timestamp(),
+        embedded: completed_temporary.embedded.clone(),
+        config: completed_temporary.config.clone(),
+        outcome: TaskOutcome::Failed {
+            code: "operation-failed-test".to_owned(),
+        },
+    };
+    let completed_compact =
+        sign_runtime_receipt(&completed_receipt, "receipt-test", &receipt).unwrap();
+    fs::write(
+        root.join("state/request-complete-receipt-temporary.receipt.receipt.jws.tmp"),
+        completed_compact.as_bytes(),
+    )
+    .unwrap();
+    let completed = run_operator_task(
+        &root,
+        &sign_task(&completed_temporary, "controller-test", &controller).unwrap(),
+    );
+    assert!(completed.status.success());
+    assert_eq!(completed.stdout, completed_compact.as_bytes());
+    assert!(
+        root.join("state/request-complete-receipt-temporary.receipt.jws")
+            .is_file()
+    );
+    assert!(
+        !root
+            .join("state/request-complete-receipt-temporary.receipt.receipt.jws.tmp")
+            .exists()
+    );
 
     let mut conflict = task.clone();
     conflict.actor.id = "uid:other".to_owned();

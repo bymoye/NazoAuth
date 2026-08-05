@@ -618,6 +618,12 @@ fn ciba_automated_decision_transport_keeps_header_and_oidf_query_separate() {
         ciba_automated_decision_request_token(&config, &get_request, &query).as_deref(),
         Some("query-secret")
     );
+
+    config.automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
+    assert_eq!(
+        ciba_automated_decision_request_token(&config, &get_request, &query).as_deref(),
+        Some("query-secret")
+    );
 }
 
 #[actix_web::test]

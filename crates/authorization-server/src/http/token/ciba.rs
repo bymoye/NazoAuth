@@ -72,6 +72,7 @@ use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 use std::collections::HashSet;
 
 pub(crate) const CIBA_GRANT_TYPE: &str = "urn:openid:params:grant-type:ciba";
+const CIBA_AUTOMATED_DECISION_PROFILE: &str = "oidc-fapi-ciba";
 const CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS: i64 = 300;
 const CIBA_REQUEST_OBJECT_CLOCK_SKEW_SECONDS: i64 = 30;
 const CIBA_BINDING_MESSAGE_MAX_CHARS: usize = 64;
@@ -99,6 +100,10 @@ pub(crate) struct CibaHttpConfig {
     trusted_proxy_cidrs: Vec<IpCidr>,
     client_ip_header_mode: ClientIpHeaderMode,
     default_audience: Box<str>,
+    // CIBA currently composes a single default-tenant authorization flow.
+    // Keep this tenant explicit when checking conformance ownership so an
+    // active lease in another tenant can never open automated decisions.
+    tenant_id: Uuid,
     auth_req_id_ttl_seconds: u64,
     poll_interval_seconds: u64,
     csrf_cookie_name: Box<str>,
@@ -118,6 +123,7 @@ impl From<&Settings> for CibaHttpConfig {
             trusted_proxy_cidrs: settings.endpoint.trusted_proxy_cidrs.clone(),
             client_ip_header_mode: settings.endpoint.client_ip_header_mode,
             default_audience: settings.protocol.default_audience.as_str().into(),
+            tenant_id: DEFAULT_TENANT_ID,
             auth_req_id_ttl_seconds: settings.ciba.ciba_auth_req_id_ttl_seconds,
             poll_interval_seconds: settings.ciba.ciba_poll_interval_seconds,
             csrf_cookie_name: settings.session.csrf_cookie_name.as_str().into(),
@@ -1250,6 +1256,7 @@ pub(crate) async fn ciba_verification(
 
 pub(crate) async fn ciba_automated_decision(
     ciba_service: Data<ServerCibaService>,
+    conformance_leases: Option<Data<nazo_postgres::ConformanceLeaseRepository>>,
     config: Data<CibaHttpConfig>,
     runtime: Data<ServerRuntimeModuleRegistry>,
     req: HttpRequest,
@@ -1283,6 +1290,40 @@ pub(crate) async fn ciba_automated_decision(
             "CIBA auth_req_id is required.",
         );
     };
+    if config.automated_decision_mode == CibaAutomatedDecisionMode::Disabled {
+        let Some(conformance_leases) = conformance_leases else {
+            // The production composition root always installs this repository;
+            // a missing dependency must fail closed rather than opening every
+            // CIBA transaction when the default mode is disabled.
+            return empty_response(StatusCode::NOT_FOUND);
+        };
+        let state_payload = match load_ciba_request_payload(&ciba_service, auth_req_id).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return empty_response(StatusCode::NOT_FOUND),
+            Err(response) => return response,
+        };
+        let lease_active = match conformance_leases
+            .active_for_client_profile(
+                config.tenant_id,
+                &state_payload.client_id,
+                CIBA_AUTOMATED_DECISION_PROFILE,
+            )
+            .await
+        {
+            Ok(active) => active,
+            Err(error) => {
+                tracing::warn!(%error, "failed to query CIBA automated-decision conformance lease");
+                return ciba_error_no_store(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "CIBA automated decision unavailable.",
+                );
+            }
+        };
+        if !lease_active {
+            return empty_response(StatusCode::NOT_FOUND);
+        }
+    }
     let decision = match query
         .action
         .as_deref()
@@ -1321,7 +1362,12 @@ fn ciba_automated_decision_request_token(
     query: &CibaAutomatedDecisionQuery,
 ) -> Option<String> {
     match config.automated_decision_mode {
-        CibaAutomatedDecisionMode::Disabled => None,
+        CibaAutomatedDecisionMode::Disabled | CibaAutomatedDecisionMode::QueryParameter => {
+            if req.method() != actix_web::http::Method::GET {
+                return None;
+            }
+            query.decision_token.clone()
+        }
         CibaAutomatedDecisionMode::Header => {
             if req.method() != actix_web::http::Method::POST || query.decision_token.is_some() {
                 return None;
@@ -1330,12 +1376,6 @@ fn ciba_automated_decision_request_token(
                 Some((nazo_http_actix::AccessTokenAuthScheme::Bearer, token)) => Some(token),
                 _ => None,
             }
-        }
-        CibaAutomatedDecisionMode::QueryParameter => {
-            if req.method() != actix_web::http::Method::GET {
-                return None;
-            }
-            query.decision_token.clone()
         }
     }
 }

@@ -119,6 +119,26 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
             .unwrap(),
         Some(public_material),
     );
+    assert!(
+        leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidf-test",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
     let active_profile_material = leases
         .active_public_materials_for_profile(leased_client.tenant_id, "oidf-test")
         .await
@@ -172,6 +192,16 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
             .unwrap()
             .is_none()
     );
+    assert!(
+        !leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidf-test",
+            )
+            .await
+            .unwrap()
+    );
     assert!(clients.update_metadata(&leased_client).await.is_err());
     let late_client = client(tenant);
     assert!(
@@ -198,6 +228,64 @@ async fn expired_conformance_lease_fails_closed_before_idempotent_physical_clean
     assert!(tombstone.revoked_at.is_some());
     assert!(tombstone.cleaned_at.is_some());
     assert!(tombstone.public_material.is_none());
+    leases.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+            }
+            Err(_) => return,
+        };
+    let pool = create_pool(database_url, 4).unwrap();
+    let clients = OAuthClientRepository::new(pool.clone());
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool);
+    let tenant = TenantContext::default_system();
+    let lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidc-fapi-ciba",
+            &"b".repeat(64),
+            None,
+            60,
+        )
+        .await
+        .unwrap();
+    let leased_client = client(tenant);
+    clients
+        .insert(&leased_client, None, None, Some(lease.id))
+        .await
+        .unwrap();
+    assert!(
+        leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+
+    leases
+        .revoke(leased_client.tenant_id, lease.id)
+        .await
+        .unwrap();
+    assert!(
+        !leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+
     leases.cleanup().await.unwrap();
 }
 

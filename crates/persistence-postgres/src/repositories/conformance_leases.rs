@@ -198,6 +198,44 @@ impl ConformanceLeaseRepository {
         .map_err(map_diesel_error)
     }
 
+    /// Returns whether the tenant-scoped client is bound to an effective lease
+    /// for the exact conformance profile.  This deliberately checks the
+    /// binding and lease state in one database statement so callers cannot
+    /// accidentally turn any active lease into a process-wide capability.
+    pub async fn active_for_client_profile(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        profile: &str,
+    ) -> Result<bool, RepositoryError> {
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        diesel::sql_query(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM oauth_clients client
+                JOIN conformance_leases lease
+                  ON lease.tenant_id = client.tenant_id
+                 AND lease.id = client.conformance_lease_id
+                WHERE client.tenant_id = $1
+                  AND client.client_id = $2
+                  AND client.is_active = TRUE
+                  AND lease.profile = $3
+                  AND lease.expires_at > CURRENT_TIMESTAMP
+                  AND lease.revoked_at IS NULL
+                  AND lease.cleaned_at IS NULL
+            ) AS active
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(client_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .get_result::<ActiveLeaseRow>(&mut connection)
+        .await
+        .map(|row| row.active)
+        .map_err(map_diesel_error)
+    }
+
     pub async fn active_public_materials_for_profile(
         &self,
         tenant_id: Uuid,
@@ -272,6 +310,12 @@ struct CleanupRow {
 struct PublicMaterialRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
     public_material: Option<Value>,
+}
+
+#[derive(diesel::QueryableByName)]
+struct ActiveLeaseRow {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    active: bool,
 }
 
 fn map_pool_error(error: anyhow::Error) -> RepositoryError {

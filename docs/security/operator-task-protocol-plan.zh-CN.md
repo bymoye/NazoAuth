@@ -399,6 +399,18 @@ target digest，但后者只是回显绑定，不是应用独立证明。ctl 在
 ID/进程、request digest、退出状态和结构化结果同时写入最终收据。在没有 TEE 的本地 root
 信任模型中，不额外授予 OAuth 签名私钥来制造伪“远程证明”。
 
+传输退出状态与签名结果状态是两个边界，不能混用：
+
+- 请求已验签且任务进程能够加载 receipt key 时，即使操作失败或 PostgreSQL 迁移超时，也
+  必须在 stdout 输出可验证的 `RuntimeReceipt`（`TaskOutcome::Failed`），并以 transport
+  成功退出；ctl 先验签并读取结构化结果，再按 signed outcome 决定重试或报告失败。尚未
+  claim 请求前的 task lock 竞争不能伪造 final receipt：它在 25 秒内以 transport 失败返回，
+  ctl 保留 intent 并重试/观察同一 JTI。
+- 验签、部署绑定、配置清单或 receipt key 等前置条件失败时，没有可验证收据，进程才以
+  transport 失败退出；ctl 不得把空 stdout 当成一个已签名的操作失败。
+- ctl 自身的超时、kill 或 engine 中断可能没有收到 stdout；这只表示 transport 证据缺失，
+  不能推断迁移未执行。重试必须依据状态所有者的 ledger/receipt 恢复边界处理。
+
 ## 10. 身份、授权和恢复
 
 ### 10.1 默认安装身份

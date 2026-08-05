@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, fs, sync::Arc, thread};
+use fs2::FileExt as _;
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use super::*;
 
@@ -224,6 +231,79 @@ fn incomplete_lifecycle_transition_is_never_deleted_or_recovered_implicitly() {
     assert!(temporary.exists());
     assert!(ensure_real_state_directory(&directory.join("missing-state")).is_err());
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn equivalent_prepared_lifecycle_temporary_is_safe_to_clean_and_continue() {
+    let directory = temporary_directory();
+    let lifecycle = directory.join("request.lifecycle.json");
+    let digest = "prepared".repeat(16);
+    let prepared = TaskLifecycle::Prepared {
+        request_sha256: digest.clone(),
+    };
+    write_initial_lifecycle(&lifecycle, &prepared).unwrap();
+    fs::write(
+        lifecycle_temporary_path(&lifecycle),
+        serde_json::to_vec(&prepared).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        load_or_prepare_lifecycle(&lifecycle, &digest).unwrap(),
+        prepared
+    );
+    assert!(!lifecycle_temporary_path(&lifecycle).exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn task_lock_acquisition_is_bounded() {
+    let directory = temporary_directory();
+    let path = directory.join("task.lock");
+    let holder = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    holder.lock_exclusive().unwrap();
+    let contender = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+
+    let started = Instant::now();
+    let error = acquire_task_lock_with_timeout(contender, Duration::from_millis(20))
+        .await
+        .expect_err("contended lock must time out");
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    holder.unlock().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn only_migration_reenters_an_executing_lifecycle() {
+    let digest = "reentry".repeat(16);
+    let executing = TaskLifecycle::Executing {
+        request_sha256: digest,
+    };
+    assert!(can_reenter_migration(
+        &TaskOperation::MigrateApply,
+        &executing
+    ));
+    assert!(!can_reenter_migration(
+        &TaskOperation::KeysValidate,
+        &executing
+    ));
+    assert!(!can_reenter_migration(
+        &TaskOperation::MigrateApply,
+        &TaskLifecycle::Prepared {
+            request_sha256: "reentry".repeat(16),
+        }
+    ));
 }
 
 #[cfg(unix)]

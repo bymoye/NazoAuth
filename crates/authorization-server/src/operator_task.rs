@@ -5,6 +5,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Cursor, Read as _, Write as _},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -14,10 +15,12 @@ use anyhow::{Context as _, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use fs2::FileExt as _;
 use nazo_operator_protocol::{
     EmbeddedIdentity, RuntimeReceipt, SecretBinding, TaskEnvelope, TaskOperation, TaskOutcome,
     TaskResult, compact_sha256, sign_runtime_receipt, validate_runtime_receipt_deployment_binding,
-    validate_task_deployment_binding, verify_task_signature, verify_task_window,
+    validate_task_deployment_binding, verify_runtime_receipt, verify_task_signature,
+    verify_task_window,
 };
 use sha2::{Digest as _, Sha256};
 use yaml_serde::Value as YamlValue;
@@ -30,6 +33,8 @@ const RECEIPT_PRIVATE_KEY_PATH: &str = "/run/nazoauth-operator/receipt.key";
 const EXTERNAL_PUBLIC_JWK_PATH: &str = "/run/nazoauth-operator/public.jwk";
 const STATE_DIRECTORY: &str = "/var/lib/nazoauth/operator-state";
 const CONFIG_MANIFEST_PATH: &str = "/run/nazoauth-operator/config-manifest.json";
+const TASK_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
+const TASK_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,11 +45,10 @@ struct TaskContext {
 
 /// Durable, per-request lifecycle state.
 ///
-/// `Executing` is deliberately a terminal state for retries unless a receipt
-/// has been published.  A process can die after the operation has made an
-/// external change but before it can attest that change.  There is no safe way
-/// to infer which side of that boundary it died on, so retrying would turn a
-/// crash into a duplicate privileged action.
+/// `Executing` is terminal for operations whose state owner cannot prove
+/// idempotent recovery.  `migrate-apply` is the one exception: the Diesel
+/// migration ledger is the state owner and makes the same request safe to
+/// re-enter after a process died before publishing its receipt.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "phase", rename_all = "kebab-case", deny_unknown_fields)]
 enum TaskLifecycle {
@@ -104,11 +108,16 @@ pub async fn run() -> anyhow::Result<()> {
         .truncate(false)
         .open(lock_path)?;
     regular_state_file_present(&state.join("task.lock"), "operator task lock")?;
-    lock.lock()?;
 
     let request_sha256 = compact_sha256(compact);
     let receipt_path = state.join(format!("{}.receipt.jws", task.jti));
     let request_path = state.join(format!("{}.request.sha256", task.jti));
+    // Keep the OS lock held through state publication and operation execution.
+    // A pre-claim lock timeout is transport failure, not an authoritative
+    // operation outcome: another holder may still publish the same JTI's
+    // success receipt.  The bounded error lets ctl preserve intent and retry.
+    let _task_lock = acquire_task_lock(lock).await?;
+
     let request_was_claimed = regular_state_file_present(&request_path, "operator request claim")?;
     if !request_was_claimed {
         // A versioned claim is published only after the envelope was accepted
@@ -120,50 +129,50 @@ pub async fn run() -> anyhow::Result<()> {
     }
     let claim = claim_request(&request_path, &request_sha256)?;
     persist_operator_state_identity(&state, &expected_deployment_id)?;
-    if regular_state_file_present(&receipt_path, "operator task receipt")? {
-        let prior = fs::read_to_string(receipt_path)?;
+    if let Some(prior) = read_published_receipt(
+        &receipt_path,
+        &task,
+        &request_sha256,
+        &expected_deployment_id,
+        &context.receipt_key_id,
+    )? {
         print!("{prior}");
         return Ok(());
     }
 
-    if state_path_present(&receipt_temporary_path(&receipt_path))? {
-        bail!("operator task receipt has an incomplete durable publication; refusing recovery");
+    if let Some(prior) = recover_receipt_temporary(
+        &receipt_path,
+        &task,
+        &request_sha256,
+        &expected_deployment_id,
+        &context.receipt_key_id,
+    )? {
+        print!("{prior}");
+        return Ok(());
     }
 
     ensure_current_claim(claim)?;
     let lifecycle_path = state.join(format!("{}.lifecycle.json", task.jti));
     let lifecycle = load_or_prepare_lifecycle(&lifecycle_path, &request_sha256)?;
 
-    mark_task_executing(&lifecycle_path, &lifecycle, &request_sha256)?;
-    pause_at_test_failpoint("after-executing")?;
+    let migration_reentry = can_reenter_migration(&task.operation, &lifecycle);
+    if !migration_reentry {
+        mark_task_executing(&lifecycle_path, &lifecycle, &request_sha256)?;
+        pause_at_test_failpoint("after-executing")?;
+    }
 
     let started_at = Utc::now().timestamp();
     let outcome = execute(&task.operation).await;
     pause_at_test_failpoint("after-operation")?;
     let completed_at = Utc::now().timestamp();
-    let receipt = RuntimeReceipt {
-        ver: nazo_operator_protocol::PROTOCOL_VERSION,
-        iss: format!("runtime:{}", task.deployment_id),
-        aud: task.iss.clone(),
-        jti: task.jti.clone(),
-        request_sha256: request_sha256.clone(),
-        deployment_id: task.deployment_id.clone(),
-        actor: task.actor.clone(),
-        operation: operation_name(&task.operation).to_owned(),
+    let compact_receipt = sign_task_outcome(
+        &task,
+        &request_sha256,
+        outcome,
+        &context.receipt_key_id,
         started_at,
         completed_at,
-        embedded: embedded_identity(),
-        config: task.config.clone(),
-        outcome,
-    };
-    validate_runtime_receipt_deployment_binding(&receipt, &task.deployment_id).map_err(
-        |error| anyhow::anyhow!("runtime receipt deployment identity is invalid: {error}"),
     )?;
-    let receipt_key = read_signing_key(&configured_path(
-        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
-        RECEIPT_PRIVATE_KEY_PATH,
-    ))?;
-    let compact_receipt = sign_runtime_receipt(&receipt, &context.receipt_key_id, &receipt_key)?;
     write_receipt_atomic(&receipt_path, compact_receipt.as_bytes())?;
     write_lifecycle_atomic(
         &lifecycle_path,
@@ -177,7 +186,7 @@ async fn execute(operation: &TaskOperation) -> TaskOutcome {
     let result = match operation {
         TaskOperation::MigrateApply => crate::cli::run_migrations()
             .await
-            .map(|()| TaskResult::Migration { applied: true }),
+            .map(|applied| TaskResult::Migration { applied }),
         TaskOperation::ConformanceLeaseCreate {
             profile,
             material_sha256,
@@ -499,6 +508,41 @@ pub(crate) fn embedded_identity() -> EmbeddedIdentity {
     }
 }
 
+async fn acquire_task_lock(lock: std::fs::File) -> anyhow::Result<std::fs::File> {
+    acquire_task_lock_with_timeout(lock, TASK_LOCK_TIMEOUT).await
+}
+
+fn can_reenter_migration(operation: &TaskOperation, lifecycle: &TaskLifecycle) -> bool {
+    matches!(
+        (operation, lifecycle),
+        (TaskOperation::MigrateApply, TaskLifecycle::Executing { .. })
+    )
+}
+
+async fn acquire_task_lock_with_timeout(
+    lock: std::fs::File,
+    timeout: Duration,
+) -> anyhow::Result<std::fs::File> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if task_lock_is_contended(&error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    bail!("operator task lock acquisition timed out");
+                }
+                tokio::time::sleep(TASK_LOCK_RETRY_INTERVAL).await;
+            }
+            Err(error) => return Err(error).context("failed to acquire operator task lock"),
+        }
+    }
+}
+
+fn task_lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || cfg!(windows) && error.raw_os_error() == Some(33)
+}
+
 fn claim_request(path: &Path, digest: &str) -> anyhow::Result<RequestClaim> {
     let parent = path
         .parent()
@@ -541,12 +585,52 @@ fn claim_request(path: &Path, digest: &str) -> anyhow::Result<RequestClaim> {
 }
 
 fn load_or_prepare_lifecycle(path: &Path, request_sha256: &str) -> anyhow::Result<TaskLifecycle> {
-    if state_path_present(&lifecycle_temporary_path(path))? {
-        bail!("operator task lifecycle has an incomplete durable transition; refusing recovery");
+    let lifecycle = if regular_state_file_present(path, "operator task lifecycle")? {
+        Some(read_lifecycle(path)?)
+    } else {
+        None
+    };
+    if let Some(ref lifecycle) = lifecycle {
+        ensure_lifecycle_digest(lifecycle, request_sha256)?;
     }
-    if regular_state_file_present(path, "operator task lifecycle")? {
-        let lifecycle = read_lifecycle(path)?;
-        ensure_lifecycle_digest(&lifecycle, request_sha256)?;
+
+    let temporary = lifecycle_temporary_path(path);
+    if state_path_present(&temporary)? {
+        regular_state_file_present(&temporary, "operator task lifecycle temporary")?;
+        let temporary_lifecycle = read_lifecycle(&temporary)
+            .context("operator task lifecycle has an incomplete durable transition")?;
+        ensure_lifecycle_digest(&temporary_lifecycle, request_sha256)?;
+        match lifecycle.as_ref() {
+            Some(existing)
+                if matches!(existing, TaskLifecycle::Prepared { .. })
+                    && existing == &temporary_lifecycle =>
+            {
+                // A fully written duplicate of Prepared can only be left by
+                // the create-new/hard-link publication window.  It crossed no
+                // execution boundary, so remove the duplicate and continue.
+                fs::remove_file(&temporary)?;
+                sync_directory(
+                    path.parent()
+                        .context("operator task lifecycle has no state directory")?,
+                )?;
+            }
+            None if matches!(temporary_lifecycle, TaskLifecycle::Prepared { .. }) => {
+                // The process died before publishing the first Prepared
+                // record.  Recreating that record is safe because execution
+                // has not started.
+                fs::remove_file(&temporary)?;
+                sync_directory(
+                    path.parent()
+                        .context("operator task lifecycle has no state directory")?,
+                )?;
+            }
+            _ => bail!(
+                "operator task lifecycle has an incomplete durable transition; refusing recovery"
+            ),
+        }
+    }
+
+    if let Some(lifecycle) = lifecycle {
         return Ok(lifecycle);
     }
 
@@ -577,6 +661,120 @@ fn ensure_lifecycle_digest(lifecycle: &TaskLifecycle, request_sha256: &str) -> a
 fn ensure_current_claim(claim: RequestClaim) -> anyhow::Result<()> {
     if claim == RequestClaim::Legacy {
         bail!("legacy request claim has no runtime receipt; refusing unknown privileged outcome");
+    }
+    Ok(())
+}
+
+fn sign_task_outcome(
+    task: &TaskEnvelope,
+    request_sha256: &str,
+    outcome: TaskOutcome,
+    receipt_key_id: &str,
+    started_at: i64,
+    completed_at: i64,
+) -> anyhow::Result<String> {
+    let receipt = RuntimeReceipt {
+        ver: nazo_operator_protocol::PROTOCOL_VERSION,
+        iss: format!("runtime:{}", task.deployment_id),
+        aud: task.iss.clone(),
+        jti: task.jti.clone(),
+        request_sha256: request_sha256.to_owned(),
+        deployment_id: task.deployment_id.clone(),
+        actor: task.actor.clone(),
+        operation: operation_name(&task.operation).to_owned(),
+        started_at,
+        completed_at,
+        embedded: embedded_identity(),
+        config: task.config.clone(),
+        outcome,
+    };
+    validate_runtime_receipt_deployment_binding(&receipt, &task.deployment_id).map_err(
+        |error| anyhow::anyhow!("runtime receipt deployment identity is invalid: {error}"),
+    )?;
+    let receipt_key = read_signing_key(&configured_path(
+        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
+        RECEIPT_PRIVATE_KEY_PATH,
+    ))?;
+    Ok(sign_runtime_receipt(
+        &receipt,
+        receipt_key_id,
+        &receipt_key,
+    )?)
+}
+
+fn read_published_receipt(
+    path: &Path,
+    task: &TaskEnvelope,
+    request_sha256: &str,
+    expected_deployment_id: &str,
+    receipt_key_id: &str,
+) -> anyhow::Result<Option<String>> {
+    if !regular_state_file_present(path, "operator task receipt")? {
+        return Ok(None);
+    }
+    let compact = fs::read_to_string(path)?;
+    validate_receipt_for_task(
+        &compact,
+        task,
+        request_sha256,
+        expected_deployment_id,
+        receipt_key_id,
+    )?;
+    Ok(Some(compact))
+}
+
+fn recover_receipt_temporary(
+    path: &Path,
+    task: &TaskEnvelope,
+    request_sha256: &str,
+    expected_deployment_id: &str,
+    receipt_key_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let temporary = receipt_temporary_path(path);
+    if !state_path_present(&temporary)? {
+        return Ok(None);
+    }
+    regular_state_file_present(&temporary, "operator task receipt temporary")?;
+    let compact = fs::read_to_string(&temporary)?;
+    validate_receipt_for_task(
+        &compact,
+        task,
+        request_sha256,
+        expected_deployment_id,
+        receipt_key_id,
+    )?;
+    fs::rename(&temporary, path)?;
+    sync_directory(
+        path.parent()
+            .context("operator task receipt has no state directory")?,
+    )?;
+    Ok(Some(compact))
+}
+
+fn validate_receipt_for_task(
+    compact: &str,
+    task: &TaskEnvelope,
+    request_sha256: &str,
+    expected_deployment_id: &str,
+    receipt_key_id: &str,
+) -> anyhow::Result<()> {
+    let receipt_key = read_signing_key(&configured_path(
+        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
+        RECEIPT_PRIVATE_KEY_PATH,
+    ))?;
+    let receipt = verify_runtime_receipt(compact, receipt_key_id, &receipt_key.verifying_key())
+        .map_err(|error| anyhow::anyhow!("operator task receipt is invalid: {error}"))?;
+    validate_runtime_receipt_deployment_binding(&receipt, expected_deployment_id).map_err(
+        |error| anyhow::anyhow!("operator task receipt deployment identity is invalid: {error}"),
+    )?;
+    if receipt.jti != task.jti
+        || receipt.request_sha256 != request_sha256
+        || receipt.actor != task.actor
+        || receipt.operation != operation_name(&task.operation)
+        || receipt.embedded != task.embedded
+        || receipt.config != task.config
+    {
+        bail!("operator task receipt is not bound to this request");
     }
     Ok(())
 }

@@ -370,22 +370,17 @@ impl Settings {
             bail!("CIBA_AUTOMATED_DECISION_TOKEN must be at least 32 bytes when set");
         }
         let ciba_automated_decision_mode = CibaAutomatedDecisionMode::from_config(config)?;
-        match (
+        // In the default mode the token is the second factor for the
+        // request-scoped conformance-lease gate. It remains optional so
+        // ordinary deployments can leave the endpoint fully closed.
+        if matches!(
             ciba_automated_decision_mode,
-            ciba_automated_decision_token.is_some(),
-        ) {
-            (CibaAutomatedDecisionMode::Disabled, true) => bail!(
-                "CIBA_AUTOMATED_DECISION_TOKEN requires an explicit CIBA_AUTOMATED_DECISION_MODE"
-            ),
-            (
-                CibaAutomatedDecisionMode::Header | CibaAutomatedDecisionMode::QueryParameter,
-                false,
-            ) => {
-                bail!(
-                    "CIBA_AUTOMATED_DECISION_TOKEN is required when CIBA_AUTOMATED_DECISION_MODE is enabled"
-                )
-            }
-            _ => {}
+            CibaAutomatedDecisionMode::Header | CibaAutomatedDecisionMode::QueryParameter
+        ) && ciba_automated_decision_token.is_none()
+        {
+            bail!(
+                "CIBA_AUTOMATED_DECISION_TOKEN is required when CIBA_AUTOMATED_DECISION_MODE is enabled"
+            )
         }
         let ciba_notification_private_origins = config
             .optional_string("CIBA_NOTIFICATION_PRIVATE_ORIGINS")

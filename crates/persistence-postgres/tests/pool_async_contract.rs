@@ -34,6 +34,12 @@ fn pool_admin_operations_reuse_the_async_rustls_connection_path() {
 
     assert!(source.contains("MakeRustlsConnect::with_native_certs"));
     assert!(source.contains("AsyncPgConnection::try_from_client_and_connection"));
+    assert!(migrations.contains("SET SESSION lock_timeout"));
+    assert!(migrations.contains("SET SESSION statement_timeout"));
+    assert!(migrations.contains("pg_try_advisory_lock"));
+    assert!(migrations.contains("pg_advisory_unlock"));
+    assert!(migrations.contains("!applied.is_empty()"));
+    assert!(cleanup.contains("SET SESSION statement_timeout"));
 }
 
 #[tokio::test]
