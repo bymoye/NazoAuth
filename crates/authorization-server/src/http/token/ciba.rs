@@ -1413,7 +1413,13 @@ fn ciba_automated_decision_request_token(
     query: &CibaAutomatedDecisionQuery,
 ) -> Option<String> {
     match config.automated_decision_mode {
-        CibaAutomatedDecisionMode::Disabled | CibaAutomatedDecisionMode::QueryParameter => {
+        CibaAutomatedDecisionMode::Disabled => {
+            if req.method() != actix_web::http::Method::POST {
+                return None;
+            }
+            query.decision_token.clone()
+        }
+        CibaAutomatedDecisionMode::QueryParameter => {
             if req.method() != actix_web::http::Method::GET {
                 return None;
             }

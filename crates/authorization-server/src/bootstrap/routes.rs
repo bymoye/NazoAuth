@@ -417,14 +417,14 @@ fn configure_ciba_automated_decision_routes(
 ) {
     match mode {
         // The default transport is still fail-closed in the handler: this
-        // GET is only useful when a request-scoped oidc-fapi-ciba lease, its
+        // POST is only useful when a request-scoped oidc-fapi-ciba lease, its
         // per-run token digest, and the lease-owned client all validate.
         CibaAutomatedDecisionMode::Disabled => {
             cfg.route(
                 "/ciba-automated-decision",
-                web::get().to(ciba_automated_decision),
+                web::post().to(ciba_automated_decision),
             )
-            .route("/ciba/automated", web::get().to(ciba_automated_decision));
+            .route("/ciba/automated", web::post().to(ciba_automated_decision));
         }
         CibaAutomatedDecisionMode::Header => {
             cfg.route(

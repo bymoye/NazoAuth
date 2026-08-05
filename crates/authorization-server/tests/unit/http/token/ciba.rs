@@ -651,7 +651,7 @@ async fn disabled_ciba_automated_decision_rejects_invalid_token_before_state_acc
     // A state lookup would hit the deliberately disconnected Valkey client and
     // produce a service error. NOT_FOUND therefore proves the invalid digest
     // was rejected at the lease lookup boundary before state access.
-    let request = actix_web::test::TestRequest::get()
+    let request = actix_web::test::TestRequest::post()
         .uri("/auth/ciba-automated-decision?token=not-stored&type=allow&decision_token=invalid-per-run-token")
         .to_request();
     let response = actix_web::test::call_service(&app, request).await;
@@ -665,7 +665,7 @@ async fn disabled_ciba_automated_decision_rejects_invalid_token_before_state_acc
 }
 
 #[actix_web::test]
-async fn disabled_ciba_automated_decision_rejects_cross_lease_client_transaction() {
+async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf_post() {
     let database_url =
         match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
             Ok(database_url) => database_url,
@@ -766,7 +766,7 @@ async fn disabled_ciba_automated_decision_rejects_cross_lease_client_transaction
     )
     .await;
 
-    let request = actix_web::test::TestRequest::get()
+    let request = actix_web::test::TestRequest::post()
         .uri(&format!(
             "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token={token_a}"
         ))
@@ -780,6 +780,20 @@ async fn disabled_ciba_automated_decision_rejects_cross_lease_client_transaction
         Err(_) => panic!("cross-lease rejection must leave readable CIBA state"),
     };
     assert_eq!(state_after.status, CibaStatus::Pending);
+
+    let request = actix_web::test::TestRequest::post()
+        .uri(&format!(
+            "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token={token_b}"
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state_after = match load_ciba_request_payload(&ciba_service, &auth_req_id).await {
+        Ok(Some(state_after)) => state_after,
+        Ok(None) => panic!("same-lease approval must retain the CIBA transaction until polling"),
+        Err(_) => panic!("same-lease approval must leave readable CIBA state"),
+    };
+    assert_eq!(state_after.status, CibaStatus::Approved);
 
     leases
         .revoke(DEFAULT_TENANT_ID, lease_a.id)
@@ -823,10 +837,12 @@ fn ciba_automated_decision_transport_keeps_header_and_oidf_query_separate() {
     );
 
     config.automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
+    let post_request = actix_web::test::TestRequest::post().to_http_request();
     assert_eq!(
-        ciba_automated_decision_request_token(&config, &get_request, &query).as_deref(),
+        ciba_automated_decision_request_token(&config, &post_request, &query).as_deref(),
         Some("query-secret")
     );
+    assert!(ciba_automated_decision_request_token(&config, &get_request, &query).is_none());
 }
 
 #[actix_web::test]
