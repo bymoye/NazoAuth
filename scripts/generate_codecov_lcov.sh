@@ -126,6 +126,11 @@ export EMAIL_CODE_DEV_RESPONSE_ENABLED='false'
 export AVATAR_STORAGE_DIR='runtime/codecov/avatars'
 export JWK_KEYS_DIR='runtime/codecov/keys'
 export REQUIRE_PUSHED_AUTHORIZATION_REQUESTS='false'
+# Coverage owns and migrates an ephemeral database with its bootstrap
+# superuser.  Keep production's strict least-privilege default intact while
+# explicitly selecting the documented non-strict repository preflight for
+# this disposable functional-test fixture.
+export SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE='false'
 export ENABLE_REQUEST_OBJECT='true'
 export ENABLE_PAR_REQUEST_OBJECT='true'
 export ENABLE_AUTHORIZATION_DETAILS='true'
