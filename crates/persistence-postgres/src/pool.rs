@@ -128,6 +128,10 @@ pub fn db_pool_metrics() -> DbPoolMetrics {
 }
 
 pub async fn run_pending_migrations(database_url: &str) -> anyhow::Result<bool> {
+    // diesel-async bridges Diesel's synchronous migration harness with
+    // `block_in_place`. Isolate that orchestration so current-thread callers
+    // remain valid; the database connection and I/O inside the harness still
+    // use the shared async tokio-postgres/Rustls path below.
     let database_url = database_url.to_owned();
     tokio::task::spawn_blocking(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
