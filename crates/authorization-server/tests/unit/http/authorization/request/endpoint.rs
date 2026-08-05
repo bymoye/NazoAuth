@@ -962,7 +962,7 @@ async fn authorization_request_redirects_when_outer_request_uri_parameters_do_no
 }
 
 #[actix_web::test]
-async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_and_request_uri() {
+async fn fapi_authorization_accepts_matching_outer_parameters_and_ignores_the_duplicates() {
     let Some(fixture) = LiveAuthorizationFixture::new().await else {
         return;
     };
@@ -984,13 +984,15 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
                 ("client_id", client_id.as_str()),
                 ("redirect_uri", "https://client.example/callback"),
                 ("response_type", "code"),
+                ("code_challenge", VALID_CODE_CHALLENGE),
+                ("code_challenge_method", "S256"),
                 ("scope", "openid"),
                 ("state", "fapi-par-state"),
             ]),
         )
         .await;
     let uri = format!(
-        "/authorize?client_id={}&request_uri={}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code",
+        "/authorize?client_id={}&request_uri={}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code&scope=openid",
         urlencoding::encode(&client_id),
         urlencoding::encode(&request_uri)
     );
@@ -1002,6 +1004,7 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
         ("request_uri", request_uri.as_str()),
         ("redirect_uri", "https://client.example/callback"),
         ("response_type", "code"),
+        ("scope", "openid"),
     ]);
 
     let response = authorize_request(
@@ -1011,7 +1014,25 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
     )
     .await;
 
-    assert_authorization_error_redirect(response, "invalid_request", Some("fapi-par-state"));
+    let location = authorization_location(&response);
+    assert_eq!(
+        location.origin().ascii_serialization(),
+        "https://app.example"
+    );
+    assert_eq!(location.path(), "/auth");
+    let next = location
+        .query_pairs()
+        .find_map(|(key, value)| (key == "next").then_some(value.into_owned()))
+        .expect("login redirect should include next parameter");
+    let next = urlencoding::decode(&next).expect("next parameter should decode");
+    for parameter in [
+        "request_uri=",
+        "redirect_uri=",
+        "response_type=code",
+        "scope=openid",
+    ] {
+        assert!(next.contains(parameter));
+    }
 }
 
 #[actix_web::test]

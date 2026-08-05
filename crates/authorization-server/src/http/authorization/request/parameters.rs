@@ -70,14 +70,6 @@ pub(super) fn outer_request_uri_parameters_match_pushed(
     })
 }
 
-pub(super) fn outer_request_uri_parameters_are_fapi_compliant(
-    outer: &HashMap<String, String>,
-) -> bool {
-    outer
-        .keys()
-        .all(|key| matches!(key.as_str(), "client_id" | "request_uri"))
-}
-
 pub(super) fn authorization_login_query(
     expanded: &HashMap<String, String>,
     original: &HashMap<String, String>,

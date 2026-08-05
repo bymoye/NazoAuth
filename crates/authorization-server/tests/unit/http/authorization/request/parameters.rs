@@ -83,18 +83,6 @@ fn outer_request_uri_parameters_must_match_pushed_values() {
 }
 
 #[test]
-fn fapi_outer_request_allows_only_client_id_and_request_uri() {
-    assert!(outer_request_uri_parameters_are_fapi_compliant(&query(&[
-        ("client_id", "client"),
-        ("request_uri", "urn:par:1"),
-    ])));
-    assert!(!outer_request_uri_parameters_are_fapi_compliant(&query(&[
-        ("client_id", "client"),
-        ("scope", "openid"),
-    ])));
-}
-
-#[test]
 fn login_query_preserves_the_original_par_reference() {
     let expanded = query(&[("scope", "openid"), ("state", "expanded")]);
     let original = query(&[("request_uri", "urn:par:1"), ("state", "original")]);

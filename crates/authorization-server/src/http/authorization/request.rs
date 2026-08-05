@@ -217,12 +217,6 @@ async fn authorize_request_with_context(
         );
     }
     let client_policy = context.config.profile.effective_client_policy(&client);
-    if client_policy.requires_fapi2_security()
-        && used_pushed_authorization_request
-        && !outer_request_uri_parameters_are_fapi_compliant(&original_authorization_query)
-    {
-        consumed_request_uri_error = Some("invalid_request");
-    }
     if client_policy.requires_fapi2_security() && pending_external_request_uri.is_some() {
         consumed_request_uri_error = Some("request_uri_not_supported");
         pending_external_request_uri = None;

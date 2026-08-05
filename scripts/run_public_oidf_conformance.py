@@ -86,6 +86,10 @@ class TerminationRequested(BaseException):
         self.signum = signum
 
 
+class GroupCancellationRequested(BaseException):
+    pass
+
+
 _TERMINATION_EVENT = threading.Event()
 _CLEANUP_MODE = threading.Event()
 _TERMINATION_LOCK = threading.Lock()
@@ -236,6 +240,7 @@ def command(
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
     pass_fds: tuple[int, ...] = (),
+    cancellation_event: threading.Event | None = None,
 ) -> None:
     creationflags = 0
     if os.name == "nt":
@@ -258,6 +263,8 @@ def command(
         while True:
             if _TERMINATION_EVENT.is_set() and not _CLEANUP_MODE.is_set():
                 raise TerminationRequested(termination_signum())
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise GroupCancellationRequested()
             try:
                 returncode = process.wait(timeout=0.25)
                 break
@@ -849,21 +856,35 @@ def run_group_phase(
     available: queue.SimpleQueue[Path] = queue.SimpleQueue()
     for suite_dir in suite_dirs[:workers]:
         available.put(suite_dir)
+    cancellation_event = threading.Event()
 
     def run_one(name: str, invocation: list[str]) -> None:
         if _TERMINATION_EVENT.is_set():
             raise TerminationRequested(termination_signum())
+        if cancellation_event.is_set():
+            raise GroupCancellationRequested()
         suite_dir = available.get()
         try:
-            resolved = [
-                str(suite_dir) if value == "{suite_dir}" else value
-                for value in invocation
-            ]
-            print(f"OIDF {phase} group start: {name}", flush=True)
-            with secret_pipe(suite_token) as descriptor:
-                resolved.extend(["--token-fd", str(descriptor)])
-                command(resolved, env=env, pass_fds=(descriptor,))
-            print(f"OIDF {phase} group complete: {name}", flush=True)
+            try:
+                resolved = [
+                    str(suite_dir) if value == "{suite_dir}" else value
+                    for value in invocation
+                ]
+                print(f"OIDF {phase} group start: {name}", flush=True)
+                with secret_pipe(suite_token) as descriptor:
+                    resolved.extend(["--token-fd", str(descriptor)])
+                    command(
+                        resolved,
+                        env=env,
+                        pass_fds=(descriptor,),
+                        cancellation_event=cancellation_event,
+                    )
+                print(f"OIDF {phase} group complete: {name}", flush=True)
+            except GroupCancellationRequested:
+                raise
+            except BaseException:
+                cancellation_event.set()
+                raise
         finally:
             available.put(suite_dir)
 
@@ -879,6 +900,8 @@ def run_group_phase(
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
+            except GroupCancellationRequested:
+                continue
             except BaseException as error:
                 error.add_note(f"OIDF {phase} group failed: {futures[future]}")
                 failures.append(error)

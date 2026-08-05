@@ -606,6 +606,65 @@ class PublicOidfRunnerTests(unittest.TestCase):
 
         command.assert_called_once()
 
+    def test_group_failure_prevents_queued_groups_from_starting(self):
+        invocations = (
+            ("01-first", ["runner", "first"]),
+            ("02-queued", ["runner", "queued"]),
+        )
+
+        with (
+            mock.patch.object(
+                self.module,
+                "command",
+                side_effect=subprocess.CalledProcessError(1, ["runner", "first"]),
+            ) as command,
+            self.assertRaises(ExceptionGroup) as raised,
+        ):
+            self.module.run_group_phase(
+                "safe",
+                invocations,
+                (Path("suite"),),
+                1,
+                {},
+                "suite-token",
+            )
+
+        command.assert_called_once()
+        self.assertIn("OIDF safe group execution failed", str(raised.exception))
+
+    def test_group_failure_cancels_other_running_group(self):
+        invocations = (
+            ("01-failing", ["runner", "failing"]),
+            ("02-running", ["runner", "running"]),
+        )
+        both_started = threading.Barrier(2)
+        running_cancelled = threading.Event()
+
+        def run_command(invocation, *, cancellation_event, **_kwargs):
+            both_started.wait(timeout=2)
+            if "failing" in invocation:
+                raise subprocess.CalledProcessError(1, invocation)
+            if cancellation_event.wait(timeout=2):
+                running_cancelled.set()
+                raise self.module.GroupCancellationRequested()
+            self.fail("running group was not cancelled after its peer failed")
+
+        with (
+            mock.patch.object(self.module, "command", side_effect=run_command) as command,
+            self.assertRaises(ExceptionGroup),
+        ):
+            self.module.run_group_phase(
+                "safe",
+                invocations,
+                (Path("suite-1"), Path("suite-2")),
+                2,
+                {},
+                "suite-token",
+            )
+
+        self.assertEqual(command.call_count, 2)
+        self.assertTrue(running_cancelled.is_set())
+
     def test_plan_groups_use_explicit_inputs_and_isolate_browser_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
