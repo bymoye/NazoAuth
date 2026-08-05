@@ -8,9 +8,13 @@ running isolated E2E deployment.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import statistics
+import struct
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -76,6 +80,10 @@ def seed_admin() -> None:
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "DELETE FROM users WHERE tenant_id = %s AND email = %s",
+                (DEFAULT_TENANT_ID, ADMIN_EMAIL),
+            )
+            cur.execute(
                 """
                 INSERT INTO users (
                     tenant_id, realm_id, organization_id, username, email,
@@ -83,12 +91,6 @@ def seed_admin() -> None:
                     is_active
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s, 'admin', 10, TRUE)
-                ON CONFLICT (tenant_id, email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
-                    role = 'admin',
-                    admin_level = 10,
-                    is_active = TRUE,
-                    updated_at = CURRENT_TIMESTAMP
                 """,
                 (
                     DEFAULT_TENANT_ID,
@@ -110,6 +112,17 @@ def csrf_header(session: requests.Session) -> dict[str, str]:
     return {"x-csrf-token": token}
 
 
+def totp_code(secret_base32: str) -> str:
+    normalized = "".join(secret_base32.split()).upper()
+    padding = "=" * ((8 - len(normalized) % 8) % 8)
+    secret = base64.b32decode(normalized + padding)
+    step = int(time.time()) // 30
+    digest = hmac.new(secret, struct.pack(">Q", step), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
+
+
 def create_load_client() -> tuple[str, str]:
     admin = requests.Session()
     login = admin.post(
@@ -119,6 +132,21 @@ def create_load_client() -> tuple[str, str]:
     )
     if login.status_code != 200:
         fail(f"admin login failed: {login.status_code} {login.text}")
+    begin = admin.post(
+        f"{BASE_URL}/auth/me/mfa/totp/begin",
+        headers=csrf_header(admin),
+        timeout=10,
+    )
+    if begin.status_code != 200:
+        fail(f"admin TOTP enrollment failed: {begin.status_code} {begin.text}")
+    confirm = admin.post(
+        f"{BASE_URL}/auth/me/mfa/totp/confirm",
+        json={"code": totp_code(begin.json()["secret_base32"])},
+        headers=csrf_header(admin),
+        timeout=10,
+    )
+    if confirm.status_code != 200 or confirm.json().get("mfa_enabled") is not True:
+        fail(f"admin TOTP confirmation failed: {confirm.status_code} {confirm.text}")
     response = admin.post(
         f"{BASE_URL}/admin/clients",
         json={
