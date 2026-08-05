@@ -77,6 +77,7 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         self.assertNotIn("  pki-init:\n", compose)
         self.assertNotIn("  server-bootstrap:\n", compose)
         self.assertIn("name: nazoauth-oidf-suite-default", compose)
+        self.assertIn('"$container_runtime" volume inspect nazoauth-oidf-proxy-pki', bootstrap)
         self.assertIn('"$container_runtime" volume create nazoauth-oidf-proxy-pki', bootstrap)
         self.assertIn("--volume nazoauth-oidf-proxy-pki:/pki", bootstrap)
         self.assertIn("external: true", compose)

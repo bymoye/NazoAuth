@@ -100,7 +100,9 @@ else
 fi
 require_image_label "$pki_init_image" run.nazoauth.source.revision "$source_revision"
 
-"$container_runtime" volume create nazoauth-oidf-proxy-pki >/dev/null
+if ! "$container_runtime" volume inspect nazoauth-oidf-proxy-pki >/dev/null 2>&1; then
+  "$container_runtime" volume create nazoauth-oidf-proxy-pki >/dev/null
+fi
 "$container_runtime" run --rm \
   --env "OIDF_TARGET_HOSTNAME=$OIDF_TARGET_HOSTNAME" \
   --volume nazoauth-oidf-proxy-pki:/pki \
