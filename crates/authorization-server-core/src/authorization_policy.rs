@@ -137,12 +137,10 @@ pub fn normalize_authorization_request(
         }
         _ => return Err(AuthorizationPolicyError::InvalidRequest),
     };
-    let confidential_oidc_nonce_exception = client.client_type == "confidential"
-        && scopes.iter().any(|scope| scope == "openid")
-        && parameters
-            .get("nonce")
-            .is_some_and(|nonce| !nonce.trim().is_empty());
-    if code_challenge.is_none() && (profile.pkce_required || !confidential_oidc_nonce_exception) {
+    let confidential_oidc_compatibility = !profile.pkce_required
+        && client.client_type == "confidential"
+        && scopes.iter().any(|scope| scope == "openid");
+    if code_challenge.is_none() && !confidential_oidc_compatibility {
         return Err(AuthorizationPolicyError::InvalidRequest);
     }
 
