@@ -95,7 +95,10 @@ use crate::http::token::device_config::DeviceHttpConfig;
 use crate::http::token::dispatch::{Openid4vcTokenHandles, TokenCoreHandles, TokenEndpointHandles};
 use crate::http::token::issue::TokenIssuanceConfig;
 use crate::runtime_modules::{RuntimeModules, ServerRuntimeModuleRegistry};
-use crate::settings::Settings;
+use crate::settings::{
+    Openid4vcRevocationPolicy, Settings, mfa_totp_key_ring, token_issuance_response_key_ring,
+};
+use nazo_digital_credentials::{CertificateRevocationPolicy, CertificateRevocationSnapshot};
 use nazo_http_actix::ClientIpConfig;
 use nazo_http_actix::{
     AuthorizationDecisionEndpoint, LocalRegistrationEndpoint, MfaProfileConfig, MfaProfileEndpoint,
@@ -106,8 +109,14 @@ use nazo_http_actix::{
 };
 use nazo_openid4vc_http_actix::{CredentialIssuerEndpoint, PresentationEndpoint};
 use nazo_postgres::create_pool;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
+use rustls::{
+    RootCertStore, ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    server::WebPkiClientVerifier,
+};
 use tracing::Instrument;
+
+const MAX_REVOCATION_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 
 pub async fn run() -> anyhow::Result<()> {
     let config = ConfigSource::load()?;
@@ -138,6 +147,17 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 数据库和 Valkey 客户端在 server factory 外创建，避免每个 worker 重复初始化。
     let diesel_db = create_pool(database_url.clone(), database_max_connections(&config)?)?;
+    let require_audit_least_privilege =
+        config.bool("SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE", true)?;
+    let audit_repository = nazo_postgres::AuditLedgerRepository::new(diesel_db.clone());
+    audit_repository
+        .check_available_with_policy(require_audit_least_privilege)
+        .await
+        .map_err(|error| anyhow::anyhow!("security audit writer preflight failed: {error}"))?;
+    crate::adapters::audit::install_persistent_audit_sink(
+        audit_repository,
+        require_audit_least_privilege,
+    )?;
     crate::conformance_lease::spawn_cleanup(diesel_db.clone());
     #[cfg(not(test))]
     let valkey =
@@ -150,6 +170,13 @@ pub async fn run() -> anyhow::Result<()> {
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
 
     let settings = Arc::new(Settings::from_config(&config)?);
+    crate::adapters::audit::configure_audit_anchor_preflight(
+        crate::adapters::audit_anchor::preflight_config_from_source(
+            &config,
+            &settings.storage.data_dir,
+        )?,
+    )?;
+    let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
     let instance_identity_dir = config
         .optional_string("INSTANCE_IDENTITY_DIR")
         .map(PathBuf::from);
@@ -286,8 +313,19 @@ pub async fn run() -> anyhow::Result<()> {
         nazo_valkey::AuthorizationStateAdapter::new(&valkey_connection),
         keyset.clone(),
     ));
+    let token_issuance_repository =
+        nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
+            diesel_db.clone(),
+            token_issuance_response_keys,
+        );
+    token_issuance_repository
+        .validate_response_key_ring()
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("token issuance response key-ring preflight failed: {error}")
+        })?;
     let token_service = web::Data::new(crate::http::token::ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(diesel_db.clone()),
+        token_issuance_repository,
         nazo_valkey::TokenIssuanceStateAdapter::new(&valkey_connection),
         keyset.clone(),
     ));
@@ -345,6 +383,7 @@ pub async fn run() -> anyhow::Result<()> {
     let openid4vc_crypto = if settings.modules.enable_openid4vci_issuer
         || settings.modules.enable_openid4vp_verifier
     {
+        let revocation_policy = load_revocation_policy(&settings.openid4vc).await?;
         let certificate_chain = tokio::fs::read(
             settings
                 .openid4vc
@@ -375,10 +414,12 @@ pub async fn run() -> anyhow::Result<()> {
                 trust_anchors_path.display()
             )
         })?;
-        Some(Openid4vcCredentialCrypto::new(
+        Some(Openid4vcCredentialCrypto::new_with_policies(
             keyset.clone(),
             &certificate_chain,
             &trust_anchors,
+            nazo_digital_credentials::VcIssuerTrustPolicy::san_bound(),
+            revocation_policy,
         )
         .with_context(|| {
             format!(
@@ -737,10 +778,24 @@ pub async fn run() -> anyhow::Result<()> {
         identity.rate_limit.window_seconds,
         identity.rate_limit.auth_max_requests,
     ));
+    let mfa_totp_keys = mfa_totp_key_ring(&config)?;
+    let mfa_repository =
+        nazo_postgres::MfaRepository::with_totp_key_ring(diesel_db.clone(), mfa_totp_keys.clone());
+    if mfa_totp_keys.is_some() {
+        let migrated = mfa_repository.migrate_legacy_totp_secrets().await?;
+        let rotated = mfa_repository.rotate_totp_secrets().await?;
+        if migrated > 0 || rotated > 0 {
+            tracing::info!(migrated, rotated, "migrated TOTP secret envelopes");
+        }
+    } else if mfa_repository.has_totp_credentials().await? {
+        anyhow::bail!(
+            "MFA_TOTP_ENCRYPTION_KEY is required before starting with persisted TOTP credentials"
+        );
+    }
     let mfa_profiles = web::Data::new(MfaProfileEndpoint::new(
         Arc::new(ServerMfaProfileOperations::new(
             nazo_identity::MfaService::new(
-                Arc::new(nazo_postgres::MfaRepository::new(diesel_db.clone())),
+                Arc::new(mfa_repository.clone()),
                 Arc::new(ServerMfaSecretHasher),
             ),
             identity_session_service.clone(),
@@ -769,7 +824,7 @@ pub async fn run() -> anyhow::Result<()> {
         nazo_postgres::UserRepository::new(diesel_db.clone()),
         nazo_valkey::RateLimitStore::new(&valkey_connection),
         LoginPasswordVerifier,
-        nazo_postgres::MfaRepository::new(diesel_db.clone()),
+        mfa_repository.clone(),
         nazo_valkey::SessionStore::new(&valkey_connection),
         TracingAuthenticationAudit,
         nazo_identity::AuthenticationServiceConfig {
@@ -801,7 +856,7 @@ pub async fn run() -> anyhow::Result<()> {
             nazo_postgres::UserRepository::new(diesel_db.clone()),
             nazo_postgres::PasskeyRepository::new(diesel_db.clone()),
             nazo_valkey::AuthenticationStore::new(&valkey_connection),
-            nazo_postgres::MfaRepository::new(diesel_db.clone()),
+            mfa_repository.clone(),
             nazo_valkey::SessionStore::new(&valkey_connection),
             TracingPasskeyAudit,
             nazo_identity::PasskeyServiceConfig {
@@ -994,30 +1049,120 @@ pub async fn run() -> anyhow::Result<()> {
         app.configure(|cfg| routes::configure(cfg, &settings, perf_metrics_enabled))
     })
     .on_connect(|io, extensions| {
-        let Some(stream) = io
-            .downcast_ref::<actix_tls::accept::openssl::TlsStream<actix_web::rt::net::TcpStream>>()
+        let Some(stream) = io.downcast_ref::<
+            actix_tls::accept::rustls_0_23::TlsStream<actix_web::rt::net::TcpStream>,
+        >()
         else {
             return;
         };
-        let Some(certificate) = stream.ssl().peer_certificate() else {
+        let Some(certificate) = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certificates| certificates.first())
+        else {
             return;
         };
-        let Ok(der) = certificate.to_der() else {
-            return;
-        };
-        if let Some(identity) = crate::http::mtls::certificate_der_identity(&der) {
+        if let Some(identity) = crate::http::mtls::certificate_der_identity(certificate.as_ref()) {
             extensions.insert(identity);
         }
     })
     .bind(addr)?;
     let server = if let Some((tls_addr, acceptor)) = direct_tls {
         tracing::info!("nazo-oauth-server direct mTLS listener on {tls_addr}");
-        server.bind_openssl(tls_addr, acceptor)?
+        server.bind_rustls_0_23(tls_addr, acceptor)?
     } else {
         server
     };
     server.run().await?;
     Ok(())
+}
+
+async fn load_revocation_policy(
+    settings: &crate::settings::Openid4vcSettings,
+) -> anyhow::Result<CertificateRevocationPolicy> {
+    let Some(path) = settings.revocation_snapshot_file.as_ref() else {
+        return Ok(CertificateRevocationPolicy::disabled());
+    };
+    let snapshot = read_revocation_snapshot(path).await.with_context(|| {
+        format!(
+            "failed to load OpenID4VC revocation snapshot from {}",
+            path.display()
+        )
+    })?;
+    let policy = match settings.revocation_policy {
+        Openid4vcRevocationPolicy::Disabled => CertificateRevocationPolicy::disabled(),
+        Openid4vcRevocationPolicy::Optional => {
+            CertificateRevocationPolicy::optional(Arc::new(snapshot))
+        }
+        Openid4vcRevocationPolicy::Required => {
+            CertificateRevocationPolicy::required(Arc::new(snapshot))
+        }
+    };
+    if policy.is_enabled() {
+        spawn_revocation_snapshot_reloader(
+            policy.clone(),
+            path.clone(),
+            Duration::from_secs(settings.revocation_reload_interval_seconds),
+        );
+    }
+    Ok(policy)
+}
+
+async fn read_revocation_snapshot(
+    path: &std::path::Path,
+) -> anyhow::Result<CertificateRevocationSnapshot> {
+    use tokio::io::AsyncReadExt as _;
+
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::new();
+    file.take(MAX_REVOCATION_SNAPSHOT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > MAX_REVOCATION_SNAPSHOT_BYTES {
+        anyhow::bail!("revocation snapshot exceeds {MAX_REVOCATION_SNAPSHOT_BYTES} bytes");
+    }
+    let snapshot =
+        CertificateRevocationSnapshot::from_json(&bytes).map_err(|error| anyhow::anyhow!(error))?;
+    snapshot
+        .validate_freshness_at(chrono::Utc::now())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(snapshot)
+}
+
+fn spawn_revocation_snapshot_reloader(
+    policy: CertificateRevocationPolicy,
+    path: PathBuf,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match read_revocation_snapshot(&path).await {
+                Ok(snapshot) => {
+                    if let Err(error) =
+                        policy.replace_snapshot(Arc::new(snapshot), chrono::Utc::now())
+                    {
+                        tracing::warn!(
+                            target: "openid4vc.revocation",
+                            snapshot_path = %path.display(),
+                            %error,
+                            "rejected OpenID4VC revocation snapshot reload"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    target: "openid4vc.revocation",
+                    snapshot_path = %path.display(),
+                    %error,
+                    "failed to reload OpenID4VC revocation snapshot; retaining previous snapshot"
+                ),
+            }
+        }
+    });
 }
 
 fn ui_static_files(root: PathBuf) -> Files {
@@ -1050,7 +1195,7 @@ fn ui_static_files(root: PathBuf) -> Files {
 fn direct_tls_listener(
     config: &ConfigSource,
     settings: &Settings,
-) -> anyhow::Result<Option<(SocketAddr, openssl::ssl::SslAcceptorBuilder)>> {
+) -> anyhow::Result<Option<(SocketAddr, ServerConfig)>> {
     use crate::http::mtls::MtlsCertificateSourceMode;
 
     if settings.endpoint.mtls_certificate_source != MtlsCertificateSourceMode::DirectTls {
@@ -1065,13 +1210,43 @@ fn direct_tls_listener(
     let certificate = required("TLS_CERTIFICATE_FILE")?;
     let private_key = required("TLS_PRIVATE_KEY_FILE")?;
     let client_ca = required("TLS_CLIENT_CA_FILE")?;
-    let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())?;
-    acceptor.set_certificate_chain_file(certificate)?;
-    acceptor.set_private_key_file(private_key, SslFiletype::PEM)?;
-    acceptor.check_private_key()?;
-    acceptor.set_ca_file(client_ca)?;
-    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-    Ok(Some((bind, acceptor)))
+
+    let certificates = CertificateDer::pem_file_iter(&certificate)
+        .with_context(|| format!("failed to open TLS certificate chain {certificate}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to parse TLS certificate chain {certificate}"))?;
+    if certificates.is_empty() {
+        anyhow::bail!("TLS certificate chain {certificate} contains no certificates");
+    }
+    let private_key = PrivateKeyDer::from_pem_file(&private_key)
+        .with_context(|| format!("failed to parse TLS private key {private_key}"))?;
+
+    let mut client_roots = RootCertStore::empty();
+    let client_ca_certificates = CertificateDer::pem_file_iter(&client_ca)
+        .with_context(|| format!("failed to open TLS client CA bundle {client_ca}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to parse TLS client CA bundle {client_ca}"))?;
+    if client_ca_certificates.is_empty() {
+        anyhow::bail!("TLS client CA bundle {client_ca} contains no certificates");
+    }
+    for certificate in client_ca_certificates {
+        client_roots.add(certificate).with_context(|| {
+            format!("TLS client CA bundle {client_ca} contains an invalid certificate")
+        })?;
+    }
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), Arc::clone(&provider))
+            .build()
+            .context("failed to build mutual TLS client certificate verifier")?;
+    let server_config = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(rustls::DEFAULT_VERSIONS)
+        .context("failed to configure TLS protocol versions")?
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(certificates, private_key)
+        .context("TLS certificate chain does not match the configured private key")?;
+    Ok(Some((bind, server_config)))
 }
 
 #[cfg(test)]

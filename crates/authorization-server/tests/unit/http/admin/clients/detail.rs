@@ -266,7 +266,7 @@ impl LiveAdminClientDetailFixture {
         let payload = SessionPayload {
             user_id: user.id,
             auth_time: Utc::now().timestamp(),
-            amr: vec!["pwd".to_owned()],
+            amr: vec!["pwd".to_owned(), "otp".to_owned(), "mfa".to_owned()],
             pending_mfa: false,
             oidc_sid: Some(format!("oidc-{sid}")),
         };

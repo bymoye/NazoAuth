@@ -2,7 +2,7 @@
 
 FROM docker.io/library/maven:3-eclipse-temurin-21 AS builder
 
-ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
+ARG OIDF_SUITE_UPSTREAM_REVISION=932b46f1e507871eb0b34621aaef65ff04442e6f
 
 WORKDIR /src
 COPY --from=oidf_suite . .
@@ -13,7 +13,7 @@ RUN --mount=type=cache,id=oidf-suite-maven,target=/root/.m2,sharing=locked \
 
 FROM docker.io/library/eclipse-temurin:21
 
-ARG OIDF_SUITE_UPSTREAM_REVISION=946451d1ce29965c9ab7aee05f5003552233160e
+ARG OIDF_SUITE_UPSTREAM_REVISION=932b46f1e507871eb0b34621aaef65ff04442e6f
 
 COPY --from=builder /src/target/fapi-test-suite.jar /server/fapi-test-suite.jar
 COPY --chmod=0555 deploy/oidf-suite/start-suite.sh /usr/local/bin/start-oidf-suite

@@ -60,7 +60,8 @@ struct ScimCursorPayload {
 ///
 /// Encryption and key derivation stay outside the identity core. The current
 /// AES-256-GCM adapter can therefore move without making this crate depend on
-/// OpenSSL, while the claims and validation rules remain compiler-owned here.
+/// a concrete crypto provider, while the claims and validation rules remain
+/// compiler-owned here.
 pub fn build_scim_cursor_plaintext(
     context: &ScimCursorContext<'_>,
     now: DateTime<Utc>,

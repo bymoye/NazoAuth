@@ -655,9 +655,7 @@ pub(crate) fn snapshot_from_loaded(loaded: &LoadedKeyset) -> KeySnapshot {
 
 #[cfg(any(test, feature = "test-support"))]
 fn test_request_object_decryption_key() -> anyhow::Result<Vec<u8>> {
-    use openssl::{pkey::PKey, rsa::Rsa};
-
-    Ok(PKey::from_rsa(Rsa::generate(2048)?)?.private_key_to_pem_pkcs8()?)
+    crate::crypto::generate_rsa_pkcs8_pem(2048)
 }
 
 #[cfg(any(test, feature = "test-support"))]

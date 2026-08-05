@@ -302,6 +302,9 @@ async fn insert_refresh_token(
             oauth_tokens::dpop_jkt.eq(token.dpop_jkt),
             oauth_tokens::mtls_x5t_s256.eq(token.mtls_x5t_s256),
             oauth_tokens::client_attestation_jkt.eq(token.client_attestation_jkt),
+            oauth_tokens::oidc_auth_context.eq(token
+                .authentication_context
+                .map(|context| serde_json::to_value(context).expect("context serializes"))),
         ))
         .execute(connection)
         .await
@@ -465,6 +468,10 @@ fn row_from_domain(token: &RefreshToken) -> RefreshTokenRow {
         dpop_jkt: token.dpop_jkt.clone(),
         mtls_x5t_s256: token.mtls_x5t_s256.clone(),
         client_attestation_jkt: token.client_attestation_jkt.clone(),
+        oidc_auth_context: token
+            .authentication_context
+            .as_ref()
+            .map(|context| serde_json::to_value(context).expect("context serializes")),
     }
 }
 

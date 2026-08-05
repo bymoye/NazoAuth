@@ -43,6 +43,19 @@ const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
         "OPENID4VC_DATA_ENCRYPTION_KEY",
         "OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
     ),
+    ("MFA_TOTP_ENCRYPTION_KEY", "MFA_TOTP_ENCRYPTION_KEY_FILE"),
+    (
+        "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY",
+        "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_FILE",
+    ),
+    (
+        "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+        "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_FILE",
+    ),
+    (
+        "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+        "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE",
+    ),
     (
         "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
         "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN_FILE",
@@ -59,6 +72,20 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "AUTH_CODE_TTL_SECONDS",
     "AUTH_RATE_LIMIT_MAX_REQUESTS",
     "AUTHORIZATION_SERVER_PROFILE",
+    "AUDIT_ANCHOR_BATCH_SIZE",
+    "AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS",
+    "AUDIT_ANCHOR_DATABASE_URL",
+    "AUDIT_ANCHOR_DATABASE_URL_FILE",
+    "AUDIT_ANCHOR_FRESHNESS_SECONDS",
+    "AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS",
+    "AUDIT_ANCHOR_MAX_LAG_SECONDS",
+    "AUDIT_ANCHOR_MODE",
+    "AUDIT_ANCHOR_POLL_INTERVAL_SECONDS",
+    "AUDIT_ANCHOR_REQUEST_TIMEOUT_SECONDS",
+    "AUDIT_ANCHOR_STATUS_FILE",
+    "AUDIT_ANCHOR_TOKEN",
+    "AUDIT_ANCHOR_TOKEN_FILE",
+    "AUDIT_ANCHOR_URL",
     "AVATAR_MAX_BYTES",
     "AVATAR_STORAGE_DIR",
     "BACKCHANNEL_LOGOUT_PRIVATE_ORIGINS",
@@ -69,6 +96,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "CLIENT_SECRET_PEPPER_FILE",
     "CIBA_AUTOMATED_DECISION_TOKEN",
     "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
+    "CIBA_AUTOMATED_DECISION_MODE",
     "CIBA_AUTH_REQ_ID_TTL_SECONDS",
     "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
     "CIBA_PING_TLS_TRUST_BUNDLE",
@@ -128,6 +156,18 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "LOGIN_FAILURE_WINDOW_SECONDS",
     "MTLS_ENDPOINT_BASE_URL",
     "MTLS_CERTIFICATE_SOURCE",
+    "MFA_TOTP_ENCRYPTION_KEY",
+    "MFA_TOTP_ENCRYPTION_KEY_FILE",
+    "MFA_TOTP_ENCRYPTION_KEY_ID",
+    "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY",
+    "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_FILE",
+    "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID",
+    "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+    "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_FILE",
+    "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID",
+    "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+    "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE",
+    "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID",
     "OPENID4VC_DATA_ENCRYPTION_KEY",
     "OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
     "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON",
@@ -135,6 +175,9 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "OPENID4VC_KEY_ATTESTATION_JWKS_JSON",
     "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
     "OPENID4VC_TRUST_ANCHORS_FILE",
+    "OPENID4VC_REVOCATION_POLICY",
+    "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
+    "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
     "OPENID4VC_TRANSACTION_TTL_SECONDS",
     "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
     "OPENID4VCI_DEFERRED_CREDENTIAL_CONFIGURATIONS",
@@ -171,6 +214,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "RUST_LOG",
     "RUNTIME_INSTANCE_ID",
     "SCIM_EVENT_RETENTION_SECONDS",
+    "SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE",
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_SECONDS",
     "SIGNING_KEY_PREPUBLISH_SECONDS",
@@ -242,6 +286,21 @@ impl ConfigSource {
 
     pub(crate) fn load_for_migrations() -> anyhow::Result<Self> {
         Self::load_for_migrations_from_dir_with_env(".", std::env::vars())
+    }
+
+    pub(crate) fn load_for_audit_anchor_worker() -> anyhow::Result<Self> {
+        let mut source = Self::load_from_dir_with_env_mode(".", std::env::vars(), false, false)?;
+        source.merge_secret_file_inputs(
+            Path::new("."),
+            &[
+                (
+                    "AUDIT_ANCHOR_DATABASE_URL",
+                    "AUDIT_ANCHOR_DATABASE_URL_FILE",
+                ),
+                ("AUDIT_ANCHOR_TOKEN", "AUDIT_ANCHOR_TOKEN_FILE"),
+            ],
+        )?;
+        Ok(source)
     }
 
     pub(crate) fn load_without_secret_values() -> anyhow::Result<Self> {
@@ -428,6 +487,36 @@ impl ConfigSource {
             }
             let value = read_or_create_generated_secret(&secrets_dir.join(file_name))?;
             self.generated_values.insert(key.to_owned(), value);
+        }
+
+        // Token-issuance response envelopes have their own key ring. Keep a
+        // local development key durable across restarts, but never derive it
+        // from CLIENT_SECRET_PEPPER (the two capabilities rotate separately).
+        let response_key = "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY";
+        let mut generated_response_key = false;
+        if !self.env_values.contains_key(response_key)
+            && !self.file_values.contains_key(response_key)
+        {
+            let value = read_or_create_generated_secret_with_size(
+                &secrets_dir.join("token-issuance-response-encryption-key"),
+                32,
+            )?;
+            self.generated_values.insert(response_key.to_owned(), value);
+            generated_response_key = true;
+        }
+        let response_key_id = "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID";
+        if generated_response_key
+            && !self.env_values.contains_key(response_key_id)
+            && !self.file_values.contains_key(response_key_id)
+        {
+            let key = self.get(response_key).ok_or_else(|| {
+                anyhow::anyhow!("{response_key} is required before deriving its id")
+            })?;
+            let digest = blake3::hash(key.as_bytes()).to_hex().to_string();
+            self.generated_values.insert(
+                response_key_id.to_owned(),
+                format!("generated-{}", &digest[..16]),
+            );
         }
         Ok(())
     }

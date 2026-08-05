@@ -1,6 +1,5 @@
 //! refresh_token grant 处理。
-use crate::adapters::audit::audit_event;
-use crate::adapters::audit::audit_fields;
+use crate::adapters::audit::{audit_event_required, audit_fields};
 use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::constant_time_eq;
@@ -211,7 +210,7 @@ pub(crate) async fn token_refresh_with_service(
                 token = successor;
             }
             Ok(None) => {
-                audit_event(
+                if let Err(error) = audit_event_required(
                     "refresh_reuse_detected",
                     audit_fields(&[
                         ("client_id", json!(client.client_id)),
@@ -225,7 +224,17 @@ pub(crate) async fn token_refresh_with_service(
                             ))),
                         ),
                     ]),
-                );
+                )
+                .await
+                {
+                    tracing::error!(%error, "required refresh reuse audit failed");
+                    return oauth_token_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "刷新令牌重用审计写入失败.",
+                        false,
+                    );
+                }
                 return oauth_token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
@@ -404,6 +413,23 @@ pub(crate) async fn token_refresh_with_service(
             false,
         );
     }
+    if token
+        .authentication_context
+        .as_ref()
+        .is_some_and(|context| {
+            context.issuer != issuance.config.issuer() || context.audience != client.client_id
+        })
+    {
+        // Do not rotate a family while dropping the original OIDC issuer or
+        // audience contract. The caller must re-authorize after a metadata
+        // mismatch rather than receive a permanently degraded successor.
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh_token 的 OpenID 上下文与当前客户端不匹配.",
+            false,
+        );
+    }
     let refresh_token_policy = match lost_response_original_id {
         Some(original_id) => RefreshTokenPolicy::RotateLostResponse {
             family_id: token.token_family_id,
@@ -417,6 +443,44 @@ pub(crate) async fn token_refresh_with_service(
             &token,
         ),
     };
+    let authentication_context = token.authentication_context.as_ref().filter(|context| {
+        context.issuer == issuance.config.issuer() && context.audience == client.client_id
+    });
+    let refresh_id_token_sid = authentication_context.map(|context| context.id_token_sid.clone());
+    let (
+        nonce,
+        auth_time,
+        amr,
+        oidc_sid,
+        acr,
+        userinfo_claims,
+        userinfo_claim_requests,
+        id_token_claims,
+        id_token_claim_requests,
+    ) = match authentication_context {
+        Some(context) => (
+            context.nonce.clone(),
+            Some(context.auth_time),
+            context.amr.clone(),
+            context.oidc_sid.clone(),
+            context.acr.clone(),
+            context.userinfo_claims.clone(),
+            context.userinfo_claim_requests.clone(),
+            context.id_token_claims.clone(),
+            context.id_token_claim_requests.clone(),
+        ),
+        None => (
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
     issue_token_response_with_service(
         issuance,
         token_service,
@@ -427,15 +491,23 @@ pub(crate) async fn token_refresh_with_service(
             scopes,
             authorization_details: token.authorization_details,
             audiences,
-            nonce: None,
-            auth_time: None,
-            amr: Vec::new(),
-            oidc_sid: None,
-            acr: None,
-            userinfo_claims: Vec::new(),
-            userinfo_claim_requests: Vec::new(),
-            id_token_claims: Vec::new(),
-            id_token_claim_requests: Vec::new(),
+            // Keep the original nonce in the persisted refresh contract, but
+            // issue.rs suppresses it from the refreshed ID Token as required
+            // by OIDC Core 12.2.
+            nonce,
+            // OIDC Core 12.2 requires the original issuer/audience and
+            // auth_time/amr/acr/sid. A legacy row, or a row whose issuer or
+            // audience no longer matches this client, therefore receives no
+            // ID Token rather than a token with a rewritten context.
+            auth_time,
+            amr,
+            oidc_sid,
+            acr,
+            userinfo_claims,
+            userinfo_claim_requests,
+            id_token_claims,
+            id_token_claim_requests,
+            refresh_id_token_sid,
             include_refresh: true,
             refresh_token_policy,
             dpop_jkt: dpop_jkt.clone(),

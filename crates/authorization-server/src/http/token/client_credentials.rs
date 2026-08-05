@@ -19,7 +19,9 @@ use nazo_http_actix::oauth_token_error;
 use serde_json::json;
 
 // 只为机密客户端签发无用户主体的访问令牌。
-use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use super::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant, request_idempotency_key,
+};
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
 };
@@ -147,10 +149,12 @@ pub(crate) async fn token_client_credentials_with_service(
         Ok(issue_request) => issue_request,
         Err(response) => return response,
     };
-    issue_token_response_with_service(
+    let idempotency_key = request_idempotency_key(req);
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        idempotency_key.as_deref(),
         TokenIssue {
             user_id: None,
             subject: client.client_id.clone(),
@@ -166,6 +170,7 @@ pub(crate) async fn token_client_credentials_with_service(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: false,
             refresh_token_policy: RefreshTokenPolicy::PreserveExisting,
             dpop_jkt,

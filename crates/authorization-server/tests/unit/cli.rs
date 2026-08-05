@@ -17,6 +17,10 @@ fn parses_all_product_commands() {
         Command::OperatorTask
     );
     assert_eq!(
+        parse(&["nazoauth", "audit-anchor-worker"]).unwrap(),
+        Command::AuditAnchorWorker
+    );
+    assert_eq!(
         parse(&["nazoauth", "build-identity"]).unwrap(),
         Command::BuildIdentity
     );

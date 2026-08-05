@@ -227,6 +227,15 @@ OTP-000 基线与契约
 - [ ] `OTP-407` 为 unmanaged/dev 模式定义显式、可审计、无隐式降级的兼容行为。
 - [ ] `OTP-408` 解析和错误路径全面应用 zeroization/secret wrapper；禁止派生 Debug 泄漏。
 
+应用侧的部署绑定实现约束：签名验证后必须读取本机只读部署身份，并逐字段
+比较 `deployment_id`、`iss=controller:<deployment_id>` 和
+`aud=runtime:<deployment_id>`。运行时已有
+`DATA_DIR/instance/deployment-id` 或 operator-state 锚点时必须逐一比对；首次
+`migrate-apply` 尚未建立任一锚点时，才能使用已纳入 config manifest 的
+`DEPLOYMENT_ID` 作为显式 bootstrap 来源，并原子持久化 operator-state 锚点；
+其他操作必须已有该锚点。
+缺少两者或两者冲突均 fail closed；该校验不依赖 NazoAuthCtl 在线可用。
+
 ### 验收
 
 - [ ] forged、expired、wrong deployment/target/config、unknown operation 和 replay request 在任何

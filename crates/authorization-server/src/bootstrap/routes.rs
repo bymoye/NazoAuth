@@ -73,7 +73,7 @@ use crate::http::token::{
     dispatch::token,
 };
 use crate::http::well_known::{captcha_config, live, ready, startup};
-use crate::settings::Settings;
+use crate::settings::{CibaAutomatedDecisionMode, Settings};
 use nazo_http_actix::{
     scim_create_user, scim_delete_user, scim_get_user, scim_list_users, scim_patch_user,
     scim_poll_security_events, scim_replace_user, scim_resource_types, scim_schemas,
@@ -87,6 +87,7 @@ pub(crate) fn configure(
     settings: &Settings,
     perf_metrics_enabled: bool,
 ) {
+    let ciba_automated_decision_mode = settings.ciba.ciba_automated_decision_mode;
     let enable_openid4vci_issuer = settings.modules.enable_openid4vci_issuer;
     // Actix scopes consume every request under their prefix, including paths
     // that are not registered inside the scope. Keep all /.well-known routes
@@ -280,16 +281,9 @@ pub(crate) fn configure(
                         )
                         .route("/access-delivery", web::post().to(access_delivery)),
                 )
-                .route(
-                    "/ciba-automated-decision",
-                    web::get().to(ciba_automated_decision),
-                )
-                .route(
-                    "/ciba-automated-decision",
-                    web::post().to(ciba_automated_decision),
-                )
-                .route("/ciba/automated", web::get().to(ciba_automated_decision))
-                .route("/ciba/automated", web::post().to(ciba_automated_decision))
+                .configure(move |cfg| {
+                    configure_ciba_automated_decision_routes(cfg, ciba_automated_decision_mode);
+                })
                 .route("/ciba/{auth_req_id}", web::get().to(ciba_verification))
                 .route("/ciba/{auth_req_id}", web::post().to(ciba_decision))
                 .route("/logout", web::post().to(profile_logout)),
@@ -414,5 +408,28 @@ pub(crate) fn configure(
     }
     if perf_metrics_enabled {
         cfg.route("/__perf/metrics", web::get().to(perf_metrics));
+    }
+}
+
+fn configure_ciba_automated_decision_routes(
+    cfg: &mut web::ServiceConfig,
+    mode: CibaAutomatedDecisionMode,
+) {
+    match mode {
+        CibaAutomatedDecisionMode::Disabled => {}
+        CibaAutomatedDecisionMode::Header => {
+            cfg.route(
+                "/ciba-automated-decision",
+                web::post().to(ciba_automated_decision),
+            )
+            .route("/ciba/automated", web::post().to(ciba_automated_decision));
+        }
+        CibaAutomatedDecisionMode::QueryParameter => {
+            cfg.route(
+                "/ciba-automated-decision",
+                web::get().to(ciba_automated_decision),
+            )
+            .route("/ciba/automated", web::get().to(ciba_automated_decision));
+        }
     }
 }

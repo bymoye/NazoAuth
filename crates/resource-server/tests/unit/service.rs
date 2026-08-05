@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::*;
 use crate::DpopProofVerifierConfig;
-use crate::tests::fixtures::{dpop_fixture, dpop_proof, fixture, token};
+use crate::tests::fixtures::{TEST_X5T_1, TEST_X5T_2, dpop_fixture, dpop_proof, fixture, token};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut context = Context::from_waker(Waker::noop());
@@ -286,11 +286,7 @@ fn mtls_bound_bearer_requires_the_verified_certificate_thumbprint() {
 
 async fn mtls_bound_bearer_requires_the_verified_certificate_thumbprint_async() {
     let fixture = fixture();
-    let access_token = token(
-        &fixture,
-        json!({"cnf": {"x5t#S256": "certificate-thumbprint"}}),
-        None,
-    );
+    let access_token = token(&fixture, json!({"cnf": {"x5t#S256": TEST_X5T_1}}), None);
     let service = ProtectedResourceAuthorizationService::new(
         fixture.verifier,
         DpopProofVerifier::new(DpopProofVerifierConfig::default()),
@@ -313,7 +309,7 @@ async fn mtls_bound_bearer_requires_the_verified_certificate_thumbprint_async() 
     let mismatch = service
         .authorize(
             request(&access_token, AccessTokenScheme::Bearer, None),
-            context(Some("different-thumbprint")),
+            context(Some(TEST_X5T_2)),
         )
         .await
         .expect_err("wrong certificate must fail");
@@ -325,13 +321,13 @@ async fn mtls_bound_bearer_requires_the_verified_certificate_thumbprint_async() 
     let authorized = service
         .authorize(
             request(&access_token, AccessTokenScheme::Bearer, None),
-            context(Some("certificate-thumbprint")),
+            context(Some(TEST_X5T_1)),
         )
         .await
         .expect("matching certificate must authorize");
     assert_eq!(
         authorized.sender_constraint.mtls_x5t_s256.as_deref(),
-        Some("certificate-thumbprint")
+        Some(TEST_X5T_1)
     );
 }
 

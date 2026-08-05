@@ -1,15 +1,11 @@
 use anyhow::{Context, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use openssl::{
-    encrypt::Decrypter,
-    hash::MessageDigest,
-    pkey::PKey,
-    rsa::Padding,
-    symm::{Cipher, decrypt_aead},
-};
 use serde::Deserialize;
 
-use crate::KeyManager;
+use crate::{
+    KeyManager,
+    crypto::{aes_256_gcm_decrypt, rsa_oaep_sha256_decrypt},
+};
 
 #[derive(Deserialize)]
 struct ProtectedHeader {
@@ -60,19 +56,13 @@ impl KeyManager {
             return Err(anyhow!("unsupported request object JWE header"));
         }
 
-        let private_key =
-            PKey::private_key_from_pem(&generation.loaded.request_object_decryption_key)
-                .context("invalid request object decryption key")?;
-        let mut decrypter = Decrypter::new(&private_key)?;
-        decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-        decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-        decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
         let encrypted_key = URL_SAFE_NO_PAD
             .decode(encrypted_key)
             .context("invalid encrypted key encoding")?;
-        let mut cek = vec![0_u8; decrypter.decrypt_len(&encrypted_key)?];
-        let cek_len = decrypter.decrypt(&encrypted_key, &mut cek)?;
-        cek.truncate(cek_len);
+        let cek = rsa_oaep_sha256_decrypt(
+            &generation.loaded.request_object_decryption_key,
+            &encrypted_key,
+        )?;
         if cek.len() != 32 {
             return Err(anyhow!(
                 "request object content encryption key must be 256 bits"
@@ -89,15 +79,8 @@ impl KeyManager {
         if iv.len() != 12 || tag.len() != 16 {
             return Err(anyhow!("invalid A256GCM iv or tag length"));
         }
-        let plaintext = decrypt_aead(
-            Cipher::aes_256_gcm(),
-            &cek,
-            Some(&iv),
-            protected.as_bytes(),
-            &ciphertext,
-            &tag,
-        )
-        .context("request object authentication failed")?;
+        let plaintext = aes_256_gcm_decrypt(&cek, &iv, protected.as_bytes(), &ciphertext, &tag)
+            .context("request object authentication failed")?;
         String::from_utf8(plaintext).context("request object plaintext is not UTF-8")
     }
 }

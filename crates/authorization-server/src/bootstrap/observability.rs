@@ -9,6 +9,7 @@ use opentelemetry_sdk::{
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::adapters::audit::AUDIT_SCHEMA_VERSION;
 use crate::config::ConfigSource;
 
 const SERVICE_NAME: &str = "nazo-oauth-server";
@@ -52,7 +53,10 @@ pub(crate) fn init(config: &ConfigSource) -> anyhow::Result<ObservabilityGuard> 
 
     let resource = Resource::builder()
         .with_service_name(SERVICE_NAME)
-        .with_attributes([KeyValue::new("service.version", env!("CARGO_PKG_VERSION"))])
+        .with_attributes([
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("nazo.audit.schema_version", AUDIT_SCHEMA_VERSION),
+        ])
         .build();
 
     let trace_exporter = otel_http_span_exporter(&otel_config)?;

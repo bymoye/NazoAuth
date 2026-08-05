@@ -208,27 +208,23 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate_chai
             .await
             .unwrap();
     let first_certificate = tokio::fs::read(&certificate).await.unwrap();
-    let certificates = X509::stack_from_pem(&first_certificate).unwrap();
+    let certificates = CertificateDer::pem_slice_iter(&first_certificate)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(certificates.len(), 2);
-    assert_ne!(
-        certificates[0].to_der().unwrap(),
-        certificates[1].to_der().unwrap()
-    );
-    assert!(!is_ca_certificate(&certificates[0]).unwrap());
-    assert!(is_ca_certificate(&certificates[1]).unwrap());
-    let subject_alt_names = certificates[0].subject_alt_names().unwrap();
-    assert_eq!(subject_alt_names.len(), 1);
-    assert_eq!(subject_alt_names[0].dnsname(), Some("auth.example"));
-    assert!(
-        certificates[1]
-            .verify(&certificates[1].public_key().unwrap())
-            .unwrap()
-    );
-    assert!(
-        certificates[0]
-            .verify(&certificates[1].public_key().unwrap())
-            .unwrap()
-    );
+    assert_ne!(certificates[0], certificates[1]);
+    let (_, leaf) = x509_parser::parse_x509_certificate(&certificates[0]).unwrap();
+    let (_, ca) = x509_parser::parse_x509_certificate(&certificates[1]).unwrap();
+    assert!(!leaf.is_ca());
+    assert!(ca.is_ca());
+    let subject_alt_names = leaf.subject_alternative_name().unwrap().unwrap();
+    assert_eq!(subject_alt_names.value.general_names.len(), 1);
+    assert!(matches!(
+        &subject_alt_names.value.general_names[0],
+        x509_parser::extensions::GeneralName::DNSName("auth.example")
+    ));
+    assert!(ca.verify_signature(Some(ca.public_key())).is_ok());
+    assert!(leaf.verify_signature(Some(ca.public_key())).is_ok());
 
     let options = parse_generate_local(
         "ES256",
@@ -298,8 +294,7 @@ async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
             .is_err()
     );
 
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-    let private_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+    let private_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     assert!(
         !existing_openid4vc_bundle_matches(&paths, &private_key)
             .await
@@ -344,7 +339,7 @@ async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
 
     let bundle = build_openid4vc_certificate_bundle(&private_key, "auth.example").unwrap();
     tokio::fs::write(&certificate, &bundle).await.unwrap();
-    let different_private_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+    let different_private_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     assert!(
         !existing_openid4vc_bundle_matches(&paths, &different_private_key)
             .await

@@ -7,7 +7,8 @@ use fred::prelude::{
     PerformanceConfig,
 };
 use nazo_auth::{
-    CibaDecisionEvaluation, CibaPollTransition, evaluate_ciba_decision, evaluate_ciba_poll,
+    CibaAuthenticationContext, CibaDecision, CibaDecisionEvaluation, CibaPollTransition,
+    evaluate_ciba_decision, evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
 };
 use nazo_valkey::AtomicResult as ValkeyAtomicResult;
 use nazo_valkey::test_support::ciba_request_storage_key;
@@ -22,6 +23,7 @@ fn pending_state(now: i64) -> CibaRequestState {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         acr: Some("1".to_owned()),
+        authentication_context: None,
         binding_message: Some("Read the number".to_owned()),
         issued_at: now,
         status: CibaStatus::Pending,
@@ -164,6 +166,27 @@ fn ciba_decision_changes_only_status() {
     assert_eq!(next.retention_expires_at, state.retention_expires_at);
     assert_eq!(next.interval_seconds, state.interval_seconds);
     assert_eq!(next.last_poll_at, state.last_poll_at);
+}
+
+#[test]
+fn approved_ciba_state_preserves_the_authenticated_session_context() {
+    let state = pending_state(1_000);
+    let context = CibaAuthenticationContext {
+        auth_time: 900,
+        amr: vec!["pwd".to_owned(), "otp".to_owned()],
+        oidc_sid: Some("sid-1".to_owned()),
+    };
+    let CibaDecisionEvaluation::Commit(next) = evaluate_ciba_decision_with_authentication_context(
+        &state,
+        Some(state.user_id),
+        CibaDecision::Approve,
+        Some(context.clone()),
+        1_001,
+    ) else {
+        panic!("valid decision should produce a terminal replacement")
+    };
+
+    assert_eq!(next.authentication_context, Some(context));
 }
 
 #[actix_web::test]

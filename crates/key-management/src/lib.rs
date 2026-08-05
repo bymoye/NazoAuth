@@ -1,5 +1,6 @@
 mod authorization_response;
 mod client_registration;
+mod crypto;
 mod external;
 mod jwks;
 mod lifecycle;

@@ -149,7 +149,7 @@ fn request_authorizer_rejects_duplicate_authorization_headers() {
 #[test]
 fn request_authorizer_requires_verified_dpop_binding_context() {
     let fixture = fixture();
-    let token = token(&fixture, json!({"cnf": {"jkt": "jkt-1"}}), None);
+    let token = token(&fixture, json!({"cnf": {"jkt": TEST_JKT_1}}), None);
     let header = dpop(&token);
     let error = authorize_resource_request(
         &fixture.verifier,
@@ -166,19 +166,19 @@ fn request_authorizer_requires_verified_dpop_binding_context() {
         &[header.as_str()],
         None,
         &VerifiedSenderConstraintProof {
-            dpop_jkt: Some("jkt-1".to_owned()),
+            dpop_jkt: Some(TEST_JKT_1.to_owned()),
             mtls_x5t_s256: None,
         },
     )
     .unwrap();
 
-    assert_eq!(verified.cnf.unwrap().jkt, Some("jkt-1".to_owned()));
+    assert_eq!(verified.cnf.unwrap().jkt, Some(TEST_JKT_1.to_owned()));
 }
 
 #[test]
 fn request_authorizer_requires_verified_mtls_binding_context() {
     let fixture = fixture();
-    let token = token(&fixture, json!({"cnf": {"x5t#S256": "thumb-1"}}), None);
+    let token = token(&fixture, json!({"cnf": {"x5t#S256": TEST_X5T_1}}), None);
     let header = bearer(&token);
     let error = authorize_resource_request(
         &fixture.verifier,
@@ -196,12 +196,12 @@ fn request_authorizer_requires_verified_mtls_binding_context() {
         None,
         &VerifiedSenderConstraintProof {
             dpop_jkt: None,
-            mtls_x5t_s256: Some("thumb-1".to_owned()),
+            mtls_x5t_s256: Some(TEST_X5T_1.to_owned()),
         },
     )
     .unwrap();
 
-    assert_eq!(verified.cnf.unwrap().x5t_s256, Some("thumb-1".to_owned()));
+    assert_eq!(verified.cnf.unwrap().x5t_s256, Some(TEST_X5T_1.to_owned()));
 }
 
 #[test]

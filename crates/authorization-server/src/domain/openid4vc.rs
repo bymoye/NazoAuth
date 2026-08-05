@@ -14,22 +14,16 @@ use mdoc_rs::{
 };
 use nazo_auth::{SignRequest, Signer, SigningPurpose};
 use nazo_digital_credentials::{
-    CredentialFormat, CredentialFuture, CredentialSignInput, CredentialSignerPort,
-    CredentialTrustError, CredentialVerifierPort, HolderBinding, PresentedCredential,
-    VerifiedCredential, decode_compact_jwt,
+    CertificateRevocationPolicy, CredentialFormat, CredentialFuture, CredentialSignInput,
+    CredentialSignerPort, CredentialTrustError, CredentialVerifierPort, HolderBinding,
+    PresentedCredential, VcIssuerTrustPolicy, VerifiedCredential, decode_compact_jwt,
 };
 use nazo_key_management::KeyManager;
 use nazo_openid4vci::{ProofError, ProofValidatorPort, Proofs, ValidatedProof};
 use nazo_operator_protocol::Openid4vcConformanceTrust;
-use openssl::{
-    bn::{BigNum, BigNumContext},
-    ec::{EcGroup, EcKey, EcPoint},
-    nid::Nid,
-    pkey::PKey,
-    stack::Stack,
-    x509::{X509, X509StoreContext, store::X509StoreBuilder},
-};
+use p256::PublicKey;
 use rand::Rng;
+use rustls::pki_types::{CertificateDer, pem::PemObject as _};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -40,16 +34,24 @@ pub(crate) struct Openid4vcCredentialCrypto {
     x5c: Arc<Vec<String>>,
     leaf_der: Arc<Vec<u8>>,
     trust_anchors: Arc<Vec<Vec<u8>>>,
+    issuer_trust_policy: VcIssuerTrustPolicy,
+    revocation_policy: CertificateRevocationPolicy,
+}
+
+struct ValidatedSdJwtChain {
+    decoding_key: DecodingKey,
+    certificates: Vec<Vec<u8>>,
+    leaf_der: Vec<u8>,
 }
 
 pub(crate) fn parse_conformance_credential_trust_anchor(pem: &str) -> anyhow::Result<Vec<u8>> {
-    let certificates = X509::stack_from_pem(pem.as_bytes())?;
+    let certificates = parse_pem_certificates(pem.as_bytes())?;
     if certificates.len() != 1 {
         anyhow::bail!(
             "OpenID4VC conformance credential trust must contain exactly one certificate"
         );
     }
-    let der = certificates[0].to_der()?;
+    let der = certificates[0].clone();
     let (remainder, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
         anyhow::anyhow!("failed to parse OpenID4VC conformance credential trust anchor: {error}")
     })?;
@@ -62,22 +64,21 @@ pub(crate) fn parse_conformance_credential_trust_anchor(pem: &str) -> anyhow::Re
 }
 
 impl Openid4vcCredentialCrypto {
-    pub(crate) fn new(
+    pub(crate) fn new_with_policies(
         keyset: KeyManager,
         certificate_chain_pem: &[u8],
         trust_anchors_pem: &[u8],
+        issuer_trust_policy: VcIssuerTrustPolicy,
+        revocation_policy: CertificateRevocationPolicy,
     ) -> anyhow::Result<Self> {
-        let certificates = X509::stack_from_pem(certificate_chain_pem)?;
-        let leaf = certificates
+        let certificates = parse_pem_certificates(certificate_chain_pem)?;
+        let leaf_der = certificates
             .first()
             .ok_or_else(|| anyhow::anyhow!("OpenID4VC signing certificate chain is empty"))?;
-        let leaf_der = leaf.to_der()?;
+        let (_, leaf) = parse_x509(leaf_der, "OpenID4VC signing leaf")?;
         let mut trust_anchors = Vec::new();
-        for certificate in X509::stack_from_pem(trust_anchors_pem)? {
-            let der = certificate.to_der()?;
-            let (_, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
-                anyhow::anyhow!("failed to parse OpenID4VC trust certificate: {error}")
-            })?;
+        for der in parse_pem_certificates(trust_anchors_pem)? {
+            let (_, parsed) = parse_x509(&der, "OpenID4VC trust certificate")?;
             if parsed.is_ca() {
                 trust_anchors.push(der);
             }
@@ -87,10 +88,8 @@ impl Openid4vcCredentialCrypto {
         }
         let x5c_der = certificates
             .iter()
-            .map(|certificate| certificate.to_der())
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
             .filter(|certificate| !trust_anchors.contains(certificate))
+            .cloned()
             .collect::<Vec<_>>();
         if x5c_der.is_empty() {
             anyhow::bail!("OpenID4VC x5c chain must contain a non-anchor leaf certificate");
@@ -99,26 +98,10 @@ impl Openid4vcCredentialCrypto {
             .into_iter()
             .map(|certificate| STANDARD.encode(certificate))
             .collect();
-        let mut store = X509StoreBuilder::new()?;
-        for anchor in &trust_anchors {
-            store.add_cert(X509::from_der(anchor)?)?;
-        }
-        let store = store.build();
-        let mut untrusted = Stack::new()?;
-        for certificate in certificates.iter().skip(1) {
-            let der = certificate.to_der()?;
-            if !trust_anchors.contains(&der) {
-                untrusted.push(certificate.clone())?;
-            }
-        }
-        let mut context = X509StoreContext::new()?;
-        if !context.init(&store, leaf, &untrusted, |context| context.verify_cert())? {
-            anyhow::bail!(
-                "OpenID4VC signing certificate is not anchored by the configured trust store"
-            );
-        }
+        verify_openid4vc_chain(&certificates, &trust_anchors)?;
         let snapshot = keyset.snapshot();
-        let leaf_key = leaf.public_key()?;
+        let leaf_key =
+            PublicKey::from_sec1_bytes(leaf.public_key().subject_public_key.data.as_ref())?;
         let credential_key =
             snapshot.signing_verification_key(SigningPurpose::Credential, Algorithm::ES256);
         let presentation_key = snapshot
@@ -126,8 +109,8 @@ impl Openid4vcCredentialCrypto {
         let key_matches = credential_key.zip(presentation_key).is_some_and(
             |(credential_key, presentation_key)| {
                 credential_key.kid == presentation_key.kid
-                    && p256_pkey_from_jwk(&credential_key.public_jwk)
-                        .is_ok_and(|candidate| candidate.public_eq(&leaf_key))
+                    && p256_public_key_from_jwk(&credential_key.public_jwk)
+                        .is_ok_and(|candidate| candidate == leaf_key)
             },
         );
         if !key_matches {
@@ -138,8 +121,10 @@ impl Openid4vcCredentialCrypto {
         Ok(Self {
             keyset,
             x5c: Arc::new(x5c),
-            leaf_der: Arc::new(leaf_der),
+            leaf_der: Arc::new(leaf_der.clone()),
             trust_anchors: Arc::new(trust_anchors),
+            issuer_trust_policy,
+            revocation_policy,
         })
     }
 
@@ -171,12 +156,15 @@ impl Openid4vcCredentialCrypto {
     }
 
     pub(crate) fn x509_san_dns_client_id(&self) -> anyhow::Result<String> {
-        let certificate = X509::from_der(self.leaf_der.as_slice())?;
+        let (_, certificate) = parse_x509(self.leaf_der.as_slice(), "OpenID4VC signing leaf")?;
         let dns_name = certificate
-            .subject_alt_names()
+            .subject_alternative_name()?
             .into_iter()
-            .flatten()
-            .find_map(|name| name.dnsname().map(ToOwned::to_owned))
+            .flat_map(|extension| extension.value.general_names.iter())
+            .find_map(|name| match name {
+                x509_parser::extensions::GeneralName::DNSName(name) => Some((*name).to_owned()),
+                _ => None,
+            })
             .filter(|name| !name.is_empty())
             .ok_or_else(|| anyhow::anyhow!("OpenID4VP signing certificate has no DNS SAN"))?;
         Ok(format!("x509_san_dns:{dns_name}"))
@@ -345,7 +333,11 @@ impl Openid4vcCredentialCrypto {
         if header.typ.as_deref() != Some("dc+sd-jwt") || header.alg != Algorithm::ES256 {
             return Err(CredentialTrustError::InvalidEncoding);
         }
-        let key = self.validate_sd_jwt_chain(
+        let ValidatedSdJwtChain {
+            decoding_key: key,
+            certificates,
+            leaf_der,
+        } = self.validate_sd_jwt_chain(
             header
                 .x5c
                 .as_deref()
@@ -358,6 +350,15 @@ impl Openid4vcCredentialCrypto {
         let credential = decode::<Value>(credential_jwt, &key, &validation)
             .map_err(|_| CredentialTrustError::InvalidSignature)?
             .claims;
+        let issuer = credential
+            .get("iss")
+            .and_then(Value::as_str)
+            .ok_or(CredentialTrustError::InvalidEncoding)?;
+        self.issuer_trust_policy
+            .validate(issuer, &leaf_der)
+            .map_err(|_| CredentialTrustError::UntrustedIssuer)?;
+        self.revocation_policy
+            .check_chain(Some(issuer), &certificates, Utc::now())?;
         if credential
             .get("_sd_alg")
             .and_then(Value::as_str)
@@ -429,11 +430,7 @@ impl Openid4vcCredentialCrypto {
         }
         Ok(VerifiedCredential {
             format: CredentialFormat::SdJwtVc,
-            issuer: credential
-                .get("iss")
-                .and_then(Value::as_str)
-                .ok_or(CredentialTrustError::InvalidEncoding)?
-                .to_owned(),
+            issuer: issuer.to_owned(),
             credential_type: credential
                 .get("vct")
                 .and_then(Value::as_str)
@@ -451,7 +448,7 @@ impl Openid4vcCredentialCrypto {
         &self,
         x5c: &[String],
         additional_trust_anchors: &[Vec<u8>],
-    ) -> Result<DecodingKey, CredentialTrustError> {
+    ) -> Result<ValidatedSdJwtChain, CredentialTrustError> {
         let certificates = x5c
             .iter()
             .map(|value| {
@@ -459,38 +456,23 @@ impl Openid4vcCredentialCrypto {
                     .decode(value)
                     .map_err(|_| CredentialTrustError::InvalidEncoding)
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|value| X509::from_der(&value).map_err(|_| CredentialTrustError::InvalidEncoding))
             .collect::<Result<Vec<_>, _>>()?;
-        let leaf = certificates
+        let leaf_der = certificates
             .first()
-            .ok_or(CredentialTrustError::UntrustedIssuer)?;
-        let mut store = X509StoreBuilder::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        for anchor in self.combined_trust_anchors(additional_trust_anchors)? {
-            store
-                .add_cert(X509::from_der(&anchor).map_err(|_| CredentialTrustError::Unavailable)?)
-                .map_err(|_| CredentialTrustError::Unavailable)?;
-        }
-        let store = store.build();
-        let mut chain = Stack::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        for intermediate in certificates.iter().skip(1) {
-            chain
-                .push(intermediate.clone())
-                .map_err(|_| CredentialTrustError::Unavailable)?;
-        }
-        let mut context = X509StoreContext::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        let trusted = context
-            .init(&store, leaf, &chain, |context| context.verify_cert())
+            .ok_or(CredentialTrustError::UntrustedIssuer)?
+            .clone();
+        let anchors = self.combined_trust_anchors(additional_trust_anchors)?;
+        verify_openid4vc_chain(&certificates, &anchors)
             .map_err(|_| CredentialTrustError::UntrustedIssuer)?;
-        if !trusted {
-            return Err(CredentialTrustError::UntrustedIssuer);
-        }
-        let public_key = leaf
-            .public_key()
-            .and_then(|key| key.public_key_to_pem())
+        let (_, leaf) = x509_parser::parse_x509_certificate(&leaf_der)
             .map_err(|_| CredentialTrustError::InvalidEncoding)?;
-        DecodingKey::from_ec_pem(&public_key).map_err(|_| CredentialTrustError::InvalidEncoding)
+        Ok(ValidatedSdJwtChain {
+            decoding_key: DecodingKey::from_ec_der(
+                leaf.public_key().subject_public_key.data.as_ref(),
+            ),
+            certificates,
+            leaf_der,
+        })
     }
 
     fn verify_mdoc(
@@ -522,7 +504,11 @@ impl Openid4vcCredentialCrypto {
             })?;
         let standard_device_authentication_valid =
             verify_standard_mdoc_device_signatures(&verified, session_transcript)?;
-        let issuer_chain_valid = verify_mdoc_issuer_certificate_chains(&verified, &trust_anchors)?;
+        let issuer_chain_valid = verify_mdoc_issuer_certificate_chains(
+            &verified,
+            &trust_anchors,
+            &self.revocation_policy,
+        )?;
         if !mdoc_assessments_accepted(
             &verified,
             standard_device_authentication_valid,
@@ -683,11 +669,12 @@ fn verify_standard_mdoc_device_signatures(
 fn verify_mdoc_issuer_certificate_chains(
     verified: &mdoc_rs::verifier::VerifiedMDoc,
     trust_anchors: &[Vec<u8>],
+    revocation_policy: &CertificateRevocationPolicy,
 ) -> Result<bool, CredentialTrustError> {
     // mdoc-rs fails this assessment closed without its optional TSP backend.
     // Avoid an unrelated RSA implementation in this ES256 mdoc path and perform
-    // path, CA, signature, and signing-time validation with the existing OpenSSL
-    // trust store.
+    // path, CA, signature, and signing-time validation with the AWS-LC-backed
+    // X.509 verifier.
     if verified.mdoc.documents.is_empty() {
         return Ok(false);
     }
@@ -698,11 +685,10 @@ fn verify_mdoc_issuer_certificate_chains(
             .certificate_chain_der()
             .map_err(|_| CredentialTrustError::InvalidEncoding)?
             .into_iter()
-            .map(|value| X509::from_der(&value).map_err(|_| CredentialTrustError::InvalidEncoding))
-            .collect::<Result<Vec<_>, _>>()?;
-        let leaf = certificates
-            .first()
-            .ok_or(CredentialTrustError::UntrustedIssuer)?;
+            .collect::<Vec<_>>();
+        if certificates.is_empty() {
+            return Err(CredentialTrustError::UntrustedIssuer);
+        }
         let signed_at = document
             .issuer_signed
             .issuer_auth
@@ -711,40 +697,50 @@ fn verify_mdoc_issuer_certificate_chains(
             .validity_info
             .signed
             .timestamp();
-        let mut store = X509StoreBuilder::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        for anchor in trust_anchors {
-            store
-                .add_cert(X509::from_der(anchor).map_err(|_| CredentialTrustError::Unavailable)?)
-                .map_err(|_| CredentialTrustError::Unavailable)?;
-        }
-        let mut parameters = openssl::x509::verify::X509VerifyParam::new()
-            .map_err(|_| CredentialTrustError::Unavailable)?;
-        parameters.set_time(signed_at);
-        store
-            .set_param(&parameters)
-            .map_err(|_| CredentialTrustError::Unavailable)?;
-        let store = store.build();
-        let mut chain = Stack::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        for intermediate in certificates.iter().skip(1) {
-            if trust_anchors
-                .iter()
-                .any(|anchor| intermediate.to_der().is_ok_and(|der| der == *anchor))
-            {
-                continue;
-            }
-            chain
-                .push(intermediate.clone())
-                .map_err(|_| CredentialTrustError::Unavailable)?;
-        }
-        let mut context = X509StoreContext::new().map_err(|_| CredentialTrustError::Unavailable)?;
-        let trusted = context
-            .init(&store, leaf, &chain, |context| context.verify_cert())
-            .map_err(|_| CredentialTrustError::UntrustedIssuer)?;
-        if !trusted {
+        if !verify_certificate_chain_at(&certificates, trust_anchors, signed_at)? {
             return Ok(false);
         }
+        revocation_policy.check_chain(None, &certificates, Utc::now())?;
     }
     Ok(true)
+}
+
+fn verify_certificate_chain_at(
+    certificates: &[Vec<u8>],
+    anchors: &[Vec<u8>],
+    unix_time: i64,
+) -> Result<bool, CredentialTrustError> {
+    let at = x509_parser::time::ASN1Time::from_timestamp(unix_time)
+        .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+    let (_, mut current) = x509_parser::parse_x509_certificate(&certificates[0])
+        .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+    if current.is_ca() || !current.validity().is_valid_at(at) {
+        return Ok(false);
+    }
+    for intermediate in certificates
+        .iter()
+        .skip(1)
+        .filter(|der| !anchors.contains(der))
+    {
+        let (_, issuer) = x509_parser::parse_x509_certificate(intermediate)
+            .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+        if !issuer.is_ca()
+            || !issuer.validity().is_valid_at(at)
+            || current.issuer() != issuer.subject()
+            || current.verify_signature(Some(issuer.public_key())).is_err()
+        {
+            return Ok(false);
+        }
+        current = issuer;
+    }
+    Ok(anchors.iter().any(|anchor| {
+        x509_parser::parse_x509_certificate(anchor).is_ok_and(|(_, anchor)| {
+            anchor.is_ca()
+                && anchor.validity().is_valid_at(at)
+                && current.issuer() == anchor.subject()
+                && current.verify_signature(Some(anchor.public_key())).is_ok()
+        })
+    }))
 }
 
 fn mdoc_assessments_accepted(
@@ -1509,7 +1505,7 @@ fn algorithm_name(algorithm: Algorithm) -> Option<&'static str> {
     }
 }
 
-fn p256_pkey_from_jwk(jwk: &Value) -> anyhow::Result<PKey<openssl::pkey::Public>> {
+fn p256_public_key_from_jwk(jwk: &Value) -> anyhow::Result<PublicKey> {
     let x = URL_SAFE_NO_PAD.decode(
         jwk.get("x")
             .and_then(Value::as_str)
@@ -1520,11 +1516,67 @@ fn p256_pkey_from_jwk(jwk: &Value) -> anyhow::Result<PKey<openssl::pkey::Public>
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing y"))?,
     )?;
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-    let mut context = BigNumContext::new()?;
-    let mut point = EcPoint::new(&group)?;
-    let x = BigNum::from_slice(&x)?;
-    let y = BigNum::from_slice(&y)?;
-    point.set_affine_coordinates_gfp(&group, &x, &y, &mut context)?;
-    Ok(PKey::from_ec_key(EcKey::from_public_key(&group, &point)?)?)
+    if x.len() != 32 || y.len() != 32 {
+        anyhow::bail!("invalid P-256 coordinate length");
+    }
+    let mut point = [0_u8; 65];
+    point[0] = 4;
+    point[1..33].copy_from_slice(&x);
+    point[33..].copy_from_slice(&y);
+    PublicKey::from_sec1_bytes(&point).map_err(Into::into)
+}
+
+fn parse_pem_certificates(pem: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+    CertificateDer::pem_slice_iter(pem)
+        .map(|certificate| certificate.map(|certificate| certificate.as_ref().to_vec()))
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
+}
+
+fn parse_x509<'a>(
+    der: &'a [u8],
+    description: &str,
+) -> anyhow::Result<(&'a [u8], x509_parser::certificate::X509Certificate<'a>)> {
+    let (remainder, certificate) = x509_parser::parse_x509_certificate(der)
+        .map_err(|error| anyhow::anyhow!("failed to parse {description}: {error}"))?;
+    if !remainder.is_empty() {
+        anyhow::bail!("{description} contains trailing DER data");
+    }
+    Ok((remainder, certificate))
+}
+
+fn verify_openid4vc_chain(certificates: &[Vec<u8>], anchors: &[Vec<u8>]) -> anyhow::Result<()> {
+    let (_, mut current) = parse_x509(&certificates[0], "OpenID4VC signing leaf")?;
+    if current.is_ca() || !current.validity().is_valid() {
+        anyhow::bail!("OpenID4VC signing leaf must be a currently valid end-entity certificate");
+    }
+    for intermediate in certificates
+        .iter()
+        .skip(1)
+        .filter(|der| !anchors.contains(der))
+    {
+        let (_, issuer) = parse_x509(intermediate, "OpenID4VC intermediate certificate")?;
+        if !issuer.is_ca()
+            || !issuer.validity().is_valid()
+            || current.issuer() != issuer.subject()
+            || current.verify_signature(Some(issuer.public_key())).is_err()
+        {
+            anyhow::bail!("OpenID4VC signing certificate chain is invalid");
+        }
+        current = issuer;
+    }
+    let anchored = anchors.iter().any(|anchor| {
+        parse_x509(anchor, "OpenID4VC trust anchor").is_ok_and(|(_, anchor)| {
+            anchor.is_ca()
+                && anchor.validity().is_valid()
+                && current.issuer() == anchor.subject()
+                && current.verify_signature(Some(anchor.public_key())).is_ok()
+        })
+    });
+    if !anchored {
+        anyhow::bail!(
+            "OpenID4VC signing certificate is not anchored by the configured trust store"
+        );
+    }
+    Ok(())
 }

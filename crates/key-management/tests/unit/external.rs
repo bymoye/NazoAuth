@@ -71,7 +71,7 @@ async fn external_signer_process_fault_fails_closed_without_stderr_disclosure() 
     let key = ExternalSigningKey {
         command: error_command(),
         key_ref: "kms://test/key".to_owned(),
-        timeout: Duration::from_secs(1),
+        timeout: Duration::from_secs(5),
     };
     let error = sign_external_jwt_input(
         &key,

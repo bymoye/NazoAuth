@@ -163,6 +163,7 @@ fn refresh_token_fixture(
         dpop_jkt: None,
         mtls_x5t_s256: None,
         client_attestation_jkt: None,
+        authentication_context: None,
     }
 }
 
@@ -202,7 +203,7 @@ async fn fixture(database_url: &str) -> FixtureIds {
     .expect("auth repository fixture should insert")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refresh_token_client_attestation_binding_round_trips() {
     let Some(database_url) = database_url() else {
         return;
@@ -234,7 +235,7 @@ async fn refresh_token_client_attestation_binding_round_trips() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grants_upsert_cover_and_revoke_tokens_atomically() {
     let Some(database_url) = database_url() else {
         return;
@@ -301,7 +302,7 @@ async fn grants_upsert_cover_and_revoke_tokens_atomically() {
     assert_eq!(revoked.removed_grants, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grant_revoke_waits_for_concurrent_refresh_rotation_before_revoking_family() {
     let Some(database_url) = database_url() else {
         return;
@@ -416,7 +417,7 @@ async fn grant_revoke_waits_for_concurrent_refresh_rotation_before_revoking_fami
     remove_rotation_insert_gate(&mut coordinator, &trigger, &function).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refresh_rotation_reuse_compromises_the_whole_family() {
     let Some(database_url) = database_url() else {
         return;
@@ -443,6 +444,7 @@ async fn refresh_rotation_reuse_compromises_the_whole_family() {
         dpop_jkt: None,
         mtls_x5t_s256: None,
         client_attestation_jkt: None,
+        authentication_context: None,
     };
     assert_eq!(
         repository
@@ -478,7 +480,7 @@ async fn refresh_rotation_reuse_compromises_the_whole_family() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authorization_code_replay_compensation_revokes_both_token_kinds() {
     let Some(database_url) = database_url() else {
         return;
@@ -530,7 +532,7 @@ async fn authorization_code_replay_compensation_revokes_both_token_kinds() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_management_revocation_is_client_scoped_idempotent_and_serializes_family() {
     let Some(database_url) = database_url() else {
         return;
@@ -651,7 +653,7 @@ async fn token_management_revocation_is_client_scoped_idempotent_and_serializes_
     assert_eq!(access_revocations.count, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authorization_replay_waits_for_concurrent_refresh_rotation_before_compensation() {
     let Some(database_url) = database_url() else {
         return;
@@ -762,7 +764,7 @@ async fn authorization_replay_waits_for_concurrent_refresh_rotation_before_compe
     remove_rotation_insert_gate(&mut coordinator, &trigger, &function).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_repository_records_scim_use_and_drives_logout_outbox() {
     let _claim_guard = BACKCHANNEL_CLAIM_TEST_LOCK.lock().await;
     let Some(database_url) = database_url() else {
@@ -836,7 +838,7 @@ async fn audit_repository_records_scim_use_and_drives_logout_outbox() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn backchannel_logout_fanout_rolls_back_when_any_delivery_is_invalid() {
     let Some(database_url) = database_url() else {
         return;
@@ -924,7 +926,7 @@ fn server_auth_callers_do_not_query_diesel_or_auth_tables() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_logout_worker_cannot_complete_or_fail_a_reclaimed_delivery() {
     let _claim_guard = BACKCHANNEL_CLAIM_TEST_LOCK.lock().await;
     let Some(database_url) = database_url() else {

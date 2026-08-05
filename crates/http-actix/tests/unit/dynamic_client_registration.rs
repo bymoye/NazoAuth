@@ -283,9 +283,14 @@ async fn bearer_credentials_are_closed_to_exact_non_empty_scheme_and_expected_to
         Some("Bearer   "),
         Some("initial-token"),
     ));
-    assert!(!initial_access_token_authorized(
+    assert!(initial_access_token_authorized(
         &FakeSecurity,
         Some("bearer initial-token"),
+        Some("initial-token"),
+    ));
+    assert!(!initial_access_token_authorized(
+        &FakeSecurity,
+        Some("Bearer initial-token extra"),
         Some("initial-token"),
     ));
     assert!(initial_access_token_authorized(
@@ -509,6 +514,7 @@ async fn registration_and_management_methods_keep_wire_contracts() {
     );
     let read: Value = test::read_body_json(read).await;
     assert_eq!(read["registration_access_token"], "registration-token");
+    assert!(read.get("client_secret").is_none());
     for selected in [
         "subject_type",
         "id_token_signed_response_alg",

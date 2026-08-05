@@ -1,10 +1,10 @@
 {
   "schema": 2,
   "artifact_rollback": true,
-  "schema_compatible": true,
+  "schema_compatible": false,
   "database_restore": "backup",
-  "irreversible_migration": false,
+  "irreversible_migration": true,
   "minimum_supported_version": "0.1.8",
-  "migration_floor": "20260803000300",
-  "rationale": "All migrations through this floor are additive, and the previous application ignores the nullable conformance ownership and public-trust fields. Artifact rollback does not run down migrations. The initial administrator receipt refuses schema downgrade after evidence exists. Lease triggers bind and clean temporary clients and verifier transactions without changing permanent records. Database recovery remains the separately verified-backup boundary."
+  "migration_floor": "20260805000500",
+  "rationale": "The TOTP envelope migration clears plaintext secrets after encrypting them, and durable token-issuance records prevent a safe schema downgrade once used. The previous application therefore cannot resume on the migrated database. Recovery requires the controller-created, separately verified pre-update database backup; artifact-only rollback is intentionally blocked across this migration barrier."
 }

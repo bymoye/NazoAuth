@@ -469,8 +469,8 @@ pub(crate) async fn device_decision(
     if !sessions.has_valid_csrf_token(&req, form.csrf_token.as_deref()) {
         return csrf_error();
     }
-    let user = match sessions.current_user_or_login_required(&req).await {
-        Ok(user) => user,
+    let session = match sessions.current_session_or_login_required(&req).await {
+        Ok(session) => session,
         Err(response) => return response,
     };
     let normalized_user_code = normalize_user_code(&form.user_code);
@@ -523,7 +523,7 @@ pub(crate) async fn device_decision(
                     );
                 }
             };
-            let subject = match device_authorization_subject(config, user.id(), &client) {
+            let subject = match device_authorization_subject(config, session.user.id(), &client) {
                 Ok(subject) => subject,
                 Err(error) => {
                     tracing::warn!(%error, "failed to compute device authorization subject");
@@ -538,11 +538,11 @@ pub(crate) async fn device_decision(
                 .approve(
                     &normalized_user_code,
                     DeviceAuthorizationApproval {
-                        user_id: user.id(),
+                        user_id: session.user.id(),
                         subject,
-                        auth_time: Utc::now().timestamp(),
-                        amr: vec!["pwd".to_owned()],
-                        oidc_sid: None,
+                        auth_time: session.auth_time,
+                        amr: session.amr.clone(),
+                        oidc_sid: Some(session.oidc_sid.clone()),
                     },
                     &client,
                     grant_repository,

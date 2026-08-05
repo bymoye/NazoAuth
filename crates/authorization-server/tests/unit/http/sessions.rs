@@ -173,6 +173,44 @@ fn session_payload_requires_non_blank_oidc_sid_after_trimming() {
     }
 }
 
+#[test]
+fn recent_admin_mfa_requires_a_fresh_interactive_factor() {
+    let fresh = vec!["password".to_owned(), "otp".to_owned(), "mfa".to_owned()];
+    assert!(recent_mfa_authentication(1_000, &fresh, 1_300));
+
+    let old = vec!["password".to_owned(), "otp".to_owned(), "mfa".to_owned()];
+    assert!(!recent_mfa_authentication(1_000, &old, 1_301));
+
+    let no_factor = vec!["password".to_owned(), "mfa".to_owned()];
+    assert!(!recent_mfa_authentication(1_000, &no_factor, 1_001));
+
+    let remembered = vec![
+        "password".to_owned(),
+        "remembered_mfa".to_owned(),
+        "mfa".to_owned(),
+    ];
+    assert!(!recent_mfa_authentication(1_000, &remembered, 1_001));
+
+    let stepped_up_after_remembered = vec![
+        "password".to_owned(),
+        "remembered_mfa".to_owned(),
+        "otp".to_owned(),
+        "mfa".to_owned(),
+    ];
+    assert!(recent_mfa_authentication(
+        1_000,
+        &stepped_up_after_remembered,
+        1_001
+    ));
+
+    let future = vec![
+        "password".to_owned(),
+        "recovery_code".to_owned(),
+        "mfa".to_owned(),
+    ];
+    assert!(!recent_mfa_authentication(1_100, &future, 1_000));
+}
+
 fn oauth_error_code(response: &HttpResponse) -> String {
     response
         .extensions()
@@ -313,8 +351,9 @@ async fn missing_session_cookie_requires_login_or_admin_denial_without_storage_l
     let state = session_state();
     let req = TestRequest::default().to_http_request();
     let sessions = test_support::admin_session_handles(&state);
+    let profile_sessions = test_support::profile_session_handles(&state);
 
-    let login = sessions
+    let login = profile_sessions
         .current_user_or_login_required(&req)
         .await
         .expect_err("anonymous user must be challenged to log in");

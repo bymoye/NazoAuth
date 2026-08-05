@@ -270,7 +270,7 @@ async fn patch_changes_only_desired_state_and_returns_pending_revision() {
             administration.clone(),
             2,
             i64::try_from(NOW_SECONDS).unwrap() - 300,
-            vec!["pwd".to_owned(), "mfa".to_owned()],
+            vec!["pwd".to_owned(), "otp".to_owned(), "mfa".to_owned()],
         ),
         patch_request(),
         Path::from("ciba".to_owned()),
@@ -322,12 +322,32 @@ async fn patch_checks_csrf_before_session_and_recent_mfa_policy() {
     assert_no_store(&response);
     assert!(administration.updates.lock().unwrap().is_empty());
 
+    let missing_factor = admin_patch_runtime_module(
+        endpoint(
+            administration.clone(),
+            2,
+            i64::try_from(NOW_SECONDS).unwrap(),
+            vec!["mfa".to_owned(), "remembered_mfa".to_owned()],
+        ),
+        patch_request(),
+        Path::from("ciba".to_owned()),
+        Json(RuntimeModulePatch {
+            desired_state: DesiredMode::Disabled,
+            expected_revision: 7,
+            reason: "maintenance".to_owned(),
+            cascade: false,
+        }),
+    )
+    .await;
+    assert_eq!(missing_factor.status(), StatusCode::PRECONDITION_REQUIRED);
+    assert!(administration.updates.lock().unwrap().is_empty());
+
     let response = admin_patch_runtime_module(
         endpoint(
             administration,
             2,
             i64::try_from(NOW_SECONDS).unwrap() - 301,
-            vec!["mfa".to_owned()],
+            vec!["otp".to_owned(), "mfa".to_owned()],
         ),
         patch_request(),
         Path::from("ciba".to_owned()),
@@ -358,7 +378,7 @@ async fn stale_revision_is_a_non_cacheable_conflict() {
             administration,
             2,
             i64::try_from(NOW_SECONDS).unwrap(),
-            vec!["mfa".to_owned()],
+            vec!["otp".to_owned(), "mfa".to_owned()],
         ),
         patch_request(),
         Path::from("ciba".to_owned()),

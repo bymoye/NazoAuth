@@ -1,24 +1,17 @@
-use std::{cmp::Ordering, collections::HashSet, str::FromStr};
+use std::{collections::HashSet, str::FromStr};
 
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use chrono::Utc;
-use der::Encode;
+use hmac::{Hmac, Mac};
 use jsonwebtoken::{Algorithm, DecodingKey};
 use nazo_auth::{
     AdminClientCryptoPort, ClientSecretDigesterPort, SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
     client_jwe_encryption_key_matches_alg,
 };
-use openssl::{
-    asn1::Asn1Time,
-    hash::MessageDigest,
-    pkey::PKey,
-    sign::Signer,
-    x509::{X509, X509Name},
-};
 use serde_json::Value;
+use sha2::Sha256;
 
 use crate::KeyManager;
 
@@ -224,12 +217,10 @@ pub fn rfc4514_dn_matches(registered: &str, certificate_subject: &str) -> bool {
     let Some(certificate_subject) = parse_rfc4514_dn(certificate_subject) else {
         return false;
     };
-    registered
-        .try_cmp(&certificate_subject)
-        .is_ok_and(|ordering| ordering == Ordering::Equal)
+    registered == certificate_subject
 }
 
-fn parse_rfc4514_dn(value: &str) -> Option<X509Name> {
+fn parse_rfc4514_dn(value: &str) -> Option<String> {
     if value.is_empty() || value.trim() != value || value.len() > 2_048 {
         return None;
     }
@@ -237,7 +228,11 @@ fn parse_rfc4514_dn(value: &str) -> Option<X509Name> {
     if name.is_empty() {
         return None;
     }
-    X509Name::from_der(&name.to_der().ok()?).ok()
+    // Parsing first resolves attribute aliases and escaping. The canonical
+    // display form gives equivalent RFC 4514 spellings one representation;
+    // Unicode lowercase retains the case-insensitive matching behavior used
+    // by the previous X509_NAME comparison.
+    Some(name.to_string().to_lowercase())
 }
 
 #[must_use]
@@ -346,19 +341,10 @@ fn valid_current_x5c_certificate(value: &str) -> bool {
     ) else {
         return false;
     };
-    let Ok(x509) = X509::from_der(&der) else {
+    let Ok((remainder, x509)) = x509_parser::parse_x509_certificate(&der) else {
         return false;
     };
-    let Ok(now) = Asn1Time::from_unix(Utc::now().timestamp()) else {
-        return false;
-    };
-    let Ok(not_before) = x509.not_before().compare(&now) else {
-        return false;
-    };
-    let Ok(not_after) = x509.not_after().compare(&now) else {
-        return false;
-    };
-    not_before != Ordering::Greater && not_after != Ordering::Less
+    remainder.is_empty() && x509.validity().is_valid()
 }
 
 fn random_urlsafe_token() -> String {
@@ -371,12 +357,12 @@ fn hash_client_secret(secret: &str, pepper: &str) -> String {
 }
 
 fn client_secret_digest(secret: &str, pepper: &str, salt: &str) -> String {
-    let key = PKey::hmac(pepper.as_bytes()).expect("HMAC accepts any key");
-    let mut signer = Signer::new(MessageDigest::sha256(), &key).expect("SHA-256 HMAC is available");
-    signer.update(salt.as_bytes()).expect("HMAC update");
-    signer.update(b":").expect("HMAC update");
-    signer.update(secret.as_bytes()).expect("HMAC update");
-    let digest = URL_SAFE_NO_PAD.encode(signer.sign_to_vec().expect("HMAC finalize"));
+    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(pepper.as_bytes())
+        .expect("HMAC accepts any key");
+    mac.update(salt.as_bytes());
+    mac.update(b":");
+    mac.update(secret.as_bytes());
+    let digest = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     format!("{CLIENT_SECRET_HASH_VERSION}:{salt}:{digest}")
 }
 

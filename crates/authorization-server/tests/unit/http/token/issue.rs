@@ -16,7 +16,11 @@ pub(crate) async fn issue_token_response(
     issue: TokenIssue,
 ) -> HttpResponse {
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
+            state.diesel_db.clone(),
+            nazo_postgres::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
+                .expect("test response key ring is valid"),
+        ),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     );
@@ -304,6 +308,7 @@ fn token_issue_with_sid(id_token_claims: Vec<String>) -> TokenIssue {
         userinfo_claim_requests: Vec::new(),
         id_token_claims,
         id_token_claim_requests: Vec::new(),
+        refresh_id_token_sid: None,
         include_refresh: false,
         refresh_token_policy: RefreshTokenPolicy::IssueNew,
         dpop_jkt: None,
@@ -335,6 +340,7 @@ fn token_issue_without_openid() -> TokenIssue {
         userinfo_claim_requests: Vec::new(),
         id_token_claims: Vec::new(),
         id_token_claim_requests: Vec::new(),
+        refresh_id_token_sid: None,
         include_refresh: true,
         refresh_token_policy: RefreshTokenPolicy::IssueNew,
         dpop_jkt: None,
@@ -416,9 +422,38 @@ fn id_token_sid_request_object_also_allows_session_sid() {
     );
 }
 
+#[test]
+fn refresh_id_token_sid_contract_distinguishes_presence_and_original_omission() {
+    let client = client_with_grants(&["authorization_code"]);
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.refresh_id_token_sid = Some(Some("native-sso-sid".to_owned()));
+    assert_eq!(
+        id_token_session_sid(&client, &issue, false),
+        Some("native-sso-sid")
+    );
+
+    issue.refresh_id_token_sid = Some(None);
+    assert_eq!(id_token_session_sid(&client, &issue, false), None);
+}
+
+#[test]
+fn refresh_without_id_token_preserves_the_original_sid_contract() {
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.refresh_id_token_sid = Some(Some("original-sid".to_owned()));
+
+    assert_eq!(persisted_id_token_sid(&issue, None), Some("original-sid"));
+    assert_eq!(
+        persisted_id_token_sid(&issue, Some("new-sid")),
+        Some("new-sid")
+    );
+}
+
 #[actix_web::test]
 async fn signing_failure_does_not_issue_any_tokens() {
-    let state = issue_state_with_invalid_signing_key();
+    let Some(mut state) = issue_state_with_live_database() else {
+        return;
+    };
+    state.keyset = crate::test_support::failing_key_manager();
     let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
     client.client_type = "confidential".to_owned();
     client.token_endpoint_auth_method = "client_secret_basic".to_owned();
@@ -487,7 +522,9 @@ async fn openid_issue_without_user_subject_fails_before_token_signing() {
 
 #[actix_web::test]
 async fn client_credentials_issue_returns_minimal_bearer_token_response_without_oidc_artifacts() {
-    let state = issue_state_with_valid_signing_key();
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
     let client = client_with_grants(&["client_credentials"]);
     let mut issue = token_issue_without_openid();
     issue.user_id = None;

@@ -553,6 +553,49 @@ pub fn verify_task_signature(
     Ok(task)
 }
 
+/// Bind a signed task's issuer, audience, and deployment claim to the
+/// deployment identity trusted by the local runtime.
+///
+/// Signature verification only proves that the configured controller signed
+/// the envelope.  It does not prove that the envelope was intended for this
+/// runtime: a valid controller envelope from another deployment would still
+/// verify with a stale or mis-mounted controller key.  The application must
+/// obtain `expected_deployment_id` from its local read-only identity/config
+/// boundary and call this check before claiming or executing the task.
+pub fn validate_task_deployment_binding(
+    task: &TaskEnvelope,
+    expected_deployment_id: &str,
+) -> Result<(), ProtocolError> {
+    validate_file_identifier(expected_deployment_id)?;
+    if task.deployment_id != expected_deployment_id
+        || task.iss != format!("controller:{expected_deployment_id}")
+        || task.aud != format!("runtime:{expected_deployment_id}")
+    {
+        return Err(ProtocolError::Policy(
+            "operator task deployment binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
+/// Bind a runtime receipt's issuer, audience, and deployment claim to the
+/// same deployment identity as its originating task.
+pub fn validate_runtime_receipt_deployment_binding(
+    receipt: &RuntimeReceipt,
+    expected_deployment_id: &str,
+) -> Result<(), ProtocolError> {
+    validate_file_identifier(expected_deployment_id)?;
+    if receipt.deployment_id != expected_deployment_id
+        || receipt.iss != format!("runtime:{expected_deployment_id}")
+        || receipt.aud != format!("controller:{expected_deployment_id}")
+    {
+        return Err(ProtocolError::Policy(
+            "runtime receipt deployment binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
 pub fn verify_task_window(task: &TaskEnvelope, now: i64) -> Result<(), ProtocolError> {
     if now < task.nbf || now > task.exp {
         return Err(ProtocolError::Policy("task is outside its validity window"));

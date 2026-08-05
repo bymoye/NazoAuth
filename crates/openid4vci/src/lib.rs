@@ -29,12 +29,14 @@ pub use offer::{
 pub use proof::{ProofError, ProofValidatorPort, ValidatedProof};
 pub use service::{
     CredentialDatasetPort, CredentialIssuance, CredentialIssuanceError, CredentialIssuerService,
-    DeferredPayload, IssuanceDisposition,
+    DeferredPayload, IssuanceClaim, IssuanceCommit, IssuanceDisposition, IssuanceIdentity,
+    PendingCredentialIssuance,
 };
 pub use store::{
-    AuthorizationOfferPort, CredentialAccess, CredentialAuthorization, CredentialStoreError,
-    CredentialStoreFuture, CredentialStorePort, DeferredCredential, IssuanceNotification,
-    NonceRecord, NotificationHandle, StoredCredentialOffer,
+    AuthorizationOfferPort, CredentialAccess, CredentialAuthorization, CredentialResponseEncoding,
+    CredentialStoreError, CredentialStoreFuture, CredentialStorePort, DeferredCredential,
+    DeferredCredentialClaim, IssuanceNotification, NonceRecord, NotificationHandle,
+    StoredCredentialOffer, StoredCredentialResponse,
 };
 
 pub const PRE_AUTHORIZED_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:pre-authorized_code";

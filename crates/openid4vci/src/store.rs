@@ -70,6 +70,18 @@ pub struct DeferredCredential {
     pub expires_at: DateTime<Utc>,
 }
 
+/// A deferred transaction that is leased to one issuance attempt.
+///
+/// The lease is deliberately separate from `consumed_at`: signing and response
+/// persistence can fail after a transaction has become ready, in which case a
+/// later request must be able to retry the same transaction without allowing
+/// two concurrent issuers to sign it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeferredCredentialClaim {
+    pub credential: DeferredCredential,
+    pub claim_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssuanceNotification {
     pub notification_id: String,
@@ -83,6 +95,27 @@ pub struct IssuanceNotification {
 pub struct NotificationHandle {
     pub notification_id: String,
     pub token_id: Uuid,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialResponseEncoding {
+    Json,
+    Jwt,
+}
+
+/// The exact wire response committed with an issuance state transition. The
+/// repository encrypts `body` at rest; the digest and issuance id prevent a
+/// different request from retrieving a previously committed response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredCredentialResponse {
+    pub issuance_id: Uuid,
+    pub token_id: Uuid,
+    pub request_digest: String,
+    pub body: Vec<u8>,
+    pub encoding: CredentialResponseEncoding,
+    pub status: u16,
+    pub dpop_nonce: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -112,11 +145,89 @@ pub trait CredentialStorePort: Send + Sync {
         nonce: &'a NonceRecord,
     ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
+    /// Legacy one-step operation retained for older adapters. New issuance
+    /// code must use claim/finalize/release so transient failures are retryable.
     fn consume_nonce<'a>(
         &'a self,
         nonce_hash: &'a str,
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
+
+    /// Lease a nonce for one issuance attempt. A lease may be reclaimed after
+    /// its expiry; finalization is the only transition that makes the nonce
+    /// permanently single-use.
+    fn claim_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
+
+    fn finalize_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
+
+    fn release_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
+
+    /// Atomically persist the notification handle and finalize the nonce when
+    /// the backing store supports transactions. The response-bearing variant
+    /// below must be implemented by stores that support recoverable issuance;
+    /// its default fails closed so a store can never consume a nonce while
+    /// silently dropping the exact response needed for a retry.
+    fn finalize_nonce_with_notification<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        handle: &'a NotificationHandle,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            self.issue_notification_handle(handle).await?;
+            self.finalize_nonce(nonce_hash, claim_id, now).await
+        })
+    }
+
+    fn find_response<'a>(
+        &'a self,
+        issuance_id: Uuid,
+        token_id: Uuid,
+        request_digest: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialResponse>, CredentialStoreError>>;
+
+    fn finalize_nonce_with_notification_and_response<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        handle: &'a NotificationHandle,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            let _ = (nonce_hash, claim_id, handle, response, now);
+            Err(CredentialStoreError::Unavailable)
+        })
+    }
+
+    fn store_response_with_notification<'a>(
+        &'a self,
+        handle: &'a NotificationHandle,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async move {
+            let _ = (handle, response, now);
+            Err(CredentialStoreError::Unavailable)
+        })
+    }
 
     fn resolve_access<'a>(
         &'a self,
@@ -129,12 +240,113 @@ pub trait CredentialStorePort: Send + Sync {
         credential: &'a DeferredCredential,
     ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
+    /// Persist a deferred transaction and finalize its proof nonce as one
+    /// state transition when the backing store supports transactions.
+    fn store_deferred_and_finalize_nonce<'a>(
+        &'a self,
+        credential: &'a DeferredCredential,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async move {
+            self.store_deferred(credential).await?;
+            if self.finalize_nonce(nonce_hash, claim_id, now).await? {
+                Ok(())
+            } else {
+                Err(CredentialStoreError::InvalidTransition)
+            }
+        })
+    }
+
+    fn store_deferred_and_finalize_nonce_with_response<'a>(
+        &'a self,
+        credential: &'a DeferredCredential,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async move {
+            let _ = (credential, nonce_hash, claim_id, response, now);
+            Err(CredentialStoreError::Unavailable)
+        })
+    }
+
+    fn store_deferred_with_response<'a>(
+        &'a self,
+        credential: &'a DeferredCredential,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async move {
+            let _ = (credential, response, now);
+            Err(CredentialStoreError::Unavailable)
+        })
+    }
+
+    /// Legacy one-step operation retained for older adapters. New deferred
+    /// issuance code must use claim/finalize/release around signing.
     fn consume_ready_deferred<'a>(
         &'a self,
         transaction_hash: &'a str,
         token_id: Uuid,
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredential>, CredentialStoreError>>;
+
+    fn claim_ready_deferred<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredentialClaim>, CredentialStoreError>>;
+
+    fn finalize_deferred<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
+
+    fn release_deferred<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
+
+    fn finalize_deferred_with_notification<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        handle: &'a NotificationHandle,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            self.issue_notification_handle(handle).await?;
+            self.finalize_deferred(transaction_hash, token_id, claim_id, now)
+                .await
+        })
+    }
+
+    fn finalize_deferred_with_notification_and_response<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        handle: &'a NotificationHandle,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            let _ = (transaction_hash, token_id, claim_id, handle, response, now);
+            Err(CredentialStoreError::Unavailable)
+        })
+    }
 
     fn record_notification<'a>(
         &'a self,

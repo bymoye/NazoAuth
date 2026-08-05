@@ -1,6 +1,10 @@
+use aws_lc_rs::{
+    rand::SystemRandom,
+    rsa::{KeyPair as RsaKeyPair, KeySize},
+    signature::{KeyPair as _, RSA_PKCS1_SHA256},
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
-use openssl::{hash::MessageDigest, pkey::PKey, rsa::Rsa, sign::Signer as OpenSslSigner};
 use p256::ecdsa::{Signature as P256Signature, SigningKey as P256SigningKey};
 use serde_json::{Value, json};
 
@@ -33,16 +37,16 @@ fn ec_public_jwk() -> Value {
     })
 }
 
-fn rsa_keypair() -> (PKey<openssl::pkey::Private>, Value) {
-    let rsa = Rsa::generate(2048).unwrap();
+fn rsa_keypair() -> (RsaKeyPair, Value) {
+    let rsa = RsaKeyPair::generate(KeySize::Rsa2048).unwrap();
     let jwk = json!({
         "kid": "rsa-key",
         "kty": "RSA",
         "alg": "RS256",
-        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
-        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec()),
+        "n": URL_SAFE_NO_PAD.encode(rsa.public_key().modulus().big_endian_without_leading_zero()),
+        "e": URL_SAFE_NO_PAD.encode(rsa.public_key().exponent().big_endian_without_leading_zero()),
     });
-    (PKey::from_rsa(rsa).unwrap(), jwk)
+    (rsa, jwk)
 }
 
 #[test]
@@ -91,9 +95,14 @@ fn verifies_valid_es256_and_rejects_an_invalid_signature() {
 fn verifies_valid_rsa_and_rejects_an_invalid_signature() {
     let (key, jwk) = rsa_keypair();
     let input = b"@method: GET";
-    let mut signer = OpenSslSigner::new(MessageDigest::sha256(), &key).unwrap();
-    signer.update(input).unwrap();
-    let signature = signer.sign_to_vec().unwrap();
+    let mut signature = vec![0; key.public_modulus_len()];
+    key.sign(
+        &RSA_PKCS1_SHA256,
+        &SystemRandom::new(),
+        input,
+        &mut signature,
+    )
+    .unwrap();
     let jwks = json!({"keys": [jwk]});
 
     verify_jwk_signature(&jwks, "rsa-key", "rsa-v1_5-sha256", input, &signature).unwrap();

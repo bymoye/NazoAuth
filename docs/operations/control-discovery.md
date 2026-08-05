@@ -38,6 +38,20 @@ but use separate instance identity directories and runtime-instance IDs. Set
 `DEPLOYMENT_ID` for the deployment. A persisted identity mismatch fails startup
 closed.
 
+The one-shot `operator-task` executor applies the same boundary before it
+claims a request: `deployment_id` must equal the local deployment identity,
+`iss` must be exactly `controller:<deployment_id>`, and `aud` must be exactly
+`runtime:<deployment_id>`. When `DATA_DIR/instance/deployment-id` already
+exists, it must agree with `DEPLOYMENT_ID` in the mounted server configuration.
+The operator-state mount also persists the same identity for one-shot
+containers that intentionally do not mount the full server data directory;
+once present, that anchor is required for every subsequent task. During the
+first migration, before either local anchor exists, the canonical mounted
+`DEPLOYMENT_ID` is the explicit bootstrap source for `migrate-apply` only.
+`NAZOAUTH_OPERATOR_DEPLOYMENT_ID_FILE` may be set to require a separate
+read-only identity mount; a configured but unavailable file fails closed. This
+check is local and does not make the recovery controller a runtime dependency.
+
 The wire DTOs, JWS types, signing/verification policy, compatibility parsing,
 and fixed vectors live only in `crates/operator-protocol`. Controllers consume
 that crate at an exact version and source revision; they do not copy protocol

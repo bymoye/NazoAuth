@@ -34,7 +34,8 @@ diesel::table! {
 
 diesel::table! {
     user_totp_credentials (id) {
-        id -> Uuid, tenant_id -> Uuid, user_id -> Uuid, secret_base32 -> Varchar,
+        id -> Uuid, tenant_id -> Uuid, user_id -> Uuid, secret_base32 -> Nullable<Varchar>,
+        secret_ciphertext -> Nullable<Binary>, secret_key_id -> Nullable<Varchar>,
         label -> Varchar, confirmed_at -> Nullable<Timestamptz>, last_used_step -> Nullable<Int8>,
         created_at -> Timestamptz, updated_at -> Timestamptz,
     }
@@ -100,6 +101,27 @@ diesel::table! {
         dpop_jkt -> Nullable<Varchar>,
         mtls_x5t_s256 -> Nullable<Varchar>,
         client_attestation_jkt -> Nullable<Varchar>,
+        oidc_auth_context -> Nullable<Jsonb>,
+    }
+}
+
+diesel::table! {
+    oauth_token_issuances (issuance_id) {
+        issuance_id -> Uuid,
+        tenant_id -> Uuid,
+        client_id -> Uuid,
+        grant_key_blake3 -> Varchar,
+        request_digest -> Varchar,
+        phase -> Varchar,
+        access_token_jti -> Nullable<Varchar>,
+        access_token_expires_at -> Nullable<Timestamptz>,
+        response_ciphertext -> Nullable<Binary>,
+        response_digest -> Nullable<Varchar>,
+        response_envelope_version -> Nullable<Varchar>,
+        response_key_id -> Nullable<Varchar>,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -331,6 +353,40 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    security_audit_chain_state (singleton) {
+        singleton -> Bool,
+        last_sequence -> Int8,
+        last_hash -> Binary,
+    }
+}
+
+diesel::table! {
+    security_audit_events (event_id) {
+        event_id -> Uuid,
+        sequence -> Int8,
+        event_type -> Varchar,
+        event_category -> Varchar,
+        payload -> Jsonb,
+        occurred_at -> Timestamptz,
+        previous_hash -> Binary,
+        event_hash -> Binary,
+    }
+}
+
+diesel::table! {
+    security_audit_event_outbox (event_id) {
+        event_id -> Uuid,
+        attempts -> Int4,
+        available_at -> Timestamptz,
+        locked_at -> Nullable<Timestamptz>,
+        exported_at -> Nullable<Timestamptz>,
+        last_error -> Nullable<Text>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(client_access_requests -> users (user_id));
 diesel::joinable!(scim_audit_events -> scim_tokens (scim_token_id));
 diesel::joinable!(scim_security_event_receipts -> scim_security_events (event_id));
@@ -348,6 +404,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_passkey_credentials,
     external_identity_links,
     oauth_tokens,
+    oauth_token_issuances,
     user_client_grants,
     client_access_requests,
     conformance_leases,
@@ -360,5 +417,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     backchannel_logout_deliveries,
     runtime_module_desired_states,
     runtime_module_instance_states,
-    runtime_module_state_events
+    runtime_module_state_events,
+    security_audit_chain_state,
+    security_audit_events,
+    security_audit_event_outbox
 );

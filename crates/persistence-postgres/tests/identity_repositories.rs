@@ -9,8 +9,8 @@ use nazo_identity::{
     AdminPolicyError, AdminUserUpdateOutcome, OrganizationId, RealmId, TenantContext, TenantId,
     UserId, UserProfile,
     ports::{
-        AdminUserUpdate, FederationLogin, NewFederatedIdentity, NewFederationLink, ProfileUpdate,
-        RepositoryError,
+        AdminUserUpdate, FederationLogin, MfaTotpKey, MfaTotpKeyRing, NewFederatedIdentity,
+        NewFederationLink, ProfileUpdate, RepositoryError,
     },
     scim::NormalizedScimUser,
 };
@@ -76,6 +76,12 @@ async fn database_fixture() -> Option<(nazo_postgres::DbPool, TenantContext, Use
         .execute(&mut connection).await.expect("fixture user can be inserted");
     drop(connection);
     Some((pool, tenant, user_id))
+}
+
+fn mfa_repository(pool: nazo_postgres::DbPool) -> MfaRepository {
+    let current = MfaTotpKey::new("test-current", [0x11; 32]).expect("test key id is valid");
+    let key_ring = MfaTotpKeyRing::new(current, None).expect("test key ring is valid");
+    MfaRepository::with_totp_key_ring(pool, Some(key_ring))
 }
 
 async fn cleanup(pool: &nazo_postgres::DbPool, user_id: UserId) {
@@ -562,7 +568,8 @@ async fn totp_last_step_compare_and_set_has_one_concurrent_winner() {
     let mut connection = get_conn(&pool).await.unwrap();
     sql_query("INSERT INTO user_totp_credentials (tenant_id,user_id,secret_base32,label,confirmed_at) VALUES ($1,$2,'JBSWY3DPEHPK3PXP','test',CURRENT_TIMESTAMP)").bind::<SqlUuid,_>(tenant.tenant_id.as_uuid()).bind::<SqlUuid,_>(user_id.as_uuid()).execute(&mut connection).await.unwrap();
     drop(connection);
-    let repository = MfaRepository::new(pool.clone());
+    let repository = mfa_repository(pool.clone());
+    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 1);
     let (left, right) = tokio::join!(
         repository.compare_and_set_totp_step(tenant.tenant_id, user_id, 42),
         repository.compare_and_set_totp_step(tenant.tenant_id, user_id, 42)
@@ -606,7 +613,8 @@ async fn totp_verification_classification_and_audit_are_atomic_and_replay_safe()
         .await
         .unwrap();
     drop(connection);
-    let repository = MfaRepository::new(pool.clone());
+    let repository = mfa_repository(pool.clone());
+    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 1);
 
     assert_eq!(
         repository
@@ -653,7 +661,7 @@ async fn failed_totp_enrollment_confirmation_is_durably_audited_without_state_ch
     let Some((pool, tenant, user_id)) = database_fixture().await else {
         return;
     };
-    let repository = MfaRepository::new(pool.clone());
+    let repository = mfa_repository(pool.clone());
     repository
         .begin_totp_enrollment(
             tenant.tenant_id,
@@ -700,7 +708,7 @@ async fn concurrent_totp_enrollment_confirmation_has_one_audited_winner() {
         return;
     };
     const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-    let repository = MfaRepository::new(pool.clone());
+    let repository = mfa_repository(pool.clone());
     repository
         .begin_totp_enrollment(
             tenant.tenant_id,
@@ -774,7 +782,7 @@ async fn backup_code_is_consumed_once_atomically() {
         .hash_password(code.as_bytes(), &salt)
         .unwrap()
         .to_string();
-    let repository = MfaRepository::new(pool.clone());
+    let repository = mfa_repository(pool.clone());
     repository
         .replace_backup_code_hashes(tenant.tenant_id, user_id, vec![hash])
         .await
@@ -1063,7 +1071,7 @@ async fn mfa_backup_code_bounds_and_enrollment_conflict_are_explicit() {
     let Some((pool, tenant, user_id)) = database_fixture().await else {
         return;
     };
-    let repository = MfaRepository::new(pool.clone());
+    let repository = mfa_repository(pool.clone());
     assert_eq!(
         repository
             .replace_backup_code_hashes(

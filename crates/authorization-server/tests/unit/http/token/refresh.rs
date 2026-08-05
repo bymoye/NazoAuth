@@ -537,6 +537,7 @@ fn token_row() -> TokenRow {
         dpop_jkt: Some("dpop-jkt".to_owned()),
         mtls_x5t_s256: None,
         client_attestation_jkt: None,
+        authentication_context: None,
     }
 }
 

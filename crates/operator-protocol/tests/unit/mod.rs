@@ -279,6 +279,47 @@ fn golden_task_vector_is_stable_and_verifies() {
 }
 
 #[test]
+fn task_deployment_binding_requires_local_identity_and_exact_claims() {
+    let valid = task();
+    validate_task_deployment_binding(&valid, "deployment-1").unwrap();
+
+    for (mut invalid, expected) in [
+        (
+            {
+                let mut value = valid.clone();
+                value.deployment_id = "deployment-2".to_owned();
+                value
+            },
+            "deployment-1",
+        ),
+        (
+            {
+                let mut value = valid.clone();
+                value.iss = "controller:deployment-2".to_owned();
+                value
+            },
+            "deployment-1",
+        ),
+        (
+            {
+                let mut value = valid.clone();
+                value.aud = "runtime:deployment-2".to_owned();
+                value
+            },
+            "deployment-1",
+        ),
+    ] {
+        assert!(validate_task_deployment_binding(&invalid, expected).is_err());
+        invalid.deployment_id = expected.to_owned();
+        invalid.iss = format!("controller:{expected}");
+        invalid.aud = format!("runtime:{expected}");
+        validate_task_deployment_binding(&invalid, expected).unwrap();
+    }
+
+    assert!(validate_task_deployment_binding(&valid, "").is_err());
+}
+
+#[test]
 fn protected_header_rejects_untrusted_key_lookup_inputs() {
     for header in [
         serde_json::json!({
@@ -474,6 +515,11 @@ fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
             .unwrap(),
         runtime
     );
+    validate_runtime_receipt_deployment_binding(&runtime, "deployment-1").unwrap();
+    assert!(validate_runtime_receipt_deployment_binding(&runtime, "deployment-2").is_err());
+    let mut wrong_runtime = runtime.clone();
+    wrong_runtime.aud = "controller:deployment-2".to_owned();
+    assert!(validate_runtime_receipt_deployment_binding(&wrong_runtime, "deployment-1").is_err());
     assert!(
         verify_runtime_receipt(&compact_runtime, "receipt-1", &wrong_key.verifying_key()).is_err()
     );

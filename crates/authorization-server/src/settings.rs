@@ -149,7 +149,31 @@ pub(crate) struct CibaSettings {
     pub(crate) ciba_auth_req_id_ttl_seconds: u64,
     pub(crate) ciba_poll_interval_seconds: u64,
     pub(crate) ciba_automated_decision_token: Option<String>,
+    pub(crate) ciba_automated_decision_mode: CibaAutomatedDecisionMode,
     pub(crate) ciba_notification_private_origins: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CibaAutomatedDecisionMode {
+    Disabled,
+    Header,
+    QueryParameter,
+}
+
+impl CibaAutomatedDecisionMode {
+    fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
+        match config
+            .string("CIBA_AUTOMATED_DECISION_MODE", "disabled")
+            .as_str()
+        {
+            "disabled" => Ok(Self::Disabled),
+            "header" => Ok(Self::Header),
+            "query" => Ok(Self::QueryParameter),
+            value => bail!(
+                "CIBA_AUTOMATED_DECISION_MODE must be disabled, header, or query; got {value}"
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -167,6 +191,32 @@ pub(crate) struct Openid4vcSettings {
     pub(crate) wallet_authorization_origins: Vec<String>,
     pub(crate) verifier_management_token: Option<String>,
     pub(crate) transaction_ttl_seconds: u64,
+    pub(crate) revocation_policy: Openid4vcRevocationPolicy,
+    pub(crate) revocation_snapshot_file: Option<PathBuf>,
+    pub(crate) revocation_reload_interval_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Openid4vcRevocationPolicy {
+    Disabled,
+    Optional,
+    Required,
+}
+
+impl Openid4vcRevocationPolicy {
+    fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
+        match config
+            .string("OPENID4VC_REVOCATION_POLICY", "disabled")
+            .as_str()
+        {
+            "disabled" => Ok(Self::Disabled),
+            "optional" => Ok(Self::Optional),
+            "required" => Ok(Self::Required),
+            value => bail!(
+                "OPENID4VC_REVOCATION_POLICY must be disabled, optional, or required; got {value}"
+            ),
+        }
+    }
 }
 
 impl Settings {
@@ -223,6 +273,30 @@ impl Settings {
         let cookie_secure = config.bool("COOKIE_SECURE", default_cookie_secure)?;
         if !cookie_secure && !is_loopback_http_url(&issuer) {
             bail!("COOKIE_SECURE=false 只允许用于 loopback HTTP 本地开发 issuer");
+        }
+        let session_cookie_name = config
+            .optional_string("SESSION_COOKIE_NAME")
+            .unwrap_or_else(|| {
+                if cookie_secure {
+                    "__Host-nazo_oauth_session".to_owned()
+                } else {
+                    "nazo_oauth_session".to_owned()
+                }
+            });
+        let csrf_cookie_name = config
+            .optional_string("CSRF_COOKIE_NAME")
+            .unwrap_or_else(|| {
+                if cookie_secure {
+                    "__Host-nazo_oauth_csrf".to_owned()
+                } else {
+                    "nazo_oauth_csrf".to_owned()
+                }
+            });
+        if !cookie_secure
+            && (session_cookie_name.starts_with("__Host-")
+                || csrf_cookie_name.starts_with("__Host-"))
+        {
+            bail!("__Host- cookie names require COOKIE_SECURE=true");
         }
         let subject_type = SubjectType::from_config(config)?;
         let pairwise_subject_secret = config.optional_string("PAIRWISE_SUBJECT_SECRET");
@@ -295,6 +369,24 @@ impl Settings {
         {
             bail!("CIBA_AUTOMATED_DECISION_TOKEN must be at least 32 bytes when set");
         }
+        let ciba_automated_decision_mode = CibaAutomatedDecisionMode::from_config(config)?;
+        match (
+            ciba_automated_decision_mode,
+            ciba_automated_decision_token.is_some(),
+        ) {
+            (CibaAutomatedDecisionMode::Disabled, true) => bail!(
+                "CIBA_AUTOMATED_DECISION_TOKEN requires an explicit CIBA_AUTOMATED_DECISION_MODE"
+            ),
+            (
+                CibaAutomatedDecisionMode::Header | CibaAutomatedDecisionMode::QueryParameter,
+                false,
+            ) => {
+                bail!(
+                    "CIBA_AUTOMATED_DECISION_TOKEN is required when CIBA_AUTOMATED_DECISION_MODE is enabled"
+                )
+            }
+            _ => {}
+        }
         let ciba_notification_private_origins = config
             .optional_string("CIBA_NOTIFICATION_PRIVATE_ORIGINS")
             .map(|value| {
@@ -306,6 +398,8 @@ impl Settings {
                     .collect()
             })
             .unwrap_or_default();
+        let _ = mfa_totp_key_ring(config)?;
+        validate_optional_token_issuance_response_key_config(config)?;
         let enable_dynamic_client_registration =
             config.bool("ENABLE_DYNAMIC_CLIENT_REGISTRATION", false)?;
         let enable_openid4vci_issuer = config.bool("ENABLE_OPENID4VCI_ISSUER", false)?;
@@ -407,6 +501,28 @@ impl Settings {
         let openid4vc_trust_anchors_file = config
             .optional_string("OPENID4VC_TRUST_ANCHORS_FILE")
             .map(PathBuf::from);
+        let openid4vc_revocation_policy = Openid4vcRevocationPolicy::from_config(config)?;
+        let openid4vc_revocation_snapshot_file = config
+            .optional_string("OPENID4VC_REVOCATION_SNAPSHOT_FILE")
+            .map(PathBuf::from);
+        let openid4vc_revocation_reload_interval_seconds = positive_u64(
+            config,
+            "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
+            30,
+            "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
+        )?;
+        if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
+            && openid4vc_revocation_snapshot_file.is_none()
+        {
+            bail!(
+                "OPENID4VC_REVOCATION_SNAPSHOT_FILE is required when OPENID4VC_REVOCATION_POLICY is enabled"
+            );
+        }
+        if enable_openid4vp_verifier
+            && openid4vc_revocation_policy != Openid4vcRevocationPolicy::Required
+        {
+            bail!("ENABLE_OPENID4VP_VERIFIER=true requires OPENID4VC_REVOCATION_POLICY=required");
+        }
         if openid4vc_enabled
             && (openid4vc_data_encryption_key.is_none()
                 || openid4vc_signing_certificate_chain_file.is_none()
@@ -551,8 +667,8 @@ impl Settings {
                 fapi_http_signature_max_age_seconds,
             },
             session: SessionSettings {
-                session_cookie_name: config.string("SESSION_COOKIE_NAME", "nazo_oauth_session"),
-                csrf_cookie_name: config.string("CSRF_COOKIE_NAME", "nazo_oauth_csrf"),
+                session_cookie_name,
+                csrf_cookie_name,
                 cookie_secure,
                 session_ttl_seconds: positive_u64(
                     config,
@@ -636,6 +752,7 @@ impl Settings {
                 ciba_auth_req_id_ttl_seconds,
                 ciba_poll_interval_seconds,
                 ciba_automated_decision_token,
+                ciba_automated_decision_mode,
                 ciba_notification_private_origins,
             },
             openid4vc: Openid4vcSettings {
@@ -656,9 +773,139 @@ impl Settings {
                     300,
                     "OPENID4VC_TRANSACTION_TTL_SECONDS",
                 )?,
+                revocation_policy: openid4vc_revocation_policy,
+                revocation_snapshot_file: openid4vc_revocation_snapshot_file,
+                revocation_reload_interval_seconds: openid4vc_revocation_reload_interval_seconds,
             },
         })
     }
+}
+
+pub(crate) fn mfa_totp_key_ring(
+    config: &ConfigSource,
+) -> anyhow::Result<Option<nazo_identity::ports::MfaTotpKeyRing>> {
+    let current_key = parse_optional_32_byte_key(config, "MFA_TOTP_ENCRYPTION_KEY")?;
+    let current_key_id = config.optional_string("MFA_TOTP_ENCRYPTION_KEY_ID");
+    let previous_key = parse_optional_32_byte_key(config, "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY")?;
+    let previous_key_id = config.optional_string("MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID");
+    validate_mfa_totp_key_pair(
+        "MFA_TOTP_ENCRYPTION_KEY",
+        current_key,
+        "MFA_TOTP_ENCRYPTION_KEY_ID",
+        current_key_id.as_deref(),
+    )?;
+    validate_mfa_totp_key_pair(
+        "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY",
+        previous_key,
+        "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID",
+        previous_key_id.as_deref(),
+    )?;
+    if current_key.is_none() && (previous_key.is_some() || previous_key_id.is_some()) {
+        bail!(
+            "MFA_TOTP_ENCRYPTION_KEY is required when a previous TOTP encryption key is configured"
+        );
+    }
+    if let (Some(current), Some(previous)) = (current_key_id.as_deref(), previous_key_id.as_deref())
+        && current == previous
+    {
+        bail!("MFA_TOTP_ENCRYPTION_KEY_ID and MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID must differ");
+    }
+    let Some(current_key) = current_key else {
+        return Ok(None);
+    };
+    let current = nazo_identity::ports::MfaTotpKey::new(
+        current_key_id.expect("validated MFA TOTP current key id"),
+        current_key,
+    )?;
+    let previous = previous_key
+        .zip(previous_key_id)
+        .map(|(key, id)| nazo_identity::ports::MfaTotpKey::new(id, key))
+        .transpose()?;
+    Ok(Some(nazo_identity::ports::MfaTotpKeyRing::new(
+        current, previous,
+    )?))
+}
+
+/// Parses the independent response-envelope key ring used by durable token
+/// issuance recovery. The current key/id pair is mandatory for the running
+/// server; the previous pair is optional only during a bounded rotation
+/// overlap. `Settings::from_config` calls the optional validator so malformed
+/// values fail early, while bootstrap calls this strict function before
+/// constructing the token repository.
+pub(crate) fn token_issuance_response_key_ring(
+    config: &ConfigSource,
+) -> anyhow::Result<nazo_postgres::TokenIssuanceResponseKeyRing> {
+    let current_key = parse_required_32_byte_key(config, "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")?;
+    let current_id = config.required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID")?;
+    let previous_key =
+        parse_optional_32_byte_key(config, "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY")?;
+    let previous_id = config.optional_string("TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID");
+    if previous_key.is_some() != previous_id.is_some() {
+        bail!(
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY and TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID must be configured together"
+        );
+    }
+    let previous = previous_key.zip(previous_id).map(|(key, id)| (id, key));
+    nazo_postgres::TokenIssuanceResponseKeyRing::new(current_id, current_key, previous)
+        .map_err(anyhow::Error::from)
+}
+
+fn validate_optional_token_issuance_response_key_config(
+    config: &ConfigSource,
+) -> anyhow::Result<()> {
+    let current_key = config.optional_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY");
+    let current_id = config.optional_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID");
+    let previous_key = config.optional_string("TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY");
+    let previous_id = config.optional_string("TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID");
+    if current_key.is_none()
+        && current_id.is_none()
+        && previous_key.is_none()
+        && previous_id.is_none()
+    {
+        return Ok(());
+    }
+    let _ = token_issuance_response_key_ring(config)?;
+    Ok(())
+}
+
+fn parse_required_32_byte_key(
+    config: &ConfigSource,
+    name: &'static str,
+) -> anyhow::Result<[u8; 32]> {
+    let value = config.required_string(name)?;
+    let decoded = URL_SAFE_NO_PAD.decode(value).map_err(anyhow::Error::from)?;
+    <[u8; 32]>::try_from(decoded)
+        .map_err(|_| anyhow::anyhow!("{name} must decode to exactly 32 bytes"))
+}
+
+fn parse_optional_32_byte_key(
+    config: &ConfigSource,
+    name: &'static str,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    config
+        .optional_string(name)
+        .map(|value| URL_SAFE_NO_PAD.decode(value).map_err(anyhow::Error::from))
+        .transpose()?
+        .map(|value| {
+            <[u8; 32]>::try_from(value)
+                .map_err(|_| anyhow::anyhow!("{name} must decode to exactly 32 bytes"))
+        })
+        .transpose()
+}
+
+fn validate_mfa_totp_key_pair(
+    key_name: &'static str,
+    key: Option<[u8; 32]>,
+    id_name: &'static str,
+    id: Option<&str>,
+) -> anyhow::Result<()> {
+    if key.is_some() != id.is_some() {
+        bail!("{key_name} and {id_name} must be configured together");
+    }
+    if id.is_some_and(|value| value.len() > 128) {
+        bail!("{id_name} must be at most 128 bytes");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

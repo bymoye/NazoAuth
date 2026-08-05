@@ -338,7 +338,8 @@ async fn authorize_request_with_context(
         AuthorizationProfilePolicy {
             signed_authorization_response_required: client_policy
                 .require_signed_authorization_response,
-            pkce_required: client_policy.requires_fapi2_security()
+            pkce_required: !client_policy.allow_confidential_oidc_without_pkce
+                || client_policy.requires_fapi2_security()
                 || client.require_dpop_bound_tokens
                 || client.require_mtls_bound_tokens
                 || dpop_jkt.is_some()

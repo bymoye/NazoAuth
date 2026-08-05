@@ -1,11 +1,15 @@
 //! RFC 7523 JWT bearer authorization grant.
 use nazo_http_actix::oauth_token_error;
 
-use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use super::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant,
+    recover_token_issuance_response,
+};
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
 };
 use crate::adapters::security::ValidatedClientAssertion;
+use crate::adapters::security::blake3_hex;
 use crate::adapters::security::client_jwt_decoding_key;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
@@ -28,6 +32,19 @@ use serde_json::json;
 
 pub(crate) const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 pub(crate) const JWT_BEARER_ASSERTION_TYP: &str = "oauth-jwt-bearer+jwt";
+
+fn jwt_bearer_grant_key(
+    assertion_jti: &str,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> String {
+    format!(
+        "jwt_bearer:{}:{}:{}",
+        blake3_hex(assertion_jti),
+        dpop_jkt.map(blake3_hex).unwrap_or_default(),
+        mtls_x5t_s256.map(blake3_hex).unwrap_or_default(),
+    )
+}
 
 #[derive(Debug)]
 pub(crate) enum JwtBearerAssertionError {
@@ -219,15 +236,6 @@ pub(crate) async fn token_jwt_bearer_with_service(
     } else {
         None
     };
-    if let Err(error) = consume_token_client_assertion_with_authorization_service(
-        issuance.authorization,
-        client,
-        client_assertion,
-    )
-    .await
-    {
-        return super::token_client_assertion_error(error);
-    }
     let assertion = match validate_jwt_bearer_assertion_with_issuer(
         issuance.config.issuer(),
         client,
@@ -243,6 +251,25 @@ pub(crate) async fn token_jwt_bearer_with_service(
             );
         }
     };
+    let jwt_bearer_grant_key = jwt_bearer_grant_key(
+        &assertion.jti,
+        dpop_jkt.as_deref(),
+        mtls_x5t_s256.as_deref(),
+    );
+    if let Some(response) =
+        recover_token_issuance_response(token_service, client, &jwt_bearer_grant_key).await
+    {
+        return response;
+    }
+    if let Err(error) = consume_token_client_assertion_with_authorization_service(
+        issuance.authorization,
+        client,
+        client_assertion,
+    )
+    .await
+    {
+        return super::token_client_assertion_error(error);
+    }
     if let Err(error) = consume_jwt_bearer_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -276,10 +303,11 @@ pub(crate) async fn token_jwt_bearer_with_service(
         Ok(admission) => admission,
         Err(error) => return jwt_bearer_grant_error_response(error, client, form),
     };
-    issue_token_response_with_service(
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        Some(&jwt_bearer_grant_key),
         TokenIssue {
             user_id: None,
             subject: assertion.subject,
@@ -295,6 +323,7 @@ pub(crate) async fn token_jwt_bearer_with_service(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: false,
             refresh_token_policy: RefreshTokenPolicy::PreserveExisting,
             dpop_jkt,

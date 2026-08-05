@@ -43,11 +43,6 @@ use fred::prelude::{
 };
 use nazo_auth::Claims;
 use nazo_http_actix::{IpCidr, OAuthJsonErrorFields, UserinfoEndpoint};
-use openssl::encrypt::Decrypter;
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::{Padding, Rsa};
-use openssl::symm::{Cipher, decrypt_aead};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -336,23 +331,23 @@ async fn update_userinfo_crypto_policy(
     .expect("UserInfo response crypto policy should update");
 }
 
-fn rsa_userinfo_jwe_keypair(kid: &str) -> (PKey<Private>, Value) {
-    let rsa = Rsa::generate(2048).expect("test RSA key should generate");
+fn rsa_userinfo_jwe_keypair(kid: &str) -> (crate::test_support::TestRsaKey, Value) {
+    let rsa = crate::test_support::TestRsaKey::generate();
     let jwk = json!({
         "kty": "RSA",
         "kid": kid,
         "use": "enc",
         "alg": "RSA-OAEP-256",
-        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
-        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
+        "n": URL_SAFE_NO_PAD.encode(&rsa.modulus),
+        "e": URL_SAFE_NO_PAD.encode(&rsa.exponent)
     });
-    (
-        PKey::from_rsa(rsa).expect("test RSA key should convert to PKey"),
-        jwk,
-    )
+    (rsa, jwk)
 }
 
-fn decrypt_userinfo_jwe(private_key: &PKey<Private>, compact_jwe: &str) -> (Value, String) {
+fn decrypt_userinfo_jwe(
+    private_key: &crate::test_support::TestRsaKey,
+    compact_jwe: &str,
+) -> (Value, String) {
     let parts = compact_jwe.split('.').collect::<Vec<_>>();
     assert_eq!(parts.len(), 5, "compact JWE must have five parts");
     let protected_header: Value = serde_json::from_slice(
@@ -373,35 +368,12 @@ fn decrypt_userinfo_jwe(private_key: &PKey<Private>, compact_jwe: &str) -> (Valu
     let tag = URL_SAFE_NO_PAD
         .decode(parts[4])
         .expect("tag should be base64url");
-    let mut decrypter = Decrypter::new(private_key).expect("RSA decrypter should initialize");
-    decrypter
-        .set_rsa_padding(Padding::PKCS1_OAEP)
-        .expect("RSA-OAEP padding should configure");
-    decrypter
-        .set_rsa_oaep_md(MessageDigest::sha256())
-        .expect("RSA-OAEP SHA-256 should configure");
-    decrypter
-        .set_rsa_mgf1_md(MessageDigest::sha256())
-        .expect("RSA-OAEP MGF1 SHA-256 should configure");
-    let mut cek = vec![
-        0;
-        decrypter
-            .decrypt_len(&encrypted_key)
-            .expect("encrypted key length should be known")
-    ];
-    let len = decrypter
-        .decrypt(&encrypted_key, &mut cek)
-        .expect("content-encryption key should decrypt");
-    cek.truncate(len);
-    let plaintext = decrypt_aead(
-        Cipher::aes_256_gcm(),
-        &cek,
-        Some(&iv),
-        parts[0].as_bytes(),
-        &ciphertext,
-        &tag,
-    )
-    .expect("A256GCM ciphertext should decrypt");
+    let cek = private_key
+        .decrypt_oaep_sha256(&encrypted_key)
+        .expect("RSA-OAEP encrypted key should decrypt");
+    let plaintext =
+        crate::crypto::aes_256_gcm_decrypt(&cek, &iv, parts[0].as_bytes(), &ciphertext, &tag)
+            .expect("A256GCM ciphertext should decrypt");
     (
         protected_header,
         String::from_utf8(plaintext).expect("JWE plaintext should be UTF-8"),

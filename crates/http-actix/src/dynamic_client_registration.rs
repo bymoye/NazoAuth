@@ -322,43 +322,19 @@ pub async fn client_configuration_get(
         Ok(source_ip) => source_ip,
         Err(response) => return response,
     };
-    let (current, authenticated_token_hash, registration_access_token) =
+    let (current, _authenticated_token_hash, registration_access_token) =
         match authenticate_registration_client(&endpoint, &request, &path).await {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
     let response_types = response_types_from_client(&current);
-    let (issued_secret, client_secret_hash) = issue_client_secret(&endpoint, &current);
-    let client = match endpoint
-        .clients
-        .rotate_credentials(
-            current.tenant_id,
-            current.id,
-            client_secret_hash.as_deref(),
-            &authenticated_token_hash,
-            &authenticated_token_hash,
-        )
-        .await
-    {
-        Ok(client) => client,
-        Err(DynamicRegistrationDependencyError::StaleCredentials) => {
-            return registration_access_denied();
-        }
-        Err(DynamicRegistrationDependencyError::Unavailable) => {
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "Client configuration update failed.",
-            );
-        }
-    };
     endpoint
         .request_guard
-        .audit("dynamic_client_configuration_read", &client, &source_ip);
+        .audit("dynamic_client_configuration_read", &current, &source_ip);
     json_response_no_store(dynamic_registration_response(
-        &client,
+        &current,
         &response_types,
-        issued_secret,
+        None,
         &endpoint.config.issuer,
         &registration_access_token,
     ))
@@ -598,25 +574,6 @@ async fn submitted_secret_matches(
         .await
 }
 
-fn issue_client_secret(
-    endpoint: &DynamicRegistrationEndpoint,
-    client: &OAuthClient,
-) -> (Option<String>, Option<String>) {
-    if client.client_type != "confidential"
-        || !matches!(
-            client.token_endpoint_auth_method.as_str(),
-            "client_secret_basic" | "client_secret_post"
-        )
-    {
-        return (None, None);
-    }
-    let (secret, digest) = endpoint
-        .security
-        .crypto
-        .issue_client_secret(&endpoint.config.client_secret_pepper);
-    (Some(secret), Some(digest))
-}
-
 async fn enforce_rate_limit(
     endpoint: &DynamicRegistrationEndpoint,
     request: &HttpRequest,
@@ -800,11 +757,13 @@ fn bearer_token(request: &HttpRequest) -> Option<&str> {
 }
 
 fn parse_bearer(value: &str) -> Option<&str> {
-    value
-        .trim()
-        .strip_prefix("Bearer ")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let mut parts = value.trim().splitn(2, char::is_whitespace);
+    let scheme = parts.next()?.trim();
+    let token = parts.next()?.trim();
+    (scheme.eq_ignore_ascii_case("Bearer")
+        && !token.is_empty()
+        && token.split_whitespace().count() == 1)
+        .then_some(token)
 }
 
 fn registration_access_denied() -> HttpResponse {

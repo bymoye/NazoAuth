@@ -71,7 +71,7 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
   --target-issuer https://auth.nazo.run \
   --conformance-server https://oauth-test.nazo.run \
   --suite-dir /opt/nazo-oauth/conformance/operator-suite \
-  --suite-revision 946451d1ce29965c9ab7aee05f5003552233160e \
+  --suite-revision 932b46f1e507871eb0b34621aaef65ff04442e6f \
   --work-dir "$work_dir" \
   --export-dir "$export_dir" \
   --run-namespace "$run_id" \

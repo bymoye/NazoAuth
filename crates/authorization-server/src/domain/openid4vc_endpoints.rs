@@ -27,10 +27,10 @@ use nazo_openid4vci::{
     AuthorizationCodeGrant, BatchCredentialIssuance, CredentialAccess, CredentialConfiguration,
     CredentialDatasetPort, CredentialError, CredentialIssuance, CredentialIssuerMetadata,
     CredentialIssuerService, CredentialOffer, CredentialOfferGrants, CredentialRequest,
-    CredentialRequestEncryptionMetadata, CredentialResponse, CredentialResponseEncryption,
-    CredentialStorePort, DeferredCredentialRequest, DeferredPayload, EncryptionMetadata,
-    IssuanceDisposition, IssuanceNotification, NonceRecord, NotificationRequest,
-    PreAuthorizedCodeGrant, TxCodeDescription,
+    CredentialRequestEncryptionMetadata, CredentialResponse, CredentialResponseEncoding,
+    CredentialResponseEncryption, CredentialStorePort, DeferredCredentialRequest, DeferredPayload,
+    EncryptionMetadata, IssuanceDisposition, IssuanceNotification, NonceRecord,
+    NotificationRequest, PreAuthorizedCodeGrant, StoredCredentialResponse, TxCodeDescription,
 };
 use nazo_openid4vp::{
     AuthorizationRequest, AuthorizationResponse, ClientIdPrefix, ClientMetadata,
@@ -607,6 +607,27 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
             }
             let request = self.request_json(body).await?;
             let access = self.access(&context).await?;
+            let request_digest = issuance_request_digest(
+                "credential",
+                &request,
+                &context.request_url,
+                context.method,
+            )?;
+            let issuance_id = stable_issuance_id(access.token_id, &request_digest);
+            if let Some(response) = self
+                .store
+                .find_response(issuance_id, access.token_id, &request_digest, Utc::now())
+                .await
+                .map_err(|_| {
+                    vci_error(
+                        503,
+                        "server_error",
+                        "Credential issuance response state is unavailable.",
+                    )
+                })?
+            {
+                return response_from_record(response);
+            }
             let dpop_nonce = self.next_dpop_nonce(&access).await?;
             let configuration_id = resolve_configuration_id(&request, &access)?;
             let configuration = self
@@ -630,9 +651,9 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
             } else {
                 IssuanceDisposition::Immediate
             };
-            let response = self
+            let pending = self
                 .service
-                .issue(
+                .issue_pending_with_identity(
                     &access,
                     &request,
                     &CredentialIssuance {
@@ -643,13 +664,43 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
                         expires_at: now + Duration::days(365),
                     },
                     &nonce,
+                    nazo_openid4vci::IssuanceIdentity {
+                        issuance_id,
+                        request_digest: request_digest.clone(),
+                    },
                     now,
                 )
                 .await
                 .map_err(map_issuance_error)?;
-            let body = self
-                .finish_response(response, request.credential_response_encryption.as_ref())
-                .await?;
+            let body = match self
+                .finish_response(
+                    pending.response.clone(),
+                    request.credential_response_encryption.as_ref(),
+                )
+                .await
+            {
+                Ok(body) => body,
+                Err(error) => {
+                    let _ = self.service.rollback_pending(&pending, Utc::now()).await;
+                    return Err(error);
+                }
+            };
+            let response_record = stored_response(
+                issuance_id,
+                access.token_id,
+                request_digest,
+                &body,
+                dpop_nonce.clone(),
+                access.expires_at,
+            )?;
+            if let Err(error) = self
+                .service
+                .commit_pending_with_response(&pending, &response_record, Utc::now())
+                .await
+            {
+                let _ = self.service.rollback_pending(&pending, Utc::now()).await;
+                return Err(map_issuance_error(error));
+            }
             Ok(CredentialEndpointResponse { body, dpop_nonce })
         })
     }
@@ -672,14 +723,33 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
             }
             let request = self.request_json(body).await?;
             let access = self.access(&context).await?;
+            let request_digest = issuance_request_digest(
+                "deferred",
+                &request,
+                &context.request_url,
+                context.method,
+            )?;
+            let issuance_id = stable_issuance_id(access.token_id, &request_digest);
+            if let Some(response) = self
+                .store
+                .find_response(issuance_id, access.token_id, &request_digest, Utc::now())
+                .await
+                .map_err(|_| {
+                    vci_error(
+                        503,
+                        "server_error",
+                        "Credential issuance response state is unavailable.",
+                    )
+                })?
+            {
+                return response_from_record(response);
+            }
             let dpop_nonce = self.next_dpop_nonce(&access).await?;
+            let transaction_hash = blake3_hex(&request.transaction_id);
+            let claim_id = Uuid::now_v7().to_string();
             let deferred = self
                 .store
-                .consume_ready_deferred(
-                    &blake3_hex(&request.transaction_id),
-                    access.token_id,
-                    Utc::now(),
-                )
+                .claim_ready_deferred(&transaction_hash, access.token_id, &claim_id, Utc::now())
                 .await
                 .map_err(|_| {
                     vci_error(
@@ -694,84 +764,125 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
                         "invalid_transaction_id",
                         "Deferred credential transaction is invalid or not ready.",
                     )
-                })?;
-            let payload: DeferredPayload = serde_json::from_slice(&deferred.payload_ciphertext)
-                .map_err(|_| {
-                    vci_error(
-                        503,
-                        "server_error",
-                        "Deferred credential payload is unavailable.",
-                    )
-                })?;
-            let configuration = self
-                .configurations
-                .get(&deferred.configuration_id)
-                .ok_or_else(|| {
-                    vci_error(
-                        503,
-                        "server_error",
-                        "Deferred credential configuration is unavailable.",
-                    )
-                })?;
-            let mut credentials = Vec::new();
-            for holder_binding in deferred.holder_bindings {
-                let credential = self
-                    .crypto
-                    .sign(&nazo_digital_credentials::CredentialSignInput {
-                        payload: nazo_digital_credentials::CredentialPayload {
-                            issuer: self.issuer.clone(),
-                            format: deferred.format,
-                            configuration_id: deferred.configuration_id.clone(),
-                            credential_type: configuration
-                                .vct
-                                .clone()
-                                .or_else(|| configuration.doctype.clone())
-                                .ok_or_else(|| {
-                                    vci_error(
-                                        503,
-                                        "server_error",
-                                        "Deferred credential type is unavailable.",
-                                    )
-                                })?,
-                            subject_claims: payload.dataset.clone(),
-                            holder_binding: serde_json::from_value(holder_binding).ok(),
-                            selectively_disclosable_claims: Vec::new(),
-                        },
-                        issued_at: payload.issued_at,
-                        expires_at: payload.expires_at,
-                        status: payload.status.clone(),
-                    })
-                    .await
+                })?
+                .credential;
+            let result = async {
+                let payload: DeferredPayload = serde_json::from_slice(&deferred.payload_ciphertext)
                     .map_err(|_| {
-                        vci_error(503, "server_error", "Deferred credential signing failed.")
+                        vci_error(
+                            503,
+                            "server_error",
+                            "Deferred credential payload is unavailable.",
+                        )
                     })?;
-                credentials.push(nazo_openid4vci::IssuedCredential {
-                    credential: Value::String(credential),
-                });
-            }
-            let notification_id = Uuid::now_v7().to_string();
-            self.store
-                .issue_notification_handle(&nazo_openid4vci::NotificationHandle {
+                let configuration = self
+                    .configurations
+                    .get(&deferred.configuration_id)
+                    .ok_or_else(|| {
+                        vci_error(
+                            503,
+                            "server_error",
+                            "Deferred credential configuration is unavailable.",
+                        )
+                    })?;
+                let mut credentials = Vec::new();
+                for holder_binding in deferred.holder_bindings {
+                    let credential = self
+                        .crypto
+                        .sign(&nazo_digital_credentials::CredentialSignInput {
+                            payload: nazo_digital_credentials::CredentialPayload {
+                                issuer: self.issuer.clone(),
+                                format: deferred.format,
+                                configuration_id: deferred.configuration_id.clone(),
+                                credential_type: configuration
+                                    .vct
+                                    .clone()
+                                    .or_else(|| configuration.doctype.clone())
+                                    .ok_or_else(|| {
+                                        vci_error(
+                                            503,
+                                            "server_error",
+                                            "Deferred credential type is unavailable.",
+                                        )
+                                    })?,
+                                subject_claims: payload.dataset.clone(),
+                                holder_binding: serde_json::from_value(holder_binding).ok(),
+                                selectively_disclosable_claims: Vec::new(),
+                            },
+                            issued_at: payload.issued_at,
+                            expires_at: payload.expires_at,
+                            status: payload.status.clone(),
+                        })
+                        .await
+                        .map_err(|_| {
+                            vci_error(503, "server_error", "Deferred credential signing failed.")
+                        })?;
+                    credentials.push(nazo_openid4vci::IssuedCredential {
+                        credential: Value::String(credential),
+                    });
+                }
+                let notification_id = Uuid::now_v7().to_string();
+                let notification_handle = nazo_openid4vci::NotificationHandle {
                     notification_id: notification_id.clone(),
                     token_id: access.token_id,
                     expires_at: access.expires_at.min(payload.expires_at),
-                })
-                .await
-                .map_err(|_| {
-                    vci_error(503, "server_error", "Notification state is unavailable.")
-                })?;
-            let body = self
-                .finish_response(
-                    CredentialResponse {
-                        credentials: Some(credentials),
-                        transaction_id: None,
-                        notification_id: Some(notification_id),
-                        interval: None,
-                    },
-                    request.credential_response_encryption.as_ref(),
-                )
-                .await?;
-            Ok(CredentialEndpointResponse { body, dpop_nonce })
+                };
+                // Finish response encoding before committing the lease. If
+                // encryption fails, the transaction remains retryable.
+                let body = self
+                    .finish_response(
+                        CredentialResponse {
+                            credentials: Some(credentials),
+                            transaction_id: None,
+                            notification_id: Some(notification_id),
+                            interval: None,
+                        },
+                        request.credential_response_encryption.as_ref(),
+                    )
+                    .await?;
+                let response_record = stored_response(
+                    issuance_id,
+                    access.token_id,
+                    request_digest.clone(),
+                    &body,
+                    dpop_nonce.clone(),
+                    access.expires_at.min(payload.expires_at),
+                )?;
+                let committed = self
+                    .store
+                    .finalize_deferred_with_notification_and_response(
+                        &transaction_hash,
+                        access.token_id,
+                        &claim_id,
+                        &notification_handle,
+                        &response_record,
+                        Utc::now(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        vci_error(
+                            503,
+                            "server_error",
+                            "Deferred credential state is unavailable.",
+                        )
+                    })?;
+                if !committed {
+                    return Err(vci_error(
+                        503,
+                        "server_error",
+                        "Deferred credential state transition was lost.",
+                    ));
+                }
+                Ok(CredentialEndpointResponse { body, dpop_nonce })
+            }
+            .await;
+            if result.is_err() {
+                let _ = self
+                    .store
+                    .release_deferred(&transaction_hash, access.token_id, &claim_id, Utc::now())
+                    .await;
+            }
+            result
         })
     }
 
@@ -979,6 +1090,48 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
                         503,
                         "server_error",
                         "Credential access token signing failed.",
+                    )
+                })?;
+            // The pre-authorized offer is consumed before the JWT is signed.  Persist the
+            // resulting grant before returning the bearer/DPoP token so every token delivered
+            // by this endpoint is visible to the credential endpoint's revocation and
+            // lifecycle checks.  A failed persistence write fails closed: the token is never
+            // sent to the wallet.
+            let token_id = Uuid::parse_str(&issued.jti).map_err(|_| {
+                vci_error(
+                    503,
+                    "server_error",
+                    "Credential access token identifier is invalid.",
+                )
+            })?;
+            let expires_at =
+                chrono::DateTime::from_timestamp(issued.expires_at, 0).ok_or_else(|| {
+                    vci_error(
+                        503,
+                        "server_error",
+                        "Credential access token expiry is invalid.",
+                    )
+                })?;
+            self.store
+                .upsert_access(
+                    &blake3_hex(&issued.token),
+                    &CredentialAccess {
+                        token_id,
+                        tenant_id: authorization.tenant_id,
+                        subject_id: authorization.subject_id,
+                        client_id: client_id.to_owned(),
+                        configuration_ids: authorization.configuration_ids.clone(),
+                        credential_identifiers: authorization.credential_identifiers.clone(),
+                        dpop_jkt: dpop_jkt.clone(),
+                        expires_at,
+                    },
+                )
+                .await
+                .map_err(|_| {
+                    vci_error(
+                        503,
+                        "server_error",
+                        "Credential access state is unavailable.",
                     )
                 })?;
             Ok(PreAuthorizedTokenResponse {
@@ -2112,6 +2265,111 @@ fn extract_proof_nonce(proofs: Option<&nazo_openid4vci::Proofs>) -> Option<Strin
         .get("nonce")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+/// Build the retry key from the canonical request model. The proof JWT is
+/// intentionally retained in full: a retry must resend the exact proof body
+/// that produced the committed response. A newly signed proof (even with the
+/// same holder key and nonce) is a different request and is rejected once the
+/// single-use nonce has been consumed.
+fn issuance_request_digest<T: serde::Serialize>(
+    kind: &str,
+    request: &T,
+    request_url: &str,
+    method: &str,
+) -> Result<String, CredentialHttpError> {
+    let input = serde_json::json!({
+        "version": 1,
+        "kind": kind,
+        "request": request,
+        "request_url": request_url,
+        "method": method,
+    });
+    let encoded = serde_json::to_vec(&input)
+        .map_err(|_| vci_error(500, "server_error", "Credential request digest failed."))?;
+    Ok(blake3::hash(&encoded).to_hex().to_string())
+}
+
+fn stable_issuance_id(token_id: Uuid, request_digest: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nazo-openid4vci-issuance-v1");
+    hasher.update(token_id.as_bytes());
+    hasher.update(request_digest.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn stored_response(
+    issuance_id: Uuid,
+    token_id: Uuid,
+    request_digest: String,
+    body: &CredentialResponseBody,
+    dpop_nonce: Option<String>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<StoredCredentialResponse, CredentialHttpError> {
+    let (encoding, body) = match body {
+        CredentialResponseBody::Json(value) => (
+            CredentialResponseEncoding::Json,
+            serde_json::to_vec(value).map_err(|_| {
+                vci_error(500, "server_error", "Credential response encoding failed.")
+            })?,
+        ),
+        CredentialResponseBody::Jwt(value) => {
+            (CredentialResponseEncoding::Jwt, value.as_bytes().to_vec())
+        }
+    };
+    let status = match body_encoding_is_deferred(&encoding, &body) {
+        true => 202,
+        false => 200,
+    };
+    Ok(StoredCredentialResponse {
+        issuance_id,
+        token_id,
+        request_digest,
+        body,
+        encoding,
+        status,
+        dpop_nonce,
+        expires_at,
+    })
+}
+
+fn body_encoding_is_deferred(encoding: &CredentialResponseEncoding, body: &[u8]) -> bool {
+    matches!(encoding, CredentialResponseEncoding::Json)
+        && serde_json::from_slice::<CredentialResponse>(body)
+            .ok()
+            .is_some_and(|response| response.transaction_id.is_some())
+}
+
+fn response_from_record(
+    response: StoredCredentialResponse,
+) -> Result<CredentialEndpointResponse<CredentialResponseBody>, CredentialHttpError> {
+    let body = match response.encoding {
+        CredentialResponseEncoding::Json => serde_json::from_slice(&response.body)
+            .map(CredentialResponseBody::Json)
+            .map_err(|_| {
+                vci_error(
+                    503,
+                    "server_error",
+                    "Stored credential response is invalid.",
+                )
+            })?,
+        CredentialResponseEncoding::Jwt => String::from_utf8(response.body)
+            .map(CredentialResponseBody::Jwt)
+            .map_err(|_| {
+                vci_error(
+                    503,
+                    "server_error",
+                    "Stored credential response is invalid.",
+                )
+            })?,
+    };
+    Ok(CredentialEndpointResponse {
+        body,
+        dpop_nonce: response.dpop_nonce,
+    })
 }
 
 fn map_issuance_error(error: nazo_openid4vci::CredentialIssuanceError) -> CredentialHttpError {

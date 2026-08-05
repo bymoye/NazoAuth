@@ -125,6 +125,7 @@ fn wait_for_marker(path: &Path) {
 fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt() {
     let root = temporary_directory();
     fs::create_dir(root.join("state")).unwrap();
+    fs::write(root.join("state/deployment-id"), b"deployment-test\n").unwrap();
     let controller = SigningKey::from_bytes(&[11; 32]);
     let receipt = SigningKey::from_bytes(&[12; 32]);
     fs::write(
@@ -142,8 +143,14 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         br#"{"controller_key_id":"controller-test","receipt_key_id":"receipt-test"}"#,
     )
     .unwrap();
-    let server_config = b"issuer: https://auth.example\n";
+    let server_config = b"ISSUER: https://auth.example\nDEPLOYMENT_ID: deployment-test\n";
     fs::write(root.join("server.yaml"), server_config).unwrap();
+    fs::create_dir_all(root.join("runtime/instance")).unwrap();
+    fs::write(
+        root.join("runtime/instance/deployment-id"),
+        b"deployment-test\n",
+    )
+    .unwrap();
     let manifest = CanonicalConfigManifest {
         version: nazo_operator_protocol::CONFIG_MANIFEST_VERSION,
         entries: BTreeMap::from([

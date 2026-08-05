@@ -153,6 +153,7 @@ async fn store_ciba_state(
                 scopes: vec!["openid".to_owned()],
                 audiences: vec!["resource://default".to_owned()],
                 acr: None,
+                authentication_context: None,
                 binding_message: None,
                 issued_at: now,
                 status,
@@ -357,6 +358,7 @@ fn ciba_start_audit_fields_are_redacted() {
         scopes: vec!["openid".to_owned(), "profile".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: Some("sensitive binding text".to_owned()),
         issued_at: now,
         status: CibaStatus::Pending,
@@ -392,6 +394,7 @@ fn committed_decision_fixture(decision: CibaDecision) -> CibaCommittedDecision {
             scopes: vec!["openid".to_owned()],
             audiences: vec!["resource://default".to_owned()],
             acr: None,
+            authentication_context: None,
             binding_message: None,
             issued_at: now,
             status: match decision {
@@ -512,11 +515,12 @@ fn ciba_poll_storage_failure_returns_503_and_never_protocol_progress() {
 }
 
 #[actix_web::test]
-async fn ciba_automated_decision_route_accepts_empty_post_without_json_content_type() {
+async fn ciba_automated_decision_oidf_query_mode_rejects_post() {
     let state = ciba_test_state_with(|settings| {
         settings.modules.enable_ciba = true;
         settings.ciba.ciba_automated_decision_token =
             Some("test-ciba-automated-decision-token-32".to_owned());
+        settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
     });
     let settings = Arc::clone(&state.settings);
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
@@ -538,13 +542,82 @@ async fn ciba_automated_decision_route_accepts_empty_post_without_json_content_t
     .await;
 
     let request = actix_web::test::TestRequest::post()
-        .uri("/auth/ciba-automated-decision?token=fake&type=allow&decision_token=wrong-token")
+        .uri("/auth/ciba-automated-decision?token=fake&type=allow&decision_token=test-ciba-automated-decision-token-32")
         .to_request();
     let response = actix_web::test::call_service(&app, request).await;
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = actix_web::test::read_body(response).await;
     assert!(body.is_empty());
+}
+
+#[actix_web::test]
+async fn ciba_automated_decision_header_mode_rejects_get_and_query_secret() {
+    let state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+        settings.ciba.ciba_automated_decision_token =
+            Some("test-ciba-automated-decision-token-32".to_owned());
+        settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Header;
+    });
+    let settings = Arc::clone(&state.settings);
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        state.diesel_db.clone(),
+        &settings,
+    )
+    .expect("CIBA runtime registry should initialize");
+    let ciba_service =
+        ServerCibaService::new(nazo_valkey::CibaStore::new(&state.valkey_connection()));
+    let app = actix_web::test::init_service(
+        actix_web::App::new()
+            .app_data(actix_web::web::Data::new(ciba_service))
+            .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
+                settings.as_ref(),
+            )))
+            .app_data(actix_web::web::Data::from(runtime))
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
+    )
+    .await;
+
+    let request = actix_web::test::TestRequest::get()
+        .uri("/auth/ciba-automated-decision?token=fake&type=allow&decision_token=test-ciba-automated-decision-token-32")
+        .insert_header((header::AUTHORIZATION, "Bearer test-ciba-automated-decision-token-32"))
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actix_web::test::read_body(response).await.is_empty());
+}
+
+#[test]
+fn ciba_automated_decision_transport_keeps_header_and_oidf_query_separate() {
+    let mut settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Header;
+    let mut config = CibaHttpConfig::from(&settings);
+    let header_request = actix_web::test::TestRequest::post()
+        .insert_header((header::AUTHORIZATION, "Bearer header-secret"))
+        .to_http_request();
+    let mut query = CibaAutomatedDecisionQuery {
+        token: Some("request-id".to_owned()),
+        auth_req_id: None,
+        r#type: Some("allow".to_owned()),
+        action: None,
+        decision_token: None,
+    };
+    assert_eq!(
+        ciba_automated_decision_request_token(&config, &header_request, &query).as_deref(),
+        Some("header-secret")
+    );
+
+    query.decision_token = Some("query-secret".to_owned());
+    assert!(ciba_automated_decision_request_token(&config, &header_request, &query).is_none());
+
+    config.automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
+    let get_request = actix_web::test::TestRequest::get().to_http_request();
+    assert_eq!(
+        ciba_automated_decision_request_token(&config, &get_request, &query).as_deref(),
+        Some("query-secret")
+    );
 }
 
 #[actix_web::test]
@@ -873,6 +946,7 @@ fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
         scopes: vec!["openid".to_owned(), "offline_access".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         acr: Some("1".to_owned()),
+        authentication_context: None,
         binding_message: None,
         issued_at: Utc::now().timestamp(),
         status: CibaStatus::Approved,
@@ -899,6 +973,37 @@ fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
 }
 
 #[test]
+fn ciba_token_issue_transfers_approved_authentication_context() {
+    let user_id = Uuid::now_v7();
+    let ciba = CibaRequestState {
+        client_id: "client-1".to_owned(),
+        user_id,
+        scopes: vec!["openid".to_owned()],
+        audiences: vec!["resource://default".to_owned()],
+        acr: Some("1".to_owned()),
+        authentication_context: Some(CibaAuthenticationContext {
+            auth_time: 1_700_000_000,
+            amr: vec!["pwd".to_owned(), "otp".to_owned()],
+            oidc_sid: Some("sid-approved".to_owned()),
+        }),
+        binding_message: None,
+        issued_at: 1_700_000_100,
+        status: CibaStatus::Approved,
+        interval_seconds: 5,
+        expires_at: 1_700_000_600,
+        retention_expires_at: 1_700_000_720,
+        last_poll_at: None,
+        ping_notification: None,
+    };
+
+    let issue = ciba_token_issue(user_id, "subject-1".to_owned(), ciba, None, None);
+
+    assert_eq!(issue.auth_time, Some(1_700_000_000));
+    assert_eq!(issue.amr, vec!["pwd", "otp"]);
+    assert_eq!(issue.oidc_sid.as_deref(), Some("sid-approved"));
+}
+
+#[test]
 fn ciba_token_grant_state_rejects_other_client_auth_req_id_as_invalid_grant() {
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut ciba = CibaRequestState {
@@ -907,6 +1012,7 @@ fn ciba_token_grant_state_rejects_other_client_auth_req_id_as_invalid_grant() {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: None,
         issued_at: Utc::now().timestamp(),
         status: CibaStatus::Pending,

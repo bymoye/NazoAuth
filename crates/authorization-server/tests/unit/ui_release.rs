@@ -196,6 +196,7 @@ fn private_ui_tree_and_archive_fail_closed_without_index() {
         }
     }
     #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
     {
         for path in [private.as_path(), private.parent().unwrap(), tree.as_path()] {
             let mut permissions = fs::metadata(path).unwrap().permissions();

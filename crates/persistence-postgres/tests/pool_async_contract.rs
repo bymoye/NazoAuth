@@ -9,7 +9,7 @@ fn function_source<'a>(source: &'a str, name: &str, next_name: Option<&str>) -> 
 }
 
 #[test]
-fn synchronous_pool_admin_operations_run_on_blocking_workers() {
+fn pool_admin_operations_reuse_the_async_rustls_connection_path() {
     let source = include_str!("../src/pool.rs");
     let migrations = function_source(
         source,
@@ -22,23 +22,18 @@ fn synchronous_pool_admin_operations_run_on_blocking_workers() {
         ("run_pending_migrations", migrations),
         ("cleanup_expired_security_state", cleanup),
     ] {
-        let copied_url = operation
-            .find("database_url.to_owned()")
-            .unwrap_or_else(|| panic!("{name} must own its URL before spawning"));
-        let blocking_worker = operation
-            .find("tokio::task::spawn_blocking")
-            .unwrap_or_else(|| panic!("{name} must offload synchronous Diesel work"));
-        let sync_connection = operation
-            .find("diesel::PgConnection::establish")
-            .unwrap_or_else(|| panic!("{name} must retain its synchronous Diesel operation"));
-
-        assert!(copied_url < blocking_worker);
-        assert!(blocking_worker < sync_connection);
         assert!(
-            operation.contains(".await??"),
-            "{name} must flatten both the blocking-task and operation results"
+            operation.contains("establish_connection(database_url).await?"),
+            "{name} must use the shared async PostgreSQL TLS connection path"
+        );
+        assert!(
+            !operation.contains("spawn_blocking") && !operation.contains("PgConnection"),
+            "{name} must not reintroduce the synchronous libpq connection path"
         );
     }
+
+    assert!(source.contains("MakeRustlsConnect::with_native_certs"));
+    assert!(source.contains("AsyncPgConnection::try_from_client_and_connection"));
 }
 
 #[tokio::test]

@@ -12,9 +12,9 @@ use nazo_openid4vci::{
     CredentialAccess, CredentialConfiguration, CredentialDatasetPort, CredentialError,
     CredentialIdentifier, CredentialIssuance, CredentialIssuanceError, CredentialIssuerService,
     CredentialRequest, CredentialStoreError, CredentialStoreFuture, CredentialStorePort,
-    DeferredCredential, IssuanceDisposition, IssuanceNotification, NonceRecord, NotificationHandle,
-    ProofError, ProofTypeMetadata, ProofValidatorPort, Proofs, StoredCredentialOffer,
-    ValidatedProof,
+    DeferredCredential, DeferredCredentialClaim, IssuanceDisposition, IssuanceNotification,
+    NonceRecord, NotificationHandle, ProofError, ProofTypeMetadata, ProofValidatorPort, Proofs,
+    StoredCredentialOffer, StoredCredentialResponse, ValidatedProof,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -22,6 +22,8 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 struct RecordingStore {
     nonce_consumed: Arc<Mutex<bool>>,
+    nonce_finalized: Arc<Mutex<usize>>,
+    nonce_released: Arc<Mutex<usize>>,
     notifications: Arc<Mutex<Vec<NotificationHandle>>>,
 }
 
@@ -74,6 +76,46 @@ impl CredentialStorePort for RecordingStore {
             }
         })
     }
+    fn claim_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        _: &'a str,
+        now: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        self.consume_nonce(nonce_hash, now)
+    }
+    fn finalize_nonce<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            *self.nonce_finalized.lock().unwrap() += 1;
+            Ok(true)
+        })
+    }
+    fn find_response<'a>(
+        &'a self,
+        _: Uuid,
+        _: Uuid,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialResponse>, CredentialStoreError>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn release_nonce<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            *self.nonce_released.lock().unwrap() += 1;
+            Ok(true)
+        })
+    }
     fn resolve_access<'a>(
         &'a self,
         _: &'a str,
@@ -94,6 +136,34 @@ impl CredentialStorePort for RecordingStore {
         _: chrono::DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredential>, CredentialStoreError>> {
         Box::pin(async { Ok(None) })
+    }
+    fn claim_ready_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredentialClaim>, CredentialStoreError>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn finalize_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn release_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(true) })
     }
     fn record_notification<'a>(
         &'a self,
@@ -250,10 +320,14 @@ async fn batch_issuance_consumes_nonce_once_and_binds_each_credential() {
     );
     let (access, issuance, request) = fixture(now);
 
-    let response = service
-        .issue(&access, &request, &issuance, "nonce", now)
+    let pending = service
+        .issue_pending(&access, &request, &issuance, "nonce", now)
         .await
         .unwrap();
+    assert_eq!(*store.nonce_finalized.lock().unwrap(), 0);
+    service.commit_pending(&pending, now).await.unwrap();
+    let response = pending.response;
+    assert_eq!(*store.nonce_finalized.lock().unwrap(), 1);
     assert_eq!(response.credentials.as_ref().map(Vec::len), Some(2));
     {
         let signed = signer.0.lock().unwrap();
@@ -281,8 +355,9 @@ async fn batch_issuance_consumes_nonce_once_and_binds_each_credential() {
 #[tokio::test]
 async fn invalid_holder_binding_remains_a_protocol_error_not_a_generic_signing_failure() {
     let now = Utc::now();
+    let store = RecordingStore::default();
     let service = CredentialIssuerService::new(
-        RecordingStore::default(),
+        store.clone(),
         FixedProofs(vec![ValidatedProof {
             proof_type: "jwt".to_owned(),
             holder_binding: json!({"jwk":{"kty":"unsupported"}}),
@@ -302,4 +377,5 @@ async fn invalid_holder_binding_remains_a_protocol_error_not_a_generic_signing_f
             .await,
         Err(CredentialIssuanceError::InvalidHolderBinding)
     );
+    assert_eq!(*store.nonce_released.lock().unwrap(), 1);
 }

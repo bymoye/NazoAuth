@@ -1,40 +1,20 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use chrono::Utc;
 use nazo_key_management::{validate_client_jwks, validate_self_signed_mtls_jwks};
-use openssl::asn1::Asn1Time;
-use openssl::hash::MessageDigest;
-use openssl::nid::Nid;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::Rsa;
-use openssl::x509::{X509Builder, X509Name};
+use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
 use serde_json::json;
 
 fn test_x5c(common_name: &str, not_before_offset: i64, not_after_offset: i64) -> String {
-    let key: PKey<Private> =
-        PKey::from_rsa(Rsa::generate(2048).expect("test rsa key")).expect("test pkey");
-    let mut name = X509Name::builder().expect("x509 name builder");
-    name.append_entry_by_nid(Nid::COMMONNAME, common_name)
-        .expect("test common name");
-    let name = name.build();
-    let mut builder = X509Builder::new().expect("x509 builder");
-    builder.set_version(2).expect("x509 version");
-    builder.set_subject_name(&name).expect("x509 subject");
-    builder.set_issuer_name(&name).expect("x509 issuer");
-    builder.set_pubkey(&key).expect("x509 pubkey");
-    let now = Utc::now().timestamp();
-    let not_before = Asn1Time::from_unix(now + not_before_offset).expect("x509 not_before");
-    let not_after = Asn1Time::from_unix(now + not_after_offset).expect("x509 not_after");
-    builder
-        .set_not_before(&not_before)
-        .expect("set x509 not_before");
-    builder
-        .set_not_after(&not_after)
-        .expect("set x509 not_after");
-    builder
-        .sign(&key, MessageDigest::sha256())
-        .expect("sign test cert");
-    STANDARD.encode(builder.build().to_der().expect("cert der"))
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("test P-256 key");
+    let mut params = CertificateParams::default();
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now + time::Duration::seconds(not_before_offset);
+    params.not_after = now + time::Duration::seconds(not_after_offset);
+    STANDARD.encode(params.self_signed(&key).expect("test cert").der())
 }
 
 #[test]

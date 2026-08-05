@@ -6,7 +6,7 @@ TLS，并把 `8443` 映射到宿主机 `0.0.0.0:8443`；Spring Boot 的明文 HT
 宿主机公开。本部署只使用 Podman。
 
 固定套件 revision：
-`946451d1ce29965c9ab7aee05f5003552233160e`。
+`932b46f1e507871eb0b34621aaef65ff04442e6f`（`release-v5.2.1`）。
 
 ## 1. 获取并核验官方源码
 
@@ -15,9 +15,9 @@ install -d -m 0755 /opt/nazo-oauth/conformance
 git clone https://gitlab.com/openid/conformance-suite.git \
   /opt/nazo-oauth/conformance/operator-suite
 git -C /opt/nazo-oauth/conformance/operator-suite checkout --detach \
-  946451d1ce29965c9ab7aee05f5003552233160e
+  932b46f1e507871eb0b34621aaef65ff04442e6f
 test "$(git -C /opt/nazo-oauth/conformance/operator-suite rev-parse HEAD)" = \
-  946451d1ce29965c9ab7aee05f5003552233160e
+  932b46f1e507871eb0b34621aaef65ff04442e6f
 test -z "$(git -C /opt/nazo-oauth/conformance/operator-suite status --porcelain)"
 ```
 

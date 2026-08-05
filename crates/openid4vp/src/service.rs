@@ -39,6 +39,7 @@ where
         if now >= transaction.expires_at
             || response.state.as_deref() != Some(transaction.request.state.as_str())
             || response.error.is_some()
+            || transaction.request.transaction_data.is_some()
         {
             return Err(PresentationError::InvalidState.into());
         }

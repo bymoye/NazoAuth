@@ -8,6 +8,14 @@ const CIBA_EXPIRED_STATE_RETENTION_SECONDS: i64 = 120;
 const CIBA_SLOW_DOWN_INCREMENT_SECONDS: u64 = 5;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CibaAuthenticationContext {
+    pub auth_time: i64,
+    pub amr: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_sid: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CibaRequestState {
     pub client_id: String,
     pub user_id: Uuid,
@@ -15,6 +23,8 @@ pub struct CibaRequestState {
     pub audiences: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_context: Option<CibaAuthenticationContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_message: Option<String>,
     #[serde(default)]
@@ -271,6 +281,27 @@ where
         auth_req_id: &str,
         decision: CibaDecision,
         expected_user_id: Option<Uuid>,
+        current_time: F,
+    ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
+    where
+        F: FnMut() -> i64,
+    {
+        self.decide_with_authentication_context(
+            auth_req_id,
+            decision,
+            expected_user_id,
+            None,
+            current_time,
+        )
+        .await
+    }
+
+    pub async fn decide_with_authentication_context<F>(
+        &self,
+        auth_req_id: &str,
+        decision: CibaDecision,
+        expected_user_id: Option<Uuid>,
+        authentication_context: Option<CibaAuthenticationContext>,
         mut current_time: F,
     ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
     where
@@ -282,8 +313,13 @@ where
                 .await
                 .map_err(CibaDecisionFailure::Storage)?
                 .ok_or(CibaDecisionFailure::Missing)?;
-            match evaluate_ciba_decision(&stored.state, expected_user_id, decision, current_time())
-            {
+            match evaluate_ciba_decision_with_authentication_context(
+                &stored.state,
+                expected_user_id,
+                decision,
+                authentication_context.clone(),
+                current_time(),
+            ) {
                 CibaDecisionEvaluation::UserMismatch => {
                     return Err(CibaDecisionFailure::UserMismatch);
                 }
@@ -453,6 +489,17 @@ pub fn evaluate_ciba_decision(
     decision: CibaDecision,
     now: i64,
 ) -> CibaDecisionEvaluation {
+    evaluate_ciba_decision_with_authentication_context(state, expected_user_id, decision, None, now)
+}
+
+#[must_use]
+pub fn evaluate_ciba_decision_with_authentication_context(
+    state: &CibaRequestState,
+    expected_user_id: Option<Uuid>,
+    decision: CibaDecision,
+    authentication_context: Option<CibaAuthenticationContext>,
+    now: i64,
+) -> CibaDecisionEvaluation {
     if expected_user_id.is_some_and(|user_id| user_id != state.user_id) {
         return CibaDecisionEvaluation::UserMismatch;
     }
@@ -467,6 +514,9 @@ pub fn evaluate_ciba_decision(
         CibaDecision::Approve => CibaStatus::Approved,
         CibaDecision::Deny => CibaStatus::Denied,
     };
+    if decision == CibaDecision::Approve {
+        next.authentication_context = authentication_context;
+    }
     if let Some(notification) = next.ping_notification.as_mut() {
         notification.status = CibaPingNotificationStatus::Pending;
         notification.next_attempt_at = Some(now);
@@ -501,6 +551,18 @@ fn validate_state_shape(
     require_persisted_auth_req_id: bool,
 ) -> Result<(), CibaStatePortError> {
     if state.expires_at <= 0 || state.retention_expires_at < state.expires_at {
+        return Err(CibaStatePortError::CorruptData);
+    }
+    if state
+        .authentication_context
+        .as_ref()
+        .is_some_and(|context| {
+            context.auth_time <= 0
+                || context.amr.is_empty()
+                || context.amr.iter().any(|method| method.trim().is_empty())
+                || context.oidc_sid.as_deref().is_some_and(str::is_empty)
+        })
+    {
         return Err(CibaStatePortError::CorruptData);
     }
     if let Some(notification) = &state.ping_notification

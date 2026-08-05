@@ -42,6 +42,61 @@ fn task(operation: TaskOperation) -> TaskEnvelope {
 }
 
 #[test]
+fn local_deployment_identity_rejects_cross_deployment_replay() {
+    let directory = temporary_directory();
+    let config_path = directory.join("server.yaml");
+    fs::write(
+        &config_path,
+        b"DATA_DIR: runtime\nDEPLOYMENT_ID: deployment-test\n",
+    )
+    .unwrap();
+    let identity_path = directory.join("runtime/instance/deployment-id");
+    fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+    fs::write(&identity_path, b"deployment-test\n").unwrap();
+    let state_directory = directory.join("state");
+    fs::create_dir_all(&state_directory).unwrap();
+
+    let valid = task(TaskOperation::KeysValidate);
+    assert!(
+        validate_local_task_identity_at(&valid, &config_path, None, Some(&state_directory))
+            .is_err()
+    );
+    let bootstrap = task(TaskOperation::MigrateApply);
+    let expected =
+        validate_local_task_identity_at(&bootstrap, &config_path, None, Some(&state_directory))
+            .unwrap();
+    persist_operator_state_identity(&state_directory, &expected).unwrap();
+    validate_local_task_identity_at(&valid, &config_path, None, Some(&state_directory)).unwrap();
+
+    let mut wrong = valid.clone();
+    wrong.deployment_id = "deployment-other".to_owned();
+    wrong.iss = "controller:deployment-other".to_owned();
+    wrong.aud = "runtime:deployment-other".to_owned();
+    assert!(
+        validate_local_task_identity_at(&wrong, &config_path, None, Some(&state_directory))
+            .is_err()
+    );
+
+    let state_identity_path = state_directory.join("deployment-id");
+    fs::remove_file(&state_identity_path).unwrap();
+    fs::write(&state_identity_path, b"deployment-other\n").unwrap();
+    assert!(
+        validate_local_task_identity_at(&valid, &config_path, None, Some(&state_directory))
+            .is_err()
+    );
+
+    fs::remove_file(&state_identity_path).unwrap();
+    fs::write(&state_identity_path, b"deployment-test\n").unwrap();
+    fs::write(&identity_path, b"deployment-other\n").unwrap();
+    assert!(
+        validate_local_task_identity_at(&valid, &config_path, None, Some(&state_directory))
+            .is_err()
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn concurrent_replay_claims_are_idempotent_and_conflicts_are_rejected() {
     let directory = temporary_directory();
     for iteration in 0..64 {

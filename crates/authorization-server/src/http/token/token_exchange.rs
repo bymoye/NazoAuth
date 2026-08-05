@@ -5,7 +5,9 @@
 //! token exchange, and ID-token issuance require separate policy models.
 use nazo_http_actix::oauth_token_error;
 
-use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use super::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant, request_idempotency_key,
+};
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
 };
@@ -485,10 +487,12 @@ pub(crate) async fn token_exchange(
         Ok(admission) => admission,
         Err(error) => return token_exchange_admission_error_response(error, form),
     };
-    issue_token_response_with_service(
+    let idempotency_key = request_idempotency_key(req);
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        idempotency_key.as_deref(),
         TokenIssue {
             user_id: validated_subject.user_id,
             subject: validated_subject.subject,
@@ -504,6 +508,7 @@ pub(crate) async fn token_exchange(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: false,
             refresh_token_policy: RefreshTokenPolicy::PreserveExisting,
             dpop_jkt,

@@ -160,6 +160,13 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
         transaction_data: None,
         wallet_nonce: None,
     };
+    let mut unsupported_transaction_data = request.clone();
+    unsupported_transaction_data.transaction_data =
+        Some(vec!["eyJ0eXBlIjoiZXhhbXBsZSJ9".to_owned()]);
+    assert_eq!(
+        unsupported_transaction_data.validate(),
+        Err(PresentationError::InvalidRequest)
+    );
     let transaction = PresentationTransaction {
         id: transaction_id,
         client_id_prefix: ClientIdPrefix::X509SanDns,

@@ -860,8 +860,11 @@ fn prompt_parsing_accepts_oidc_values_and_rejects_invalid_combinations() {
 }
 
 #[test]
-fn authorization_pkce_allows_absent_value_for_baseline_confidential_oidc() {
-    assert_eq!(authorization_pkce(&query(&[])).unwrap(), (None, None));
+fn authorization_pkce_compatibility_exception_requires_confidential_oidc_nonce() {
+    assert_eq!(
+        authorization_pkce(&query(&[("nonce", "fresh-nonce")])).unwrap(),
+        (None, None)
+    );
     let valid_challenge = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
 
     assert!(
@@ -883,7 +886,11 @@ fn authorization_pkce_allows_absent_value_for_baseline_confidential_oidc() {
 
 #[test]
 fn authorization_request_pkce_policy_preserves_client_profile_boundary() {
-    assert!(normalize_pkce_case(&HashMap::new(), "confidential").is_ok());
+    assert_eq!(
+        normalize_pkce_case(&HashMap::new(), "confidential"),
+        Err(AuthorizationPolicyError::InvalidRequest),
+    );
+    assert!(normalize_pkce_case(&query(&[("nonce", "fresh-nonce")]), "confidential").is_ok());
     assert_eq!(
         normalize_pkce_case(&HashMap::new(), "public"),
         Err(AuthorizationPolicyError::InvalidRequest),

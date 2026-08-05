@@ -5,9 +5,11 @@
 //! type, algorithm, key id, expiry, scopes, and sender constraints locally
 //! before falling back to introspection or application policy hooks.
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, Validation};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 mod dpop;
 mod jwk;
@@ -86,6 +88,7 @@ pub enum ResourceServerVerifierError {
     MissingIssuer,
     MissingAudience,
     MissingJwks,
+    DuplicateKeyId,
     UnsupportedAlgorithm,
     MissingKeyId,
     UnknownKeyId,
@@ -154,8 +157,19 @@ impl ResourceServerVerifier {
         if config.audiences.is_empty() {
             return Err(ResourceServerVerifierError::MissingAudience);
         }
-        if config.jwks.get("keys").and_then(Value::as_array).is_none() {
+        let Some(keys) = config.jwks.get("keys").and_then(Value::as_array) else {
             return Err(ResourceServerVerifierError::MissingJwks);
+        };
+        let mut key_ids = HashSet::with_capacity(keys.len());
+        for key in keys {
+            if let Some(kid) = key.get("kid") {
+                let Some(kid) = kid.as_str() else {
+                    return Err(ResourceServerVerifierError::InvalidKey);
+                };
+                if kid.trim().is_empty() || !key_ids.insert(kid) {
+                    return Err(ResourceServerVerifierError::DuplicateKeyId);
+                }
+            }
         }
         Ok(Self { config })
     }
@@ -206,7 +220,8 @@ impl ResourceServerVerifier {
         if claims.iss != self.config.issuer {
             return Err(ResourceServerVerifierError::IssuerMismatch);
         }
-        let audiences = audience_values(&claims.aud);
+        let audiences =
+            audience_values(&claims.aud).ok_or(ResourceServerVerifierError::AudienceMismatch)?;
         if !audiences
             .iter()
             .any(|aud| self.config.audiences.iter().any(|expected| expected == aud))
@@ -226,6 +241,7 @@ impl ResourceServerVerifier {
                 return Err(ResourceServerVerifierError::MissingScope(required.clone()));
             }
         }
+        validate_confirmation_claims(claims.cnf.as_ref())?;
         validate_confirmation_policy(&self.config.confirmation, claims.cnf.as_ref())?;
         Ok(VerifiedAccessToken {
             issuer: claims.iss,
@@ -398,15 +414,39 @@ fn validate_confirmation_policy(
     }
 }
 
-fn audience_values(value: &Value) -> Vec<String> {
+fn audience_values(value: &Value) -> Option<Vec<String>> {
     match value {
-        Value::String(value) => vec![value.clone()],
-        Value::Array(values) => values
+        Value::String(value) if !value.trim().is_empty() => Some(vec![value.clone()]),
+        Value::Array(values) if !values.is_empty() => values
             .iter()
-            .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned)
+            })
             .collect(),
-        _ => Vec::new(),
+        _ => None,
     }
+}
+
+fn validate_confirmation_claims(
+    cnf: Option<&ConfirmationClaims>,
+) -> Result<(), ResourceServerVerifierError> {
+    let Some(cnf) = cnf else {
+        return Ok(());
+    };
+    let has_jkt = cnf.jkt.as_deref().is_some_and(valid_thumbprint);
+    let has_x5t = cnf.x5t_s256.as_deref().is_some_and(valid_thumbprint);
+    if has_jkt == has_x5t || (cnf.jkt.is_some() && !has_jkt) || (cnf.x5t_s256.is_some() && !has_x5t)
+    {
+        return Err(ResourceServerVerifierError::InvalidToken);
+    }
+    Ok(())
+}
+
+fn valid_thumbprint(value: &str) -> bool {
+    base64::Engine::decode(&URL_SAFE_NO_PAD, value).is_ok_and(|decoded| decoded.len() == 32)
 }
 
 fn scope_values(value: &str) -> Vec<String> {

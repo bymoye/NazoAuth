@@ -24,6 +24,8 @@ PASSKEY_ORIGIN=https://auth.example.com
 PASSKEY_RP_ID=auth.example.com
 PROTECTED_RESOURCE_IDENTIFIER=https://auth.example.com/fapi/resource
 CLIENT_SECRET_PEPPER=<random 32+ byte secret>
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY=<base64url-encoded 32-byte key>
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID=response-2026-08
 ```
 
 ## Minimal deployment
@@ -35,6 +37,8 @@ DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 CLIENT_SECRET_PEPPER: "<random 32+ byte secret>"
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY: "<base64url-encoded 32-byte key>"
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID: "response-2026-08"
 RUST_LOG: "info"
 ```
 
@@ -68,11 +72,36 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
+| `CIBA_AUTOMATED_DECISION_MODE` | `disabled` | Test-control transport. `header` accepts POST with an `Authorization: Bearer` secret; `query` preserves the legacy GET/query contract and must only be used on an isolated test deployment. |
+| `CIBA_AUTOMATED_DECISION_TOKEN` | unset | 32+ byte secret required by either automated-decision mode. Setting the token without an explicit mode is rejected; prefer `CIBA_AUTOMATED_DECISION_TOKEN_FILE`. |
+| `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | unset | Current 32-byte base64url key and non-empty version id for TOTP seed envelope encryption. Without it, TOTP operations fail closed; prefer `MFA_TOTP_ENCRYPTION_KEY_FILE`. |
+| `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional previous key pair accepted only while rotating TOTP envelopes; startup re-wraps legacy/previous rows before serving traffic, so retain it until that startup succeeds. |
+| `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` for local development | Independent current 32-byte base64url key and non-empty key id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`. Production should inject it with `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_FILE` and persist the matching id. Missing or malformed pairs fail startup. |
+| `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY` / `_ID` | unset | Optional previous key retained only during a rotation overlap; use `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE` for file injection. Existing live envelopes decrypt with current or previous; new envelopes always use current. Startup authenticates every live envelope, and expired rows are lazily removed before a grant key is reused. Remove the previous pair only after all rows encrypted with that id have expired and all old instances have stopped writing it. |
+| `OPENID4VC_REVOCATION_POLICY` | `disabled` | `disabled`, `optional`, or `required`. The VP verifier requires `required`; enabling a policy also requires a bounded local snapshot file. Request handling never performs network or file I/O. |
+| `OPENID4VC_REVOCATION_SNAPSHOT_FILE` | unset | Operator-controlled JSON snapshot containing SHA-256 certificate identities and `good`/`revoked` status with hard `this_update`/`next_update` bounds. Invalid reloads retain the previous snapshot only until its own expiry. |
+| `OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS` | `30` | Positive local snapshot reload interval. |
+| `SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE` | `true` | Reject startup and high-impact administration when the server role is a superuser, can assume a ledger owner/privileged role, has direct ledger table capabilities, or lacks the writer function grants. |
 | `ENABLE_FAPI_HTTP_SIGNATURES` | `false` | Experimental resource-only profile for the 2026-06-26 FAPI 2.0 HTTP Signatures working draft; when enabled, `/fapi/resource` requires a registered client JWK and RFC 9421 signature and signs every response |
 | `FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS` | `60` | Request signature age and replay-marker lifetime; accepted range is 1–300 seconds, with at most five seconds of future clock skew |
 | `ENABLE_SCIM_SECURITY_EVENTS` | `false` | Enables default-closed RFC 9967 SET outbox creation, discovery, and RFC 8936 polling; depends on the SCIM runtime module |
 | `SCIM_EVENT_RETENTION_SECONDS` | `604800` | Per-receiver delivery window and outbox retention; accepted range is 3600–2592000 seconds |
 | `RUST_LOG` | `info` | Tracing filter |
+
+The response key id is not the envelope format. The current format is `v1` and
+is stored separately from `response_key_id`; a format change requires an
+explicit migration. Keep the current and previous key material available for
+the full durable-response recovery window. A `nazoauth migrate` rollback is
+refused while issuance rows remain, so take an explicit database backup and
+drain/expire the saga before any destructive schema rollback.
+
+PostgreSQL connections use Rustls with the AWS-LC provider. `DATABASE_URL`
+accepts `sslmode=disable`, `prefer` (the PostgreSQL client default), or
+`require`. TLS connections validate the server hostname and certificate against
+the operating system trust store; bundled WebPKI roots are used only when the
+platform store is empty. This path does not load `libpq` or the system OpenSSL
+ABI. Use `sslmode=require` for remote or untrusted networks and
+`sslmode=disable` only for a separately protected local/private transport.
 
 ## Derived settings
 

@@ -44,3 +44,19 @@ fn public_identity_api_has_no_catch_all_identity_user() {
     assert!(!claims.contains("PublicAccount"));
     assert!(!claims.contains("find_user_by"));
 }
+
+#[test]
+fn totp_key_ring_requires_distinct_non_empty_versioned_keys() {
+    use nazo_identity::ports::{MfaTotpKey, MfaTotpKeyError, MfaTotpKeyRing};
+
+    assert!(matches!(
+        MfaTotpKey::new("", [0; 32]),
+        Err(MfaTotpKeyError::EmptyId)
+    ));
+    let current = MfaTotpKey::new("current", [1; 32]).expect("current key is valid");
+    let previous = MfaTotpKey::new("current", [2; 32]).expect("previous key material is valid");
+    assert!(matches!(
+        MfaTotpKeyRing::new(current, Some(previous)),
+        Err(MfaTotpKeyError::DuplicateId)
+    ));
+}

@@ -25,7 +25,7 @@ use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
-use crate::settings::{AuthorizationServerProfile, Settings};
+use crate::settings::{AuthorizationServerProfile, CibaAutomatedDecisionMode, Settings};
 use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::HeaderValue;
@@ -34,9 +34,9 @@ use actix_web::{HttpRequest, HttpResponse};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use nazo_auth::{
-    CibaCommittedDecision, CibaCreateFailure, CibaDecision, CibaDecisionFailure,
-    CibaPingNotification, CibaPingNotificationStatus, CibaPollCommit, CibaPollFailure,
-    CibaRequestState, CibaService, CibaStatePortError, CibaStatus, ClientProfile,
+    CibaAuthenticationContext, CibaCommittedDecision, CibaCreateFailure, CibaDecision,
+    CibaDecisionFailure, CibaPingNotification, CibaPingNotificationStatus, CibaPollCommit,
+    CibaPollFailure, CibaRequestState, CibaService, CibaStatePortError, CibaStatus, ClientProfile,
     ProtocolErrorCode, SecurityProfile, SenderConstraintPolicy, ciba_retention_deadline,
     validate_token_request_profile as validate_auth_token_request_profile,
 };
@@ -53,7 +53,10 @@ use super::client_auth::{
     consume_token_management_client_assertion_with_authorization_service,
 };
 use super::issue::TokenIssuanceConfig;
-use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use super::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant,
+    recover_token_issuance_response,
+};
 
 use super::{
     ServerTokenService, TokenForm, TokenManagementClientAuthError, client_auth_request_facts,
@@ -73,6 +76,19 @@ const CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS: i64 = 300;
 const CIBA_REQUEST_OBJECT_CLOCK_SKEW_SECONDS: i64 = 30;
 const CIBA_BINDING_MESSAGE_MAX_CHARS: usize = 64;
 
+fn ciba_grant_key(
+    auth_req_id: &str,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> String {
+    let binding = json!({
+        "auth_req_id": auth_req_id,
+        "dpop_jkt": dpop_jkt,
+        "mtls_x5t_s256": mtls_x5t_s256,
+    });
+    format!("ciba:{}", blake3_hex(&binding.to_string()))
+}
+
 pub(crate) type ServerCibaService = CibaService<CibaStore>;
 
 #[derive(Clone)]
@@ -87,6 +103,7 @@ pub(crate) struct CibaHttpConfig {
     poll_interval_seconds: u64,
     csrf_cookie_name: Box<str>,
     automated_decision_token: Option<Box<str>>,
+    automated_decision_mode: CibaAutomatedDecisionMode,
     ciba_fapi_profile: bool,
     ciba_fapi2_hardening: bool,
     authorization_server_profile: AuthorizationServerProfile,
@@ -109,6 +126,7 @@ impl From<&Settings> for CibaHttpConfig {
                 .ciba_automated_decision_token
                 .as_deref()
                 .map(Into::into),
+            automated_decision_mode: settings.ciba.ciba_automated_decision_mode,
             ciba_fapi_profile: settings.protocol.ciba_security_profile.requires_fapi_ciba(),
             ciba_fapi2_hardening: settings
                 .protocol
@@ -483,6 +501,7 @@ pub(crate) async fn backchannel_authentication(
         scopes,
         audiences: vec![config.default_audience.to_string()],
         acr,
+        authentication_context: None,
         binding_message: form.binding_message,
         issued_at: now,
         status: CibaStatus::Pending,
@@ -1189,8 +1208,8 @@ pub(crate) async fn ciba_verification(
     ) {
         return empty_response(StatusCode::NOT_FOUND);
     }
-    let user = match sessions.current_user_or_login_required(&req).await {
-        Ok(user) => user,
+    let session = match sessions.current_session_or_login_required(&req).await {
+        Ok(session) => session,
         Err(response) => return response,
     };
     let auth_req_id = path.into_inner();
@@ -1205,7 +1224,7 @@ pub(crate) async fn ciba_verification(
         }
         Err(response) => return response,
     };
-    if state_payload.user_id != user.id() {
+    if state_payload.user_id != session.user.id() {
         return oauth_error(
             StatusCode::FORBIDDEN,
             "access_denied",
@@ -1245,7 +1264,7 @@ pub(crate) async fn ciba_automated_decision(
     let Some(expected_token) = config.automated_decision_token.as_deref() else {
         return empty_response(StatusCode::NOT_FOUND);
     };
-    let Some(actual_token) = query.decision_token.as_deref() else {
+    let Some(actual_token) = ciba_automated_decision_request_token(&config, &req, &query) else {
         return empty_response(StatusCode::NOT_FOUND);
     };
     if !constant_time_eq(expected_token.as_bytes(), actual_token.as_bytes()) {
@@ -1286,6 +1305,7 @@ pub(crate) async fn ciba_automated_decision(
         decision,
         None,
         CibaDecisionSource::Automation,
+        None,
         Some(blake3_hex(&client_ip_with_context(
             &req,
             config.client_ip_header_mode,
@@ -1293,6 +1313,31 @@ pub(crate) async fn ciba_automated_decision(
         ))),
     )
     .await
+}
+
+fn ciba_automated_decision_request_token(
+    config: &CibaHttpConfig,
+    req: &HttpRequest,
+    query: &CibaAutomatedDecisionQuery,
+) -> Option<String> {
+    match config.automated_decision_mode {
+        CibaAutomatedDecisionMode::Disabled => None,
+        CibaAutomatedDecisionMode::Header => {
+            if req.method() != actix_web::http::Method::POST || query.decision_token.is_some() {
+                return None;
+            }
+            match nazo_http_actix::authorization_access_token(req.headers()) {
+                Some((nazo_http_actix::AccessTokenAuthScheme::Bearer, token)) => Some(token),
+                _ => None,
+            }
+        }
+        CibaAutomatedDecisionMode::QueryParameter => {
+            if req.method() != actix_web::http::Method::GET {
+                return None;
+            }
+            query.decision_token.clone()
+        }
+    }
 }
 
 pub(crate) async fn ciba_decision(
@@ -1319,8 +1364,8 @@ pub(crate) async fn ciba_decision(
     ) {
         return csrf_error();
     }
-    let user = match sessions.current_user_or_login_required(&req).await {
-        Ok(user) => user,
+    let session = match sessions.current_session_or_login_required(&req).await {
+        Ok(session) => session,
         Err(response) => return response,
     };
     let auth_req_id = path.into_inner();
@@ -1340,8 +1385,13 @@ pub(crate) async fn ciba_decision(
         &ciba_service,
         &auth_req_id,
         decision,
-        Some(user.id()),
+        Some(session.user.id()),
         CibaDecisionSource::User,
+        Some(CibaAuthenticationContext {
+            auth_time: session.auth_time,
+            amr: session.amr.clone(),
+            oidc_sid: Some(session.oidc_sid.clone()),
+        }),
         Some(blake3_hex(&client_ip_with_context(
             &req,
             config.client_ip_header_mode,
@@ -1357,13 +1407,18 @@ async fn set_ciba_request_decision(
     decision: CibaDecision,
     expected_user_id: Option<Uuid>,
     source: CibaDecisionSource,
+    authentication_context: Option<CibaAuthenticationContext>,
     source_ip_hash: Option<String>,
 ) -> HttpResponse {
     complete_ciba_decision(
         ciba_service
-            .decide(auth_req_id, decision, expected_user_id, || {
-                Utc::now().timestamp()
-            })
+            .decide_with_authentication_context(
+                auth_req_id,
+                decision,
+                expected_user_id,
+                authentication_context,
+                || Utc::now().timestamp(),
+            )
             .await,
         auth_req_id,
         source,
@@ -1538,20 +1593,33 @@ pub(crate) async fn token_ciba(
         return response;
     }
     let initial = match ciba_service.load(auth_req_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => {
-            return oauth_token_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_grant",
-                "CIBA auth_req_id is expired.",
-                false,
-            );
-        }
+        Ok(value) => value,
         Err(error) => return ciba_poll_failure_response(CibaPollFailure::Storage(error)),
     };
-    if let Some(response) = ciba_auth_req_id_client_error(initial.state(), client) {
+    if let Some(initial) = initial.as_ref()
+        && let Some(response) = ciba_auth_req_id_client_error(initial.state(), client)
+    {
         return response;
     }
+    let (dpop_jkt, mtls_x5t_s256) = match ciba_issue_binding(issuance, req, client).await {
+        Ok(binding) => binding,
+        Err(response) => return response,
+    };
+    let ciba_grant_key = ciba_grant_key(auth_req_id, dpop_jkt.as_deref(), mtls_x5t_s256.as_deref());
+    if initial.is_none()
+        && let Some(response) =
+            recover_token_issuance_response(token_service, client, &ciba_grant_key).await
+    {
+        return response;
+    }
+    let Some(initial) = initial else {
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "CIBA auth_req_id is expired.",
+            false,
+        );
+    };
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -1561,10 +1629,6 @@ pub(crate) async fn token_ciba(
     {
         return super::token_client_assertion_error(error);
     }
-    let (dpop_jkt, mtls_x5t_s256) = match ciba_issue_binding(issuance, req, client).await {
-        Ok(binding) => binding,
-        Err(response) => return response,
-    };
     let ciba = match ciba_service
         .poll(auth_req_id, &client.client_id, initial, || {
             Utc::now().timestamp()
@@ -1645,7 +1709,14 @@ pub(crate) async fn token_ciba(
         }
     };
     let issue = ciba_token_issue(user.id(), subject, *ciba, dpop_jkt, mtls_x5t_s256);
-    issue_token_response_with_service(issuance, token_service, client, issue).await
+    issue_token_response_with_service_and_grant(
+        issuance,
+        token_service,
+        client,
+        Some(&ciba_grant_key),
+        issue,
+    )
+    .await
 }
 
 fn ciba_auth_req_id_client_error(
@@ -1676,14 +1747,25 @@ fn ciba_token_issue(
         authorization_details: json!([]),
         audiences: ciba.audiences,
         nonce: None,
-        auth_time: Some(Utc::now().timestamp()),
-        amr: vec!["ciba".to_owned()],
-        oidc_sid: None,
+        auth_time: Some(
+            ciba.authentication_context
+                .as_ref()
+                .map_or(ciba.issued_at, |context| context.auth_time),
+        ),
+        amr: ciba.authentication_context.as_ref().map_or_else(
+            || vec!["ciba_automation".to_owned()],
+            |context| context.amr.clone(),
+        ),
+        oidc_sid: ciba
+            .authentication_context
+            .as_ref()
+            .and_then(|context| context.oidc_sid.clone()),
         acr: ciba.acr,
         userinfo_claims: Vec::new(),
         userinfo_claim_requests: Vec::new(),
         id_token_claims: Vec::new(),
         id_token_claim_requests: Vec::new(),
+        refresh_id_token_sid: None,
         include_refresh: true,
         refresh_token_policy: RefreshTokenPolicy::IssueNew,
         dpop_jkt: dpop_jkt.clone(),

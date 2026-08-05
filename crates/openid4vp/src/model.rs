@@ -152,6 +152,11 @@ impl AuthorizationRequest {
         if self.response_type != VP_TOKEN_RESPONSE_TYPE
             || self.nonce.is_empty()
             || self.state.is_empty()
+            // The verifier does not yet parse the holder-binding proof's
+            // transaction_data_hashes. Accepting transaction_data here would
+            // let a wallet present a proof that is not bound to the requested
+            // transaction, so fail closed until that verifier path exists.
+            || self.transaction_data.is_some()
             || !matches!(
                 self.response_mode.as_str(),
                 "direct_post" | "direct_post.jwt"

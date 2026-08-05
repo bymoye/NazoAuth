@@ -13,7 +13,9 @@ use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::validate_dpop_proof_with_authorization_service;
 use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 use crate::http::token::client_auth::consume_token_client_assertion_with_authorization_service;
-use crate::http::token::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use crate::http::token::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant, request_idempotency_key,
+};
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -397,10 +399,12 @@ pub(crate) async fn token_native_sso_exchange(
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    issue_token_response_with_service(
+    let idempotency_key = request_idempotency_key(req);
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        idempotency_key.as_deref(),
         TokenIssue {
             user_id: Some(secret.user_id),
             subject,
@@ -416,6 +420,7 @@ pub(crate) async fn token_native_sso_exchange(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: true,
             refresh_token_policy: RefreshTokenPolicy::IssueNew,
             dpop_jkt: dpop_jkt.clone(),

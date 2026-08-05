@@ -1,4 +1,5 @@
 pub(crate) mod audit;
+pub(crate) mod audit_anchor;
 pub(crate) mod avatar_files;
 pub(crate) mod email;
 mod email_templates;

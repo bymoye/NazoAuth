@@ -22,6 +22,11 @@ fn key_attestation_policy_can_defer_trust_to_a_scoped_conformance_lease() {
             "OPENID4VC_TRUST_ANCHORS_FILE",
             "runtime/openid4vc-roots.pem",
         ),
+        ("OPENID4VC_REVOCATION_POLICY", "required"),
+        (
+            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
+            "runtime/openid4vc-revocation.json",
+        ),
         (
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
             ATTESTATION_CREDENTIAL_CONFIGURATIONS,
@@ -455,6 +460,50 @@ fn invalid_ciba_security_profile_is_rejected() {
 }
 
 #[test]
+fn ciba_automated_decision_requires_explicit_transport_and_secret() {
+    let token_only = ConfigSource::from_pairs_for_test([(
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "test-ciba-automated-decision-token-32",
+    )]);
+    assert!(Settings::from_config(&token_only).is_err());
+
+    let mode_only = ConfigSource::from_pairs_for_test([("CIBA_AUTOMATED_DECISION_MODE", "header")]);
+    assert!(Settings::from_config(&mode_only).is_err());
+
+    let configured = ConfigSource::from_pairs_for_test([
+        ("CIBA_AUTOMATED_DECISION_MODE", "header"),
+        (
+            "CIBA_AUTOMATED_DECISION_TOKEN",
+            "test-ciba-automated-decision-token-32",
+        ),
+    ]);
+    let settings = Settings::from_config(&configured).unwrap();
+    assert_eq!(
+        settings.ciba.ciba_automated_decision_mode,
+        CibaAutomatedDecisionMode::Header
+    );
+}
+
+#[test]
+fn secure_deployments_default_to_host_only_cookie_names() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("PUBLIC_BASE_URL", "https://auth.example"),
+        (
+            "CLIENT_SECRET_PEPPER",
+            "test-client-secret-pepper-at-least-32-bytes",
+        ),
+    ]);
+    let settings = Settings::from_config(&config).unwrap();
+
+    assert!(settings.session.cookie_secure);
+    assert_eq!(
+        settings.session.session_cookie_name,
+        "__Host-nazo_oauth_session"
+    );
+    assert_eq!(settings.session.csrf_cookie_name, "__Host-nazo_oauth_csrf");
+}
+
+#[test]
 fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     let defaults = Settings::from_config(&ConfigSource::default()).unwrap();
     assert!(!defaults.modules.enable_request_object);
@@ -465,6 +514,10 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     assert!(!defaults.modules.enable_frontchannel_logout);
     assert!(!defaults.modules.enable_session_management);
     assert!(!defaults.modules.enable_ciba);
+    assert_eq!(
+        defaults.ciba.ciba_automated_decision_mode,
+        CibaAutomatedDecisionMode::Disabled
+    );
     assert!(!defaults.modules.enable_native_sso);
     assert!(!defaults.modules.enable_scim_security_events);
     assert!(!defaults.modules.enable_openid4vci_issuer);
@@ -509,6 +562,11 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
         (
             "OPENID4VC_TRUST_ANCHORS_FILE",
             "runtime/openid4vc-roots.pem",
+        ),
+        ("OPENID4VC_REVOCATION_POLICY", "required"),
+        (
+            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
+            "runtime/openid4vc-revocation.json",
         ),
         (
             "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
@@ -624,6 +682,50 @@ fn dynamic_client_registration_requires_initial_access_token() {
             .as_deref(),
         Some("register-token")
     );
+}
+
+#[test]
+fn token_issuance_response_key_ring_requires_independent_current_pair() {
+    let missing = ConfigSource::from_pairs_for_test([]);
+    assert!(
+        crate::settings::token_issuance_response_key_ring(&missing)
+            .expect_err("missing response key must fail closed")
+            .to_string()
+            .contains("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")
+    );
+
+    let valid = ConfigSource::from_pairs_for_test([
+        (
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        ("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID", "current"),
+        (
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        ),
+        (
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID",
+            "previous",
+        ),
+    ]);
+    let ring = crate::settings::token_issuance_response_key_ring(&valid)
+        .expect("independent current/previous key ring should parse");
+    assert_eq!(ring.current_id(), "current");
+
+    let duplicate = ConfigSource::from_pairs_for_test([
+        (
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        ("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID", "same"),
+        (
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        ),
+        ("TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID", "same"),
+    ]);
+    assert!(crate::settings::token_issuance_response_key_ring(&duplicate).is_err());
 }
 
 #[test]

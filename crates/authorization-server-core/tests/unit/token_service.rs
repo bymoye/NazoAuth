@@ -80,4 +80,38 @@ fn token_inspection_builds_exact_rfc7662_documents() {
             "sub": "subject",
         })
     );
+
+    assert_eq!(
+        TokenInspection::ActiveAccess {
+            scope: "openid".to_owned(),
+            client_id: "client".to_owned(),
+            token_type: "DPoP",
+            expires_at: 20,
+            issued_at: 10,
+            not_before: 10,
+            subject: "subject".to_owned(),
+            audience: json!("resource://default"),
+            issuer: "https://issuer.example".to_owned(),
+            jti: "jti".to_owned(),
+            cnf: Some(ConfirmationClaims {
+                jkt: Some("thumbprint".to_owned()),
+                x5t_s256: None,
+            }),
+        }
+        .into_document(),
+        json!({
+            "active": true,
+            "scope": "openid",
+            "client_id": "client",
+            "token_type": "DPoP",
+            "exp": 20,
+            "iat": 10,
+            "nbf": 10,
+            "sub": "subject",
+            "aud": "resource://default",
+            "iss": "https://issuer.example",
+            "jti": "jti",
+            "cnf": {"jkt": "thumbprint"},
+        })
+    );
 }

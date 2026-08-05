@@ -185,7 +185,7 @@ fn stable_identifier(path: &Path, configured: Option<&str>) -> anyhow::Result<St
     }
 }
 
-fn read_identifier(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn read_identifier(path: &Path) -> anyhow::Result<String> {
     let value = fs::read_to_string(path)
         .with_context(|| format!("failed to read identity {}", path.display()))?;
     let value = value.trim().to_owned();

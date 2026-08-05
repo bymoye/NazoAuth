@@ -170,6 +170,10 @@ fn assert_security_headers(headers: &header::HeaderMap) {
         "interest-cohort=()"
     );
     assert_eq!(
+        headers.get("strict-transport-security").unwrap(),
+        "max-age=31536000"
+    );
+    assert_eq!(
         headers.get("content-security-policy").unwrap(),
         "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
     );

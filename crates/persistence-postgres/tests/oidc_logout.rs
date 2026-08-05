@@ -109,7 +109,7 @@ async fn insert_grant(
     .expect("logout grant fixture should insert");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn logout_fanout_is_tenant_scoped_idempotent_and_atomic() {
     let Some(database_url) = database_url() else {
         return;

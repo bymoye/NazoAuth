@@ -42,7 +42,7 @@ struct CiphertextRow {
     claims_ciphertext: Vec<u8>,
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn credential_dataset_mutations_require_an_active_admin_and_are_audited_atomically() {
     let Some(database_url) = database_url() else {
         return;
@@ -236,7 +236,7 @@ async fn credential_dataset_mutations_require_an_active_admin_and_are_audited_at
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revoking_a_conformance_lease_deletes_its_presentation_transactions() {
     let Some(database_url) = database_url() else {
         return;
@@ -287,7 +287,7 @@ async fn revoking_a_conformance_lease_deletes_its_presentation_transactions() {
     assert_eq!(count.count, 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and_encrypted_at_rest()
 {
     let Some(database_url) = database_url() else {

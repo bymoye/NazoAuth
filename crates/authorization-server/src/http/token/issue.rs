@@ -1,8 +1,7 @@
 //! 令牌签发响应构造。
 use std::collections::BTreeSet;
 
-use crate::adapters::audit::audit_event;
-use crate::adapters::audit::audit_fields;
+use crate::adapters::audit::{audit_event_required, audit_fields};
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::random_urlsafe_token;
 use crate::domain::client_jwe::{JwePayloadKind, client_jwe_key, encrypt_compact_jwe};
@@ -17,9 +16,12 @@ use actix_web::HttpResponse;
 use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::HeaderValue;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 
-use nazo_auth::normalize_authorization_details;
+use nazo_auth::{
+    PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuancePhase, TokenIssuanceRecord,
+    TokenIssuanceTransitionResult, normalize_authorization_details,
+};
 
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 use nazo_http_actix::{json_response_no_store, oauth_token_error};
@@ -205,6 +207,9 @@ fn id_token_session_sid<'a>(
     issue: &'a TokenIssue,
     frontchannel_logout: bool,
 ) -> Option<&'a str> {
+    if let Some(contract) = issue.refresh_id_token_sid.as_ref() {
+        return contract.as_deref();
+    }
     if let Some(native_sso) = issue.native_sso.as_ref() {
         return Some(native_sso.sid.as_str());
     }
@@ -217,6 +222,52 @@ fn id_token_session_sid<'a>(
             .iter()
             .any(|request| request.name == "sid");
     requested.then_some(issue.oidc_sid.as_deref()).flatten()
+}
+
+fn persisted_id_token_sid<'a>(
+    issue: &'a TokenIssue,
+    issued_id_token_sid: Option<&'a str>,
+) -> Option<&'a str> {
+    issued_id_token_sid.or_else(|| {
+        issue
+            .refresh_id_token_sid
+            .as_ref()
+            .and_then(|contract| contract.as_deref())
+    })
+}
+
+fn claim_request_value_matches(request: &nazo_auth::OidcClaimRequest, actual: &Value) -> bool {
+    match (&request.value, request.values.as_slice()) {
+        (Some(expected), _) => expected == actual,
+        (None, []) => true,
+        (None, values) => values.iter().any(|expected| expected == actual),
+    }
+}
+
+fn refreshed_id_token_essential_claims_satisfied(
+    issue: &TokenIssue,
+    client: &ClientRow,
+    frontchannel_logout_enabled: bool,
+    extra_claims: Option<&Value>,
+) -> bool {
+    issue
+        .id_token_claim_requests
+        .iter()
+        .filter(|request| request.essential)
+        .all(|request| {
+            let actual = match request.name.as_str() {
+                "auth_time" => issue.auth_time.map(|value| json!(value)),
+                "amr" if !issue.amr.is_empty() => Some(json!(&issue.amr)),
+                "acr" => issue.acr.as_ref().map(|value| json!(value)),
+                "sid" => id_token_session_sid(client, issue, frontchannel_logout_enabled)
+                    .map(|value| json!(value)),
+                _ => extra_claims
+                    .and_then(Value::as_object)
+                    .and_then(|claims| claims.get(&request.name))
+                    .cloned(),
+            };
+            actual.is_some_and(|actual| claim_request_value_matches(request, &actual))
+        })
 }
 
 fn id_token_signing_alg_for_client(client: &ClientRow) -> jsonwebtoken::Algorithm {
@@ -261,10 +312,111 @@ async fn persist_access_token_subject_mapping(
     Ok(())
 }
 
+fn issuance_request_digest(client: &ClientRow, issue: &TokenIssue, grant_key: &str) -> String {
+    // This digest is deliberately built from the normalized issue, not from
+    // raw form fields.  A retry with a different client, subject, scope,
+    // resource, sender binding or OIDC contract therefore cannot reuse a
+    // response belonging to another logical grant.
+    let material = json!({
+        "client_id": client.id,
+        "tenant_id": client.tenant_id,
+        "grant_key": grant_key,
+        "subject": issue.subject,
+        "user_id": issue.user_id,
+        "scopes": issue.scopes,
+        "audiences": issue.audiences,
+        "authorization_details": issue.authorization_details,
+        "nonce": issue.nonce,
+        "auth_time": issue.auth_time,
+        "amr": issue.amr,
+        "oidc_sid": issue.oidc_sid,
+        "acr": issue.acr,
+        "userinfo_claims": issue.userinfo_claims,
+        "userinfo_claim_requests": issue.userinfo_claim_requests,
+        "id_token_claims": issue.id_token_claims,
+        "id_token_claim_requests": issue.id_token_claim_requests,
+        "refresh_id_token_sid": issue.refresh_id_token_sid,
+        "include_refresh": issue.include_refresh,
+        "dpop_jkt": issue.dpop_jkt,
+        "refresh_token_dpop_jkt": issue.refresh_token_dpop_jkt,
+        "mtls_x5t_s256": issue.mtls_x5t_s256,
+        "refresh_token_mtls_x5t_s256": issue.refresh_token_mtls_x5t_s256,
+        "refresh_token_client_attestation_jkt": issue.refresh_token_client_attestation_jkt,
+        "refresh_token_scopes": issue.refresh_token_scopes,
+        "issued_token_type": issue.issued_token_type,
+    });
+    blake3_hex(
+        &serde_json::to_string(&material)
+            .expect("normalized token issue digest payload must serialize"),
+    )
+}
+
+fn stable_grant_key(grant_key: Option<&str>) -> String {
+    grant_key
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("ephemeral:{}", Uuid::now_v7()))
+}
+
+fn response_from_token_issuance(record: &TokenIssuanceRecord) -> Option<HttpResponse> {
+    let body = record.response_body.as_ref()?.clone();
+    if !matches!(
+        record.phase,
+        TokenIssuancePhase::Signed | TokenIssuancePhase::Persisted | TokenIssuancePhase::Delivered
+    ) {
+        return None;
+    }
+    Some(
+        HttpResponse::Ok()
+            .insert_header((header::CACHE_CONTROL, "no-store"))
+            .content_type("application/json")
+            .body(body),
+    )
+}
+
+/// Recover a response that was durably persisted before the previous request
+/// lost its HTTP connection.  This intentionally says nothing about socket
+/// delivery: only the database-backed response handoff is recoverable.
+pub(crate) async fn recover_token_issuance_response(
+    token_service: &ServerTokenService,
+    client: &ClientRow,
+    grant_key: &str,
+) -> Option<HttpResponse> {
+    match token_service
+        .token_issuance_by_grant(client.tenant_id, client.id, grant_key)
+        .await
+    {
+        Ok(Some(record)) => response_from_token_issuance(&record),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "failed to recover token issuance response");
+            None
+        }
+    }
+}
+
+pub(crate) fn request_idempotency_key(req: &actix_web::HttpRequest) -> Option<String> {
+    let value = req.headers().get("idempotency-key")?.to_str().ok()?.trim();
+    if value.is_empty() || value.len() > 256 {
+        return None;
+    }
+    Some(format!("idempotency:{}", blake3_hex(value)))
+}
+
 pub(crate) async fn issue_token_response_with_service(
     context: &TokenIssuanceContext<'_>,
     token_service: &ServerTokenService,
     client: &ClientRow,
+    issue: TokenIssue,
+) -> HttpResponse {
+    issue_token_response_with_service_and_grant(context, token_service, client, None, issue).await
+}
+
+pub(crate) async fn issue_token_response_with_service_and_grant(
+    context: &TokenIssuanceContext<'_>,
+    token_service: &ServerTokenService,
+    client: &ClientRow,
+    grant_key: Option<&str>,
     mut issue: TokenIssue,
 ) -> HttpResponse {
     let auth_code_ttl_seconds = context.config.auth_code_ttl_seconds.max(1);
@@ -333,6 +485,106 @@ pub(crate) async fn issue_token_response_with_service(
             false,
         );
     }
+    let refresh_authorization_scopes = issue
+        .refresh_token_scopes
+        .as_deref()
+        .unwrap_or(&issue.scopes);
+    let openid4vci_credential_authorization = context
+        .config
+        .openid4vci_audience(refresh_authorization_scopes, &issue.authorization_details)
+        .is_some();
+    let will_issue_refresh = issue.include_refresh
+        && should_issue_refresh_token(
+            client,
+            refresh_authorization_scopes,
+            openid4vci_credential_authorization,
+        );
+    if will_issue_refresh
+        && client.token_endpoint_auth_method == "attest_jwt_client_auth"
+        && issue.refresh_token_client_attestation_jkt.is_none()
+    {
+        mark_failed_authorization_code_if_needed(
+            token_service,
+            issue.authorization_code_hash.as_deref(),
+            "client_attestation_binding_missing",
+            auth_code_ttl_seconds,
+        )
+        .await;
+        return oauth_token_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client_attestation",
+            "Client attestation refresh-token binding is missing.",
+            false,
+        );
+    }
+    let grant_key = stable_grant_key(grant_key);
+    let request_digest = issuance_request_digest(client, &issue, &grant_key);
+    let issuance_id = match token_service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id: Uuid::now_v7(),
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: grant_key.clone(),
+            request_digest: request_digest.clone(),
+            expires_at: Utc::now()
+                + Duration::seconds(context.config.access_token_ttl_seconds.max(1)),
+        })
+        .await
+    {
+        Ok(PrepareTokenIssuanceResult::Created(record)) => record.issuance_id,
+        Ok(PrepareTokenIssuanceResult::Existing(record)) => {
+            if record.request_digest != request_digest {
+                mark_failed_authorization_code_if_needed(
+                    token_service,
+                    issue.authorization_code_hash.as_deref(),
+                    "token_issuance_request_conflict",
+                    auth_code_ttl_seconds,
+                )
+                .await;
+                return oauth_token_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_grant",
+                    "令牌签发请求与既有事务不一致.",
+                    false,
+                );
+            }
+            if let Some(response) = response_from_token_issuance(&record) {
+                return response;
+            }
+            record.issuance_id
+        }
+        Ok(PrepareTokenIssuanceResult::Conflict) => {
+            mark_failed_authorization_code_if_needed(
+                token_service,
+                issue.authorization_code_hash.as_deref(),
+                "token_issuance_request_conflict",
+                auth_code_ttl_seconds,
+            )
+            .await;
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "令牌签发请求与既有事务不一致.",
+                false,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to prepare token issuance saga");
+            mark_failed_authorization_code_if_needed(
+                token_service,
+                issue.authorization_code_hash.as_deref(),
+                "token_issuance_prepare_failed",
+                auth_code_ttl_seconds,
+            )
+            .await;
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发状态准备失败.",
+                false,
+            );
+        }
+    };
     let now = Utc::now();
     let next_dpop_nonce = if issue.dpop_jkt.is_some() {
         match issue_dpop_nonce_with_authorization_service(context.authorization).await {
@@ -435,11 +687,22 @@ pub(crate) async fn issue_token_response_with_service(
         body["issued_token_type"] = json!(issued_token_type);
     }
     let mut refresh_token_family_id = None;
-    if issue_includes_openid {
+    let mut issued_id_token_sid = None;
+    // A refreshed ID Token is optional under OIDC Core 12.2, but if it is
+    // emitted it must carry the original authentication context. Legacy
+    // refresh rows have no persisted context; keep their access/refresh
+    // response usable while omitting an unverifiable ID Token.
+    let can_issue_refresh_id_token =
+        issue.refresh_token_scopes.is_none() || issue.auth_time.is_some();
+    if issue_includes_openid && can_issue_refresh_id_token {
         let user_id = issue
             .user_id
             .expect("openid token issues are rejected before signing without a user subject");
         let sector_identifier_host = client.sector_identifier_host.as_deref();
+        let id_token_claim_scopes = issue
+            .refresh_token_scopes
+            .as_deref()
+            .unwrap_or(&issue.scopes);
         let loaded_claims = token_service
             .active_subject_claims(client.tenant_id, user_id)
             .await;
@@ -480,7 +743,7 @@ pub(crate) async fn issue_token_response_with_service(
         let mut user_claims = loaded_claims.map(|claims| {
             oidc_id_token_user_claims(
                 &claims,
-                &issue.scopes,
+                id_token_claim_scopes,
                 &issue.subject,
                 &issue.id_token_claims,
                 &issue.id_token_claim_requests,
@@ -493,19 +756,50 @@ pub(crate) async fn issue_token_response_with_service(
                 claims.insert("ds_hash".to_owned(), json!(native_sso.ds_hash));
             }
         }
+        let frontchannel_logout_enabled =
+            context.permits(nazo_runtime_modules::ModuleId::FrontchannelLogout);
+        let id_token_sid = id_token_session_sid(client, &issue, frontchannel_logout_enabled)
+            .map(ToOwned::to_owned);
+        issued_id_token_sid = id_token_sid.clone();
+        if issue.refresh_token_scopes.is_some()
+            && !refreshed_id_token_essential_claims_satisfied(
+                &issue,
+                client,
+                frontchannel_logout_enabled,
+                user_claims.as_ref(),
+            )
+        {
+            mark_failed_authorization_code_if_needed(
+                token_service,
+                issue.authorization_code_hash.as_deref(),
+                "refresh_id_token_essential_claim_missing",
+                auth_code_ttl_seconds,
+            )
+            .await;
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token 无法满足原始 ID Token 必需声明.",
+                false,
+            );
+        }
         let signed_id_token = match token_service
             .sign_id_token(nazo_auth::IdTokenSignInput {
                 issuer: &context.config.issuer,
                 subject: &issue.subject,
                 client_id: &client.client_id,
-                nonce: issue.nonce.as_deref(),
+                // OIDC Core 12.2 says a refreshed ID Token SHOULD omit
+                // nonce.  The original value remains in `issue.nonce` so
+                // the successor refresh contract can retain it, but it is
+                // never emitted for a refresh issuance.
+                nonce: if issue.refresh_token_scopes.is_some() {
+                    None
+                } else {
+                    issue.nonce.as_deref()
+                },
                 auth_time: issue.auth_time,
                 amr: &issue.amr,
-                sid: id_token_session_sid(
-                    client,
-                    &issue,
-                    context.permits(nazo_runtime_modules::ModuleId::FrontchannelLogout),
-                ),
+                sid: id_token_sid.as_deref(),
                 acr: issue.acr.as_deref(),
                 extra_claims: user_claims.as_ref(),
                 ttl_seconds: context.config.id_token_ttl_seconds,
@@ -570,38 +864,7 @@ pub(crate) async fn issue_token_response_with_service(
     // `openid_credential` authorization detail; HAIP 1.0 section 4.4 recommends
     // refresh-token support for later credential refresh. Keep both paths behind
     // the client's explicit `refresh_token` grant registration.
-    let refresh_authorization_scopes = issue
-        .refresh_token_scopes
-        .as_deref()
-        .unwrap_or(&issue.scopes);
-    let openid4vci_credential_authorization = context
-        .config
-        .openid4vci_audience(refresh_authorization_scopes, &issue.authorization_details)
-        .is_some();
-    if issue.include_refresh
-        && should_issue_refresh_token(
-            client,
-            refresh_authorization_scopes,
-            openid4vci_credential_authorization,
-        )
-    {
-        if client.token_endpoint_auth_method == "attest_jwt_client_auth"
-            && issue.refresh_token_client_attestation_jkt.is_none()
-        {
-            mark_failed_authorization_code_if_needed(
-                token_service,
-                issue.authorization_code_hash.as_deref(),
-                "client_attestation_binding_missing",
-                auth_code_ttl_seconds,
-            )
-            .await;
-            return oauth_token_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_client_attestation",
-                "Client attestation refresh-token binding is missing.",
-                false,
-            );
-        }
+    if will_issue_refresh {
         let refresh_family = match issue.refresh_token_policy {
             RefreshTokenPolicy::IssueNew => Some((Uuid::now_v7(), None, None)),
             RefreshTokenPolicy::Rotate {
@@ -629,7 +892,22 @@ pub(crate) async fn issue_token_response_with_service(
                 issued_at: now,
                 expires_at: now + Duration::seconds(context.config.refresh_token_ttl_seconds),
             };
-            match persist_refresh_token(token_service, client, &issue, &refresh).await {
+            // A refresh request may narrow away `openid`, so no ID Token is
+            // signed in this response.  The successor must nevertheless
+            // retain the original SID contract for a later refresh that
+            // requests OpenID again.
+            let id_token_sid_for_refresh_persistence =
+                persisted_id_token_sid(&issue, issued_id_token_sid.as_deref());
+            match persist_refresh_token(
+                token_service,
+                client,
+                context.config.issuer(),
+                &issue,
+                &refresh,
+                id_token_sid_for_refresh_persistence,
+            )
+            .await
+            {
                 Ok(RefreshPersistResult::Inserted) => {
                     body["refresh_token"] = json!(refresh.raw);
                     refresh_token_family_id = Some(refresh.family);
@@ -748,7 +1026,93 @@ pub(crate) async fn issue_token_response_with_service(
             );
         }
     }
-    audit_event(
+    let response_body = match serde_json::to_vec(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize token issuance response");
+            let _ = token_service
+                .revoke_issued_tokens(
+                    client.tenant_id,
+                    client.id,
+                    &issued_access_token.jti,
+                    DateTime::<Utc>::from_timestamp(issued_access_token.expires_at, 0),
+                    refresh_token_family_id,
+                )
+                .await;
+            return oauth_token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "令牌签发响应序列化失败.",
+                false,
+            );
+        }
+    };
+    let response_digest = blake3::hash(&response_body).to_hex().to_string();
+    match token_service
+        .record_token_issuance_signed(
+            issuance_id,
+            &request_digest,
+            &issued_access_token.jti,
+            issued_access_token.expires_at,
+            &response_body,
+            &response_digest,
+        )
+        .await
+    {
+        Ok(TokenIssuanceTransitionResult::Applied) => {}
+        Ok(TokenIssuanceTransitionResult::Conflict) => {
+            // A concurrent request may have won the transition.  Recover its
+            // durable response rather than minting a second credential.
+            if let Some(response) =
+                recover_token_issuance_response(token_service, client, &grant_key).await
+            {
+                return response;
+            }
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发状态竞争.",
+                false,
+            );
+        }
+        Ok(TokenIssuanceTransitionResult::Missing) | Err(_) => {
+            tracing::warn!(issuance_id = %issuance_id, "failed to persist signed token issuance");
+            let _ = token_service
+                .revoke_issued_tokens(
+                    client.tenant_id,
+                    client.id,
+                    &issued_access_token.jti,
+                    DateTime::<Utc>::from_timestamp(issued_access_token.expires_at, 0),
+                    refresh_token_family_id,
+                )
+                .await;
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发状态写入失败.",
+                false,
+            );
+        }
+    }
+    match token_service
+        .mark_token_issuance_persisted(issuance_id, &request_digest)
+        .await
+    {
+        Ok(TokenIssuanceTransitionResult::Applied)
+        | Ok(TokenIssuanceTransitionResult::Conflict) => {}
+        Ok(TokenIssuanceTransitionResult::Missing) | Err(_) => {
+            tracing::warn!(issuance_id = %issuance_id, "failed to mark token issuance persisted");
+        }
+    }
+    // “Delivered” means the stable response handoff is recorded.  The actual
+    // HTTP socket write is intentionally outside the saga's proof boundary.
+    if let Err(error) = token_service
+        .mark_token_issuance_delivered(issuance_id, &request_digest)
+        .await
+    {
+        tracing::warn!(%error, issuance_id = %issuance_id, "failed to mark token issuance delivered");
+    }
+    if let Err(error) = audit_event_required(
         "token_issued",
         audit_fields(&[
             ("client_id", json!(client.client_id)),
@@ -759,15 +1123,34 @@ pub(crate) async fn issue_token_response_with_service(
             ("access_token_jti", json!(issued_access_token.jti)),
             ("refresh_token_family_id", json!(refresh_token_family_id)),
         ]),
-    );
-    if let Some((family_id, rotated_from_id)) = refresh_rotated {
-        audit_event(
+    )
+    .await
+    {
+        tracing::error!(%error, issuance_id = %issuance_id, "required token issuance audit failed");
+        return oauth_token_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "令牌签发审计写入失败.",
+            false,
+        );
+    }
+    if let Some((family_id, rotated_from_id)) = refresh_rotated
+        && let Err(error) = audit_event_required(
             "refresh_rotated",
             audit_fields(&[
                 ("client_id", json!(client.client_id)),
                 ("token_family_id", json!(family_id)),
                 ("rotated_from_id", json!(rotated_from_id)),
             ]),
+        )
+        .await
+    {
+        tracing::error!(%error, issuance_id = %issuance_id, "required refresh rotation audit failed");
+        return oauth_token_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "刷新令牌轮换审计写入失败.",
+            false,
         );
     }
     let mut response = json_response_no_store(body);

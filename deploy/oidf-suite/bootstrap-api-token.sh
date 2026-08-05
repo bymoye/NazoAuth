@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-expected_revision=946451d1ce29965c9ab7aee05f5003552233160e
+expected_revision=932b46f1e507871eb0b34621aaef65ff04442e6f
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 NAZOAUTH_SOURCE_DIR=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 export NAZOAUTH_SOURCE_DIR
@@ -38,7 +38,7 @@ test -z "$(git -C "$NAZOAUTH_SOURCE_DIR" status --porcelain)" || {
   echo "NazoAuth source checkout is not clean" >&2
   exit 1
 }
-suite_image_tag=${OIDF_SUITE_IMAGE_TAG:-946451d1}
+suite_image_tag=${OIDF_SUITE_IMAGE_TAG:-932b46f1}
 export OIDF_SUITE_IMAGE_TAG=$suite_image_tag
 suite_image="nazoauth-oidf-suite:$suite_image_tag"
 nginx_image="nazoauth-oidf-suite-nginx:$suite_image_tag"

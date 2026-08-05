@@ -271,6 +271,67 @@ fn rejects_verifier_configs_missing_trust_anchors() {
 }
 
 #[test]
+fn rejects_duplicate_jwk_key_ids_at_configuration_time() {
+    let fixture = fixture();
+    let mut jwks = fixture.jwks.clone();
+    jwks["keys"] = json!([jwks["keys"][0].clone(), jwks["keys"][0].clone()]);
+    assert_eq!(
+        ResourceServerVerifier::new(ResourceServerVerifierConfig::new(
+            "https://issuer.example",
+            "resource://default",
+            jwks,
+        ))
+        .unwrap_err(),
+        ResourceServerVerifierError::DuplicateKeyId
+    );
+}
+
+#[test]
+fn accepts_jwk_without_optional_key_id() {
+    let fixture = fixture();
+    let mut jwks = fixture.jwks.clone();
+    jwks["keys"][0]
+        .as_object_mut()
+        .expect("fixture JWK is an object")
+        .remove("kid");
+    assert!(
+        ResourceServerVerifier::new(ResourceServerVerifierConfig::new(
+            "https://issuer.example",
+            "resource://default",
+            jwks,
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn rejects_mixed_type_audience_and_ambiguous_confirmation_claims() {
+    let fixture = fixture();
+    assert_eq!(
+        fixture
+            .verifier
+            .verify(&token(
+                &fixture,
+                json!({"aud": ["resource://default", 7]}),
+                None,
+            ))
+            .unwrap_err(),
+        ResourceServerVerifierError::AudienceMismatch
+    );
+    assert_eq!(
+        fixture
+            .verifier
+            .verify(&token(
+                &fixture,
+                json!({"cnf": {"jkt": "AQ", "x5t#S256": "AQ"}}),
+                None,
+            ))
+            .unwrap_err(),
+        ResourceServerVerifierError::InvalidToken
+    );
+}
+
+#[test]
 fn enforces_dpop_jkt_binding() {
     let fixture = fixture();
     let mut config = ResourceServerVerifierConfig::new(
@@ -278,13 +339,13 @@ fn enforces_dpop_jkt_binding() {
         "resource://default",
         fixture.jwks.clone(),
     );
-    config.confirmation = ConfirmationPolicy::RequireDpopJkt("jkt-1".to_owned());
+    config.confirmation = ConfirmationPolicy::RequireDpopJkt(TEST_JKT_1.to_owned());
     let verifier = ResourceServerVerifier::new(config).unwrap();
 
     let verified = verifier
-        .verify(&token(&fixture, json!({"cnf": {"jkt": "jkt-1"}}), None))
+        .verify(&token(&fixture, json!({"cnf": {"jkt": TEST_JKT_1}}), None))
         .unwrap();
-    assert_eq!(verified.cnf.unwrap().jkt, Some("jkt-1".to_owned()));
+    assert_eq!(verified.cnf.unwrap().jkt, Some(TEST_JKT_1.to_owned()));
 }
 
 #[test]
@@ -297,7 +358,7 @@ fn enforces_sender_constraint_policy_variants() {
         validate_confirmation_policy(
             &ConfirmationPolicy::RequireDpop,
             Some(&ConfirmationClaims {
-                jkt: Some("jkt-1".to_owned()),
+                jkt: Some(TEST_JKT_1.to_owned()),
                 x5t_s256: None,
             }),
         ),
@@ -308,17 +369,17 @@ fn enforces_sender_constraint_policy_variants() {
             &ConfirmationPolicy::RequireMtls,
             Some(&ConfirmationClaims {
                 jkt: None,
-                x5t_s256: Some("thumb-1".to_owned()),
+                x5t_s256: Some(TEST_X5T_1.to_owned()),
             }),
         ),
         Ok(())
     );
     assert_eq!(
         validate_confirmation_policy(
-            &ConfirmationPolicy::RequireMtlsThumbprint("thumb-1".to_owned()),
+            &ConfirmationPolicy::RequireMtlsThumbprint(TEST_X5T_1.to_owned()),
             Some(&ConfirmationClaims {
                 jkt: None,
-                x5t_s256: Some("thumb-2".to_owned()),
+                x5t_s256: Some(TEST_X5T_2.to_owned()),
             }),
         )
         .unwrap_err(),
@@ -345,11 +406,11 @@ fn rejects_dpop_jkt_mismatch() {
         "resource://default",
         fixture.jwks.clone(),
     );
-    config.confirmation = ConfirmationPolicy::RequireDpopJkt("jkt-1".to_owned());
+    config.confirmation = ConfirmationPolicy::RequireDpopJkt(TEST_JKT_1.to_owned());
     let verifier = ResourceServerVerifier::new(config).unwrap();
 
     let error = verifier
-        .verify(&token(&fixture, json!({"cnf": {"jkt": "jkt-2"}}), None))
+        .verify(&token(&fixture, json!({"cnf": {"jkt": TEST_JKT_2}}), None))
         .unwrap_err();
 
     assert_eq!(error, ResourceServerVerifierError::DpopBindingMismatch);
@@ -369,7 +430,7 @@ fn enforces_require_any_sender_constraint_with_jkt() {
         validate_confirmation_policy(
             &ConfirmationPolicy::RequireAnySenderConstraint,
             Some(&ConfirmationClaims {
-                jkt: Some("jkt-1".to_owned()),
+                jkt: Some(TEST_JKT_1.to_owned()),
                 x5t_s256: None,
             }),
         ),
@@ -384,7 +445,7 @@ fn enforces_require_any_sender_constraint_with_x5t() {
             &ConfirmationPolicy::RequireAnySenderConstraint,
             Some(&ConfirmationClaims {
                 jkt: None,
-                x5t_s256: Some("thumb-1".to_owned()),
+                x5t_s256: Some(TEST_X5T_1.to_owned()),
             }),
         ),
         Ok(())
@@ -403,7 +464,7 @@ fn enforces_require_mtls_with_none_cnf() {
 fn enforces_require_mtls_thumbprint_with_none_cnf() {
     assert_eq!(
         validate_confirmation_policy(
-            &ConfirmationPolicy::RequireMtlsThumbprint("thumb-1".to_owned()),
+            &ConfirmationPolicy::RequireMtlsThumbprint(TEST_X5T_1.to_owned()),
             None,
         ),
         Err(ResourceServerVerifierError::MissingSenderConstraint)
@@ -414,10 +475,10 @@ fn enforces_require_mtls_thumbprint_with_none_cnf() {
 fn enforces_require_mtls_thumbprint_with_matching_cnf() {
     assert_eq!(
         validate_confirmation_policy(
-            &ConfirmationPolicy::RequireMtlsThumbprint("thumb-1".to_owned()),
+            &ConfirmationPolicy::RequireMtlsThumbprint(TEST_X5T_1.to_owned()),
             Some(&ConfirmationClaims {
                 jkt: None,
-                x5t_s256: Some("thumb-1".to_owned()),
+                x5t_s256: Some(TEST_X5T_1.to_owned()),
             }),
         ),
         Ok(())
@@ -428,7 +489,7 @@ fn enforces_require_mtls_thumbprint_with_matching_cnf() {
 fn enforces_require_dpop_jkt_with_none_cnf() {
     assert_eq!(
         validate_confirmation_policy(
-            &ConfirmationPolicy::RequireDpopJkt("jkt-1".to_owned()),
+            &ConfirmationPolicy::RequireDpopJkt(TEST_JKT_1.to_owned()),
             None,
         ),
         Err(ResourceServerVerifierError::MissingSenderConstraint)

@@ -7,14 +7,6 @@ use aws_lc_rs::key_wrap::{AES_128, AES_256, AesKek, KeyWrap};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nazo_auth::{ClientJweKeyManagement, client_jwe_key_management_from_name};
-use openssl::{
-    bn::BigNum,
-    encrypt::Encrypter,
-    hash::MessageDigest,
-    pkey::PKey,
-    rsa::{Padding, Rsa},
-    symm::{Cipher, encrypt_aead},
-};
 use p256::{
     PublicKey, SecretKey,
     ecdh::diffie_hellman,
@@ -148,15 +140,8 @@ fn encrypt_compact_jwe_with_cek(
     plaintext: &[u8],
 ) -> anyhow::Result<String> {
     let iv = rand::random::<[u8; 12]>();
-    let mut tag = [0u8; 16];
-    let ciphertext = encrypt_aead(
-        Cipher::aes_256_gcm(),
-        cek,
-        Some(&iv),
-        protected.as_bytes(),
-        plaintext,
-        &mut tag,
-    )?;
+    let (ciphertext, tag) =
+        crate::crypto::aes_256_gcm_encrypt(cek, &iv, protected.as_bytes(), plaintext)?;
     Ok(format!(
         "{}.{}.{}.{}.{}",
         protected,
@@ -176,18 +161,11 @@ fn rsa_oaep_256_encrypt_jwk(jwk: &Value, plaintext: &[u8]) -> anyhow::Result<Vec
         .get("e")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("RSA JWE key missing e"))?;
-    let n = BigNum::from_slice(&URL_SAFE_NO_PAD.decode(n)?)?;
-    let e = BigNum::from_slice(&URL_SAFE_NO_PAD.decode(e)?)?;
-    let rsa = Rsa::from_public_components(n, e)?;
-    let public_key = PKey::from_rsa(rsa)?;
-    let mut encrypter = Encrypter::new(&public_key)?;
-    encrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-    encrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-    encrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
-    let mut encrypted = vec![0; encrypter.encrypt_len(plaintext)?];
-    let len = encrypter.encrypt(plaintext, &mut encrypted)?;
-    encrypted.truncate(len);
-    Ok(encrypted)
+    crate::crypto::rsa_oaep_sha256_encrypt(
+        &URL_SAFE_NO_PAD.decode(n)?,
+        &URL_SAFE_NO_PAD.decode(e)?,
+        plaintext,
+    )
 }
 
 fn parse_p256_public_jwk(jwk: &Value) -> anyhow::Result<PublicKey> {

@@ -10,6 +10,7 @@ fn baseline_policy_is_explicitly_default_deny() {
     assert!(!policy.require_signed_introspection_response);
     assert!(!policy.session_management);
     assert!(!policy.allow_cross_device_flows);
+    assert!(!policy.allow_confidential_oidc_without_pkce);
     assert_eq!(policy.validate(), Ok(()));
 }
 

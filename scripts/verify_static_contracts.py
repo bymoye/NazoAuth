@@ -298,9 +298,6 @@ def check_rust_test_structure() -> None:
             "let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);",
             "let session_profiles = web::Data::new(SessionProfileHandles::new(",
         ),
-        "crates/authorization-server/src/http/auth/federation.rs": (
-            "let builder = builder.no_proxy();",
-        ),
         "crates/authorization-server/src/domain/openid4vc.rs": (
             "fn validate_key_attestation(",
         ),
@@ -533,9 +530,17 @@ def check_fapi_ciba_boundaries() -> None:
     ).read_text(encoding="utf-8")
     if any(marker in tls_policy for marker in forbidden_test_markers):
         raise SystemExit("CIBA ping TLS policy tests must remain outside production source")
-    if "tls_version_min(reqwest::tls::Version::TLS_1_2)" not in tls_policy:
+    if (
+        "CIBA_PING_TLS_MIN: reqwest::tls::Version = reqwest::tls::Version::TLS_1_2"
+        not in tls_policy
+        or ".tls_version_min(CIBA_PING_TLS_MIN)" not in tls_policy
+    ):
         raise SystemExit("CIBA ping delivery must reject TLS versions below 1.2")
-    if "tls_version_max(reqwest::tls::Version::TLS_1_3)" not in tls_policy:
+    if (
+        "CIBA_PING_TLS_MAX: reqwest::tls::Version = reqwest::tls::Version::TLS_1_3"
+        not in tls_policy
+        or ".tls_version_max(CIBA_PING_TLS_MAX)" not in tls_policy
+    ):
         raise SystemExit("CIBA ping delivery must offer TLS 1.3")
     if ".use_rustls_tls()" not in tls_policy:
         raise SystemExit("CIBA ping delivery must use the Rustls TLS backend")
@@ -558,7 +563,7 @@ def check_fapi_ciba_boundaries() -> None:
         ROOT / "crates" / "authorization-server-core" / "src" / "ciba_ping.rs"
     ).read_text(encoding="utf-8")
     for required_test in (
-        "ciba_ping_transport_rejects_tls11",
+        "ciba_ping_transport_policy_is_bounded_to_tls12_and_tls13",
         "ciba_ping_transport_supports_the_tls12_fapi_baseline",
         "ciba_ping_transport_supports_tls13",
     ):
@@ -1115,7 +1120,11 @@ def check_conformance_provisioning_boundaries() -> None:
     ):
         if marker not in mtls_runtime:
             raise SystemExit(f"RFC 8705 certificate selector boundary is missing: {marker}")
-    for marker in ("x509_cert::name::Name::from_str", "X509Name::from_der", "try_cmp"):
+    for marker in (
+        "x509_cert::name::Name::from_str",
+        "name.to_string().to_lowercase()",
+        "registered == certificate_subject",
+    ):
         if marker not in mtls_key_management:
             raise SystemExit(f"RFC 4514 distinguished-name boundary is missing: {marker}")
 

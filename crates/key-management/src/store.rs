@@ -16,10 +16,11 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
 use nazo_auth::SigningPurpose;
-use openssl::{pkey::PKey, rsa::Rsa, sha::sha256};
 use p256::elliptic_curve::{Generate, pkcs8::EncodePrivateKey as EncodeEcPrivateKey};
+use sha2::Digest as _;
 
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::model::{
@@ -442,8 +443,7 @@ async fn ensure_request_object_encryption_key(settings: &KeySettings) -> anyhow:
             return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
         }
     }
-    let key = PKey::from_rsa(Rsa::generate(3072)?)?;
-    let pem = String::from_utf8(key.private_key_to_pem_pkcs8()?)
+    let pem = String::from_utf8(crate::crypto::generate_rsa_pkcs8_pem(3072)?)
         .context("generated request object key was not PEM text")?;
     write_private_key_pem_if_absent(&path, &pem).await
 }
@@ -453,26 +453,24 @@ async fn load_request_object_decryption_key(settings: &KeySettings) -> anyhow::R
     let pem = tokio::fs::read(&path)
         .await
         .with_context(|| format!("failed to read {}", path.display()))?;
-    PKey::private_key_from_pem(&pem)
+    crate::crypto::validate_rsa_pkcs8_pem(&pem)
         .context("request object decryption key is not valid PKCS#8 PEM")?;
     Ok(pem)
 }
 
 pub(crate) fn request_object_encryption_jwk(private_key_pem: &[u8]) -> anyhow::Result<Value> {
-    let key = PKey::private_key_from_pem(private_key_pem)?;
-    let rsa = key.rsa()?;
-    let public_der = key.public_key_to_der()?;
+    let (n, e, public_der) = crate::crypto::rsa_public_components_from_pem(private_key_pem)?;
     let kid = format!(
         "request-object-{}",
-        URL_SAFE_NO_PAD.encode(&sha256(&public_der)[..12])
+        URL_SAFE_NO_PAD.encode(&sha2::Sha256::digest(&public_der)[..12])
     );
     Ok(json!({
         "kty": "RSA",
         "use": "enc",
         "alg": "RSA-OAEP-256",
         "kid": kid,
-        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
-        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
+        "n": URL_SAFE_NO_PAD.encode(n),
+        "e": URL_SAFE_NO_PAD.encode(e)
     }))
 }
 
@@ -824,8 +822,34 @@ pub(crate) async fn write_json_atomic(path: &Path, value: &Value) -> anyhow::Res
 }
 
 pub(crate) async fn write_private_key_pem_atomic(path: &Path, pem: &str) -> anyhow::Result<()> {
-    write_file_atomic(path, pem.as_bytes()).await?;
-    set_private_key_permissions(path).await
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("target file must have a parent directory"))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let tmp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("private-key"),
+        Uuid::now_v7()
+    ));
+    let result = write_private_key_temp(&tmp_path, pem.as_bytes()).await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error);
+    }
+    if let Err(error) = tokio::fs::rename(&tmp_path, path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error).with_context(|| {
+            format!(
+                "failed to atomically rename private key {} to {}",
+                tmp_path.display(),
+                path.display()
+            )
+        });
+    }
+    sync_private_key_directory(parent).await?;
+    Ok(())
 }
 
 async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> anyhow::Result<()> {
@@ -840,11 +864,7 @@ async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> anyhow::Resu
             .unwrap_or("private-key"),
         Uuid::now_v7()
     ));
-    let prepare_result = async {
-        tokio::fs::write(&tmp_path, pem.as_bytes()).await?;
-        set_private_key_permissions(&tmp_path).await
-    }
-    .await;
+    let prepare_result = async { write_private_key_temp(&tmp_path, pem.as_bytes()).await }.await;
     if let Err(error) = prepare_result {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(error);
@@ -859,6 +879,7 @@ async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> anyhow::Resu
                     tmp_path.display()
                 )
             })?;
+            sync_private_key_directory(parent).await?;
             Ok(())
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
@@ -872,6 +893,33 @@ async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> anyhow::Resu
             })
         }
     }
+}
+
+async fn write_private_key_temp(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    #[cfg(not(unix))]
+    set_private_key_permissions(path).await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn sync_private_key_directory(path: &Path) -> anyhow::Result<()> {
+    tokio::fs::File::open(path).await?.sync_all().await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn sync_private_key_directory(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 async fn write_file_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -924,7 +972,7 @@ pub(crate) fn generate_key_material(
             ed25519_pkcs8_private_der(&seed)
         }
         jsonwebtoken::Algorithm::RS256 | jsonwebtoken::Algorithm::PS256 => {
-            Rsa::generate(2048)?.private_key_to_der()?
+            crate::crypto::generate_rsa_pkcs1_der(2048)?
         }
         jsonwebtoken::Algorithm::ES256 => {
             let secret_key = p256::SecretKey::try_generate()?;

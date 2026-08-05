@@ -61,6 +61,7 @@ fn ping_creation_allows_the_adapter_to_atomically_bind_auth_req_id() {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: None,
         issued_at: 100,
         status: CibaStatus::Pending,

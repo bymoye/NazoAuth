@@ -9,11 +9,6 @@ use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
 use nazo_valkey::test_support::par_storage_key;
-use openssl::encrypt::Decrypter;
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::{Padding, Rsa};
-use openssl::symm::{Cipher, decrypt_aead};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -482,24 +477,21 @@ fn decode_jarm_claims(state: &TestInfrastructure, response_jwt: &str, audience: 
         .claims
 }
 
-fn rsa_jarm_jwe_keypair(kid: &str) -> (PKey<Private>, Value) {
-    let rsa = Rsa::generate(2048).expect("test RSA key should generate");
+fn rsa_jarm_jwe_keypair(kid: &str) -> (crate::test_support::TestRsaKey, Value) {
+    let rsa = crate::test_support::TestRsaKey::generate();
     let jwk = json!({
         "kty": "RSA",
         "kid": kid,
         "use": "enc",
         "alg": "RSA-OAEP-256",
-        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
-        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
+        "n": URL_SAFE_NO_PAD.encode(&rsa.modulus),
+        "e": URL_SAFE_NO_PAD.encode(&rsa.exponent)
     });
-    (
-        PKey::from_rsa(rsa).expect("test RSA key should convert to PKey"),
-        jwk,
-    )
+    (rsa, jwk)
 }
 
 fn decrypt_jarm_jwe(
-    private_key: &PKey<Private>,
+    private_key: &crate::test_support::TestRsaKey,
     compact_jwe: &str,
 ) -> anyhow::Result<(Value, String)> {
     let parts = compact_jwe.split('.').collect::<Vec<_>>();
@@ -509,21 +501,9 @@ fn decrypt_jarm_jwe(
     let iv = URL_SAFE_NO_PAD.decode(parts[2])?;
     let ciphertext = URL_SAFE_NO_PAD.decode(parts[3])?;
     let tag = URL_SAFE_NO_PAD.decode(parts[4])?;
-    let mut decrypter = Decrypter::new(private_key)?;
-    decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-    decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-    decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
-    let mut cek = vec![0; decrypter.decrypt_len(&encrypted_key)?];
-    let len = decrypter.decrypt(&encrypted_key, &mut cek)?;
-    cek.truncate(len);
-    let plaintext = decrypt_aead(
-        Cipher::aes_256_gcm(),
-        &cek,
-        Some(&iv),
-        parts[0].as_bytes(),
-        &ciphertext,
-        &tag,
-    )?;
+    let cek = private_key.decrypt_oaep_sha256(&encrypted_key)?;
+    let plaintext =
+        crate::crypto::aes_256_gcm_decrypt(&cek, &iv, parts[0].as_bytes(), &ciphertext, &tag)?;
     Ok((protected_header, String::from_utf8(plaintext)?))
 }
 

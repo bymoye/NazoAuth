@@ -25,12 +25,16 @@ use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
 
 use nazo_http_actix::oauth_token_error;
+use serde_json::json;
 
 // 只消费授权码并转入统一令牌签发逻辑。
 use super::issue::TokenIssuanceConfig;
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
-    issue::{TokenIssuanceContext, issue_token_response_with_service},
+    issue::{
+        TokenIssuanceContext, issue_token_response_with_service_and_grant,
+        recover_token_issuance_response,
+    },
     native_sso_requested, new_native_sso_token_binding, revoke_issued_authorization_code_tokens,
 };
 
@@ -124,6 +128,28 @@ fn authorization_code_client_mismatch_response() -> HttpResponse {
     )
 }
 
+/// Bind a recoverable authorization-code response to the one-time request
+/// proofs that the caller must present again.  The code hash alone is not a
+/// sufficient recovery key: it would let a consumed public/PKCE code bypass
+/// `code_verifier` validation after the pending state was removed.
+fn authorization_code_grant_key(
+    code_hash: &str,
+    form: &TokenForm,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> String {
+    let proof = json!({
+        "code_hash": code_hash,
+        "code_verifier": form.code_verifier.as_deref().map(blake3_hex),
+        "redirect_uri": form.redirect_uri.as_deref().map(blake3_hex),
+        "scope": form.scope.as_deref().map(blake3_hex),
+        "audiences": &form.audiences,
+        "dpop_jkt": dpop_jkt,
+        "mtls_x5t_s256": mtls_x5t_s256,
+    });
+    format!("authorization_code:{}", blake3_hex(&proof.to_string()))
+}
+
 struct AuthorizationCodeIssueInput {
     payload: CodePayload,
     subject: String,
@@ -155,6 +181,7 @@ fn token_issue_from_authorization_code(input: AuthorizationCodeIssueInput) -> To
         userinfo_claim_requests: input.payload.userinfo_claim_requests,
         id_token_claims: input.payload.id_token_claims,
         id_token_claim_requests: input.payload.id_token_claim_requests,
+        refresh_id_token_sid: None,
         include_refresh: true,
         refresh_token_policy: RefreshTokenPolicy::IssueNew,
         dpop_jkt: input.dpop_jkt,
@@ -351,6 +378,19 @@ pub(crate) async fn token_authorization_code_with_service(
         }
         (None, _) => None,
     };
+    let authorization_code_grant_key = authorization_code_grant_key(
+        &code_hash,
+        form,
+        dpop_jkt.as_deref(),
+        mtls_x5t_s256.as_deref(),
+    );
+    if expected_payload.is_none()
+        && let Some(response) =
+            recover_token_issuance_response(token_service, client, &authorization_code_grant_key)
+                .await
+    {
+        return response;
+    }
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -364,6 +404,17 @@ pub(crate) async fn token_authorization_code_with_service(
         match begin_authorization_code_consumption_with_service(token_service, &code_hash).await {
             Ok(AuthorizationCodeConsumption::Consuming(payload)) => payload,
             Ok(AuthorizationCodeConsumption::Consumed(marker)) => {
+                // A mismatched replay must not revoke a response that belongs
+                // to a different PKCE/holder proof.  A matching proof was
+                // already recovered above.
+                if expected_payload.is_none() {
+                    return oauth_token_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_grant",
+                        "授权码已被使用.",
+                        false,
+                    );
+                }
                 match revoke_replayed_authorization_code(token_service, marker).await {
                     Ok(true) => {
                         return oauth_token_error(
@@ -570,10 +621,11 @@ pub(crate) async fn token_authorization_code_with_service(
             return oauth_token_error(status, error, description, false);
         }
     };
-    issue_token_response_with_service(
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        Some(&authorization_code_grant_key),
         token_issue_from_authorization_code(AuthorizationCodeIssueInput {
             payload,
             subject,

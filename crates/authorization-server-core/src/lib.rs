@@ -83,11 +83,12 @@ pub use authorization_service::{
     stored_grant_covers_requested_authorization,
 };
 pub use ciba::{
-    CibaAtomicResult, CibaCommittedDecision, CibaCreateFailure, CibaDecision,
-    CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification, CibaPingNotificationStatus,
-    CibaPollCommit, CibaPollFailure, CibaPollTransition, CibaRequestState, CibaService,
-    CibaStateFuture, CibaStatePortError, CibaStateStorePort, CibaStatus, CibaStoredRequest,
-    ciba_retention_deadline, evaluate_ciba_decision, evaluate_ciba_poll,
+    CibaAtomicResult, CibaAuthenticationContext, CibaCommittedDecision, CibaCreateFailure,
+    CibaDecision, CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification,
+    CibaPingNotificationStatus, CibaPollCommit, CibaPollFailure, CibaPollTransition,
+    CibaRequestState, CibaService, CibaStateFuture, CibaStatePortError, CibaStateStorePort,
+    CibaStatus, CibaStoredRequest, ciba_retention_deadline, evaluate_ciba_decision,
+    evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
 };
 pub use ciba_ping::{
     CibaPingResponseAction, classify_ciba_ping_status, next_ciba_ping_retry_at,
@@ -194,7 +195,8 @@ pub use session_management::{
 pub use signing::{SignError, SignRequest, Signature, Signer, SigningPurpose};
 pub use token::{
     BackchannelLogoutDelivery, LostResponseRetry, NewRefreshToken,
-    PendingBackchannelLogoutDelivery, RefreshToken, RefreshTokenPersistResult,
+    PendingBackchannelLogoutDelivery, RefreshToken, RefreshTokenAuthenticationContext,
+    RefreshTokenPersistResult,
 };
 pub use token_endpoint::{
     AdmittedTokenClient, AppliedSenderConstraint, AuthorizationCodeTokenRequest,
@@ -207,9 +209,10 @@ pub use token_endpoint::{
 pub use token_service::{
     AccessTokenRevocation, AccessTokenSignInput, AuthorizationCodeBeginResult,
     AuthorizationCodeTransitionResult, IdTokenSignInput, IntrospectionSignInput, IssuedAccessToken,
-    IssuedAuthorizationCodeTokens, TokenFuture, TokenInspection, TokenPortError,
-    TokenRepositoryPort, TokenRevocation, TokenService, TokenSignerPort, TokenStateStorePort,
-    validate_sender_constraint,
+    IssuedAuthorizationCodeTokens, PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenFuture,
+    TokenInspection, TokenIssuancePhase, TokenIssuanceRecord, TokenIssuanceTransitionResult,
+    TokenPortError, TokenRepositoryPort, TokenRevocation, TokenService, TokenSignerPort,
+    TokenStateStorePort, validate_sender_constraint,
 };
 pub use transaction::{
     AuthorizationCodeState, CodePayload, ConsentPayload, ConsumedAuthorizationCode,

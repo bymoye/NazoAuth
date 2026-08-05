@@ -4,7 +4,7 @@ use anyhow::bail;
 
 use crate::config::{ConfigSource, ServerConfigPreparation, database_url};
 
-const USAGE: &str = "usage: nazoauth <server|operator-task|build-identity>";
+const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|build-identity>";
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     match Command::parse(args)? {
@@ -14,11 +14,27 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
         }
         Command::Server => run_server().await,
         Command::OperatorTask => crate::operator_task::run().await,
+        Command::AuditAnchorWorker => run_audit_anchor_worker().await,
         Command::BuildIdentity => {
             println!(
                 "{}",
                 serde_json::to_string(&crate::operator_task::embedded_identity())?
             );
+            Ok(())
+        }
+    }
+}
+
+async fn run_audit_anchor_worker() -> anyhow::Result<()> {
+    let config = ConfigSource::load_for_audit_anchor_worker()?;
+    let (database_url, database_max_connections, worker_config) =
+        crate::adapters::audit_anchor::worker_config_from_source(&config)?;
+    let pool = nazo_postgres::create_pool(database_url, database_max_connections)?;
+    let repository = nazo_postgres::AuditLedgerRepository::new(pool);
+    tokio::select! {
+        result = crate::adapters::audit_anchor::run_worker(repository, worker_config) => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
             Ok(())
         }
     }
@@ -53,6 +69,7 @@ enum Command {
     Help,
     Server,
     OperatorTask,
+    AuditAnchorWorker,
     BuildIdentity,
 }
 
@@ -75,6 +92,10 @@ impl Command {
             "operator-task" => {
                 ensure_no_extra_args(args, "operator-task")?;
                 Ok(Self::OperatorTask)
+            }
+            "audit-anchor-worker" => {
+                ensure_no_extra_args(args, "audit-anchor-worker")?;
+                Ok(Self::AuditAnchorWorker)
             }
             "build-identity" => {
                 ensure_no_extra_args(args, "build-identity")?;

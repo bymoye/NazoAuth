@@ -1,8 +1,13 @@
 //! 管理端用户账户接口。
-use crate::adapters::audit::audit_event;
 use crate::adapters::audit::audit_fields;
 use crate::adapters::security::blake3_hex;
-use crate::http::sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles};
+use crate::http::admin::{
+    persist_required_audit_or_unavailable, require_durable_audit_or_unavailable,
+};
+use crate::http::sessions::{
+    AdminSessionHandles, require_admin_or_forbidden_with_handles,
+    require_admin_with_recent_mfa_or_forbidden_with_handles,
+};
 use crate::http::views::admin_user_json;
 use crate::http::views::pagination;
 use actix_web::http::StatusCode;
@@ -89,7 +94,9 @@ pub(crate) async fn admin_create_user(
     ) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req)
+        .await
+    {
         Ok(admin) => admin,
         Err(response) => return response,
     };
@@ -120,6 +127,9 @@ pub(crate) async fn admin_create_user(
             );
         }
     };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     match accounts
         .create_user(NewUser {
             tenant: admin.tenant(),
@@ -131,16 +141,21 @@ pub(crate) async fn admin_create_user(
         .await
     {
         Ok(account) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 "admin_user_created",
                 audit_fields(&[
                     ("user_id", json!(account.id())),
+                    ("admin_user_id", json!(admin.id())),
                     (
                         "source_ip_hash",
                         json!(blake3_hex(&client_ip_with_config(&req, &client_ip_config))),
                     ),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             HttpResponse::Created()
                 .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
                 .json(admin_user_json(account))
@@ -177,7 +192,9 @@ pub(crate) async fn admin_patch_user(
     ) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req)
+        .await
+    {
         Ok(admin) => admin,
         Err(response) => return response,
     };
@@ -205,6 +222,9 @@ pub(crate) async fn admin_patch_user(
             );
         }
     };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     let updated = match users
         .update_authorized(
             admin.tenant().tenant_id,
@@ -237,16 +257,21 @@ pub(crate) async fn admin_patch_user(
     };
     match updated {
         nazo_identity::AdminUserUpdateOutcome::Updated(user) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 "admin_user_updated",
                 audit_fields(&[
                     ("user_id", json!(user.id())),
+                    ("admin_user_id", json!(admin.id())),
                     (
                         "source_ip_hash",
                         json!(blake3_hex(&client_ip_with_config(&req, &client_ip_config))),
                     ),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             json_response(admin_user_json(*user))
         }
         nazo_identity::AdminUserUpdateOutcome::TargetNotFound => {

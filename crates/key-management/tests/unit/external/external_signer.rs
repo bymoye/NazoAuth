@@ -1,5 +1,12 @@
 use super::*;
-use std::{sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::time::{Instant, sleep};
+use uuid::Uuid;
 
 use crate::store::{generate_key_material, public_jwk_from_private_der};
 
@@ -90,6 +97,162 @@ fn shell_single_quote(value: &str) -> String {
 #[cfg(windows)]
 fn powershell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(unix)]
+fn descendant_signer_command(pid_path: &Path, response: Option<&str>) -> Arc<Vec<String>> {
+    let pid_path = shell_single_quote(
+        pid_path
+            .to_str()
+            .expect("temporary descendant pid path should be valid UTF-8"),
+    );
+    let action = response.map_or_else(
+        || "sleep 30".to_owned(),
+        |response| {
+            format!(
+                "sleep 1; printf '%s' {}; exit 0",
+                shell_single_quote(response)
+            )
+        },
+    );
+    Arc::new(vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "cat >/dev/null; (sleep 30 </dev/null >/dev/null 2>&1) & child=$!; printf '%s' \"$child\" > {pid_path}; {action}",
+        ),
+    ])
+}
+
+#[cfg(windows)]
+fn descendant_signer_command(pid_path: &Path, response: Option<&str>) -> Arc<Vec<String>> {
+    let pid_path = powershell_single_quote(
+        pid_path
+            .to_str()
+            .expect("temporary descendant pid path should be valid UTF-8"),
+    );
+    let action = response.map_or_else(
+        || "Start-Sleep -Seconds 30".to_owned(),
+        |response| {
+            format!(
+                "Start-Sleep -Seconds 1; [Console]::Out.Write({}); exit 0",
+                powershell_single_quote(response)
+            )
+        },
+    );
+    Arc::new(vec![
+        "pwsh".to_owned(),
+        "-NoLogo".to_owned(),
+        "-NoProfile".to_owned(),
+        "-NonInteractive".to_owned(),
+        "-Command".to_owned(),
+        format!(
+            "$null=[Console]::In.ReadToEnd(); $child=Start-Process -FilePath 'pwsh' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden; Set-Content -LiteralPath {pid_path} -Value $child.Id -NoNewline; {action}",
+        ),
+    ])
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return stat
+            .split_whitespace()
+            .nth(2)
+            .is_some_and(|state| state != "Z");
+    }
+    ProcessCommand::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let script = format!(
+        "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+    );
+    ProcessCommand::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+fn kill_process_for_test(pid: u32) {
+    let _ = ProcessCommand::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+}
+
+#[cfg(windows)]
+fn kill_process_for_test(pid: u32) {
+    let _ = ProcessCommand::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+}
+
+struct DescendantFixture {
+    pid_path: PathBuf,
+    pid: Option<u32>,
+}
+
+impl DescendantFixture {
+    fn new() -> Self {
+        Self {
+            pid_path: std::env::temp_dir().join(format!(
+                "nazo-external-signer-descendant-{}.pid",
+                Uuid::now_v7()
+            )),
+            pid: None,
+        }
+    }
+
+    async fn wait_until_alive(&mut self) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&self.pid_path)
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                && process_is_alive(pid)
+            {
+                self.pid = Some(pid);
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "signer did not publish a live descendant pid at {}",
+                self.pid_path.display()
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn assert_gone(&self, pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "external signer descendant {pid} survived tree termination"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+impl Drop for DescendantFixture {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.filter(|pid| process_is_alive(*pid)) {
+            kill_process_for_test(pid);
+        }
+        let _ = std::fs::remove_file(&self.pid_path);
+    }
 }
 
 fn eddsa_fixture(kid: &str) -> (Vec<u8>, Value) {
@@ -337,6 +500,150 @@ async fn external_signing_times_out_and_fails_closed() {
         format!("{error}").contains("timed out"),
         "unexpected error: {error}"
     );
+}
+
+#[tokio::test]
+async fn external_signer_success_terminates_owned_descendant() {
+    let mut fixture = DescendantFixture::new();
+    let kid = "external-kid";
+    let (private_key, public_jwk) = eddsa_fixture(kid);
+    let signature = sign_input(&private_key, "header.claims");
+    let response = json!({"signature": signature}).to_string();
+    let external = external_signing_key_with_command(
+        descendant_signer_command(&fixture.pid_path, Some(&response)),
+        5_000,
+    );
+    let task = tokio::spawn(async move {
+        sign_external_jwt_input(
+            &external,
+            kid,
+            jsonwebtoken::Algorithm::EdDSA,
+            "header.claims",
+            &public_jwk,
+        )
+        .await
+    });
+    let pid = fixture.wait_until_alive().await;
+    let result = task
+        .await
+        .expect("external signer task should not panic")
+        .expect("valid signer response should succeed");
+    assert_eq!(result, signature);
+    fixture.assert_gone(pid).await;
+}
+
+#[tokio::test]
+async fn external_signer_malformed_response_terminates_owned_descendant() {
+    let mut fixture = DescendantFixture::new();
+    let kid = "external-kid";
+    let (_private_key, public_jwk) = eddsa_fixture(kid);
+    let external = external_signing_key_with_command(
+        descendant_signer_command(&fixture.pid_path, Some("not-json")),
+        5_000,
+    );
+    let task = tokio::spawn(async move {
+        sign_external_jwt_input(
+            &external,
+            kid,
+            jsonwebtoken::Algorithm::EdDSA,
+            "header.claims",
+            &public_jwk,
+        )
+        .await
+    });
+    let pid = fixture.wait_until_alive().await;
+    let error = task
+        .await
+        .expect("external signer task should not panic")
+        .expect_err("malformed signer output must fail");
+    assert!(format!("{error}").contains("expected"));
+    fixture.assert_gone(pid).await;
+}
+
+#[tokio::test]
+async fn external_signer_invalid_signature_terminates_owned_descendant() {
+    let mut fixture = DescendantFixture::new();
+    let kid = "external-kid";
+    let (_private_key, public_jwk) = eddsa_fixture(kid);
+    let response = json!({"signature": "ZmFrZQ"}).to_string();
+    let external = external_signing_key_with_command(
+        descendant_signer_command(&fixture.pid_path, Some(&response)),
+        5_000,
+    );
+    let task = tokio::spawn(async move {
+        sign_external_jwt_input(
+            &external,
+            kid,
+            jsonwebtoken::Algorithm::EdDSA,
+            "header.claims",
+            &public_jwk,
+        )
+        .await
+    });
+    let pid = fixture.wait_until_alive().await;
+    let error = task
+        .await
+        .expect("external signer task should not panic")
+        .expect_err("invalid signer signature must fail closed");
+    assert!(format!("{error}").contains("does not verify"));
+    fixture.assert_gone(pid).await;
+}
+
+#[tokio::test]
+async fn external_signer_timeout_terminates_owned_descendant() {
+    let mut fixture = DescendantFixture::new();
+    let kid = "external-kid";
+    let (_private_key, public_jwk) = eddsa_fixture(kid);
+    let external = external_signing_key_with_command(
+        descendant_signer_command(&fixture.pid_path, None),
+        2_000,
+    );
+    let task = tokio::spawn(async move {
+        sign_external_jwt_input(
+            &external,
+            kid,
+            jsonwebtoken::Algorithm::EdDSA,
+            "header.claims",
+            &public_jwk,
+        )
+        .await
+    });
+    let pid = fixture.wait_until_alive().await;
+    let error = task
+        .await
+        .expect("external signer task should not panic")
+        .expect_err("slow signer must time out");
+    assert!(format!("{error}").contains("timed out"));
+    fixture.assert_gone(pid).await;
+}
+
+#[tokio::test]
+async fn external_signer_future_cancellation_terminates_owned_descendant() {
+    let mut fixture = DescendantFixture::new();
+    let kid = "external-kid";
+    let (_private_key, public_jwk) = eddsa_fixture(kid);
+    let external = external_signing_key_with_command(
+        descendant_signer_command(&fixture.pid_path, None),
+        5_000,
+    );
+    let task = tokio::spawn(async move {
+        sign_external_jwt_input(
+            &external,
+            kid,
+            jsonwebtoken::Algorithm::EdDSA,
+            "header.claims",
+            &public_jwk,
+        )
+        .await
+    });
+    let pid = fixture.wait_until_alive().await;
+    task.abort();
+    assert!(
+        task.await
+            .expect_err("aborted signer future should report cancellation")
+            .is_cancelled()
+    );
+    fixture.assert_gone(pid).await;
 }
 
 #[tokio::test]

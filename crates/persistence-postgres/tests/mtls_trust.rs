@@ -45,7 +45,7 @@ fn request(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
     let Some(database_url) = database_url() else {
         return;

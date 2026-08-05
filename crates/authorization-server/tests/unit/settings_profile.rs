@@ -22,6 +22,11 @@ fn legacy_message_signing_profiles_map_to_independent_policy_bits() {
     assert!(!introspection.require_signed_authorization_request);
     assert!(!introspection.require_signed_authorization_response);
     assert!(introspection.require_signed_introspection_response);
+    assert!(
+        !AuthorizationServerProfile::Oauth2Baseline
+            .legacy_client_policy()
+            .allow_confidential_oidc_without_pkce
+    );
 }
 
 #[test]

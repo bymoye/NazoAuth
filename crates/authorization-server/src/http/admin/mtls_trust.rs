@@ -18,7 +18,11 @@ use crate::{
     adapters::audit::{audit_event, audit_fields},
     bootstrap::MtlsTrustAnchorService,
     http::{
-        sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles},
+        admin::{persist_required_audit_or_unavailable, require_durable_audit_or_unavailable},
+        sessions::{
+            AdminSessionHandles, require_admin_or_forbidden_with_handles,
+            require_admin_with_recent_mfa_or_forbidden_with_handles,
+        },
         views::pagination,
     },
 };
@@ -134,7 +138,7 @@ async fn resolve(
     if !valid_csrf(sessions, req) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(sessions, req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(sessions, req).await {
         Ok(admin) => admin,
         Err(response) => return response,
     };
@@ -142,6 +146,9 @@ async fn resolve(
         Ok(note) => note,
         Err(response) => return response,
     };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     let result = if approve {
         service
             .approve(
@@ -163,7 +170,7 @@ async fn resolve(
     };
     match result {
         Ok(value) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 if approve {
                     "mtls_trust_anchor_approved"
                 } else {
@@ -173,7 +180,11 @@ async fn resolve(
                     ("request_id", serde_json::json!(request_id)),
                     ("admin_user_id", serde_json::json!(admin.id())),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             json_response_no_store(value)
         }
         Err(nazo_identity::ports::RepositoryError::Conflict) => oauth_error(
@@ -226,7 +237,8 @@ pub(crate) async fn admin_revoke_mtls_trust_anchor(
     if !valid_csrf(&sessions, &req) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&sessions, &req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&sessions, &req).await
+    {
         Ok(admin) => admin,
         Err(response) => return response,
     };
@@ -239,6 +251,9 @@ pub(crate) async fn admin_revoke_mtls_trust_anchor(
             "撤销原因不能为空且不得超过 1000 字节.",
         );
     }
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     match service
         .revoke(
             admin.principal.tenant.tenant_id,
@@ -249,13 +264,17 @@ pub(crate) async fn admin_revoke_mtls_trust_anchor(
         .await
     {
         Ok(value) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 "mtls_trust_anchor_revoked",
                 audit_fields(&[
                     ("request_id", serde_json::json!(request_id)),
                     ("admin_user_id", serde_json::json!(admin.id())),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             json_response_no_store(value)
         }
         Err(nazo_identity::ports::RepositoryError::Conflict) => oauth_error(

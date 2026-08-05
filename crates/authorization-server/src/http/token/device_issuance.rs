@@ -6,6 +6,7 @@
 //! client-assertion consumption use the focused authorization service carried by
 //! the issuance context.
 use crate::adapters::security::ValidatedClientAssertion;
+use crate::adapters::security::blake3_hex;
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
@@ -21,8 +22,24 @@ use super::client_auth::consume_token_client_assertion_with_authorization_servic
 use super::{
     ServerTokenService, TokenForm,
     device::ServerDeviceGrantService,
-    issue::{TokenIssuanceContext, issue_token_response_with_service},
+    issue::{
+        TokenIssuanceContext, issue_token_response_with_service_and_grant,
+        recover_token_issuance_response,
+    },
 };
+
+fn device_grant_key(
+    device_code: &str,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> String {
+    format!(
+        "device_code:{}:{}:{}",
+        blake3_hex(device_code),
+        dpop_jkt.map(blake3_hex).unwrap_or_default(),
+        mtls_x5t_s256.map(blake3_hex).unwrap_or_default(),
+    )
+}
 
 pub(crate) async fn token_device_code_with_service(
     token_service: &ServerTokenService,
@@ -91,6 +108,13 @@ pub(crate) async fn token_device_code_with_service(
     } else {
         None
     };
+    let device_grant_key =
+        device_grant_key(device_code, dpop_jkt.as_deref(), mtls_x5t_s256.as_deref());
+    if let Some(response) =
+        recover_token_issuance_response(token_service, client, &device_grant_key).await
+    {
+        return response;
+    }
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -134,10 +158,11 @@ pub(crate) async fn token_device_code_with_service(
         ),
         Ok(DevicePollCommit::Approved(approved)) => {
             let nazo_auth::ApprovedDeviceAuthorization { payload, approval } = *approved;
-            issue_token_response_with_service(
+            issue_token_response_with_service_and_grant(
                 issuance,
                 token_service,
                 client,
+                Some(&device_grant_key),
                 TokenIssue {
                     user_id: Some(approval.user_id),
                     subject: approval.subject,
@@ -153,6 +178,7 @@ pub(crate) async fn token_device_code_with_service(
                     userinfo_claim_requests: Vec::new(),
                     id_token_claims: Vec::new(),
                     id_token_claim_requests: Vec::new(),
+                    refresh_id_token_sid: None,
                     include_refresh: true,
                     refresh_token_policy: RefreshTokenPolicy::IssueNew,
                     refresh_token_dpop_jkt: dpop_jkt.clone(),

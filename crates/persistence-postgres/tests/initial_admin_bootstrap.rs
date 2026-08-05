@@ -43,7 +43,7 @@ fn schema_database_url(base: &str, schema: &str) -> String {
     format!("{base}{separator}options=-csearch_path%3D{schema}%2Cpublic")
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() {
     let Some(database_url) = database_url() else {
         return;
@@ -275,7 +275,7 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
         .expect("isolated schema should drop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_consumed_claim_is_closed_without_becoming_replayable() {
     let Some(database_url) = database_url() else {
         return;
@@ -327,7 +327,7 @@ async fn legacy_consumed_claim_is_closed_without_becoming_replayable() {
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bootstrap_audit_failure_rolls_back_user_receipt_and_consumption() {
     let Some(database_url) = database_url() else {
         return;

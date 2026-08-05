@@ -3,45 +3,18 @@ use actix_web::http::header;
 use actix_web::{HttpResponse, test as actix_test};
 
 fn write_test_tls_identity(root: &std::path::Path) -> (String, String, String) {
-    use openssl::{
-        asn1::Asn1Time,
-        bn::{BigNum, MsbOption},
-        hash::MessageDigest,
-        pkey::PKey,
-        rsa::Rsa,
-        x509::{X509, X509NameBuilder, extension::BasicConstraints},
-    };
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256};
 
-    let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-    let mut name = X509NameBuilder::new().unwrap();
-    name.append_entry_by_text("CN", "localhost").unwrap();
-    let name = name.build();
-    let mut serial = BigNum::new().unwrap();
-    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
-    let serial = serial.to_asn1_integer().unwrap();
-    let mut certificate = X509::builder().unwrap();
-    certificate.set_version(2).unwrap();
-    certificate.set_serial_number(&serial).unwrap();
-    certificate.set_subject_name(&name).unwrap();
-    certificate.set_issuer_name(&name).unwrap();
-    certificate.set_pubkey(&key).unwrap();
-    certificate
-        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
-        .unwrap();
-    certificate
-        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
-        .unwrap();
-    certificate
-        .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-        .unwrap();
-    certificate.sign(&key, MessageDigest::sha256()).unwrap();
-    let certificate = certificate.build();
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let mut params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let certificate = params.self_signed(&key).unwrap();
     let certificate_path = root.join("server.pem");
     let private_key_path = root.join("server.key");
     let ca_path = root.join("ca.pem");
-    std::fs::write(&certificate_path, certificate.to_pem().unwrap()).unwrap();
-    std::fs::write(&ca_path, certificate.to_pem().unwrap()).unwrap();
-    std::fs::write(&private_key_path, key.private_key_to_pem_pkcs8().unwrap()).unwrap();
+    std::fs::write(&certificate_path, certificate.pem()).unwrap();
+    std::fs::write(&ca_path, certificate.pem()).unwrap();
+    std::fs::write(&private_key_path, key.serialize_pem()).unwrap();
     (
         certificate_path.display().to_string(),
         private_key_path.display().to_string(),
@@ -61,6 +34,22 @@ fn production_bootstrap_only_publishes_focused_application_data() {
         !source.contains(".app_data(state"),
         "production Actix app must not publish the giant TestInfrastructure"
     );
+}
+
+#[test]
+fn transport_tls_features_are_consolidated_on_rustls() {
+    let manifest = include_str!("../../Cargo.toml");
+
+    assert!(
+        manifest
+            .contains(r#"actix-web = { workspace = true, features = ["cookies", "rustls-0_23"] }"#)
+    );
+    assert!(manifest.contains(
+        r#"lettre = { workspace = true, features = ["aws-lc-rs", "builder", "rustls-platform-verifier", "smtp-transport", "tokio1-rustls"] }"#
+    ));
+    assert!(!manifest.contains("tokio1-native-tls"));
+    assert!(!manifest.contains(r#"features = ["native-tls", "rustls"#));
+    assert!(!manifest.contains(r#"features = ["cookies", "openssl"]"#));
 }
 
 #[actix_web::test]
