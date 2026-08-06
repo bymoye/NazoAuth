@@ -734,16 +734,17 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
     assert!(issuer.record_notification(&notification).await.unwrap());
     assert!(!issuer.record_notification(&notification).await.unwrap());
 
+    let deferred_ready_at = Utc::now() + Duration::seconds(1);
     let deferred = DeferredCredential {
         id: Uuid::now_v7(),
         transaction_hash: blake3::hash(b"deferred-transaction").to_hex().to_string(),
         access: access.clone(),
         configuration_id: "pid".to_owned(),
         format: CredentialFormat::SdJwtVc,
-        holder_bindings: Vec::new(),
+        holder_bindings: vec![serde_json::json!({"jwk":{"kid":"holder"}})],
         payload_ciphertext: b"deferred-payload".to_vec(),
-        ready_at: now - Duration::seconds(1),
-        expires_at: now + Duration::minutes(5),
+        ready_at: deferred_ready_at,
+        expires_at: deferred_ready_at + Duration::minutes(5),
     };
     issuer.store_deferred(&deferred).await.unwrap();
     let first_claim = issuer
@@ -751,7 +752,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             &deferred.transaction_hash,
             access.token_id,
             "deferred-a",
-            now,
+            deferred_ready_at,
         )
         .await
         .unwrap()
@@ -767,7 +768,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &deferred.transaction_hash,
                 access.token_id,
                 "deferred-b",
-                now,
+                deferred_ready_at,
             )
             .await
             .unwrap()
@@ -779,7 +780,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &deferred.transaction_hash,
                 access.token_id,
                 "deferred-a",
-                now,
+                deferred_ready_at,
             )
             .await
             .unwrap()
@@ -790,7 +791,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &deferred.transaction_hash,
                 access.token_id,
                 "deferred-b",
-                now,
+                deferred_ready_at,
             )
             .await
             .unwrap()
@@ -802,7 +803,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &deferred.transaction_hash,
                 access.token_id,
                 "deferred-a",
-                now,
+                deferred_ready_at,
             )
             .await
             .unwrap()
@@ -813,7 +814,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &deferred.transaction_hash,
                 access.token_id,
                 "deferred-b",
-                now,
+                deferred_ready_at,
             )
             .await
             .unwrap()
@@ -831,7 +832,11 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
     );
     assert!(
         issuer
-            .consume_ready_deferred(&deferred.transaction_hash, access.token_id, now)
+            .consume_ready_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                deferred_ready_at,
+            )
             .await
             .unwrap()
             .is_none()
@@ -852,6 +857,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             .await
             .unwrap()
     );
+    let atomic_deferred_ready_at = Utc::now() + Duration::seconds(1);
     let atomic_deferred = DeferredCredential {
         id: Uuid::now_v7(),
         transaction_hash: blake3::hash(b"atomic-deferred-transaction")
@@ -860,10 +866,10 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
         access: access.clone(),
         configuration_id: "pid".to_owned(),
         format: CredentialFormat::SdJwtVc,
-        holder_bindings: Vec::new(),
+        holder_bindings: vec![serde_json::json!({"jwk":{"kid":"holder"}})],
         payload_ciphertext: b"atomic-payload".to_vec(),
-        ready_at: now - Duration::seconds(1),
-        expires_at: now + Duration::minutes(5),
+        ready_at: atomic_deferred_ready_at,
+        expires_at: atomic_deferred_ready_at + Duration::minutes(5),
     };
     let atomic_response = StoredCredentialResponse {
         issuance_id: Uuid::now_v7(),
@@ -881,7 +887,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             &atomic_nonce_hash,
             "atomic-claim",
             &atomic_response,
-            atomic_now,
+            atomic_deferred_ready_at,
         )
         .await
         .unwrap();
@@ -897,7 +903,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 atomic_response.issuance_id,
                 atomic_response.token_id,
                 &atomic_response.request_digest,
-                atomic_now,
+                atomic_deferred_ready_at,
             )
             .await
             .unwrap()
@@ -910,7 +916,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             &atomic_deferred.transaction_hash,
             access.token_id,
             "atomic-deferred-claim",
-            atomic_now,
+            atomic_deferred_ready_at,
         )
         .await
         .unwrap()
@@ -925,7 +931,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &atomic_deferred.transaction_hash,
                 access.token_id,
                 &atomic_claim.claim_id,
-                atomic_now,
+                atomic_deferred_ready_at,
             )
             .await
             .unwrap()

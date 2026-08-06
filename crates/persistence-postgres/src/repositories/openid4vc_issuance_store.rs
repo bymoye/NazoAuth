@@ -169,7 +169,7 @@ impl CredentialStorePort for Openid4vciRepository {
                 let configuration_ids = serde_json::from_value(row.credential_configuration_ids)
                     .map_err(decode_error)?;
                 let consumed = sql_query(
-                    "UPDATE openid4vci_offers SET consumed_at = $2 \
+                    "UPDATE openid4vci_offers SET consumed_at = GREATEST($2, created_at) \
                      WHERE id = $1 AND consumed_at IS NULL",
                 )
                 .bind::<sql_types::Uuid, _>(row.id)
@@ -226,7 +226,7 @@ impl CredentialStorePort for Openid4vciRepository {
                 .await
                 .map_err(|_| CredentialStoreError::Unavailable)?;
             let changed = sql_query(
-                "UPDATE openid4vci_nonces SET consumed_at = $2 \
+                "UPDATE openid4vci_nonces SET consumed_at = GREATEST($2, created_at) \
                  WHERE nonce_hash = $1 AND consumed_at IS NULL AND expires_at > $2",
             )
             .bind::<sql_types::Text, _>(nonce_hash)
@@ -280,7 +280,7 @@ impl CredentialStorePort for Openid4vciRepository {
                 .await
                 .map_err(|_| CredentialStoreError::Unavailable)?;
             let changed = sql_query(
-                "UPDATE openid4vci_nonces SET consumed_at = $3, claim_id = NULL, claim_expires_at = NULL \
+                "UPDATE openid4vci_nonces SET consumed_at = GREATEST($3, created_at), claim_id = NULL, claim_expires_at = NULL \
                  WHERE nonce_hash = $1 AND claim_id = $2 AND consumed_at IS NULL AND expires_at > $3",
             )
             .bind::<sql_types::Text, _>(nonce_hash)
@@ -346,7 +346,7 @@ impl CredentialStorePort for Openid4vciRepository {
                     .execute(connection)
                     .await?;
                     let changed = sql_query(
-                        "UPDATE openid4vci_nonces SET consumed_at = $3, claim_id = NULL, claim_expires_at = NULL \
+                        "UPDATE openid4vci_nonces SET consumed_at = GREATEST($3, created_at), claim_id = NULL, claim_expires_at = NULL \
                          WHERE nonce_hash = $1 AND claim_id = $2 AND consumed_at IS NULL AND expires_at > $3",
                     )
                     .bind::<sql_types::Text, _>(nonce_hash)
@@ -417,7 +417,7 @@ impl CredentialStorePort for Openid4vciRepository {
                     .execute(connection)
                     .await?;
                     let changed = sql_query(
-                        "UPDATE openid4vci_nonces SET consumed_at = $3, claim_id = NULL, claim_expires_at = NULL \
+                        "UPDATE openid4vci_nonces SET consumed_at = GREATEST($3, created_at), claim_id = NULL, claim_expires_at = NULL \
                          WHERE nonce_hash = $1 AND claim_id = $2 AND consumed_at IS NULL AND expires_at > $3",
                     )
                     .bind::<sql_types::Text, _>(nonce_hash)
@@ -680,7 +680,7 @@ impl CredentialStorePort for Openid4vciRepository {
                     .execute(connection)
                     .await?;
                     let changed = sql_query(
-                        "UPDATE openid4vci_nonces SET consumed_at = $3, claim_id = NULL, claim_expires_at = NULL \
+                        "UPDATE openid4vci_nonces SET consumed_at = GREATEST($3, created_at), claim_id = NULL, claim_expires_at = NULL \
                          WHERE nonce_hash = $1 AND claim_id = $2 AND consumed_at IS NULL AND expires_at > $3",
                     )
                     .bind::<sql_types::Text, _>(nonce_hash)
@@ -769,7 +769,7 @@ impl CredentialStorePort for Openid4vciRepository {
                     )
                     .await?;
                     let changed = sql_query(
-                        "UPDATE openid4vci_nonces SET consumed_at = $3, claim_id = NULL, claim_expires_at = NULL \
+                        "UPDATE openid4vci_nonces SET consumed_at = GREATEST($3, created_at), claim_id = NULL, claim_expires_at = NULL \
                          WHERE nonce_hash = $1 AND claim_id = $2 AND consumed_at IS NULL AND expires_at > $3",
                     )
                     .bind::<sql_types::Text, _>(nonce_hash)
@@ -864,7 +864,7 @@ impl CredentialStorePort for Openid4vciRepository {
                 .map_err(|_| CredentialStoreError::Unavailable)?;
             let changed = sql_query(
                 "UPDATE openid4vci_deferred_transactions \
-                 SET consumed_at = $4, claim_id = NULL, claim_expires_at = NULL \
+                 SET consumed_at = GREATEST($4, ready_at), claim_id = NULL, claim_expires_at = NULL \
                  WHERE transaction_hash = $1 AND token_id = $2 AND claim_id = $3 \
                    AND consumed_at IS NULL AND expires_at > $4",
             )
@@ -938,7 +938,7 @@ impl CredentialStorePort for Openid4vciRepository {
                     .await?;
                     let changed = sql_query(
                         "UPDATE openid4vci_deferred_transactions \
-                         SET consumed_at = $4, claim_id = NULL, claim_expires_at = NULL \
+                         SET consumed_at = GREATEST($4, ready_at), claim_id = NULL, claim_expires_at = NULL \
                          WHERE transaction_hash = $1 AND token_id = $2 AND claim_id = $3 \
                            AND consumed_at IS NULL AND expires_at > $4",
                     )
@@ -1013,7 +1013,7 @@ impl CredentialStorePort for Openid4vciRepository {
                     .await?;
                     let changed = sql_query(
                         "UPDATE openid4vci_deferred_transactions \
-                         SET consumed_at = $4, claim_id = NULL, claim_expires_at = NULL \
+                         SET consumed_at = GREATEST($4, ready_at), claim_id = NULL, claim_expires_at = NULL \
                          WHERE transaction_hash = $1 AND token_id = $2 AND claim_id = $3 \
                            AND consumed_at IS NULL AND expires_at > $4",
                     )
@@ -1048,7 +1048,7 @@ impl CredentialStorePort for Openid4vciRepository {
             connection
                 .transaction::<Option<DeferredCredential>, diesel::result::Error, _>(async move |connection| {
                     let row = sql_query(
-                        "UPDATE openid4vci_deferred_transactions SET consumed_at = $3 \
+                        "UPDATE openid4vci_deferred_transactions SET consumed_at = GREATEST($3, ready_at) \
                          WHERE transaction_hash = $1 AND token_id = $2 AND consumed_at IS NULL \
                            AND ready_at <= $3 AND expires_at > $3 \
                          RETURNING id, transaction_hash, token_id, credential_configuration_id, \
