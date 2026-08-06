@@ -1,9 +1,13 @@
 #!/bin/sh
 set -eu
 
-expected_revision=932b46f1e507871eb0b34621aaef65ff04442e6f
+# Keep the historical release revision as the safe default, while allowing an
+# operator to bind this deployment to an explicitly fetched GitLab baseline.
+# The value is always checked against the clean checkout before any image is
+# reused or built.
+expected_revision=${OIDF_SUITE_UPSTREAM_REVISION:-932b46f1e507871eb0b34621aaef65ff04442e6f}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-NAZOAUTH_SOURCE_DIR=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+NAZOAUTH_SOURCE_DIR=${NAZOAUTH_SOURCE_DIR:-$(CDPATH= cd -- "$script_dir/../.." && pwd)}
 export NAZOAUTH_SOURCE_DIR
 : "${OIDF_SUITE_SOURCE_DIR:?set OIDF_SUITE_SOURCE_DIR}"
 : "${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL}"
@@ -45,7 +49,7 @@ test -z "$(git -C "$NAZOAUTH_SOURCE_DIR" status --porcelain)" || {
   echo "NazoAuth source checkout is not clean" >&2
   exit 1
 }
-suite_image_tag=${OIDF_SUITE_IMAGE_TAG:-932b46f1}
+suite_image_tag=${OIDF_SUITE_IMAGE_TAG:-$(printf '%.12s' "$expected_revision")}
 export OIDF_SUITE_IMAGE_TAG=$suite_image_tag
 suite_image="nazoauth-oidf-suite:$suite_image_tag"
 nginx_image="nazoauth-oidf-suite-nginx:$suite_image_tag"
