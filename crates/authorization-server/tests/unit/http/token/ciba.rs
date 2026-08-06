@@ -191,6 +191,15 @@ async fn call_ciba_token_for_test(
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
         .to_http_request();
+    call_ciba_token_with_request_for_test(state, client, auth_req_id, req).await
+}
+
+async fn call_ciba_token_with_request_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    auth_req_id: String,
+    req: HttpRequest,
+) -> HttpResponse {
     let form = ciba_token_form(auth_req_id);
     let connection = state.valkey_connection();
     let ciba_service = ServerCibaService::new(CibaStore::new(&connection));
@@ -1477,20 +1486,33 @@ async fn ciba_token_request_validates_mtls_binding_before_issuing_approved_token
 
 #[actix_web::test]
 async fn ciba_replay_rejects_a_consumed_auth_req_id_even_with_a_persisted_response() {
-    let Some(state) = live_ciba_replay_state().await else {
+    let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
+    let mut settings = (*state.settings).clone();
+    settings.endpoint.trusted_proxy_cidrs = vec![
+        nazo_http_actix::IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse"),
+    ];
+    state.settings = Arc::new(settings);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
-    let client = ciba_private_key_jwt_client("ciba-replay-kid", &key);
+    let mut client = ciba_private_key_jwt_client("ciba-replay-kid", &key);
+    client.require_mtls_bound_tokens = true;
     let auth_req_id = format!("ciba-replay-{}", Uuid::now_v7());
-    let grant_key = ciba_grant_key(&auth_req_id, None, None);
+    let thumbprint = "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8";
+    let grant_key = ciba_grant_key(&auth_req_id, None, Some(thumbprint));
 
     crate::http::token::issue::tests::persist_token_issuance_response_for_test(
         &state, &client, &grant_key,
     )
     .await;
 
-    let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
+    let req = actix_web::test::TestRequest::post()
+        .uri("/token")
+        .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("x-ssl-client-verify", "SUCCESS"))
+        .insert_header(("x-ssl-client-cert-sha256", thumbprint))
+        .to_http_request();
+    let response = call_ciba_token_with_request_for_test(&state, &client, auth_req_id, req).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         response
