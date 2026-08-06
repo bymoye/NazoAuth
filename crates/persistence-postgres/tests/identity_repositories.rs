@@ -828,7 +828,6 @@ async fn mfa_encrypted_lifecycle_rotation_and_trait_boundary_are_tenant_safe() {
     let other_tenant = TenantId::new(Uuid::now_v7()).unwrap();
     let trait_repository: &dyn MfaRepositoryPort = &repository;
 
-    assert!(!repository.has_totp_credentials().await.unwrap());
     assert!(
         trait_repository
             .totp_enrollment(tenant.tenant_id, user_id)
@@ -904,7 +903,6 @@ async fn mfa_encrypted_lifecycle_rotation_and_trait_boundary_are_tenant_safe() {
             .unwrap(),
         nazo_identity::ports::TotpVerificationOutcome::Accepted
     );
-    assert!(repository.has_totp_credentials().await.unwrap());
     let credential = trait_repository
         .totp_credential(tenant.tenant_id, user_id)
         .await
@@ -1062,7 +1060,13 @@ async fn mfa_encrypted_lifecycle_rotation_and_trait_boundary_are_tenant_safe() {
         .clear_mfa_state(tenant.tenant_id, user_id)
         .await
         .unwrap();
-    assert!(!repository.has_totp_credentials().await.unwrap());
+    assert!(
+        trait_repository
+            .totp_credential(tenant.tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         trait_repository
             .backup_code_candidates(tenant.tenant_id, user_id)

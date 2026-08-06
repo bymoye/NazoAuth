@@ -212,6 +212,10 @@ impl MfaRepository {
             .map_err(MfaSecretMigrationError::into_repository)
     }
 
+    /// Returns whether any tenant has a persisted TOTP credential.
+    ///
+    /// This process-wide query is for bootstrap preflight checks. Tenant and
+    /// user flows must use the scoped credential and enrollment queries.
     pub async fn has_totp_credentials(&self) -> Result<bool, RepositoryError> {
         let mut connection = self
             .pool

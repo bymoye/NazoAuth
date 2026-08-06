@@ -144,10 +144,13 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         .iter()
         .find(|delivery| delivery.event_id == first_id)
         .expect("first event should have an outbox row");
-    repository
-        .mark_exported(first_id, first_delivery.attempts)
-        .await
-        .expect("claimed event should be markable as exported");
+    assert_eq!(first_delivery.event_id, first_id);
+    for delivery in claimed {
+        repository
+            .mark_exported(delivery.event_id, delivery.attempts)
+            .await
+            .expect("every claimed audit event should be marked as exported");
+    }
 
     let health = repository
         .anchor_health()

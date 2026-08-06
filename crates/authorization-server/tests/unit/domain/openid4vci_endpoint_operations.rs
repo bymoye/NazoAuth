@@ -370,8 +370,8 @@ fn jwt_credential_request(configuration_id: &str, issuer: &str, nonce: &str) -> 
         }),
     );
     CredentialRequest {
-        credential_identifier: None,
-        credential_configuration_id: Some(configuration_id.to_owned()),
+        credential_identifier: Some(openid4vci_credential_identifier(configuration_id)),
+        credential_configuration_id: None,
         proofs: Some(nazo_openid4vci::Proofs(BTreeMap::from([(
             "jwt".to_owned(),
             vec![json!(jwt)],

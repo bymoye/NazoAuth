@@ -629,7 +629,8 @@ pub(crate) async fn issue_token_response_with_service_and_grant(
         .await
     {
         Ok(v) => v,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(%error, "failed to sign access token");
             mark_failed_authorization_code_if_needed(
                 token_service,
                 issue.authorization_code_hash.as_deref(),
@@ -809,7 +810,8 @@ pub(crate) async fn issue_token_response_with_service_and_grant(
             .await
         {
             Ok(token) => token,
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(%error, "failed to sign id_token");
                 mark_failed_authorization_code_if_needed(
                     token_service,
                     issue.authorization_code_hash.as_deref(),

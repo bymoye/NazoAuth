@@ -104,10 +104,15 @@ docker exec "$VALKEY_CONTAINER" valkey-cli ping
 docker exec "$POSTGRES_CONTAINER" \
   psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
   -c 'CREATE DATABASE nazo_audit_test'
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nazo_workspace_test'
 
 export DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/oauth"
 export NAZO_AUDIT_TEST_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_audit_test"
 export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"
+WORKSPACE_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_workspace_test"
+WORKSPACE_VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/1"
 export VALKEY_COMMAND_TIMEOUT_MS='1000'
 export BIND='127.0.0.1:18000'
 export ISSUER='http://127.0.0.1:18000'
@@ -309,6 +314,16 @@ SIGNED_SERVER_PID=""
 kill -INT "$SERVER_PID"
 wait "$SERVER_PID" || true
 SERVER_PID=""
+
+# The E2E seed intentionally leaves durable identity and protocol state behind.
+# Workspace integration tests include process-wide migration and key-rotation
+# invariants, so they must start from their own migrated database and Valkey DB
+# rather than inheriting another test phase's credentials or key versions.
+export DATABASE_URL="$WORKSPACE_DATABASE_URL"
+export NAZO_TEST_DATABASE_URL="$WORKSPACE_DATABASE_URL"
+export VALKEY_URL="$WORKSPACE_VALKEY_URL"
+cargo test --locked -p nazo-postgres --test migrations \
+  pending_migrations_create_all_runtime_module_state_tables
 
 TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"
 cargo test --locked --workspace --all-features --lib --bins --tests \

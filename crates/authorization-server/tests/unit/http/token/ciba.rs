@@ -255,6 +255,30 @@ async fn call_ciba_token_for_test(
     call_ciba_token_with_request_for_test(state, client, auth_req_id, req).await
 }
 
+const CIBA_TEST_MTLS_THUMBPRINT: &str = "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8";
+
+fn enable_ciba_test_mtls_proxy(state: &mut TestInfrastructure) {
+    let mut settings = (*state.settings).clone();
+    settings.endpoint.trusted_proxy_cidrs = vec![
+        nazo_http_actix::IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse"),
+    ];
+    state.settings = Arc::new(settings);
+}
+
+async fn call_ciba_token_with_mtls_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    auth_req_id: String,
+) -> HttpResponse {
+    let req = actix_web::test::TestRequest::post()
+        .uri("/token")
+        .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("x-ssl-client-verify", "SUCCESS"))
+        .insert_header(("x-ssl-client-cert-sha256", CIBA_TEST_MTLS_THUMBPRINT))
+        .to_http_request();
+    call_ciba_token_with_request_for_test(state, client, auth_req_id, req).await
+}
+
 async fn call_ciba_token_with_request_for_test(
     state: &TestInfrastructure,
     client: &ClientRow,
@@ -1786,22 +1810,24 @@ async fn ciba_token_poll_maps_pending_slow_down_and_denied_states() {
         settings.modules.enable_ciba = true;
     });
     state.valkey = valkey;
+    enable_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
-    let client = ciba_private_key_jwt_client("poll-status-kid", &key);
+    let mut client = ciba_private_key_jwt_client("poll-status-kid", &key);
+    client.require_mtls_bound_tokens = true;
 
     let pending_id = format!("pending-status-{}", Uuid::now_v7());
     store_ciba_state(&state, &client, &pending_id, CibaStatus::Pending).await;
-    let pending = call_ciba_token_for_test(&state, &client, pending_id.clone()).await;
+    let pending = call_ciba_token_with_mtls_for_test(&state, &client, pending_id.clone()).await;
     assert_eq!(pending.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&pending), "authorization_pending");
 
-    let slow_down = call_ciba_token_for_test(&state, &client, pending_id).await;
+    let slow_down = call_ciba_token_with_mtls_for_test(&state, &client, pending_id).await;
     assert_eq!(slow_down.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&slow_down), "slow_down");
 
     let denied_id = format!("denied-status-{}", Uuid::now_v7());
     store_ciba_state(&state, &client, &denied_id, CibaStatus::Denied).await;
-    let denied = call_ciba_token_for_test(&state, &client, denied_id).await;
+    let denied = call_ciba_token_with_mtls_for_test(&state, &client, denied_id).await;
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&denied), "access_denied");
 }
@@ -1815,8 +1841,10 @@ async fn ciba_token_poll_maps_an_expired_state_before_user_lookup() {
         settings.modules.enable_ciba = true;
     });
     state.valkey = valkey;
+    enable_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
-    let client = ciba_private_key_jwt_client("expired-status-kid", &key);
+    let mut client = ciba_private_key_jwt_client("expired-status-kid", &key);
+    client.require_mtls_bound_tokens = true;
     let auth_req_id = format!("expired-status-{}", Uuid::now_v7());
     let now = Utc::now().timestamp();
     CibaStore::new(&state.valkey_connection())
@@ -1842,19 +1870,23 @@ async fn ciba_token_poll_maps_an_expired_state_before_user_lookup() {
         .await
         .expect("expired CIBA state should be stored");
 
-    let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
+    let response = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&response), "expired_token");
 }
 
 #[actix_web::test]
 async fn ciba_token_approved_state_issues_access_and_id_tokens_for_an_active_user() {
-    let Some(state) = live_ciba_replay_state().await else {
+    let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
+    enable_ciba_test_mtls_proxy(&mut state);
+    state.keyset =
+        crate::test_support::test_key_manager_with_auxiliary(jsonwebtoken::Algorithm::PS256);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("approved-issue-kid", &key);
     client.client_id = format!("ciba-approved-client-{}", Uuid::now_v7());
+    client.require_mtls_bound_tokens = true;
     nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
         .insert(&client, None, None, None)
         .await
@@ -1865,8 +1897,17 @@ async fn ciba_token_approved_state_issues_access_and_id_tokens_for_an_active_use
     let auth_req_id = format!("approved-issue-{}", Uuid::now_v7());
     store_ciba_state_with_user(&state, &client, &auth_req_id, user_id, CibaStatus::Approved).await;
 
-    let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
-    assert_eq!(response.status(), StatusCode::OK);
+    let response = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id).await;
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("CIBA error response should collect");
+        panic!(
+            "approved CIBA token request returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
     let body = actix_web::body::to_bytes(response.into_body())
         .await
         .expect("CIBA token response should collect");
@@ -1889,30 +1930,19 @@ async fn ciba_replay_rejects_a_consumed_auth_req_id_even_with_a_persisted_respon
     let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    let mut settings = (*state.settings).clone();
-    settings.endpoint.trusted_proxy_cidrs = vec![
-        nazo_http_actix::IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse"),
-    ];
-    state.settings = Arc::new(settings);
+    enable_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("ciba-replay-kid", &key);
     client.require_mtls_bound_tokens = true;
     let auth_req_id = format!("ciba-replay-{}", Uuid::now_v7());
-    let thumbprint = "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8";
-    let grant_key = ciba_grant_key(&auth_req_id, None, Some(thumbprint));
+    let grant_key = ciba_grant_key(&auth_req_id, None, Some(CIBA_TEST_MTLS_THUMBPRINT));
 
     crate::http::token::issue::tests::persist_token_issuance_response_for_test(
         &state, &client, &grant_key,
     )
     .await;
 
-    let req = actix_web::test::TestRequest::post()
-        .uri("/token")
-        .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header(("x-ssl-client-verify", "SUCCESS"))
-        .insert_header(("x-ssl-client-cert-sha256", thumbprint))
-        .to_http_request();
-    let response = call_ciba_token_with_request_for_test(&state, &client, auth_req_id, req).await;
+    let response = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         response

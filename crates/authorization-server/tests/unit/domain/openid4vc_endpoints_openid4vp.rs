@@ -586,6 +586,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
 
     let mut missing_response_key = stored_signed_post;
     missing_response_key.id = Uuid::now_v7();
+    missing_response_key.request.state = format!("missing-response-key-{}", Uuid::now_v7());
     missing_response_key.response_encryption_private_key = None;
     operations
         .store
