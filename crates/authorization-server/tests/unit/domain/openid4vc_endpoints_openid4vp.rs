@@ -218,7 +218,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .create(create_input(
             Some("request_uri_signed_get"),
             Some("direct_post"),
-            Some("x509_hash"),
+            Some("x509_san_dns"),
             false,
         ))
         .await
@@ -236,7 +236,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .create(create_input(
             None,
             Some("direct_post.jwt"),
-            Some("x509_san_dns"),
+            Some("x509_hash"),
             true,
         ))
         .await

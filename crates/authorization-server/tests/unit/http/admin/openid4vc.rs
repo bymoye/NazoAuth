@@ -447,9 +447,36 @@ async fn admin_dataset_mutations_fail_closed_on_csrf_and_recent_mfa() {
         Path::from((subject.id, "unit-config".to_owned())),
     )
     .await;
-    assert_eq!(no_mfa.status(), StatusCode::FORBIDDEN);
+    assert_eq!(no_mfa.status(), StatusCode::PRECONDITION_REQUIRED);
     assert_eq!(
         no_mfa
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("mfa_step_up_required")
+    );
+
+    let non_admin = fixture
+        .create_user(&format!("{suffix}-non-admin"), "user", 0, true)
+        .await;
+    let non_admin_sid = format!("openid4vc-non-admin-sid-{suffix}");
+    fixture
+        .store_session(&non_admin, &non_admin_sid, true)
+        .await;
+    let access_denied = admin_delete_credential_dataset(
+        fixture.sessions(),
+        fixture.endpoint.clone(),
+        fixture.post_request(
+            &non_admin_sid,
+            Some(&format!("openid4vc-non-admin-csrf-{suffix}")),
+            "/admin/openid4vci/credential-datasets",
+        ),
+        Path::from((subject.id, "unit-config".to_owned())),
+    )
+    .await;
+    assert_eq!(access_denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        access_denied
             .extensions()
             .get::<OAuthJsonErrorFields>()
             .map(|fields| fields.error.as_str()),
