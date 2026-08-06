@@ -101,7 +101,9 @@ pub(crate) async fn persist_token_issuance_response_for_test(
         state.keyset.clone(),
     );
     let issuance_id = Uuid::now_v7();
-    let request_digest = format!("test-request-{issuance_id}");
+    let request_digest = blake3::hash(format!("test-request-{issuance_id}").as_bytes())
+        .to_hex()
+        .to_string();
     let expires_at = Utc::now() + chrono::Duration::minutes(5);
     let prepared = service
         .prepare_token_issuance(PrepareTokenIssuance {
