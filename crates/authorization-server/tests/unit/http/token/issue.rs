@@ -91,6 +91,10 @@ pub(crate) async fn persist_token_issuance_response_for_test(
     client: &ClientRow,
     grant_key: &str,
 ) {
+    nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
+        .insert(client, None, None, None)
+        .await
+        .expect("replay fixture client should persist");
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
@@ -115,12 +119,13 @@ pub(crate) async fn persist_token_issuance_response_for_test(
     let response_body =
         br#"{"access_token":"replay-fixture","token_type":"Bearer","expires_in":300}"#;
     let response_digest = blake3::hash(response_body).to_hex().to_string();
+    let access_token_jti = format!("replay-fixture-{issuance_id}");
     assert_eq!(
         service
             .record_token_issuance_signed(
                 issuance_id,
                 &request_digest,
-                "replay-fixture-jti",
+                &access_token_jti,
                 expires_at.timestamp(),
                 response_body,
                 &response_digest,

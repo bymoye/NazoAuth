@@ -908,7 +908,10 @@ async fn disabled_ciba_automated_decision_rejects_expired_lease() {
             .await
             .expect("test database connection should be available");
         diesel::sql_query(
-            "UPDATE conformance_leases SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE id = $1",
+            "UPDATE conformance_leases \
+             SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes', \
+                 expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute' \
+             WHERE id = $1",
         )
         .bind::<diesel::sql_types::Uuid, _>(lease.id)
         .execute(&mut connection)
