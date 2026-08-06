@@ -1,3 +1,4 @@
+use super::dataset::openid4vci_credential_identifier;
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};

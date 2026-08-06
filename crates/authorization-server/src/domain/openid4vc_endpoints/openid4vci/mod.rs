@@ -47,8 +47,6 @@ mod issuance;
 mod offers;
 
 use dataset::Openid4vcDataset;
-#[cfg(test)]
-use dataset::openid4vci_credential_identifier;
 pub(crate) use dataset::{
     openid4vci_authorization_detail, openid4vci_configuration_id_from_identifier,
     token_endpoint_dpop_target_uris,
