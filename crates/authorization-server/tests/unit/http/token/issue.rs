@@ -546,6 +546,143 @@ fn refresh_without_id_token_preserves_the_original_sid_contract() {
     );
 }
 
+#[test]
+fn essential_id_token_claim_requests_match_protocol_claim_values() {
+    let client = client_with_grants(&["authorization_code"]);
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.acr = Some("urn:example:loa:2".to_owned());
+    issue.id_token_claim_requests = vec![
+        OidcClaimRequest {
+            name: "auth_time".to_owned(),
+            essential: true,
+            value: Some(json!(1_000)),
+            values: Vec::new(),
+        },
+        OidcClaimRequest {
+            name: "amr".to_owned(),
+            essential: true,
+            value: None,
+            values: vec![json!(["password"]), json!(["password", "otp"])],
+        },
+        OidcClaimRequest {
+            name: "acr".to_owned(),
+            essential: true,
+            value: Some(json!("urn:example:loa:2")),
+            values: Vec::new(),
+        },
+        OidcClaimRequest {
+            name: "sid".to_owned(),
+            essential: true,
+            value: None,
+            values: Vec::new(),
+        },
+        OidcClaimRequest {
+            name: "department".to_owned(),
+            essential: true,
+            value: None,
+            values: vec![json!("engineering"), json!("security")],
+        },
+    ];
+    let extra_claims = json!({"department": "engineering"});
+
+    assert!(refreshed_id_token_essential_claims_satisfied(
+        &issue,
+        &client,
+        false,
+        Some(&extra_claims),
+    ));
+
+    assert!(claim_request_value_matches(
+        &OidcClaimRequest {
+            name: "department".to_owned(),
+            essential: true,
+            value: None,
+            values: Vec::new(),
+        },
+        &json!("anything"),
+    ));
+    assert!(!claim_request_value_matches(
+        &OidcClaimRequest {
+            name: "department".to_owned(),
+            essential: true,
+            value: Some(json!("finance")),
+            values: Vec::new(),
+        },
+        &json!("engineering"),
+    ));
+    assert!(!claim_request_value_matches(
+        &OidcClaimRequest {
+            name: "department".to_owned(),
+            essential: true,
+            value: None,
+            values: vec![json!("finance")],
+        },
+        &json!("engineering"),
+    ));
+
+    issue.acr = Some("urn:example:loa:1".to_owned());
+    assert!(!refreshed_id_token_essential_claims_satisfied(
+        &issue,
+        &client,
+        false,
+        Some(&extra_claims),
+    ));
+}
+
+#[test]
+fn request_idempotency_key_trims_and_rejects_invalid_values() {
+    let missing = actix_web::test::TestRequest::get().to_http_request();
+    assert_eq!(request_idempotency_key(&missing), None);
+
+    let blank = actix_web::test::TestRequest::get()
+        .insert_header(("idempotency-key", "   "))
+        .to_http_request();
+    assert_eq!(request_idempotency_key(&blank), None);
+
+    let valid = actix_web::test::TestRequest::get()
+        .insert_header(("idempotency-key", "  stable-grant  "))
+        .to_http_request();
+    let key = request_idempotency_key(&valid).expect("trimmed idempotency key should be accepted");
+    assert!(key.starts_with("idempotency:"));
+    assert_ne!(key, "idempotency:stable-grant");
+
+    let too_long = "x".repeat(257);
+    let too_long_request = actix_web::test::TestRequest::get()
+        .insert_header(("idempotency-key", too_long))
+        .to_http_request();
+    assert_eq!(request_idempotency_key(&too_long_request), None);
+}
+
+#[test]
+fn response_from_token_issuance_requires_a_signed_terminal_phase() {
+    let mut record = TokenIssuanceRecord {
+        issuance_id: Uuid::now_v7(),
+        tenant_id: DEFAULT_TENANT_ID,
+        client_id: Uuid::now_v7(),
+        grant_key: "grant".to_owned(),
+        request_digest: "digest".to_owned(),
+        phase: TokenIssuancePhase::Prepared,
+        access_token_jti: None,
+        access_token_expires_at: None,
+        response_body: Some(br#"{}"#.to_vec()),
+        response_digest: None,
+        response_key_version: None,
+    };
+    assert!(response_from_token_issuance(&record).is_none());
+
+    record.phase = TokenIssuancePhase::Signed;
+    let response = response_from_token_issuance(&record)
+        .expect("signed issuance with a response body should be recoverable");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    record.response_body = None;
+    assert!(response_from_token_issuance(&record).is_none());
+}
+
 #[actix_web::test]
 async fn signing_failure_does_not_issue_any_tokens() {
     let Some(mut state) = issue_state_with_live_database() else {
@@ -921,4 +1058,42 @@ async fn concurrent_prepared_issuance_conflict_recovers_the_winning_response() {
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(response_body(first).await, response_body(second).await);
+}
+
+#[actix_web::test]
+async fn prepared_issuance_rejects_a_different_request_digest_for_the_same_grant() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("digest-conflict-{}", Uuid::now_v7());
+    let first_issue = token_issue_without_openid();
+    let request_digest = issuance_request_digest(&client, &first_issue, &grant_key);
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let prepared = service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id: Uuid::now_v7(),
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: grant_key.clone(),
+            request_digest,
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+        })
+        .await
+        .expect("initial issuance should prepare");
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+
+    let mut conflicting_issue = first_issue;
+    conflicting_issue.subject = "different-subject".to_owned();
+    let response =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, conflicting_issue)
+            .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_grant");
+    assert!(!response_body(response).await.is_empty());
 }

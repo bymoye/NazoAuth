@@ -1424,6 +1424,27 @@ async fn local_signing_rejects_algorithms_outside_server_allowlist() {
     ));
 }
 
+#[tokio::test]
+async fn request_object_key_probe_fails_when_keys_path_is_not_a_directory() {
+    let keys_path = temp_keys_dir("request_object_probe_not_directory");
+    tokio::fs::write(&keys_path, b"not a directory")
+        .await
+        .expect("fixture path should be a file");
+
+    let error = ensure_request_object_encryption_key(&test_settings(keys_path.clone()))
+        .await
+        .expect_err("non-directory key path must fail closed");
+    assert!(
+        error
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .is_some()
+    );
+    tokio::fs::remove_file(keys_path)
+        .await
+        .expect("fixture file should be removable");
+}
+
 fn temp_keys_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "nazo_keyset_{label}_{}",

@@ -40,10 +40,14 @@ fn validate_ciba_request_object_presence(
 
 use super::*;
 use crate::config::ConfigSource;
-use nazo_postgres::create_pool;
+use nazo_postgres::{create_pool, get_conn};
 
 use crate::test_support::ClientSigningFixture;
 use crate::test_support::client_signing_fixture;
+use crate::test_support::valkey::valkey_set_ex;
+use diesel::sql_query;
+use diesel::sql_types::{Bool, Text, Uuid as SqlUuid};
+use diesel_async::RunQueryDsl;
 use std::io::{self, Write};
 use std::sync::{
     Arc,
@@ -158,13 +162,23 @@ async fn store_ciba_state(
     auth_req_id: &str,
     status: CibaStatus,
 ) {
+    store_ciba_state_with_user(state, client, auth_req_id, Uuid::now_v7(), status).await;
+}
+
+async fn store_ciba_state_with_user(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    auth_req_id: &str,
+    user_id: Uuid,
+    status: CibaStatus,
+) {
     let now = Utc::now().timestamp();
     CibaStore::new(&state.valkey_connection())
         .create(
             auth_req_id,
             &CibaRequestState {
                 client_id: client.client_id.clone(),
-                user_id: Uuid::now_v7(),
+                user_id,
                 scopes: vec!["openid".to_owned()],
                 audiences: vec!["resource://default".to_owned()],
                 acr: None,
@@ -181,6 +195,53 @@ async fn store_ciba_state(
         )
         .await
         .expect("CIBA state should be stored");
+}
+
+async fn insert_ciba_user(state: &TestInfrastructure, user_id: Uuid) {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("CIBA test database connection should be available");
+    sql_query("DELETE FROM users WHERE tenant_id = $1 AND id = $2")
+        .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+        .bind::<SqlUuid, _>(user_id)
+        .execute(&mut connection)
+        .await
+        .expect("CIBA test user cleanup should succeed");
+    sql_query(
+        "INSERT INTO users (\
+            id, tenant_id, realm_id, organization_id, username, email, password_hash,\
+            is_active, mfa_enabled, email_verified, role, admin_level\
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, TRUE, 'user', 0)",
+    )
+    .bind::<SqlUuid, _>(user_id)
+    .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+    .bind::<SqlUuid, _>(DEFAULT_REALM_ID)
+    .bind::<SqlUuid, _>(DEFAULT_ORGANIZATION_ID)
+    .bind::<Text, _>(format!("ciba-user-{user_id}"))
+    .bind::<Text, _>(format!("ciba-user-{user_id}@example.test"))
+    .bind::<Text, _>("ciba-test-password-hash")
+    .bind::<Bool, _>(true)
+    .execute(&mut connection)
+    .await
+    .expect("CIBA test user should insert");
+}
+
+async fn store_ciba_session(state: &TestInfrastructure, sid: &str, user_id: Uuid) {
+    let payload = crate::http::sessions::SessionPayload {
+        user_id,
+        auth_time: Utc::now().timestamp(),
+        amr: vec!["pwd".to_owned(), "otp".to_owned(), "mfa".to_owned()],
+        pending_mfa: false,
+        oidc_sid: Some(format!("oidc-{sid}")),
+    };
+    valkey_set_ex(
+        &state.valkey,
+        format!("oauth:session:{sid}"),
+        serde_json::to_string(&payload).expect("CIBA session should serialize"),
+        state.settings.session.session_ttl_seconds,
+    )
+    .await
+    .expect("CIBA session should store");
 }
 
 async fn call_ciba_token_for_test(
@@ -236,6 +297,23 @@ async fn call_ciba_token_with_request_for_test(
         "private_key_jwt",
     )
     .await
+}
+
+fn oauth_error_code(response: &HttpResponse) -> String {
+    response
+        .extensions()
+        .get::<OAuthJsonErrorFields>()
+        .map(|fields| fields.error.clone())
+        .expect("OAuth error response should record its error code")
+}
+
+fn service_response_oauth_error_code<B>(response: &actix_web::dev::ServiceResponse<B>) -> String {
+    response
+        .response()
+        .extensions()
+        .get::<OAuthJsonErrorFields>()
+        .map(|fields| fields.error.clone())
+        .expect("OAuth service response should record its error code")
 }
 
 #[actix_web::test]
@@ -610,6 +688,91 @@ async fn ciba_automated_decision_header_mode_rejects_get_and_query_secret() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(actix_web::test::read_body(response).await.is_empty());
+}
+
+#[actix_web::test]
+async fn disabled_ciba_automated_decision_fails_closed_without_a_lease_repository() {
+    let state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+        settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
+        settings.ciba.ciba_automated_decision_token = None;
+    });
+    let settings = Arc::clone(&state.settings);
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        state.diesel_db.clone(),
+        &settings,
+    )
+    .expect("CIBA runtime registry should initialize");
+    let app = actix_web::test::init_service(
+        actix_web::App::new()
+            .app_data(actix_web::web::Data::new(ServerCibaService::new(
+                CibaStore::new(&state.valkey_connection()),
+            )))
+            .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
+                settings.as_ref(),
+            )))
+            .app_data(actix_web::web::Data::from(runtime))
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
+    )
+    .await;
+
+    let missing_token = actix_web::test::TestRequest::post()
+        .uri("/auth/ciba-automated-decision?token=auth-req&type=allow")
+        .to_request();
+    let response = actix_web::test::call_service(&app, missing_token).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let missing_repository = actix_web::test::TestRequest::post()
+        .uri(
+            "/auth/ciba-automated-decision?token=auth-req&type=allow&decision_token=per-run-secret",
+        )
+        .to_request();
+    let response = actix_web::test::call_service(&app, missing_repository).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actix_web::test::read_body(response).await.is_empty());
+}
+
+#[actix_web::test]
+async fn configured_ciba_automated_decision_rejects_missing_or_mismatched_request_credentials() {
+    let state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+        settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
+        settings.ciba.ciba_automated_decision_token =
+            Some("query-secret-32-characters-long".to_owned());
+    });
+    let settings = Arc::clone(&state.settings);
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        state.diesel_db.clone(),
+        &settings,
+    )
+    .expect("CIBA runtime registry should initialize");
+    let app = actix_web::test::init_service(
+        actix_web::App::new()
+            .app_data(actix_web::web::Data::new(ServerCibaService::new(
+                CibaStore::new(&state.valkey_connection()),
+            )))
+            .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
+                settings.as_ref(),
+            )))
+            .app_data(actix_web::web::Data::from(runtime))
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
+    )
+    .await;
+
+    let mismatched = actix_web::test::TestRequest::get()
+        .uri("/auth/ciba-automated-decision?token=auth-req&type=allow&decision_token=wrong-secret")
+        .to_request();
+    let response = actix_web::test::call_service(&app, mismatched).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let missing_auth_req_id = actix_web::test::TestRequest::get()
+        .uri("/auth/ciba-automated-decision?type=allow&decision_token=query-secret-32-characters-long")
+        .to_request();
+    let response = actix_web::test::call_service(&app, missing_auth_req_id).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = actix_web::test::read_body(response).await;
+    let fields: Value = serde_json::from_slice(&body).expect("CIBA error should be JSON");
+    assert_eq!(fields["error"], "invalid_request");
 }
 
 #[actix_web::test]
@@ -1009,6 +1172,57 @@ fn ciba_automated_decision_transport_keeps_header_and_oidf_query_separate() {
     assert!(ciba_automated_decision_request_token(&config, &get_request, &query).is_none());
 }
 
+#[test]
+fn ciba_automated_decision_requires_a_non_empty_auth_req_id() {
+    let missing = CibaAutomatedDecisionQuery {
+        token: None,
+        auth_req_id: None,
+        r#type: Some("allow".to_owned()),
+        action: None,
+        decision_token: None,
+    };
+    let response = ciba_automated_decision_auth_req_id(&missing)
+        .expect_err("automated decisions must identify a CIBA transaction");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_request")
+    );
+
+    let blank = CibaAutomatedDecisionQuery {
+        token: Some("  ".to_owned()),
+        ..missing
+    };
+    assert!(ciba_automated_decision_auth_req_id(&blank).is_err());
+
+    let from_token = CibaAutomatedDecisionQuery {
+        token: Some("auth-req-from-token".to_owned()),
+        auth_req_id: None,
+        r#type: None,
+        action: None,
+        decision_token: None,
+    };
+    assert_eq!(
+        ciba_automated_decision_auth_req_id(&from_token).unwrap(),
+        "auth-req-from-token"
+    );
+
+    let from_explicit_id = CibaAutomatedDecisionQuery {
+        token: Some("legacy-token".to_owned()),
+        auth_req_id: Some(" explicit-auth-req ".to_owned()),
+        r#type: None,
+        action: None,
+        decision_token: None,
+    };
+    assert_eq!(
+        ciba_automated_decision_auth_req_id(&from_explicit_id).unwrap(),
+        "explicit-auth-req"
+    );
+}
+
 #[actix_web::test]
 async fn ciba_verification_page_preserves_redirect_and_non_cacheable_headers() {
     let state = ciba_test_state_with(|settings| {
@@ -1057,6 +1271,85 @@ async fn ciba_verification_page_preserves_redirect_and_non_cacheable_headers() {
             .get(header::PRAGMA)
             .and_then(|value| value.to_str().ok()),
         Some("no-cache")
+    );
+}
+
+#[actix_web::test]
+async fn ciba_verification_loads_the_bound_user_and_rejects_a_session_mismatch() {
+    let Some(state) = live_ciba_replay_state().await else {
+        return;
+    };
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("verification-kid", &key);
+    client.client_id = format!("ciba-verification-client-{}", Uuid::now_v7());
+    nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
+        .insert(&client, None, None, None)
+        .await
+        .expect("verification CIBA client should be stored");
+
+    let user_id = Uuid::now_v7();
+    let other_user_id = Uuid::now_v7();
+    insert_ciba_user(&state, user_id).await;
+    insert_ciba_user(&state, other_user_id).await;
+    let auth_req_id = format!("verification-{}", Uuid::now_v7());
+    store_ciba_state_with_user(&state, &client, &auth_req_id, user_id, CibaStatus::Pending).await;
+    let session_id = format!("ciba-session-{}", Uuid::now_v7());
+    let other_session_id = format!("ciba-session-other-{}", Uuid::now_v7());
+    store_ciba_session(&state, &session_id, user_id).await;
+    store_ciba_session(&state, &other_session_id, other_user_id).await;
+
+    let settings = Arc::clone(&state.settings);
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        state.diesel_db.clone(),
+        &settings,
+    )
+    .expect("CIBA runtime registry should initialize");
+    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(CibaStore::new(
+        &state.valkey_connection(),
+    )));
+    let app = actix_web::test::init_service(
+        actix_web::App::new()
+            .app_data(ciba_service)
+            .app_data(actix_web::web::Data::new(
+                super::super::issue::test_support::test_authorization_service(&state),
+            ))
+            .app_data(actix_web::web::Data::new(
+                crate::http::sessions::test_support::admin_session_handles(&state),
+            ))
+            .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
+                settings.as_ref(),
+            )))
+            .app_data(actix_web::web::Data::from(runtime))
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
+    )
+    .await;
+
+    let request = actix_web::test::TestRequest::get()
+        .uri(&format!("/auth/ciba/{auth_req_id}"))
+        .cookie(actix_web::cookie::Cookie::new(
+            state.settings.session.session_cookie_name.clone(),
+            session_id,
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = actix_web::test::read_body(response).await;
+    let view: Value = serde_json::from_slice(&body).expect("verification view should be JSON");
+    assert_eq!(view["auth_req_id"], auth_req_id);
+    assert!(view["request"].is_object());
+
+    let request = actix_web::test::TestRequest::get()
+        .uri(&format!("/auth/ciba/{auth_req_id}"))
+        .cookie(actix_web::cookie::Cookie::new(
+            state.settings.session.session_cookie_name.clone(),
+            other_session_id,
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        service_response_oauth_error_code(&response),
+        "access_denied"
     );
 }
 
@@ -1482,6 +1775,113 @@ async fn ciba_token_request_validates_mtls_binding_before_issuing_approved_token
             .map(|fields| fields.error.as_str()),
         Some("invalid_grant")
     );
+}
+
+#[actix_web::test]
+async fn ciba_token_poll_maps_pending_slow_down_and_denied_states() {
+    let Some(valkey) = live_test_valkey().await else {
+        return;
+    };
+    let mut state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+    });
+    state.valkey = valkey;
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("poll-status-kid", &key);
+
+    let pending_id = format!("pending-status-{}", Uuid::now_v7());
+    store_ciba_state(&state, &client, &pending_id, CibaStatus::Pending).await;
+    let pending = call_ciba_token_for_test(&state, &client, pending_id.clone()).await;
+    assert_eq!(pending.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&pending), "authorization_pending");
+
+    let slow_down = call_ciba_token_for_test(&state, &client, pending_id).await;
+    assert_eq!(slow_down.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&slow_down), "slow_down");
+
+    let denied_id = format!("denied-status-{}", Uuid::now_v7());
+    store_ciba_state(&state, &client, &denied_id, CibaStatus::Denied).await;
+    let denied = call_ciba_token_for_test(&state, &client, denied_id).await;
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&denied), "access_denied");
+}
+
+#[actix_web::test]
+async fn ciba_token_poll_maps_an_expired_state_before_user_lookup() {
+    let Some(valkey) = live_test_valkey().await else {
+        return;
+    };
+    let mut state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+    });
+    state.valkey = valkey;
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("expired-status-kid", &key);
+    let auth_req_id = format!("expired-status-{}", Uuid::now_v7());
+    let now = Utc::now().timestamp();
+    CibaStore::new(&state.valkey_connection())
+        .create(
+            &auth_req_id,
+            &CibaRequestState {
+                client_id: client.client_id.clone(),
+                user_id: Uuid::now_v7(),
+                scopes: vec!["openid".to_owned()],
+                audiences: vec!["resource://default".to_owned()],
+                acr: None,
+                authentication_context: None,
+                binding_message: None,
+                issued_at: now - 120,
+                status: CibaStatus::Pending,
+                interval_seconds: 5,
+                expires_at: now - 1,
+                retention_expires_at: now + 600,
+                last_poll_at: None,
+                ping_notification: None,
+            },
+        )
+        .await
+        .expect("expired CIBA state should be stored");
+
+    let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "expired_token");
+}
+
+#[actix_web::test]
+async fn ciba_token_approved_state_issues_access_and_id_tokens_for_an_active_user() {
+    let Some(state) = live_ciba_replay_state().await else {
+        return;
+    };
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("approved-issue-kid", &key);
+    client.client_id = format!("ciba-approved-client-{}", Uuid::now_v7());
+    nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
+        .insert(&client, None, None, None)
+        .await
+        .expect("approved CIBA client should be stored");
+
+    let user_id = Uuid::now_v7();
+    insert_ciba_user(&state, user_id).await;
+    let auth_req_id = format!("approved-issue-{}", Uuid::now_v7());
+    store_ciba_state_with_user(&state, &client, &auth_req_id, user_id, CibaStatus::Approved).await;
+
+    let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("CIBA token response should collect");
+    let value: Value = serde_json::from_slice(&body).expect("CIBA token response should be JSON");
+    assert!(
+        value["access_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        value["id_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(value.get("refresh_token").is_none());
 }
 
 #[actix_web::test]

@@ -391,3 +391,86 @@ async fn admin_gate_propagates_session_lookup_failures_as_server_errors() {
     assert_eq!(oauth_error_code(&response), "server_error");
     assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
 }
+
+#[actix_web::test]
+async fn profile_and_admin_session_boundaries_preserve_cookie_and_backend_semantics() {
+    let state = session_state();
+    let profiles = test_support::profile_session_handles(&state);
+    let admins = test_support::admin_session_handles(&state);
+    let session = &state.settings.session;
+
+    assert_eq!(
+        profiles.http_config().session_cookie_name(),
+        session.session_cookie_name
+    );
+    assert_eq!(
+        profiles.http_config().csrf_cookie_name(),
+        session.csrf_cookie_name
+    );
+    assert_eq!(
+        profiles.http_config().cookie_secure(),
+        session.cookie_secure
+    );
+
+    let anonymous = TestRequest::default().to_http_request();
+    assert!(profiles.has_valid_csrf_token(&anonymous, None));
+    assert!(
+        admins
+            .current_session(&anonymous)
+            .await
+            .expect("anonymous admin lookup should not hit storage")
+            .is_none()
+    );
+
+    let login = match profiles.current_session_or_login_required(&anonymous).await {
+        Ok(_) => panic!("profile session guard must require login without a cookie"),
+        Err(response) => response,
+    };
+    assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(oauth_error_code(&login), "login_required");
+    assert!(login.headers().get(header::SET_COOKIE).is_some());
+
+    let admin_login = match admins.current_session_or_login_required(&anonymous).await {
+        Ok(_) => panic!("admin session guard must require login without a cookie"),
+        Err(response) => response,
+    };
+    assert_eq!(admin_login.status(), StatusCode::UNAUTHORIZED);
+    assert!(admin_login.headers().get(header::SET_COOKIE).is_some());
+
+    let with_cookie = session_request(&state, "unavailable-session");
+    assert!(!profiles.has_valid_csrf_token(&with_cookie, None));
+    assert!(!profiles.has_valid_csrf_token(&with_cookie, Some("fallback")));
+    let csrf_cookie =
+        actix_web::cookie::Cookie::new(session.csrf_cookie_name.clone(), "csrf-token");
+    let csrf_request = TestRequest::default()
+        .cookie(actix_web::cookie::Cookie::new(
+            session.session_cookie_name.clone(),
+            "unavailable-session",
+        ))
+        .cookie(csrf_cookie)
+        .insert_header(("x-csrf-token", "csrf-token"))
+        .to_http_request();
+    assert!(profiles.has_valid_csrf_token(&csrf_request, None));
+
+    let profile_backend_error = match profiles.current_user_or_login_required(&with_cookie).await {
+        Ok(_) => panic!("profile backend failure must be surfaced"),
+        Err(response) => response,
+    };
+    assert_eq!(
+        profile_backend_error.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(oauth_error_code(&profile_backend_error), "server_error");
+
+    let session_by_id_error = match profiles.current_session_by_id("unavailable-session").await {
+        Ok(_) => panic!("session-by-id backend failure must be surfaced"),
+        Err(error) => error,
+    };
+    assert!(!session_by_id_error.to_string().is_empty());
+
+    let delete_error = profiles
+        .delete_session("unavailable-session")
+        .await
+        .expect_err("session deletion backend failure must be surfaced");
+    assert!(!delete_error.to_string().is_empty());
+}

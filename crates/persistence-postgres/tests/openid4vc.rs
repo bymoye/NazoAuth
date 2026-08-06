@@ -191,6 +191,138 @@ async fn credential_dataset_mutations_require_an_active_admin_and_are_audited_at
             .claims,
         claims
     );
+    assert_eq!(
+        repository
+            .dataset(tenant_id, subject_id, "pid")
+            .await
+            .unwrap()
+            .expect("an unbounded dataset should be active"),
+        claims
+    );
+    assert!(
+        repository
+            .dataset(Uuid::now_v7(), subject_id, "pid")
+            .await
+            .unwrap()
+            .is_none(),
+        "dataset reads must remain tenant scoped"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vci_credential_datasets
+         SET valid_from = CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+         WHERE tenant_id = $1 AND subject_id = $2 AND credential_configuration_id = 'pid'",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(subject_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(
+        repository
+            .dataset(tenant_id, subject_id, "pid")
+            .await
+            .unwrap()
+            .is_none(),
+        "future-valid datasets must not be available to issuance"
+    );
+    assert!(
+        repository
+            .managed_dataset(tenant_id, subject_id, "pid")
+            .await
+            .unwrap()
+            .is_some(),
+        "management reads retain future validity metadata"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vci_credential_datasets
+         SET valid_from = NULL, valid_until = CURRENT_TIMESTAMP - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND subject_id = $2 AND credential_configuration_id = 'pid'",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(subject_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(
+        repository
+            .dataset(tenant_id, subject_id, "pid")
+            .await
+            .unwrap()
+            .is_none(),
+        "expired datasets must not be available to issuance"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vci_credential_datasets
+         SET valid_until = NULL
+         WHERE tenant_id = $1 AND subject_id = $2 AND credential_configuration_id = 'pid'",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(subject_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("UPDATE users SET role = 'admin', admin_level = 0 WHERE id = $1")
+        .bind::<SqlUuid, _>(admin_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+    assert!(
+        !repository
+            .upsert_managed_dataset(ManagedCredentialDatasetWrite {
+                tenant_id,
+                actor_user_id: admin_id,
+                subject_id,
+                credential_configuration_id: "zero-level-admin",
+                claims: &claims,
+                valid_from: None,
+                valid_until: None,
+            })
+            .await
+            .unwrap(),
+        "an admin without a positive level cannot write datasets"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("UPDATE users SET role = 'admin', admin_level = 1, is_active = TRUE WHERE id = $1")
+        .bind::<SqlUuid, _>(admin_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("UPDATE users SET is_active = FALSE WHERE id = $1")
+        .bind::<SqlUuid, _>(subject_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+    assert!(
+        !repository
+            .upsert_managed_dataset(ManagedCredentialDatasetWrite {
+                tenant_id,
+                actor_user_id: admin_id,
+                subject_id,
+                credential_configuration_id: "inactive-subject",
+                claims: &claims,
+                valid_from: None,
+                valid_until: None,
+            })
+            .await
+            .unwrap(),
+        "inactive subjects cannot receive issuer-authoritative datasets"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("UPDATE users SET is_active = TRUE WHERE id = $1")
+        .bind::<SqlUuid, _>(subject_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
     let mut connection = get_conn(&pool).await.unwrap();
     let raw = sql_query(
         "SELECT claims_ciphertext FROM openid4vci_credential_datasets

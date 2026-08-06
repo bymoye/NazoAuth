@@ -30,6 +30,34 @@ fn request_object_decryption_rejects_tampered_ciphertext() {
     assert!(manager.decrypt_request_object(&compact).is_err());
 }
 
+#[test]
+fn request_object_decryption_rejects_invalid_encrypted_key_before_aead() {
+    let manager = KeyManager::for_test(jsonwebtoken::Algorithm::RS256);
+    let jwk = manager.snapshot().request_object_encryption_jwk.clone();
+    let protected = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "alg": "RSA-OAEP-256",
+            "enc": "A256GCM",
+            "kid": jwk["kid"],
+            "cty": "JWT"
+        }))
+        .expect("header"),
+    );
+    let compact = format!(
+        "{}.{}.{}.{}.{}",
+        protected,
+        URL_SAFE_NO_PAD.encode([1_u8, 2, 3]),
+        URL_SAFE_NO_PAD.encode([0_u8; 12]),
+        URL_SAFE_NO_PAD.encode([0_u8; 1]),
+        URL_SAFE_NO_PAD.encode([0_u8; 16])
+    );
+
+    let error = manager
+        .decrypt_request_object(&compact)
+        .expect_err("invalid RSA ciphertext must fail before AEAD");
+    assert!(format!("{error:#}").contains("RSA") || format!("{error:#}").contains("decrypt"));
+}
+
 fn encrypt(jwk: &serde_json::Value, plaintext: &[u8]) -> String {
     let kid = jwk["kid"].as_str().expect("kid");
     let protected = URL_SAFE_NO_PAD.encode(

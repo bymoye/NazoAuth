@@ -105,3 +105,36 @@ fn audit_event_definitions_include_trust_and_credential_control_planes() {
 fn audit_schema_version_is_stable_for_collectors() {
     assert_eq!(AUDIT_SCHEMA_VERSION, "nazo.audit.v1");
 }
+
+#[test]
+fn prepare_event_normalizes_security_payload_and_rejects_unknown_or_oversized_events() {
+    let queued = prepare_event(
+        "login_success",
+        audit_fields(&[
+            ("user_id", json!("user-1")),
+            ("access_token", json!("must-not-persist")),
+        ]),
+    )
+    .expect("allowlisted audit event should be prepared");
+    assert_eq!(queued.event_type, "login_success");
+    assert_eq!(queued.event_category, "authentication");
+    assert_eq!(
+        queued.payload["schema_version"],
+        json!(AUDIT_SCHEMA_VERSION)
+    );
+    assert_eq!(queued.payload["event_category"], json!("authentication"));
+    assert!(queued.payload.get("access_token").is_none());
+
+    assert!(matches!(
+        prepare_event("unknown_event", serde_json::Map::new()),
+        Err("unknown_event_type")
+    ));
+    let oversized = audit_fields(&[(
+        "large",
+        json!("x".repeat(nazo_postgres::MAX_SECURITY_AUDIT_PAYLOAD_BYTES + 1)),
+    )]);
+    assert!(matches!(
+        prepare_event("login_success", oversized),
+        Err("payload_too_large")
+    ));
+}

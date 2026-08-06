@@ -236,6 +236,134 @@ async fn refresh_token_client_attestation_binding_round_trips() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_token_authentication_context_conversion_is_strict_and_optional() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let fixture = fixture(&database_url).await;
+    let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let raw_token = format!("context-refresh-{}", Uuid::now_v7());
+    let mut token =
+        refresh_token_fixture(&fixture, tenant_id, Uuid::now_v7(), raw_token.clone(), None);
+    token.authentication_context = None;
+    let repository = TokenRepository::new(create_pool(&database_url, 2).unwrap());
+    assert_eq!(
+        repository
+            .persist_refresh_token(token)
+            .await
+            .expect("refresh token with no authentication context should persist"),
+        RefreshTokenPersistResult::Inserted
+    );
+    let loaded = repository
+        .by_raw_refresh_token(tenant_id, &raw_token)
+        .await
+        .expect("refresh token should load without an optional context")
+        .expect("the persisted refresh token should exist");
+
+    let valid_context = json!({
+        "version": 1,
+        "issuer": "https://issuer.example",
+        "audience": "client",
+        "auth_time": 1_700_000_000_i64,
+        "amr": ["pwd"],
+        "oidc_sid": null,
+        "id_token_sid": null,
+        "acr": null,
+        "nonce": null,
+        "userinfo_claims": [],
+        "userinfo_claim_requests": [],
+        "id_token_claims": [],
+        "id_token_claim_requests": []
+    });
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
+        .bind::<SqlUuid, _>(loaded.id)
+        .bind::<diesel::sql_types::Jsonb, _>(valid_context.clone())
+        .execute(&mut connection)
+        .await
+        .expect("a valid authentication context should be writable for the conversion test");
+    drop(connection);
+    let converted = repository
+        .by_raw_refresh_token(tenant_id, &raw_token)
+        .await
+        .expect("a valid authentication context should convert")
+        .expect("the refresh token should remain present");
+    let context = converted
+        .authentication_context
+        .expect("the converted context should remain optional but present");
+    assert_eq!(context.version, 1);
+    assert_eq!(context.issuer, "https://issuer.example");
+    assert_eq!(context.amr, vec!["pwd".to_owned()]);
+
+    let invalid_json = json!("not-an-authentication-context");
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
+        .bind::<SqlUuid, _>(loaded.id)
+        .bind::<diesel::sql_types::Jsonb, _>(invalid_json)
+        .execute(&mut connection)
+        .await
+        .expect("an invalid JSON value should remain storable for conversion testing");
+    drop(connection);
+    assert!(matches!(
+        repository.by_raw_refresh_token(tenant_id, &raw_token).await,
+        Err(nazo_identity::ports::RepositoryError::Unexpected(_))
+    ));
+
+    let unsupported_context = json!({
+        "version": 2,
+        "issuer": "https://issuer.example",
+        "audience": "client",
+        "auth_time": 1_700_000_000_i64,
+        "amr": ["pwd"],
+        "oidc_sid": null,
+        "id_token_sid": null,
+        "acr": null,
+        "nonce": null,
+        "userinfo_claims": [],
+        "userinfo_claim_requests": [],
+        "id_token_claims": [],
+        "id_token_claim_requests": []
+    });
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
+        .bind::<SqlUuid, _>(loaded.id)
+        .bind::<diesel::sql_types::Jsonb, _>(unsupported_context)
+        .execute(&mut connection)
+        .await
+        .expect("an unsupported context version should remain storable for conversion testing");
+    drop(connection);
+    assert!(matches!(
+        repository.by_raw_refresh_token(tenant_id, &raw_token).await,
+        Err(nazo_identity::ports::RepositoryError::Unexpected(_))
+    ));
+
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    sql_query("DELETE FROM oauth_tokens WHERE id = $1")
+        .bind::<SqlUuid, _>(loaded.id)
+        .execute(&mut connection)
+        .await
+        .expect("the conversion fixture token should be cleaned up");
+    sql_query("DELETE FROM oauth_clients WHERE id = $1")
+        .bind::<SqlUuid, _>(fixture.client_id)
+        .execute(&mut connection)
+        .await
+        .expect("the conversion fixture client should be cleaned up");
+    sql_query("DELETE FROM users WHERE id = $1")
+        .bind::<SqlUuid, _>(fixture.user_id)
+        .execute(&mut connection)
+        .await
+        .expect("the conversion fixture user should be cleaned up");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grants_upsert_cover_and_revoke_tokens_atomically() {
     let Some(database_url) = database_url() else {
         return;

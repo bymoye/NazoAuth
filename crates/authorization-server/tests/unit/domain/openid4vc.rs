@@ -1426,3 +1426,74 @@ async fn client_attestation_validate_for_client_uses_static_trust_when_no_confor
         .expect("static trust fallback should validate");
     assert_eq!(validated.client_id, "wallet-client");
 }
+
+#[tokio::test]
+async fn client_attestation_conformance_constructor_and_lookup_fail_closed_without_database() {
+    let (mut attester_jwk, attester_key) = es256_test_key(97);
+    attester_jwk["kid"] = json!("attester-key");
+    attester_jwk["alg"] = json!("ES256");
+    let pool = nazo_postgres::create_pool(
+        "postgres://openid4vc_conformance:openid4vc_conformance@127.0.0.1:1/oauth".to_owned(),
+        1,
+    )
+    .expect("pool construction should not connect");
+    let repository = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let configured = Openid4vcClientAttestationValidator::with_conformance_leases(
+        Some((
+            "https://attester.example".to_owned(),
+            json!({"keys": [attester_jwk.clone()]}),
+        )),
+        repository,
+        uuid::Uuid::nil(),
+    )
+    .expect("static trust plus conformance repository should configure");
+    let now = Utc::now().timestamp();
+    let instance_jwk = es256_test_key(101).0;
+    let instance_key = es256_test_key(101).1;
+    let attestation = signed_client_attestation_jwt(
+        &json!({
+            "iss": "https://attester.example",
+            "sub": "wallet-client",
+            "exp": now + 600,
+            "cnf": {"jwk": instance_jwk},
+        }),
+        &attester_key,
+        "oauth-client-attestation+jwt",
+        Algorithm::ES256,
+        Some("attester-key"),
+    );
+    let proof = signed_client_attestation_jwt(
+        &json!({
+            "iss": "wallet-client",
+            "aud": "https://issuer.example",
+            "iat": now,
+            "jti": "constructor-proof",
+        }),
+        &instance_key,
+        "oauth-client-attestation-pop+jwt",
+        Algorithm::ES256,
+        None,
+    );
+    let validated = configured
+        .validate(&attestation, &proof, "https://issuer.example", now)
+        .expect("configured static trust must validate a matching attestation");
+    assert_eq!(validated.client_id, "wallet-client");
+
+    let dynamic = Openid4vcClientAttestationValidator::with_conformance_leases(
+        None,
+        nazo_postgres::ConformanceLeaseRepository::new(pool),
+        uuid::Uuid::nil(),
+    )
+    .expect("dynamic conformance-only validator should configure");
+    let (static_validator, attestation, proof, _, _, now) = valid_client_attestation_fixture();
+    let error = dynamic
+        .validate_for_client(&attestation, &proof, "https://issuer.example", now)
+        .await
+        .expect_err("unavailable conformance database must fail closed");
+    assert!(!format!("{error:#}").is_empty());
+    let validated = static_validator
+        .validate_for_client(&attestation, &proof, "https://issuer.example", now)
+        .await
+        .expect("static validator should remain observable through its public behavior");
+    assert_eq!(validated.client_id, "wallet-client");
+}

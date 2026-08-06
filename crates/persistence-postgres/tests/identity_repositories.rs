@@ -9,8 +9,8 @@ use nazo_identity::{
     AdminPolicyError, AdminUserUpdateOutcome, OrganizationId, RealmId, TenantContext, TenantId,
     UserId, UserProfile,
     ports::{
-        AdminUserUpdate, FederationLogin, MfaTotpKey, MfaTotpKeyRing, NewFederatedIdentity,
-        NewFederationLink, ProfileUpdate, RepositoryError,
+        AdminUserUpdate, EncodedSecretHash, FederationLogin, MfaRepositoryPort, MfaTotpKey,
+        MfaTotpKeyRing, NewFederatedIdentity, NewFederationLink, ProfileUpdate, RepositoryError,
     },
     scim::NormalizedScimUser,
 };
@@ -815,6 +815,351 @@ async fn backup_code_is_consumed_once_atomically() {
             event.outcome == "replay" && event.reason_code == "backup_code_replay"
         })
     );
+    cleanup(&pool, user_id).await;
+}
+
+#[tokio::test]
+async fn mfa_encrypted_lifecycle_rotation_and_trait_boundary_are_tenant_safe() {
+    let Some((pool, tenant, user_id)) = database_fixture().await else {
+        return;
+    };
+    const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    let repository = mfa_repository(pool.clone());
+    let other_tenant = TenantId::new(Uuid::now_v7()).unwrap();
+    let trait_repository: &dyn MfaRepositoryPort = &repository;
+
+    assert!(!repository.has_totp_credentials().await.unwrap());
+    assert!(
+        trait_repository
+            .totp_enrollment(tenant.tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        trait_repository
+            .totp_credential(other_tenant, user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    trait_repository
+        .begin_totp_enrollment(
+            tenant.tenant_id,
+            user_id,
+            SECRET.to_owned(),
+            "first label".to_owned(),
+        )
+        .await
+        .unwrap();
+    trait_repository
+        .begin_totp_enrollment(
+            tenant.tenant_id,
+            user_id,
+            SECRET.to_owned(),
+            "replacement label".to_owned(),
+        )
+        .await
+        .unwrap();
+    let enrollment = trait_repository
+        .totp_enrollment(tenant.tenant_id, user_id)
+        .await
+        .unwrap()
+        .expect("the pending encrypted enrollment should be readable");
+    assert_eq!(enrollment.secret_base32, SECRET);
+    assert!(!enrollment.confirmed);
+
+    let step = 1_234_567_i64;
+    let timestamp = step * nazo_identity::mfa::MFA_TOTP_PERIOD_SECONDS;
+    let invalid_hashes = (0..nazo_identity::mfa::MFA_BACKUP_CODE_COUNT)
+        .map(|index| EncodedSecretHash::new(format!("invalid-{index}")).unwrap())
+        .collect();
+    assert_eq!(
+        trait_repository
+            .verify_and_confirm_totp(
+                tenant.tenant_id,
+                user_id,
+                "invalid-code",
+                timestamp,
+                invalid_hashes,
+            )
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Invalid
+    );
+    trait_repository
+        .record_invalid_totp_attempt(tenant.tenant_id, user_id)
+        .await
+        .unwrap();
+
+    let code = nazo_identity::mfa::totp_for_step(b"12345678901234567890", step).unwrap();
+    let hashes = (0..nazo_identity::mfa::MFA_BACKUP_CODE_COUNT)
+        .map(|index| EncodedSecretHash::new(format!("backup-{index}")).unwrap())
+        .collect();
+    assert_eq!(
+        trait_repository
+            .verify_and_confirm_totp(tenant.tenant_id, user_id, &code, timestamp, hashes)
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Accepted
+    );
+    assert!(repository.has_totp_credentials().await.unwrap());
+    let credential = trait_repository
+        .totp_credential(tenant.tenant_id, user_id)
+        .await
+        .unwrap()
+        .expect("confirmed TOTP credential should be readable");
+    assert_eq!(credential.secret_base32, SECRET);
+    assert_eq!(credential.last_used_step, Some(step));
+    assert_eq!(
+        trait_repository
+            .verify_and_confirm_totp(
+                tenant.tenant_id,
+                user_id,
+                &code,
+                timestamp,
+                (0..nazo_identity::mfa::MFA_BACKUP_CODE_COUNT)
+                    .map(|index| EncodedSecretHash::new(format!("replay-{index}")).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Replay
+    );
+    assert_eq!(
+        trait_repository
+            .verify_and_consume_totp(tenant.tenant_id, user_id, "invalid-code", timestamp + 1)
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Invalid
+    );
+    let next_timestamp = (step + 1) * nazo_identity::mfa::MFA_TOTP_PERIOD_SECONDS;
+    let next_code = nazo_identity::mfa::totp_for_step(b"12345678901234567890", step + 1).unwrap();
+    assert_eq!(
+        trait_repository
+            .verify_and_consume_totp(tenant.tenant_id, user_id, &next_code, next_timestamp)
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Accepted
+    );
+    assert_eq!(
+        trait_repository
+            .verify_and_consume_totp(tenant.tenant_id, user_id, &next_code, next_timestamp)
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Replay
+    );
+    assert!(
+        trait_repository
+            .compare_and_set_totp_step(tenant.tenant_id, user_id, step + 2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !trait_repository
+            .compare_and_set_totp_step(tenant.tenant_id, user_id, step + 2)
+            .await
+            .unwrap()
+    );
+
+    let candidates = trait_repository
+        .backup_code_candidates(tenant.tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), nazo_identity::mfa::MFA_BACKUP_CODE_COUNT);
+    let candidate_id = candidates[0].id;
+    assert!(
+        trait_repository
+            .consume_backup_code_candidate(tenant.tenant_id, user_id, candidate_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !trait_repository
+            .consume_backup_code_candidate(tenant.tenant_id, user_id, candidate_id)
+            .await
+            .unwrap()
+    );
+    trait_repository
+        .record_invalid_backup_code_attempt(tenant.tenant_id, user_id)
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now();
+    let token_hash = "a".repeat(64);
+    let user_agent_hash = "b".repeat(64);
+    trait_repository
+        .remember_device(
+            tenant.tenant_id,
+            user_id,
+            token_hash.clone(),
+            Some(user_agent_hash.clone()),
+            now + chrono::Duration::minutes(10),
+        )
+        .await
+        .unwrap();
+    trait_repository
+        .remember_device(
+            tenant.tenant_id,
+            user_id,
+            "c".repeat(64),
+            None,
+            now - chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .remembered_device_valid(
+                tenant.tenant_id,
+                user_id,
+                &token_hash,
+                Some(&user_agent_hash),
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .remembered_device_valid(
+                tenant.tenant_id,
+                user_id,
+                &token_hash,
+                Some("wrong-agent"),
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .remembered_device_valid(
+                other_tenant,
+                user_id,
+                &token_hash,
+                Some(&user_agent_hash),
+                now
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .remembered_device_valid(
+                tenant.tenant_id,
+                user_id,
+                &token_hash,
+                Some(&user_agent_hash),
+                now + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap()
+    );
+
+    trait_repository
+        .clear_mfa_state(tenant.tenant_id, user_id)
+        .await
+        .unwrap();
+    assert!(!repository.has_totp_credentials().await.unwrap());
+    assert!(
+        trait_repository
+            .backup_code_candidates(tenant.tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        trait_repository
+            .verify_and_consume_totp(tenant.tenant_id, user_id, &code, timestamp)
+            .await
+            .unwrap(),
+        nazo_identity::ports::TotpVerificationOutcome::Invalid
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "INSERT INTO user_totp_credentials
+            (tenant_id,user_id,secret_base32,label,confirmed_at)
+         VALUES ($1,$2,$3,'legacy',CURRENT_TIMESTAMP)",
+    )
+    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<SqlUuid, _>(user_id.as_uuid())
+    .bind::<Text, _>(SECRET)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 1);
+    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 0);
+    assert_eq!(repository.rotate_totp_secrets().await.unwrap(), 0);
+    trait_repository
+        .clear_mfa_state(tenant.tenant_id, user_id)
+        .await
+        .unwrap();
+
+    let old_key = MfaTotpKey::new("old-key", [0x22; 32]).unwrap();
+    let old_ring = MfaTotpKeyRing::new(old_key.clone(), None).unwrap();
+    let old_repository = MfaRepository::with_totp_key_ring(pool.clone(), Some(old_ring));
+    old_repository
+        .begin_totp_enrollment(
+            tenant.tenant_id,
+            user_id,
+            SECRET.to_owned(),
+            "old key".to_owned(),
+        )
+        .await
+        .unwrap();
+    let current_key = MfaTotpKey::new("new-key", [0x33; 32]).unwrap();
+    let previous_key = MfaTotpKey::new("old-key", [0x22; 32]).unwrap();
+    let rotated_repository = MfaRepository::with_totp_key_ring(
+        pool.clone(),
+        Some(MfaTotpKeyRing::new(current_key, Some(previous_key)).unwrap()),
+    );
+    assert_eq!(rotated_repository.rotate_totp_secrets().await.unwrap(), 1);
+    assert_eq!(rotated_repository.rotate_totp_secrets().await.unwrap(), 0);
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE user_totp_credentials
+         SET secret_key_id = 'missing-key'
+         WHERE tenant_id = $1 AND user_id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<SqlUuid, _>(user_id.as_uuid())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(matches!(
+        rotated_repository.rotate_totp_secrets().await,
+        Err(RepositoryError::Consistency(_))
+    ));
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE user_totp_credentials
+         SET secret_key_id = 'old-key', secret_ciphertext = $3
+         WHERE tenant_id = $1 AND user_id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<SqlUuid, _>(user_id.as_uuid())
+    .bind::<diesel::sql_types::Binary, _>(vec![0_u8; 30])
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(matches!(
+        old_repository
+            .totp_enrollment(tenant.tenant_id, user_id)
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+    rotated_repository
+        .clear_mfa_state(tenant.tenant_id, user_id)
+        .await
+        .unwrap();
     cleanup(&pool, user_id).await;
 }
 

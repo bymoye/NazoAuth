@@ -73,6 +73,7 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/oauth
+      NAZO_AUDIT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/nazo_audit_test
       VALKEY_URL: redis://127.0.0.1:6379/0
       VALKEY_COMMAND_TIMEOUT_MS: "1000"
       BIND: 127.0.0.1:18000
@@ -110,10 +111,17 @@ jobs:
           shared-key: workspace-quality
 
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev postgresql-client
 
       - name: Prepare runtime directories
         run: mkdir -p runtime/ci/avatars runtime/ci/keys
+
+      - name: Create isolated audit ledger test database
+        run: >-
+          PGPASSWORD=postgres psql
+          -h 127.0.0.1 -U postgres -d postgres
+          -v ON_ERROR_STOP=1
+          -c 'CREATE DATABASE nazo_audit_test'
 
       - name: Verify compatibility contracts
         run: python scripts/verify_static_contracts.py --check

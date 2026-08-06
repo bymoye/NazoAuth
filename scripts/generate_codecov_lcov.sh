@@ -101,8 +101,12 @@ if [[ "$services_ready" != "true" ]]; then
 fi
 docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d oauth
 docker exec "$VALKEY_CONTAINER" valkey-cli ping
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nazo_audit_test'
 
 export DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/oauth"
+export NAZO_AUDIT_TEST_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_audit_test"
 export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"
 export VALKEY_COMMAND_TIMEOUT_MS='1000'
 export BIND='127.0.0.1:18000'

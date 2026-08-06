@@ -1,3 +1,7 @@
+use diesel::sql_query;
+use diesel_async::RunQueryDsl;
+use nazo_postgres::{create_pool, db_pool_metrics, get_conn, health_check};
+
 fn function_source<'a>(source: &'a str, name: &str, next_name: Option<&str>) -> &'a str {
     let start = source
         .find(&format!("pub async fn {name}"))
@@ -90,4 +94,36 @@ async fn pool_admin_operation_errors_remain_typed_across_runtime_boundaries() {
             .is_some(),
         "the cleanup operation error must not be replaced by a task-join error"
     );
+}
+
+#[tokio::test]
+async fn pool_health_and_connection_round_trip_record_acquisition_metrics() {
+    let database_url = std::env::var("NAZO_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok();
+    if database_url.is_none() && std::env::var_os("CI").is_some() {
+        panic!("CI pool health tests require NAZO_TEST_DATABASE_URL or DATABASE_URL");
+    }
+    let Some(database_url) = database_url else {
+        return;
+    };
+
+    let before = db_pool_metrics();
+    let pool = create_pool(database_url, 1).expect("the test pool should be configured");
+    health_check(&pool)
+        .await
+        .expect("the pool health check should execute a database round trip");
+    let mut connection = get_conn(&pool)
+        .await
+        .expect("the pool should acquire an asynchronous connection");
+    sql_query("SELECT 1")
+        .execute(&mut connection)
+        .await
+        .expect("an acquired connection should execute a query");
+    drop(connection);
+
+    let after = db_pool_metrics();
+    assert!(after.acquire_count >= before.acquire_count + 2);
+    assert!(after.wait_nanos_total >= before.wait_nanos_total);
+    assert!(after.wait_nanos_max >= before.wait_nanos_max);
 }

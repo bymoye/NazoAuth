@@ -5,13 +5,23 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::{Duration, Utc};
-use coset::{CoseKeyBuilder, iana};
+use coset::{CoseKeyBuilder, SignatureContext, iana};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, decode, decode_header, encode};
+use mdoc_rs::{
+    MdocError,
+    builder::{CoseSigner, DocumentBuilder},
+    model::types::ValidityInfo,
+    response_builder::DeviceResponseBuilder,
+    session::SessionTranscript,
+};
 use nazo_digital_credentials::{
     CertificateRevocationPolicy, CredentialFormat, CredentialSignInput, CredentialSignerPort,
     CredentialTrustError, HolderBinding, PresentedCredential, VcIssuerTrustPolicy,
 };
-use p256::{ecdsa::SigningKey, pkcs8::EncodePrivateKey};
+use p256::{
+    ecdsa::{SigningKey, signature::Signer as _},
+    pkcs8::{DecodePrivateKey, EncodePrivateKey},
+};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, KeyPair,
     KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
@@ -126,6 +136,126 @@ async fn real_crypto_fixture() -> (Openid4vcCredentialCrypto, CertificateFixture
     )
     .expect("credential crypto should validate the generated chain");
     (crypto, certs, key_dir)
+}
+
+fn crypto_with_certificate(
+    keyset: nazo_key_management::KeyManager,
+    certs: &CertificateFixture,
+) -> Openid4vcCredentialCrypto {
+    Openid4vcCredentialCrypto {
+        keyset,
+        x5c: Arc::new(vec![STANDARD.encode(&certs.leaf_der)]),
+        leaf_der: Arc::new(certs.leaf_der.clone()),
+        trust_anchors: Arc::new(vec![certs.ca_der.clone()]),
+        issuer_trust_policy: VcIssuerTrustPolicy::san_bound(),
+        revocation_policy: CertificateRevocationPolicy::disabled(),
+    }
+}
+
+struct TestMdocIssuerSigner {
+    signing_key: SigningKey,
+    certificate_der: Vec<u8>,
+}
+
+impl CoseSigner for TestMdocIssuerSigner {
+    fn sign(&self, tbs: &[u8]) -> Result<Vec<u8>, MdocError> {
+        let signature: p256::ecdsa::Signature = self.signing_key.sign(tbs);
+        Ok(signature.to_bytes().to_vec())
+    }
+
+    fn algorithm(&self) -> i64 {
+        -7
+    }
+
+    fn certificate_der(&self) -> &[u8] {
+        &self.certificate_der
+    }
+}
+
+fn valid_mdoc_presentation(certs: &CertificateFixture) -> (String, Vec<u8>) {
+    let issuer_secret =
+        p256::SecretKey::from_pkcs8_der(&certs.leaf_key.serialize_der()).expect("leaf private key");
+    let issuer_signing_key =
+        SigningKey::from_slice(&issuer_secret.to_bytes()).expect("leaf signing key");
+    let device_signing_key = SigningKey::from_slice(&[83; 32]).expect("device signing key");
+    let device_point = device_signing_key.verifying_key().to_sec1_point(false);
+    let device_key = CoseKeyBuilder::new_ec2_pub_key(
+        iana::EllipticCurve::P_256,
+        device_point.x().expect("device x").to_vec(),
+        device_point.y().expect("device y").to_vec(),
+    )
+    .build();
+    let now = Utc::now();
+    let issuer_document = DocumentBuilder::new("org.iso.18013.5.1.mDL")
+        .device_key(device_key)
+        .validity(ValidityInfo {
+            signed: now,
+            valid_from: now - Duration::minutes(1),
+            valid_until: now + Duration::hours(1),
+            expected_update: None,
+        })
+        .add_namespace(
+            "org.iso.18013.5.1",
+            vec![
+                ("given_name", ciborium::Value::Text("Ada".to_owned())),
+                ("age", ciborium::Value::Integer(42.into())),
+            ],
+        )
+        .sign(&TestMdocIssuerSigner {
+            signing_key: issuer_signing_key,
+            certificate_der: certs.leaf_der.clone(),
+        })
+        .expect("issuer-signed mdoc");
+    let transcript = SessionTranscript::Oid4vp {
+        mdoc_nonce: "mdoc-nonce".to_owned(),
+        client_id: "https://verifier.example".to_owned(),
+        response_uri: "https://verifier.example/response".to_owned(),
+        verifier_nonce: "verifier-nonce".to_owned(),
+    };
+    let transcript_bytes = transcript.to_cbor_bytes().expect("session transcript");
+    let device_key_der = device_signing_key.to_bytes().to_vec();
+    let mut response = DeviceResponseBuilder::from_documents(vec![issuer_document])
+        .session_transcript(transcript)
+        .authenticate_with_signature(device_key_der, -7)
+        .build()
+        .expect("device response");
+    let document = response
+        .documents
+        .first_mut()
+        .expect("device response document");
+    let device_signed = document
+        .device_signed
+        .as_mut()
+        .expect("device-signed response");
+    let mdoc_rs::model::types::DeviceAuth::Signature(device_signature) =
+        &mut device_signed.device_auth
+    else {
+        panic!("device response should use a signature");
+    };
+    let device_authentication = standard_device_authentication_bytes(
+        &transcript_bytes,
+        &document.doc_type,
+        &device_signed.name_spaces_bytes,
+    )
+    .expect("standard DeviceAuthenticationBytes");
+    let signature_input = coset::sig_structure_data(
+        SignatureContext::CoseSign1,
+        device_signature.protected.clone(),
+        None,
+        &[],
+        &device_authentication,
+    );
+    let signature: p256::ecdsa::Signature = device_signing_key.sign(&signature_input);
+    device_signature.payload = None;
+    device_signature.signature = signature.to_bytes().to_vec();
+    (
+        URL_SAFE_NO_PAD.encode(
+            response
+                .to_device_response_cbor()
+                .expect("device response CBOR"),
+        ),
+        transcript_bytes,
+    )
 }
 
 fn sd_input(
@@ -259,6 +389,12 @@ fn conformance_trust_anchor_requires_one_current_ca() {
             .is_err()
     );
     assert!(parse_conformance_credential_trust_anchor(&certs.leaf_pem).is_err());
+    assert!(
+        parse_conformance_credential_trust_anchor(
+            "-----BEGIN CERTIFICATE-----\nAQ==\n-----END CERTIFICATE-----"
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -334,6 +470,28 @@ async fn request_and_metadata_signing_emit_required_jose_headers() {
     assert_eq!(metadata_header.kid.as_deref(), Some("credential-test"));
     assert_eq!(metadata_header.x5c.as_ref(), Some(&expected_x5c));
     let _ = std::fs::remove_dir_all(key_dir);
+}
+
+#[tokio::test]
+async fn request_and_metadata_signing_map_key_failures_to_errors() {
+    let certs = certificate_fixture("issuer.example");
+    let failing_keyset = nazo_key_management::KeyManager::for_test_behavior(
+        Algorithm::ES256,
+        nazo_key_management::TestSigningBehavior::Failing,
+    );
+    let crypto = crypto_with_certificate(failing_keyset, &certs);
+    assert!(
+        crypto
+            .sign_request_object(&json!({"iss": "issuer"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        crypto
+            .sign_issuer_metadata(&json!({"iss": "issuer"}))
+            .await
+            .is_err()
+    );
 }
 
 #[test]
@@ -491,6 +649,21 @@ fn sd_jwt_chain_and_combined_anchor_validation_fail_closed() {
         .validate_sd_jwt_chain(&[STANDARD.encode(&certs.leaf_der)], &[])
         .expect("valid SD-JWT chain");
     assert_eq!(valid.certificates, vec![certs.leaf_der.clone()]);
+    assert_eq!(
+        crypto
+            .combined_trust_anchors(std::slice::from_ref(&certs.ca_der))
+            .unwrap()
+            .len(),
+        1
+    );
+    let other_certs = certificate_fixture("other.example");
+    assert_eq!(
+        crypto
+            .combined_trust_anchors(std::slice::from_ref(&other_certs.ca_der))
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(crypto.validate_sd_jwt_chain(&[], &[]).is_err());
     assert!(matches!(
         crypto.validate_sd_jwt_chain(&["bad".to_owned()], &[]),
@@ -506,12 +679,17 @@ fn sd_jwt_chain_and_combined_anchor_validation_fail_closed() {
     ));
 }
 
-#[test]
-fn sd_jwt_verification_accepts_valid_holder_binding_and_rejects_tampering() {
+#[tokio::test]
+async fn sd_jwt_verification_accepts_valid_holder_binding_and_rejects_tampering() {
     let (crypto, presentation, disclosed, _certs) = sd_presentation_fixture();
     let verified = crypto
         .verify_sd_jwt(&presentation)
         .expect("valid SD-JWT presentation");
+    let verified_via_port = crypto
+        .verify(&presentation)
+        .await
+        .expect("credential verifier port");
+    assert_eq!(verified_via_port, verified);
     assert_eq!(verified.format, CredentialFormat::SdJwtVc);
     assert_eq!(verified.issuer, "https://issuer.example");
     assert_eq!(verified.credential_type, "ExampleCredential");
@@ -553,6 +731,98 @@ fn sd_jwt_verification_accepts_valid_holder_binding_and_rejects_tampering() {
     assert_eq!(
         crypto.verify_sd_jwt(&duplicate),
         Err(CredentialTrustError::InvalidEncoding)
+    );
+}
+
+#[test]
+fn sd_jwt_key_binding_requires_type_and_matches_disclosure_hash() {
+    let (crypto, presentation, _, certs) = sd_presentation_fixture();
+    let parts = presentation.encoded.split('~').collect::<Vec<_>>();
+    let (holder_jwk, holder_key) = es256_jwk(71);
+
+    let mut wrong_type_header = Header::new(Algorithm::ES256);
+    wrong_type_header.typ = Some("jwt".to_owned());
+    let wrong_type_kb = encode(
+        &wrong_type_header,
+        &json!({
+            "nonce": presentation.expected_nonce,
+            "aud": presentation.expected_audience,
+            "iat": Utc::now().timestamp(),
+            "sd_hash": "unused",
+        }),
+        &holder_key,
+    )
+    .expect("wrong-type key binding");
+    let wrong_type = PresentedCredential {
+        encoded: format!("{}~{}~{}", parts[0], parts[1], wrong_type_kb),
+        ..presentation.clone()
+    };
+    assert_eq!(
+        crypto.verify_sd_jwt(&wrong_type),
+        Err(CredentialTrustError::InvalidHolderBinding)
+    );
+
+    let issuer_key = EncodingKey::from_ec_der(&certs.leaf_key.serialize_der());
+    let issued_at = Utc::now() - Duration::minutes(1);
+    let mut credential_header = Header::new(Algorithm::ES256);
+    credential_header.typ = Some("dc+sd-jwt".to_owned());
+    credential_header.x5c = Some(vec![STANDARD.encode(&certs.leaf_der)]);
+    let credential_jwt = encode(
+        &credential_header,
+        &json!({
+            "iss": "https://issuer.example",
+            "iat": issued_at.timestamp(),
+            "nbf": issued_at.timestamp(),
+            "exp": (issued_at + Duration::hours(1)).timestamp(),
+            "vct": "ExampleCredential",
+            "_sd_alg": "sha-256",
+            "_sd": [],
+            "cnf": {"jwk": holder_jwk},
+        }),
+        &issuer_key,
+    )
+    .expect("credential without disclosures");
+    let no_disclosure_input = format!("{credential_jwt}~");
+    let mut kb_header = Header::new(Algorithm::ES256);
+    kb_header.typ = Some("kb+jwt".to_owned());
+    let no_disclosure_kb = encode(
+        &kb_header,
+        &json!({
+            "nonce": presentation.expected_nonce,
+            "aud": presentation.expected_audience,
+            "iat": Utc::now().timestamp(),
+            "sd_hash": URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(no_disclosure_input.as_bytes())),
+        }),
+        &holder_key,
+    )
+    .expect("empty disclosure key binding");
+    let no_disclosure = PresentedCredential {
+        encoded: format!("{credential_jwt}~{no_disclosure_kb}"),
+        ..presentation.clone()
+    };
+    let verified = crypto
+        .verify_sd_jwt(&no_disclosure)
+        .expect("empty disclosure presentation");
+    assert_eq!(verified.claims, json!({}));
+
+    let wrong_hash_kb = encode(
+        &kb_header,
+        &json!({
+            "nonce": presentation.expected_nonce,
+            "aud": presentation.expected_audience,
+            "iat": Utc::now().timestamp(),
+            "sd_hash": "not-the-presentation-hash",
+        }),
+        &holder_key,
+    )
+    .expect("wrong disclosure hash key binding");
+    let wrong_hash = PresentedCredential {
+        encoded: format!("{}~{}~{}", parts[0], parts[1], wrong_hash_kb),
+        ..presentation
+    };
+    assert_eq!(
+        crypto.verify_sd_jwt(&wrong_hash),
+        Err(CredentialTrustError::InvalidHolderBinding)
     );
 }
 
@@ -606,6 +876,14 @@ fn sd_jwt_verification_rejects_holder_and_issuer_policy_failures() {
         strict.verify_sd_jwt(&presentation),
         Err(CredentialTrustError::UntrustedIssuer)
     );
+    let strict_revocation = Openid4vcCredentialCrypto {
+        revocation_policy: CertificateRevocationPolicy::required_without_snapshot(),
+        ..crypto
+    };
+    assert_eq!(
+        strict_revocation.verify_sd_jwt(&presentation),
+        Err(CredentialTrustError::RevocationSnapshotUnavailable)
+    );
 }
 
 #[tokio::test]
@@ -641,6 +919,43 @@ async fn mdoc_verification_rejects_missing_transcript_bad_cbor_and_bad_anchors()
     assert_eq!(
         crypto.verify_mdoc(&bad_anchor),
         Err(CredentialTrustError::InvalidEncoding)
+    );
+    let _ = std::fs::remove_dir_all(key_dir);
+}
+
+#[tokio::test]
+async fn mdoc_verification_accepts_signed_device_response_and_extracts_claims() {
+    let (crypto, certs, key_dir) = real_crypto_fixture().await;
+    let (encoded, transcript) = valid_mdoc_presentation(&certs);
+    let presentation = PresentedCredential {
+        format: CredentialFormat::MsoMdoc,
+        encoded,
+        expected_nonce: "verifier-nonce".to_owned(),
+        expected_audience: "https://verifier.example".to_owned(),
+        response_uri: "https://verifier.example/response".to_owned(),
+        mdoc_session_transcript: Some(transcript),
+        additional_trust_anchors: vec![],
+    };
+    let verified = crypto
+        .verify_mdoc(&presentation)
+        .expect("signed mdoc presentation");
+    assert_eq!(verified.format, CredentialFormat::MsoMdoc);
+    assert_eq!(verified.credential_type, "org.iso.18013.5.1.mDL");
+    assert_eq!(verified.claims["org.iso.18013.5.1"]["given_name"], "Ada");
+    assert_eq!(verified.claims["org.iso.18013.5.1"]["age"], 42);
+    assert!(verified.holder_key.is_some());
+    assert_eq!(verified.status, None);
+    assert_eq!(
+        verified.issuer,
+        URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(&certs.leaf_der))
+    );
+    let strict_revocation = Openid4vcCredentialCrypto {
+        revocation_policy: CertificateRevocationPolicy::required_without_snapshot(),
+        ..crypto
+    };
+    assert_eq!(
+        strict_revocation.verify_mdoc(&presentation),
+        Err(CredentialTrustError::RevocationSnapshotUnavailable)
     );
     let _ = std::fs::remove_dir_all(key_dir);
 }
