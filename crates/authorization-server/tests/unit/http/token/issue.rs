@@ -91,10 +91,6 @@ pub(crate) async fn persist_token_issuance_response_for_test(
     client: &ClientRow,
     grant_key: &str,
 ) {
-    nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
-        .insert(client, None, None, None)
-        .await
-        .expect("replay fixture client should persist");
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
