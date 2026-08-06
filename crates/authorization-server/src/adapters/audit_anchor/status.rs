@@ -144,11 +144,10 @@ async fn write_atomic(path: &Path, bytes: Vec<u8>) -> anyhow::Result<()> {
 }
 
 pub(super) fn age_seconds(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> anyhow::Result<i64> {
-    let age = (now - timestamp).num_seconds();
-    if age < 0 {
+    if timestamp > now {
         bail!("audit anchor health timestamp is in the future");
     }
-    Ok(age)
+    Ok((now - timestamp).num_seconds())
 }
 
 pub(super) fn duration_seconds(value: Duration) -> i64 {

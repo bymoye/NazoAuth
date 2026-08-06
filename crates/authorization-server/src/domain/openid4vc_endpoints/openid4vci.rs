@@ -321,6 +321,13 @@ impl ServerCredentialIssuerOperations {
         }
         let tenant_id = Uuid::parse_str(&claims.tenant_id)
             .map_err(|_| vci_error(401, "invalid_token", "Access token tenant is invalid."))?;
+        if tenant_id != self.tenant_id {
+            return Err(vci_error(
+                401,
+                "invalid_token",
+                "Access token tenant does not match this credential issuer.",
+            ));
+        }
         if self
             .token_service
             .access_token_revoked(tenant_id, &claims.jti)
@@ -1313,3 +1320,7 @@ impl CredentialIssuerOperations for ServerCredentialIssuerOperations {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/domain/openid4vci_endpoint_operations.rs"]
+mod tests;

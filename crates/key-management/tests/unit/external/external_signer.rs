@@ -663,7 +663,11 @@ async fn external_signer_stdin_timeout_terminates_owned_descendant() {
     let (_private_key, public_jwk) = eddsa_fixture(kid);
     let external = external_signing_key_with_command(
         descendant_blocking_stdin_command(&fixture.pid_path),
-        2_000,
+        // Starting nested PowerShell processes can take several seconds on a
+        // loaded Windows test runner. Keep the signer timeout comfortably past
+        // fixture readiness so this test measures blocked stdin termination,
+        // not process-startup scheduling.
+        10_000,
     );
     let signing_input = "x".repeat(2 * 1024 * 1024);
     let task = tokio::spawn(async move {

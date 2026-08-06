@@ -92,7 +92,7 @@ impl PresentationStorePort for Openid4vpRepository {
                 .get()
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            let row = load_presentation(&mut connection, transaction_id, now)
+            let row = load_presentation(&mut connection, self.tenant_id, transaction_id, now)
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
             row.map(|value| value.transaction_with_key(&self.data_key))
@@ -113,9 +113,10 @@ impl PresentationStorePort for Openid4vpRepository {
                 .get()
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            let Some(mut row) = load_presentation(&mut connection, transaction_id, now)
-                .await
-                .map_err(|_| PresentationStoreError::Unavailable)?
+            let Some(mut row) =
+                load_presentation(&mut connection, self.tenant_id, transaction_id, now)
+                    .await
+                    .map_err(|_| PresentationStoreError::Unavailable)?
             else {
                 return Ok(None);
             };
@@ -123,16 +124,22 @@ impl PresentationStorePort for Openid4vpRepository {
             request.wallet_nonce = Some(wallet_nonce.to_owned());
             let encoded = serde_json::to_value(&request)
                 .map_err(|_| PresentationStoreError::InvalidTransition)?;
-            sql_query(
-                "UPDATE openid4vp_transactions SET request = $3 \
-                 WHERE id = $1 AND completed_at IS NULL AND expires_at > $2",
+            let changed = sql_query(
+                "UPDATE openid4vp_transactions SET request = $4 \
+                 WHERE id = $1 AND tenant_id = $2 AND completed_at IS NULL AND expires_at > $3 \
+                   AND (conformance_lease_id IS NULL OR \
+                        nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
             )
             .bind::<sql_types::Uuid, _>(transaction_id)
+            .bind::<sql_types::Uuid, _>(self.tenant_id)
             .bind::<sql_types::Timestamptz, _>(now)
             .bind::<sql_types::Jsonb, _>(encoded.clone())
             .execute(&mut connection)
             .await
             .map_err(|_| PresentationStoreError::Unavailable)?;
+            if changed != 1 {
+                return Ok(None);
+            }
             row.request = encoded;
             row.transaction_with_key(&self.data_key).map(Some)
         })
@@ -155,10 +162,14 @@ impl PresentationStorePort for Openid4vpRepository {
                 .map_err(|_| PresentationStoreError::InvalidTransition)?;
             let encoded = protect_result(&self.data_key, transaction_id, &encoded)?;
             let changed = sql_query(
-                "UPDATE openid4vp_transactions SET result_ciphertext = $4, completed_at = $3 \
-                 WHERE id = $1 AND state_hash = $2 AND completed_at IS NULL AND expires_at > $3",
+                "UPDATE openid4vp_transactions SET result_ciphertext = $5, completed_at = $4 \
+                 WHERE id = $1 AND tenant_id = $2 AND state_hash = $3 \
+                   AND completed_at IS NULL AND expires_at > $4 \
+                   AND (conformance_lease_id IS NULL OR \
+                        nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
             )
             .bind::<sql_types::Uuid, _>(transaction_id)
+            .bind::<sql_types::Uuid, _>(self.tenant_id)
             .bind::<sql_types::Text, _>(state_hash)
             .bind::<sql_types::Timestamptz, _>(now)
             .bind::<sql_types::Binary, _>(encoded)
@@ -181,7 +192,7 @@ impl PresentationStorePort for Openid4vpRepository {
                 .get()
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            let row = load_presentation(&mut connection, transaction_id, now)
+            let row = load_presentation(&mut connection, self.tenant_id, transaction_id, now)
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
             row.map(|value| value.stored(&self.data_key)).transpose()
@@ -289,17 +300,19 @@ impl PresentationRow {
 
 async fn load_presentation(
     connection: &mut diesel_async::AsyncPgConnection,
+    tenant_id: Uuid,
     id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<Option<PresentationRow>, diesel::result::Error> {
     sql_query(
         "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
          request, request_object, request_uri, conformance_lease_id, ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
-         FROM openid4vp_transactions WHERE id = $1 AND expires_at > $2 \
+         FROM openid4vp_transactions WHERE id = $1 AND tenant_id = $2 AND expires_at > $3 \
            AND (conformance_lease_id IS NULL OR \
                 nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
     )
     .bind::<sql_types::Uuid, _>(id)
+    .bind::<sql_types::Uuid, _>(tenant_id)
     .bind::<sql_types::Timestamptz, _>(now)
     .get_result(connection)
     .await

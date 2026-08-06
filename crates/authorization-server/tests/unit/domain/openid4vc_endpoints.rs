@@ -122,6 +122,96 @@ fn managed_dataset_validity_must_end_after_start_and_now() {
         valid_until: Some(now + Duration::hours(1)),
     };
     assert!(validate_managed_dataset(&configuration, &reversed).is_err());
+
+    validate_managed_dataset(
+        &configuration,
+        &PutCredentialDatasetRequest {
+            claims: json!({"given_name":"Ada"}),
+            valid_from: Some(now + Duration::hours(1)),
+            valid_until: Some(now + Duration::hours(2)),
+        },
+    )
+    .expect("a future validity interval must be accepted");
+    validate_managed_dataset(
+        &configuration,
+        &PutCredentialDatasetRequest {
+            claims: json!({"given_name":"Ada"}),
+            valid_from: None,
+            valid_until: Some(now + Duration::hours(1)),
+        },
+    )
+    .expect("a future expiry without an explicit start must be accepted");
+}
+
+#[test]
+fn managed_dataset_rejects_claim_names_and_json_shape_at_every_boundary() {
+    let sd_jwt = dataset_configuration(CredentialFormat::SdJwtVc);
+    let mut empty_name = serde_json::Map::new();
+    empty_name.insert(String::new(), json!("empty-name"));
+    let mut oversized_name = serde_json::Map::new();
+    oversized_name.insert("x".repeat(129), json!("too-long-name"));
+    for claims in [Value::Object(empty_name), Value::Object(oversized_name)] {
+        assert!(validate_managed_dataset(&sd_jwt, &dataset_request(claims)).is_err());
+    }
+
+    let oversized_key = "k".repeat(256);
+    let mut oversized_key_claims = serde_json::Map::new();
+    oversized_key_claims.insert(oversized_key, json!("too-long-key"));
+    assert!(
+        validate_managed_dataset(
+            &sd_jwt,
+            &dataset_request(Value::Object(oversized_key_claims)),
+        )
+        .is_err()
+    );
+
+    let too_many_nodes = Value::Array((0..513).map(|_| json!(true)).collect());
+    assert!(
+        validate_managed_dataset(&sd_jwt, &dataset_request(json!({"values": too_many_nodes})),)
+            .is_err()
+    );
+
+    let nested_array = json!({"values": ["one", 2, false, null]});
+    validate_managed_dataset(&sd_jwt, &dataset_request(nested_array))
+        .expect("bounded arrays and scalar values are accepted");
+}
+
+#[test]
+fn managed_mdoc_dataset_rejects_namespace_and_inner_claim_name_bounds() {
+    let configuration = dataset_configuration(CredentialFormat::MsoMdoc);
+    let oversized_namespace = "n".repeat(256);
+    let mut oversized_namespace_claims = serde_json::Map::new();
+    oversized_namespace_claims.insert(oversized_namespace, json!({"family_name": "Lovelace"}));
+    assert!(
+        validate_managed_dataset(
+            &configuration,
+            &dataset_request(Value::Object(oversized_namespace_claims)),
+        )
+        .is_err()
+    );
+
+    let oversized_claim_name = "c".repeat(129);
+    let mut oversized_inner = serde_json::Map::new();
+    oversized_inner.insert(oversized_claim_name, json!("Lovelace"));
+    let mut oversized_inner_claims = serde_json::Map::new();
+    oversized_inner_claims.insert(
+        "org.iso.18013.5.1".to_owned(),
+        Value::Object(oversized_inner),
+    );
+    assert!(
+        validate_managed_dataset(
+            &configuration,
+            &dataset_request(Value::Object(oversized_inner_claims)),
+        )
+        .is_err()
+    );
+    assert!(
+        validate_managed_dataset(
+            &configuration,
+            &dataset_request(json!({"org.iso.18013.5.1": {"": "Lovelace"}})),
+        )
+        .is_err()
+    );
 }
 
 #[test]

@@ -84,10 +84,35 @@ pub(super) fn validate_health(
     if status.head_sequence != last_anchored_sequence || status.head_hash != last_anchored_hash {
         anyhow::bail!("audit anchor is behind the current ledger head");
     }
-    if status.anchor_lag_seconds.unwrap_or_default() < 0 {
+    let Some(last_anchored_occurred_at) = status.last_anchored_occurred_at else {
+        anyhow::bail!("audit anchor status has no last checkpoint occurrence time");
+    };
+    let Some(last_anchored_at) = status.last_anchored_at else {
+        anyhow::bail!("audit anchor status has no last checkpoint delivery time");
+    };
+    age_seconds(now, last_anchored_occurred_at)?;
+    age_seconds(now, last_anchored_at)?;
+    if last_anchored_at < last_anchored_occurred_at {
+        anyhow::bail!("audit anchor checkpoint was delivered before it occurred");
+    }
+    if status.observed_at < last_anchored_at {
+        anyhow::bail!("audit anchor checkpoint was delivered after the health observation");
+    }
+
+    let Some(anchor_lag) = status.anchor_lag_seconds else {
+        anyhow::bail!("audit anchor status has no delivery lag");
+    };
+    if anchor_lag < 0 {
         anyhow::bail!("audit anchor status has a negative delivery lag");
     }
-    let anchor_lag = status.anchor_lag_seconds.unwrap_or_default();
+    let computed_anchor_lag = if last_anchored_sequence == 0 {
+        0
+    } else {
+        (last_anchored_at - last_anchored_occurred_at).num_seconds()
+    };
+    if anchor_lag != computed_anchor_lag {
+        anyhow::bail!("audit anchor status delivery lag does not match its checkpoint timestamps");
+    }
     if anchor_lag > duration_seconds(config.max_lag) {
         anyhow::bail!(
             "audit anchor delivery lag is {anchor_lag}s (limit {}s)",

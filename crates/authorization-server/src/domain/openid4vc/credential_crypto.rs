@@ -831,3 +831,7 @@ impl CoseSigner for AsyncCoseSigner {
         &self.certificate_der
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/domain/openid4vc_credential_crypto.rs"]
+mod tests;

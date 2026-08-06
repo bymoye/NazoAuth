@@ -46,7 +46,9 @@ struct NotificationState {
 struct State {
     nonces: HashMap<String, NonceState>,
     deferred: HashMap<(String, Uuid), DeferredState>,
-    responses: HashMap<(Uuid, Uuid, String), StoredCredentialResponse>,
+    // Mirrors the database UNIQUE(token_id, request_digest) constraint.  The
+    // issuance id remains part of the read-side identity check below.
+    responses: HashMap<(Uuid, String), StoredCredentialResponse>,
     notifications: HashMap<(String, Uuid), NotificationState>,
 }
 
@@ -149,11 +151,7 @@ impl TransitionStore {
         state: &mut State,
         response: &StoredCredentialResponse,
     ) -> Result<(), CredentialStoreError> {
-        let key = (
-            response.issuance_id,
-            response.token_id,
-            response.request_digest.clone(),
-        );
+        let key = (response.token_id, response.request_digest.clone());
         if state.responses.insert(key, response.clone()).is_some() {
             return Err(CredentialStoreError::InvalidTransition);
         }
@@ -186,11 +184,7 @@ impl TransitionStore {
             return Err(CredentialStoreError::InvalidTransition);
         }
         if let Some(response) = response {
-            let key = (
-                response.issuance_id,
-                response.token_id,
-                response.request_digest.clone(),
-            );
+            let key = (response.token_id, response.request_digest.clone());
             if state.responses.contains_key(&key) {
                 return Err(CredentialStoreError::InvalidTransition);
             }
@@ -228,11 +222,7 @@ impl TransitionStore {
             return Err(CredentialStoreError::InvalidTransition);
         }
         if let Some(response) = response {
-            let response_key = (
-                response.issuance_id,
-                response.token_id,
-                response.request_digest.clone(),
-            );
+            let response_key = (response.token_id, response.request_digest.clone());
             if state.responses.contains_key(&response_key) {
                 return Err(CredentialStoreError::InvalidTransition);
             }
@@ -418,8 +408,8 @@ impl CredentialStorePort for TransitionStore {
             let state = self.state.lock().unwrap();
             Ok(state
                 .responses
-                .get(&(issuance_id, token_id, request_digest.to_owned()))
-                .filter(|response| response.expires_at > now)
+                .get(&(token_id, request_digest.to_owned()))
+                .filter(|response| response.issuance_id == issuance_id && response.expires_at > now)
                 .cloned())
         })
     }
@@ -445,8 +435,15 @@ impl CredentialStorePort for TransitionStore {
     ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
-            Self::store_response_locked(&mut state, response)?;
-            Self::store_notification_locked(&mut state, handle)
+            let notification_key = (handle.notification_id.clone(), handle.token_id);
+            let response_key = (response.token_id, response.request_digest.clone());
+            if state.notifications.contains_key(&notification_key)
+                || state.responses.contains_key(&response_key)
+            {
+                return Err(CredentialStoreError::InvalidTransition);
+            }
+            Self::store_notification_locked(&mut state, handle)?;
+            Self::store_response_locked(&mut state, response)
         })
     }
 
@@ -699,11 +696,7 @@ impl CredentialStorePort for TransitionStore {
             {
                 return Ok(false);
             }
-            let response_key = (
-                response.issuance_id,
-                response.token_id,
-                response.request_digest.clone(),
-            );
+            let response_key = (response.token_id, response.request_digest.clone());
             if state.responses.contains_key(&response_key) {
                 return Err(CredentialStoreError::InvalidTransition);
             }
@@ -746,6 +739,244 @@ impl CredentialStorePort for TransitionStore {
             async move { Self::store_notification_locked(&mut self.state.lock().unwrap(), handle) },
         )
     }
+}
+
+/// A deliberately minimal adapter that leaves the optional response-aware
+/// operations on [`CredentialStorePort`] at their fail-closed defaults.  The
+/// production adapters implement those operations transactionally; this test
+/// proves that an older adapter cannot silently report success when the
+/// service attempts to use a response-aware transition.
+#[derive(Clone, Copy, Default)]
+struct DefaultMethodsStore;
+
+impl CredentialStorePort for DefaultMethodsStore {
+    fn upsert_access<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a CredentialAccess,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn offer<'a>(
+        &'a self,
+        _: Uuid,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn consume_pre_authorized_offer<'a>(
+        &'a self,
+        _: &'a str,
+        _: Option<&'a str>,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<
+        'a,
+        Result<Option<nazo_openid4vci::CredentialAuthorization>, CredentialStoreError>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn issue_nonce<'a>(
+        &'a self,
+        _: &'a NonceRecord,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn consume_nonce<'a>(
+        &'a self,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn claim_nonce<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn finalize_nonce<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn release_nonce<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn finalize_nonce_with_notification<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a NotificationHandle,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn find_response<'a>(
+        &'a self,
+        _: Uuid,
+        _: Uuid,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialResponse>, CredentialStoreError>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn resolve_access<'a>(
+        &'a self,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<CredentialAccess>, CredentialStoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn store_deferred<'a>(
+        &'a self,
+        _: &'a DeferredCredential,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn store_deferred_and_finalize_nonce<'a>(
+        &'a self,
+        _: &'a DeferredCredential,
+        _: &'a str,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn consume_ready_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredential>, CredentialStoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn claim_ready_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredentialClaim>, CredentialStoreError>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn finalize_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn release_deferred<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn finalize_deferred_with_notification<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        _: &'a NotificationHandle,
+        _: DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn record_notification<'a>(
+        &'a self,
+        _: &'a IssuanceNotification,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn issue_notification_handle<'a>(
+        &'a self,
+        _: &'a NotificationHandle,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[test]
+fn response_aware_store_defaults_fail_closed_for_legacy_adapters() {
+    let now = Utc::now();
+    let store = DefaultMethodsStore;
+    let deferred = deferred_fixture(now);
+    let handle = NotificationHandle {
+        notification_id: "notification-default".to_owned(),
+        token_id: deferred.access.token_id,
+        expires_at: now + Duration::minutes(5),
+    };
+    let response = response_fixture(Uuid::now_v7(), deferred.access.token_id, now);
+
+    assert_eq!(
+        block_on(store.finalize_nonce_with_notification_and_response(
+            "nonce", "claim", &handle, &response, now,
+        )),
+        Err(CredentialStoreError::Unavailable)
+    );
+    assert_eq!(
+        block_on(store.store_response_with_notification(&handle, &response, now)),
+        Err(CredentialStoreError::Unavailable)
+    );
+    assert_eq!(
+        block_on(store.store_deferred_and_finalize_nonce_with_response(
+            &deferred, "nonce", "claim", &response, now,
+        )),
+        Err(CredentialStoreError::Unavailable)
+    );
+    assert_eq!(
+        block_on(store.store_deferred_with_response(&deferred, &response, now)),
+        Err(CredentialStoreError::Unavailable)
+    );
+    assert_eq!(
+        block_on(store.finalize_deferred_with_notification_and_response(
+            &deferred.transaction_hash,
+            deferred.access.token_id,
+            "claim",
+            &handle,
+            &response,
+            now,
+        )),
+        Err(CredentialStoreError::Unavailable)
+    );
 }
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
@@ -982,6 +1213,16 @@ fn response_lookup_is_bound_to_issuance_identity_and_expiry() {
             .is_some()
     );
     assert!(
+        block_on(store.find_response(Uuid::now_v7(), token_id, "request-digest", now,))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        block_on(store.find_response(issuance_id, Uuid::now_v7(), "request-digest", now,))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
         block_on(store.find_response(issuance_id, token_id, "different-request", now,))
             .unwrap()
             .is_none()
@@ -995,6 +1236,77 @@ fn response_lookup_is_bound_to_issuance_identity_and_expiry() {
         ))
         .unwrap()
         .is_none()
+    );
+}
+
+#[test]
+fn response_commit_rejects_duplicate_notification_atomically_and_can_retry() {
+    let now = Utc::now();
+    let store = TransitionStore::default();
+    let token_id = Uuid::now_v7();
+    let handle = NotificationHandle {
+        notification_id: "notification-duplicate".to_owned(),
+        token_id,
+        expires_at: now + Duration::minutes(10),
+    };
+    let first = response_fixture(Uuid::now_v7(), token_id, now);
+    block_on(store.issue_notification_handle(&handle)).unwrap();
+    let mut second = response_fixture(Uuid::now_v7(), token_id, now);
+    second.request_digest = "request-digest-2".to_owned();
+
+    assert_eq!(
+        block_on(store.store_response_with_notification(&handle, &second, now)),
+        Err(CredentialStoreError::InvalidTransition)
+    );
+    assert_eq!(store.response_count(), 0);
+
+    let retry_handle = NotificationHandle {
+        notification_id: "notification-retry".to_owned(),
+        ..handle
+    };
+    block_on(store.store_response_with_notification(&retry_handle, &first, now)).unwrap();
+    assert_eq!(store.response_count(), 1);
+    let second_retry_handle = NotificationHandle {
+        notification_id: "notification-retry-2".to_owned(),
+        ..retry_handle
+    };
+    block_on(store.store_response_with_notification(&second_retry_handle, &second, now)).unwrap();
+    assert_eq!(store.response_count(), 2);
+}
+
+#[test]
+fn response_identity_conflict_is_keyed_by_token_and_digest_across_issuances() {
+    let now = Utc::now();
+    let store = TransitionStore::default();
+    let token_id = Uuid::now_v7();
+    let first = response_fixture(Uuid::now_v7(), token_id, now);
+    let first_handle = NotificationHandle {
+        notification_id: "notification-first".to_owned(),
+        token_id,
+        expires_at: now + Duration::minutes(10),
+    };
+    block_on(store.store_response_with_notification(&first_handle, &first, now)).unwrap();
+
+    let second = response_fixture(Uuid::now_v7(), token_id, now);
+    let second_handle = NotificationHandle {
+        notification_id: "notification-second".to_owned(),
+        token_id,
+        expires_at: now + Duration::minutes(10),
+    };
+    assert_eq!(
+        block_on(store.store_response_with_notification(&second_handle, &second, now,)),
+        Err(CredentialStoreError::InvalidTransition)
+    );
+    assert_eq!(store.response_count(), 1);
+    assert!(
+        block_on(store.find_response(first.issuance_id, token_id, &first.request_digest, now,))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        block_on(store.find_response(second.issuance_id, token_id, &second.request_digest, now,))
+            .unwrap()
+            .is_none()
     );
 }
 

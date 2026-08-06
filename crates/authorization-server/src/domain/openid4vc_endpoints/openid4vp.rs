@@ -572,3 +572,7 @@ impl PresentationOperations for ServerPresentationOperations {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/domain/openid4vc_endpoints_openid4vp.rs"]
+mod tests;

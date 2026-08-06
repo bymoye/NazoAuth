@@ -165,6 +165,8 @@ pub(super) fn issuance_request_digest<T: serde::Serialize>(
     request_url: &str,
     method: &str,
 ) -> Result<String, CredentialHttpError> {
+    let request = serde_json::to_value(request)
+        .map_err(|_| vci_error(500, "server_error", "Credential request digest failed."))?;
     let input = serde_json::json!({
         "version": 1,
         "kind": kind,
@@ -310,3 +312,7 @@ pub(super) const fn vp_error(
         description,
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/domain/openid4vc_endpoints_helpers.rs"]
+mod tests;
