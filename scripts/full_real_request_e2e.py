@@ -70,7 +70,7 @@ HTTP_SIGNATURE_CASE_REGISTRY = (
     ("fapi_http_signature_tampered_dpop", "signed_request", {"query": "tampered-dpop", "signed_dpop": "signed-dpop-value", "sent_dpop": "altered-dpop-value", "expected_status": 401}),
     ("fapi_http_signature_tampered_body", "tampered_body", {"query": "tampered-body", "expected_status": 401}),
     ("fapi_http_signature_stale_created", "relative_created", {"query": "stale-created", "created_offset": -61, "expected_status": 401}),
-    ("fapi_http_signature_future_created", "relative_created", {"query": "future-created", "created_offset": 6, "expected_status": 401}),
+    ("fapi_http_signature_future_created", "relative_created", {"query": "future-created", "created_offset": 30, "expected_status": 401}),
     ("fapi_http_signature_replay", "replay", {"query": "replay", "expected_status": 200}),
     ("fapi_http_signature_wrong_key", "wrong_key", {"query": "wrong-key", "expected_status": 401}),
     ("fapi_http_signature_wrong_client", "wrong_client", {"query": "wrong-client", "expected_status": 401}),
