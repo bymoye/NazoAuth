@@ -4,20 +4,25 @@ use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
 use crate::domain::tenancy::DEFAULT_REALM_ID;
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 use crate::http::rate_limit::TokenManagementRequestLimiter;
-use crate::http::token::device_issuance::required_device_code;
 use crate::http::token::device_issuance::token_device_code_with_service;
+use crate::http::token::device_issuance::{device_grant_key, required_device_code};
 use crate::http::token::issue::{TokenIssuanceConfig, TokenIssuanceContext};
 use crate::http::token::{ServerTokenService, TokenForm, device_config::DeviceHttpConfig};
 use crate::settings::Settings;
 use crate::test_support::TestInfrastructure;
 use actix_web::test::TestRequest;
 use chrono::Duration;
+use fred::interfaces::ClientLike as _;
+use fred::prelude::{
+    Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
+};
 use nazo_auth::{DeviceAuthorizationState, DevicePollTransition, evaluate_device_poll};
 use nazo_http_actix::ClientIpConfig;
 use nazo_http_actix::OAuthJsonErrorFields;
 use nazo_postgres::create_pool;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 fn device_authorization_service(
@@ -167,6 +172,67 @@ fn oauth_error_code(response: &HttpResponse) -> String {
         .expect("OAuth error response should record its error code")
 }
 
+async fn live_device_replay_state() -> Option<TestInfrastructure> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let valkey_url = std::env::var("VALKEY_URL").ok()?;
+    let mut valkey = ValkeyBuilder::from_config(
+        ValkeyConfig::from_url(&valkey_url).expect("VALKEY_URL should parse"),
+    );
+    valkey.with_performance_config(|performance: &mut PerformanceConfig| {
+        performance.default_command_timeout = StdDuration::from_millis(1000);
+    });
+    valkey.with_connection_config(|connection: &mut ConnectionConfig| {
+        connection.connection_timeout = StdDuration::from_millis(1000);
+        connection.internal_command_timeout = StdDuration::from_millis(1000);
+        connection.max_command_attempts = 1;
+    });
+    let valkey = valkey.build().expect("device test Valkey should build");
+    valkey
+        .init()
+        .await
+        .expect("device test Valkey should connect");
+
+    Some(TestInfrastructure {
+        diesel_db: create_pool(database_url, 2).expect("device test database should build"),
+        valkey,
+        settings: Arc::new(enabled_settings()),
+        keyset: crate::test_support::test_key_manager(),
+    })
+}
+
+async fn call_device_token_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    device_code: &str,
+) -> HttpResponse {
+    let connection = state.valkey_connection();
+    let token_service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        state.keyset.clone(),
+    );
+    let issuance_config = TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = super::super::issue::test_support::test_authorization_service(state);
+    let issuance = TokenIssuanceContext {
+        config: &issuance_config,
+        modules: &modules,
+        authorization: &authorization,
+    };
+    let device_service = ServerDeviceGrantService::new(nazo_valkey::DeviceStore::new(&connection));
+    let request = TestRequest::post().uri("/token").to_http_request();
+    token_device_code_with_service(
+        &token_service,
+        &issuance,
+        &device_service,
+        &request,
+        client,
+        &device_token_form(Some(device_code)),
+        None,
+    )
+    .await
+}
+
 #[test]
 fn device_authorization_form_parses_scope_resource_and_auth_fields() {
     let req = form_request();
@@ -183,6 +249,37 @@ fn device_authorization_form_parses_scope_resource_and_auth_fields() {
     assert_eq!(form.scope.as_deref(), Some("openid profile"));
     assert_eq!(form.resources, vec!["https://api.example.com"]);
     assert_eq!(form.client_secret.as_deref(), Some("secret"));
+}
+
+#[test]
+fn device_authorization_form_rejects_transport_and_parameter_boundary_violations() {
+    let wrong_content_type = TestRequest::post()
+        .insert_header((header::CONTENT_TYPE, "application/json"))
+        .to_http_request();
+    assert!(matches!(
+        parse_device_authorization_form(&wrong_content_type, &Bytes::from_static(b"{}")),
+        Err(DeviceAuthorizationFormError::InvalidContentType)
+    ));
+
+    let valid_request = form_request();
+    assert!(matches!(
+        parse_device_authorization_form(&valid_request, &Bytes::from_static(b"\xff")),
+        Err(DeviceAuthorizationFormError::InvalidEncoding)
+    ));
+    assert!(matches!(
+        parse_device_authorization_form(
+            &valid_request,
+            &Bytes::from_static(b"client_id=one&client_id=two"),
+        ),
+        Err(DeviceAuthorizationFormError::DuplicateParameter)
+    ));
+    assert!(matches!(
+        parse_device_authorization_form(
+            &valid_request,
+            &Bytes::from_static(b"client_id=one&resource=https%3A%2F%2Fapi.example%2F%23fragment"),
+        ),
+        Err(DeviceAuthorizationFormError::InvalidResourceParameter)
+    ));
 }
 
 #[test]
@@ -322,6 +419,12 @@ fn device_authorization_verification_uri_targets_frontend_device_page() {
     );
 }
 
+#[test]
+fn device_user_code_normalization_is_case_insensitive_and_separator_safe() {
+    assert_eq!(normalize_user_code(" ab-cd_12 "), "ABCD12");
+    assert_eq!(normalize_user_code("\t\n"), "");
+}
+
 #[actix_web::test]
 async fn legacy_device_verification_path_redirects_to_frontend_without_html() {
     let config = DeviceHttpConfig::from(&enabled_settings());
@@ -397,11 +500,35 @@ async fn device_token_rejects_client_policy_before_polling_state() {
     assert_eq!(oauth_error_code(&response), "unauthorized_client");
 }
 
+#[actix_web::test]
+async fn device_code_replay_rejects_a_consumed_code_even_with_a_persisted_response() {
+    let Some(state) = live_device_replay_state().await else {
+        return;
+    };
+    let client = device_client();
+    let device_code = format!("device-replay-{}", Uuid::now_v7());
+    let grant_key = device_grant_key(&device_code, None, None);
+
+    crate::http::token::issue::tests::persist_token_issuance_response_for_test(
+        &state, &client, &grant_key,
+    )
+    .await;
+
+    let response = call_device_token_for_test(&state, &client, &device_code).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_grant");
+}
+
 #[test]
 fn device_code_grant_requires_device_code_before_state_lookup() {
     let form = device_token_form(None);
     let response = required_device_code(&form).expect_err("missing device_code must fail");
 
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+
+    let form = device_token_form(Some("   "));
+    let response = required_device_code(&form).expect_err("blank device_code must fail");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&response), "invalid_request");
 }

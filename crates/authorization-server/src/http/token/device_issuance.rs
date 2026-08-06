@@ -25,7 +25,7 @@ use super::{
     issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant},
 };
 
-fn device_grant_key(
+pub(super) fn device_grant_key(
     device_code: &str,
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
@@ -218,12 +218,19 @@ pub(crate) async fn token_device_code_with_service(
 }
 
 pub(super) fn required_device_code(form: &TokenForm) -> Result<&str, HttpResponse> {
-    form.device_code.as_deref().ok_or_else(|| {
-        oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "缺少 device_code.",
-            false,
-        )
-    })
+    form.device_code
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "缺少 device_code.",
+                false,
+            )
+        })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/http/token/device_issuance.rs"]
+mod tests;

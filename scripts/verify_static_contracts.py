@@ -70,6 +70,23 @@ RFC9967_CASES = {
 }
 
 
+def read_rust_module_tree(root_file: Path) -> str:
+    """Read a Rust module facade and every source file in its child directory."""
+    sources = [root_file]
+    child_directory = root_file.with_suffix("")
+    if child_directory.is_dir():
+        sources.extend(sorted(child_directory.rglob("*.rs")))
+    return "\n".join(source.read_text(encoding="utf-8") for source in sources)
+
+
+def read_rust_source_family(directory: Path, prefix: str) -> str:
+    """Read a facade plus private sibling modules sharing a capability prefix."""
+    return "\n".join(
+        source.read_text(encoding="utf-8")
+        for source in sorted(directory.glob(f"{prefix}*.rs"))
+    )
+
+
 def migration_line(path: Path) -> str:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return f"{digest}  {path.relative_to(ROOT).as_posix()}"
@@ -297,9 +314,6 @@ def check_rust_test_structure() -> None:
             "let valkey = nazo_valkey::test_support::connect(",
             "let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);",
             "let session_profiles = web::Data::new(SessionProfileHandles::new(",
-        ),
-        "crates/authorization-server/src/domain/openid4vc.rs": (
-            "fn validate_key_attestation(",
         ),
         "crates/key-management/src/lifecycle.rs": (
             'panic!("signing key lifecycle refresh failed: {error:#}");',
@@ -706,9 +720,9 @@ def check_openid4vc_boundaries() -> None:
     openid4vc_protocol_adapter = (
         ROOT / "crates" / "openid4vc-http-actix" / "src" / "vci.rs"
     ).read_text(encoding="utf-8")
-    openid4vc_server_domain = (
+    openid4vc_server_domain = read_rust_module_tree(
         ROOT / "crates" / "authorization-server" / "src" / "domain" / "openid4vc_endpoints.rs"
-    ).read_text(encoding="utf-8")
+    )
     for plan in expected_plans:
         if plan not in materializer:
             raise SystemExit(f"OpenID4VC materializer lacks upstream plan: {plan}")
@@ -1160,24 +1174,24 @@ def check_conformance_provisioning_boundaries() -> None:
                 f"public conformance onboarding artifact omits OpenID4VC material: {marker}"
             )
 
-    openid4vc_runtime = (
+    openid4vc_runtime = read_rust_module_tree(
         ROOT
         / "crates"
         / "authorization-server"
         / "src"
         / "domain"
         / "openid4vc_endpoints.rs"
-    ).read_text(encoding="utf-8")
+    )
     if "Openid4vciDatasetRepository" not in openid4vc_runtime:
         raise SystemExit("OpenID4VC runtime lacks an issuer-authoritative dataset repository")
-    openid4vc_repository = (
+    openid4vc_repository = read_rust_source_family(
         ROOT
         / "crates"
         / "persistence-postgres"
         / "src"
-        / "repositories"
-        / "openid4vc.rs"
-    ).read_text(encoding="utf-8")
+        / "repositories",
+        "openid4vc",
+    )
     openid4vc_admin = (
         ROOT
         / "crates"

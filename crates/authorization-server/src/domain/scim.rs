@@ -333,3 +333,7 @@ impl ScimBootstrapPasswordProvider for ServerScimBootstrapPasswordProvider {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/domain/scim.rs"]
+mod tests;

@@ -173,3 +173,7 @@ fn valid_csrf(sessions: &AdminSessionHandles, request: &HttpRequest) -> bool {
         config.csrf_cookie_name(),
     )
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/http/admin/openid4vc.rs"]
+mod tests;

@@ -112,6 +112,10 @@ pub async fn run() -> anyhow::Result<()> {
     let request_sha256 = compact_sha256(compact);
     let receipt_path = state.join(format!("{}.receipt.jws", task.jti));
     let request_path = state.join(format!("{}.request.sha256", task.jti));
+    let receipt_key_path = configured_path(
+        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
+        RECEIPT_PRIVATE_KEY_PATH,
+    );
     // Keep the OS lock held through state publication and operation execution.
     // A pre-claim lock timeout is transport failure, not an authoritative
     // operation outcome: another holder may still publish the same JTI's
@@ -135,6 +139,7 @@ pub async fn run() -> anyhow::Result<()> {
         &request_sha256,
         &expected_deployment_id,
         &context.receipt_key_id,
+        &receipt_key_path,
     )? {
         print!("{prior}");
         return Ok(());
@@ -146,6 +151,7 @@ pub async fn run() -> anyhow::Result<()> {
         &request_sha256,
         &expected_deployment_id,
         &context.receipt_key_id,
+        &receipt_key_path,
     )? {
         print!("{prior}");
         return Ok(());
@@ -170,6 +176,7 @@ pub async fn run() -> anyhow::Result<()> {
         &request_sha256,
         outcome,
         &context.receipt_key_id,
+        &receipt_key_path,
         started_at,
         completed_at,
     )?;
@@ -674,6 +681,7 @@ fn sign_task_outcome(
     request_sha256: &str,
     outcome: TaskOutcome,
     receipt_key_id: &str,
+    receipt_key_path: &Path,
     started_at: i64,
     completed_at: i64,
 ) -> anyhow::Result<String> {
@@ -695,10 +703,7 @@ fn sign_task_outcome(
     validate_runtime_receipt_deployment_binding(&receipt, &task.deployment_id).map_err(
         |error| anyhow::anyhow!("runtime receipt deployment identity is invalid: {error}"),
     )?;
-    let receipt_key = read_signing_key(&configured_path(
-        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
-        RECEIPT_PRIVATE_KEY_PATH,
-    ))?;
+    let receipt_key = read_signing_key(receipt_key_path)?;
     Ok(sign_runtime_receipt(
         &receipt,
         receipt_key_id,
@@ -712,6 +717,7 @@ fn read_published_receipt(
     request_sha256: &str,
     expected_deployment_id: &str,
     receipt_key_id: &str,
+    receipt_key_path: &Path,
 ) -> anyhow::Result<Option<String>> {
     if !regular_state_file_present(path, "operator task receipt")? {
         return Ok(None);
@@ -723,6 +729,7 @@ fn read_published_receipt(
         request_sha256,
         expected_deployment_id,
         receipt_key_id,
+        receipt_key_path,
     )?;
     Ok(Some(compact))
 }
@@ -733,6 +740,7 @@ fn recover_receipt_temporary(
     request_sha256: &str,
     expected_deployment_id: &str,
     receipt_key_id: &str,
+    receipt_key_path: &Path,
 ) -> anyhow::Result<Option<String>> {
     let temporary = receipt_temporary_path(path);
     if !state_path_present(&temporary)? {
@@ -746,6 +754,7 @@ fn recover_receipt_temporary(
         request_sha256,
         expected_deployment_id,
         receipt_key_id,
+        receipt_key_path,
     )?;
     fs::rename(&temporary, path)?;
     sync_directory(
@@ -761,11 +770,9 @@ fn validate_receipt_for_task(
     request_sha256: &str,
     expected_deployment_id: &str,
     receipt_key_id: &str,
+    receipt_key_path: &Path,
 ) -> anyhow::Result<()> {
-    let receipt_key = read_signing_key(&configured_path(
-        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
-        RECEIPT_PRIVATE_KEY_PATH,
-    ))?;
+    let receipt_key = read_signing_key(receipt_key_path)?;
     let receipt = verify_runtime_receipt(compact, receipt_key_id, &receipt_key.verifying_key())
         .map_err(|error| anyhow::anyhow!("operator task receipt is invalid: {error}"))?;
     validate_runtime_receipt_deployment_binding(&receipt, expected_deployment_id).map_err(

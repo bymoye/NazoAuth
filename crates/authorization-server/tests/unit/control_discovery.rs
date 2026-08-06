@@ -146,6 +146,145 @@ async fn http_discovery_rejects_invalid_challenges_without_exposing_identity() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[actix_web::test]
+async fn http_discovery_returns_signed_response_for_valid_challenges() {
+    let root = temporary_root();
+    let endpoint = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .unwrap();
+    let response = control_discovery(
+        web::Data::new(endpoint),
+        web::Json(DiscoveryRequest {
+            schema: CONTROL_DISCOVERY_SCHEMA,
+            nonce: URL_SAFE_NO_PAD.encode([8_u8; 32]),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn initialization_rejects_unusable_identity_roots_and_identifiers() {
+    let data_root = temporary_root();
+    fs::write(&data_root, b"not-a-directory").unwrap();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &data_root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("failed to create deployment identity directory"));
+    fs::remove_file(data_root).unwrap();
+
+    let root = temporary_root();
+    fs::create_dir_all(&root).unwrap();
+    let identity_file = root.join("identity-file");
+    fs::write(&identity_file, b"not-a-directory").unwrap();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &root,
+        Some(&identity_file),
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("failed to create runtime instance identity directory"));
+    fs::remove_dir_all(root).unwrap();
+
+    let root = temporary_root();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("invalid/runtime-id"),
+        "https://auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("invalid file identifier"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn initialization_rejects_corrupt_identity_key_and_statement() {
+    let root = temporary_root();
+    ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .unwrap();
+    let identity_dir = root.join(INSTANCE_DIRECTORY);
+    let original_key = fs::read_to_string(identity_dir.join(IDENTITY_KEY_FILE)).unwrap();
+    fs::write(
+        identity_dir.join(IDENTITY_KEY_FILE),
+        "!".repeat(32).as_bytes(),
+    )
+    .unwrap();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("not valid base64url"));
+
+    fs::write(
+        identity_dir.join(IDENTITY_KEY_FILE),
+        URL_SAFE_NO_PAD.encode([3; 31]),
+    )
+    .unwrap();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("must contain 32 bytes"));
+
+    fs::write(identity_dir.join(IDENTITY_KEY_FILE), original_key).unwrap();
+    fs::write(
+        identity_dir.join(DEPLOYMENT_STATEMENT_FILE),
+        b"not-a-deployment-statement",
+    )
+    .unwrap();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(!error.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn generated_identifiers_are_stable_without_controller_configuration() {
     let root = temporary_root();
@@ -274,5 +413,34 @@ fn changed_public_deployment_claim_preserves_the_previous_signed_statement() {
     .unwrap();
     assert_eq!(current.issuer, "https://new-auth.example");
     assert_eq!(previous.issuer, "https://old-auth.example");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_previous_statement_is_not_silently_removed_when_it_is_not_a_file() {
+    let root = temporary_root();
+    ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://old-auth.example",
+    )
+    .unwrap();
+    let previous = root
+        .join(INSTANCE_DIRECTORY)
+        .join("deployment-statement.previous.jws");
+    fs::create_dir(&previous).unwrap();
+    let error = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://new-auth.example",
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("failed to remove stale statement"));
     fs::remove_dir_all(root).unwrap();
 }

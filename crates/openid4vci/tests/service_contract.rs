@@ -95,6 +95,19 @@ impl CredentialStorePort for RecordingStore {
             Ok(true)
         })
     }
+    fn finalize_nonce_with_notification<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        handle: &'a NotificationHandle,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            *self.nonce_finalized.lock().unwrap() += 1;
+            self.notifications.lock().unwrap().push(handle.clone());
+            Ok(true)
+        })
+    }
     fn find_response<'a>(
         &'a self,
         _: Uuid,
@@ -126,6 +139,15 @@ impl CredentialStorePort for RecordingStore {
     fn store_deferred<'a>(
         &'a self,
         _: &'a DeferredCredential,
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn store_deferred_and_finalize_nonce<'a>(
+        &'a self,
+        _: &'a DeferredCredential,
+        _: &'a str,
+        _: &'a str,
+        _: chrono::DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
         Box::pin(async { Ok(()) })
     }
@@ -164,6 +186,19 @@ impl CredentialStorePort for RecordingStore {
         _: chrono::DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
         Box::pin(async { Ok(true) })
+    }
+    fn finalize_deferred_with_notification<'a>(
+        &'a self,
+        _: &'a str,
+        _: Uuid,
+        _: &'a str,
+        handle: &'a NotificationHandle,
+        _: chrono::DateTime<Utc>,
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            self.notifications.lock().unwrap().push(handle.clone());
+            Ok(true)
+        })
     }
     fn record_notification<'a>(
         &'a self,

@@ -138,6 +138,13 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 配置只在启动阶段读取；运行期只向 handler 注入其所需的 focused handles。
     let database_url = database_url(&config);
+    let audit_anchor_data_dir = PathBuf::from(config.string("DATA_DIR", "runtime"));
+    let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
+        crate::adapters::audit_anchor::preflight_config_from_source(
+            &config,
+            &audit_anchor_data_dir,
+        )?,
+    )?;
     let valkey_url = config.string("VALKEY_URL", "redis://127.0.0.1:6379/0");
     let valkey_command_timeout_ms = config.parse::<u64>("VALKEY_COMMAND_TIMEOUT_MS", 1_000)?;
     if valkey_command_timeout_ms == 0 {
@@ -157,6 +164,7 @@ pub async fn run() -> anyhow::Result<()> {
     crate::adapters::audit::install_persistent_audit_sink(
         audit_repository,
         require_audit_least_privilege,
+        audit_anchor_preflight,
     )?;
     crate::conformance_lease::spawn_cleanup(diesel_db.clone());
     #[cfg(not(test))]
@@ -170,12 +178,6 @@ pub async fn run() -> anyhow::Result<()> {
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
 
     let settings = Arc::new(Settings::from_config(&config)?);
-    crate::adapters::audit::configure_audit_anchor_preflight(
-        crate::adapters::audit_anchor::preflight_config_from_source(
-            &config,
-            &settings.storage.data_dir,
-        )?,
-    )?;
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
     let instance_identity_dir = config
         .optional_string("INSTANCE_IDENTITY_DIR")

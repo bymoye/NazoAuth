@@ -11,7 +11,13 @@ fields:
 
 * `event_id` (also the `Idempotency-Key`);
 * `deployment_id`, `sequence`, `previous_hash`, and `event_hash`;
-* `occurred_at` and `anchored_at`.
+* `event_type`, `event_category`, `payload`, and `occurred_at`.
+
+The signed body is immutable for a given outbox row. The delivery timestamp is
+carried separately in `X-Nazo-Audit-Sent-At`, so retries reuse the same body,
+signature, and idempotency key. The empty ledger uses a stable
+`genesis:<deployment_id>` idempotency key and an explicit `checkpoint_kind` of
+`genesis`.
 
 The receiver must recompute the BLAKE3 event hash before accepting a
 checkpoint. The hash input is `nazo.audit.v1\0`, big-endian sequence, previous

@@ -110,6 +110,55 @@ fn native_sso_profile_requires_id_token_and_device_secret_token_types() {
 
     form.actor_token_type = Some("urn:ietf:params:oauth:token-type:access_token".to_owned());
     assert!(!native_sso_profile_requested(&form));
+
+    let mut wrong_grant = token_form();
+    wrong_grant.grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer".to_owned();
+    assert!(!native_sso_profile_requested(&wrong_grant));
+
+    let mut wrong_subject_type = token_form();
+    wrong_subject_type.subject_token_type = Some(NATIVE_SSO_DEVICE_SECRET_TYPE.to_owned());
+    assert!(!native_sso_profile_requested(&wrong_subject_type));
+}
+
+#[test]
+fn native_sso_id_token_audience_requires_the_source_client() {
+    let base = NativeSsoIdTokenClaims {
+        iss: "https://issuer.example".to_owned(),
+        sub: "subject-1".to_owned(),
+        aud: json!("source-client"),
+        ds_hash: "hash".to_owned(),
+        sid: "sid-1".to_owned(),
+    };
+    assert!(native_sso_id_token_audience_contains(
+        &base,
+        "source-client"
+    ));
+    assert!(!native_sso_id_token_audience_contains(
+        &base,
+        "other-client"
+    ));
+
+    let array = NativeSsoIdTokenClaims {
+        aud: json!(["other-client", "source-client"]),
+        ..base
+    };
+    assert!(native_sso_id_token_audience_contains(
+        &array,
+        "source-client"
+    ));
+    assert!(!native_sso_id_token_audience_contains(
+        &array,
+        "missing-client"
+    ));
+
+    let invalid = NativeSsoIdTokenClaims {
+        aud: json!(42),
+        ..array
+    };
+    assert!(!native_sso_id_token_audience_contains(
+        &invalid,
+        "source-client"
+    ));
 }
 
 #[test]

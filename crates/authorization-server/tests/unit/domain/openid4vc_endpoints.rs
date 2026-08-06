@@ -4,9 +4,10 @@ use nazo_openid4vci::CredentialConfiguration;
 use serde_json::{Value, json};
 
 use super::{
-    PutCredentialDatasetRequest, openid4vci_authorization_detail,
-    openid4vci_configuration_id_from_identifier, token_endpoint_dpop_target_uris,
-    validate_managed_dataset,
+    PutCredentialDatasetRequest,
+    openid4vci::{openid4vci_configuration_id_from_identifier, token_endpoint_dpop_target_uris},
+    openid4vci_authorization_detail,
+    openid4vci_dataset::validate_managed_dataset,
 };
 
 fn dataset_configuration(format: CredentialFormat) -> CredentialConfiguration {
@@ -146,7 +147,7 @@ fn vci_token_dpop_targets_include_public_issuer_endpoint() {
 fn pre_authorized_token_validates_dpop_before_consuming_single_use_state() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/domain/openid4vc_endpoints.rs"
+        "/src/domain/openid4vc_endpoints/openid4vci.rs"
     ));
     let start = source
         .find("fn pre_authorized_token")
@@ -169,5 +170,9 @@ fn pre_authorized_token_validates_dpop_before_consuming_single_use_state() {
     assert!(
         dpop < pre_authorized_code,
         "DPoP nonce challenges must not consume the pre-authorized code"
+    );
+    assert!(
+        attestation_replay < pre_authorized_code,
+        "client-attestation replay state must be consumed before the pre-authorized code"
     );
 }

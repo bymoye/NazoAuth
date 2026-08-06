@@ -102,6 +102,21 @@ fn ciba_test_state() -> TestInfrastructure {
     ciba_test_state_with(|_| {})
 }
 
+async fn live_ciba_replay_state() -> Option<TestInfrastructure> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let valkey = live_test_valkey().await?;
+    let mut settings = Settings::from_config(&ConfigSource::default())
+        .expect("default CIBA test settings should load");
+    settings.endpoint.issuer = "https://issuer.example".to_owned();
+    settings.modules.enable_ciba = true;
+    Some(TestInfrastructure {
+        diesel_db: create_pool(database_url, 2).expect("CIBA test database should build"),
+        valkey,
+        settings: Arc::new(settings),
+        keyset: crate::test_support::test_key_manager(),
+    })
+}
+
 async fn live_test_valkey() -> Option<nazo_valkey::test_support::Client> {
     let valkey_url = std::env::var("VALKEY_URL").ok()?;
     Some(
@@ -803,6 +818,143 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
         .revoke(DEFAULT_TENANT_ID, lease_b.id)
         .await
         .expect("lease B should be revocable");
+
+    // Revocation is checked on every request, not only when the lease is
+    // created. The same credential must fail closed after its lease is
+    // revoked, while the already committed CIBA decision remains intact.
+    let request = actix_web::test::TestRequest::post()
+        .uri(&format!(
+            "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token={token_b}"
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actix_web::test::read_body(response).await.is_empty());
+    let state_after = match load_ciba_request_payload(&ciba_service, &auth_req_id).await {
+        Ok(Some(state_after)) => state_after,
+        Ok(None) => panic!("revocation must retain the CIBA transaction"),
+        Err(_) => panic!("revocation must leave readable CIBA state"),
+    };
+    assert_eq!(state_after.status, CibaStatus::Approved);
+}
+
+#[actix_web::test]
+async fn disabled_ciba_automated_decision_rejects_expired_lease() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires a database URL for leased CIBA decision coverage")
+            }
+            Err(_) => return,
+        };
+    let valkey = match live_test_valkey().await {
+        Some(valkey) => valkey,
+        None if std::env::var_os("CI").is_some() => {
+            panic!("CI requires VALKEY_URL for leased CIBA decision coverage")
+        }
+        None => return,
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .expect("leased CIBA decision migrations should apply");
+    let pool = create_pool(database_url, 2).expect("test database pool should initialize");
+    let mut settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    settings.modules.enable_ciba = true;
+    settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
+    settings.ciba.ciba_automated_decision_token = None;
+    let settings = Arc::new(settings);
+    let state = TestInfrastructure {
+        diesel_db: pool.clone(),
+        valkey,
+        settings: Arc::clone(&settings),
+        keyset: crate::test_support::test_key_manager(),
+    };
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let clients = nazo_postgres::OAuthClientRepository::new(pool.clone());
+    let token = format!("expired-lease-{}", Uuid::now_v7());
+    let digest = sha256_hex(token.as_bytes());
+    let lease = leases
+        .create(
+            DEFAULT_TENANT_ID,
+            CIBA_AUTOMATED_DECISION_PROFILE,
+            &format!("{:064x}", Uuid::now_v7().as_u128()),
+            nazo_postgres::ConformanceLeaseTokenDigests {
+                dynamic_registration_initial_access_token_sha256: None,
+                ciba_automated_decision_token_sha256: Some(&digest),
+            },
+            None,
+            60,
+        )
+        .await
+        .expect("expired lease should be stored");
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("expired-lease-kid", &key);
+    client.client_id = format!("expired-lease-client-{}", Uuid::now_v7());
+    clients
+        .insert(&client, None, None, Some(lease.id))
+        .await
+        .expect("expired lease client should be stored");
+    let auth_req_id = format!("expired-lease-{}", Uuid::now_v7());
+    store_ciba_state(&state, &client, &auth_req_id, CibaStatus::Pending).await;
+
+    // Expire the lease in the database before the request. This exercises the
+    // repository's `expires_at > CURRENT_TIMESTAMP` gate rather than relying
+    // on a client-side clock or a cleanup task having run first.
+    {
+        use diesel_async::RunQueryDsl as _;
+        let mut connection = nazo_postgres::get_conn(&pool)
+            .await
+            .expect("test database connection should be available");
+        diesel::sql_query(
+            "UPDATE conformance_leases SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE id = $1",
+        )
+        .bind::<diesel::sql_types::Uuid, _>(lease.id)
+        .execute(&mut connection)
+        .await
+        .expect("lease expiry should be writable");
+    }
+
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        pool.clone(),
+        &settings,
+    )
+    .expect("CIBA runtime registry should initialize");
+    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(CibaStore::new(
+        &state.valkey_connection(),
+    )));
+    let app = actix_web::test::init_service(
+        actix_web::App::new()
+            .app_data(ciba_service.clone())
+            .app_data(actix_web::web::Data::new(leases.clone()))
+            .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
+                settings.as_ref(),
+            )))
+            .app_data(actix_web::web::Data::from(runtime))
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
+    )
+    .await;
+
+    let request = actix_web::test::TestRequest::post()
+        .uri(&format!(
+            "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token={token}"
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actix_web::test::read_body(response).await.is_empty());
+    let state_after = match load_ciba_request_payload(&ciba_service, &auth_req_id).await {
+        Ok(Some(state_after)) => state_after,
+        Ok(None) => panic!("expired lease must retain the CIBA transaction"),
+        Err(_) => panic!("expired lease must leave readable CIBA state"),
+    };
+    assert_eq!(state_after.status, CibaStatus::Pending);
+
+    leases
+        .cleanup()
+        .await
+        .expect("expired CIBA lease should be cleanable");
 }
 
 #[test]
@@ -1310,6 +1462,32 @@ async fn ciba_token_request_validates_mtls_binding_before_issuing_approved_token
 
     let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
 
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+}
+
+#[actix_web::test]
+async fn ciba_replay_rejects_a_consumed_auth_req_id_even_with_a_persisted_response() {
+    let Some(state) = live_ciba_replay_state().await else {
+        return;
+    };
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("ciba-replay-kid", &key);
+    let auth_req_id = format!("ciba-replay-{}", Uuid::now_v7());
+    let grant_key = ciba_grant_key(&auth_req_id, None, None);
+
+    crate::http::token::issue::tests::persist_token_issuance_response_for_test(
+        &state, &client, &grant_key,
+    )
+    .await;
+
+    let response = call_ciba_token_for_test(&state, &client, auth_req_id).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         response

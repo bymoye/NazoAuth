@@ -1,7 +1,24 @@
-use super::*;
-use jsonwebtoken::{EncodingKey, Header, encode};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::{Duration, Utc};
+use coset::{CborSerializable, CoseKeyBuilder, iana};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use nazo_digital_credentials::CredentialTrustError;
+use nazo_openid4vci::{ProofError, Proofs};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use p256::pkcs8::EncodePrivateKey;
+use serde_json::{Value, json};
+
+use nazo_openid4vci::ProofValidatorPort as _;
+
+use super::{
+    Openid4vcClientAttestationValidator, Openid4vcProofValidator,
+    client_attestation::client_instance_key_thumbprint,
+    credential_crypto::{
+        mdoc_failed_assessments_accepted, mdoc_holder_key, standard_device_authentication_bytes,
+    },
+    crypto_helpers::jwk_to_cose_key,
+    proof_validator::KeyAttestationContext,
+};
 
 fn es256_test_key(seed: u8) -> (Value, EncodingKey) {
     let signing_key = SigningKey::from_slice(&[seed; 32]).expect("valid P-256 test key");
@@ -39,6 +56,24 @@ fn key_attestation_fixture(
     (validator, encoded, metadata)
 }
 
+fn validate_key_attestation(
+    validator: &Openid4vcProofValidator,
+    encoded: &str,
+    expected_nonce: &str,
+    metadata: &nazo_openid4vci::ProofTypeMetadata,
+    now: chrono::DateTime<Utc>,
+    context: KeyAttestationContext,
+) -> Result<Value, ProofError> {
+    validator.validate_key_attestation_with(
+        &validator.key_attestation_jwks,
+        encoded,
+        expected_nonce,
+        metadata,
+        now,
+        context,
+    )
+}
+
 #[test]
 fn key_attestation_rejects_missing_issued_at() {
     let now = Utc::now();
@@ -49,7 +84,8 @@ fn key_attestation_rejects_missing_issued_at() {
     }));
 
     assert!(matches!(
-        validator.validate_key_attestation(
+        validate_key_attestation(
+            &validator,
             &encoded,
             "expected-nonce",
             &metadata,
@@ -75,7 +111,8 @@ fn key_attestation_rejects_out_of_window_issued_at() {
         }));
 
         assert!(matches!(
-            validator.validate_key_attestation(
+            validate_key_attestation(
+                &validator,
                 &encoded,
                 "expected-nonce",
                 &metadata,
@@ -97,7 +134,8 @@ fn attestation_proof_rejects_missing_nonce() {
     }));
 
     assert!(matches!(
-        validator.validate_key_attestation(
+        validate_key_attestation(
+            &validator,
             &encoded,
             "expected-nonce",
             &metadata,
@@ -117,15 +155,15 @@ fn attestation_proof_accepts_missing_expiration() {
         "attested_keys": [es256_test_key(21).0],
     }));
 
-    validator
-        .validate_key_attestation(
-            &encoded,
-            "expected-nonce",
-            &metadata,
-            now,
-            KeyAttestationContext::AttestationProof,
-        )
-        .expect("exp is optional for an attestation proof");
+    validate_key_attestation(
+        &validator,
+        &encoded,
+        "expected-nonce",
+        &metadata,
+        now,
+        KeyAttestationContext::AttestationProof,
+    )
+    .expect("exp is optional for an attestation proof");
 }
 
 #[tokio::test]
@@ -172,7 +210,8 @@ fn key_attestation_rejects_expired_optional_expiration() {
     }));
 
     assert!(matches!(
-        validator.validate_key_attestation(
+        validate_key_attestation(
+            &validator,
             &encoded,
             "expected-nonce",
             &metadata,
@@ -192,7 +231,8 @@ fn jwt_proof_key_attestation_requires_expiration() {
     }));
 
     assert!(matches!(
-        validator.validate_key_attestation(
+        validate_key_attestation(
+            &validator,
             &encoded,
             "expected-nonce",
             &metadata,
@@ -212,15 +252,15 @@ fn jwt_proof_key_attestation_accepts_missing_nonce() {
         "attested_keys": [es256_test_key(25).0],
     }));
 
-    validator
-        .validate_key_attestation(
-            &encoded,
-            "expected-nonce",
-            &metadata,
-            now,
-            KeyAttestationContext::JwtProof,
-        )
-        .expect("the outer JWT proof already carries the required nonce");
+    validate_key_attestation(
+        &validator,
+        &encoded,
+        "expected-nonce",
+        &metadata,
+        now,
+        KeyAttestationContext::JwtProof,
+    )
+    .expect("the outer JWT proof already carries the required nonce");
 }
 
 #[test]

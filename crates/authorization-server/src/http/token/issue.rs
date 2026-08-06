@@ -1172,4 +1172,4 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "../../../tests/unit/http/token/issue.rs"]
-mod tests;
+pub(crate) mod tests;

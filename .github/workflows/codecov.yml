@@ -50,6 +50,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # The complete base-to-head diff is required for the repository-owned
+          # patch gate. GitHub's pull-files API can omit large file patches.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
@@ -70,7 +74,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Verify deterministic LCOV union
-        run: python -m unittest tests.unit.test_merge_lcov
+        run: python -m unittest tests.unit.test_merge_lcov tests.unit.test_check_patch_coverage
 
       - name: Generate coverage report
         shell: bash
@@ -95,3 +99,12 @@ jobs:
           disable_search: true
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Verify complete Git patch coverage
+        if: github.event_name == 'pull_request'
+        run: >-
+          python scripts/check_patch_coverage.py
+          --lcov lcov.info
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+          --threshold 90

@@ -104,6 +104,121 @@ fn local_deployment_identity_rejects_cross_deployment_replay() {
 }
 
 #[test]
+fn local_deployment_identity_rejects_missing_or_malformed_bootstrap_sources() {
+    let directory = temporary_directory();
+    let config_path = directory.join("server.yaml");
+    let valid = task(TaskOperation::KeysValidate);
+
+    assert!(
+        validate_local_task_identity_at(
+            &valid,
+            &config_path,
+            None,
+            Some(&directory.join("state")),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("failed to read server configuration")
+    );
+
+    fs::write(&config_path, b"- not-a-mapping\n").unwrap();
+    assert!(
+        validate_local_task_identity_at(
+            &valid,
+            &config_path,
+            None,
+            Some(&directory.join("state")),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("top-level key/value mapping")
+    );
+
+    fs::write(
+        &config_path,
+        b"DATA_DIR: runtime\nDEPLOYMENT_ID: deployment-test\n",
+    )
+    .unwrap();
+    let explicit_identity = directory.join("explicit-deployment-id");
+    assert!(
+        validate_local_task_identity_at(
+            &valid,
+            &config_path,
+            Some(&explicit_identity),
+            Some(&directory.join("state")),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("configured persisted deployment identity is unavailable")
+    );
+
+    let persisted_identity = directory.join("runtime/instance/deployment-id");
+    fs::create_dir_all(persisted_identity.parent().unwrap()).unwrap();
+    fs::write(&persisted_identity, b"deployment-test\n").unwrap();
+    let state_directory = directory.join("state");
+    fs::create_dir_all(&state_directory).unwrap();
+    assert!(
+        validate_local_task_identity_at(&valid, &config_path, None, Some(&state_directory))
+            .unwrap_err()
+            .to_string()
+            .contains("operator state deployment identity is unavailable")
+    );
+
+    fs::remove_file(&persisted_identity).unwrap();
+    fs::write(&config_path, b"DATA_DIR: runtime\n").unwrap();
+    let bootstrap = task(TaskOperation::MigrateApply);
+    assert!(
+        validate_local_task_identity_at(&bootstrap, &config_path, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("no local deployment identity is available")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn local_deployment_identity_accepts_yaml_scalar_types_and_rejects_sequences() {
+    let directory = temporary_directory();
+    let config_path = directory.join("server.yaml");
+    let bootstrap = task(TaskOperation::MigrateApply);
+
+    fs::write(&config_path, b"DEPLOYMENT_ID: true\n").unwrap();
+    assert!(validate_local_task_identity_at(&bootstrap, &config_path, None, None).is_err());
+    fs::write(&config_path, b"DEPLOYMENT_ID: 42\n").unwrap();
+    assert!(validate_local_task_identity_at(&bootstrap, &config_path, None, None).is_err());
+    fs::write(
+        &config_path,
+        b"DATA_DIR: [runtime]\nDEPLOYMENT_ID: deployment-test\n",
+    )
+    .unwrap();
+    assert!(
+        validate_local_task_identity_at(&bootstrap, &config_path, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a scalar")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn operator_state_identity_is_immutable_after_first_publication() {
+    let directory = temporary_directory();
+    persist_operator_state_identity(&directory, "deployment-test").unwrap();
+    persist_operator_state_identity(&directory, "deployment-test").unwrap();
+    let error = persist_operator_state_identity(&directory, "deployment-other")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("changed unexpectedly"));
+    assert_eq!(
+        fs::read_to_string(directory.join("deployment-id"))
+            .unwrap()
+            .trim(),
+        "deployment-test"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn concurrent_replay_claims_are_idempotent_and_conflicts_are_rejected() {
     let directory = temporary_directory();
     for iteration in 0..64 {
@@ -253,6 +368,156 @@ fn equivalent_prepared_lifecycle_temporary_is_safe_to_clean_and_continue() {
         prepared
     );
     assert!(!lifecycle_temporary_path(&lifecycle).exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn prepared_lifecycle_temporary_without_published_record_is_recovered() {
+    let directory = temporary_directory();
+    let lifecycle = directory.join("request.lifecycle.json");
+    let digest = "prepared-without-record".repeat(4);
+    let prepared = TaskLifecycle::Prepared {
+        request_sha256: digest.clone(),
+    };
+    fs::write(
+        lifecycle_temporary_path(&lifecycle),
+        serde_json::to_vec(&prepared).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        load_or_prepare_lifecycle(&lifecycle, &digest).unwrap(),
+        prepared
+    );
+    assert!(lifecycle.exists());
+    assert!(!lifecycle_temporary_path(&lifecycle).exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn nonprepared_lifecycle_temporary_fails_closed_without_a_published_record() {
+    let directory = temporary_directory();
+    let lifecycle = directory.join("request.lifecycle.json");
+    let temporary = lifecycle_temporary_path(&lifecycle);
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&TaskLifecycle::Executing {
+            request_sha256: "executing".repeat(16),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = load_or_prepare_lifecycle(&lifecycle, &"executing".repeat(16))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("incomplete durable transition"));
+    assert!(temporary.exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn signed_receipts_are_recovered_and_bound_to_the_request() {
+    let directory = temporary_directory();
+    let receipt_key = SigningKey::from_bytes(&[11; 32]);
+    let receipt_key_path = directory.join("receipt.key");
+    fs::write(
+        &receipt_key_path,
+        URL_SAFE_NO_PAD.encode(receipt_key.to_bytes()),
+    )
+    .unwrap();
+    let request = task(TaskOperation::KeysValidate);
+    let digest = "r".repeat(64);
+    let compact = sign_task_outcome(
+        &request,
+        &digest,
+        TaskOutcome::Failed {
+            code: "operation-failed-test".to_owned(),
+        },
+        "receipt-key",
+        &receipt_key_path,
+        10,
+        11,
+    )
+    .unwrap();
+    validate_receipt_for_task(
+        &compact,
+        &request,
+        &digest,
+        "deployment-test",
+        "receipt-key",
+        &receipt_key_path,
+    )
+    .unwrap();
+
+    let mut wrong_request = request.clone();
+    wrong_request.jti.push_str("-other");
+    let error = validate_receipt_for_task(
+        &compact,
+        &wrong_request,
+        &digest,
+        "deployment-test",
+        "receipt-key",
+        &receipt_key_path,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("not bound to this request"));
+    assert!(
+        validate_receipt_for_task(
+            &compact,
+            &request,
+            &digest,
+            "deployment-other",
+            "receipt-key",
+            &receipt_key_path,
+        )
+        .is_err()
+    );
+
+    let receipt_path = directory.join("request.receipt.jws");
+    assert_eq!(
+        read_published_receipt(
+            &receipt_path,
+            &request,
+            &digest,
+            "deployment-test",
+            "receipt-key",
+            &receipt_key_path,
+        )
+        .unwrap(),
+        None
+    );
+    fs::write(&receipt_path, &compact).unwrap();
+    assert_eq!(
+        read_published_receipt(
+            &receipt_path,
+            &request,
+            &digest,
+            "deployment-test",
+            "receipt-key",
+            &receipt_key_path,
+        )
+        .unwrap(),
+        Some(compact.clone())
+    );
+
+    fs::remove_file(&receipt_path).unwrap();
+    fs::write(receipt_temporary_path(&receipt_path), &compact).unwrap();
+    assert_eq!(
+        recover_receipt_temporary(
+            &receipt_path,
+            &request,
+            &digest,
+            "deployment-test",
+            "receipt-key",
+            &receipt_key_path,
+        )
+        .unwrap(),
+        Some(compact)
+    );
+    assert!(receipt_path.exists());
+    assert!(!receipt_temporary_path(&receipt_path).exists());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -623,4 +888,16 @@ async fn conformance_operations_execute_through_the_closed_task_dispatch() {
         .await,
         TaskOutcome::Failed { .. }
     ));
+}
+
+#[tokio::test]
+async fn external_key_dispatch_rejects_unmounted_public_material() {
+    let outcome = execute(&TaskOperation::KeysRegisterExternal {
+        kid: "external-1".to_owned(),
+        alg: "ES256".to_owned(),
+        key_ref: "provider:key-1".to_owned(),
+        public_jwk_sha256: "a".repeat(64),
+    })
+    .await;
+    assert!(matches!(outcome, TaskOutcome::Failed { .. }));
 }

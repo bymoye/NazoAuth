@@ -7,8 +7,9 @@ use diesel_async::RunQueryDsl;
 use nazo_digital_credentials::{CredentialFormat, CredentialQuery, DcqlQuery};
 use nazo_openid4vci::{
     AuthorizationCodeGrant, AuthorizationOfferPort, CredentialAccess, CredentialOfferGrants,
-    CredentialStoreError, CredentialStorePort, NonceRecord, PreAuthorizedCodeGrant,
-    StoredCredentialOffer,
+    CredentialResponseEncoding, CredentialStoreError, CredentialStorePort, DeferredCredential,
+    IssuanceNotification, NonceRecord, NotificationEvent, NotificationHandle,
+    PreAuthorizedCodeGrant, StoredCredentialOffer, StoredCredentialResponse,
 };
 use nazo_openid4vp::{
     AuthorizationRequest, ClientIdPrefix, PresentationResult, PresentationStorePort,
@@ -556,4 +557,389 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
             .completed,
         Some(result)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_once() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .unwrap();
+    let pool = create_pool(&database_url, 4).unwrap();
+    let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let realm_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let organization_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let subject_id = Uuid::now_v7();
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "INSERT INTO users (id,tenant_id,realm_id,organization_id,username,email,password_hash) \
+         VALUES ($1,$2,$3,$4,$5,$6,'test')",
+    )
+    .bind::<SqlUuid, _>(subject_id)
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(realm_id)
+    .bind::<SqlUuid, _>(organization_id)
+    .bind::<Text, _>(format!("openid4vc-recovery-{subject_id}"))
+    .bind::<Text, _>(format!("openid4vc-recovery-{subject_id}@example.test"))
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    let now = Utc::now();
+    let issuer = Openid4vciRepository::new(pool.clone(), [0x37_u8; 32]);
+    let access = CredentialAccess {
+        token_id: Uuid::now_v7(),
+        tenant_id,
+        subject_id,
+        client_id: "wallet".to_owned(),
+        configuration_ids: vec!["pid".to_owned()],
+        credential_identifiers: Vec::new(),
+        dpop_jkt: None,
+        expires_at: now + Duration::minutes(10),
+    };
+    let token_hash = blake3::hash(access.token_id.as_bytes())
+        .to_hex()
+        .to_string();
+    issuer.upsert_access(&token_hash, &access).await.unwrap();
+
+    let nonce_hash = blake3::hash(Uuid::now_v7().as_bytes()).to_hex().to_string();
+    issuer
+        .issue_nonce(&NonceRecord {
+            nonce_hash: nonce_hash.clone(),
+            expires_at: now + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    assert!(
+        issuer
+            .claim_nonce(&nonce_hash, "claim-a", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !issuer
+            .claim_nonce(&nonce_hash, "claim-b", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !issuer
+            .release_nonce(&nonce_hash, "claim-b", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .release_nonce(&nonce_hash, "claim-a", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .claim_nonce(&nonce_hash, "claim-b", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !issuer
+            .finalize_nonce(&nonce_hash, "claim-a", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .finalize_nonce(&nonce_hash, "claim-b", now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !issuer
+            .finalize_nonce(&nonce_hash, "claim-b", now)
+            .await
+            .unwrap()
+    );
+
+    let response_nonce_hash = blake3::hash(Uuid::now_v7().as_bytes()).to_hex().to_string();
+    issuer
+        .issue_nonce(&NonceRecord {
+            nonce_hash: response_nonce_hash.clone(),
+            expires_at: now + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    assert!(
+        issuer
+            .claim_nonce(&response_nonce_hash, "response-claim", now)
+            .await
+            .unwrap()
+    );
+    let response = StoredCredentialResponse {
+        issuance_id: Uuid::now_v7(),
+        token_id: access.token_id,
+        request_digest: blake3::hash(b"issuance-request").to_hex().to_string(),
+        body: br#"{"credentials":[]}"#.to_vec(),
+        encoding: CredentialResponseEncoding::Json,
+        status: 200,
+        dpop_nonce: None,
+        expires_at: now + Duration::minutes(5),
+    };
+    let handle = NotificationHandle {
+        notification_id: format!("notification-{}", Uuid::now_v7()),
+        token_id: access.token_id,
+        expires_at: now + Duration::minutes(5),
+    };
+    assert!(
+        issuer
+            .finalize_nonce_with_notification_and_response(
+                &response_nonce_hash,
+                "response-claim",
+                &handle,
+                &response,
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        issuer
+            .find_response(
+                response.issuance_id,
+                response.token_id,
+                &response.request_digest,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        response
+    );
+    assert!(
+        !issuer
+            .claim_nonce(&response_nonce_hash, "response-retry", now)
+            .await
+            .unwrap()
+    );
+    let notification = IssuanceNotification {
+        notification_id: handle.notification_id.clone(),
+        token_id: handle.token_id,
+        event: NotificationEvent::CredentialAccepted,
+        description: Some("issued".to_owned()),
+        occurred_at: now + Duration::seconds(1),
+    };
+    assert!(issuer.record_notification(&notification).await.unwrap());
+    assert!(!issuer.record_notification(&notification).await.unwrap());
+
+    let deferred = DeferredCredential {
+        id: Uuid::now_v7(),
+        transaction_hash: blake3::hash(b"deferred-transaction").to_hex().to_string(),
+        access: access.clone(),
+        configuration_id: "pid".to_owned(),
+        format: CredentialFormat::SdJwtVc,
+        holder_bindings: Vec::new(),
+        payload_ciphertext: b"deferred-payload".to_vec(),
+        ready_at: now - Duration::seconds(1),
+        expires_at: now + Duration::minutes(5),
+    };
+    issuer.store_deferred(&deferred).await.unwrap();
+    let first_claim = issuer
+        .claim_ready_deferred(
+            &deferred.transaction_hash,
+            access.token_id,
+            "deferred-a",
+            now,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_claim.claim_id, "deferred-a");
+    assert_eq!(
+        first_claim.credential.payload_ciphertext,
+        b"deferred-payload"
+    );
+    assert!(
+        issuer
+            .claim_ready_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "deferred-b",
+                now,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        issuer
+            .release_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "deferred-a",
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .claim_ready_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "deferred-b",
+                now,
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !issuer
+            .release_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "deferred-a",
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .finalize_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "deferred-b",
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !issuer
+            .finalize_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "deferred-b",
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .consume_ready_deferred(&deferred.transaction_hash, access.token_id, now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let atomic_nonce_hash = blake3::hash(Uuid::now_v7().as_bytes()).to_hex().to_string();
+    issuer
+        .issue_nonce(&NonceRecord {
+            nonce_hash: atomic_nonce_hash.clone(),
+            expires_at: now + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    assert!(
+        issuer
+            .claim_nonce(&atomic_nonce_hash, "atomic-claim", now)
+            .await
+            .unwrap()
+    );
+    let atomic_deferred = DeferredCredential {
+        id: Uuid::now_v7(),
+        transaction_hash: blake3::hash(b"atomic-deferred-transaction")
+            .to_hex()
+            .to_string(),
+        access: access.clone(),
+        configuration_id: "pid".to_owned(),
+        format: CredentialFormat::SdJwtVc,
+        holder_bindings: Vec::new(),
+        payload_ciphertext: b"atomic-payload".to_vec(),
+        ready_at: now - Duration::seconds(1),
+        expires_at: now + Duration::minutes(5),
+    };
+    let atomic_response = StoredCredentialResponse {
+        issuance_id: Uuid::now_v7(),
+        token_id: access.token_id,
+        request_digest: blake3::hash(b"atomic-request").to_hex().to_string(),
+        body: b"atomic-response".to_vec(),
+        encoding: CredentialResponseEncoding::Jwt,
+        status: 202,
+        dpop_nonce: Some("dpop-nonce".to_owned()),
+        expires_at: now + Duration::minutes(5),
+    };
+    issuer
+        .store_deferred_and_finalize_nonce_with_response(
+            &atomic_deferred,
+            &atomic_nonce_hash,
+            "atomic-claim",
+            &atomic_response,
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !issuer
+            .claim_nonce(&atomic_nonce_hash, "atomic-retry", now)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        issuer
+            .find_response(
+                atomic_response.issuance_id,
+                atomic_response.token_id,
+                &atomic_response.request_digest,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
+        atomic_response.body
+    );
+    let atomic_claim = issuer
+        .claim_ready_deferred(
+            &atomic_deferred.transaction_hash,
+            access.token_id,
+            "atomic-deferred-claim",
+            now,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        atomic_claim.credential.payload_ciphertext,
+        b"atomic-payload"
+    );
+    assert!(
+        issuer
+            .finalize_deferred(
+                &atomic_deferred.transaction_hash,
+                access.token_id,
+                &atomic_claim.claim_id,
+                now,
+            )
+            .await
+            .unwrap()
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("DELETE FROM openid4vci_nonces WHERE nonce_hash IN ($1,$2,$3)")
+        .bind::<Text, _>(&nonce_hash)
+        .bind::<Text, _>(&response_nonce_hash)
+        .bind::<Text, _>(&atomic_nonce_hash)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind::<SqlUuid, _>(subject_id)
+        .bind::<SqlUuid, _>(tenant_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
 }

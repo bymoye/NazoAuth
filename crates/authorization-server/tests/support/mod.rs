@@ -93,9 +93,9 @@ pub(crate) fn token_issuance_repository(
 }
 
 pub(crate) fn initialize_audit_dependencies(pool: &nazo_postgres::DbPool) {
-    crate::adapters::audit::configure_audit_anchor_preflight(
+    let preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
         crate::adapters::audit_anchor::AuditAnchorPreflightConfig {
-            mode: crate::adapters::audit_anchor::AuditAnchorMode::Disabled,
+            mode: crate::adapters::audit_anchor::config::AuditAnchorMode::Disabled,
             deployment_id: "unit-test".to_owned(),
             status_file: std::path::PathBuf::from("runtime/test/audit-anchor-health.json"),
             freshness: std::time::Duration::from_secs(1),
@@ -106,6 +106,7 @@ pub(crate) fn initialize_audit_dependencies(pool: &nazo_postgres::DbPool) {
     crate::adapters::audit::install_persistent_audit_sink(
         nazo_postgres::AuditLedgerRepository::new(pool.clone()),
         false,
+        preflight,
     )
     .expect("test durable audit repository should install");
 }

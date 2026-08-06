@@ -153,6 +153,41 @@ fn descendant_signer_command(pid_path: &Path, response: Option<&str>) -> Arc<Vec
 }
 
 #[cfg(unix)]
+fn descendant_blocking_stdin_command(pid_path: &Path) -> Arc<Vec<String>> {
+    let pid_path = shell_single_quote(
+        pid_path
+            .to_str()
+            .expect("temporary descendant pid path should be valid UTF-8"),
+    );
+    Arc::new(vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "(sleep 30 </dev/null >/dev/null 2>&1) & child=$!; printf '%s' \"$child\" > {pid_path}; sleep 30",
+        ),
+    ])
+}
+
+#[cfg(windows)]
+fn descendant_blocking_stdin_command(pid_path: &Path) -> Arc<Vec<String>> {
+    let pid_path = powershell_single_quote(
+        pid_path
+            .to_str()
+            .expect("temporary descendant pid path should be valid UTF-8"),
+    );
+    Arc::new(vec![
+        "pwsh".to_owned(),
+        "-NoLogo".to_owned(),
+        "-NoProfile".to_owned(),
+        "-NonInteractive".to_owned(),
+        "-Command".to_owned(),
+        format!(
+            "$child=Start-Process -FilePath 'pwsh' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru -WindowStyle Hidden; Set-Content -LiteralPath {pid_path} -Value $child.Id -NoNewline; Start-Sleep -Seconds 30",
+        ),
+    ])
+}
+
+#[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -235,6 +270,7 @@ impl DescendantFixture {
     }
 
     async fn assert_gone(&self, pid: u32) {
+        assert_eq!(self.pid, Some(pid));
         let deadline = Instant::now() + Duration::from_secs(5);
         while process_is_alive(pid) {
             assert!(
@@ -616,6 +652,35 @@ async fn external_signer_timeout_terminates_owned_descendant() {
         .await
         .expect("external signer task should not panic")
         .expect_err("slow signer must time out");
+    assert!(format!("{error}").contains("timed out"));
+    fixture.assert_gone(pid).await;
+}
+
+#[tokio::test]
+async fn external_signer_stdin_timeout_terminates_owned_descendant() {
+    let mut fixture = DescendantFixture::new();
+    let kid = "external-kid";
+    let (_private_key, public_jwk) = eddsa_fixture(kid);
+    let external = external_signing_key_with_command(
+        descendant_blocking_stdin_command(&fixture.pid_path),
+        2_000,
+    );
+    let signing_input = "x".repeat(2 * 1024 * 1024);
+    let task = tokio::spawn(async move {
+        sign_external_jwt_input(
+            &external,
+            kid,
+            jsonwebtoken::Algorithm::EdDSA,
+            &signing_input,
+            &public_jwk,
+        )
+        .await
+    });
+    let pid = fixture.wait_until_alive().await;
+    let error = task
+        .await
+        .expect("external signer task should not panic")
+        .expect_err("signer that does not consume stdin must time out");
     assert!(format!("{error}").contains("timed out"));
     fixture.assert_gone(pid).await;
 }

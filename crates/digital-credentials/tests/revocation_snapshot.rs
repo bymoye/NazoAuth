@@ -188,3 +188,162 @@ fn json_snapshot_rejects_duplicate_issuer_certificate_entries() {
         Err(CertificateRevocationSnapshotError::DuplicateEntry)
     );
 }
+
+#[test]
+fn snapshot_validation_rejects_unsupported_versions_and_invalid_intervals() {
+    let certificate = certificate_der();
+    let now = Utc::now();
+
+    let mut unsupported = snapshot(&certificate, CertificateRevocationStatus::Good);
+    unsupported.version = CertificateRevocationSnapshot::VERSION + 1;
+    assert_eq!(
+        unsupported.validate_structure(),
+        Err(CertificateRevocationSnapshotError::UnsupportedVersion)
+    );
+
+    let mut invalid_interval = snapshot(&certificate, CertificateRevocationStatus::Good);
+    invalid_interval.this_update = now;
+    invalid_interval.next_update = now;
+    assert_eq!(
+        invalid_interval.validate_structure(),
+        Err(CertificateRevocationSnapshotError::InvalidUpdateInterval)
+    );
+}
+
+#[test]
+fn snapshot_validation_rejects_invalid_entries_and_accepts_valid_json() {
+    let certificate = certificate_der();
+
+    let valid = snapshot(&certificate, CertificateRevocationStatus::Good);
+    let encoded = serde_json::to_vec(&valid).expect("snapshot JSON");
+    assert_eq!(
+        CertificateRevocationSnapshot::from_json(&encoded).expect("valid snapshot JSON"),
+        valid
+    );
+
+    let mut empty_issuer = valid.clone();
+    empty_issuer.entries[0].issuer.clear();
+    assert_eq!(
+        empty_issuer.validate_structure(),
+        Err(CertificateRevocationSnapshotError::InvalidEntry)
+    );
+
+    let mut oversized_issuer = valid.clone();
+    oversized_issuer.entries[0].issuer = "i".repeat(2049);
+    assert_eq!(
+        oversized_issuer.validate_structure(),
+        Err(CertificateRevocationSnapshotError::InvalidEntry)
+    );
+
+    let mut invalid_identity = valid.clone();
+    invalid_identity.entries[0].certificate = "not-a-certificate-identity".to_owned();
+    assert_eq!(
+        invalid_identity.validate_structure(),
+        Err(CertificateRevocationSnapshotError::InvalidEntry)
+    );
+}
+
+#[test]
+fn freshness_rejects_a_snapshot_that_is_not_yet_valid() {
+    let certificate = certificate_der();
+    let now = Utc::now();
+    let mut future = snapshot(&certificate, CertificateRevocationStatus::Good);
+    future.this_update = now + Duration::minutes(1);
+    future.next_update = now + Duration::minutes(2);
+
+    assert_eq!(
+        future.validate_freshness_at(now),
+        Err(CertificateRevocationSnapshotError::NotYetValid)
+    );
+}
+
+#[test]
+fn policy_modes_expose_snapshot_state_and_disabled_policy_fails_open() {
+    let certificate = certificate_der();
+    let now = Utc::now();
+
+    let disabled = CertificateRevocationPolicy::default();
+    assert!(!disabled.is_enabled());
+    assert!(!disabled.is_required());
+    assert!(disabled.snapshot().is_none());
+    disabled
+        .check_chain(Some(ISSUER), &[b"not a certificate".to_vec()], now)
+        .expect("disabled policy does not inspect certificates");
+
+    let required_without_snapshot = CertificateRevocationPolicy::required_without_snapshot();
+    assert!(required_without_snapshot.is_enabled());
+    assert!(required_without_snapshot.is_required());
+    assert!(required_without_snapshot.snapshot().is_none());
+    assert_eq!(
+        required_without_snapshot.check_chain(None, &[], now),
+        Err(CredentialTrustError::RevocationSnapshotUnavailable)
+    );
+
+    let optional = CertificateRevocationPolicy::optional(Arc::new(snapshot(
+        &certificate,
+        CertificateRevocationStatus::Good,
+    )));
+    assert!(optional.is_enabled());
+    assert!(!optional.is_required());
+    assert!(optional.snapshot().is_some());
+}
+
+#[test]
+fn check_chain_maps_not_yet_valid_and_structurally_invalid_snapshots() {
+    let certificate = certificate_der();
+    let now = Utc::now();
+
+    let mut future = snapshot(&certificate, CertificateRevocationStatus::Good);
+    future.this_update = now + Duration::minutes(1);
+    future.next_update = now + Duration::minutes(2);
+    assert_eq!(
+        CertificateRevocationPolicy::required(Arc::new(future)).check_chain(
+            Some(ISSUER),
+            std::slice::from_ref(&certificate),
+            now,
+        ),
+        Err(CredentialTrustError::RevocationSnapshotStale)
+    );
+
+    let mut unsupported = snapshot(&certificate, CertificateRevocationStatus::Good);
+    unsupported.version = CertificateRevocationSnapshot::VERSION + 1;
+    assert_eq!(
+        CertificateRevocationPolicy::required(Arc::new(unsupported)).check_chain(
+            Some(ISSUER),
+            &[certificate],
+            now,
+        ),
+        Err(CredentialTrustError::RevocationSnapshotUnavailable)
+    );
+}
+
+#[test]
+fn global_certificate_status_requires_consistent_entries() {
+    let certificate = certificate_der();
+    let identity = certificate_identity(&certificate);
+
+    let mut all_good = snapshot(&certificate, CertificateRevocationStatus::Good);
+    all_good.entries.push(CertificateRevocationEntry {
+        issuer: "x509:other-authority.example".to_owned(),
+        certificate: identity.clone(),
+        status: CertificateRevocationStatus::Good,
+    });
+    CertificateRevocationPolicy::required(Arc::new(all_good))
+        .check_chain(None, std::slice::from_ref(&certificate), Utc::now())
+        .expect("consistent global entries are good");
+
+    let mut conflicting = snapshot(&certificate, CertificateRevocationStatus::Good);
+    conflicting.entries.push(CertificateRevocationEntry {
+        issuer: "x509:other-authority.example".to_owned(),
+        certificate: identity,
+        status: CertificateRevocationStatus::Revoked,
+    });
+    assert_eq!(
+        CertificateRevocationPolicy::required(Arc::new(conflicting)).check_chain(
+            None,
+            std::slice::from_ref(&certificate),
+            Utc::now(),
+        ),
+        Err(CredentialTrustError::RevocationStatusUnknown)
+    );
+}

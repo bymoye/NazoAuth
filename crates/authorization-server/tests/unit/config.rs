@@ -26,6 +26,17 @@ impl ConfigSource {
     fn load_from_dir(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::load_from_dir_with_env(path, std::iter::empty::<(String, String)>())
     }
+
+    fn load_from_dir_with_env(
+        path: impl AsRef<Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> anyhow::Result<Self> {
+        Self::load_from_dir_with_env_mode(path, env, true, true)
+    }
+
+    fn merge_env(&mut self, env: impl IntoIterator<Item = (String, String)>) -> anyhow::Result<()> {
+        self.merge_env_with_worker_policy(env, true)
+    }
 }
 
 use super::*;

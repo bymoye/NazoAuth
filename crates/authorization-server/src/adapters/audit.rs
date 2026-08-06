@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use nazo_postgres::{AuditLedgerRepository, SecurityAuditEvent};
 
-use super::audit_anchor::{self, AuditAnchorPreflightConfig};
+use super::audit_anchor::AuditAnchorPreflight;
 
 pub(crate) const AUDIT_SCHEMA_VERSION: &str = "nazo.audit.v1";
 
@@ -82,12 +82,16 @@ const AUDIT_EVENT_DEFINITIONS: &[(&str, &str)] = &[
 ];
 
 const AUDIT_QUEUE_CAPACITY: usize = 4096;
+// These are process-lifetime handles: the request path currently resolves the
+// durable sink through `ensure_audit_storage`, so bootstrap must install them
+// exactly once before handlers start accepting traffic.
 static PERSISTENT_AUDIT_SINK: OnceLock<mpsc::Sender<QueuedAuditEvent>> = OnceLock::new();
 static REQUIRED_AUDIT_REPOSITORY: OnceLock<RequiredAuditRepository> = OnceLock::new();
 
 struct RequiredAuditRepository {
     repository: AuditLedgerRepository,
     require_least_privilege: bool,
+    preflight: AuditAnchorPreflight,
 }
 
 #[derive(Clone, Debug)]
@@ -112,14 +116,38 @@ struct QueuedAuditEvent {
 pub(crate) fn install_persistent_audit_sink(
     repository: AuditLedgerRepository,
     require_least_privilege: bool,
+    preflight: AuditAnchorPreflight,
 ) -> anyhow::Result<()> {
     if PERSISTENT_AUDIT_SINK.get().is_some() {
+        let Some(existing) = REQUIRED_AUDIT_REPOSITORY.get() else {
+            anyhow::bail!("durable security audit sink is partially installed");
+        };
+        if existing.require_least_privilege != require_least_privilege
+            || existing.preflight != preflight
+        {
+            anyhow::bail!(
+                "durable security audit sink was already installed with different configuration"
+            );
+        }
         return Ok(());
     }
-    let _ = REQUIRED_AUDIT_REPOSITORY.set(RequiredAuditRepository {
+    let candidate = RequiredAuditRepository {
         repository: repository.clone(),
         require_least_privilege,
-    });
+        preflight: preflight.clone(),
+    };
+    if let Err(candidate) = REQUIRED_AUDIT_REPOSITORY.set(candidate) {
+        let Some(existing) = REQUIRED_AUDIT_REPOSITORY.get() else {
+            anyhow::bail!("durable security audit repository installation raced bootstrap");
+        };
+        if existing.require_least_privilege != candidate.require_least_privilege
+            || existing.preflight != candidate.preflight
+        {
+            anyhow::bail!(
+                "durable security audit repository was already installed with different configuration"
+            );
+        }
+    }
     let (sender, mut receiver) = mpsc::channel(AUDIT_QUEUE_CAPACITY);
     if PERSISTENT_AUDIT_SINK.set(sender).is_err() {
         return Ok(());
@@ -187,15 +215,10 @@ pub(crate) async fn ensure_audit_storage() -> anyhow::Result<()> {
         .anchor_freshness()
         .await
         .map_err(|error| anyhow::anyhow!("durable security audit head unavailable: {error}"))?;
-    audit_anchor::ensure_fresh(head.head_sequence, &head.head_hash).await
-}
-
-/// Configure the server-side anchor freshness check. The exporter credential
-/// and database handle are intentionally not accepted here.
-pub(crate) fn configure_audit_anchor_preflight(
-    config: AuditAnchorPreflightConfig,
-) -> anyhow::Result<()> {
-    audit_anchor::configure_preflight(config)
+    required
+        .preflight
+        .ensure_fresh(head.head_sequence, &head.head_hash)
+        .await
 }
 
 /// Append a high-impact audit outcome synchronously. Unlike [`audit_event`],

@@ -233,6 +233,22 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "VALKEY_URL",
     "VALKEY_URL_FILE",
 ];
+// The server may share one allowlisted `.env.yaml` with the sidecar, but it
+// must not materialize the sidecar's database URL, endpoint, or HMAC secret.
+// `ConfigSource::load_for_audit_anchor_worker` deliberately opts into these
+// keys; the server loader filters them before secret-file resolution.
+const AUDIT_ANCHOR_WORKER_CONFIG_KEYS: &[&str] = &[
+    "AUDIT_ANCHOR_BATCH_SIZE",
+    "AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS",
+    "AUDIT_ANCHOR_DATABASE_URL",
+    "AUDIT_ANCHOR_DATABASE_URL_FILE",
+    "AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS",
+    "AUDIT_ANCHOR_POLL_INTERVAL_SECONDS",
+    "AUDIT_ANCHOR_REQUEST_TIMEOUT_SECONDS",
+    "AUDIT_ANCHOR_TOKEN",
+    "AUDIT_ANCHOR_TOKEN_FILE",
+    "AUDIT_ANCHOR_URL",
+];
 
 #[derive(Clone, Debug, Default)]
 pub struct ConfigSource {
@@ -281,7 +297,7 @@ fn prepare_server_config_in(path: impl AsRef<Path>) -> anyhow::Result<ServerConf
 
 impl ConfigSource {
     pub fn load() -> anyhow::Result<Self> {
-        Self::load_from_dir_with_env(".", std::env::vars())
+        Self::load_from_dir_with_env_filtered(".", std::env::vars(), true, true, false)
     }
 
     pub(crate) fn load_for_migrations() -> anyhow::Result<Self> {
@@ -304,14 +320,7 @@ impl ConfigSource {
     }
 
     pub(crate) fn load_without_secret_values() -> anyhow::Result<Self> {
-        Self::load_from_dir_with_env_mode(".", std::env::vars(), false, false)
-    }
-
-    fn load_from_dir_with_env(
-        path: impl AsRef<Path>,
-        env: impl IntoIterator<Item = (String, String)>,
-    ) -> anyhow::Result<Self> {
-        Self::load_from_dir_with_env_mode(path, env, true, true)
+        Self::load_from_dir_with_env_filtered(".", std::env::vars(), false, false, false)
     }
 
     fn load_for_migrations_from_dir_with_env(
@@ -330,6 +339,22 @@ impl ConfigSource {
         materialize_generated_secrets: bool,
         resolve_secret_files: bool,
     ) -> anyhow::Result<Self> {
+        Self::load_from_dir_with_env_filtered(
+            path,
+            env,
+            materialize_generated_secrets,
+            resolve_secret_files,
+            true,
+        )
+    }
+
+    fn load_from_dir_with_env_filtered(
+        path: impl AsRef<Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+        materialize_generated_secrets: bool,
+        resolve_secret_files: bool,
+        include_worker_config: bool,
+    ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let dotenv_path = path.join(UNSUPPORTED_DOTENV_FILE);
         if dotenv_path.exists() {
@@ -339,9 +364,9 @@ impl ConfigSource {
         let mut source = Self::default();
         let config_path = path.join(CONFIG_FILE);
         if config_path.exists() {
-            source.merge_yaml_file(config_path)?;
+            source.merge_yaml_file_with_worker_policy(config_path, include_worker_config)?;
         }
-        source.merge_env(env)?;
+        source.merge_env_with_worker_policy(env, include_worker_config)?;
         if resolve_secret_files {
             source.merge_secret_file_inputs(path, SECRET_FILE_INPUTS)?;
         }
@@ -403,7 +428,11 @@ impl ConfigSource {
         Ok(parsed)
     }
 
-    fn merge_yaml_file(&mut self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+    fn merge_yaml_file_with_worker_policy(
+        &mut self,
+        path: impl AsRef<Path>,
+        include_worker_config: bool,
+    ) -> anyhow::Result<()> {
         let path = path.as_ref();
         let file = File::open(path)
             .with_context(|| format!("failed to read required {}", path.display()))?;
@@ -419,15 +448,25 @@ impl ConfigSource {
             if !ENV_CONFIG_KEYS.contains(&key) {
                 bail!("{} contains unknown config key {key}", path.display());
             }
+            if !include_worker_config && AUDIT_ANCHOR_WORKER_CONFIG_KEYS.contains(&key) {
+                continue;
+            }
             let value = yaml_value_to_string(key, &value)?;
             self.file_values.insert(key.to_owned(), value);
         }
         Ok(())
     }
 
-    fn merge_env(&mut self, env: impl IntoIterator<Item = (String, String)>) -> anyhow::Result<()> {
+    fn merge_env_with_worker_policy(
+        &mut self,
+        env: impl IntoIterator<Item = (String, String)>,
+        include_worker_config: bool,
+    ) -> anyhow::Result<()> {
         for (key, value) in env {
             if !ENV_CONFIG_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            if !include_worker_config && AUDIT_ANCHOR_WORKER_CONFIG_KEYS.contains(&key.as_str()) {
                 continue;
             }
             if key.trim().is_empty() {

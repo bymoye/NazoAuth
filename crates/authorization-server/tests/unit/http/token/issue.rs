@@ -36,6 +36,41 @@ pub(crate) async fn issue_token_response(
     .await
 }
 
+async fn issue_token_response_with_grant_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    grant_key: &str,
+    issue: TokenIssue,
+) -> HttpResponse {
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let config = TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = test_support::test_authorization_service(state);
+    issue_token_response_with_service_and_grant(
+        &TokenIssuanceContext {
+            config: &config,
+            modules: &modules,
+            authorization: &authorization,
+        },
+        &service,
+        client,
+        Some(grant_key),
+        issue,
+    )
+    .await
+}
+
+async fn response_body(response: HttpResponse) -> Vec<u8> {
+    actix_web::body::to_bytes(response.into_body())
+        .await
+        .expect("token response body should collect")
+        .to_vec()
+}
+
 use super::*;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -45,6 +80,70 @@ use nazo_postgres::create_pool;
 
 use crate::test_support::client_signing_fixture;
 use fred::prelude::{Builder as ValkeyBuilder, ConnectionConfig, PerformanceConfig};
+use nazo_auth::{PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuanceTransitionResult};
+
+/// Seed a durable response for endpoint replay tests.  The HTTP handlers under
+/// test must reject a consumed one-time grant even when an old issuance row is
+/// present; this helper represents the response that would have been returned
+/// by the original successful redemption.
+pub(crate) async fn persist_token_issuance_response_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    grant_key: &str,
+) {
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let issuance_id = Uuid::now_v7();
+    let request_digest = format!("test-request-{issuance_id}");
+    let expires_at = Utc::now() + chrono::Duration::minutes(5);
+    let prepared = service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id,
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: grant_key.to_owned(),
+            request_digest: request_digest.clone(),
+            expires_at,
+        })
+        .await
+        .expect("test token issuance should prepare");
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+
+    let response_body =
+        br#"{"access_token":"replay-fixture","token_type":"Bearer","expires_in":300}"#;
+    let response_digest = blake3::hash(response_body).to_hex().to_string();
+    assert_eq!(
+        service
+            .record_token_issuance_signed(
+                issuance_id,
+                &request_digest,
+                "replay-fixture-jti",
+                expires_at.timestamp(),
+                response_body,
+                &response_digest,
+            )
+            .await
+            .expect("test token issuance should record signed response"),
+        TokenIssuanceTransitionResult::Applied
+    );
+    assert_eq!(
+        service
+            .mark_token_issuance_persisted(issuance_id, &request_digest)
+            .await
+            .expect("test token issuance should mark persisted"),
+        TokenIssuanceTransitionResult::Applied
+    );
+    assert_eq!(
+        service
+            .mark_token_issuance_delivered(issuance_id, &request_digest)
+            .await
+            .expect("test token issuance should mark delivered"),
+        TokenIssuanceTransitionResult::Applied
+    );
+}
 
 fn disconnected_valkey_client() -> fred::prelude::Client {
     let mut builder = ValkeyBuilder::default_centralized();
@@ -730,4 +829,93 @@ async fn consumed_authorization_code_marker_failure_returns_error_after_revocati
     let value: Value = serde_json::from_slice(&body).expect("OAuth error body should be JSON");
     assert!(value.get("access_token").is_none());
     assert!(value.get("refresh_token").is_none());
+}
+
+#[actix_web::test]
+async fn same_idempotent_grant_retry_reuses_the_persisted_response() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("idempotent-test-{}", Uuid::now_v7());
+
+    let mut first_issue = token_issue_without_openid();
+    first_issue.include_refresh = false;
+    let first =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, first_issue).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = response_body(first).await;
+
+    let mut retry_issue = token_issue_without_openid();
+    retry_issue.include_refresh = false;
+    let retry =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, retry_issue).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(response_body(retry).await, first_body);
+}
+
+#[actix_web::test]
+async fn concurrent_prepared_issuance_conflict_recovers_the_winning_response() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("conflict-test-{}", Uuid::now_v7());
+    let mut prepared_issue = token_issue_without_openid();
+    prepared_issue.include_refresh = false;
+    let request_digest = issuance_request_digest(&client, &prepared_issue, &grant_key);
+
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let prepared = service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id: Uuid::now_v7(),
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: grant_key.clone(),
+            request_digest,
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+        })
+        .await
+        .expect("prepared issuance should be stored");
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+
+    let config = TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = test_support::test_authorization_service(&state);
+    let context = TokenIssuanceContext {
+        config: &config,
+        modules: &modules,
+        authorization: &authorization,
+    };
+    let first_future = issue_token_response_with_service_and_grant(
+        &context,
+        &service,
+        &client,
+        Some(&grant_key),
+        {
+            let mut issue = token_issue_without_openid();
+            issue.include_refresh = false;
+            issue
+        },
+    );
+    let second_future = issue_token_response_with_service_and_grant(
+        &context,
+        &service,
+        &client,
+        Some(&grant_key),
+        {
+            let mut issue = token_issue_without_openid();
+            issue.include_refresh = false;
+            issue
+        },
+    );
+    let (first, second) = tokio::join!(first_future, second_future);
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(response_body(first).await, response_body(second).await);
 }

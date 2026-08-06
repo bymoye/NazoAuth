@@ -177,23 +177,17 @@ pub trait CredentialStorePort: Send + Sync {
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
 
-    /// Atomically persist the notification handle and finalize the nonce when
-    /// the backing store supports transactions. The response-bearing variant
-    /// below must be implemented by stores that support recoverable issuance;
-    /// its default fails closed so a store can never consume a nonce while
-    /// silently dropping the exact response needed for a retry.
+    /// Atomically persist the notification handle and finalize the nonce.
+    /// Implementations must own this transition in one transaction; composing
+    /// the two lower-level methods is not safe because a process failure could
+    /// leave a notification without a consumed nonce (or vice versa).
     fn finalize_nonce_with_notification<'a>(
         &'a self,
         nonce_hash: &'a str,
         claim_id: &'a str,
         handle: &'a NotificationHandle,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
-        Box::pin(async move {
-            self.issue_notification_handle(handle).await?;
-            self.finalize_nonce(nonce_hash, claim_id, now).await
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
 
     fn find_response<'a>(
         &'a self,
@@ -241,23 +235,15 @@ pub trait CredentialStorePort: Send + Sync {
     ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
     /// Persist a deferred transaction and finalize its proof nonce as one
-    /// state transition when the backing store supports transactions.
+    /// state transition. Implementations must own this transition in one
+    /// transaction rather than composing the lower-level operations.
     fn store_deferred_and_finalize_nonce<'a>(
         &'a self,
         credential: &'a DeferredCredential,
         nonce_hash: &'a str,
         claim_id: &'a str,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
-        Box::pin(async move {
-            self.store_deferred(credential).await?;
-            if self.finalize_nonce(nonce_hash, claim_id, now).await? {
-                Ok(())
-            } else {
-                Err(CredentialStoreError::InvalidTransition)
-            }
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
     fn store_deferred_and_finalize_nonce_with_response<'a>(
         &'a self,
@@ -318,6 +304,9 @@ pub trait CredentialStorePort: Send + Sync {
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
 
+    /// Atomically persist the notification handle and finalize a deferred
+    /// transaction. The store owns this transition so a retry can never
+    /// observe a notification without the corresponding consumed transaction.
     fn finalize_deferred_with_notification<'a>(
         &'a self,
         transaction_hash: &'a str,
@@ -325,13 +314,7 @@ pub trait CredentialStorePort: Send + Sync {
         claim_id: &'a str,
         handle: &'a NotificationHandle,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
-        Box::pin(async move {
-            self.issue_notification_handle(handle).await?;
-            self.finalize_deferred(transaction_hash, token_id, claim_id, now)
-                .await
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
 
     fn finalize_deferred_with_notification_and_response<'a>(
         &'a self,

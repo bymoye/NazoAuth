@@ -26,10 +26,12 @@ fn pool_admin_operations_keep_async_rustls_and_isolate_the_migration_harness() {
             operation.contains("establish_connection(database_url).await?"),
             "{name} must use the shared async PostgreSQL TLS connection path"
         );
-        assert!(
-            !operation.contains("diesel::PgConnection"),
-            "{name} must not reintroduce the synchronous libpq connection path"
-        );
+        for synchronous_connection in ["diesel::PgConnection", "diesel::pg::PgConnection"] {
+            assert!(
+                !operation.contains(synchronous_connection),
+                "{name} must not reintroduce the synchronous libpq connection path"
+            );
+        }
     }
 
     assert!(source.contains("MakeRustlsConnect::with_native_certs"));
@@ -48,7 +50,7 @@ fn pool_admin_operations_keep_async_rustls_and_isolate_the_migration_harness() {
     assert!(cleanup.contains("SET SESSION statement_timeout"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn migrations_run_from_a_current_thread_runtime() {
     let database_url = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -65,8 +67,8 @@ async fn migrations_run_from_a_current_thread_runtime() {
         .expect("the isolated migration harness should run from a current-thread Tokio runtime");
 }
 
-#[tokio::test]
-async fn pool_admin_operation_errors_survive_the_blocking_task_boundary() {
+#[tokio::test(flavor = "current_thread")]
+async fn pool_admin_operation_errors_remain_typed_across_runtime_boundaries() {
     let invalid_url = "postgres://127.0.0.1:not-a-port/database";
 
     let migration_error = nazo_postgres::run_pending_migrations(invalid_url)
