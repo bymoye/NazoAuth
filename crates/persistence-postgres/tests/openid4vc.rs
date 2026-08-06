@@ -705,18 +705,26 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             .await
             .unwrap()
     );
+    let stored_response = issuer
+        .find_response(
+            response.issuance_id,
+            response.token_id,
+            &response.request_digest,
+            response_now,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_response.issuance_id, response.issuance_id);
+    assert_eq!(stored_response.token_id, response.token_id);
+    assert_eq!(stored_response.request_digest, response.request_digest);
+    assert_eq!(stored_response.body, response.body);
+    assert_eq!(stored_response.encoding, response.encoding);
+    assert_eq!(stored_response.status, response.status);
+    assert_eq!(stored_response.dpop_nonce, response.dpop_nonce);
     assert_eq!(
-        issuer
-            .find_response(
-                response.issuance_id,
-                response.token_id,
-                &response.request_digest,
-                response_now,
-            )
-            .await
-            .unwrap()
-            .unwrap(),
-        response
+        stored_response.expires_at.timestamp_micros(),
+        response.expires_at.timestamp_micros()
     );
     assert!(
         !issuer
