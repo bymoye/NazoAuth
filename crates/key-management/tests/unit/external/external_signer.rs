@@ -799,7 +799,7 @@ async fn external_output_reader_enforces_the_configured_limit() {
 #[cfg(unix)]
 #[tokio::test]
 async fn process_tree_child_delegates_nonblocking_wait_and_consumption() {
-    use process_wrap::tokio::{ChildWrapper, CommandWrap, ProcessGroup};
+    use process_wrap::tokio::{CommandWrap, ProcessGroup};
     use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
 
