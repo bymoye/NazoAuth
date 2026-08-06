@@ -613,51 +613,52 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
         })
         .await
         .unwrap();
+    let nonce_now = Utc::now();
     assert!(
         issuer
-            .claim_nonce(&nonce_hash, "claim-a", now)
+            .claim_nonce(&nonce_hash, "claim-a", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         !issuer
-            .claim_nonce(&nonce_hash, "claim-b", now)
+            .claim_nonce(&nonce_hash, "claim-b", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         !issuer
-            .release_nonce(&nonce_hash, "claim-b", now)
+            .release_nonce(&nonce_hash, "claim-b", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         issuer
-            .release_nonce(&nonce_hash, "claim-a", now)
+            .release_nonce(&nonce_hash, "claim-a", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         issuer
-            .claim_nonce(&nonce_hash, "claim-b", now)
+            .claim_nonce(&nonce_hash, "claim-b", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         !issuer
-            .finalize_nonce(&nonce_hash, "claim-a", now)
+            .finalize_nonce(&nonce_hash, "claim-a", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         issuer
-            .finalize_nonce(&nonce_hash, "claim-b", now)
+            .finalize_nonce(&nonce_hash, "claim-b", nonce_now)
             .await
             .unwrap()
     );
     assert!(
         !issuer
-            .finalize_nonce(&nonce_hash, "claim-b", now)
+            .finalize_nonce(&nonce_hash, "claim-b", nonce_now)
             .await
             .unwrap()
     );
@@ -670,9 +671,10 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
         })
         .await
         .unwrap();
+    let response_now = Utc::now();
     assert!(
         issuer
-            .claim_nonce(&response_nonce_hash, "response-claim", now)
+            .claim_nonce(&response_nonce_hash, "response-claim", response_now)
             .await
             .unwrap()
     );
@@ -698,7 +700,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 "response-claim",
                 &handle,
                 &response,
-                now,
+                response_now,
             )
             .await
             .unwrap()
@@ -709,7 +711,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 response.issuance_id,
                 response.token_id,
                 &response.request_digest,
-                now,
+                response_now,
             )
             .await
             .unwrap()
@@ -718,7 +720,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
     );
     assert!(
         !issuer
-            .claim_nonce(&response_nonce_hash, "response-retry", now)
+            .claim_nonce(&response_nonce_hash, "response-retry", response_now)
             .await
             .unwrap()
     );
@@ -843,9 +845,10 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
         })
         .await
         .unwrap();
+    let atomic_now = Utc::now();
     assert!(
         issuer
-            .claim_nonce(&atomic_nonce_hash, "atomic-claim", now)
+            .claim_nonce(&atomic_nonce_hash, "atomic-claim", atomic_now)
             .await
             .unwrap()
     );
@@ -878,13 +881,13 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             &atomic_nonce_hash,
             "atomic-claim",
             &atomic_response,
-            now,
+            atomic_now,
         )
         .await
         .unwrap();
     assert!(
         !issuer
-            .claim_nonce(&atomic_nonce_hash, "atomic-retry", now)
+            .claim_nonce(&atomic_nonce_hash, "atomic-retry", atomic_now)
             .await
             .unwrap()
     );
@@ -894,7 +897,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 atomic_response.issuance_id,
                 atomic_response.token_id,
                 &atomic_response.request_digest,
-                now,
+                atomic_now,
             )
             .await
             .unwrap()
@@ -907,7 +910,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
             &atomic_deferred.transaction_hash,
             access.token_id,
             "atomic-deferred-claim",
-            now,
+            atomic_now,
         )
         .await
         .unwrap()
@@ -922,7 +925,7 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
                 &atomic_deferred.transaction_hash,
                 access.token_id,
                 &atomic_claim.claim_id,
-                now,
+                atomic_now,
             )
             .await
             .unwrap()
