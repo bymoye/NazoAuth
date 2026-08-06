@@ -10,13 +10,20 @@ use super::{
         read_health, read_health_optional, write_health,
     },
     transport::{AnchorPushError, send_checkpoint, send_genesis_checkpoint},
-    worker::{delivery_lag_seconds, retry_delay},
+    worker::{
+        AuditAnchorRepository, IterationOutcome, delivery_lag_seconds, retry_delay, run_iteration,
+    },
 };
 use chrono::{Duration as ChronoDuration, Utc};
-use nazo_postgres::{SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery};
+use nazo_identity::ports::{RepositoryError, RepositoryFuture};
+use nazo_postgres::{
+    AuditLedgerRepository, SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery,
+};
 use serde_json::{Value, json};
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -70,6 +77,388 @@ fn delivery() -> SecurityAuditOutboxDelivery {
         event_hash: vec![2; 32],
         attempts: 1,
     }
+}
+
+#[derive(Default)]
+struct ScriptedRepository {
+    health: Mutex<VecDeque<Result<SecurityAuditAnchorHealth, RepositoryError>>>,
+    claims: Mutex<VecDeque<Result<Vec<SecurityAuditOutboxDelivery>, RepositoryError>>>,
+    acknowledgements: Mutex<VecDeque<Result<(), RepositoryError>>>,
+    reschedules: Mutex<Vec<(Uuid, i32, String)>>,
+    marked: Mutex<Vec<(Uuid, i32)>>,
+    reschedule_failure: bool,
+}
+
+impl ScriptedRepository {
+    fn with_health(
+        health: Result<SecurityAuditAnchorHealth, RepositoryError>,
+        claims: Result<Vec<SecurityAuditOutboxDelivery>, RepositoryError>,
+    ) -> Self {
+        Self {
+            health: Mutex::new(VecDeque::from([health])),
+            claims: Mutex::new(VecDeque::from([claims])),
+            ..Self::default()
+        }
+    }
+
+    fn with_acknowledgement(self, acknowledgement: Result<(), RepositoryError>) -> Self {
+        {
+            let mut acknowledgements = self
+                .acknowledgements
+                .lock()
+                .expect("scripted repository mutex is not poisoned");
+            acknowledgements.push_back(acknowledgement);
+        }
+        self
+    }
+
+    fn with_reschedule_failure(mut self) -> Self {
+        self.reschedule_failure = true;
+        self
+    }
+
+    fn reschedules(&self) -> Vec<(Uuid, i32, String)> {
+        self.reschedules
+            .lock()
+            .expect("scripted repository mutex is not poisoned")
+            .clone()
+    }
+
+    fn marked(&self) -> Vec<(Uuid, i32)> {
+        self.marked
+            .lock()
+            .expect("scripted repository mutex is not poisoned")
+            .clone()
+    }
+}
+
+impl AuditAnchorRepository for ScriptedRepository {
+    fn anchor_health(&self) -> RepositoryFuture<'_, SecurityAuditAnchorHealth> {
+        Box::pin(async move {
+            self.health
+                .lock()
+                .expect("scripted repository mutex is not poisoned")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(RepositoryError::Unexpected(
+                        "health script exhausted".to_owned(),
+                    ))
+                })
+        })
+    }
+
+    fn claim_due(
+        &self,
+        _limit: i64,
+        _lock_timeout_seconds: i32,
+    ) -> RepositoryFuture<'_, Vec<SecurityAuditOutboxDelivery>> {
+        Box::pin(async move {
+            self.claims
+                .lock()
+                .expect("scripted repository mutex is not poisoned")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(RepositoryError::Unexpected(
+                        "claim script exhausted".to_owned(),
+                    ))
+                })
+        })
+    }
+
+    fn mark_exported(&self, event_id: Uuid, expected_attempts: i32) -> RepositoryFuture<'_, ()> {
+        Box::pin(async move {
+            let result = self
+                .acknowledgements
+                .lock()
+                .expect("scripted repository mutex is not poisoned")
+                .pop_front()
+                .unwrap_or(Ok(()));
+            if result.is_ok() {
+                self.marked
+                    .lock()
+                    .expect("scripted repository mutex is not poisoned")
+                    .push((event_id, expected_attempts));
+            }
+            result
+        })
+    }
+
+    fn reschedule(
+        &self,
+        event_id: Uuid,
+        expected_attempts: i32,
+        _available_at: chrono::DateTime<Utc>,
+        last_error: &str,
+    ) -> RepositoryFuture<'_, ()> {
+        let last_error = last_error.to_owned();
+        Box::pin(async move {
+            self.reschedules
+                .lock()
+                .expect("scripted repository mutex is not poisoned")
+                .push((event_id, expected_attempts, last_error));
+            if self.reschedule_failure {
+                Err(RepositoryError::Unexpected("reschedule failed".to_owned()))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+fn iteration_config(endpoint: Url) -> AuditAnchorWorkerConfig {
+    let mut config = valid_worker_config(endpoint);
+    config.preflight.status_file = temp_status_path("iteration");
+    config.poll_interval = Duration::from_millis(1);
+    config
+}
+
+fn genesis_snapshot() -> SecurityAuditAnchorHealth {
+    let mut snapshot = health_snapshot();
+    snapshot.head_sequence = 0;
+    snapshot.head_hash = vec![9; 32];
+    snapshot.last_exported_sequence = None;
+    snapshot.last_exported_hash = None;
+    snapshot.last_exported_occurred_at = None;
+    snapshot.last_exported_at = None;
+    snapshot
+}
+
+fn repository_error(message: &str) -> RepositoryError {
+    RepositoryError::Unexpected(message.to_owned())
+}
+
+#[tokio::test]
+async fn worker_iteration_anchors_genesis_before_polling_empty_outbox() {
+    let (endpoint, server) = local_anchor_endpoint(202).await;
+    let config = iteration_config(endpoint);
+    let repository = ScriptedRepository::with_health(Ok(genesis_snapshot()), Ok(Vec::new()));
+    let client = test_client();
+    let mut last_anchored = None;
+
+    let outcome = run_iteration(&repository, &client, &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Poll(config.poll_interval));
+    let checkpoint = last_anchored.expect("genesis checkpoint is retained");
+    assert_eq!(checkpoint.sequence, 0);
+    assert_eq!(checkpoint.hash, encode_hash(&[9; 32]));
+    let request = server.await.expect("genesis endpoint completes");
+    let header_end = request
+        .windows(4)
+        .position(|value| value == b"\r\n\r\n")
+        .expect("request has headers");
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let body: Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+    assert_eq!(
+        header_value(&headers, "idempotency-key"),
+        Some("genesis:deployment-1")
+    );
+    assert_eq!(body["checkpoint_kind"], "genesis");
+    assert_eq!(body["sequence"], 0);
+    let health = read_health(&config.preflight.status_file)
+        .await
+        .expect("genesis health is published");
+    assert_eq!(health.last_anchored_sequence, Some(0));
+}
+
+#[tokio::test]
+async fn worker_iteration_retries_failed_genesis_without_claiming_deliveries() {
+    let (endpoint, server) = local_anchor_endpoint(503).await;
+    let config = iteration_config(endpoint);
+    let repository = ScriptedRepository::with_health(Ok(genesis_snapshot()), Ok(Vec::new()));
+    let mut last_anchored = None;
+
+    let outcome = run_iteration(&repository, &test_client(), &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Retry(Duration::from_secs(1)));
+    assert!(last_anchored.is_none());
+    assert_eq!(
+        repository
+            .claims
+            .lock()
+            .expect("scripted repository mutex is not poisoned")
+            .len(),
+        1,
+        "failed genesis must not claim durable deliveries"
+    );
+    server.await.expect("failed genesis endpoint completes");
+}
+
+#[tokio::test]
+async fn worker_iteration_reuses_current_genesis_and_tolerates_health_publish_failure() {
+    let mut config =
+        iteration_config(Url::parse("https://unused-anchor.example.test/checkpoint").unwrap());
+    config.preflight.status_file = PathBuf::new();
+    let snapshot = genesis_snapshot();
+    let expected = AnchorCheckpoint::genesis(encode_hash(&snapshot.head_hash));
+    let repository = ScriptedRepository::with_health(Ok(snapshot), Ok(Vec::new()));
+    let mut last_anchored = Some(expected.clone());
+
+    let outcome = run_iteration(&repository, &test_client(), &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Poll(config.poll_interval));
+    assert_eq!(last_anchored, Some(expected));
+}
+
+#[tokio::test]
+async fn worker_iteration_pushes_checkpoint_and_acknowledges_it() {
+    let (endpoint, server) = local_anchor_endpoint(202).await;
+    let config = iteration_config(endpoint);
+    let delivery = delivery();
+    let repository =
+        ScriptedRepository::with_health(Ok(health_snapshot()), Ok(vec![delivery.clone()]))
+            .with_acknowledgement(Ok(()));
+    let client = test_client();
+    let mut last_anchored = None;
+
+    let outcome = run_iteration(&repository, &client, &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Continue);
+    assert_eq!(
+        repository.marked(),
+        vec![(delivery.event_id, delivery.attempts)]
+    );
+    assert!(repository.reschedules().is_empty());
+    let checkpoint = last_anchored.expect("acknowledged checkpoint is retained");
+    assert_eq!(checkpoint.sequence, delivery.sequence);
+    server.await.expect("checkpoint endpoint completes");
+}
+
+#[tokio::test]
+async fn worker_iteration_reschedules_http_failures() {
+    let (endpoint, server) = local_anchor_endpoint(503).await;
+    let config = iteration_config(endpoint);
+    let delivery = delivery();
+    let repository =
+        ScriptedRepository::with_health(Ok(health_snapshot()), Ok(vec![delivery.clone()]));
+    let client = test_client();
+    let mut last_anchored = None;
+
+    let outcome = run_iteration(&repository, &client, &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Continue);
+    assert!(repository.marked().is_empty());
+    assert_eq!(
+        repository.reschedules(),
+        vec![(delivery.event_id, delivery.attempts, "http_5xx".to_owned())]
+    );
+    server.await.expect("failed checkpoint endpoint completes");
+}
+
+#[tokio::test]
+async fn worker_iteration_keeps_retrying_when_reschedule_persistence_fails() {
+    let (endpoint, server) = local_anchor_endpoint(503).await;
+    let config = iteration_config(endpoint);
+    let delivery = delivery();
+    let repository =
+        ScriptedRepository::with_health(Ok(health_snapshot()), Ok(vec![delivery.clone()]))
+            .with_reschedule_failure();
+    let mut last_anchored = None;
+
+    let outcome = run_iteration(&repository, &test_client(), &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Continue);
+    assert_eq!(
+        repository.reschedules(),
+        vec![(delivery.event_id, delivery.attempts, "http_5xx".to_owned())]
+    );
+    server.await.expect("failed checkpoint endpoint completes");
+}
+
+#[tokio::test]
+async fn worker_iteration_reschedules_ack_failure_and_remaining_claims() {
+    let (endpoint, server) = local_anchor_endpoint(202).await;
+    let config = iteration_config(endpoint);
+    let mut first = delivery();
+    first.event_id = Uuid::from_u128(1);
+    let mut second = delivery();
+    second.event_id = Uuid::from_u128(2);
+    second.sequence = 8;
+    second.event_hash = vec![3; 32];
+    let repository = ScriptedRepository::with_health(
+        Ok(health_snapshot()),
+        Ok(vec![first.clone(), second.clone()]),
+    )
+    .with_acknowledgement(Err(repository_error("ack failed")));
+    let client = test_client();
+    let mut last_anchored = None;
+
+    let outcome = run_iteration(&repository, &client, &config, &mut last_anchored).await;
+
+    assert_eq!(outcome, IterationOutcome::Continue);
+    assert!(repository.marked().is_empty());
+    assert_eq!(
+        repository.reschedules(),
+        vec![
+            (
+                first.event_id,
+                first.attempts,
+                "ack_database_error".to_owned()
+            ),
+            (
+                second.event_id,
+                second.attempts,
+                "ack_database_error".to_owned()
+            ),
+        ]
+    );
+    server.await.expect("checkpoint endpoint completes");
+}
+
+#[tokio::test]
+async fn worker_iteration_retries_health_and_claim_failures() {
+    let config = iteration_config(Url::parse("https://anchor.example.test/checkpoint").unwrap());
+    let client = test_client();
+    let mut last_anchored = None;
+    let health_failure =
+        ScriptedRepository::with_health(Err(repository_error("health failed")), Ok(Vec::new()));
+    assert_eq!(
+        run_iteration(&health_failure, &client, &config, &mut last_anchored,).await,
+        IterationOutcome::Retry(Duration::from_secs(1))
+    );
+
+    let claim_failure = ScriptedRepository::with_health(
+        Ok(health_snapshot()),
+        Err(repository_error("claim failed")),
+    );
+    assert_eq!(
+        run_iteration(&claim_failure, &client, &config, &mut last_anchored,).await,
+        IterationOutcome::Retry(Duration::from_secs(1))
+    );
+}
+
+#[tokio::test]
+async fn worker_outer_rejects_invalid_config_before_repository_preflight() {
+    let pool = nazo_postgres::create_pool("not a postgres url", 1).unwrap();
+    let repository = AuditLedgerRepository::new(pool);
+    let config = AuditAnchorWorkerConfig {
+        preflight: required_config(),
+        endpoint: Url::parse("http://anchor.example.test/checkpoint").unwrap(),
+        auth_secret: vec![0; 15],
+        poll_interval: Duration::from_secs(1),
+        request_timeout: Duration::from_secs(1),
+        batch_size: 1,
+        lock_timeout_seconds: 1,
+    };
+
+    let error = super::worker::run_worker(repository, config)
+        .await
+        .expect_err("invalid worker configuration must fail before preflight");
+    assert!(error.to_string().contains("HTTPS"));
+}
+
+#[tokio::test]
+async fn worker_outer_rejects_repository_preflight_failure() {
+    let pool = nazo_postgres::create_pool("not a postgres url", 1).unwrap();
+    let repository = AuditLedgerRepository::new(pool);
+    let config = iteration_config(Url::parse("https://anchor.example.test/checkpoint").unwrap());
+
+    let error = super::worker::run_worker(repository, config)
+        .await
+        .expect_err("repository preflight failure must stop the worker");
+    assert_eq!(
+        error.to_string(),
+        "audit anchor exporter capability preflight failed"
+    );
 }
 
 #[test]

@@ -279,10 +279,21 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
         "CLIENT_SECRET_PEPPER",
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
         "PAIRWISE_SUBJECT_SECRET",
+        "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
     ] {
         assert!(first.required_string(key).unwrap().len() >= 32);
         assert_eq!(first.get(key), second.get(key));
     }
+    let response_key = first
+        .required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")
+        .unwrap();
+    let digest = blake3::hash(response_key.as_bytes()).to_hex().to_string();
+    assert_eq!(
+        first
+            .required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID")
+            .unwrap(),
+        format!("generated-{}", &digest[..16])
+    );
     let explicit = ConfigSource::load_from_dir_with_env(
         &path,
         [(
@@ -295,6 +306,56 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
         explicit.required_string("CLIENT_SECRET_PEPPER").unwrap(),
         "explicit-client-secret-pepper-value-123456"
     );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn server_config_excludes_worker_only_yaml_and_environment_values() {
+    let path = temp_config_dir("worker_config_isolation");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        concat!(
+            "PUBLIC_BASE_URL: https://auth.example\n",
+            "AUDIT_ANCHOR_URL: https://anchor-from-yaml.example\n",
+            "AUDIT_ANCHOR_TOKEN: yaml-worker-secret\n",
+        ),
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir_with_env_filtered(
+        &path,
+        [
+            (
+                "AUDIT_ANCHOR_URL".to_owned(),
+                "https://anchor-from-env.example".to_owned(),
+            ),
+            (
+                "AUDIT_ANCHOR_DATABASE_URL".to_owned(),
+                "postgresql://worker-only.example/oauth".to_owned(),
+            ),
+            ("ISSUER".to_owned(), "https://issuer.example".to_owned()),
+        ],
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        source.get("PUBLIC_BASE_URL").as_deref(),
+        Some("https://auth.example")
+    );
+    assert_eq!(
+        source.get("ISSUER").as_deref(),
+        Some("https://issuer.example")
+    );
+    for key in [
+        "AUDIT_ANCHOR_URL",
+        "AUDIT_ANCHOR_TOKEN",
+        "AUDIT_ANCHOR_DATABASE_URL",
+    ] {
+        assert!(source.get(key).is_none(), "{key} must remain worker-only");
+    }
     let _ = std::fs::remove_dir_all(&path);
 }
 

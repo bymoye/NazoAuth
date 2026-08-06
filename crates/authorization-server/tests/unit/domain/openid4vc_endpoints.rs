@@ -237,10 +237,10 @@ fn vci_token_dpop_targets_include_public_issuer_endpoint() {
 fn pre_authorized_token_validates_dpop_before_consuming_single_use_state() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/domain/openid4vc_endpoints/openid4vci.rs"
+        "/src/domain/openid4vc_endpoints/openid4vci/offers.rs"
     ));
     let start = source
-        .find("fn pre_authorized_token")
+        .find("fn pre_authorized_token_operation")
         .expect("pre_authorized_token implementation should exist");
     let body = &source[start..];
     let dpop = body

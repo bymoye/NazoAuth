@@ -2,6 +2,7 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diesel::sql_query;
 use diesel::sql_types::{Integer, Text, Uuid as SqlUuid};
@@ -103,7 +104,16 @@ async fn fixture_crypto() -> Openid4vcCredentialCrypto {
 
 async fn operations(enabled: bool) -> ServerCredentialIssuerOperations {
     let pool = invalid_pool();
-    let valkey = fred::prelude::Builder::default_centralized()
+    let mut valkey_builder = fred::prelude::Builder::default_centralized();
+    valkey_builder.with_performance_config(|performance: &mut fred::prelude::PerformanceConfig| {
+        performance.default_command_timeout = std::time::Duration::from_millis(100);
+    });
+    valkey_builder.with_connection_config(|connection: &mut fred::prelude::ConnectionConfig| {
+        connection.connection_timeout = std::time::Duration::from_millis(100);
+        connection.internal_command_timeout = std::time::Duration::from_millis(100);
+        connection.max_command_attempts = 1;
+    });
+    let valkey = valkey_builder
         .build()
         .expect("valkey fixture should build without connecting");
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
@@ -606,6 +616,24 @@ async fn finish_response_supports_json_ecdh_and_deflate_and_rejects_unsupported_
         assert_eq!(error.status, 400);
         assert_eq!(error.error, "invalid_encryption_parameters");
     }
+
+    let error = issuer
+        .finish_response(
+            response,
+            Some(&CredentialResponseEncryption {
+                jwk: json!({"alg":"ECDH-ES"}),
+                enc: "A256GCM".to_owned(),
+                zip: None,
+            }),
+        )
+        .await
+        .expect_err("an incomplete ECDH key must fail during encryption");
+    assert_error(
+        error,
+        400,
+        "invalid_encryption_parameters",
+        "Credential response encryption key is invalid.",
+    );
 }
 
 #[tokio::test]
@@ -655,6 +683,22 @@ async fn disabled_issuer_rejects_every_mutating_endpoint_before_state_access() {
             )
             .await
             .expect_err("deferred disabled"),
+        503,
+        "temporarily_unavailable",
+        "Credential issuer is unavailable.",
+    );
+    assert_error(
+        issuer
+            .notify(
+                request_context(),
+                NotificationRequest {
+                    notification_id: "unit-notification".to_owned(),
+                    event: nazo_openid4vci::NotificationEvent::CredentialFailure,
+                    event_description: None,
+                },
+            )
+            .await
+            .expect_err("notification disabled"),
         503,
         "temporarily_unavailable",
         "Credential issuer is unavailable.",
@@ -1116,16 +1160,38 @@ async fn live_immediate_offer_pre_authorized_credential_replay_and_notification(
         .notify(
             CredentialRequestContext {
                 request_url: "/openid4vci/notification".to_owned(),
-                ..context
+                ..context.clone()
             },
             NotificationRequest {
-                notification_id,
+                notification_id: notification_id.clone(),
                 event: nazo_openid4vci::NotificationEvent::CredentialAccepted,
                 event_description: Some("live immediate completed".to_owned()),
             },
         )
         .await
         .expect("live immediate notification should be recorded");
+
+    let error = fixture
+        .issuer
+        .notify(
+            CredentialRequestContext {
+                request_url: "/openid4vci/notification".to_owned(),
+                ..context
+            },
+            NotificationRequest {
+                notification_id,
+                event: nazo_openid4vci::NotificationEvent::CredentialAccepted,
+                event_description: Some("live immediate replay".to_owned()),
+            },
+        )
+        .await
+        .expect_err("terminal notification must not be replayed");
+    assert_error(
+        error,
+        400,
+        "invalid_notification_id",
+        "Notification identifier is invalid or already terminal.",
+    );
     fixture.cleanup().await;
 }
 
@@ -1241,3 +1307,6 @@ async fn live_deferred_credential_claim_response_replay_and_notification() {
         .expect("live deferred notification should be recorded");
     fixture.cleanup().await;
 }
+
+#[path = "openid4vci_endpoint_operations_policy.rs"]
+mod policy;
