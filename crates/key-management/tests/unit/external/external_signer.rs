@@ -90,15 +90,6 @@ fn signer_sleep_command() -> Arc<Vec<String>> {
 }
 
 #[cfg(unix)]
-fn signer_close_stdin_command() -> Arc<Vec<String>> {
-    Arc::new(vec![
-        "sh".to_owned(),
-        "-c".to_owned(),
-        "exec 0<&-; sleep 30".to_owned(),
-    ])
-}
-
-#[cfg(unix)]
 fn signer_large_stdout_command() -> Arc<Vec<String>> {
     Arc::new(vec![
         "sh".to_owned(),
@@ -669,17 +660,32 @@ async fn external_signing_times_out_and_fails_closed() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn external_signing_reports_stdin_write_failures() {
-    let error = sign_with_command(signer_close_stdin_command())
-        .await
-        .expect_err("a signer that closes stdin must reject the request write");
+async fn external_request_writer_classifies_closed_pipe_and_backpressure_timeout() {
+    let (mut closed_writer, closed_reader) = tokio::io::duplex(64);
+    drop(closed_reader);
+    let error = write_external_signer_request(
+        &mut closed_writer,
+        b"request",
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .await
+    .expect_err("a closed signer pipe must reject the request write");
+    assert!(matches!(
+        error,
+        ExternalSignerRequestWriteError::Io(error)
+            if error.kind() == std::io::ErrorKind::BrokenPipe
+    ));
 
-    assert!(
-        format!("{error}").contains("failed to write external signer request"),
-        "unexpected error: {error}"
-    );
+    let (mut blocked_writer, _blocked_reader) = tokio::io::duplex(1);
+    let error = write_external_signer_request(
+        &mut blocked_writer,
+        b"request",
+        tokio::time::Instant::now() + std::time::Duration::from_millis(10),
+    )
+    .await
+    .expect_err("a backpressured signer pipe must honor the request deadline");
+    assert!(matches!(error, ExternalSignerRequestWriteError::TimedOut));
 }
 
 #[cfg(unix)]

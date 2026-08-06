@@ -35,11 +35,29 @@ static EXTERNAL_SIGNER_SLOTS: LazyLock<Semaphore> =
 
 struct AbortTasksOnDrop(Vec<tokio::task::AbortHandle>);
 
+#[derive(Debug)]
+enum ExternalSignerRequestWriteError {
+    Io(std::io::Error),
+    TimedOut,
+}
+
 impl Drop for AbortTasksOnDrop {
     fn drop(&mut self) {
         for task in &self.0 {
             task.abort();
         }
+    }
+}
+
+async fn write_external_signer_request(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    request_body: &[u8],
+    deadline: time::Instant,
+) -> Result<(), ExternalSignerRequestWriteError> {
+    match time::timeout_at(deadline, writer.write_all(request_body)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(ExternalSignerRequestWriteError::Io(error)),
+        Err(_) => Err(ExternalSignerRequestWriteError::TimedOut),
     }
 }
 
@@ -238,9 +256,9 @@ pub(super) async fn sign_external_jwt_input(
     let _reader_abort_guard =
         AbortTasksOnDrop(vec![stdout_task.abort_handle(), stderr_task.abort_handle()]);
     let request_body = serde_json::to_string(&request)?;
-    match time::timeout_at(deadline, stdin.write_all(request_body.as_bytes())).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
+    match write_external_signer_request(&mut stdin, request_body.as_bytes(), deadline).await {
+        Ok(()) => {}
+        Err(ExternalSignerRequestWriteError::Io(error)) => {
             stdout_task.abort();
             stderr_task.abort();
             terminate_process_tree(&mut child, &armed).await;
@@ -248,7 +266,7 @@ pub(super) async fn sign_external_jwt_input(
                 "failed to write external signer request: {error}"
             )));
         }
-        Err(_) => {
+        Err(ExternalSignerRequestWriteError::TimedOut) => {
             stdout_task.abort();
             stderr_task.abort();
             terminate_process_tree(&mut child, &armed).await;
