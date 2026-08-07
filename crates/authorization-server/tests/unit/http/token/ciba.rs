@@ -453,6 +453,7 @@ async fn ciba_backchannel_validates_request_object_and_creates_bound_state() {
     let kid = "backchannel-kid";
     let mut client = ciba_private_key_jwt_client(kid, &key);
     client.client_id = format!("ciba-backchannel-client-{}", Uuid::now_v7());
+    client.require_mtls_bound_tokens = true;
     nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
         .insert(&client, None, None, None)
         .await
@@ -543,6 +544,7 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
     let kid = "backchannel-invalid-kid";
     let mut client = ciba_private_key_jwt_client(kid, &key);
     client.client_id = format!("ciba-backchannel-invalid-client-{}", Uuid::now_v7());
+    client.require_mtls_bound_tokens = true;
     nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
         .insert(&client, None, None, None)
         .await
