@@ -590,7 +590,7 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
         ),
         (
             json!({"scope": "openid", "login_hint": "subject@example.test", "acr_values": "9"}),
-            "invalid_request",
+            "unknown_user_id",
         ),
     ];
     for (extra_claims, expected_error) in cases {
@@ -612,6 +612,36 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(service_response_oauth_error_code(&response), expected_error);
     }
+
+    insert_ciba_user_with_email(&state, Uuid::now_v7(), "subject@example.test").await;
+    let request_object = signed_ciba_request_object_for_client(
+        &client.client_id,
+        kid,
+        &key,
+        json!({
+            "scope": "openid",
+            "login_hint": "subject@example.test",
+            "acr_values": "9",
+        }),
+    );
+    let body = ciba_backchannel_body(
+        &client.client_id,
+        Some(&request_object),
+        Some(&client_assertion),
+        None,
+        None,
+    );
+    let request = actix_web::test::TestRequest::post()
+        .uri("/bc-authorize")
+        .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+        .set_payload(body)
+        .to_request();
+    let response = actix_web::test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        service_response_oauth_error_code(&response),
+        "invalid_request"
+    );
 }
 
 fn ciba_private_key_jwt_client_with_alg(kid: &str, fixture: &ClientSigningFixture) -> ClientRow {
