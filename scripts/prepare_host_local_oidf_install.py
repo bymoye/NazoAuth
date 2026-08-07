@@ -65,7 +65,9 @@ def prepare(
     try:
         generation_dir = temporary / "generation"
         generation_dir.mkdir(mode=0o700)
-        material = host_local.generate_certificate_material(generation_dir)
+        material = host_local.generate_certificate_material(
+            generation_dir, suite_origin=suite_origin
+        )
         host_local.validate_generated_material(material)
         profile = host_local.build_prepared_install_profile(material, suite_origin)
         trust = host_local.build_prepared_conformance_trust(material, suite_origin)
