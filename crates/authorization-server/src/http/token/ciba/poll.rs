@@ -1,6 +1,7 @@
 use super::decision::ciba_poll_failure_response;
 use super::*;
 use actix_web::body::MessageBody;
+use nazo_http_actix::OAuthJsonErrorFields;
 
 /// `HttpResponse<BoxBody>` is intentionally not `Send`, while the database
 /// lease transaction must return a `Send` value.  Materialize the small JSON
@@ -10,6 +11,7 @@ struct SendCibaResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Bytes,
+    oauth_error: Option<OAuthJsonErrorFields>,
 }
 
 impl SendCibaResponse {
@@ -17,6 +19,9 @@ impl SendCibaResponse {
         let mut response = HttpResponse::build(self.status);
         for (name, value) in &self.headers {
             response.append_header((name.clone(), value.clone()));
+        }
+        if let Some(fields) = self.oauth_error {
+            response.extensions_mut().insert(fields);
         }
         response.body(self.body)
     }
@@ -26,6 +31,7 @@ fn materialize_ciba_response(response: HttpResponse) -> SendCibaResponse {
     let (head, body) = response.into_parts();
     let status = head.status();
     let headers = head.headers().clone();
+    let oauth_error = head.extensions().get::<OAuthJsonErrorFields>().cloned();
     let body = body.try_into_bytes().unwrap_or_else(|_| {
         Bytes::from_static(
             br#"{"error":"server_error","error_description":"CIBA response body unavailable."}"#,
@@ -35,6 +41,7 @@ fn materialize_ciba_response(response: HttpResponse) -> SendCibaResponse {
         status,
         headers,
         body,
+        oauth_error,
     }
 }
 
