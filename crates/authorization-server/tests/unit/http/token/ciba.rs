@@ -460,7 +460,8 @@ async fn ciba_backchannel_validates_request_object_and_creates_bound_state() {
         .expect("CIBA backchannel client should be stored");
 
     let user_id = Uuid::now_v7();
-    insert_ciba_user_with_email(&state, user_id, "subject@example.test").await;
+    let login_hint = format!("ciba-backchannel-user-{user_id}@example.test");
+    insert_ciba_user_with_email(&state, user_id, &login_hint).await;
     let settings = Arc::clone(&state.settings);
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
         state.diesel_db.clone(),
@@ -496,7 +497,7 @@ async fn ciba_backchannel_validates_request_object_and_creates_bound_state() {
         &key,
         json!({
             "scope": "openid profile",
-            "login_hint": "subject@example.test",
+            "login_hint": login_hint,
         }),
     );
     let client_assertion = signed_ciba_client_assertion(&client.client_id, kid, &key);
@@ -542,6 +543,10 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
     };
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let kid = "backchannel-invalid-kid";
+    let login_hint = format!(
+        "ciba-backchannel-invalid-user-{}@example.test",
+        Uuid::now_v7()
+    );
     let mut client = ciba_private_key_jwt_client(kid, &key);
     client.client_id = format!("ciba-backchannel-invalid-client-{}", Uuid::now_v7());
     client.require_mtls_bound_tokens = true;
@@ -581,15 +586,15 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
     let client_assertion = signed_ciba_client_assertion(&client.client_id, kid, &key);
     let cases = [
         (
-            json!({"scope": "profile", "login_hint": "subject@example.test"}),
+            json!({"scope": "profile", "login_hint": login_hint.clone()}),
             "invalid_scope",
         ),
         (
-            json!({"scope": "openid", "login_hint": "subject@example.test", "id_token_hint": "unexpected"}),
+            json!({"scope": "openid", "login_hint": login_hint.clone(), "id_token_hint": "unexpected"}),
             "invalid_request",
         ),
         (
-            json!({"scope": "openid", "login_hint": "subject@example.test", "acr_values": "9"}),
+            json!({"scope": "openid", "login_hint": login_hint.clone(), "acr_values": "9"}),
             "unknown_user_id",
         ),
     ];
@@ -613,14 +618,14 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
         assert_eq!(service_response_oauth_error_code(&response), expected_error);
     }
 
-    insert_ciba_user_with_email(&state, Uuid::now_v7(), "subject@example.test").await;
+    insert_ciba_user_with_email(&state, Uuid::now_v7(), &login_hint).await;
     let request_object = signed_ciba_request_object_for_client(
         &client.client_id,
         kid,
         &key,
         json!({
             "scope": "openid",
-            "login_hint": "subject@example.test",
+            "login_hint": login_hint,
             "acr_values": "9",
         }),
     );
