@@ -928,7 +928,8 @@ async fn openid_issue_with_active_user_emits_id_and_refresh_tokens() {
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
-    let client = client_with_grants(&["authorization_code", "refresh_token"]);
+    let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
+    client.client_id = format!("issue-client-{}", Uuid::now_v7());
     let user_id = Uuid::now_v7();
     insert_issue_client(&state, &client).await;
     insert_issue_user(&state, user_id).await;
