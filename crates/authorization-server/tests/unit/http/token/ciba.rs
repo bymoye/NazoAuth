@@ -197,6 +197,13 @@ async fn store_ciba_state_with_user(
         .expect("CIBA state should be stored");
 }
 
+async fn persist_ciba_test_client(state: &TestInfrastructure, client: &ClientRow) {
+    nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone())
+        .upsert(client, None)
+        .await
+        .expect("CIBA test client should be persisted");
+}
+
 async fn insert_ciba_user(state: &TestInfrastructure, user_id: Uuid) {
     let mut connection = get_conn(&state.diesel_db)
         .await
@@ -1806,17 +1813,14 @@ async fn ciba_token_request_validates_mtls_binding_before_issuing_approved_token
 
 #[actix_web::test]
 async fn ciba_token_poll_maps_pending_slow_down_and_denied_states() {
-    let Some(valkey) = live_test_valkey().await else {
+    let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    let mut state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
-    state.valkey = valkey;
     enable_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("poll-status-kid", &key);
     client.require_mtls_bound_tokens = true;
+    persist_ciba_test_client(&state, &client).await;
 
     let pending_id = format!("pending-status-{}", Uuid::now_v7());
     store_ciba_state(&state, &client, &pending_id, CibaStatus::Pending).await;
@@ -1837,17 +1841,14 @@ async fn ciba_token_poll_maps_pending_slow_down_and_denied_states() {
 
 #[actix_web::test]
 async fn ciba_token_poll_maps_an_expired_state_before_user_lookup() {
-    let Some(valkey) = live_test_valkey().await else {
+    let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    let mut state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
-    state.valkey = valkey;
     enable_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("expired-status-kid", &key);
     client.require_mtls_bound_tokens = true;
+    persist_ciba_test_client(&state, &client).await;
     let auth_req_id = format!("expired-status-{}", Uuid::now_v7());
     let now = Utc::now().timestamp();
     CibaStore::new(&state.valkey_connection())

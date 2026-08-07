@@ -540,6 +540,14 @@ async fn set_ciba_request_decision_with_lease(
     {
         Ok(Some(result)) => result,
         Ok(None) => {
+            // A per-run OIDF credential is deliberately indistinguishable
+            // from an unknown transaction or an already revoked lease.  Do
+            // not return a protocol body that would let the caller probe the
+            // client/lease binding; the disabled production route is an
+            // opaque, temporary conformance boundary.
+            if lease.expected_lease_id.is_some() {
+                return empty_response(StatusCode::NOT_FOUND);
+            }
             return complete_ciba_decision(
                 Err(CibaDecisionFailure::Missing),
                 &auth_req_id,
