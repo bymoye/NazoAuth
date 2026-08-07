@@ -83,7 +83,9 @@ use diesel_async::RunQueryDsl;
 use nazo_postgres::{create_pool, get_conn};
 
 use crate::test_support::client_signing_fixture;
-use fred::prelude::{Builder as ValkeyBuilder, ConnectionConfig, PerformanceConfig};
+use fred::prelude::{
+    Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
+};
 use nazo_auth::{PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuanceTransitionResult};
 
 /// Seed a durable response for endpoint replay tests.  The HTTP handlers under
@@ -165,6 +167,21 @@ fn disconnected_valkey_client() -> fred::prelude::Client {
     builder
         .build()
         .expect("valkey client construction should not connect")
+}
+
+fn live_valkey_client() -> Option<fred::prelude::Client> {
+    let valkey_url = std::env::var("VALKEY_URL").ok()?;
+    let mut builder =
+        ValkeyBuilder::from_config(ValkeyConfig::from_url(&valkey_url).expect("VALKEY_URL"));
+    builder.with_performance_config(|performance: &mut PerformanceConfig| {
+        performance.default_command_timeout = StdDuration::from_secs(1);
+    });
+    builder.with_connection_config(|connection: &mut ConnectionConfig| {
+        connection.connection_timeout = StdDuration::from_secs(1);
+        connection.internal_command_timeout = StdDuration::from_secs(1);
+        connection.max_command_attempts = 1;
+    });
+    Some(builder.build().expect("Valkey client should build"))
 }
 
 fn client_with_grants(grant_types: &[&str]) -> ClientRow {
@@ -314,10 +331,11 @@ async fn insert_issue_user(state: &TestInfrastructure, user_id: Uuid) {
 
 fn issue_state_with_live_database() -> Option<TestInfrastructure> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    let valkey = live_valkey_client()?;
     let _key_material = client_signing_fixture(jsonwebtoken::Algorithm::EdDSA);
     Some(TestInfrastructure {
         diesel_db: create_pool(database_url, 1).expect("database pool should build"),
-        valkey: disconnected_valkey_client(),
+        valkey,
         settings: Arc::new(
             Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
         ),
