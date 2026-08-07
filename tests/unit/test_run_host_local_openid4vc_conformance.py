@@ -119,7 +119,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             ),
         )
 
-    def test_admin_credentials_fd_uses_the_wrappers_closed_two_field_schema(self):
+    def test_admin_credentials_fd_includes_mfa_without_other_secrets(self):
         secrets = {field: f"value-{field}" for field in self.module.SECRET_FIELDS}
         with self.module.admin_credentials_fd(secrets) as descriptor:
             payload = b""
@@ -130,6 +130,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             {
                 "admin_email": secrets["admin_email"],
                 "admin_password": secrets["admin_password"],
+                "admin_mfa_totp_secret": secrets["admin_mfa_totp_secret"],
             },
         )
         self.assertNotIn("openid4vc_base_config_json", self.module.SECRET_FIELDS)
@@ -510,6 +511,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.test",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "admin-totp-secret",
                         "suite_token": "suite-token",
                     },
                 )

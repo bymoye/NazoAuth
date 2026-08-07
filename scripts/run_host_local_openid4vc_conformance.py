@@ -638,7 +638,6 @@ def credential_document(secrets: dict[str, str]) -> dict[str, str]:
         "admin_email": secrets["admin_email"],
         "admin_password": secrets["admin_password"],
         "admin_mfa_totp_secret": secrets["admin_mfa_totp_secret"],
-        "admin_mfa_totp_secret": secrets["admin_mfa_totp_secret"],
     }
 
 
@@ -655,6 +654,7 @@ def admin_credentials_fd(secrets: dict[str, str]) -> Iterator[int]:
         {
             "admin_email": secrets["admin_email"],
             "admin_password": secrets["admin_password"],
+            "admin_mfa_totp_secret": secrets["admin_mfa_totp_secret"],
         },
         separators=(",", ":"),
     )

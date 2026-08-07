@@ -92,6 +92,7 @@ def install_credential_datasets(
             origin,
             credentials["admin_email"],
             credentials["admin_password"],
+            mfa_totp_secret=credentials["admin_mfa_totp_secret"],
         )
         profile = admin.request_json("GET", "/auth/me", expected_status=200)
     except OnboardingError as error:
@@ -1275,7 +1276,11 @@ def main(argv: list[str] | None = None) -> int:
             secret_fd=args.operator_credentials_fd,
             secret_file=args.operator_credentials_file,
         ),
-        required_fields=("admin_email", "admin_password"),
+        required_fields=(
+            "admin_email",
+            "admin_password",
+            "admin_mfa_totp_secret",
+        ),
     )
     suite_token = read_secret_value(
         descriptor=args.suite_token_fd
