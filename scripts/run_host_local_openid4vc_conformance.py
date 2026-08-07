@@ -30,6 +30,7 @@ import stat
 import subprocess
 import sys
 from typing import Iterator
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -300,7 +301,9 @@ def ec_p256_jwk(key_path: Path, *, kid: str, certificate_path: Path | None = Non
     return result
 
 
-def generate_certificate_material(work_dir: Path) -> dict[str, object]:
+def generate_certificate_material(
+    work_dir: Path, *, suite_origin: str | None = None
+) -> dict[str, object]:
     """Create fresh P-256 wallet/attestation/credential material for one run."""
     directory = work_dir / "generated-openid4vc-material"
     directory.mkdir(parents=True, mode=0o700)
@@ -327,12 +330,22 @@ def generate_certificate_material(work_dir: Path) -> dict[str, object]:
     )
     extension_file.chmod(0o600)
     credential_extension_file = directory / "credential.ext"
+    credential_san = ""
+    if suite_origin is not None:
+        parsed_suite = urlsplit(canonical_suite_origin(suite_origin))
+        suite_host = parsed_suite.hostname
+        if not suite_host:
+            fail("conformance suite origin must contain a DNS host")
+        credential_san = f"subjectAltName=DNS:{suite_host}\n"
     credential_extension_file.write_text(
-        "basicConstraints=critical,CA:FALSE\n"
-        "keyUsage=critical,digitalSignature\n"
-        "extendedKeyUsage=1.0.18013.5.1.2\n"
-        "subjectKeyIdentifier=hash\n"
-        "authorityKeyIdentifier=keyid,issuer\n",
+        (
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=1.0.18013.5.1.2\n"
+            + credential_san
+            + "subjectKeyIdentifier=hash\n"
+            + "authorityKeyIdentifier=keyid,issuer\n"
+        ),
         encoding="ascii",
     )
     credential_extension_file.chmod(0o600)
@@ -709,7 +722,9 @@ def materialize_configs(
     trust_anchor: str,
     supplied_material: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    material = supplied_material or generate_certificate_material(args.work_dir)
+    material = supplied_material or generate_certificate_material(
+        args.work_dir, suite_origin=args.conformance_server
+    )
     validate_generated_material(material)
     private_write_json(
         args.work_dir / "base-input.json",

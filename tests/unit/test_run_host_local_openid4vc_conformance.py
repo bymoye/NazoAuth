@@ -298,8 +298,12 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
     def test_each_run_generates_unique_p256_keys_certificates_and_no_reusable_input(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            first = self.module.generate_certificate_material(root / "first")
-            second = self.module.generate_certificate_material(root / "second")
+            first = self.module.generate_certificate_material(
+                root / "first", suite_origin="https://suite.example"
+            )
+            second = self.module.generate_certificate_material(
+                root / "second", suite_origin="https://suite.example"
+            )
             self.module.validate_generated_material(first)
             self.module.validate_generated_material(second)
             key_names = ("wallet_private", "wallet_attested", "client_attestation", "key_attestation", "credential")
@@ -329,6 +333,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 text=True,
             ).stdout
             self.assertIn("1.0.18013.5.1.2", credential_text)
+            self.assertIn("DNS:suite.example", credential_text)
             deployed_anchor = "-----BEGIN CERTIFICATE-----\ndeployed\n-----END CERTIFICATE-----\n"
             base = self.module.build_base_input(
                 first,
