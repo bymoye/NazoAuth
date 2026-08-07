@@ -342,7 +342,6 @@ def generate_certificate_material(
             "basicConstraints=critical,CA:FALSE\n"
             "keyUsage=critical,digitalSignature\n"
             "extendedKeyUsage=1.0.18013.5.1.2\n"
-            + credential_san
             + "subjectKeyIdentifier=hash\n"
             + "authorityKeyIdentifier=keyid,issuer\n"
         ),
@@ -355,11 +354,18 @@ def generate_certificate_material(
         request = directory / f"{name}.csr"
         certificate = directory / f"{name}.pem"
         run_openssl(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key)], cwd=directory)
-        run_openssl(["req", "-new", "-key", str(key), "-subj", f"/CN=NazoAuth {name}", "-out", str(request)], cwd=directory)
+        run_openssl(
+            [
+                "req", "-new", "-key", str(key), "-subj", f"/CN=NazoAuth {name}",
+                *(["-addext", credential_san.rstrip("\n")] if name == "credential" and credential_san else []),
+                "-out", str(request),
+            ],
+            cwd=directory,
+        )
         run_openssl(
             [
                 "x509", "-req", "-in", str(request), "-CA", str(root_certificate), "-CAkey", str(root_key),
-                "-CAcreateserial", "-days", "2", "-sha256", "-extfile",
+                "-CAcreateserial", "-days", "2", "-sha256", "-copy_extensions", "copy", "-extfile",
                 str(credential_extension_file if name == "credential" else extension_file),
                 "-out", str(certificate),
             ],
