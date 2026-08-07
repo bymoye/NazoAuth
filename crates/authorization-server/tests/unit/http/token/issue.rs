@@ -78,7 +78,7 @@ use std::time::Duration as StdDuration;
 
 use crate::config::ConfigSource;
 use diesel::sql_query;
-use diesel::sql_types::{Text, Uuid as SqlUuid};
+use diesel::sql_types::{Jsonb, Text, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
 use nazo_postgres::{create_pool, get_conn};
 
@@ -327,6 +327,37 @@ async fn insert_issue_user(state: &TestInfrastructure, user_id: Uuid) {
     .execute(&mut connection)
     .await
     .expect("issue test user should insert");
+}
+
+async fn insert_issue_client(state: &TestInfrastructure, client: &ClientRow) {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("issue test database connection should be available");
+    sql_query("DELETE FROM oauth_clients WHERE id = $1")
+        .bind::<SqlUuid, _>(client.id)
+        .execute(&mut connection)
+        .await
+        .expect("issue test client cleanup should succeed");
+    sql_query(
+        "INSERT INTO oauth_clients (\
+            id, tenant_id, realm_id, organization_id, client_id, client_name, client_type,\
+            redirect_uris, scopes, grant_types, token_endpoint_auth_method, is_active\
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)",
+    )
+    .bind::<SqlUuid, _>(client.id)
+    .bind::<SqlUuid, _>(client.tenant_id)
+    .bind::<SqlUuid, _>(client.realm_id)
+    .bind::<SqlUuid, _>(client.organization_id)
+    .bind::<Text, _>(&client.client_id)
+    .bind::<Text, _>(&client.client_name)
+    .bind::<Text, _>(&client.client_type)
+    .bind::<Jsonb, _>(serde_json::to_value(&client.redirect_uris).expect("redirect URIs JSON"))
+    .bind::<Jsonb, _>(serde_json::to_value(&client.scopes).expect("scopes JSON"))
+    .bind::<Jsonb, _>(serde_json::to_value(&client.grant_types).expect("grant types JSON"))
+    .bind::<Text, _>(&client.token_endpoint_auth_method)
+    .execute(&mut connection)
+    .await
+    .expect("issue test client should insert");
 }
 
 fn issue_state_with_live_database() -> Option<TestInfrastructure> {
@@ -899,6 +930,7 @@ async fn openid_issue_with_active_user_emits_id_and_refresh_tokens() {
     };
     let client = client_with_grants(&["authorization_code", "refresh_token"]);
     let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
     insert_issue_user(&state, user_id).await;
     let mut issue = token_issue_with_sid(vec!["sid".to_owned()]);
     issue.user_id = Some(user_id);
