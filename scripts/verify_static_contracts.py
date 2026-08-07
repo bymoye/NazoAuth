@@ -809,7 +809,6 @@ def check_openid4vc_boundaries() -> None:
         if marker not in openid4vc_server_domain:
             raise SystemExit(f"OpenID4VC internal control-plane boundary is missing: {marker}")
     for marker in (
-        'required_fields=("admin_email", "admin_password")',
         "--operator-credentials-file",
         "read_secret_document",
         "/admin/openid4vci/credential-datasets/",
@@ -819,6 +818,17 @@ def check_openid4vc_boundaries() -> None:
     ):
         if marker not in driver:
             raise SystemExit(f"OpenID4VC driver lacks production admin boundary: {marker}")
+    required_fields = re.search(
+        r"required_fields\s*=\s*\((?P<body>.*?)\)", driver, flags=re.DOTALL
+    )
+    if required_fields is None or any(
+        f'"{field}"' not in required_fields.group("body")
+        for field in ("admin_email", "admin_password", "admin_mfa_totp_secret")
+    ):
+        raise SystemExit(
+            "OpenID4VC driver lacks production admin boundary: "
+            "required_fields must include admin_email, admin_password, and admin_mfa_totp_secret"
+        )
     for forbidden in ("OIDF_ADMIN_EMAIL", "OIDF_ADMIN_PASSWORD"):
         if forbidden in driver:
             raise SystemExit(

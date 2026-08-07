@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -28,7 +29,13 @@ class Openid4vcOidfTests(unittest.TestCase):
             / "run_openid4vc_conformance.py"
         ).read_text(encoding="utf-8")
         self.assertIn("--operator-credentials-file", source)
-        self.assertIn('required_fields=("admin_email", "admin_password")', source)
+        required_fields = re.search(
+            r"required_fields\s*=\s*\((?P<body>.*?)\)", source, flags=re.DOTALL
+        )
+        self.assertIsNotNone(required_fields)
+        assert required_fields is not None
+        for field in ("admin_email", "admin_password", "admin_mfa_totp_secret"):
+            self.assertIn(f'"{field}"', required_fields.group("body"))
         self.assertIn("read_secret_document", source)
         self.assertNotIn("OIDF_ADMIN_EMAIL", source)
         self.assertNotIn("OIDF_ADMIN_PASSWORD", source)
