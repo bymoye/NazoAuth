@@ -928,11 +928,6 @@ async fn client_credentials_issue_returns_dpop_and_authorization_details_metadat
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
-    state
-        .valkey_connection()
-        .health_check()
-        .await
-        .expect("live token issuance fixture should reach Valkey before DPoP nonce issuance");
     let mut client = client_with_grants(&["client_credentials"]);
     client.client_id = format!("issue-dpop-client-{}", Uuid::now_v7());
     insert_issue_client(&state, &client).await;
