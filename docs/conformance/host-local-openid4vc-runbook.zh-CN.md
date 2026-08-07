@@ -31,6 +31,7 @@ runner 只从非交互 stdin 或已继承 FD 接受一个严格 UTF-8 JSON 对�
   "applicant_password": "...",
   "admin_email": "...",
   "admin_password": "...",
+  "admin_mfa_totp_secret": "...",
   "suite_token": "...",
   "issuer_management_token": "...",
   "verifier_management_token": "..."

@@ -112,6 +112,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 "applicant_password",
                 "admin_email",
                 "admin_password",
+                "admin_mfa_totp_secret",
                 "suite_token",
                 "issuer_management_token",
                 "verifier_management_token",
@@ -138,6 +139,9 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
         secrets = {
             "applicant_email": "applicant@example.test",
             "applicant_password": "applicant-secret",
+            "admin_email": "admin@example.test",
+            "admin_password": "admin-secret",
+            "admin_mfa_totp_secret": "totp-secret",
             "issuer_management_token": "issuer-token",
             "verifier_management_token": "verifier-token",
         }

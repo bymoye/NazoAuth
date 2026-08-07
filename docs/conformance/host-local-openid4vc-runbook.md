@@ -33,6 +33,7 @@ The runner accepts one strict UTF-8 JSON object only through non-interactive std
   "applicant_password": "...",
   "admin_email": "...",
   "admin_password": "...",
+  "admin_mfa_totp_secret": "...",
   "suite_token": "...",
   "issuer_management_token": "...",
   "verifier_management_token": "..."

@@ -73,6 +73,7 @@ SECRET_FIELDS = (
     "applicant_password",
     "admin_email",
     "admin_password",
+    "admin_mfa_totp_secret",
     "suite_token",
     "issuer_management_token",
     "verifier_management_token",
@@ -636,6 +637,8 @@ def credential_document(secrets: dict[str, str]) -> dict[str, str]:
         "applicant_password": secrets["applicant_password"],
         "admin_email": secrets["admin_email"],
         "admin_password": secrets["admin_password"],
+        "admin_mfa_totp_secret": secrets["admin_mfa_totp_secret"],
+        "admin_mfa_totp_secret": secrets["admin_mfa_totp_secret"],
     }
 
 
