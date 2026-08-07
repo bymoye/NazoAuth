@@ -117,15 +117,25 @@ def install_credential_datasets(
             )
             installed.append((subject_id, encoded_configuration))
     except OnboardingError as error:
-        cleanup_credential_datasets(admin, installed)
+        cleanup_credential_datasets(origin, credentials, installed)
         raise RuntimeError(f"OpenID4VC dataset installation failed: {error}") from error
     return admin, installed
 
 
 def cleanup_credential_datasets(
-    admin: ControlPlaneSession,
+    origin: str,
+    credentials: dict[str, str],
     installed: list[tuple[str, str]],
 ) -> None:
+    # Dataset deletion requires recent MFA.  A full OpenID4VC matrix can outlive
+    # the login freshness window, so establish a fresh session for cleanup
+    # instead of reusing the setup session.
+    admin = ControlPlaneSession.login(
+        origin,
+        credentials["admin_email"],
+        credentials["admin_password"],
+        mfa_totp_secret=credentials["admin_mfa_totp_secret"],
+    )
     failures: list[str] = []
     for subject_id, encoded_configuration in reversed(installed):
         path = (
@@ -1321,7 +1331,11 @@ def main(argv: list[str] | None = None) -> int:
         stop.set()
         thread.join(timeout=5)
         try:
-            cleanup_credential_datasets(admin, installed_datasets)
+            cleanup_credential_datasets(
+                canonical_https_origin(str(config.get("target_origin", "")), label="target_origin"),
+                credentials,
+                installed_datasets,
+            )
         finally:
             try:
                 cleanup_suite_plan_configs(plan_config_paths)
