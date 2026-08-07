@@ -12,6 +12,9 @@ use crate::settings::Settings;
 use crate::test_support::TestInfrastructure;
 use actix_web::test::TestRequest;
 use chrono::Duration;
+use diesel::sql_query;
+use diesel::sql_types::{Text, Uuid as SqlUuid};
+use diesel_async::RunQueryDsl;
 use fred::interfaces::ClientLike as _;
 use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
@@ -19,11 +22,13 @@ use fred::prelude::{
 use nazo_auth::{DeviceAuthorizationState, DevicePollTransition, evaluate_device_poll};
 use nazo_http_actix::ClientIpConfig;
 use nazo_http_actix::OAuthJsonErrorFields;
-use nazo_postgres::create_pool;
+use nazo_postgres::{create_pool, get_conn};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
+
+use crate::test_support::valkey::valkey_set_ex;
 
 fn device_authorization_service(
     state: &Data<TestInfrastructure>,
@@ -198,6 +203,52 @@ async fn live_device_replay_state() -> Option<TestInfrastructure> {
         settings: Arc::new(enabled_settings()),
         keyset: crate::test_support::test_key_manager(),
     })
+}
+
+async fn insert_device_user(state: &TestInfrastructure, user_id: Uuid) {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("device test database connection should be available");
+    sql_query("DELETE FROM users WHERE tenant_id = $1 AND id = $2")
+        .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+        .bind::<SqlUuid, _>(user_id)
+        .execute(&mut connection)
+        .await
+        .expect("device test user cleanup should succeed");
+    sql_query(
+        "INSERT INTO users (\
+            id, tenant_id, realm_id, organization_id, username, email, password_hash,\
+            is_active, mfa_enabled, email_verified, role, admin_level\
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, TRUE, 'user', 0)",
+    )
+    .bind::<SqlUuid, _>(user_id)
+    .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+    .bind::<SqlUuid, _>(DEFAULT_REALM_ID)
+    .bind::<SqlUuid, _>(DEFAULT_ORGANIZATION_ID)
+    .bind::<Text, _>(format!("device-user-{user_id}"))
+    .bind::<Text, _>(format!("device-user-{user_id}@example.test"))
+    .bind::<Text, _>("device-test-password-hash")
+    .execute(&mut connection)
+    .await
+    .expect("device test user should insert");
+}
+
+async fn store_device_session(state: &TestInfrastructure, session_id: &str, user_id: Uuid) {
+    let payload = crate::http::sessions::SessionPayload {
+        user_id,
+        auth_time: Utc::now().timestamp(),
+        amr: vec!["pwd".to_owned()],
+        pending_mfa: false,
+        oidc_sid: Some(format!("device-oidc-{session_id}")),
+    };
+    valkey_set_ex(
+        &state.valkey,
+        format!("oauth:session:{session_id}"),
+        serde_json::to_string(&payload).expect("device session should serialize"),
+        state.settings.session.session_ttl_seconds,
+    )
+    .await
+    .expect("device session should store");
 }
 
 async fn call_device_token_for_test(
@@ -459,6 +510,91 @@ async fn device_authorization_endpoint_disabled_fails_before_client_lookup() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&response), "invalid_request");
+}
+
+#[actix_web::test]
+async fn device_denial_consumes_pending_request_after_audited_user_decision() {
+    let Some(state) = live_device_replay_state().await else {
+        return;
+    };
+    let user_id = Uuid::now_v7();
+    insert_device_user(&state, user_id).await;
+    let session_id = format!("device-session-{}", Uuid::now_v7());
+    store_device_session(&state, &session_id, user_id).await;
+
+    let now = Utc::now();
+    let payload = DeviceAuthorizationPayload {
+        client_id: "device-client".to_owned(),
+        client_name: "Device Client".to_owned(),
+        scopes: vec!["openid".to_owned()],
+        resource_indicators: vec!["resource://default".to_owned()],
+        authorization_details: json!([]),
+        interval_seconds: 5,
+        issued_at: now,
+        expires_at: now + Duration::minutes(10),
+    };
+    let device_service =
+        ServerDeviceGrantService::new(nazo_valkey::DeviceStore::new(&state.valkey_connection()));
+    let device_code = format!("device-code-{}", Uuid::now_v7());
+    let user_code = format!("DEVICE-{}", Uuid::now_v7().simple());
+    let (_, stored_user_code) = device_service
+        .create_unique(&payload, 600, || device_code.clone(), || user_code.clone())
+        .await
+        .expect("device request should be stored");
+
+    // Install the durable audit dependency before entering the required-intent
+    // boundary.  The decision must not mutate Valkey until this succeeds.
+    crate::test_support::token_issuance_repository(state.diesel_db.clone());
+    let state_data = Data::new(state.clone());
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        state.diesel_db.clone(),
+        state.settings.as_ref(),
+    )
+    .expect("device runtime registry should initialize");
+    let handles = Data::new(DeviceDecisionHandles::new(
+        device_authorization_service(&state_data),
+        Data::new(device_service),
+        Data::new(nazo_postgres::AuthorizationFlowRepository::new(
+            state.diesel_db.clone(),
+            DEFAULT_TENANT_ID,
+        )),
+        Data::new(crate::http::sessions::test_support::profile_session_handles(&state)),
+        Data::new(DeviceHttpConfig::from(state.settings.as_ref())),
+        Data::from(runtime),
+    ));
+    let request = TestRequest::post()
+        .uri("/device/decision")
+        .cookie(actix_web::cookie::Cookie::new(
+            state.settings.session.session_cookie_name.clone(),
+            session_id,
+        ))
+        .cookie(actix_web::cookie::Cookie::new(
+            state.settings.session.csrf_cookie_name.clone(),
+            "device-csrf",
+        ))
+        .to_http_request();
+
+    let response = device_decision(
+        handles,
+        request,
+        actix_web::web::Form(DeviceDecisionForm {
+            user_code: stored_user_code.clone(),
+            decision: "deny".to_owned(),
+            csrf_token: Some("device-csrf".to_owned()),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let state_after =
+        ServerDeviceGrantService::new(nazo_valkey::DeviceStore::new(&state.valkey_connection()));
+    assert!(
+        state_after
+            .pending_request_for_user_code(&stored_user_code, Utc::now)
+            .await
+            .expect("device decision state should be readable")
+            .is_none()
+    );
 }
 
 #[actix_web::test]

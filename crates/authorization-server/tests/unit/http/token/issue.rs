@@ -924,6 +924,45 @@ async fn client_credentials_issue_returns_minimal_bearer_token_response_without_
 }
 
 #[actix_web::test]
+async fn client_credentials_issue_returns_dpop_and_authorization_details_metadata() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let mut client = client_with_grants(&["client_credentials"]);
+    client.client_id = format!("issue-dpop-client-{}", Uuid::now_v7());
+    insert_issue_client(&state, &client).await;
+
+    let mut issue = token_issue_without_openid();
+    issue.user_id = None;
+    issue.subject = client.client_id.clone();
+    issue.scopes = vec!["accounts".to_owned()];
+    issue.include_refresh = false;
+    issue.auth_time = None;
+    issue.amr = Vec::new();
+    issue.dpop_jkt = Some("dpop-thumbprint".to_owned());
+    issue.authorization_details = json!([{"type": "account_information"}]);
+    issue.issued_token_type = Some("urn:example:access-token".to_owned());
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("dpop-nonce").is_some());
+    let body = response_body(response).await;
+    let value: Value = serde_json::from_slice(&body).expect("token response should be JSON");
+    assert_eq!(value["token_type"], "DPoP");
+    assert_eq!(
+        value["authorization_details"],
+        json!([{"type": "account_information"}])
+    );
+    assert_eq!(value["issued_token_type"], "urn:example:access-token");
+    assert!(
+        value["access_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+}
+
+#[actix_web::test]
 async fn openid_issue_with_active_user_emits_id_and_refresh_tokens() {
     let Some(state) = issue_state_with_live_database() else {
         return;
