@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "rfc9967_scim_set_e2e.py"
@@ -25,6 +28,17 @@ EXPECTED_CASES = {
     "long_poll_wakes_on_new_event",
     "invalid_poll_shapes_fail_closed",
 }
+
+
+def load_runner_module():
+    if str(RUNNER.parent) not in sys.path:
+        sys.path.insert(0, str(RUNNER.parent))
+    spec = importlib.util.spec_from_file_location("rfc9967_scim_set_e2e", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class Rfc9967BlackBoxPolicyTests(unittest.TestCase):
@@ -52,6 +66,30 @@ class Rfc9967BlackBoxPolicyTests(unittest.TestCase):
         self.assertIn("INSERT INTO scim_tokens", source)
         self.assertIn("DELETE FROM scim_audit_events", source)
         self.assertIn("DELETE FROM scim_tokens", source)
+
+    def test_destructive_target_guard_rejects_loopback_defaults(self) -> None:
+        module = load_runner_module()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(AssertionError):
+                module.assert_destructive_targets_are_e2e()
+
+    def test_destructive_target_guard_accepts_repository_e2e_target(self) -> None:
+        module = load_runner_module()
+        with (
+            mock.patch.object(module, "BASE_URL", "http://nazo-oauth-e2e-server:8000"),
+            mock.patch.object(
+                module,
+                "DATABASE_URL",
+                "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth",
+            ),
+        ):
+            module.assert_destructive_targets_are_e2e()
+
+    def test_cleanup_reports_http_or_database_failures(self) -> None:
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("RFC 9967 cleanup incomplete", source)
+        self.assertIn("RFC 9967 fixture cleanup complete", source)
+        self.assertIn("finally:", source)
 
     def test_scim_tests_are_outside_production_sources(self) -> None:
         sources = [

@@ -75,6 +75,7 @@ impl From<&Settings> for CibaHttpConfig {
 pub(crate) struct CibaTokenHandles {
     pub(crate) service: Data<ServerCibaService>,
     pub(crate) users: Data<nazo_postgres::UserRepository>,
+    pub(crate) conformance_leases: Data<nazo_postgres::ConformanceLeaseRepository>,
     pub(crate) config: Data<CibaHttpConfig>,
 }
 
@@ -82,11 +83,13 @@ impl CibaTokenHandles {
     pub(crate) fn new(
         service: Data<ServerCibaService>,
         users: Data<nazo_postgres::UserRepository>,
+        conformance_leases: Data<nazo_postgres::ConformanceLeaseRepository>,
         config: Data<CibaHttpConfig>,
     ) -> Self {
         Self {
             service,
             users,
+            conformance_leases,
             config,
         }
     }

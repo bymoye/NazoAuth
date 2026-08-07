@@ -16,6 +16,7 @@ import os
 import statistics
 import struct
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -30,10 +31,15 @@ DATABASE_URL = os.environ.get(
     "E2E_DATABASE_URL",
     "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth",
 )
-ADMIN_EMAIL = os.environ.get("LOAD_ADMIN_EMAIL", "admin-load-e2e@example.com")
+LOAD_RUN_ID = uuid.uuid4().hex
+ADMIN_EMAIL = os.environ.get(
+    "LOAD_ADMIN_EMAIL", f"admin-load-e2e-{LOAD_RUN_ID}@example.com"
+)
 ADMIN_PASSWORD = os.environ.get("LOAD_ADMIN_PASSWORD", "AdminLoadPassword-2026")
 LOAD_REQUESTS = int(os.environ.get("LOAD_REQUESTS", "300"))
 LOAD_CONCURRENCY = int(os.environ.get("LOAD_CONCURRENCY", "24"))
+LOAD_ADMIN_USERNAME = f"admin_load_e2e_{LOAD_RUN_ID}"
+LOAD_CLIENT_NAME = f"Load Test Client {LOAD_RUN_ID}"
 DEFAULT_AUDIENCE = "resource://default"
 DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 DEFAULT_REALM_ID = "00000000-0000-0000-0000-000000000002"
@@ -48,14 +54,22 @@ def assert_e2e_target() -> None:
     database = urlparse(DATABASE_URL)
     base = urlparse(BASE_URL)
     actual = {
+        "database_scheme": database.scheme,
         "database_host": database.hostname,
+        "database_port": database.port,
         "database_name": database.path.lstrip("/"),
+        "base_scheme": base.scheme,
         "base_host": base.hostname,
+        "base_port": base.port,
     }
     expected = {
+        "database_scheme": "postgresql",
         "database_host": "nazo-oauth-e2e-postgres",
+        "database_port": 5432,
         "database_name": "oauth",
+        "base_scheme": "http",
         "base_host": "nazo-oauth-e2e-server",
+        "base_port": 8000,
     }
     if actual != expected:
         fail(f"refusing load seed outside Docker E2E targets: {actual}")
@@ -96,7 +110,7 @@ def seed_admin() -> None:
                     DEFAULT_TENANT_ID,
                     DEFAULT_REALM_ID,
                     DEFAULT_ORGANIZATION_ID,
-                    "admin_load_e2e",
+                    LOAD_ADMIN_USERNAME,
                     ADMIN_EMAIL,
                     password_hash,
                     "Admin Load E2E",
@@ -150,7 +164,7 @@ def create_load_client() -> tuple[str, str]:
     response = admin.post(
         f"{BASE_URL}/admin/clients",
         json={
-            "client_name": "Load Test Client",
+            "client_name": LOAD_CLIENT_NAME,
             "client_type": "confidential",
             "redirect_uris": [],
             "scopes": ["profile"],
@@ -166,6 +180,139 @@ def create_load_client() -> tuple[str, str]:
         fail(f"load client creation failed: {response.status_code} {response.text}")
     body = response.json()
     return body["client_id"], body["client_secret"]
+
+
+def cleanup_load_fixture() -> None:
+    """Delete only this run's client/admin rows from the disposable E2E DB."""
+
+    assert_e2e_target()
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM oauth_clients WHERE client_name = %s",
+                (LOAD_CLIENT_NAME,),
+            )
+            client_ids = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT id FROM users WHERE email = %s", (ADMIN_EMAIL,))
+            user_ids = [row[0] for row in cur.fetchall()]
+
+            if client_ids:
+                # Break self-referential refresh-token links before deleting the
+                # fixture's token rows in one statement.
+                cur.execute(
+                    """
+                    UPDATE oauth_tokens
+                    SET rotated_from_id = NULL
+                    WHERE rotated_from_id IN (
+                        SELECT id FROM oauth_tokens WHERE client_id = ANY(%s)
+                    )
+                    """,
+                    (client_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM access_token_revocations WHERE client_id = ANY(%s)",
+                    (client_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM oauth_token_issuances WHERE client_id = ANY(%s)",
+                    (client_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM oauth_tokens WHERE client_id = ANY(%s)",
+                    (client_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM user_client_grants WHERE client_id = ANY(%s)",
+                    (client_ids,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM client_access_requests
+                    WHERE approved_client_id = ANY(%s)
+                    """,
+                    (client_ids,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM oauth_client_mtls_trust_anchor_events
+                    WHERE request_id IN (
+                        SELECT id FROM oauth_client_mtls_trust_anchor_requests
+                        WHERE client_id = ANY(%s)
+                    )
+                    """,
+                    (client_ids,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM oauth_client_mtls_trust_anchor_requests
+                    WHERE client_id = ANY(%s)
+                    """,
+                    (client_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM oauth_clients WHERE id = ANY(%s)",
+                    (client_ids,),
+                )
+
+            if user_ids:
+                cur.execute(
+                    """
+                    UPDATE oauth_tokens
+                    SET rotated_from_id = NULL
+                    WHERE rotated_from_id IN (
+                        SELECT id FROM oauth_tokens WHERE user_id = ANY(%s)
+                    )
+                    """,
+                    (user_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM oauth_tokens WHERE user_id = ANY(%s)",
+                    (user_ids,),
+                )
+                cur.execute(
+                    "DELETE FROM user_client_grants WHERE user_id = ANY(%s)",
+                    (user_ids,),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM client_access_requests
+                    WHERE user_id = ANY(%s) OR resolved_by_user_id = ANY(%s)
+                    """,
+                    (user_ids, user_ids),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM oauth_client_mtls_trust_anchor_events
+                    WHERE actor_user_id = ANY(%s)
+                       OR request_id IN (
+                            SELECT id FROM oauth_client_mtls_trust_anchor_requests
+                            WHERE user_id = ANY(%s)
+                               OR resolved_by_user_id = ANY(%s)
+                               OR revoked_by_user_id = ANY(%s)
+                       )
+                    """,
+                    (user_ids, user_ids, user_ids, user_ids),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM oauth_client_mtls_trust_anchor_requests
+                    WHERE user_id = ANY(%s)
+                       OR resolved_by_user_id = ANY(%s)
+                       OR revoked_by_user_id = ANY(%s)
+                    """,
+                    (user_ids, user_ids, user_ids),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM openid4vci_credential_dataset_events
+                    WHERE actor_user_id = ANY(%s)
+                    """,
+                    (user_ids,),
+                )
+                cur.execute("DELETE FROM users WHERE id = ANY(%s)", (user_ids,))
+
+        conn.commit()
+    print("Load-gate fixture cleanup complete", flush=True)
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -214,7 +361,7 @@ def run_phase(name: str, requests_count: int, concurrency: int, call: Callable[[
     }
 
 
-def main() -> None:
+def run_load_gate() -> None:
     seed_admin()
     wait_for_service()
     client_id, client_secret = create_load_client()
@@ -286,6 +433,24 @@ def main() -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["ok"]:
         raise SystemExit(1)
+
+
+def main() -> None:
+    try:
+        run_load_gate()
+    except BaseException:
+        active_error = True
+        raise
+    else:
+        active_error = False
+    finally:
+        try:
+            cleanup_load_fixture()
+        except BaseException as error:  # noqa: BLE001
+            if active_error:
+                print(f"Load-gate fixture cleanup incomplete: {error}", flush=True)
+            else:
+                raise
 
 
 if __name__ == "__main__":

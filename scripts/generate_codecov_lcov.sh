@@ -5,7 +5,22 @@ IGNORE_REGEX='(^|/)(tests?|benches|examples|migrations)(/|\.rs$)|(^|/)cargo/regi
 
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/codecov-coverage}"
+SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+DEFAULT_CARGO_TARGET_DIR="$SCRIPT_ROOT/target/codecov-coverage"
+REQUESTED_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$DEFAULT_CARGO_TARGET_DIR}"
+if ! command -v realpath >/dev/null 2>&1; then
+  echo "realpath is required to validate CARGO_TARGET_DIR" >&2
+  exit 2
+fi
+if ! CARGO_TARGET_DIR="$(realpath -m -- "$REQUESTED_CARGO_TARGET_DIR")"; then
+  echo "unable to resolve CARGO_TARGET_DIR" >&2
+  exit 2
+fi
+if [[ "$CARGO_TARGET_DIR" != "$DEFAULT_CARGO_TARGET_DIR" ]]; then
+  echo "refusing CARGO_TARGET_DIR outside the repository-owned codecov target: $CARGO_TARGET_DIR" >&2
+  exit 2
+fi
+export CARGO_TARGET_DIR
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 
 COVERAGE_DIR="${CARGO_TARGET_DIR%/}/llvm-cov-target"
@@ -20,19 +35,58 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 SERVER_PID=""
 SIGNED_SERVER_PID=""
-POSTGRES_CONTAINER="${CODECOV_POSTGRES_CONTAINER:-nazo-oauth-codecov-postgres}"
-VALKEY_CONTAINER="${CODECOV_VALKEY_CONTAINER:-nazo-oauth-codecov-valkey}"
+CODECOV_OWNER_LABEL="nazoauth-codecov-lcov"
+DEFAULT_POSTGRES_CONTAINER="nazo-oauth-codecov-postgres"
+DEFAULT_VALKEY_CONTAINER="nazo-oauth-codecov-valkey"
+POSTGRES_CONTAINER="${CODECOV_POSTGRES_CONTAINER:-$DEFAULT_POSTGRES_CONTAINER}"
+VALKEY_CONTAINER="${CODECOV_VALKEY_CONTAINER:-$DEFAULT_VALKEY_CONTAINER}"
+if [[ "$POSTGRES_CONTAINER" != "$DEFAULT_POSTGRES_CONTAINER" ]]; then
+  echo "refusing CODECOV_POSTGRES_CONTAINER override; only $DEFAULT_POSTGRES_CONTAINER is script-owned" >&2
+  exit 2
+fi
+if [[ "$VALKEY_CONTAINER" != "$DEFAULT_VALKEY_CONTAINER" ]]; then
+  echo "refusing CODECOV_VALKEY_CONTAINER override; only $DEFAULT_VALKEY_CONTAINER is script-owned" >&2
+  exit 2
+fi
+
+remove_owned_container() {
+  local container_name="$1"
+  if ! docker inspect "$container_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  local owner
+  owner="$(docker inspect --format '{{ index .Config.Labels "io.nazoauth.owner" }}' "$container_name" 2>/dev/null || true)"
+  if [[ "$owner" != "$CODECOV_OWNER_LABEL" ]]; then
+    echo "refusing to remove unowned Docker container $container_name" >&2
+    return 1
+  fi
+  docker rm -f "$container_name"
+}
+
 POSTGRES_HOST="${CODECOV_POSTGRES_HOST:-127.0.0.1}"
 POSTGRES_PORT="${CODECOV_POSTGRES_PORT:-15432}"
 VALKEY_HOST="${CODECOV_VALKEY_HOST:-127.0.0.1}"
 VALKEY_PORT="${CODECOV_VALKEY_PORT:-16383}"
-DOCKER_NETWORK="${CODECOV_DOCKER_NETWORK:-}"
-if [[ -n "$DOCKER_NETWORK" ]]; then
-  POSTGRES_HOST="${CODECOV_POSTGRES_HOST:-$POSTGRES_CONTAINER}"
-  POSTGRES_PORT="${CODECOV_POSTGRES_PORT:-5432}"
-  VALKEY_HOST="${CODECOV_VALKEY_HOST:-$VALKEY_CONTAINER}"
-  VALKEY_PORT="${CODECOV_VALKEY_PORT:-6379}"
+if [[ -n "${CODECOV_DOCKER_NETWORK:-}" ]]; then
+  echo "refusing CODECOV_DOCKER_NETWORK override; coverage owns its loopback ports" >&2
+  exit 2
 fi
+case "$POSTGRES_HOST" in
+  127.0.0.1) ;;
+  *) echo "refusing CODECOV_POSTGRES_HOST outside the script-owned fixture" >&2; exit 2 ;;
+esac
+case "$POSTGRES_PORT" in
+  15432) ;;
+  *) echo "refusing CODECOV_POSTGRES_PORT outside the script-owned fixture" >&2; exit 2 ;;
+esac
+case "$VALKEY_HOST" in
+  127.0.0.1) ;;
+  *) echo "refusing CODECOV_VALKEY_HOST outside the script-owned fixture" >&2; exit 2 ;;
+esac
+case "$VALKEY_PORT" in
+  16383) ;;
+  *) echo "refusing CODECOV_VALKEY_PORT outside the script-owned fixture" >&2; exit 2 ;;
+esac
 
 cleanup() {
   if [[ -n "$SIGNED_SERVER_PID" ]]; then
@@ -43,7 +97,8 @@ cleanup() {
     kill -INT "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  docker rm -f "$POSTGRES_CONTAINER" "$VALKEY_CONTAINER" 2>/dev/null || true
+  remove_owned_container "$POSTGRES_CONTAINER" || true
+  remove_owned_container "$VALKEY_CONTAINER" || true
 }
 trap cleanup EXIT
 
@@ -56,29 +111,26 @@ profile_path() {
 
 cargo llvm-cov clean --workspace
 eval "$(cargo llvm-cov show-env --sh)"
+if [[ "${CARGO_TARGET_DIR:-}" != "$DEFAULT_CARGO_TARGET_DIR" ]]; then
+  echo "cargo llvm-cov changed CARGO_TARGET_DIR outside the repository-owned codecov target" >&2
+  exit 2
+fi
 if [[ "${CODECOV_FORCE_CARGO_CLEAN:-0}" == "1" ]]; then
   cargo clean
 fi
 
-docker rm -f "$POSTGRES_CONTAINER" "$VALKEY_CONTAINER" 2>/dev/null || true
-docker_args=()
-if [[ -n "$DOCKER_NETWORK" ]]; then
-  docker_args+=(--network "$DOCKER_NETWORK")
-fi
+remove_owned_container "$POSTGRES_CONTAINER"
+remove_owned_container "$VALKEY_CONTAINER"
 postgres_port_args=(-p "${POSTGRES_PORT}:5432")
 valkey_port_args=(-p "${VALKEY_PORT}:6379")
-if [[ -n "$DOCKER_NETWORK" ]]; then
-  postgres_port_args=()
-  valkey_port_args=()
-fi
 docker run -d --name "$POSTGRES_CONTAINER" \
-  "${docker_args[@]}" \
+  --label "io.nazoauth.owner=$CODECOV_OWNER_LABEL" \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=oauth \
   "${postgres_port_args[@]}" \
   postgres:18-alpine
 docker run -d --name "$VALKEY_CONTAINER" \
-  "${docker_args[@]}" \
+  --label "io.nazoauth.owner=$CODECOV_OWNER_LABEL" \
   "${valkey_port_args[@]}" \
   valkey/valkey:8-alpine
 

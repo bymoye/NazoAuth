@@ -14,6 +14,7 @@ import re
 import shlex
 import signal
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -269,6 +270,78 @@ def atomic_write_json_file(path: Path, value: object) -> None:
             os.close(descriptor)
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+PlanConfigBackup = tuple[bytes | None, int | None]
+
+
+def remember_plan_config(
+    path: Path,
+    backups: dict[Path, PlanConfigBackup],
+) -> None:
+    if path in backups:
+        return
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        backups[path] = (None, None)
+        return
+    except OSError as error:
+        fail(f"unable to inspect private OIDF config target {path}: {error}")
+    if stat.S_ISLNK(metadata.st_mode):
+        fail(f"refusing to overwrite symlinked private OIDF config target {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        fail(f"private OIDF config target is not a regular file: {path}")
+    try:
+        original_bytes = path.read_bytes()
+    except OSError as error:
+        fail(f"unable to back up private OIDF config target {path}: {error}")
+    backups[path] = (original_bytes, stat.S_IMODE(metadata.st_mode))
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def restore_plan_configs(backups: dict[Path, PlanConfigBackup]) -> None:
+    errors: list[str] = []
+    for path, backup in reversed(tuple(backups.items())):
+        try:
+            original_bytes, original_mode = backup
+            if original_bytes is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write_bytes(path, original_bytes)
+                assert original_mode is not None
+                path.chmod(original_mode)
+        except OSError as error:
+            errors.append(f"{path}: {error}")
+    if errors:
+        raise RuntimeError(
+            "OIDF private plan config cleanup incomplete: " + "; ".join(errors)
+        )
+    if backups:
+        print("OIDF private plan config cleanup complete", flush=True)
 
 
 def issuer_from_discovery_url(discovery_url: str) -> str | None:
@@ -1082,7 +1155,16 @@ def write_plan_configs(
     file_name: str,
     config_json_file: str,
     target_issuer: str,
+    *,
+    backups: dict[Path, PlanConfigBackup] | None = None,
 ) -> tuple[set[str], dict[str, str]]:
+    config_backups = backups if backups is not None else {}
+
+    def write_config(config_name: str, config_value: dict[str, object]) -> None:
+        target = suite_scripts / config_name
+        remember_plan_config(target, config_backups)
+        atomic_write_json_file(target, config_value)
+
     validate_config_file_name(file_name)
     try:
         raw_config = read_private_text(Path(config_json_file))
@@ -1104,8 +1186,7 @@ def write_plan_configs(
         if target_issuer:
             assert_config_target_boundaries(parsed, file_name, target_issuer)
         validate_browser_automation(file_name, parsed)
-        target = suite_scripts / file_name
-        atomic_write_json_file(target, parsed)
+        write_config(file_name, parsed)
         aliases_by_config = {file_name: alias} if (alias := config_alias(parsed)) else {}
         return {file_name}, aliases_by_config
 
@@ -1130,8 +1211,7 @@ def write_plan_configs(
         alias = config_alias(config_value)
         if alias:
             aliases_by_config[config_name] = alias
-        target = suite_scripts / config_name
-        atomic_write_json_file(target, config_value)
+        write_config(config_name, config_value)
         written.add(config_name)
     return written, aliases_by_config
 
@@ -2550,69 +2630,76 @@ def main() -> int:
     if not runner.is_file():
         fail(f"official runner not found: {runner}")
 
-    config_names, aliases_by_config = write_plan_configs(
-        suite_scripts,
-        args.config_file_name,
-        args.config_json_file,
-        target_issuer,
-    )
-    expressions = plan_expressions(
-        args.plan_expression,
-        args.plan_set_env,
-        args.plan_set_json_file,
-        config_names,
-        args.config_file_name,
-    )
-    selected_config_names = config_names_from_plan_expressions(expressions, config_names)
-    aliases = {
-        alias
-        for config_name, alias in aliases_by_config.items()
-        if config_name in selected_config_names
-    }
+    plan_config_backups: dict[Path, PlanConfigBackup] = {}
+    config_names: set[str] = set()
+    aliases_by_config: dict[str, str] = {}
+    aliases: set[str] = set()
 
     env = sanitized_runner_environment()
-    env["CONFORMANCE_SERVER"] = args.conformance_server
     token = suite_token(args)
-    env.pop("CONFORMANCE_TOKEN", None)
-    if token is None:
-        env["CONFORMANCE_DEV_MODE"] = "1"
-    if args.disable_ssl_verify:
-        env["DISABLE_SSL_VERIFY"] = "1"
-
-    if not args.list and not args.rerun:
-        cleanup_existing_alias_plans(args.conformance_server, token, aliases)
-
-    expected_failures_file = (
-        Path(args.expected_failures_file).resolve() if args.expected_failures_file else None
-    )
-    expected_skips_file = None
-    if args.expected_skips_file:
-        expected_skips_file = Path(args.expected_skips_file).resolve()
-    export_dir = None
-    if args.export_dir:
-        export_dir = Path(args.export_dir).resolve()
-        export_dir.mkdir(parents=True, exist_ok=True)
-
-    monitor_aliases = set() if args.list else aliases
-    if monitor_aliases and any("ciba" in alias for alias in monitor_aliases):
-        if not ciba_config_has_automated_approval_url(args.config_json_file):
-            fail(
-                "FAPI-CIBA conformance automation requires automated_ciba_approval_url "
-                "so the official suite controls approve/deny timing"
-            )
-
-    monitor_interval_seconds = effective_monitor_interval_seconds(
-        monitor_aliases,
-        args.monitor_interval_seconds,
-    )
-    if monitor_interval_seconds != args.monitor_interval_seconds:
-        print(
-            "OIDF early-stop monitor interval raised to "
-            f"{monitor_interval_seconds} seconds because runnable aliases are present",
-            flush=True,
-        )
 
     try:
+        config_names, aliases_by_config = write_plan_configs(
+            suite_scripts,
+            args.config_file_name,
+            args.config_json_file,
+            target_issuer,
+            backups=plan_config_backups,
+        )
+        expressions = plan_expressions(
+            args.plan_expression,
+            args.plan_set_env,
+            args.plan_set_json_file,
+            config_names,
+            args.config_file_name,
+        )
+        selected_config_names = config_names_from_plan_expressions(expressions, config_names)
+        aliases = {
+            alias
+            for config_name, alias in aliases_by_config.items()
+            if config_name in selected_config_names
+        }
+
+        env["CONFORMANCE_SERVER"] = args.conformance_server
+        env.pop("CONFORMANCE_TOKEN", None)
+        if token is None:
+            env["CONFORMANCE_DEV_MODE"] = "1"
+        if args.disable_ssl_verify:
+            env["DISABLE_SSL_VERIFY"] = "1"
+
+        if not args.list and not args.rerun:
+            cleanup_existing_alias_plans(args.conformance_server, token, aliases)
+
+        expected_failures_file = (
+            Path(args.expected_failures_file).resolve() if args.expected_failures_file else None
+        )
+        expected_skips_file = None
+        if args.expected_skips_file:
+            expected_skips_file = Path(args.expected_skips_file).resolve()
+        export_dir = None
+        if args.export_dir:
+            export_dir = Path(args.export_dir).resolve()
+            export_dir.mkdir(parents=True, exist_ok=True)
+
+        monitor_aliases = set() if args.list else aliases
+        if monitor_aliases and any("ciba" in alias for alias in monitor_aliases):
+            if not ciba_config_has_automated_approval_url(args.config_json_file):
+                fail(
+                    "FAPI-CIBA conformance automation requires automated_ciba_approval_url "
+                    "so the official suite controls approve/deny timing"
+                )
+
+        monitor_interval_seconds = effective_monitor_interval_seconds(
+            monitor_aliases,
+            args.monitor_interval_seconds,
+        )
+        if monitor_interval_seconds != args.monitor_interval_seconds:
+            print(
+                "OIDF early-stop monitor interval raised to "
+                f"{monitor_interval_seconds} seconds because runnable aliases are present",
+                flush=True,
+            )
+
         with inherited_token_descriptor(token) as token_fd:
             command = official_runner_command(suite_scripts, runner, token_fd)
             if args.list:
@@ -2651,8 +2738,23 @@ def main() -> int:
                 token_fd,
             )
     finally:
+        active_error = sys.exc_info()[1]
+        cleanup_errors: list[str] = []
+        try:
+            restore_plan_configs(plan_config_backups)
+        except BaseException as error:  # noqa: BLE001
+            cleanup_errors.append(str(error))
+        export_dir = locals().get("export_dir")
         if export_dir is not None:
-            sanitize_evidence_tree(export_dir)
+            try:
+                sanitize_evidence_tree(export_dir)
+            except BaseException as error:  # noqa: BLE001
+                cleanup_errors.append(f"evidence sanitization failed: {error}")
+        if cleanup_errors:
+            message = "OIDF conformance cleanup incomplete: " + "; ".join(cleanup_errors)
+            if active_error is None:
+                raise RuntimeError(message)
+            print(message, file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

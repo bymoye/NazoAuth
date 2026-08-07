@@ -28,7 +28,7 @@ use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 use crate::settings::{AuthorizationServerProfile, CibaAutomatedDecisionMode, Settings};
 use actix_web::http::StatusCode;
 use actix_web::http::header;
-use actix_web::http::header::HeaderValue;
+use actix_web::http::header::{HeaderMap, HeaderValue};
 use actix_web::web::{Bytes, Data, Json, Query};
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::{DateTime, Utc};

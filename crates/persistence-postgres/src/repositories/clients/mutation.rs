@@ -1,4 +1,4 @@
-use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, QueryDsl, QueryableByName, SelectableHelper, sql_query};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_auth::OAuthClient;
 use nazo_identity::ports::RepositoryError;
@@ -20,6 +20,26 @@ impl OAuthClientRepository {
         let mut connection = self.connection().await?;
         let record = connection
             .transaction::<OAuthClientRecord, diesel::result::Error, _>(async move |connection| {
+                if let Some(conformance_lease_id) = conformance_lease_id {
+                    // DCR is a lease-owned mutation.  Lock the lease row for
+                    // the entire insert transaction so revocation and
+                    // registration have one database linearization point:
+                    // whichever operation acquires this row lock first wins.
+                    // A pre-check followed by INSERT would allow a revoked
+                    // lease to create a client in the interleaving window.
+                    let locked = sql_query(
+                        "SELECT id FROM conformance_leases \
+                         WHERE tenant_id = $1 AND id = $2 \
+                           AND expires_at > CURRENT_TIMESTAMP \
+                           AND revoked_at IS NULL AND cleaned_at IS NULL \
+                         FOR UPDATE",
+                    )
+                    .bind::<diesel::sql_types::Uuid, _>(client.tenant_id)
+                    .bind::<diesel::sql_types::Uuid, _>(conformance_lease_id)
+                    .get_result::<ActiveConformanceLease>(connection)
+                    .await?;
+                    debug_assert_eq!(locked.id, conformance_lease_id);
+                }
                 let record = diesel::insert_into(oauth_clients::table)
                     .values((
                         oauth_clients::id.eq(client.id),
@@ -560,6 +580,12 @@ impl OAuthClientRepository {
             .await
             .map_err(map_error)
     }
+}
+
+#[derive(QueryableByName)]
+struct ActiveConformanceLease {
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    id: Uuid,
 }
 
 pub(crate) async fn upsert_client_on_connection(

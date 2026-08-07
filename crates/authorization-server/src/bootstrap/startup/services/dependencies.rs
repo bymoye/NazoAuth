@@ -230,6 +230,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         CibaTokenHandles::new(
             ciba_service.clone(),
             ciba_users.clone(),
+            conformance_leases.clone(),
             ciba_config.clone(),
         ),
         token_issuance_config.clone(),

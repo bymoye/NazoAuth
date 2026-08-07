@@ -306,6 +306,9 @@ async fn call_ciba_token_with_request_for_test(
     let handles = CibaTokenHandles::new(
         Data::new(ciba_service),
         Data::new(users),
+        Data::new(nazo_postgres::ConformanceLeaseRepository::new(
+            state.diesel_db.clone(),
+        )),
         Data::new(ciba_config),
     );
     token_ciba(

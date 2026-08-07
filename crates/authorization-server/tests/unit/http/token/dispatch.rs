@@ -69,7 +69,14 @@ pub(crate) async fn token(
                 authorization_service,
                 device_service,
             },
-            CibaTokenHandles::new(ciba_service, ciba_users, ciba_config),
+            CibaTokenHandles::new(
+                ciba_service,
+                ciba_users,
+                Data::new(nazo_postgres::ConformanceLeaseRepository::new(
+                    state.diesel_db.clone(),
+                )),
+                ciba_config,
+            ),
             issuance_config,
             runtime_modules,
             Arc::new(

@@ -92,6 +92,49 @@ class RunOidfConformanceTests(unittest.TestCase):
 
         self.assertEqual(credentials, ("local@example.test", "local-password"))
 
+    def test_private_plan_configs_are_restored_or_removed_after_materialization(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite_scripts = root / "suite" / "scripts"
+            suite_scripts.mkdir(parents=True)
+            private_input = root / "private.json"
+            private_input.write_text(
+                json.dumps({"configs": {"existing.json": {"alias": "private-alias"}}}),
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                private_input.chmod(0o600)
+            existing = suite_scripts / "existing.json"
+            existing.write_bytes(b"suite-owned-before-run\n")
+            original_mode = existing.stat().st_mode & 0o777
+            backups = {}
+
+            with mock.patch.object(
+                module,
+                "read_private_text",
+                return_value=private_input.read_text(encoding="utf-8"),
+            ):
+                module.write_plan_configs(
+                    suite_scripts,
+                    "ignored.json",
+                    str(private_input),
+                    "",
+                    backups=backups,
+                )
+            module.restore_plan_configs(backups)
+
+            self.assertEqual(existing.read_bytes(), b"suite-owned-before-run\n")
+            self.assertEqual(existing.stat().st_mode & 0o777, original_mode)
+            self.assertFalse((suite_scripts / "ignored.json").exists())
+
+    def test_main_source_has_finally_cleanup_for_injected_configs(self):
+        module = load_runner_module()
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertIn("plan_config_backups", source)
+        self.assertIn("restore_plan_configs(plan_config_backups)", source)
+        self.assertIn("OIDF conformance cleanup incomplete", source)
+
     def test_main_accepts_omitted_expected_skips_file(self):
         module = load_runner_module()
         with tempfile.TemporaryDirectory() as temporary:

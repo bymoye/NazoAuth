@@ -1,8 +1,19 @@
 use super::*;
+use crate::adapters::audit::{audit_event_required, ensure_audit_storage};
+
+enum GuardedCibaCreation {
+    Created(String),
+    ClientAuthentication(TokenManagementClientAuthError),
+    RequestObjectReplay,
+    RequestObjectStore,
+    State(CibaCreateFailure),
+    LeaseExpired,
+}
 
 pub(crate) async fn backchannel_authentication(
     authorization_service: Data<ServerAuthorizationService>,
     ciba_service: Data<ServerCibaService>,
+    conformance_leases: Data<nazo_postgres::ConformanceLeaseRepository>,
     users: Data<nazo_postgres::UserRepository>,
     config: Data<CibaHttpConfig>,
     runtime: Data<ServerRuntimeModuleRegistry>,
@@ -81,15 +92,6 @@ pub(crate) async fn backchannel_authentication(
     };
     if !ciba_client_assertion_algorithm_supported(assertion.as_ref()) {
         return token_management_auth_error(TokenManagementClientAuthError::InvalidClient);
-    }
-    if let Err(error) = consume_token_management_client_assertion_with_authorization_service(
-        &authorization_service,
-        &client,
-        assertion.as_ref(),
-    )
-    .await
-    {
-        return token_management_auth_error(error);
     }
     if !client_supports_grant(&client, CIBA_GRANT_TYPE) {
         return oauth_error(
@@ -203,25 +205,6 @@ pub(crate) async fn backchannel_authentication(
         }
         None => None,
     };
-    if let Some(replay) = request_object_replay {
-        match authorization_service
-            .consume_ciba_request_object(&client.client_id, &replay.jti, replay.ttl_seconds)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return ciba_invalid_request("CIBA request object has already been used.");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to persist CIBA request object replay state");
-                return oauth_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "server_error",
-                    "CIBA failed.",
-                );
-            }
-        }
-    }
     let now = Utc::now().timestamp();
     let expires_at = now.saturating_add(expires_in.min(i64::MAX as u64) as i64);
     let state_payload = CibaRequestState {
@@ -254,12 +237,127 @@ pub(crate) async fn backchannel_authentication(
             None
         },
     };
-    let auth_req_id = match ciba_service
-        .create_unique(&state_payload, random_urlsafe_token)
+    if let Err(error) = ensure_audit_storage().await {
+        tracing::error!(%error, "CIBA authorization-start audit preflight failed");
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "CIBA audit storage unavailable.",
+        );
+    }
+    if let Err(error) = audit_event_required(
+        "ciba_authorization_intent",
+        audit_fields(&[
+            ("client_id", json!(state_payload.client_id)),
+            ("user_id", json!(state_payload.user_id)),
+            ("scope", json!(state_payload.scopes.join(" "))),
+            ("audience", json!(state_payload.audiences)),
+            (
+                "source_ip_hash",
+                json!(blake3_hex(&client_ip_with_context(
+                    &req,
+                    config.client_ip_header_mode,
+                    &config.trusted_proxy_cidrs,
+                ))),
+            ),
+        ]),
+    )
+    .await
+    {
+        tracing::error!(%error, "CIBA authorization-start audit intent failed");
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "CIBA authorization audit unavailable.",
+        );
+    }
+    let audit_state = state_payload.clone();
+    let client_id = client.client_id.clone();
+    let lease_client_id = client_id.clone();
+    let client_for_creation = client.clone();
+    let authorization_service_for_creation = authorization_service.clone();
+    let ciba_service_for_creation = ciba_service.clone();
+    let auth_req_id = match conformance_leases
+        .with_active_ciba_decision(
+            config.tenant_id,
+            &lease_client_id,
+            None,
+            |lease_expires_at| async move {
+                if lease_expires_at.is_some_and(|deadline| Utc::now().timestamp() >= deadline) {
+                    return GuardedCibaCreation::LeaseExpired;
+                }
+                if let Err(error) =
+                    consume_token_management_client_assertion_with_authorization_service(
+                        &authorization_service_for_creation,
+                        &client_for_creation,
+                        assertion.as_ref(),
+                    )
+                    .await
+                {
+                    return GuardedCibaCreation::ClientAuthentication(error);
+                }
+                if let Some(replay) = request_object_replay {
+                    if lease_expires_at
+                        .is_some_and(|deadline| Utc::now().timestamp() >= deadline)
+                    {
+                        return GuardedCibaCreation::LeaseExpired;
+                    }
+                    match authorization_service_for_creation
+                        .consume_ciba_request_object(
+                            &client_id,
+                            &replay.jti,
+                            replay.ttl_seconds,
+                        )
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => return GuardedCibaCreation::RequestObjectReplay,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to persist CIBA request object replay state");
+                            return GuardedCibaCreation::RequestObjectStore;
+                        }
+                    }
+                }
+                if lease_expires_at.is_some_and(|deadline| Utc::now().timestamp() >= deadline) {
+                    return GuardedCibaCreation::LeaseExpired;
+                }
+                match ciba_service_for_creation
+                    .create_unique_with_lease_deadline(
+                        &state_payload,
+                        lease_expires_at,
+                        random_urlsafe_token,
+                    )
+                    .await
+                {
+                    Ok(auth_req_id) => GuardedCibaCreation::Created(auth_req_id),
+                    Err(error) => GuardedCibaCreation::State(error),
+                }
+            },
+        )
         .await
     {
-        Ok(auth_req_id) => auth_req_id,
-        Err(CibaCreateFailure::Storage(error)) => {
+        Ok(Some(GuardedCibaCreation::Created(auth_req_id))) => auth_req_id,
+        Ok(Some(GuardedCibaCreation::ClientAuthentication(error))) => {
+            return token_management_auth_error(error);
+        }
+        Ok(Some(GuardedCibaCreation::RequestObjectReplay)) => {
+            return ciba_invalid_request("CIBA request object has already been used.");
+        }
+        Ok(Some(GuardedCibaCreation::RequestObjectStore)) => {
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "CIBA failed.",
+            );
+        }
+        Ok(Some(GuardedCibaCreation::LeaseExpired)) | Ok(None) => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "客户端认证失败.",
+            );
+        }
+        Ok(Some(GuardedCibaCreation::State(error))) => {
             tracing::warn!(%error, "failed to create CIBA auth_req_id");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -267,8 +365,8 @@ pub(crate) async fn backchannel_authentication(
                 "CIBA failed.",
             );
         }
-        Err(CibaCreateFailure::DeadlineElapsed | CibaCreateFailure::CollisionLimit) => {
-            tracing::warn!("failed to allocate a unique CIBA auth_req_id");
+        Err(error) => {
+            tracing::warn!(%error, "failed to acquire CIBA creation lease guard");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
@@ -279,7 +377,7 @@ pub(crate) async fn backchannel_authentication(
     audit_event(
         "ciba_authorization_started",
         ciba_start_audit_fields(
-            &state_payload,
+            &audit_state,
             &auth_req_id,
             Some(blake3_hex(&client_ip_with_context(
                 &req,

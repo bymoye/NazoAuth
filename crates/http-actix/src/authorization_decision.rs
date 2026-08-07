@@ -50,6 +50,7 @@ pub enum AuthorizationDecisionError {
     ConsentInvalid,
     ConsentReadUnavailable,
     UserMismatch,
+    AuditUnavailable,
     ApprovalUnavailable,
     UnsupportedResponseMode,
     ResponseProtectionUnavailable,
@@ -154,6 +155,11 @@ fn authorization_decision_error_response(
             StatusCode::FORBIDDEN,
             "access_denied",
             "当前会话与授权请求不匹配.",
+        ),
+        AuthorizationDecisionError::AuditUnavailable => oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "授权审计存储不可用.",
         ),
         AuthorizationDecisionError::ApprovalUnavailable => oauth_error(
             StatusCode::SERVICE_UNAVAILABLE,

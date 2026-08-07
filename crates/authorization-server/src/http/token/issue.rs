@@ -1,7 +1,7 @@
 //! 令牌签发响应构造。
 use std::collections::BTreeSet;
 
-use crate::adapters::audit::{audit_event_required, audit_fields};
+use crate::adapters::audit::{audit_event_required, audit_fields, ensure_audit_storage};
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::random_urlsafe_token;
 use crate::domain::client_jwe::{JwePayloadKind, client_jwe_key, encrypt_compact_jwe};

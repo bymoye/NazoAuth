@@ -48,6 +48,26 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
         self.assertLess(switch_database, migrate_workspace)
         self.assertLess(migrate_workspace, run_workspace)
 
+    def test_destructive_container_names_are_not_environment_selectable(self) -> None:
+        self.assertIn("DEFAULT_POSTGRES_CONTAINER=\"nazo-oauth-codecov-postgres\"", self.source)
+        self.assertIn("DEFAULT_VALKEY_CONTAINER=\"nazo-oauth-codecov-valkey\"", self.source)
+        self.assertIn("refusing CODECOV_POSTGRES_CONTAINER override", self.source)
+        self.assertIn("refusing CODECOV_VALKEY_CONTAINER override", self.source)
+
+    def test_cargo_target_dir_is_pinned_to_repository_owned_coverage_root(self) -> None:
+        self.assertIn("realpath -m", self.source)
+        self.assertIn("DEFAULT_CARGO_TARGET_DIR=\"$SCRIPT_ROOT/target/codecov-coverage\"", self.source)
+        self.assertIn("refusing CARGO_TARGET_DIR outside the repository-owned codecov target", self.source)
+
+    def test_docker_network_override_is_rejected(self) -> None:
+        self.assertIn("refusing CODECOV_DOCKER_NETWORK override", self.source)
+        self.assertNotIn('DOCKER_NETWORK="${CODECOV_DOCKER_NETWORK:-}"', self.source)
+
+    def test_cleanup_removes_only_labelled_script_owned_containers(self) -> None:
+        self.assertIn("remove_owned_container", self.source)
+        self.assertIn("refusing to remove unowned Docker container", self.source)
+        self.assertIn("io.nazoauth.owner=$CODECOV_OWNER_LABEL", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

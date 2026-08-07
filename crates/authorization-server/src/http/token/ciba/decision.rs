@@ -1,3 +1,5 @@
+use crate::adapters::audit::{audit_event_required, audit_fields, ensure_audit_storage};
+
 use super::poll::{ciba_error_no_store, ciba_state_error_response, load_ciba_request_payload};
 use super::*;
 
@@ -93,7 +95,7 @@ pub(crate) async fn ciba_automated_decision(
     ) {
         return empty_response(StatusCode::NOT_FOUND);
     }
-    let auth_req_id = match config.automated_decision_mode {
+    let (auth_req_id, lease_binding) = match config.automated_decision_mode {
         CibaAutomatedDecisionMode::Disabled => {
             let Some(actual_token) = ciba_automated_decision_request_token(&config, &req, &query)
             else {
@@ -136,27 +138,14 @@ pub(crate) async fn ciba_automated_decision(
                 Ok(None) => return empty_response(StatusCode::NOT_FOUND),
                 Err(response) => return response,
             };
-            match conformance_leases
-                .active_for_client_lease_profile(
-                    config.tenant_id,
-                    &state_payload.client_id,
+            (
+                auth_req_id,
+                Some((
                     lease_id,
-                    CIBA_AUTOMATED_DECISION_PROFILE,
-                )
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => return empty_response(StatusCode::NOT_FOUND),
-                Err(_error) => {
-                    tracing::warn!("failed to verify CIBA automated-decision client lease binding");
-                    return ciba_error_no_store(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "server_error",
-                        "CIBA automated decision unavailable.",
-                    );
-                }
-            }
-            auth_req_id
+                    state_payload.client_id.clone(),
+                    conformance_leases,
+                )),
+            )
         }
         CibaAutomatedDecisionMode::Header | CibaAutomatedDecisionMode::QueryParameter => {
             let Some(expected_token) = config.automated_decision_token.as_deref() else {
@@ -169,10 +158,41 @@ pub(crate) async fn ciba_automated_decision(
             if !constant_time_eq(expected_token.as_bytes(), actual_token.as_bytes()) {
                 return empty_response(StatusCode::NOT_FOUND);
             }
-            match ciba_automated_decision_auth_req_id(&query) {
+            let auth_req_id = match ciba_automated_decision_auth_req_id(&query) {
                 Ok(auth_req_id) => auth_req_id,
                 Err(response) => return response,
-            }
+            };
+            let Some(conformance_leases) = conformance_leases else {
+                return empty_response(StatusCode::NOT_FOUND);
+            };
+            let state_payload = match load_ciba_request_payload(&ciba_service, auth_req_id).await {
+                Ok(Some(value)) => value,
+                Ok(None) => return empty_response(StatusCode::NOT_FOUND),
+                Err(response) => return response,
+            };
+            let lease_id = match conformance_leases
+                .active_lease_id_for_client(
+                    config.tenant_id,
+                    &state_payload.client_id,
+                    CIBA_AUTOMATED_DECISION_PROFILE,
+                )
+                .await
+            {
+                Ok(Some(lease_id)) => lease_id,
+                Ok(None) => return empty_response(StatusCode::NOT_FOUND),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to query CIBA automated-decision client lease");
+                    return ciba_error_no_store(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "CIBA automated decision unavailable.",
+                    );
+                }
+            };
+            (
+                auth_req_id,
+                Some((lease_id, state_payload.client_id, conformance_leases)),
+            )
         }
     };
     let decision = match query
@@ -191,20 +211,38 @@ pub(crate) async fn ciba_automated_decision(
             );
         }
     };
-    set_ciba_request_decision(
-        &ciba_service,
-        auth_req_id,
-        decision,
-        None,
-        CibaDecisionSource::Automation,
-        None,
-        Some(blake3_hex(&client_ip_with_context(
-            &req,
-            config.client_ip_header_mode,
-            &config.trusted_proxy_cidrs,
-        ))),
-    )
-    .await
+    let source_ip_hash = Some(blake3_hex(&client_ip_with_context(
+        &req,
+        config.client_ip_header_mode,
+        &config.trusted_proxy_cidrs,
+    )));
+    if let Some((lease_id, client_id, conformance_leases)) = lease_binding {
+        set_ciba_request_decision_with_lease(
+            &ciba_service,
+            &conformance_leases,
+            config.tenant_id,
+            &client_id,
+            Some(lease_id),
+            auth_req_id,
+            decision,
+            None,
+            CibaDecisionSource::Automation,
+            None,
+            source_ip_hash,
+        )
+        .await
+    } else {
+        set_ciba_request_decision(
+            &ciba_service,
+            auth_req_id,
+            decision,
+            None,
+            CibaDecisionSource::Automation,
+            None,
+            source_ip_hash,
+        )
+        .await
+    }
 }
 
 pub(super) fn ciba_automated_decision_auth_req_id(
@@ -266,6 +304,7 @@ pub(super) fn ciba_automated_decision_request_token(
 
 pub(crate) async fn ciba_decision(
     ciba_service: Data<ServerCibaService>,
+    conformance_leases: Option<Data<nazo_postgres::ConformanceLeaseRepository>>,
     sessions: Data<AdminSessionHandles>,
     config: Data<CibaHttpConfig>,
     runtime: Data<ServerRuntimeModuleRegistry>,
@@ -305,8 +344,27 @@ pub(crate) async fn ciba_decision(
     } else {
         CibaDecision::Deny
     };
-    set_ciba_request_decision(
+    let state_payload = match load_ciba_request_payload(&ciba_service, &auth_req_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return empty_response(StatusCode::NOT_FOUND),
+        Err(response) => return response,
+    };
+    let Some(conformance_leases) = conformance_leases else {
+        // The composition root always installs the repository. A missing
+        // guard must fail closed instead of allowing a browser decision to
+        // race a conformance-lease revocation.
+        return ciba_error_no_store(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "CIBA decision unavailable.",
+        );
+    };
+    set_ciba_request_decision_with_lease(
         &ciba_service,
+        &conformance_leases,
+        config.tenant_id,
+        &state_payload.client_id,
+        None,
         &auth_req_id,
         decision,
         Some(session.user.id()),
@@ -334,6 +392,21 @@ async fn set_ciba_request_decision(
     authentication_context: Option<CibaAuthenticationContext>,
     source_ip_hash: Option<String>,
 ) -> HttpResponse {
+    if let Err(response) = prepare_ciba_decision_intent(
+        ciba_service,
+        auth_req_id,
+        decision,
+        expected_user_id,
+        source,
+        source_ip_hash.as_deref(),
+    )
+    .await
+    {
+        return response;
+    }
+    // The required intent is persisted before the Valkey CAS. The committed
+    // outcome remains best-effort because the state store and audit ledger do
+    // not share a transaction boundary.
     complete_ciba_decision(
         ciba_service
             .decide_with_authentication_context(
@@ -350,6 +423,130 @@ async fn set_ciba_request_decision(
     )
 }
 
+async fn prepare_ciba_decision_intent(
+    ciba_service: &ServerCibaService,
+    auth_req_id: &str,
+    decision: CibaDecision,
+    expected_user_id: Option<Uuid>,
+    source: CibaDecisionSource,
+    source_ip_hash: Option<&str>,
+) -> Result<(), HttpResponse> {
+    let state = match load_ciba_request_payload(ciba_service, auth_req_id).await {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            return Err(ciba_error_no_store(
+                StatusCode::NOT_FOUND,
+                "invalid_request",
+                "CIBA request expired.",
+            ));
+        }
+        Err(response) => return Err(response),
+    };
+    if let Err(error) = ensure_audit_storage().await {
+        tracing::error!(%error, "CIBA decision audit preflight failed");
+        return Err(ciba_error_no_store(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "CIBA decision audit storage unavailable.",
+        ));
+    }
+    let decision_name = match decision {
+        CibaDecision::Approve => "approve",
+        CibaDecision::Deny => "deny",
+    };
+    let mut fields = audit_fields(&[
+        ("client_id", json!(state.client_id)),
+        ("user_id", json!(state.user_id)),
+        ("auth_req_id_hash", json!(blake3_hex(auth_req_id))),
+        ("decision", json!(decision_name)),
+        ("decision_source", json!(source.as_str())),
+        ("scope", json!(state.scopes.join(" "))),
+        ("audience", json!(state.audiences)),
+    ]);
+    if let Some(source_ip_hash) = source_ip_hash {
+        fields.insert("source_ip_hash".to_owned(), json!(source_ip_hash));
+    }
+    if let Some(expected_user_id) = expected_user_id {
+        fields.insert("expected_user_id".to_owned(), json!(expected_user_id));
+    }
+    audit_event_required("ciba_decision_intent", fields)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "CIBA decision audit intent failed");
+            ciba_error_no_store(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "CIBA decision audit could not be persisted.",
+            )
+        })
+}
+
+async fn set_ciba_request_decision_with_lease(
+    ciba_service: &ServerCibaService,
+    conformance_leases: &nazo_postgres::ConformanceLeaseRepository,
+    tenant_id: Uuid,
+    client_id: &str,
+    expected_lease_id: Option<Uuid>,
+    auth_req_id: &str,
+    decision: CibaDecision,
+    expected_user_id: Option<Uuid>,
+    source: CibaDecisionSource,
+    authentication_context: Option<CibaAuthenticationContext>,
+    source_ip_hash: Option<String>,
+) -> HttpResponse {
+    if let Err(response) = prepare_ciba_decision_intent(
+        ciba_service,
+        auth_req_id,
+        decision,
+        expected_user_id,
+        source,
+        source_ip_hash.as_deref(),
+    )
+    .await
+    {
+        return response;
+    }
+    let result = match conformance_leases
+        .with_active_ciba_decision(
+            tenant_id,
+            client_id,
+            expected_lease_id,
+            |lease_expires_at| async move {
+                ciba_service
+                    .decide_with_authentication_context_and_lease_deadline(
+                        auth_req_id,
+                        decision,
+                        expected_user_id,
+                        authentication_context,
+                        lease_expires_at,
+                        || Utc::now().timestamp(),
+                    )
+                    .await
+            },
+        )
+        .await
+    {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            return complete_ciba_decision(
+                Err(CibaDecisionFailure::Missing),
+                auth_req_id,
+                source,
+                source_ip_hash,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to acquire CIBA conformance lease decision guard");
+            return ciba_error_no_store(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "CIBA decision unavailable.",
+            );
+        }
+    };
+    complete_ciba_decision(result, auth_req_id, source, source_ip_hash)
+}
+
 pub(super) fn complete_ciba_decision(
     result: Result<CibaCommittedDecision, CibaDecisionFailure>,
     auth_req_id: &str,
@@ -362,10 +559,15 @@ pub(super) fn complete_ciba_decision(
                 CibaDecision::Approve => "ciba_authorization_approved",
                 CibaDecision::Deny => "ciba_authorization_denied",
             };
+            let decision_name = match committed.decision {
+                CibaDecision::Approve => "approve",
+                CibaDecision::Deny => "deny",
+            };
             let mut fields = audit_fields(&[
                 ("client_id", json!(committed.state.client_id)),
                 ("user_id", json!(committed.state.user_id)),
                 ("auth_req_id_hash", json!(blake3_hex(auth_req_id))),
+                ("decision", json!(decision_name)),
                 ("decision_source", json!(source.as_str())),
             ]);
             if let Some(source_ip_hash) = source_ip_hash {

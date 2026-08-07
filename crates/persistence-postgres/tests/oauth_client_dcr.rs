@@ -1,4 +1,7 @@
-use diesel::{sql_query, sql_types::Uuid as SqlUuid};
+use diesel::{
+    sql_query,
+    sql_types::{Bool, Uuid as SqlUuid},
+};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use nazo_auth::{
     DynamicRegistrationClientStore, DynamicRegistrationDependencyError, OAuthClient,
@@ -745,6 +748,101 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
     let mut connection = get_conn(&pool).await.unwrap();
     sql_query("DELETE FROM oauth_clients WHERE id = $1")
         .bind::<SqlUuid, _>(client.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[derive(diesel::QueryableByName)]
+struct LeaseStillActive {
+    #[diesel(sql_type = Bool)]
+    active: bool,
+}
+
+#[tokio::test]
+async fn ciba_decision_guard_holds_lease_lock_until_state_cas_finishes() {
+    let Ok(database_url) =
+        std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
+    else {
+        return;
+    };
+    let pool = create_pool(database_url, 4).unwrap();
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let clients = OAuthClientRepository::new(pool.clone());
+    let tenant = TenantContext::default_system();
+    let lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidc-fapi-ciba",
+            &"b".repeat(64),
+            ConformanceLeaseTokenDigests::default(),
+            None,
+            60,
+        )
+        .await
+        .unwrap();
+    let client = client(tenant);
+    clients
+        .insert(&client, None, None, Some(lease.id))
+        .await
+        .unwrap();
+
+    let (decision_started_tx, decision_started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let decision_leases = leases.clone();
+    let decision_client_id = client.client_id.clone();
+    let decision = tokio::spawn(async move {
+        decision_leases
+            .with_active_ciba_decision(
+                tenant.tenant_id.into(),
+                &decision_client_id,
+                Some(lease.id),
+                |lease_expires_at| async move {
+                    decision_started_tx.send(lease_expires_at).unwrap();
+                    release_rx.await.unwrap();
+                    lease_expires_at
+                },
+            )
+            .await
+    });
+    let lease_expires_at = decision_started_rx.await.unwrap();
+    assert!(lease_expires_at.is_some());
+
+    let (revoke_started_tx, revoke_started_rx) = tokio::sync::oneshot::channel();
+    let revoke_leases = leases.clone();
+    let revoke = tokio::spawn(async move {
+        revoke_started_tx.send(()).unwrap();
+        revoke_leases
+            .revoke(tenant.tenant_id.as_uuid().to_owned(), lease.id)
+            .await
+    });
+    revoke_started_rx.await.unwrap();
+    tokio::task::yield_now().await;
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    let active = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM conformance_leases WHERE id = $1 AND revoked_at IS NULL) AS active",
+    )
+    .bind::<SqlUuid, _>(lease.id)
+    .get_result::<LeaseStillActive>(&mut connection)
+    .await
+    .unwrap();
+    assert!(
+        active.active,
+        "revoke must wait for the decision CAS callback"
+    );
+
+    release_tx.send(()).unwrap();
+    assert!(decision.await.unwrap().unwrap().unwrap().is_some());
+    assert_eq!(revoke.await.unwrap().unwrap(), 1);
+
+    sql_query("DELETE FROM oauth_clients WHERE id = $1")
+        .bind::<SqlUuid, _>(client.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM conformance_leases WHERE id = $1")
+        .bind::<SqlUuid, _>(lease.id)
         .execute(&mut connection)
         .await
         .unwrap();

@@ -67,11 +67,44 @@ fn audit_event_definitions_include_external_identity_lifecycle() {
 fn audit_event_definitions_include_ciba_authorization_lifecycle() {
     for name in [
         "ciba_authorization_started",
+        "ciba_authorization_intent",
         "ciba_authorization_approved",
         "ciba_authorization_denied",
+        "ciba_decision_intent",
     ] {
         assert_eq!(audit_event_category(name), Some("authorization"));
     }
+}
+
+#[test]
+fn audit_event_definitions_include_device_authorization_lifecycle() {
+    for name in [
+        "device_authorization_started",
+        "device_authorization_approved",
+        "device_authorization_denied",
+        "device_decision_intent",
+    ] {
+        assert_eq!(audit_event_category(name), Some("authorization"));
+        assert!(prepare_event(name, serde_json::Map::new()).is_ok());
+    }
+}
+
+#[test]
+fn audit_event_definitions_include_authorization_decision_intent() {
+    assert_eq!(
+        audit_event_category("authorization_decision_intent"),
+        Some("authorization")
+    );
+    assert!(prepare_event("authorization_decision_intent", serde_json::Map::new()).is_ok());
+}
+
+#[test]
+fn audit_event_definitions_include_token_issuance_intent() {
+    assert_eq!(
+        audit_event_category("token_issuance_intent"),
+        Some("token_lifecycle")
+    );
+    assert!(prepare_event("token_issuance_intent", serde_json::Map::new()).is_ok());
 }
 
 #[test]

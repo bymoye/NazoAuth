@@ -29,10 +29,17 @@ const AUDIT_EVENT_DEFINITIONS: &[(&str, &str)] = &[
     ("admin_access_request_rejected", "administration"),
     ("authorization_approved", "authorization"),
     ("authorization_denied", "authorization"),
+    ("authorization_decision_intent", "authorization"),
     ("authorization_prompt_none_approved", "authorization"),
     ("ciba_authorization_approved", "authorization"),
     ("ciba_authorization_denied", "authorization"),
     ("ciba_authorization_started", "authorization"),
+    ("ciba_authorization_intent", "authorization"),
+    ("ciba_decision_intent", "authorization"),
+    ("device_authorization_approved", "authorization"),
+    ("device_authorization_denied", "authorization"),
+    ("device_authorization_started", "authorization"),
+    ("device_decision_intent", "authorization"),
     ("client_assertion_replay_detected", "credential_replay"),
     ("client_created", "client_lifecycle"),
     ("client_updated", "client_lifecycle"),
@@ -78,6 +85,7 @@ const AUDIT_EVENT_DEFINITIONS: &[(&str, &str)] = &[
     ("scim_token_denied", "provisioning"),
     ("scim_token_used", "provisioning"),
     ("token_issued", "token_lifecycle"),
+    ("token_issuance_intent", "token_lifecycle"),
     ("token_revoked", "token_lifecycle"),
 ];
 
@@ -196,9 +204,13 @@ pub(crate) fn install_persistent_audit_sink(
     Ok(())
 }
 
-/// Preflight the durable ledger before a high-impact management mutation.
-/// Callers should invoke this before changing state, then use
-/// [`audit_event_required`] for the committed outcome.
+/// Preflight the durable ledger before a high-impact mutation.
+///
+/// When the mutation and this ledger do not share a transaction boundary,
+/// callers should append a required `*_intent` event after this check and
+/// before changing state. The committed outcome can then be emitted through
+/// [`audit_event`] (or, where the stores are atomic, through
+/// [`audit_event_required`]).
 pub(crate) async fn ensure_audit_storage() -> anyhow::Result<()> {
     let Some(required) = REQUIRED_AUDIT_REPOSITORY.get() else {
         anyhow::bail!("durable security audit repository is not configured");

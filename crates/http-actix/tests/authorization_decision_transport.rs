@@ -214,6 +214,12 @@ async fn domain_failures_keep_existing_status_and_oauth_error_contracts() {
             "Request failed.",
         ),
         (
+            AuthorizationDecisionError::AuditUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "Request failed.",
+        ),
+        (
             AuthorizationDecisionError::ApprovalUnavailable,
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",

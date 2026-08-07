@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{
-        audit::{audit_event, audit_fields},
+        audit::{audit_event, audit_event_required, audit_fields, ensure_audit_storage},
         security::{blake3_hex, random_urlsafe_token},
     },
     domain::{
@@ -71,6 +71,29 @@ impl ServerAuthorizationDecisionOperations {
             }
         };
 
+        ensure_audit_storage().await.map_err(|error| {
+            tracing::error!(%error, "authorization decision audit preflight failed");
+            AuthorizationDecisionError::AuditUnavailable
+        })?;
+        let decision = match command.decision {
+            UserAuthorizationDecision::Approve => "approve",
+            UserAuthorizationDecision::Deny => "deny",
+        };
+        audit_event_required(
+            "authorization_decision_intent",
+            audit_fields(&[
+                ("request_id_hash", json!(blake3_hex(&command.request_id))),
+                ("user_id", json!(session.user().id())),
+                ("decision", json!(decision)),
+                ("source_ip_hash", json!(blake3_hex(&command.source_ip))),
+            ]),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "authorization decision audit intent failed");
+            AuthorizationDecisionError::AuditUnavailable
+        })?;
+
         let payload = match self
             .service
             .admit_user_decision(&command.request_id, session.user().id())
@@ -110,6 +133,9 @@ impl ServerAuthorizationDecisionOperations {
             }
         };
 
+        // The intent above is the fail-closed evidence boundary. The outcome
+        // remains best-effort because consent/PAR state and the audit ledger
+        // are separate stores and cannot commit atomically here.
         if command.decision == UserAuthorizationDecision::Deny {
             record_decision_audit("authorization_denied", &payload, &command.source_ip);
             return self
@@ -324,6 +350,7 @@ fn record_decision_audit(event: &str, payload: &nazo_auth::ConsentPayload, sourc
         audit_fields(&[
             ("user_id", json!(payload.user_id)),
             ("client_id", json!(payload.client_id)),
+            ("request_id_hash", json!(blake3_hex(&payload.request_id))),
             ("scope", json!(payload.scopes.join(" "))),
             ("source_ip_hash", json!(blake3_hex(source_ip))),
         ]),

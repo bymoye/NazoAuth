@@ -107,6 +107,36 @@ pub(super) async fn issue_token_response_with_service_and_grant(
     }
     let grant_key = stable_grant_key(grant_key);
     let request_digest = issuance_request_digest(client, &issue, &grant_key);
+    if let Err(error) = ensure_audit_storage().await {
+        tracing::error!(%error, "token issuance audit preflight failed");
+        return oauth_token_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "令牌签发审计存储不可用.",
+            false,
+        );
+    }
+    if let Err(error) = audit_event_required(
+        "token_issuance_intent",
+        audit_fields(&[
+            ("client_id", json!(client.client_id)),
+            ("user_id", json!(issue.user_id)),
+            ("scope", json!(issue.scopes.join(" "))),
+            ("audience", json!(issue.audiences)),
+            ("grant_key_hash", json!(blake3_hex(&grant_key))),
+            ("request_digest", json!(request_digest)),
+        ]),
+    )
+    .await
+    {
+        tracing::error!(%error, "token issuance audit intent failed");
+        return oauth_token_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "令牌签发审计无法持久化.",
+            false,
+        );
+    }
     let issuance_id = match token_service
         .prepare_token_issuance(PrepareTokenIssuance {
             issuance_id: Uuid::now_v7(),
