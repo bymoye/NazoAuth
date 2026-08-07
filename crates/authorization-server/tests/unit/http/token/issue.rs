@@ -1,4 +1,5 @@
 use crate::test_support::TestInfrastructure;
+use crate::test_support::valkey::valkey_set_ex;
 
 use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
 
@@ -928,6 +929,14 @@ async fn client_credentials_issue_returns_dpop_and_authorization_details_metadat
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
+    valkey_set_ex(
+        &state.valkey,
+        format!("test:dpop:fixture:{}", Uuid::now_v7()),
+        "1",
+        30,
+    )
+    .await
+    .expect("live token issuance fixture should establish its Valkey connection");
     let mut client = client_with_grants(&["client_credentials"]);
     client.client_id = format!("issue-dpop-client-{}", Uuid::now_v7());
     insert_issue_client(&state, &client).await;
