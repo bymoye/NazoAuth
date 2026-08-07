@@ -1,5 +1,4 @@
 use crate::test_support::TestInfrastructure;
-use crate::test_support::valkey::valkey_set_ex;
 
 use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
 
@@ -81,6 +80,7 @@ use crate::config::ConfigSource;
 use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Text, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
+use fred::interfaces::ClientLike;
 use nazo_postgres::{create_pool, get_conn};
 
 use crate::test_support::client_signing_fixture;
@@ -88,6 +88,8 @@ use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
 use nazo_auth::{PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuanceTransitionResult};
+
+const LIVE_VALKEY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
 /// Seed a durable response for endpoint replay tests.  The HTTP handlers under
 /// test must reject a consumed one-time grant even when an old issuance row is
@@ -175,11 +177,11 @@ fn live_valkey_client() -> Option<fred::prelude::Client> {
     let mut builder =
         ValkeyBuilder::from_config(ValkeyConfig::from_url(&valkey_url).expect("VALKEY_URL"));
     builder.with_performance_config(|performance: &mut PerformanceConfig| {
-        performance.default_command_timeout = StdDuration::from_secs(1);
+        performance.default_command_timeout = LIVE_VALKEY_TIMEOUT;
     });
     builder.with_connection_config(|connection: &mut ConnectionConfig| {
-        connection.connection_timeout = StdDuration::from_secs(1);
-        connection.internal_command_timeout = StdDuration::from_secs(1);
+        connection.connection_timeout = LIVE_VALKEY_TIMEOUT;
+        connection.internal_command_timeout = LIVE_VALKEY_TIMEOUT;
         connection.max_command_attempts = 1;
     });
     Some(builder.build().expect("Valkey client should build"))
@@ -929,14 +931,11 @@ async fn client_credentials_issue_returns_dpop_and_authorization_details_metadat
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
-    valkey_set_ex(
-        &state.valkey,
-        format!("test:dpop:fixture:{}", Uuid::now_v7()),
-        "1",
-        30,
-    )
-    .await
-    .expect("live token issuance fixture should establish its Valkey connection");
+    state
+        .valkey
+        .init()
+        .await
+        .expect("live token issuance fixture should connect to Valkey");
     let mut client = client_with_grants(&["client_credentials"]);
     client.client_id = format!("issue-dpop-client-{}", Uuid::now_v7());
     insert_issue_client(&state, &client).await;
