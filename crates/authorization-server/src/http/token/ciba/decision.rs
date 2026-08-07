@@ -216,39 +216,31 @@ pub(crate) async fn ciba_automated_decision(
         config.client_ip_header_mode,
         &config.trusted_proxy_cidrs,
     )));
-    if let Some((lease_id, client_id, conformance_leases)) = lease_binding {
-        set_ciba_request_decision_with_lease(
-            &ciba_service,
-            &conformance_leases,
-            CibaDecisionLease {
-                tenant_id: config.tenant_id,
-                client_id,
-                expected_lease_id: Some(lease_id),
-            },
-            CibaDecisionCommand {
-                auth_req_id: auth_req_id.to_owned(),
-                decision,
-                expected_user_id: None,
-                source: CibaDecisionSource::Automation,
-                authentication_context: None,
-                source_ip_hash,
-            },
-        )
-        .await
-    } else {
-        set_ciba_request_decision(
-            &ciba_service,
-            CibaDecisionCommand {
-                auth_req_id: auth_req_id.to_owned(),
-                decision,
-                expected_user_id: None,
-                source: CibaDecisionSource::Automation,
-                authentication_context: None,
-                source_ip_hash,
-            },
-        )
-        .await
-    }
+    let Some((lease_id, client_id, conformance_leases)) = lease_binding else {
+        // Every enabled automated-decision transport is lease-bound.  The
+        // branches above return an opaque response when the lease repository
+        // or active lease is unavailable, so an unguarded decision path must
+        // never be reachable here.
+        return empty_response(StatusCode::NOT_FOUND);
+    };
+    set_ciba_request_decision_with_lease(
+        &ciba_service,
+        &conformance_leases,
+        CibaDecisionLease {
+            tenant_id: config.tenant_id,
+            client_id,
+            expected_lease_id: Some(lease_id),
+        },
+        CibaDecisionCommand {
+            auth_req_id: auth_req_id.to_owned(),
+            decision,
+            expected_user_id: None,
+            source: CibaDecisionSource::Automation,
+            authentication_context: None,
+            source_ip_hash,
+        },
+    )
+    .await
 }
 
 pub(super) fn ciba_automated_decision_auth_req_id(
@@ -410,40 +402,6 @@ struct CibaDecisionLease {
     tenant_id: Uuid,
     client_id: String,
     expected_lease_id: Option<Uuid>,
-}
-
-async fn set_ciba_request_decision(
-    ciba_service: &ServerCibaService,
-    command: CibaDecisionCommand,
-) -> HttpResponse {
-    if let Err(response) = prepare_ciba_decision_intent(ciba_service, &command).await {
-        return response;
-    }
-    let CibaDecisionCommand {
-        auth_req_id,
-        decision,
-        expected_user_id,
-        source,
-        authentication_context,
-        source_ip_hash,
-    } = command;
-    // The required intent is persisted before the Valkey CAS. The committed
-    // outcome remains best-effort because the state store and audit ledger do
-    // not share a transaction boundary.
-    complete_ciba_decision(
-        ciba_service
-            .decide_with_authentication_context(
-                &auth_req_id,
-                decision,
-                expected_user_id,
-                authentication_context,
-                || Utc::now().timestamp(),
-            )
-            .await,
-        &auth_req_id,
-        source,
-        source_ip_hash,
-    )
 }
 
 async fn prepare_ciba_decision_intent(

@@ -51,6 +51,7 @@ pub(crate) async fn parse_backchannel_authentication_form(
             "id_token_hint" => form.id_token_hint = non_empty(value),
             "login_hint_token" => form.login_hint_token = non_empty(value),
             "binding_message" => form.binding_message = non_empty(value),
+            "client_notification_token" => form.client_notification_token = non_empty(value),
             "acr_values" => form.acr_values = non_empty(value),
             "requested_expiry" => {
                 form.requested_expiry_seconds = parse_requested_expiry_string(&value)

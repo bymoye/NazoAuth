@@ -77,7 +77,10 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use crate::config::ConfigSource;
-use nazo_postgres::create_pool;
+use diesel::sql_query;
+use diesel::sql_types::{Text, Uuid as SqlUuid};
+use diesel_async::RunQueryDsl;
+use nazo_postgres::{create_pool, get_conn};
 
 use crate::test_support::client_signing_fixture;
 use fred::prelude::{Builder as ValkeyBuilder, ConnectionConfig, PerformanceConfig};
@@ -279,6 +282,34 @@ fn issue_state_with_valid_signing_key() -> TestInfrastructure {
         ),
         keyset: crate::test_support::test_key_manager(),
     }
+}
+
+async fn insert_issue_user(state: &TestInfrastructure, user_id: Uuid) {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("issue test database connection should be available");
+    sql_query("DELETE FROM users WHERE tenant_id = $1 AND id = $2")
+        .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+        .bind::<SqlUuid, _>(user_id)
+        .execute(&mut connection)
+        .await
+        .expect("issue test user cleanup should succeed");
+    sql_query(
+        "INSERT INTO users (\
+            id, tenant_id, realm_id, organization_id, username, email, password_hash,\
+            is_active, mfa_enabled, email_verified, role, admin_level\
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE, TRUE, 'user', 0)",
+    )
+    .bind::<SqlUuid, _>(user_id)
+    .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+    .bind::<SqlUuid, _>(DEFAULT_REALM_ID)
+    .bind::<SqlUuid, _>(DEFAULT_ORGANIZATION_ID)
+    .bind::<Text, _>(format!("issue-user-{user_id}"))
+    .bind::<Text, _>(format!("issue-user-{user_id}@example.test"))
+    .bind::<Text, _>("issue-test-password-hash")
+    .execute(&mut connection)
+    .await
+    .expect("issue test user should insert");
 }
 
 fn issue_state_with_live_database() -> Option<TestInfrastructure> {
@@ -834,6 +865,44 @@ async fn client_credentials_issue_returns_minimal_bearer_token_response_without_
     );
     assert!(value.get("id_token").is_none());
     assert!(value.get("refresh_token").is_none());
+}
+
+#[actix_web::test]
+async fn openid_issue_with_active_user_emits_id_and_refresh_tokens() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let client = client_with_grants(&["authorization_code", "refresh_token"]);
+    let user_id = Uuid::now_v7();
+    insert_issue_user(&state, user_id).await;
+    let mut issue = token_issue_with_sid(vec!["sid".to_owned()]);
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+    issue.scopes = vec!["openid".to_owned(), "offline_access".to_owned()];
+    issue.include_refresh = true;
+    issue.oidc_sid = Some("issue-session-sid".to_owned());
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_body(response).await;
+    let value: Value = serde_json::from_slice(&body).expect("token response should be JSON");
+    assert!(
+        value["access_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        value["id_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        value["refresh_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert_eq!(value["token_type"], "Bearer");
 }
 
 #[actix_web::test]

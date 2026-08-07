@@ -86,6 +86,98 @@ fn client(tenant: TenantContext) -> OAuthClient {
 }
 
 #[tokio::test]
+async fn conformance_lease_rejects_invalid_capability_material_before_database_access() {
+    let repository = nazo_postgres::ConformanceLeaseRepository::new(
+        create_pool("postgres://invalid:invalid@127.0.0.1:1/never", 1)
+            .expect("invalid test pool should still be constructible"),
+    );
+    let tenant_id = Uuid::now_v7();
+    let valid_material = "a".repeat(64);
+    let valid_token = "b".repeat(64);
+
+    for ttl in [
+        nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS - 1,
+        nazo_postgres::MAX_CONFORMANCE_LEASE_SECONDS + 1,
+    ] {
+        assert!(matches!(
+            repository
+                .create(
+                    tenant_id,
+                    "oidf-test",
+                    &valid_material,
+                    ConformanceLeaseTokenDigests::default(),
+                    None,
+                    ttl,
+                )
+                .await,
+            Err(RepositoryError::Consistency(_))
+        ));
+    }
+    for profile in [String::new(), "x".repeat(65)] {
+        assert!(matches!(
+            repository
+                .create(
+                    tenant_id,
+                    &profile,
+                    &valid_material,
+                    ConformanceLeaseTokenDigests::default(),
+                    None,
+                    nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+                )
+                .await,
+            Err(RepositoryError::Consistency(_))
+        ));
+    }
+    for material in ["A".repeat(64), "z".repeat(64), "short".to_owned()] {
+        assert!(matches!(
+            repository
+                .create(
+                    tenant_id,
+                    "oidf-test",
+                    &material,
+                    ConformanceLeaseTokenDigests::default(),
+                    None,
+                    nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+                )
+                .await,
+            Err(RepositoryError::Consistency(_))
+        ));
+    }
+    assert!(matches!(
+        repository
+            .create(
+                tenant_id,
+                "oidf-test",
+                &valid_material,
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: Some("invalid"),
+                    ciba_automated_decision_token_sha256: None,
+                },
+                None,
+                nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+    assert!(matches!(
+        repository
+            .create(
+                tenant_id,
+                "oidf-test",
+                &valid_material,
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: None,
+                    ciba_automated_decision_token_sha256: Some(&valid_token),
+                },
+                None,
+                nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+}
+
+#[tokio::test]
 async fn expired_conformance_lease_fails_closed_before_idempotent_physical_cleanup() {
     let database_url =
         match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {

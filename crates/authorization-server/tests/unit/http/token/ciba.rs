@@ -5,6 +5,14 @@ use crate::test_support::TestInfrastructure;
 use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID};
 
 use super::super::dispatch::validate_token_request_profile_with_profile;
+use super::request::{
+    ciba_binding_message_is_supported, ciba_hint_count, ciba_request_object_audience_valid,
+    ciba_request_object_hint_count, ciba_request_object_jti_valid, ciba_request_object_times_valid,
+    ciba_requested_expiry_seconds, ciba_selected_acr, decode_jwt_header_value,
+    merge_request_object_string, parse_backchannel_authentication_form,
+    parse_requested_expiry_string, split_compact_jwt,
+    unverified_signed_ciba_request_object_client_id,
+};
 
 fn validate_and_apply_ciba_request_object_claims(
     state: &TestInfrastructure,
@@ -873,6 +881,242 @@ fn ciba_start_audit_fields_are_redacted() {
     assert!(!serialized.contains("client_assertion"));
     assert_eq!(fields.get("client_id"), Some(&json!("client-1")));
     assert_eq!(fields.get("source_ip_hash"), Some(&json!("source-ip-hash")));
+}
+
+#[actix_web::test]
+async fn ciba_request_parser_enforces_form_encoding_and_parameter_uniqueness() {
+    let body = concat!(
+        "request=jwt&scope=openid%20profile&login_hint=user%40example.test&",
+        "id_token_hint=id-token&login_hint_token=hint-token&binding_message=1234&",
+        "acr_values=1&requested_expiry=30&client_id=client-1&client_secret=secret&",
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer&",
+        "client_assertion=assertion&client_notification_token=notification"
+    );
+    let (request, mut payload) = actix_web::test::TestRequest::post()
+        .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+        .set_payload(body)
+        .to_http_parts();
+    let mut payload =
+        <actix_web::web::Payload as actix_web::FromRequest>::from_request(&request, &mut payload)
+            .await
+            .expect("CIBA payload extractor should succeed");
+    let form = parse_backchannel_authentication_form(&request, &mut payload)
+        .await
+        .expect("valid CIBA form should parse");
+    assert_eq!(form.request.as_deref(), Some("jwt"));
+    assert_eq!(form.scope.as_deref(), Some("openid profile"));
+    assert_eq!(form.login_hint.as_deref(), Some("user@example.test"));
+    assert_eq!(form.id_token_hint.as_deref(), Some("id-token"));
+    assert_eq!(form.login_hint_token.as_deref(), Some("hint-token"));
+    assert_eq!(form.binding_message.as_deref(), Some("1234"));
+    assert_eq!(form.acr_values.as_deref(), Some("1"));
+    assert_eq!(form.requested_expiry_seconds, Some(30));
+    assert_eq!(
+        form.client_notification_token.as_deref(),
+        Some("notification")
+    );
+
+    let (request, mut payload) = actix_web::test::TestRequest::post()
+        .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+        .set_payload("scope=openid&scope=profile")
+        .to_http_parts();
+    let mut payload =
+        <actix_web::web::Payload as actix_web::FromRequest>::from_request(&request, &mut payload)
+            .await
+            .expect("CIBA payload extractor should succeed");
+    let duplicate = match parse_backchannel_authentication_form(&request, &mut payload).await {
+        Ok(_) => panic!("duplicate CIBA parameters must fail"),
+        Err(response) => response,
+    };
+    assert_eq!(
+        service_response_oauth_error_code(&actix_web::dev::ServiceResponse::new(
+            request, duplicate
+        )),
+        "invalid_request"
+    );
+
+    let (request, mut payload) = actix_web::test::TestRequest::post()
+        .insert_header((header::CONTENT_TYPE, "application/json"))
+        .set_payload(body)
+        .to_http_parts();
+    let mut payload =
+        <actix_web::web::Payload as actix_web::FromRequest>::from_request(&request, &mut payload)
+            .await
+            .expect("CIBA payload extractor should succeed");
+    let wrong_content_type =
+        match parse_backchannel_authentication_form(&request, &mut payload).await {
+            Ok(_) => panic!("CIBA must reject non-form content types"),
+            Err(response) => response,
+        };
+    assert_eq!(wrong_content_type.status(), StatusCode::BAD_REQUEST);
+
+    let (request, mut payload) = actix_web::test::TestRequest::post()
+        .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+        .set_payload("x".repeat(16 * 1024 + 1))
+        .to_http_parts();
+    let mut payload =
+        <actix_web::web::Payload as actix_web::FromRequest>::from_request(&request, &mut payload)
+            .await
+            .expect("CIBA payload extractor should succeed");
+    let oversized = match parse_backchannel_authentication_form(&request, &mut payload).await {
+        Ok(_) => panic!("oversized CIBA forms must fail closed"),
+        Err(response) => response,
+    };
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[test]
+fn ciba_request_object_helpers_cover_protocol_boundaries() {
+    let now = Utc::now().timestamp();
+    let claims =
+        |aud: Option<Value>, exp: i64, nbf: i64, iat: i64| CibaAuthenticationRequestClaims {
+            iss: Some("client-1".to_owned()),
+            aud,
+            exp: Some(exp),
+            nbf: Some(nbf),
+            iat: Some(iat),
+            jti: Some("jti-1".to_owned()),
+            scope: None,
+            login_hint: None,
+            id_token_hint: None,
+            login_hint_token: None,
+            binding_message: None,
+            acr_values: None,
+            requested_expiry: None,
+            client_notification_token: None,
+        };
+    let valid = claims(Some(json!("https://issuer.example")), now + 120, now, now);
+    assert!(ciba_request_object_audience_valid(
+        &valid,
+        "https://issuer.example"
+    ));
+    assert!(ciba_request_object_audience_valid(
+        &claims(
+            Some(json!(["other", "https://issuer.example/bc-authorize"])),
+            now + 120,
+            now,
+            now,
+        ),
+        "https://issuer.example"
+    ));
+    assert!(!ciba_request_object_audience_valid(
+        &claims(Some(json!(42)), now + 120, now, now),
+        "https://issuer.example"
+    ));
+    assert!(!ciba_request_object_audience_valid(
+        &claims(None, now + 120, now, now),
+        "https://issuer.example"
+    ));
+
+    assert!(ciba_request_object_times_valid(&valid, now));
+    assert!(!ciba_request_object_times_valid(
+        &claims(Some(json!("https://issuer.example")), now, now, now),
+        now
+    ));
+    assert!(!ciba_request_object_times_valid(
+        &claims(
+            Some(json!("https://issuer.example")),
+            now + 120,
+            now + CIBA_REQUEST_OBJECT_CLOCK_SKEW_SECONDS + 1,
+            now,
+        ),
+        now
+    ));
+    assert!(!ciba_request_object_times_valid(
+        &claims(
+            Some(json!("https://issuer.example")),
+            now + 120,
+            now - CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS - 1,
+            now,
+        ),
+        now
+    ));
+    assert!(!ciba_request_object_times_valid(
+        &claims(
+            Some(json!("https://issuer.example")),
+            now + 120,
+            now,
+            now + CIBA_REQUEST_OBJECT_CLOCK_SKEW_SECONDS + 1,
+        ),
+        now
+    ));
+    assert!(!ciba_request_object_times_valid(
+        &claims(
+            Some(json!("https://issuer.example")),
+            now + 120,
+            now,
+            now - CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS - 1,
+        ),
+        now
+    ));
+    assert!(!ciba_request_object_times_valid(
+        &claims(
+            Some(json!("https://issuer.example")),
+            now + CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS + 120,
+            now,
+            now,
+        ),
+        now
+    ));
+    assert!(!ciba_request_object_jti_valid(None));
+    assert!(!ciba_request_object_jti_valid(Some("  ")));
+    assert!(ciba_request_object_jti_valid(Some("jti")));
+    assert!(!ciba_request_object_jti_valid(Some(&"x".repeat(129))));
+    assert_eq!(ciba_request_object_hint_count(&valid), 0);
+    let mut hinted = claims(Some(json!("https://issuer.example")), now + 120, now, now);
+    hinted.login_hint = Some("user".to_owned());
+    hinted.id_token_hint = Some("token".to_owned());
+    assert_eq!(ciba_request_object_hint_count(&hinted), 2);
+
+    let mut form = BackchannelAuthenticationForm {
+        login_hint: Some("user".to_owned()),
+        ..BackchannelAuthenticationForm::default()
+    };
+    form.id_token_hint = Some("token".to_owned());
+    assert_eq!(ciba_hint_count(&form), 2);
+    assert_eq!(ciba_selected_acr(Some("0 1 2")).as_deref(), Some("1"));
+    assert_eq!(ciba_selected_acr(Some("0 2")), None);
+    assert!(ciba_binding_message_is_supported("1234"));
+    assert!(!ciba_binding_message_is_supported("\n"));
+    assert!(!ciba_binding_message_is_supported(
+        &"x".repeat(CIBA_BINDING_MESSAGE_MAX_CHARS + 1)
+    ));
+
+    let mut target = None;
+    merge_request_object_string(&mut target, Some(" value ".to_owned()), "conflict")
+        .expect("first request object value should apply");
+    merge_request_object_string(&mut target, None, "conflict").expect("missing value is a no-op");
+    merge_request_object_string(&mut target, Some("value".to_owned()), "conflict")
+        .expect("equal request object value should be accepted");
+    assert!(
+        merge_request_object_string(&mut target, Some("other".to_owned()), "conflict").is_err()
+    );
+    assert!(merge_request_object_string(&mut target, Some("  ".to_owned()), "conflict").is_err());
+    assert_eq!(ciba_requested_expiry_seconds(&json!(30)), Some(30));
+    assert_eq!(ciba_requested_expiry_seconds(&json!("30")), Some(30));
+    assert_eq!(ciba_requested_expiry_seconds(&json!(0)), None);
+    assert_eq!(ciba_requested_expiry_seconds(&json!(true)), None);
+    assert_eq!(parse_requested_expiry_string(" 30 "), Some(30));
+    assert_eq!(parse_requested_expiry_string("0"), None);
+    assert_eq!(parse_requested_expiry_string("bad"), None);
+
+    assert_eq!(split_compact_jwt("a.b.c"), Some(("a", "b", "c")));
+    assert_eq!(split_compact_jwt("a.b.c.d"), None);
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"PS256"}"#);
+    assert_eq!(decode_jwt_header_value(&header).unwrap()["alg"], "PS256");
+    assert!(decode_jwt_header_value("*").is_err());
+
+    let fixture = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let signed = signed_ciba_request_object("ciba-kid", &fixture, json!({}));
+    assert_eq!(
+        unverified_signed_ciba_request_object_client_id(&signed).as_deref(),
+        Some("client-1")
+    );
+    assert_eq!(unverified_signed_ciba_request_object_client_id("bad"), None);
+    assert_eq!(
+        unverified_signed_ciba_request_object_client_id("a.b."),
+        None
+    );
 }
 
 fn committed_decision_fixture(decision: CibaDecision) -> CibaCommittedDecision {
