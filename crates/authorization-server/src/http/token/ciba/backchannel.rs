@@ -10,6 +10,10 @@ enum GuardedCibaCreation {
     LeaseExpired,
 }
 
+// Actix supplies each dependency as an independent extractor at this route
+// boundary. The handler keeps that explicit transport contract; its creation
+// logic is already isolated below the extraction/authentication phase.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn backchannel_authentication(
     authorization_service: Data<ServerAuthorizationService>,
     ciba_service: Data<ServerCibaService>,

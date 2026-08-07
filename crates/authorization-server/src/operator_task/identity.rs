@@ -1,8 +1,5 @@
 use super::*;
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
-
 pub(super) fn validate_embedded_identity(task: &TaskEnvelope) -> anyhow::Result<()> {
     let actual = embedded_identity();
     if actual != task.embedded {

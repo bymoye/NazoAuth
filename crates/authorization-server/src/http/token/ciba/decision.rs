@@ -220,26 +220,32 @@ pub(crate) async fn ciba_automated_decision(
         set_ciba_request_decision_with_lease(
             &ciba_service,
             &conformance_leases,
-            config.tenant_id,
-            &client_id,
-            Some(lease_id),
-            auth_req_id,
-            decision,
-            None,
-            CibaDecisionSource::Automation,
-            None,
-            source_ip_hash,
+            CibaDecisionLease {
+                tenant_id: config.tenant_id,
+                client_id,
+                expected_lease_id: Some(lease_id),
+            },
+            CibaDecisionCommand {
+                auth_req_id: auth_req_id.to_owned(),
+                decision,
+                expected_user_id: None,
+                source: CibaDecisionSource::Automation,
+                authentication_context: None,
+                source_ip_hash,
+            },
         )
         .await
     } else {
         set_ciba_request_decision(
             &ciba_service,
-            auth_req_id,
-            decision,
-            None,
-            CibaDecisionSource::Automation,
-            None,
-            source_ip_hash,
+            CibaDecisionCommand {
+                auth_req_id: auth_req_id.to_owned(),
+                decision,
+                expected_user_id: None,
+                source: CibaDecisionSource::Automation,
+                authentication_context: None,
+                source_ip_hash,
+            },
         )
         .await
     }
@@ -302,6 +308,10 @@ pub(super) fn ciba_automated_decision_request_token(
     }
 }
 
+/// The Actix route boundary intentionally receives independent extractors and
+/// shared application handles. Keep that transport signature explicit; the
+/// business helpers below use focused command values instead.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn ciba_decision(
     ciba_service: Data<ServerCibaService>,
     conformance_leases: Option<Data<nazo_postgres::ConformanceLeaseRepository>>,
@@ -362,62 +372,75 @@ pub(crate) async fn ciba_decision(
     set_ciba_request_decision_with_lease(
         &ciba_service,
         &conformance_leases,
-        config.tenant_id,
-        &state_payload.client_id,
-        None,
-        &auth_req_id,
-        decision,
-        Some(session.user.id()),
-        CibaDecisionSource::User,
-        Some(CibaAuthenticationContext {
-            auth_time: session.auth_time,
-            amr: session.amr.clone(),
-            oidc_sid: Some(session.oidc_sid.clone()),
-        }),
-        Some(blake3_hex(&client_ip_with_context(
-            &req,
-            config.client_ip_header_mode,
-            &config.trusted_proxy_cidrs,
-        ))),
+        CibaDecisionLease {
+            tenant_id: config.tenant_id,
+            client_id: state_payload.client_id,
+            expected_lease_id: None,
+        },
+        CibaDecisionCommand {
+            auth_req_id,
+            decision,
+            expected_user_id: Some(session.user.id()),
+            source: CibaDecisionSource::User,
+            authentication_context: Some(CibaAuthenticationContext {
+                auth_time: session.auth_time,
+                amr: session.amr.clone(),
+                oidc_sid: Some(session.oidc_sid.clone()),
+            }),
+            source_ip_hash: Some(blake3_hex(&client_ip_with_context(
+                &req,
+                config.client_ip_header_mode,
+                &config.trusted_proxy_cidrs,
+            ))),
+        },
     )
     .await
 }
 
-async fn set_ciba_request_decision(
-    ciba_service: &ServerCibaService,
-    auth_req_id: &str,
+struct CibaDecisionCommand {
+    auth_req_id: String,
     decision: CibaDecision,
     expected_user_id: Option<Uuid>,
     source: CibaDecisionSource,
     authentication_context: Option<CibaAuthenticationContext>,
     source_ip_hash: Option<String>,
+}
+
+struct CibaDecisionLease {
+    tenant_id: Uuid,
+    client_id: String,
+    expected_lease_id: Option<Uuid>,
+}
+
+async fn set_ciba_request_decision(
+    ciba_service: &ServerCibaService,
+    command: CibaDecisionCommand,
 ) -> HttpResponse {
-    if let Err(response) = prepare_ciba_decision_intent(
-        ciba_service,
+    if let Err(response) = prepare_ciba_decision_intent(ciba_service, &command).await {
+        return response;
+    }
+    let CibaDecisionCommand {
         auth_req_id,
         decision,
         expected_user_id,
         source,
-        source_ip_hash.as_deref(),
-    )
-    .await
-    {
-        return response;
-    }
+        authentication_context,
+        source_ip_hash,
+    } = command;
     // The required intent is persisted before the Valkey CAS. The committed
     // outcome remains best-effort because the state store and audit ledger do
     // not share a transaction boundary.
     complete_ciba_decision(
         ciba_service
             .decide_with_authentication_context(
-                auth_req_id,
+                &auth_req_id,
                 decision,
                 expected_user_id,
                 authentication_context,
                 || Utc::now().timestamp(),
             )
             .await,
-        auth_req_id,
+        &auth_req_id,
         source,
         source_ip_hash,
     )
@@ -425,13 +448,9 @@ async fn set_ciba_request_decision(
 
 async fn prepare_ciba_decision_intent(
     ciba_service: &ServerCibaService,
-    auth_req_id: &str,
-    decision: CibaDecision,
-    expected_user_id: Option<Uuid>,
-    source: CibaDecisionSource,
-    source_ip_hash: Option<&str>,
+    command: &CibaDecisionCommand,
 ) -> Result<(), HttpResponse> {
-    let state = match load_ciba_request_payload(ciba_service, auth_req_id).await {
+    let state = match load_ciba_request_payload(ciba_service, &command.auth_req_id).await {
         Ok(Some(state)) => state,
         Ok(None) => {
             return Err(ciba_error_no_store(
@@ -450,23 +469,23 @@ async fn prepare_ciba_decision_intent(
             "CIBA decision audit storage unavailable.",
         ));
     }
-    let decision_name = match decision {
+    let decision_name = match command.decision {
         CibaDecision::Approve => "approve",
         CibaDecision::Deny => "deny",
     };
     let mut fields = audit_fields(&[
         ("client_id", json!(state.client_id)),
         ("user_id", json!(state.user_id)),
-        ("auth_req_id_hash", json!(blake3_hex(auth_req_id))),
+        ("auth_req_id_hash", json!(blake3_hex(&command.auth_req_id))),
         ("decision", json!(decision_name)),
-        ("decision_source", json!(source.as_str())),
+        ("decision_source", json!(command.source.as_str())),
         ("scope", json!(state.scopes.join(" "))),
         ("audience", json!(state.audiences)),
     ]);
-    if let Some(source_ip_hash) = source_ip_hash {
+    if let Some(source_ip_hash) = command.source_ip_hash.as_deref() {
         fields.insert("source_ip_hash".to_owned(), json!(source_ip_hash));
     }
-    if let Some(expected_user_id) = expected_user_id {
+    if let Some(expected_user_id) = command.expected_user_id {
         fields.insert("expected_user_id".to_owned(), json!(expected_user_id));
     }
     audit_event_required("ciba_decision_intent", fields)
@@ -484,37 +503,30 @@ async fn prepare_ciba_decision_intent(
 async fn set_ciba_request_decision_with_lease(
     ciba_service: &ServerCibaService,
     conformance_leases: &nazo_postgres::ConformanceLeaseRepository,
-    tenant_id: Uuid,
-    client_id: &str,
-    expected_lease_id: Option<Uuid>,
-    auth_req_id: &str,
-    decision: CibaDecision,
-    expected_user_id: Option<Uuid>,
-    source: CibaDecisionSource,
-    authentication_context: Option<CibaAuthenticationContext>,
-    source_ip_hash: Option<String>,
+    lease: CibaDecisionLease,
+    command: CibaDecisionCommand,
 ) -> HttpResponse {
-    if let Err(response) = prepare_ciba_decision_intent(
-        ciba_service,
+    if let Err(response) = prepare_ciba_decision_intent(ciba_service, &command).await {
+        return response;
+    }
+    let CibaDecisionCommand {
         auth_req_id,
         decision,
         expected_user_id,
         source,
-        source_ip_hash.as_deref(),
-    )
-    .await
-    {
-        return response;
-    }
+        authentication_context,
+        source_ip_hash,
+    } = command;
+    let operation_auth_req_id = auth_req_id.clone();
     let result = match conformance_leases
         .with_active_ciba_decision(
-            tenant_id,
-            client_id,
-            expected_lease_id,
+            lease.tenant_id,
+            &lease.client_id,
+            lease.expected_lease_id,
             |lease_expires_at| async move {
                 ciba_service
                     .decide_with_authentication_context_and_lease_deadline(
-                        auth_req_id,
+                        &operation_auth_req_id,
                         decision,
                         expected_user_id,
                         authentication_context,
@@ -530,7 +542,7 @@ async fn set_ciba_request_decision_with_lease(
         Ok(None) => {
             return complete_ciba_decision(
                 Err(CibaDecisionFailure::Missing),
-                auth_req_id,
+                &auth_req_id,
                 source,
                 source_ip_hash,
             );
@@ -544,7 +556,7 @@ async fn set_ciba_request_decision_with_lease(
             );
         }
     };
-    complete_ciba_decision(result, auth_req_id, source, source_ip_hash)
+    complete_ciba_decision(result, &auth_req_id, source, source_ip_hash)
 }
 
 pub(super) fn complete_ciba_decision(

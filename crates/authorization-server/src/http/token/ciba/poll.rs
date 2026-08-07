@@ -38,6 +38,21 @@ fn materialize_ciba_response(response: HttpResponse) -> SendCibaResponse {
     }
 }
 
+struct CibaPollIssueRequest<'a, 'issuance> {
+    ciba_service: &'a ServerCibaService,
+    users: &'a nazo_postgres::UserRepository,
+    token_service: &'a ServerTokenService,
+    issuance: &'a TokenIssuanceContext<'issuance>,
+    client: &'a ClientRow,
+    auth_req_id: &'a str,
+    initial: nazo_auth::CibaStoredRequest<nazo_valkey::StoredCibaRequest>,
+    ciba_grant_key: String,
+    dpop_jkt: Option<String>,
+    mtls_x5t_s256: Option<String>,
+    client_assertion: Option<ValidatedClientAssertion>,
+    lease_expires_at: Option<i64>,
+}
+
 pub(crate) async fn token_ciba(
     context: CibaTokenContext<'_, '_>,
     client: &ClientRow,
@@ -129,7 +144,7 @@ pub(crate) async fn token_ciba(
             &client.client_id,
             None,
             |lease_expires_at| async move {
-                poll_and_issue_ciba(
+                poll_and_issue_ciba(CibaPollIssueRequest {
                     ciba_service,
                     users,
                     token_service,
@@ -142,7 +157,7 @@ pub(crate) async fn token_ciba(
                     mtls_x5t_s256,
                     client_assertion,
                     lease_expires_at,
-                )
+                })
                 .await
             },
         )
@@ -167,20 +182,21 @@ pub(crate) async fn token_ciba(
     }
 }
 
-async fn poll_and_issue_ciba(
-    ciba_service: &ServerCibaService,
-    users: &nazo_postgres::UserRepository,
-    token_service: &ServerTokenService,
-    issuance: &TokenIssuanceContext<'_>,
-    client: &ClientRow,
-    auth_req_id: &str,
-    initial: nazo_auth::CibaStoredRequest<nazo_valkey::StoredCibaRequest>,
-    ciba_grant_key: String,
-    dpop_jkt: Option<String>,
-    mtls_x5t_s256: Option<String>,
-    client_assertion: Option<ValidatedClientAssertion>,
-    lease_expires_at: Option<i64>,
-) -> SendCibaResponse {
+async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaResponse {
+    let CibaPollIssueRequest {
+        ciba_service,
+        users,
+        token_service,
+        issuance,
+        client,
+        auth_req_id,
+        initial,
+        ciba_grant_key,
+        dpop_jkt,
+        mtls_x5t_s256,
+        client_assertion,
+        lease_expires_at,
+    } = request;
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,

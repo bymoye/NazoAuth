@@ -48,6 +48,22 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
         self.assertLess(switch_database, migrate_workspace)
         self.assertLess(migrate_workspace, run_workspace)
 
+    def test_parallel_server_instances_use_distinct_identity_directories(self) -> None:
+        self.assertIn(
+            'PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"',
+            self.source,
+        )
+        self.assertIn(
+            'SIGNED_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-signed"',
+            self.source,
+        )
+        self.assertIn('INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR"', self.source)
+        self.assertIn('INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR"', self.source)
+        self.assertLess(
+            self.source.index('INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR"'),
+            self.source.index('INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR"'),
+        )
+
     def test_destructive_container_names_are_not_environment_selectable(self) -> None:
         self.assertIn("DEFAULT_POSTGRES_CONTAINER=\"nazo-oauth-codecov-postgres\"", self.source)
         self.assertIn("DEFAULT_VALKEY_CONTAINER=\"nazo-oauth-codecov-valkey\"", self.source)

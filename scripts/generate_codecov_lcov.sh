@@ -200,6 +200,9 @@ export MFA_TOTP_ENCRYPTION_KEY_ID='codecov-ephemeral-v1'
 export MFA_TOTP_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 export ENABLE_AUTHORIZATION_DETAILS='true'
 export RUNTIME_INSTANCE_ID='codecov-primary'
+PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"
+SIGNED_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-signed"
+export INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR"
 # 覆盖率 E2E 使用与服务端相同的 provider registry，不再维护单 provider 配置入口。
 export FEDERATION_PROVIDER_CONFIGS='[{"provider_id":"codecov-oidc","enabled":true,"display_name":"Codecov OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"codecov-oidc-client","client_secret":"codecov-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/codecov-oidc/callback","scopes":"openid email profile"}]'
 export E2E_OIDC_PROVIDER_ID='codecov-oidc'
@@ -210,7 +213,8 @@ export FEDERATION_SAML_GATEWAY_AUDIENCE='nazo-oauth-codecov'
 export FEDERATION_SAML_GATEWAY_SECRET='codecov-saml-gateway-secret-000000'
 export RUST_LOG="${RUST_LOG:-warn}"
 
-mkdir -p runtime/codecov/avatars runtime/codecov/keys "$COVERAGE_DIR"
+mkdir -p runtime/codecov/avatars runtime/codecov/keys \
+  "$PRIMARY_INSTANCE_IDENTITY_DIR" "$SIGNED_INSTANCE_IDENTITY_DIR" "$COVERAGE_DIR"
 "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -325,10 +329,12 @@ cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
 cargo build --locked --workspace --all-features --bin nazoauth
 
-LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
+INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
+  LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
 SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
   RUNTIME_INSTANCE_ID='codecov-signed' \
+  INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR" \
   BIND='127.0.0.1:18001' \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
   "$BIN_DIR/nazoauth" server &
