@@ -307,6 +307,37 @@ impl CertificateRevocationPolicy {
         certificates: &[Vec<u8>],
         now: DateTime<Utc>,
     ) -> Result<(), CredentialTrustError> {
+        self.check_chain_inner(issuer, certificates, now, false)
+    }
+
+    /// Check a chain that has already been authenticated against an explicit
+    /// short-lived conformance trust anchor.  The normal required policy
+    /// remains fail-closed for every certificate; only the lease-scoped
+    /// conformance source may supply an out-of-band status for its ephemeral
+    /// certificates.  Callers must verify the chain against that anchor before
+    /// invoking this method.
+    pub fn check_chain_with_conformance_trust(
+        &self,
+        issuer: Option<&str>,
+        certificates: &[Vec<u8>],
+        now: DateTime<Utc>,
+        conformance_trust_anchors: &[Vec<u8>],
+    ) -> Result<(), CredentialTrustError> {
+        self.check_chain_inner(
+            issuer,
+            certificates,
+            now,
+            !conformance_trust_anchors.is_empty(),
+        )
+    }
+
+    fn check_chain_inner(
+        &self,
+        issuer: Option<&str>,
+        certificates: &[Vec<u8>],
+        now: DateTime<Utc>,
+        conformance_trust_loaded: bool,
+    ) -> Result<(), CredentialTrustError> {
         if matches!(self.state.mode, CertificateRevocationMode::Disabled) {
             return Ok(());
         }
@@ -339,7 +370,7 @@ impl CertificateRevocationPolicy {
                     return Err(CredentialTrustError::RevokedCertificate);
                 }
                 Some(CertificateRevocationStatus::Good) => {}
-                None if self.is_required() => {
+                None if self.is_required() && !conformance_trust_loaded => {
                     return Err(CredentialTrustError::RevocationStatusUnknown);
                 }
                 None => {}

@@ -94,6 +94,24 @@ fn required_policy_rejects_an_unknown_issuer_or_certificate() {
 }
 
 #[test]
+fn required_policy_accepts_unknown_certificate_only_for_lease_scoped_conformance_trust() {
+    let certificate = certificate_der();
+    let snapshot = Arc::new(snapshot(
+        &certificate_der(),
+        CertificateRevocationStatus::Good,
+    ));
+
+    CertificateRevocationPolicy::required(snapshot)
+        .check_chain_with_conformance_trust(
+            Some(ISSUER),
+            &[certificate],
+            Utc::now(),
+            &[vec![1, 2, 3]],
+        )
+        .expect("an authenticated lease-scoped conformance chain may be absent from the operator snapshot");
+}
+
+#[test]
 fn stale_snapshot_fails_closed_even_when_status_is_good() {
     let certificate = certificate_der();
     let mut snapshot = snapshot(&certificate, CertificateRevocationStatus::Good);

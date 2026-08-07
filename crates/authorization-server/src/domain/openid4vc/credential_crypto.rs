@@ -356,8 +356,12 @@ impl Openid4vcCredentialCrypto {
         self.issuer_trust_policy
             .validate(issuer, &leaf_der)
             .map_err(|_| CredentialTrustError::UntrustedIssuer)?;
-        self.revocation_policy
-            .check_chain(Some(issuer), &certificates, Utc::now())?;
+        self.revocation_policy.check_chain_with_conformance_trust(
+            Some(issuer),
+            &certificates,
+            Utc::now(),
+            &presentation.additional_trust_anchors,
+        )?;
         if credential
             .get("_sd_alg")
             .and_then(Value::as_str)
@@ -506,6 +510,7 @@ impl Openid4vcCredentialCrypto {
         let issuer_chain_valid = verify_mdoc_issuer_certificate_chains(
             &verified,
             &trust_anchors,
+            &presentation.additional_trust_anchors,
             &self.revocation_policy,
         )?;
         if !mdoc_assessments_accepted(
@@ -668,6 +673,7 @@ fn verify_standard_mdoc_device_signatures(
 fn verify_mdoc_issuer_certificate_chains(
     verified: &mdoc_rs::verifier::VerifiedMDoc,
     trust_anchors: &[Vec<u8>],
+    conformance_trust_anchors: &[Vec<u8>],
     revocation_policy: &CertificateRevocationPolicy,
 ) -> Result<bool, CredentialTrustError> {
     // mdoc-rs fails this assessment closed without its optional TSP backend.
@@ -699,7 +705,12 @@ fn verify_mdoc_issuer_certificate_chains(
         if !verify_certificate_chain_at(&certificates, trust_anchors, signed_at)? {
             return Ok(false);
         }
-        revocation_policy.check_chain(None, &certificates, Utc::now())?;
+        revocation_policy.check_chain_with_conformance_trust(
+            None,
+            &certificates,
+            Utc::now(),
+            conformance_trust_anchors,
+        )?;
     }
     Ok(true)
 }
