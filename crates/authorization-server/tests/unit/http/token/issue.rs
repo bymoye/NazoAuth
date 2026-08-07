@@ -4,6 +4,7 @@ use crate::domain::tenancy::DEFAULT_ORGANIZATION_ID;
 
 use crate::domain::tenancy::DEFAULT_REALM_ID;
 
+use crate::domain::NativeSsoTokenBinding;
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 
 use nazo_auth::OidcClaimRequest;
@@ -753,6 +754,46 @@ async fn openid_issue_without_user_subject_fails_before_token_signing() {
     assert!(value.get("access_token").is_none());
     assert!(value.get("refresh_token").is_none());
     assert!(value.get("id_token").is_none());
+}
+
+#[actix_web::test]
+async fn native_sso_issue_fails_closed_when_the_runtime_module_is_disabled() {
+    let state = issue_state_with_valid_signing_key();
+    let client = client_with_grants(&["authorization_code", "refresh_token"]);
+    let mut issue = token_issue_without_openid();
+    issue.user_id = Some(Uuid::now_v7());
+    issue.scopes = vec!["openid".to_owned(), "offline_access".to_owned()];
+    issue.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: "device-secret".to_owned(),
+        ds_hash: "device-hash".to_owned(),
+        sid: "sid-1".to_owned(),
+    });
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_scope");
+}
+
+#[actix_web::test]
+async fn native_sso_issue_requires_openid_before_token_signing() {
+    let mut state = issue_state_with_valid_signing_key();
+    Arc::get_mut(&mut state.settings)
+        .expect("test state owns its settings")
+        .modules
+        .enable_native_sso = true;
+    let client = client_with_grants(&["authorization_code", "refresh_token"]);
+    let mut issue = token_issue_without_openid();
+    issue.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: "device-secret".to_owned(),
+        ds_hash: "device-hash".to_owned(),
+        sid: "sid-1".to_owned(),
+    });
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_scope");
 }
 
 #[actix_web::test]
