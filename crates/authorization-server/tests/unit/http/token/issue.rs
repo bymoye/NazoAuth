@@ -928,6 +928,11 @@ async fn client_credentials_issue_returns_dpop_and_authorization_details_metadat
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
+    state
+        .valkey_connection()
+        .health_check()
+        .await
+        .expect("live token issuance fixture should reach Valkey before DPoP nonce issuance");
     let mut client = client_with_grants(&["client_credentials"]);
     client.client_id = format!("issue-dpop-client-{}", Uuid::now_v7());
     insert_issue_client(&state, &client).await;
@@ -944,10 +949,17 @@ async fn client_credentials_issue_returns_dpop_and_authorization_details_metadat
     issue.issued_token_type = Some("urn:example:access-token".to_owned());
 
     let response = issue_token_response(&state, &client, issue).await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("dpop-nonce").is_some());
+    let has_dpop_nonce = response.headers().get("dpop-nonce").is_some();
+    let status = response.status();
     let body = response_body(response).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "live DPoP issuance failed: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(has_dpop_nonce);
     let value: Value = serde_json::from_slice(&body).expect("token response should be JSON");
     assert_eq!(value["token_type"], "DPoP");
     assert_eq!(
