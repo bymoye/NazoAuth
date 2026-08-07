@@ -243,3 +243,98 @@ fn client_patch_preserves_pairwise_host_and_rejects_unsafe_transitions() {
         Some("sector.example")
     );
 }
+
+#[test]
+fn client_patch_applies_optional_registration_metadata_as_one_update() {
+    let crypto = TestCrypto;
+    let resolver = StaticSectorIdentifier(vec!["https://client.example/callback".to_owned()]);
+    let updated = futures_executor::block_on(prepare_client_patch(
+        oauth_client(),
+        PatchClientRequest {
+            scopes: Some(vec!["openid".to_owned(), "profile".to_owned()]),
+            allowed_audiences: Some(vec!["resource://accounts".to_owned()]),
+            grant_types: Some(vec![
+                "authorization_code".to_owned(),
+                "urn:openid:params:grant-type:ciba".to_owned(),
+            ]),
+            require_dpop_bound_tokens: Some(true),
+            require_mtls_bound_tokens: Some(false),
+            allow_client_assertion_audience_array: Some(false),
+            allow_client_assertion_endpoint_audience: Some(false),
+            require_par_request_object: Some(false),
+            backchannel_token_delivery_mode: Some("ping".to_owned()),
+            backchannel_client_notification_endpoint: Some(
+                " https://client.example/ciba/notify ".to_owned(),
+            ),
+            backchannel_authentication_request_signing_alg: Some("PS256".to_owned()),
+            backchannel_user_code_parameter: Some(false),
+            backchannel_logout_uri: Some(" https://client.example/backchannel ".to_owned()),
+            backchannel_logout_session_required: Some(true),
+            frontchannel_logout_uri: Some(" https://client.example/frontchannel ".to_owned()),
+            frontchannel_logout_session_required: Some(true),
+            tls_client_auth_subject_dn: Some("CN=client".to_owned()),
+            tls_client_auth_cert_sha256: Some("aa".repeat(32)),
+            tls_client_auth_san_dns: Some(vec!["client.example".to_owned()]),
+            tls_client_auth_san_uri: Some(vec!["https://client.example/san".to_owned()]),
+            tls_client_auth_san_ip: Some(vec!["127.0.0.1".to_owned()]),
+            tls_client_auth_san_email: Some(vec!["admin@client.example".to_owned()]),
+            jwks: Some(json!({"keys": []})),
+            is_active: Some(false),
+            ..PatchClientRequest::default()
+        },
+        &policy(None),
+        &resolver,
+        &crypto,
+    ))
+    .expect("optional client metadata should be applied atomically");
+
+    assert_eq!(updated.scopes, ["openid", "profile"]);
+    assert_eq!(updated.allowed_audiences, ["resource://accounts"]);
+    assert!(updated.require_dpop_bound_tokens);
+    assert_eq!(updated.backchannel_token_delivery_mode, "ping");
+    assert_eq!(
+        updated.backchannel_client_notification_endpoint.as_deref(),
+        Some("https://client.example/ciba/notify")
+    );
+    assert_eq!(updated.tls_client_auth_san_ip, ["127.0.0.1"]);
+    assert!(!updated.is_active);
+}
+
+#[test]
+fn admin_client_ports_and_errors_have_stable_operator_messages() {
+    use nazo_auth::{AdminClientError, AdminClientPortError};
+
+    for (error, expected) in [
+        (
+            AdminClientPortError::Unavailable,
+            "admin client repository unavailable",
+        ),
+        (
+            AdminClientPortError::Conflict,
+            "admin client repository conflict",
+        ),
+        (
+            AdminClientPortError::CorruptData,
+            "admin client repository returned corrupt data",
+        ),
+        (
+            AdminClientPortError::Unexpected,
+            "unexpected admin client repository failure",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected);
+    }
+    for (error, expected) in [
+        (AdminClientError::NotFound, "admin client not found"),
+        (
+            AdminClientError::Consistency("invariant".to_owned()),
+            "invariant",
+        ),
+        (
+            AdminClientError::Repository(AdminClientPortError::Unavailable),
+            "admin client repository unavailable",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected);
+    }
+}

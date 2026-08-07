@@ -43,7 +43,7 @@ impl CibaStateStorePort for CreateStore {
         _version: &'a Self::Version,
         _state: &'a CibaRequestState,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
-        unreachable!("creation does not replace state")
+        Box::pin(async { Ok(CibaAtomicResult::Applied) })
     }
 
     fn delete<'a>(
@@ -51,8 +51,49 @@ impl CibaStateStorePort for CreateStore {
         _auth_req_id: &'a str,
         _version: &'a Self::Version,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
-        unreachable!("creation does not delete state")
+        Box::pin(async { Ok(CibaAtomicResult::Applied) })
     }
+}
+
+#[test]
+fn lease_deadline_defaults_delegate_to_the_atomic_store_operations() {
+    let state = CibaRequestState {
+        client_id: "lease-client".to_owned(),
+        user_id: Uuid::from_u128(7),
+        scopes: vec!["openid".to_owned()],
+        audiences: vec!["resource".to_owned()],
+        acr: None,
+        authentication_context: None,
+        binding_message: None,
+        issued_at: 100,
+        status: CibaStatus::Pending,
+        interval_seconds: 5,
+        expires_at: 200,
+        retention_expires_at: 320,
+        last_poll_at: None,
+        ping_notification: Some(CibaPingNotification {
+            auth_req_id: None,
+            endpoint: "https://client.example/ciba".to_owned(),
+            client_notification_token: None,
+            status: CibaPingNotificationStatus::AwaitingDecision,
+            attempts: 0,
+            next_attempt_at: None,
+        }),
+    };
+    let store = CreateStore;
+    assert_eq!(
+        block_on(store.create_with_lease_deadline("generated-auth-req-id", &state, Some(150),))
+            .unwrap(),
+        CibaAtomicResult::Applied
+    );
+    assert_eq!(
+        block_on(store.replace_with_lease_deadline("auth-req-id", &(), &state, Some(150))).unwrap(),
+        CibaAtomicResult::Applied
+    );
+    assert_eq!(
+        block_on(store.delete_with_lease_deadline("auth-req-id", &(), Some(150))).unwrap(),
+        CibaAtomicResult::Applied
+    );
 }
 
 #[test]
