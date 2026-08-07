@@ -32,6 +32,61 @@ use uuid::Uuid;
 
 use super::*;
 
+trait CredentialCryptoTestExt {
+    fn verify_sd_jwt(
+        &self,
+        presentation: &nazo_digital_credentials::PresentedCredential,
+    ) -> Result<
+        nazo_digital_credentials::VerifiedCredential,
+        nazo_digital_credentials::CredentialTrustError,
+    >;
+
+    fn validate_sd_jwt_chain(
+        &self,
+        x5c: &[String],
+        additional_trust_anchors: &[Vec<u8>],
+    ) -> Result<super::sd_jwt::ValidatedSdJwtChain, nazo_digital_credentials::CredentialTrustError>;
+
+    fn verify_mdoc(
+        &self,
+        presentation: &nazo_digital_credentials::PresentedCredential,
+    ) -> Result<
+        nazo_digital_credentials::VerifiedCredential,
+        nazo_digital_credentials::CredentialTrustError,
+    >;
+}
+
+impl CredentialCryptoTestExt for Openid4vcCredentialCrypto {
+    fn verify_sd_jwt(
+        &self,
+        presentation: &nazo_digital_credentials::PresentedCredential,
+    ) -> Result<
+        nazo_digital_credentials::VerifiedCredential,
+        nazo_digital_credentials::CredentialTrustError,
+    > {
+        super::sd_jwt::verify(self, presentation)
+    }
+
+    fn validate_sd_jwt_chain(
+        &self,
+        x5c: &[String],
+        additional_trust_anchors: &[Vec<u8>],
+    ) -> Result<super::sd_jwt::ValidatedSdJwtChain, nazo_digital_credentials::CredentialTrustError>
+    {
+        super::sd_jwt::validate_sd_jwt_chain(self, x5c, additional_trust_anchors)
+    }
+
+    fn verify_mdoc(
+        &self,
+        presentation: &nazo_digital_credentials::PresentedCredential,
+    ) -> Result<
+        nazo_digital_credentials::VerifiedCredential,
+        nazo_digital_credentials::CredentialTrustError,
+    > {
+        super::mdoc::verify(self, presentation)
+    }
+}
+
 struct CertificateFixture {
     ca_der: Vec<u8>,
     ca_pem: String,

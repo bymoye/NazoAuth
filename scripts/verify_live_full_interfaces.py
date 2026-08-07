@@ -242,28 +242,25 @@ def db_url(secrets_doc: dict) -> str:
 
 
 def cleanup_rows(conn):
+    client_name_pattern = f"{RUN_ID}%"
+    user_emails = (f"{RUN_ID}@{test_email_domain()}", f"registered-{RUN_ID}@{test_email_domain()}")
     with conn.cursor() as cur:
         cur.execute(
             """
             WITH test_clients AS (
                 SELECT id FROM oauth_clients
-                WHERE client_name LIKE 'live-full-%' OR client_id LIKE 'live-full-%'
-            ),
-            test_users AS (
-                SELECT id FROM users
-                WHERE email LIKE %s
-                   OR email LIKE %s
+                WHERE client_name LIKE %s
             )
             DELETE FROM access_token_revocations
             WHERE client_id IN (SELECT id FROM test_clients)
             """,
-            (f"live-full-%@{test_email_domain()}", f"registered-live-full-%@{test_email_domain()}"),
+            (client_name_pattern,),
         )
         cur.execute(
             """
             WITH test_clients AS (
                 SELECT id FROM oauth_clients
-                WHERE client_name LIKE 'live-full-%' OR client_id LIKE 'live-full-%'
+                WHERE client_name LIKE %s
             ),
             test_users AS (
                 SELECT id FROM users
@@ -274,13 +271,13 @@ def cleanup_rows(conn):
             WHERE client_id IN (SELECT id FROM test_clients)
                OR user_id IN (SELECT id FROM test_users)
             """,
-            (f"live-full-%@{test_email_domain()}", f"registered-live-full-%@{test_email_domain()}"),
+            (client_name_pattern, *user_emails),
         )
         cur.execute(
             """
             WITH test_clients AS (
                 SELECT id FROM oauth_clients
-                WHERE client_name LIKE 'live-full-%' OR client_id LIKE 'live-full-%'
+                WHERE client_name LIKE %s
             ),
             test_users AS (
                 SELECT id FROM users
@@ -291,13 +288,13 @@ def cleanup_rows(conn):
             WHERE client_id IN (SELECT id FROM test_clients)
                OR user_id IN (SELECT id FROM test_users)
             """,
-            (f"live-full-%@{test_email_domain()}", f"registered-live-full-%@{test_email_domain()}"),
+            (client_name_pattern, *user_emails),
         )
         cur.execute(
             """
             WITH test_clients AS (
                 SELECT id FROM oauth_clients
-                WHERE client_name LIKE 'live-full-%' OR client_id LIKE 'live-full-%'
+                WHERE client_name LIKE %s
             ),
             test_users AS (
                 SELECT id FROM users
@@ -307,23 +304,24 @@ def cleanup_rows(conn):
             DELETE FROM client_access_requests
             WHERE user_id IN (SELECT id FROM test_users)
                OR approved_client_id IN (SELECT id FROM test_clients)
-               OR site_name LIKE 'live-full-%'
+               OR site_name LIKE %s
             """,
-            (f"live-full-%@{test_email_domain()}", f"registered-live-full-%@{test_email_domain()}"),
+            (client_name_pattern, *user_emails, client_name_pattern),
         )
         cur.execute(
             """
             DELETE FROM oauth_clients
-            WHERE client_name LIKE 'live-full-%' OR client_id LIKE 'live-full-%'
-            """
+            WHERE client_name LIKE %s
+            """,
+            (client_name_pattern,),
         )
         cur.execute(
             """
             DELETE FROM users
-            WHERE email LIKE %s
-               OR email LIKE %s
+            WHERE email = %s
+               OR email = %s
             """,
-            (f"live-full-%@{test_email_domain()}", f"registered-live-full-%@{test_email_domain()}"),
+            user_emails,
         )
 
 

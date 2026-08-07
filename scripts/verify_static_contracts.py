@@ -305,14 +305,20 @@ def check_rust_test_structure() -> None:
         r"(?:(?:#\[[^\r\n]+\]\r?\n)*)"
         r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;"
     )
+    top_level_test_import = re.compile(
+        r"(?:\r?\n#\[[^\r\n]+\])*\r?\n"
+        r"\s*(?:pub(?:\([^)]*\))?\s+)?use\b"
+    )
     nested_cfg = re.compile(
         r"(?m)^(?P<indent>[ \t]+)#\[cfg\(test\)\]\r?\n"
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
     allowed_nested_seams = {
-        "crates/authorization-server/src/bootstrap/mod.rs": (
+        "crates/authorization-server/src/bootstrap/startup/configuration.rs": (
             "let valkey = nazo_valkey::test_support::connect(",
             "let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);",
+        ),
+        "crates/authorization-server/src/bootstrap/startup/services/identity.rs": (
             "let session_profiles = web::Data::new(SessionProfileHandles::new(",
         ),
         "crates/key-management/src/lifecycle.rs": (
@@ -347,7 +353,7 @@ def check_rust_test_structure() -> None:
             for cfg_match in top_level_cfg.finditer(source):
                 if not any(
                     hook.start() == cfg_match.start() for hook in hook_matches
-                ):
+                ) and top_level_test_import.match(source[cfg_match.end() :]) is None:
                     violations.append(f"{relative} has a non-mount top-level cfg(test) item")
 
             actual_nested = tuple(
@@ -705,9 +711,9 @@ def check_openid4vc_boundaries() -> None:
     driver = (ROOT / "scripts" / "run_openid4vc_conformance.py").read_text(
         encoding="utf-8"
     )
-    server_settings = (
+    server_settings = read_rust_module_tree(
         ROOT / "crates" / "authorization-server" / "src" / "settings.rs"
-    ).read_text(encoding="utf-8")
+    )
     server_config = (
         ROOT / "crates" / "authorization-server" / "src" / "config.rs"
     ).read_text(encoding="utf-8")
@@ -842,8 +848,11 @@ def check_openid4vc_boundaries() -> None:
     keyctl = (ROOT / "crates" / "authorization-server" / "src" / "keyctl.rs").read_text(
         encoding="utf-8"
     )
-    key_store = (ROOT / "crates" / "key-management" / "src" / "store.rs").read_text(
-        encoding="utf-8"
+    key_store = "\n".join(
+        (
+            ROOT / "crates" / "key-management" / "src" / name
+        ).read_text(encoding="utf-8")
+        for name in ("store.rs", "serialization.rs", "lifecycle.rs")
     )
     for marker in (
         "generate-local",

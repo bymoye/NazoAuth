@@ -54,7 +54,7 @@ limitation called out explicitly.
 ## Repository Evidence
 
 - `crates/http-actix/tests/unit/dynamic_client_registration.rs`
-- `src/http/dynamic_client_registration.rs`
+- `crates/http-actix/src/dynamic_client_registration.rs`
 - `migrations/20260702000100_rfc7592_registration_management`
 
 The local tests cover registration management response fields, registration

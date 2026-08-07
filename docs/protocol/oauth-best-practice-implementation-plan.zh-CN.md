@@ -233,7 +233,8 @@ CIBA 等 profile 明确注册、测试和运维。
 
 预计涉及：
 
-- `crates/authorization-server/src/http/dynamic_client_registration.rs`
+- `crates/http-actix/src/dynamic_client_registration.rs`
+- `crates/authorization-server-core/src/dynamic_client_registration/mod.rs`
 - `crates/authorization-server/src/http/admin/clients/create.rs`
 - `crates/authorization-server/src/http/well_known.rs`
 - `crates/http-actix/tests/unit/dynamic_client_registration.rs`
@@ -265,7 +266,7 @@ baseline 和 FAPI2 默认链路。
 
 - `crates/authorization-server/src/http/token/token_exchange.rs`
 - `crates/authorization-server/src/http/token/jwt_bearer.rs`
-- `crates/authorization-server/src/http/token/dispatch.rs`
+- `crates/authorization-server/src/http/token/dispatch/mod.rs`
 - `crates/authorization-server/tests/unit/http/token/token_exchange.rs`
 - `crates/authorization-server/tests/unit/http/token/jwt_bearer.rs`
 
@@ -351,7 +352,7 @@ cargo test --locked session --lib
 预计涉及：
 
 - `crates/authorization-server/src/http/token/ciba.rs`
-- `crates/authorization-server/src/http/token/dispatch.rs`
+- `crates/authorization-server/src/http/token/dispatch/mod.rs`
 - `crates/authorization-server/src/http/well_known.rs`
 - `crates/authorization-server/src/settings/profile.rs`
 - `crates/authorization-server/tests/unit/http/token/ciba.rs`

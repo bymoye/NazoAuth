@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('install', 'status', 'doctor', 'plan', 'update', 'rollback', 'recover')]
-    [string]$Action = 'update',
+    [string]$Action = 'status',
     [Parameter(Mandatory = $true)]
     [string]$SshHost,
     [string]$Config = '/etc/nazoauth/update.json',

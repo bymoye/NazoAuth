@@ -128,6 +128,13 @@ SESSION_CLIENT_ID = f"{OIDF_CLIENT_PREFIX}-session-client"
 BASIC_ALIAS = os.environ.get(
     "OIDF_BASIC_ALIAS", f"nazo-oauth-oidf-{RUN_NAMESPACE}"
 )
+
+
+def run_scoped_alias(slug: str) -> str:
+    """Return a plan alias owned by this isolated conformance run."""
+    return f"nazo-oauth-oidf-{RUN_NAMESPACE}-{slug}"
+
+
 USER_EMAIL = ""
 USER_PASSWORD = ""
 CLIENT_SECRET = ""
@@ -1226,7 +1233,7 @@ def fapi_plan_focus(plan_kind: str, fapi_profile: str, fapi_response_mode: str) 
 
 def write_oidcc_config_plan_config() -> dict[str, object]:
     config = {
-        "alias": "nazo-oauth-oidf-config",
+        "alias": run_scoped_alias("config"),
         "description": "OIDC Config OP: provider metadata accuracy for the public issuer.",
         "server": oidf_server_config(),
     }
@@ -1399,7 +1406,7 @@ def fapi_matrix_plan_config(
         fapi_response_mode,
     )
     config = fapi_plan_config(
-        f"nazo-oauth-oidf-{slug}",
+        run_scoped_alias(slug),
         description,
         slug,
         False,
@@ -1421,25 +1428,25 @@ def fapi_matrix_plan_config(
 def write_fapi_plan_configs() -> dict[str, dict[str, object]]:
     configs = {
         "oidf-fapi-security-final-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-security-final",
+            run_scoped_alias("fapi-security-final"),
             "NazoAuth FAPI2 Security Final conformance configuration",
             "security-final",
             False,
         ),
         "oidf-fapi-message-final-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-message-final",
+            run_scoped_alias("fapi-message-final"),
             "NazoAuth FAPI2 Message Signing Final conformance configuration",
             "message-final",
             False,
         ),
         "oidf-fapi-security-id2-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-security-id2",
+            run_scoped_alias("fapi-security-id2"),
             "NazoAuth FAPI2 Security ID2 conformance configuration",
             "security-id2",
             True,
         ),
         "oidf-fapi-message-id1-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-message-id1",
+            run_scoped_alias("fapi-message-id1"),
             "NazoAuth FAPI2 Message Signing ID1 conformance configuration",
             "message-id1",
             True,
@@ -1463,7 +1470,7 @@ def write_fapi_ciba_plan_config() -> dict[str, dict[str, object]]:
         client1_id, client2_id = fapi_client_ids(slug)
         client1_jwks = client_private_jwks(client1_id)
         client2_jwks = client_private_jwks(client2_id)
-        alias = f"nazo-oauth-oidf-{slug}"
+        alias = run_scoped_alias(slug)
         notification_endpoint = test_endpoint_for(alias, "ciba-notification-endpoint")
 
         def ciba_client(client_id: str, jwks: dict[str, object]) -> dict[str, object]:

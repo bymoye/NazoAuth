@@ -47,30 +47,5 @@ impl CredentialVerifierPort for Openid4vcCredentialCrypto {
 }
 
 #[cfg(test)]
-impl Openid4vcCredentialCrypto {
-    fn verify_sd_jwt(
-        &self,
-        presentation: &PresentedCredential,
-    ) -> Result<VerifiedCredential, CredentialTrustError> {
-        sd_jwt::verify(self, presentation)
-    }
-
-    fn validate_sd_jwt_chain(
-        &self,
-        x5c: &[String],
-        additional_trust_anchors: &[Vec<u8>],
-    ) -> Result<sd_jwt::ValidatedSdJwtChain, CredentialTrustError> {
-        sd_jwt::validate_sd_jwt_chain(self, x5c, additional_trust_anchors)
-    }
-
-    fn verify_mdoc(
-        &self,
-        presentation: &PresentedCredential,
-    ) -> Result<VerifiedCredential, CredentialTrustError> {
-        mdoc::verify(self, presentation)
-    }
-}
-
-#[cfg(test)]
 #[path = "../../../tests/unit/domain/openid4vc_credential_crypto.rs"]
 mod tests;
