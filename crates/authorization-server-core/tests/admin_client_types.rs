@@ -1,10 +1,56 @@
 use nazo_auth::{
-    ClientPresentationMetadata, ClientSecurityPolicy, CreatedClient, OAuthClient,
-    PreparedClientRegistration, ValidatedClientRegistration,
+    AdminClientCryptoPort, AdminClientError, AdminClientPolicy, ClientPresentationMetadata,
+    ClientSecurityPolicy, CreatedClient, OAuthClient, PatchClientRequest,
+    PreparedClientRegistration, SectorIdentifierFuture, SectorIdentifierResolverPort,
+    ValidatedClientRegistration, prepare_client_patch,
 };
 use nazo_identity::TenantContext;
 use serde_json::json;
 use uuid::Uuid;
+
+struct TestCrypto;
+
+impl AdminClientCryptoPort for TestCrypto {
+    fn response_signing_algorithms(&self) -> Vec<String> {
+        ["EdDSA", "ES256", "PS256", "RS256"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn issue_client_secret(&self, _pepper: &str) -> (String, String) {
+        ("issued-secret".to_owned(), "hashed-secret".to_owned())
+    }
+
+    fn validate_jwks(&self, _jwks: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn validate_rfc4514_dn(&self, _value: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn matching_encryption_key_count(&self, _jwks: &serde_json::Value, _algorithm: &str) -> usize {
+        1
+    }
+
+    fn contains_signing_key(&self, _jwks: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn valid_self_signed_mtls_jwks(&self, _jwks: &serde_json::Value) -> bool {
+        true
+    }
+}
+
+struct StaticSectorIdentifier(Vec<String>);
+
+impl SectorIdentifierResolverPort for StaticSectorIdentifier {
+    fn resolve<'a>(&'a self, _uri: &'a str) -> SectorIdentifierFuture<'a> {
+        let values = self.0.clone();
+        Box::pin(async move { Ok(values) })
+    }
+}
 
 fn registration() -> ValidatedClientRegistration {
     ValidatedClientRegistration {
@@ -105,4 +151,95 @@ fn prepared_and_created_client_debug_redacts_all_secret_material() {
     assert!(created_debug.contains("[REDACTED]"));
     assert_eq!(created.client.client_id, "client-types");
     assert_eq!(json!(created.client.scopes), json!(["openid"]));
+}
+
+fn oauth_client() -> OAuthClient {
+    OAuthClient {
+        id: Uuid::now_v7(),
+        tenant_id: Uuid::now_v7(),
+        realm_id: Uuid::now_v7(),
+        organization_id: Uuid::now_v7(),
+        registration: registration(),
+        require_mtls_bound_tokens: false,
+        is_active: true,
+    }
+}
+
+fn policy(pairwise_subject_secret: Option<&str>) -> AdminClientPolicy {
+    AdminClientPolicy {
+        tenant: TenantContext::default(),
+        pairwise_subject_secret: pairwise_subject_secret.map(str::to_owned),
+        client_secret_pepper: "pepper".to_owned(),
+    }
+}
+
+#[test]
+fn client_patch_preserves_pairwise_host_and_rejects_unsafe_transitions() {
+    let crypto = TestCrypto;
+    let resolver = StaticSectorIdentifier(vec!["https://client.example/callback".to_owned()]);
+
+    let mut cached = oauth_client();
+    cached.subject_type = "pairwise".to_owned();
+    cached.sector_identifier_uri = Some("https://sector.example/sector.json".to_owned());
+    cached.sector_identifier_host = Some("client.example".to_owned());
+    let cached = futures_executor::block_on(prepare_client_patch(
+        cached,
+        PatchClientRequest {
+            subject_type: Some("pairwise".to_owned()),
+            ..PatchClientRequest::default()
+        },
+        &policy(Some("pairwise-secret")),
+        &resolver,
+        &crypto,
+    ))
+    .expect("existing pairwise host should be retained");
+    assert_eq!(
+        cached.sector_identifier_host.as_deref(),
+        Some("client.example")
+    );
+
+    let mut immutable = oauth_client();
+    immutable.sector_identifier_uri = Some("https://sector.example/sector.json".to_owned());
+    let error = futures_executor::block_on(prepare_client_patch(
+        immutable,
+        PatchClientRequest {
+            sector_identifier_uri: Some("https://other.example/sector.json".to_owned()),
+            ..PatchClientRequest::default()
+        },
+        &policy(Some("pairwise-secret")),
+        &resolver,
+        &crypto,
+    ))
+    .expect_err("pairwise sector identifier must be immutable");
+    assert!(matches!(error, AdminClientError::InvalidRequest(_)));
+
+    let error = futures_executor::block_on(prepare_client_patch(
+        oauth_client(),
+        PatchClientRequest {
+            subject_type: Some("pairwise".to_owned()),
+            ..PatchClientRequest::default()
+        },
+        &policy(None),
+        &resolver,
+        &crypto,
+    ))
+    .expect_err("pairwise clients require the deployment secret");
+    assert!(matches!(error, AdminClientError::InvalidRequest(_)));
+
+    let resolved = futures_executor::block_on(prepare_client_patch(
+        oauth_client(),
+        PatchClientRequest {
+            subject_type: Some("pairwise".to_owned()),
+            sector_identifier_uri: Some("https://sector.example/sector.json".to_owned()),
+            ..PatchClientRequest::default()
+        },
+        &policy(Some("pairwise-secret")),
+        &resolver,
+        &crypto,
+    ))
+    .expect("sector identifier document should resolve");
+    assert_eq!(
+        resolved.sector_identifier_host.as_deref(),
+        Some("sector.example")
+    );
 }
