@@ -321,7 +321,14 @@ fn issue_state_with_live_database() -> Option<TestInfrastructure> {
         settings: Arc::new(
             Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
         ),
-        keyset: crate::test_support::test_key_manager(),
+        // The default OIDC ID-token algorithm is RS256. Keep the live
+        // issuance fixture aligned with that protocol default so this test
+        // exercises successful signing instead of manufacturing an
+        // algorithm/key mismatch (the generic unit fixture intentionally
+        // uses EdDSA for failure-path tests).
+        keyset: crate::test_support::test_key_manager_with_algorithm(
+            jsonwebtoken::Algorithm::RS256,
+        ),
     })
 }
 
