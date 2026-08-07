@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,16 +67,32 @@ class Openid4vcOidfTests(unittest.TestCase):
                 "credential_datasets": {"pid/1": {"given_name": "Ada"}},
             },
         }
+        credentials = {
+            "admin_email": "admin@example.test",
+            "admin_password": "secret",
+            "admin_mfa_totp_secret": "123456",
+        }
         with patch.object(module.ControlPlaneSession, "login", return_value=session) as login:
             admin, installed = module.install_credential_datasets(
                 config,
-                {"admin_email": "admin@example.test", "admin_password": "secret"},
+                credentials,
             )
-            module.cleanup_credential_datasets(admin, installed)
+            module.cleanup_credential_datasets("https://issuer.example", credentials, installed)
 
-        login.assert_called_once_with(
-            "https://issuer.example", "admin@example.test", "secret"
-        )
+        self.assertEqual(login.call_args_list, [
+            call(
+                "https://issuer.example",
+                "admin@example.test",
+                "secret",
+                mfa_totp_secret="123456",
+            ),
+            call(
+                "https://issuer.example",
+                "admin@example.test",
+                "secret",
+                mfa_totp_secret="123456",
+            ),
+        ])
         put = next(call for call in session.json_calls if call[0] == "PUT")
         self.assertEqual(
             put[1],

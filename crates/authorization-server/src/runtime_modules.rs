@@ -84,10 +84,14 @@ pub(crate) struct RuntimeModules {
 }
 
 impl RuntimeModules {
-    pub(crate) async fn initialize(pool: DbPool, settings: &Settings) -> anyhow::Result<Self> {
+    pub(crate) async fn initialize(
+        pool: DbPool,
+        settings: &Settings,
+        instance_id: &str,
+    ) -> anyhow::Result<Self> {
         let repository = Arc::new(RuntimeModuleRepository::new(pool));
         let migration = repository
-            .migrate_composable_default_policy(&legacy_inherited_enabled(settings))
+            .migrate_composable_default_policy(&inherited_enabled(settings))
             .await?;
         tracing::info!(
             previous_version = migration.previous_version,
@@ -101,7 +105,7 @@ impl RuntimeModules {
         let lifecycle = Arc::new(ServerModuleLifecycle {
             repository: repository.clone(),
         });
-        let instance_id = runtime_instance_id()?;
+        let instance_id = instance_id.to_owned();
         let (accepting, draining) =
             seed_desired_states(&repository, &catalog, &instance_id).await?;
         let registry = Arc::new(RuntimeModuleRegistry::new(
@@ -373,82 +377,6 @@ pub(crate) fn inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
             .filter_map(|(module_id, ready)| ready.then_some(module_id)),
     );
     enabled
-}
-
-fn legacy_inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
-    let settings = &settings.modules;
-    let mut enabled = BTreeSet::from([
-        ModuleId::TokenExchange,
-        ModuleId::JwtBearerGrant,
-        ModuleId::Jarm,
-        ModuleId::Scim,
-    ]);
-    let configured = [
-        (
-            ModuleId::DeviceAuthorization,
-            settings.enable_device_authorization_grant,
-        ),
-        (ModuleId::Ciba, settings.enable_ciba),
-        (
-            ModuleId::DynamicClientRegistration,
-            settings.enable_dynamic_client_registration,
-        ),
-        (
-            ModuleId::RequestObjects,
-            settings.enable_request_object || settings.enable_par_request_object,
-        ),
-        (
-            ModuleId::AuthorizationDetails,
-            settings.enable_authorization_details,
-        ),
-        (
-            ModuleId::HttpMessageSignatures,
-            settings.enable_fapi_http_signatures,
-        ),
-        (
-            ModuleId::ScimSecurityEvents,
-            settings.enable_scim_security_events,
-        ),
-        (
-            ModuleId::Openid4vciIssuer,
-            settings.enable_openid4vci_issuer,
-        ),
-        (
-            ModuleId::Openid4vpVerifier,
-            settings.enable_openid4vp_verifier,
-        ),
-        (ModuleId::NativeSso, settings.enable_native_sso),
-        (
-            ModuleId::FrontchannelLogout,
-            settings.enable_frontchannel_logout,
-        ),
-        (
-            ModuleId::SessionManagement,
-            settings.enable_session_management,
-        ),
-    ];
-    enabled.extend(
-        configured
-            .into_iter()
-            .filter_map(|(module_id, configured)| configured.then_some(module_id)),
-    );
-    enabled
-}
-
-fn runtime_instance_id() -> anyhow::Result<String> {
-    let configured =
-        std::env::var("NAZO_RUNTIME_INSTANCE_ID").unwrap_or_else(|_| "primary".to_owned());
-    if configured.is_empty()
-        || configured.len() > 255
-        || !configured.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-    {
-        anyhow::bail!(
-            "NAZO_RUNTIME_INSTANCE_ID must be 1..=255 ASCII letters, digits, dots, dashes, or underscores"
-        );
-    }
-    Ok(configured)
 }
 
 #[cfg(test)]

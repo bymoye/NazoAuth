@@ -117,17 +117,10 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
     "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
     "ENABLE_AUTHORIZATION_DETAILS",
-    "ENABLE_CIBA",
-    "ENABLE_DEVICE_AUTHORIZATION_GRANT",
-    "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
-    "ENABLE_FRONTCHANNEL_LOGOUT",
     "ENABLE_FAPI_HTTP_SIGNATURES",
     "ENABLE_NATIVE_SSO",
     "ENABLE_OPENID4VCI_ISSUER",
     "ENABLE_OPENID4VP_VERIFIER",
-    "ENABLE_PAR_REQUEST_OBJECT",
-    "ENABLE_REQUEST_OBJECT",
-    "ENABLE_SESSION_MANAGEMENT",
     "ENABLE_SCIM_SECURITY_EVENTS",
     "EMAIL_CODE_DEV_RESPONSE_ENABLED",
     "EMAIL_CODE_PEER_COOLDOWN_SECONDS",
@@ -232,6 +225,15 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "VALKEY_COMMAND_TIMEOUT_MS",
     "VALKEY_URL",
     "VALKEY_URL_FILE",
+];
+const REMOVED_CONFIG_KEYS: &[&str] = &[
+    "ENABLE_REQUEST_OBJECT",
+    "ENABLE_PAR_REQUEST_OBJECT",
+    "ENABLE_DEVICE_AUTHORIZATION_GRANT",
+    "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
+    "ENABLE_CIBA",
+    "ENABLE_FRONTCHANNEL_LOGOUT",
+    "ENABLE_SESSION_MANAGEMENT",
 ];
 // The server may share one allowlisted `.env.yaml` with the sidecar, but it
 // must not materialize the sidecar's database URL, endpoint, or HMAC secret.
@@ -463,6 +465,11 @@ impl ConfigSource {
         include_worker_config: bool,
     ) -> anyhow::Result<()> {
         for (key, value) in env {
+            if REMOVED_CONFIG_KEYS.contains(&key.as_str()) {
+                bail!(
+                    "{key} was removed; manage this capability through runtime-module administration"
+                );
+            }
             if !ENV_CONFIG_KEYS.contains(&key.as_str()) {
                 continue;
             }
@@ -528,36 +535,104 @@ impl ConfigSource {
             self.generated_values.insert(key.to_owned(), value);
         }
 
+        // These values are service-owned key material. Generate them once in
+        // the persistent data directory when the corresponding capability is
+        // configured, while preserving an explicitly supplied value/file.
+        if matches!(
+            self.string("CIBA_AUTOMATED_DECISION_MODE", "disabled")
+                .as_str(),
+            "header" | "query"
+        ) {
+            self.generate_secret_if_absent(
+                "CIBA_AUTOMATED_DECISION_TOKEN",
+                "ciba-automated-decision-token",
+                GENERATED_SECRET_BYTES,
+                &secrets_dir,
+            )?;
+        }
+        self.generate_secret_if_absent(
+            "MFA_TOTP_ENCRYPTION_KEY",
+            "mfa-totp-encryption-key",
+            32,
+            &secrets_dir,
+        )?;
+        if self.bool("ENABLE_OPENID4VCI_ISSUER", false)?
+            || self.bool("ENABLE_OPENID4VP_VERIFIER", false)?
+        {
+            self.generate_secret_if_absent(
+                "OPENID4VC_DATA_ENCRYPTION_KEY",
+                "openid4vc-data-encryption-key",
+                32,
+                &secrets_dir,
+            )?;
+        }
+        if self.bool("ENABLE_OPENID4VCI_ISSUER", false)? {
+            self.generate_secret_if_absent(
+                "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+                "openid4vci-issuer-management-token",
+                GENERATED_SECRET_BYTES,
+                &secrets_dir,
+            )?;
+        }
+        if self.bool("ENABLE_OPENID4VP_VERIFIER", false)? {
+            self.generate_secret_if_absent(
+                "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+                "openid4vp-verifier-management-token",
+                GENERATED_SECRET_BYTES,
+                &secrets_dir,
+            )?;
+        }
+
         // Token-issuance response envelopes have their own key ring. Keep a
         // local development key durable across restarts, but never derive it
         // from CLIENT_SECRET_PEPPER (the two capabilities rotate separately).
-        let response_key = "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY";
-        let mut generated_response_key = false;
-        if !self.env_values.contains_key(response_key)
-            && !self.file_values.contains_key(response_key)
-        {
-            let value = read_or_create_generated_secret_with_size(
-                &secrets_dir.join("token-issuance-response-encryption-key"),
-                32,
-            )?;
-            self.generated_values.insert(response_key.to_owned(), value);
-            generated_response_key = true;
-        }
-        let response_key_id = "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID";
-        if generated_response_key
-            && !self.env_values.contains_key(response_key_id)
-            && !self.file_values.contains_key(response_key_id)
-        {
-            let key = self.get(response_key).ok_or_else(|| {
-                anyhow::anyhow!("{response_key} is required before deriving its id")
-            })?;
-            let digest = blake3::hash(key.as_bytes()).to_hex().to_string();
-            self.generated_values.insert(
-                response_key_id.to_owned(),
-                format!("generated-{}", &digest[..16]),
-            );
-        }
+        self.generate_secret_if_absent(
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "token-issuance-response-encryption-key",
+            32,
+            &secrets_dir,
+        )?;
+        self.derive_key_id_if_absent(
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID",
+        );
+        self.derive_key_id_if_absent(
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID",
+        );
+        self.derive_key_id_if_absent("MFA_TOTP_ENCRYPTION_KEY", "MFA_TOTP_ENCRYPTION_KEY_ID");
+        self.derive_key_id_if_absent(
+            "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY",
+            "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID",
+        );
         Ok(())
+    }
+
+    fn generate_secret_if_absent(
+        &mut self,
+        key: &str,
+        file_name: &str,
+        bytes: usize,
+        secrets_dir: &Path,
+    ) -> anyhow::Result<()> {
+        if self.env_values.contains_key(key) || self.file_values.contains_key(key) {
+            return Ok(());
+        }
+        let value = read_or_create_generated_secret_with_size(&secrets_dir.join(file_name), bytes)?;
+        self.generated_values.insert(key.to_owned(), value);
+        Ok(())
+    }
+
+    fn derive_key_id_if_absent(&mut self, key: &str, id_key: &str) {
+        if self.get(id_key).is_some() {
+            return;
+        }
+        let Some(value) = self.get(key) else {
+            return;
+        };
+        let digest = blake3::hash(value.as_bytes()).to_hex().to_string();
+        self.generated_values
+            .insert(id_key.to_owned(), format!("generated-{}", &digest[..16]));
     }
 }
 

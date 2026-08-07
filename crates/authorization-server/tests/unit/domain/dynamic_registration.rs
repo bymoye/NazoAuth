@@ -107,13 +107,10 @@ fn unavailable_dynamic_registration_guard(
 
 #[tokio::test]
 async fn dynamic_registration_guard_fails_closed_for_unavailable_dependencies() {
-    let config = ConfigSource::from_pairs_for_test([
-        ("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true"),
-        (
-            "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
-            "initial-token",
-        ),
-    ]);
+    let config = ConfigSource::from_pairs_for_test([(
+        "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
+        "initial-token",
+    )]);
     let settings = Settings::from_config(&config).expect("enabled dynamic registration settings");
     let guard = unavailable_dynamic_registration_guard(&settings);
 

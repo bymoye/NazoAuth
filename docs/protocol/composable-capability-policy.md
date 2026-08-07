@@ -99,16 +99,16 @@ The runtime default-policy version and client policy are persisted.
 
 - On a **new database**, the composable defaults above are seeded.
 - On an **existing database**, every inherited runtime-module state is
-  atomically materialized as an explicit enabled/disabled row using the old
-  deployment settings. This preserves the deployment's effective behavior
-  during the upgrade.
+  atomically materialized as an explicit enabled/disabled row using the
+  current composable defaults. This gives the database one authoritative
+  policy source after the upgrade.
 - Existing clients with no stored `security_policy` retain the old
   `AUTHORIZATION_SERVER_PROFILE` behavior as a compatibility fallback.
 - Any newly created client receives an explicit version-1 baseline policy.
 
-After migration, runtime module administration is authoritative. Legacy
-`ENABLE_*` flags for the stable modules are migration inputs, not a second
-competing source of truth.
+After migration, runtime module administration is authoritative. The removed
+legacy stable-module `ENABLE_*` flags are not accepted by the configuration
+loader and are not a second competing source of truth.
 
 ## Discovery semantics
 

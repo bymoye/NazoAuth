@@ -1,10 +1,16 @@
+const REQUEST_SOURCE: &str = concat!(
+    include_str!("../../../../src/http/authorization/request/mod.rs"),
+    include_str!("../../../../src/http/authorization/request/flow.rs"),
+    include_str!("../../../../src/http/authorization/request/policy.rs"),
+    include_str!("../../../../src/http/authorization/request/pushed.rs"),
+    include_str!("../../../../src/http/authorization/request/reauth.rs"),
+    include_str!("../../../../src/http/authorization/request/response.rs"),
+);
+
 #[test]
 fn authorization_entrypoints_use_focused_dependencies() {
     for (name, source) in [
-        (
-            "request",
-            include_str!("../../../../src/http/authorization/request.rs"),
-        ),
+        ("request", REQUEST_SOURCE),
         (
             "par",
             include_str!("../../../../src/http/authorization/par.rs"),
@@ -36,10 +42,7 @@ fn authorization_entrypoints_use_focused_dependencies() {
         );
     }
     for (name, source) in [
-        (
-            "request",
-            include_str!("../../../../src/http/authorization/request.rs"),
-        ),
+        ("request", REQUEST_SOURCE),
         (
             "par",
             include_str!("../../../../src/http/authorization/par.rs"),

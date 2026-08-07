@@ -208,6 +208,34 @@ fn unknown_yaml_key_is_rejected_with_the_key_name() {
 }
 
 #[test]
+fn removed_stable_module_flags_are_rejected_instead_of_becoming_hidden_policy() {
+    for key in [
+        "ENABLE_REQUEST_OBJECT",
+        "ENABLE_PAR_REQUEST_OBJECT",
+        "ENABLE_DEVICE_AUTHORIZATION_GRANT",
+        "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
+        "ENABLE_CIBA",
+        "ENABLE_FRONTCHANNEL_LOGOUT",
+        "ENABLE_SESSION_MANAGEMENT",
+    ] {
+        let path = temp_config_dir("removed_module_flag");
+        std::fs::write(path.join(CONFIG_FILE), format!("{key}: true\n")).unwrap();
+        let error = ConfigSource::load_from_dir(&path)
+            .expect_err("removed stable module flags must not be accepted");
+        assert!(error.to_string().contains(key), "{key}");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+    let path = temp_config_dir("removed_module_env");
+    let error = ConfigSource::load_from_dir_with_env(
+        &path,
+        [("ENABLE_CIBA".to_owned(), "false".to_owned())],
+    )
+    .expect_err("removed stable module environment flags must not be ignored");
+    assert!(error.to_string().contains("ENABLE_CIBA was removed"));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn yaml_document_must_be_a_mapping_with_non_empty_string_keys() {
     let sequence = temp_config_dir("yaml_top_level_sequence");
     std::fs::write(sequence.join(CONFIG_FILE), "- ISSUER\n").unwrap();
@@ -279,6 +307,7 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
         "CLIENT_SECRET_PEPPER",
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
         "PAIRWISE_SUBJECT_SECRET",
+        "MFA_TOTP_ENCRYPTION_KEY",
         "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
     ] {
         assert!(first.required_string(key).unwrap().len() >= 32);
@@ -294,6 +323,12 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
             .unwrap(),
         format!("generated-{}", &digest[..16])
     );
+    let mfa_key = first.required_string("MFA_TOTP_ENCRYPTION_KEY").unwrap();
+    let mfa_digest = blake3::hash(mfa_key.as_bytes()).to_hex().to_string();
+    assert_eq!(
+        first.required_string("MFA_TOTP_ENCRYPTION_KEY_ID").unwrap(),
+        format!("generated-{}", &mfa_digest[..16])
+    );
     let explicit = ConfigSource::load_from_dir_with_env(
         &path,
         [(
@@ -306,6 +341,41 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
         explicit.required_string("CLIENT_SECRET_PEPPER").unwrap(),
         "explicit-client-secret-pepper-value-123456"
     );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn configured_capabilities_receive_durable_service_owned_secrets() {
+    let path = temp_config_dir("generated_capability_secrets");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        concat!(
+            "DATA_DIR: state\n",
+            "CIBA_AUTOMATED_DECISION_MODE: header\n",
+            "ENABLE_OPENID4VCI_ISSUER: true\n",
+            "ENABLE_OPENID4VP_VERIFIER: true\n",
+        ),
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+    for key in [
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "OPENID4VC_DATA_ENCRYPTION_KEY",
+        "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+        "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+    ] {
+        assert!(source.required_string(key).unwrap().len() >= 32, "{key}");
+    }
+    let second = ConfigSource::load_from_dir(&path).unwrap();
+    for key in [
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "OPENID4VC_DATA_ENCRYPTION_KEY",
+        "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+        "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+    ] {
+        assert_eq!(source.get(key), second.get(key), "{key} must be stable");
+    }
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -731,17 +801,10 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
             "ENABLE_AUTHORIZATION_DETAILS",
-            "ENABLE_CIBA",
-            "ENABLE_DEVICE_AUTHORIZATION_GRANT",
-            "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
-            "ENABLE_FRONTCHANNEL_LOGOUT",
             "ENABLE_FAPI_HTTP_SIGNATURES",
             "ENABLE_NATIVE_SSO",
             "ENABLE_OPENID4VCI_ISSUER",
             "ENABLE_OPENID4VP_VERIFIER",
-            "ENABLE_PAR_REQUEST_OBJECT",
-            "ENABLE_REQUEST_OBJECT",
-            "ENABLE_SESSION_MANAGEMENT",
             "ENABLE_SCIM_SECURITY_EVENTS",
             "EMAIL_CODE_DEV_RESPONSE_ENABLED",
             "EMAIL_CODE_PEER_COOLDOWN_SECONDS",

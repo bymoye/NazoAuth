@@ -1,7 +1,6 @@
 {
   "schema": 2,
   "repository": "nazozero/NazoAuth",
-  "updater_install_path": "/usr/local/sbin/nazoauthctl",
   "backup_root": "/opt/nazo-oauth/backups",
   "deployment_root": "/opt/nazo-oauth/deployments",
   "operator": {

@@ -114,6 +114,10 @@ impl ControlDiscoveryEndpoint {
         })
     }
 
+    pub(crate) fn runtime_instance_id(&self) -> &str {
+        &self.identity.deployment.runtime_instance_id
+    }
+
     fn respond(&self, request: DiscoveryRequest) -> anyhow::Result<DiscoveryResponse> {
         validate_discovery_request(&request)?;
         let issued_at = Utc::now().timestamp();

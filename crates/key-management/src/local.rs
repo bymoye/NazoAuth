@@ -1,7 +1,19 @@
 use std::{future::Future, pin::Pin};
 
+use anyhow::anyhow;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
 use nazo_auth::{SignError, Signature};
+use serde_json::json;
+
+use crate::{
+    lifecycle::create_prepublished_local_key_entry,
+    model::{KeySettings, LocalKeyRegistration},
+    serialization::{
+        key_entry_purposes, keyset_keys, keyset_keys_mut, load_keyset_json, validate_keyset_json,
+        write_json_atomic,
+    },
+};
 
 pub(crate) trait SigningBackend {
     fn sign<'a>(
@@ -45,4 +57,79 @@ fn sign(
         _ => return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into()),
     };
     jsonwebtoken::crypto::sign(signing_input, &key, algorithm)
+}
+
+pub(crate) async fn register_local_key(
+    settings: &KeySettings,
+    registration: LocalKeyRegistration,
+) -> anyhow::Result<String> {
+    if registration.purposes.is_empty() {
+        anyhow::bail!("purpose-scoped local key requires at least one signing purpose");
+    }
+    if registration.purposes.iter().any(|purpose| {
+        !matches!(
+            purpose,
+            nazo_auth::SigningPurpose::Credential | nazo_auth::SigningPurpose::PresentationRequest
+        )
+    }) {
+        anyhow::bail!(
+            "purpose-scoped local keys are restricted to credential and presentation_request"
+        );
+    }
+    let algorithm = crate::serialization::signing_algorithm_name(registration.algorithm)
+        .ok_or_else(|| anyhow!("unsupported signing alg"))?;
+    let path = settings.keys_dir.join("keyset.json");
+    let mut keyset = load_keyset_json(settings).await?;
+    for key in keyset_keys(&keyset)? {
+        if key.get("alg").and_then(serde_json::Value::as_str) != Some(algorithm) {
+            continue;
+        }
+        let Some(existing) = key_entry_purposes(key)? else {
+            continue;
+        };
+        if existing == registration.purposes {
+            return key
+                .get("kid")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("purpose-scoped key is missing kid"));
+        }
+        if existing
+            .iter()
+            .any(|purpose| registration.purposes.contains(purpose))
+        {
+            anyhow::bail!(
+                "a purpose-scoped {algorithm} key already covers one or more requested purposes"
+            );
+        }
+    }
+    let mut entry =
+        create_prepublished_local_key_entry(settings, registration.algorithm, Utc::now()).await?;
+    let kid = entry
+        .get("kid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("generated local key entry missing kid"))?
+        .to_owned();
+    let file = entry
+        .get("file")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("generated local key entry missing file"))?
+        .to_owned();
+    entry["purposes"] = json!(
+        registration
+            .purposes
+            .iter()
+            .map(|purpose| purpose.as_str())
+            .collect::<Vec<_>>()
+    );
+    keyset_keys_mut(&mut keyset)?.push(entry);
+    let result = match validate_keyset_json(&keyset) {
+        Ok(()) => write_json_atomic(&path, &keyset).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(settings.keys_dir.join(file)).await;
+        return Err(error);
+    }
+    Ok(kid)
 }

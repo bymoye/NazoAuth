@@ -1,5 +1,6 @@
 //! External signer boundary for active JWT signing keys.
 
+use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
@@ -15,7 +16,13 @@ use tokio::sync::Semaphore;
 use tokio::time;
 
 use crate::local::SigningBackend;
-use crate::{model::ExternalSigningKey, store::signing_algorithm_name};
+use crate::{
+    model::{ExternalKeyRegistration, ExternalSigningKey, KeySettings},
+    serialization::{
+        keyset_keys, keyset_keys_mut, load_keyset_json, signing_algorithm_name,
+        validate_keyset_json, write_json_atomic,
+    },
+};
 use nazo_auth::{SignError, Signature};
 use std::{
     future::Future,
@@ -502,6 +509,54 @@ fn decoding_key_from_public_jwk(
 
 pub(super) fn jwt_provider_error(message: impl Into<String>) -> jsonwebtoken::errors::Error {
     jsonwebtoken::errors::ErrorKind::Provider(message.into()).into()
+}
+
+/// Registers an externally managed signing key without copying private material into the keyset.
+///
+/// The public JWK is read before the keyset is changed, and the JSON update is committed through
+/// the shared atomic writer.  Retrying the exact registration is idempotent; changing any part of
+/// an existing `kid` fails closed so a key reference cannot silently drift.
+pub(crate) async fn register_external_key(
+    settings: &KeySettings,
+    registration: ExternalKeyRegistration,
+) -> anyhow::Result<()> {
+    let algorithm = signing_algorithm_name(registration.algorithm)
+        .ok_or_else(|| anyhow::anyhow!("unsupported signing alg"))?;
+    let public_jwk_raw = tokio::fs::read_to_string(&registration.public_jwk_file)
+        .await
+        .with_context(|| format!("failed to read {}", registration.public_jwk_file.display()))?;
+    let public_jwk: Value = serde_json::from_str(&public_jwk_raw)
+        .with_context(|| format!("failed to parse {}", registration.public_jwk_file.display()))?;
+    let path = settings.keys_dir.join("keyset.json");
+    let mut keyset = if path.exists() {
+        load_keyset_json(settings).await?
+    } else {
+        json!({"active_kid":registration.kid,"keys":[]})
+    };
+    if let Some(existing) = keyset_keys(&keyset)?
+        .iter()
+        .find(|key| key.get("kid").and_then(Value::as_str) == Some(registration.kid.as_str()))
+    {
+        if existing.get("alg").and_then(Value::as_str) == Some(algorithm)
+            && existing.get("key_ref").and_then(Value::as_str)
+                == Some(registration.key_ref.as_str())
+            && existing.get("public_jwk") == Some(&public_jwk)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("external key kid already exists with different material");
+    }
+    keyset_keys_mut(&mut keyset)?.push(json!({
+        "kid":registration.kid,
+        "alg":algorithm,
+        "backend":"external-command",
+        "key_ref":registration.key_ref,
+        "public_jwk":public_jwk,
+        "created_at":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "retire_at":null
+    }));
+    validate_keyset_json(&keyset)?;
+    write_json_atomic(&path, &keyset).await
 }
 
 #[cfg(test)]

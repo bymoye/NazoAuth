@@ -73,10 +73,10 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
 | `CIBA_AUTOMATED_DECISION_MODE` | `disabled` | Automated decisions are closed by default. `nazoauthctl conformance lease create` can temporarily admit the OIDF GET/query endpoint for clients owned by that exact `oidc-fapi-ciba` lease and its independently generated token digest; lease expiry or revocation closes it immediately. Explicit `header` (POST + `Authorization: Bearer`) and `query` (legacy GET/query) modes retain their static transport behavior and are intended only for isolated conformance deployments. |
-| `CIBA_AUTOMATED_DECISION_TOKEN` | unset | 32+ byte static secret required only by explicit `header`/`query` modes. The default lease-gated OIDF path does not read it. Prefer `CIBA_AUTOMATED_DECISION_TOKEN_FILE` when an isolated deployment explicitly selects a static mode. |
-| `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | unset | Current 32-byte base64url key and non-empty version id for TOTP seed envelope encryption. Without it, TOTP operations fail closed; prefer `MFA_TOTP_ENCRYPTION_KEY_FILE`. |
+| `CIBA_AUTOMATED_DECISION_TOKEN` | generated only for explicit static mode | 32+ byte static secret required only by explicit `header`/`query` modes. The default lease-gated OIDF path does not read it. Prefer `CIBA_AUTOMATED_DECISION_TOKEN_FILE` when an isolated deployment explicitly selects a static mode. |
+| `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | generated under `DATA_DIR/secrets` | Current 32-byte base64url key and derived version id for TOTP seed envelope encryption. Prefer `MFA_TOTP_ENCRYPTION_KEY_FILE` when importing a controlled existing key. |
 | `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional previous key pair accepted only while rotating TOTP envelopes; startup re-wraps legacy/previous rows before serving traffic, so retain it until that startup succeeds. |
-| `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` for local development | Independent current 32-byte base64url key and non-empty key id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`. Production should inject it with `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_FILE` and persist the matching id. Missing or malformed pairs fail startup. |
+| `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` | Independent current 32-byte base64url key and derived id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`; file injection remains available for controlled rotation. Missing or malformed pairs fail startup. |
 | `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY` / `_ID` | unset | Optional previous key retained only during a rotation overlap; use `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE` for file injection. Existing live envelopes decrypt with current or previous; new envelopes always use current. Startup authenticates every live envelope, and expired rows are lazily removed before a grant key is reused. Remove the previous pair only after all rows encrypted with that id have expired and all old instances have stopped writing it. |
 | `OPENID4VC_REVOCATION_POLICY` | `disabled` | `disabled`, `optional`, or `required`. The VP verifier requires `required`; enabling a policy also requires a bounded local snapshot file. Request handling never performs network or file I/O. |
 | `OPENID4VC_REVOCATION_SNAPSHOT_FILE` | unset | Operator-controlled JSON snapshot containing SHA-256 certificate identities and `good`/`revoked` status with hard `this_update`/`next_update` bounds. Invalid reloads retain the previous snapshot only until its own expiry. |
@@ -138,15 +138,16 @@ grant/metadata are assigned. Session Management similarly requires
 `session_management=true`.
 
 Dynamic Client Registration is active only when
-`DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. Experimental,
-draft, remote-trust, and role-specific modules remain conditional on their
-complete prerequisites.
+`DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. The token is
+generated and persisted by the server/managed installer when it is not
+provided. Experimental, draft, remote-trust, and role-specific modules remain
+conditional on their complete prerequisites.
 
 During the first upgrade to composable defaults, existing inherited module
-states are materialized as explicit rows using the old `ENABLE_*` settings.
-This avoids silently changing an existing deployment. After migration, runtime
-module administration is authoritative; the old stable-module flags are only
-migration inputs.
+states are materialized as explicit rows using the current composable defaults.
+After migration, runtime module administration is authoritative. The removed
+stable-module flags are not accepted as configuration and must be deleted from
+older `.env.yaml` files before restarting.
 
 See
 [Composable Capability Policy](../protocol/composable-capability-policy.md)
@@ -211,11 +212,10 @@ is only appropriate for local loopback development.
 The following settings are still supported but should not be part of a quick
 deployment path. They are candidates for the administrator UI:
 
-- OAuth/OIDC compatibility/migration gates: `ENABLE_REQUEST_OBJECT`,
-  `ENABLE_PAR_REQUEST_OBJECT`, `ENABLE_DEVICE_AUTHORIZATION_GRANT`,
-  `ENABLE_DYNAMIC_CLIENT_REGISTRATION`; new deployments use runtime-module
-  state and per-client policy
-- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`
+- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`,
+  `ENABLE_NATIVE_SSO`, `ENABLE_FAPI_HTTP_SIGNATURES`,
+  `ENABLE_SCIM_SECURITY_EVENTS`, `ENABLE_OPENID4VCI_ISSUER`,
+  `ENABLE_OPENID4VP_VERIFIER`
 - protocol tuning: `DPOP_NONCE_POLICY`, `FAPI_RESOURCE_DPOP_NONCE_POLICY`, `REQUEST_OBJECT_JTI_POLICY`,
   `CIBA_SECURITY_PROFILE`, `REQUIRE_PUSHED_AUTHORIZATION_REQUESTS`,
   `PAR_TTL_SECONDS`,

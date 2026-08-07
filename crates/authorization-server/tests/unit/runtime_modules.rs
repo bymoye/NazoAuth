@@ -2,13 +2,6 @@ use super::*;
 use crate::config::ConfigSource;
 
 #[test]
-fn instance_id_is_nonempty_and_storage_bounded() {
-    let instance_id = runtime_instance_id().expect("default runtime instance id is valid");
-    assert!(!instance_id.trim().is_empty());
-    assert!(instance_id.len() <= 255);
-}
-
-#[test]
 fn stable_dormant_capabilities_are_inherited_on() {
     let settings =
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
@@ -79,15 +72,15 @@ fn native_sso_depends_on_token_exchange() {
 }
 
 #[test]
-fn legacy_defaults_remain_available_for_upgrade_materialization() {
+fn migration_defaults_match_current_composable_defaults() {
     let settings =
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-    let legacy = legacy_inherited_enabled(&settings);
+    let inherited = inherited_enabled(&settings);
 
-    assert!(!legacy.contains(&ModuleId::DeviceAuthorization));
-    assert!(!legacy.contains(&ModuleId::Ciba));
-    assert!(!legacy.contains(&ModuleId::RequestObjects));
-    assert!(!legacy.contains(&ModuleId::SessionManagement));
+    assert!(inherited.contains(&ModuleId::DeviceAuthorization));
+    assert!(inherited.contains(&ModuleId::Ciba));
+    assert!(inherited.contains(&ModuleId::RequestObjects));
+    assert!(inherited.contains(&ModuleId::SessionManagement));
 }
 
 #[tokio::test]
@@ -102,7 +95,7 @@ async fn initialization_reconciles_the_persisted_catalog_before_exposing_a_snaps
     let settings =
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
 
-    let runtime = RuntimeModules::initialize(pool, &settings)
+    let runtime = RuntimeModules::initialize(pool, &settings, "test-instance")
         .await
         .expect("persisted module policy should initialize");
 

@@ -2,24 +2,32 @@
 use std::sync::Arc;
 
 use crate::adapters::security::ClientCredentials;
-use crate::adapters::security::blake3_hex;
-
-use crate::domain::{AuthorizationCodeState, ClientRow};
-
 use crate::http::client_attestation::client_attestation_headers;
 use crate::http::dpop::dpop_proof_present;
-use crate::http::mtls::client_mtls_certificate_matches;
 use crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy;
-use crate::http::rate_limit::rate_limited_response;
-
-use actix_web::http::{StatusCode, header};
+use actix_web::http::StatusCode;
+#[cfg(test)]
+use actix_web::http::header;
 use actix_web::web::{Bytes, Data};
 use actix_web::{HttpRequest, HttpResponse};
-
-use nazo_http_actix::client_ip_with_context;
 use nazo_http_actix::{TokenClientAuthForm, oauth_token_error, token_client_auth_transport_facts};
 
-// 只负责客户端认证与 grant_type 分派，不直接签发令牌。
+mod client_auth;
+mod errors;
+mod pre_authorized;
+mod rate_limit;
+
+pub(crate) use self::client_auth::validate_token_request_profile_with_profile;
+use self::client_auth::{
+    attestation_client_id_matches_form_hint, missing_client_authorization_code_holder_error,
+    mtls_client_credentials_without_client_id, validate_token_client_enabled,
+};
+use self::errors::{client_credentials_holder_missing_client_error, pre_authorized_token_error};
+use self::pre_authorized::pre_authorized_parameters;
+use self::rate_limit::enforce_token_rate_limit;
+
+#[cfg(test)]
+use super::TokenForm;
 use super::ciba::{CibaTokenContext, CibaTokenHandles};
 use super::client_auth::{
     ClientAuthConfig, TokenManagementClientAuthError, authenticate_client_with_dependencies,
@@ -29,185 +37,17 @@ use super::client_auth::{
 use super::issue::{TokenIssuanceConfig, TokenIssuanceContext};
 use super::{
     CIBA_GRANT_TYPE, DEVICE_CODE_GRANT_TYPE, JWT_BEARER_GRANT_TYPE, ServerTokenService,
-    TOKEN_EXCHANGE_GRANT_TYPE, TokenForm, TokenFormError, client_auth_request_facts,
-    parse_token_form, token_authorization_code_with_service, token_ciba,
-    token_client_credentials_with_service, token_device_code_with_service, token_exchange,
-    token_jwt_bearer_with_service, token_refresh_with_service,
+    TOKEN_EXCHANGE_GRANT_TYPE, TokenFormError, client_auth_request_facts, parse_token_form,
+    token_authorization_code_with_service, token_ciba, token_client_credentials_with_service,
+    token_device_code_with_service, token_exchange, token_jwt_bearer_with_service,
+    token_refresh_with_service,
 };
 use crate::http::authorization::ServerAuthorizationService;
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use nazo_auth::{
-    CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientAuthenticationContext, ClientProfile,
-    ProtocolErrorCode, SecurityProfile, SenderConstraintPolicy,
+    CLIENT_ASSERTION_TYPE_JWT_BEARER, ClientAuthenticationContext,
     token_client_authentication_context, unverified_client_assertion_client_id,
-    validate_token_request_profile as validate_auth_token_request_profile,
 };
-
-fn mtls_client_credentials(client_id: String) -> ClientCredentials {
-    ClientCredentials {
-        client_id: Some(client_id),
-        client_secret: None,
-        client_assertion: None,
-        method: "tls_client_auth".to_owned(),
-    }
-}
-
-async fn mtls_client_credentials_without_client_id(
-    service: &ServerAuthorizationService,
-    trusted_proxy_cidrs: &[nazo_http_actix::IpCidr],
-    req: &HttpRequest,
-) -> Result<Option<ClientCredentials>, HttpResponse> {
-    let Some(certificate) =
-        request_mtls_client_certificate_from_trusted_proxy(req, trusted_proxy_cidrs)
-    else {
-        return Ok(None);
-    };
-    match service.active_mtls_candidates(1000).await {
-        Ok(candidates) => {
-            let clients = candidates
-                .into_iter()
-                .filter(|client| client_mtls_certificate_matches(client, &certificate))
-                .take(2)
-                .collect::<Vec<_>>();
-            Ok(match clients.as_slice() {
-                [client] => Some(mtls_client_credentials(client.client_id.clone())),
-                _ => None,
-            })
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to query mTLS client by certificate identity");
-            Err(oauth_token_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "客户端查询失败.",
-                false,
-            ))
-        }
-    }
-}
-
-fn authorization_code_holder_missing_client_error(
-    dpop_bound: bool,
-    mtls_bound: bool,
-) -> Option<HttpResponse> {
-    if mtls_bound {
-        return Some(oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "authorization code proof of possession validation failed.",
-            false,
-        ));
-    }
-    if dpop_bound {
-        return Some(oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "authorization code proof of possession validation failed.",
-            false,
-        ));
-    }
-    None
-}
-
-fn client_credentials_holder_missing_client_error(
-    form: &TokenForm,
-    dpop_present: bool,
-) -> Option<HttpResponse> {
-    if form.grant_type != "client_credentials" || dpop_present {
-        return None;
-    }
-    Some(oauth_token_error(
-        StatusCode::BAD_REQUEST,
-        "invalid_request",
-        "client_credentials requires a holder-of-key proof.",
-        false,
-    ))
-}
-
-async fn missing_client_authorization_code_holder_error(
-    token_service: &ServerTokenService,
-    authorization_service: &ServerAuthorizationService,
-    form: &TokenForm,
-) -> Option<HttpResponse> {
-    if form.grant_type != "authorization_code" {
-        return None;
-    }
-    let code = form.code.as_deref()?;
-    let stored = match token_service
-        .load_authorization_code(&blake3_hex(code))
-        .await
-    {
-        Ok(Some(value)) => value,
-        Ok(None) => return None,
-        Err(error) => {
-            tracing::warn!(%error, "failed to read authorization code before client authentication");
-            return Some(oauth_token_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "授权码校验失败.",
-                false,
-            ));
-        }
-    };
-    let payload = match stored {
-        AuthorizationCodeState::Pending { payload } => payload,
-        _ => return None,
-    };
-    if let Some(response) = authorization_code_holder_missing_client_error(
-        payload.dpop_jkt.is_some(),
-        payload.mtls_x5t_s256.is_some(),
-    ) {
-        return Some(response);
-    }
-    match authorization_service.client_by_id(&payload.client_id).await {
-        Ok(Some(client))
-            if client.require_dpop_bound_tokens || client.require_mtls_bound_tokens =>
-        {
-            authorization_code_holder_missing_client_error(
-                client.require_dpop_bound_tokens,
-                client.require_mtls_bound_tokens,
-            )
-        }
-        Ok(_) => None,
-        Err(error) => {
-            tracing::warn!(%error, "failed to query authorization code client before client authentication");
-            Some(oauth_token_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "客户端查询失败.",
-                false,
-            ))
-        }
-    }
-}
-
-async fn enforce_token_rate_limit(
-    service: &ServerAuthorizationService,
-    config: &TokenIssuanceConfig,
-    req: &HttpRequest,
-) -> Result<(), HttpResponse> {
-    let subject = client_ip_with_context(
-        req,
-        config.client_ip_header_mode(),
-        config.trusted_proxy_cidrs(),
-    );
-    let count = service
-        .increment_token_rate(&subject, config.rate_limit_window_seconds())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "token rate limit increment failed");
-            oauth_token_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "请求频率校验失败.",
-                false,
-            )
-        })?;
-    if count > config.token_rate_limit_max_requests() {
-        return Err(rate_limited_response(config.rate_limit_window_seconds()));
-    }
-    Ok(())
-}
 
 pub(crate) struct TokenEndpointHandles {
     core: TokenCoreHandles,
@@ -831,133 +671,17 @@ pub(crate) async fn token_with_service(
     }
 }
 
-fn pre_authorized_parameters(body: &Bytes) -> Result<(String, Option<String>), HttpResponse> {
-    let mut pre_authorized_code = None;
-    let mut tx_code = None;
-    for (name, value) in url::form_urlencoded::parse(body) {
-        match name.as_ref() {
-            "pre-authorized_code" if pre_authorized_code.is_none() && !value.is_empty() => {
-                pre_authorized_code = Some(value.into_owned());
-            }
-            "tx_code" if tx_code.is_none() && !value.is_empty() => {
-                tx_code = Some(value.into_owned());
-            }
-            "pre-authorized_code" | "tx_code" => {
-                return Err(oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    "Pre-authorized issuance parameters must be non-empty and must not repeat.",
-                    false,
-                ));
-            }
-            _ => {}
-        }
-    }
-    pre_authorized_code
-        .map(|code| (code, tx_code))
-        .ok_or_else(|| {
-            oauth_token_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "pre-authorized_code is required.",
-                false,
-            )
-        })
-}
-
-fn pre_authorized_token_error(
-    error: nazo_openid4vc_http_actix::CredentialHttpError,
-) -> HttpResponse {
-    let mut response = oauth_token_error(
-        StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_REQUEST),
-        error.error,
-        error.description,
-        false,
-    );
-    if let Some(challenge) = match error.error {
-        "use_dpop_nonce" => Some(header::HeaderValue::from_static(
-            r#"DPoP error="use_dpop_nonce""#,
-        )),
-        "invalid_dpop_proof" => Some(header::HeaderValue::from_static(
-            r#"DPoP error="invalid_dpop_proof""#,
-        )),
-        _ => None,
-    } {
-        response
-            .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, challenge);
-    }
-    if let Some(nonce) = error.dpop_nonce
-        && let Ok(value) = header::HeaderValue::from_str(&nonce)
-    {
-        response
-            .headers_mut()
-            .insert(header::HeaderName::from_static("dpop-nonce"), value);
-    }
-    response
-}
-
-fn attestation_client_id_matches_form_hint(
-    form_client_id: Option<&str>,
-    attested_client_id: &str,
-) -> bool {
-    form_client_id.is_none_or(|client_id| client_id == attested_client_id)
-}
-
 pub(crate) use token_with_service as token;
 
-fn validate_token_client_enabled(client: &ClientRow, grant_type: &str) -> Result<(), HttpResponse> {
-    if !client.is_active || !client.grant_types.iter().any(|grant| grant == grant_type) {
-        return Err(oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "unauthorized_client",
-            "该客户端未启用当前授权类型.",
-            false,
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_token_request_profile_with_profile(
-    server_profile: crate::settings::AuthorizationServerProfile,
-    client: &ClientRow,
-    auth_method: &str,
-) -> Result<(), HttpResponse> {
-    let profile = if server_profile
-        .effective_client_policy(client)
-        .requires_fapi2_security()
-    {
-        SecurityProfile::Fapi2Security
-    } else {
-        SecurityProfile::Baseline
-    };
-    let sender_constraint = match (
-        client.require_dpop_bound_tokens,
-        client.require_mtls_bound_tokens,
-    ) {
-        (false, false) => SenderConstraintPolicy::BearerAllowed,
-        (true, false) => SenderConstraintPolicy::DpopRequired,
-        (false, true) => SenderConstraintPolicy::MtlsRequired,
-        (true, true) => SenderConstraintPolicy::DpopOrMtls,
-    };
-    validate_auth_token_request_profile(
-        profile,
-        ClientProfile {
-            client_type: &client.client_type,
-            authentication_method: auth_method,
-            sender_constraint,
-        },
-    )
-    .map_err(|error| {
-        let status = if error.code == ProtocolErrorCode::InvalidClient {
-            StatusCode::UNAUTHORIZED
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        oauth_token_error(status, error.code.as_str(), error.description, false)
-    })
-}
+#[cfg(test)]
+use self::client_auth::mtls_client_credentials;
+#[cfg(test)]
+use self::errors::authorization_code_holder_missing_client_error;
+#[cfg(test)]
+use crate::adapters::security::blake3_hex;
+#[cfg(test)]
+use crate::domain::{AuthorizationCodeState, ClientRow};
 
 #[cfg(test)]
-#[path = "../../../tests/unit/http/token/dispatch.rs"]
+#[path = "../../../../tests/unit/http/token/dispatch.rs"]
 mod tests;

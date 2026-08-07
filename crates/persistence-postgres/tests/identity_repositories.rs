@@ -2323,8 +2323,24 @@ fn oauth_client_persistence_contract_skips_cfg_test_items_with_const_generics() 
 #[test]
 fn oauth_client_repository_keeps_records_private_and_returns_domain_clients() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repository = std::fs::read_to_string(manifest.join("src/repositories/clients.rs"))
-        .expect("OAuth client repository source is readable");
+    let repository = [
+        "src/repositories/clients/mod.rs",
+        "src/repositories/clients/base.rs",
+        "src/repositories/clients/query.rs",
+        "src/repositories/clients/mutation.rs",
+        "src/repositories/clients/logout.rs",
+        "src/repositories/clients/admin.rs",
+        "src/repositories/clients/dynamic_registration.rs",
+        "src/repositories/clients/mapping.rs",
+    ]
+    .into_iter()
+    .map(|path| {
+        std::fs::read_to_string(manifest.join(path)).unwrap_or_else(|error| {
+            panic!("OAuth client repository source {path} is readable: {error}")
+        })
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
     let postgres_root = std::fs::read_to_string(manifest.join("src/lib.rs"))
         .expect("postgres crate root is readable");
     let server_rows =
@@ -2455,6 +2471,11 @@ fn identity_claim_boundaries_use_narrow_single_snapshot_reads() {
     let issue =
         std::fs::read_to_string(manifest.join("../authorization-server/src/http/token/issue.rs"))
             .expect("token issue source is readable");
+    let issue_grant = std::fs::read_to_string(
+        manifest.join("../authorization-server/src/http/token/issue_grant.rs"),
+    )
+    .expect("token grant issue source is readable");
+    let issue = format!("{issue}\n{issue_grant}");
     let userinfo =
         std::fs::read_to_string(manifest.join("../authorization-server/src/domain/userinfo.rs"))
             .expect("userinfo domain adapter source is readable");

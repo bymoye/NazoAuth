@@ -1,11 +1,63 @@
+use std::io::ErrorKind;
+
 use anyhow::{Context, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
+use serde_json::Value;
+use sha2::Digest as _;
 
 use crate::{
     KeyManager,
     crypto::{aes_256_gcm_decrypt, rsa_oaep_sha256_decrypt},
+    model::KeySettings,
+    serialization::write_private_key_pem_if_absent,
 };
+
+pub(crate) const REQUEST_OBJECT_ENCRYPTION_KEY_FILE: &str = "request-object-encryption.pem";
+
+pub(crate) async fn ensure_request_object_encryption_key(
+    settings: &KeySettings,
+) -> anyhow::Result<()> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    let pem = String::from_utf8(crate::crypto::generate_rsa_pkcs8_pem(3072)?)
+        .context("generated request object key was not PEM text")?;
+    write_private_key_pem_if_absent(&path, &pem).await
+}
+
+pub(crate) async fn load_request_object_decryption_key(
+    settings: &KeySettings,
+) -> anyhow::Result<Vec<u8>> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    let pem = tokio::fs::read(&path)
+        .await
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    crate::crypto::validate_rsa_pkcs8_pem(&pem)
+        .context("request object decryption key is not valid PKCS#8 PEM")?;
+    Ok(pem)
+}
+
+pub(crate) fn request_object_encryption_jwk(private_key_pem: &[u8]) -> anyhow::Result<Value> {
+    let (n, e, public_der) = crate::crypto::rsa_public_components_from_pem(private_key_pem)?;
+    let kid = format!(
+        "request-object-{}",
+        URL_SAFE_NO_PAD.encode(&sha2::Sha256::digest(&public_der)[..12])
+    );
+    Ok(serde_json::json!({
+        "kty": "RSA",
+        "use": "enc",
+        "alg": "RSA-OAEP-256",
+        "kid": kid,
+        "n": URL_SAFE_NO_PAD.encode(n),
+        "e": URL_SAFE_NO_PAD.encode(e)
+    }))
+}
 
 #[derive(Deserialize)]
 struct ProtectedHeader {

@@ -547,14 +547,7 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     assert!(defaults.ciba.ciba_notification_private_origins.is_empty());
 
     let config = ConfigSource::from_pairs_for_test([
-        ("ENABLE_REQUEST_OBJECT", "true"),
-        ("ENABLE_PAR_REQUEST_OBJECT", "true"),
         ("ENABLE_AUTHORIZATION_DETAILS", "true"),
-        ("ENABLE_DEVICE_AUTHORIZATION_GRANT", "true"),
-        ("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true"),
-        ("ENABLE_FRONTCHANNEL_LOGOUT", "true"),
-        ("ENABLE_SESSION_MANAGEMENT", "true"),
-        ("ENABLE_CIBA", "true"),
         ("ENABLE_NATIVE_SSO", "true"),
         ("ENABLE_SCIM_SECURITY_EVENTS", "true"),
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
@@ -612,14 +605,14 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     ]);
     let settings = Settings::from_config(&config).unwrap();
 
-    assert!(settings.modules.enable_request_object);
-    assert!(settings.modules.enable_par_request_object);
+    assert!(!settings.modules.enable_request_object);
+    assert!(!settings.modules.enable_par_request_object);
     assert!(settings.modules.enable_authorization_details);
-    assert!(settings.modules.enable_device_authorization_grant);
+    assert!(!settings.modules.enable_device_authorization_grant);
     assert!(settings.modules.enable_dynamic_client_registration);
-    assert!(settings.modules.enable_frontchannel_logout);
-    assert!(settings.modules.enable_session_management);
-    assert!(settings.modules.enable_ciba);
+    assert!(!settings.modules.enable_frontchannel_logout);
+    assert!(!settings.modules.enable_session_management);
+    assert!(!settings.modules.enable_ciba);
     assert!(settings.modules.enable_native_sso);
     assert!(settings.modules.enable_scim_security_events);
     assert!(settings.modules.enable_openid4vci_issuer);
@@ -662,25 +655,15 @@ fn scim_event_retention_is_bounded_for_delivery_and_data_minimization() {
 }
 
 #[test]
-fn dynamic_client_registration_requires_initial_access_token() {
-    let missing_token =
-        ConfigSource::from_pairs_for_test([("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true")]);
-    let error = settings_error(
-        &missing_token,
-        "dynamic registration must not become open registration by accident",
-    );
-    assert_eq!(
-        error.to_string(),
-        "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN is required when ENABLE_DYNAMIC_CLIENT_REGISTRATION=true"
-    );
+fn dynamic_client_registration_is_enabled_only_with_an_initial_access_token() {
+    let missing_token = ConfigSource::from_pairs_for_test([]);
+    let settings = Settings::from_config(&missing_token).unwrap();
+    assert!(!settings.modules.enable_dynamic_client_registration);
 
-    let protected = ConfigSource::from_pairs_for_test([
-        ("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true"),
-        (
-            "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
-            "register-token",
-        ),
-    ]);
+    let protected = ConfigSource::from_pairs_for_test([(
+        "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
+        "register-token",
+    )]);
     let settings = Settings::from_config(&protected).unwrap();
     assert!(settings.modules.enable_dynamic_client_registration);
     assert_eq!(

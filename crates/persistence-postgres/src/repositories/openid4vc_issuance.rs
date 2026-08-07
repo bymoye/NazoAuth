@@ -2,7 +2,7 @@
 mod crypto;
 #[path = "openid4vc_issuance_offer.rs"]
 mod offer;
-#[path = "openid4vc_issuance_store.rs"]
+#[path = "openid4vc_issuance_store/mod.rs"]
 mod store;
 
 use crate::DbPool;

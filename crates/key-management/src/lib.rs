@@ -8,6 +8,7 @@ mod local;
 mod model;
 mod mtls_trust;
 mod request_object_encryption;
+mod serialization;
 mod store;
 mod token;
 
