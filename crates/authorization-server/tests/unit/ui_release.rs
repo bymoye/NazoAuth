@@ -4,10 +4,11 @@ use super::*;
 fn embedded_descriptor_is_closed_and_valid() {
     let descriptor: FrontendDescriptor = serde_json::from_str(DEFAULT_FRONTEND).unwrap();
     descriptor.validate().unwrap();
-    assert_eq!(
-        descriptor.url().unwrap().as_str(),
-        "https://github.com/nazozero/NazoAuthWeb/releases/download/v0.2.2/nazoauth-web.tar.gz"
+    let expected_url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        descriptor.repository, descriptor.version, descriptor.artifact.name
     );
+    assert_eq!(descriptor.url().unwrap().as_str(), expected_url);
     let mut value: serde_json::Value = serde_json::from_str(DEFAULT_FRONTEND).unwrap();
     value["unexpected"] = serde_json::json!(true);
     assert!(serde_json::from_value::<FrontendDescriptor>(value).is_err());
