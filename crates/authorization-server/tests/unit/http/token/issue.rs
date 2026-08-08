@@ -396,11 +396,15 @@ async fn insert_issue_client(state: &TestInfrastructure, client: &ClientRow) {
 }
 
 fn issue_state_with_live_database() -> Option<TestInfrastructure> {
+    issue_state_with_live_database_pool_size(1)
+}
+
+fn issue_state_with_live_database_pool_size(max_size: usize) -> Option<TestInfrastructure> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let valkey = live_valkey_client()?;
     let _key_material = client_signing_fixture(jsonwebtoken::Algorithm::EdDSA);
     Some(TestInfrastructure {
-        diesel_db: create_pool(database_url, 1).expect("database pool should build"),
+        diesel_db: create_pool(database_url, max_size).expect("database pool should build"),
         valkey,
         settings: Arc::new(
             Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
@@ -1250,7 +1254,7 @@ async fn same_idempotent_grant_retry_reuses_the_persisted_response() {
 
 #[actix_web::test]
 async fn concurrent_prepared_issuance_conflict_recovers_the_winning_response() {
-    let Some(state) = issue_state_with_live_database() else {
+    let Some(state) = issue_state_with_live_database_pool_size(4) else {
         return;
     };
     let client = client_with_grants(&["client_credentials", "refresh_token"]);
