@@ -93,6 +93,17 @@ async fn refresh_token_row_count(state: &TestInfrastructure, client: &ClientRow)
     .count
 }
 
+async fn delete_token_issuance(state: &TestInfrastructure, issuance_id: Uuid) {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("issue test database connection should be available for cleanup");
+    sql_query("DELETE FROM oauth_token_issuances WHERE issuance_id = $1")
+        .bind::<SqlUuid, _>(issuance_id)
+        .execute(&mut connection)
+        .await
+        .expect("issue test token issuance cleanup should succeed");
+}
+
 use super::*;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -1267,31 +1278,28 @@ async fn terminal_issuance_owned_by_another_claim_is_busy() {
     );
     let issuance_id = Uuid::now_v7();
     let first_owner_id = Uuid::now_v7();
+    let grant_key = format!("terminal-claim-{issuance_id}");
     let request_digest = blake3::hash(issuance_id.as_bytes()).to_hex().to_string();
     let expires_at = Utc::now() + chrono::Duration::minutes(5);
-    let prepared = service
-        .prepare_token_issuance(PrepareTokenIssuance {
-            issuance_id,
-            tenant_id: client.tenant_id,
-            client_id: client.id,
-            grant_key: format!("terminal-claim-{issuance_id}"),
-            request_digest: request_digest.clone(),
-            expires_at,
-        })
-        .await
-        .expect("terminal claim fixture should prepare");
-    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
-    assert_eq!(
-        service
-            .claim_token_issuance(issuance_id, &request_digest, first_owner_id)
-            .await
-            .expect("first owner should claim issuance"),
-        TokenIssuanceClaimResult::Applied
-    );
     let response_body = br#"{"access_token":"stable","token_type":"Bearer"}"#;
     let response_digest = blake3::hash(response_body).to_hex().to_string();
-    assert_eq!(
-        service
+    let exercise = async {
+        let prepared = service
+            .prepare_token_issuance(PrepareTokenIssuance {
+                issuance_id,
+                tenant_id: client.tenant_id,
+                client_id: client.id,
+                grant_key: grant_key.clone(),
+                request_digest: request_digest.clone(),
+                expires_at,
+            })
+            .await
+            .map_err(|error| format!("terminal claim fixture should prepare: {error}"))?;
+        let first_claim = service
+            .claim_token_issuance(issuance_id, &request_digest, first_owner_id)
+            .await
+            .map_err(|error| format!("first owner should claim issuance: {error}"))?;
+        let signed = service
             .record_token_issuance_signed(nazo_auth::RecordTokenIssuanceSigned {
                 issuance_id,
                 request_digest: &request_digest,
@@ -1302,16 +1310,41 @@ async fn terminal_issuance_owned_by_another_claim_is_busy() {
                 response_digest: &response_digest,
             })
             .await
-            .expect("first owner should persist signed response"),
-        TokenIssuanceTransitionResult::Applied
-    );
-    assert_eq!(
-        service
+            .map_err(|error| format!("first owner should persist signed response: {error}"))?;
+        let stored = service
+            .token_issuance_by_grant(client.tenant_id, client.id, &grant_key)
+            .await
+            .map_err(|error| format!("signed issuance lookup should succeed: {error}"))?;
+        let missing = service
+            .token_issuance_by_grant(client.tenant_id, client.id, "missing-grant")
+            .await
+            .map_err(|error| format!("missing issuance lookup should succeed: {error}"))?;
+        let second_claim = service
             .claim_token_issuance(issuance_id, &request_digest, Uuid::now_v7())
             .await
-            .expect("second owner claim should be classified"),
-        TokenIssuanceClaimResult::Busy
+            .map_err(|error| format!("second owner claim should be classified: {error}"))?;
+        Ok::<_, String>((prepared, first_claim, signed, stored, missing, second_claim))
+    }
+    .await;
+
+    delete_token_issuance(&state, issuance_id).await;
+
+    let (prepared, first_claim, signed, stored, missing, second_claim) =
+        exercise.unwrap_or_else(|message| panic!("{message}"));
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+    assert_eq!(first_claim, TokenIssuanceClaimResult::Applied);
+    assert_eq!(signed, TokenIssuanceTransitionResult::Applied);
+    let stored = stored.expect("signed issuance should remain recoverable by grant");
+    assert_eq!(stored.issuance_id, issuance_id);
+    assert_eq!(stored.request_digest, request_digest);
+    assert_eq!(stored.phase, TokenIssuancePhase::Signed);
+    assert_eq!(stored.claim_owner_id, Some(first_owner_id));
+    assert_eq!(
+        stored.response_body.as_deref(),
+        Some(response_body.as_slice())
     );
+    assert!(missing.is_none());
+    assert_eq!(second_claim, TokenIssuanceClaimResult::Busy);
 }
 
 #[actix_web::test]

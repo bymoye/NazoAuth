@@ -336,6 +336,80 @@ fn reauth_nonce_state_with_valkey(valkey: fred::prelude::Client) -> TestInfrastr
     }
 }
 
+#[test]
+fn authorization_policy_enforces_runtime_modules_and_extracts_credential_ids() {
+    let authorization_details = json!([
+        {
+            "type": "openid_credential",
+            "credential_configuration_id": "university_degree"
+        },
+        {
+            "type": "openid_credential"
+        },
+        {
+            "type": "payment",
+            "credential_configuration_id": "ignored_type"
+        },
+        {
+            "type": "openid_credential",
+            "credential_configuration_id": 42
+        }
+    ]);
+    assert_eq!(
+        credential_configuration_ids(&authorization_details),
+        vec!["university_degree".to_owned()]
+    );
+    assert!(credential_configuration_ids(&json!({})).is_empty());
+
+    let mut state = reauth_nonce_state_with_valkey(disconnected_valkey_client());
+    {
+        let settings = Arc::make_mut(&mut state.settings);
+        settings.modules.enable_authorization_details = true;
+        settings.modules.enable_native_sso = true;
+    }
+    let dependencies =
+        crate::http::authorization::test_support::TestAuthorizationDependencies::new(&state);
+    for (module, parameters, expected_error) in [
+        (
+            nazo_runtime_modules::ModuleId::RequestObjects,
+            query(&[("request", "signed-request-object")]),
+            "invalid_request",
+        ),
+        (
+            nazo_runtime_modules::ModuleId::AuthorizationDetails,
+            query(&[("authorization_details", "[]")]),
+            "invalid_request",
+        ),
+        (
+            nazo_runtime_modules::ModuleId::Jarm,
+            query(&[("response_mode", "jwt")]),
+            "unsupported_response_mode",
+        ),
+        (
+            nazo_runtime_modules::ModuleId::NativeSso,
+            query(&[("scope", "openid device_sso")]),
+            "invalid_scope",
+        ),
+    ] {
+        let mut context = dependencies.context();
+        assert!(
+            context.modules.accepting.remove(&module),
+            "{module:?} must be enabled by the test fixture"
+        );
+        let response = runtime_authorization_capability_error(&context, &parameters)
+            .expect("disabled module capability should fail closed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_oauth_error_code(&response).as_deref(),
+            Some(expected_error)
+        );
+    }
+
+    assert!(
+        runtime_authorization_capability_error(&dependencies.context(), &HashMap::new()).is_none()
+    );
+}
+
 async fn live_reauth_nonce_state() -> Option<TestInfrastructure> {
     let valkey_url = std::env::var("VALKEY_URL").ok()?;
     let mut builder =

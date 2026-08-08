@@ -778,6 +778,20 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
         .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
+    let registered = repository
+        .by_registration_access_token(client.tenant_id, &client.client_id, initial_token.as_str())
+        .await
+        .unwrap()
+        .expect("active registration access token should resolve its client");
+    assert_eq!(registered.id, client.id);
+    assert!(!repository.has_client_secret(client.id).await.unwrap());
+    assert!(
+        repository
+            .active_for_user(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     DynamicRegistrationClientStore::rotate_credentials(
         &repository,

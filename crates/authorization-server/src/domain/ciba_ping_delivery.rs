@@ -197,7 +197,3 @@ pub(crate) fn spawn_ciba_ping_delivery_worker(worker: CibaPingDeliveryWorker) {
         }
     });
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/domain/ciba_ping_delivery_worker.rs"]
-mod tests;
