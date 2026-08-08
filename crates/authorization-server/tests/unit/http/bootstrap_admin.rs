@@ -17,7 +17,10 @@ fn endpoint(
     let pool =
         nazo_postgres::create_pool("postgresql://unused:unused@127.0.0.1:1/unused", 1).unwrap();
     InitialAdminBootstrapEndpoint {
-        repository: nazo_postgres::InitialAdminBootstrapRepository::new(pool),
+        repository: nazo_postgres::InitialAdminBootstrapRepository::new(
+            pool,
+            nazo_identity::TenantContext::default_system(),
+        ),
         expected_token_hash: Arc::new(RwLock::new(expected_token_hash)),
         token_path,
     }
@@ -154,8 +157,13 @@ async fn initialization_persists_a_retryable_token_before_database_ownership_is_
     )
     .unwrap();
 
-    let error = match InitialAdminBootstrapEndpoint::initialize(pool, &root, "https://auth.example")
-        .await
+    let error = match InitialAdminBootstrapEndpoint::initialize(
+        pool,
+        &root,
+        "https://auth.example",
+        nazo_identity::TenantContext::default_system(),
+    )
+    .await
     {
         Ok(_) => panic!("unavailable persistence must not initialize bootstrap ownership"),
         Err(error) => error,

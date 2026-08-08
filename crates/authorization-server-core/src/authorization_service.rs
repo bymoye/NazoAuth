@@ -9,8 +9,9 @@ use crate::{
     ConsentPayload, JarmAuthorizationResponse, JwtBearerGrantError, NormalizedRequestObject,
     OAuthClient, PushedAuthorizationRequest, PushedAuthorizationRequestConsumeError,
     RequestObjectClaims, RequestObjectPolicy, SignedJarmAuthorizationResponse,
-    ValidatedJwtBearerAssertion, authorization_details_empty, canonical_authorization_details,
-    high_risk_authorization_details, normalize_request_object,
+    ValidatedJwtBearerAssertion, authorization_details_empty,
+    authorization_request::{apply_request_object_plan, prepare_request_object},
+    canonical_authorization_details, high_risk_authorization_details,
 };
 
 pub type AuthorizationFuture<'a, T> =
@@ -653,15 +654,28 @@ where
         claims: &RequestObjectClaims,
         policy: RequestObjectPolicy<'_>,
     ) -> Result<NormalizedRequestObject, AuthorizationRequestError> {
-        let normalized = normalize_request_object(outer, claims, policy)?;
-        if let Some(replay) = normalized.replay.as_ref() {
+        let mut outer = outer.clone();
+        self.admit_request_object_owned(&mut outer, claims, policy)
+            .await
+    }
+
+    /// Validates a verified request object while reusing the caller's outer
+    /// parameter map. Policy failures leave the map untouched.
+    pub async fn admit_request_object_owned(
+        &self,
+        outer: &mut std::collections::HashMap<String, String>,
+        claims: &RequestObjectClaims,
+        policy: RequestObjectPolicy<'_>,
+    ) -> Result<NormalizedRequestObject, AuthorizationRequestError> {
+        let plan = prepare_request_object(outer, claims, policy)?;
+        if let Some(replay) = plan.replay() {
             super::authorization_request::classify_request_object_replay(
                 self.state
                     .consume_jar(&replay.client_id, &replay.jti, replay.ttl_seconds)
                     .await,
             )?;
         }
-        Ok(normalized)
+        Ok(apply_request_object_plan(outer, plan))
     }
 
     /// Atomically consumes a PAR transaction and preserves malformed-state and

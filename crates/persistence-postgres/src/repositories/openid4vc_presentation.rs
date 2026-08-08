@@ -133,7 +133,7 @@ impl PresentationStorePort for Openid4vpRepository {
             .bind::<sql_types::Uuid, _>(transaction_id)
             .bind::<sql_types::Uuid, _>(self.tenant_id)
             .bind::<sql_types::Timestamptz, _>(now)
-            .bind::<sql_types::Jsonb, _>(encoded.clone())
+            .bind::<sql_types::Jsonb, _>(&encoded)
             .execute(&mut connection)
             .await
             .map_err(|_| PresentationStoreError::Unavailable)?;

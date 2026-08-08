@@ -11,11 +11,20 @@ use serde_json::{Value, json};
 pub(crate) struct ReadinessDependencies {
     database: DbPool,
     valkey: nazo_valkey::ValkeyConnection,
+    keyset: nazo_key_management::KeyManager,
 }
 
 impl ReadinessDependencies {
-    pub(crate) fn new(database: DbPool, valkey: nazo_valkey::ValkeyConnection) -> Self {
-        Self { database, valkey }
+    pub(crate) fn new(
+        database: DbPool,
+        valkey: nazo_valkey::ValkeyConnection,
+        keyset: nazo_key_management::KeyManager,
+    ) -> Self {
+        Self {
+            database,
+            valkey,
+            keyset,
+        }
     }
 }
 
@@ -34,6 +43,7 @@ struct ReadinessResponse {
 struct ReadinessChecks {
     postgresql: DependencyCheck,
     valkey: DependencyCheck,
+    signing_keys: DependencyCheck,
 }
 
 pub(crate) async fn live() -> Json<Value> {
@@ -53,17 +63,21 @@ pub(crate) async fn ready(dependencies: Data<ReadinessDependencies>) -> HttpResp
     );
     let postgresql_up = postgresql.is_ok();
     let valkey_up = valkey.is_ok();
+    let signing_keys_up = dependencies.keyset.is_healthy();
     if let Err(error) = postgresql {
         tracing::warn!(%error, "readiness PostgreSQL probe failed");
     }
     if let Err(error) = valkey {
         tracing::warn!(%error, "readiness Valkey probe failed");
     }
-    readiness_response(postgresql_up, valkey_up)
+    if !signing_keys_up {
+        tracing::warn!("readiness signing-key lifecycle is unhealthy");
+    }
+    readiness_response(postgresql_up, valkey_up, signing_keys_up)
 }
 
-fn readiness_response(postgresql_up: bool, valkey_up: bool) -> HttpResponse {
-    let ready = postgresql_up && valkey_up;
+fn readiness_response(postgresql_up: bool, valkey_up: bool, signing_keys_up: bool) -> HttpResponse {
+    let ready = postgresql_up && valkey_up && signing_keys_up;
     HttpResponse::build(if ready {
         StatusCode::OK
     } else {
@@ -77,6 +91,9 @@ fn readiness_response(postgresql_up: bool, valkey_up: bool) -> HttpResponse {
             },
             valkey: DependencyCheck {
                 status: if valkey_up { "up" } else { "down" },
+            },
+            signing_keys: DependencyCheck {
+                status: if signing_keys_up { "up" } else { "down" },
             },
         },
     })

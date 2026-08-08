@@ -95,6 +95,7 @@ pub struct TokenIssuanceRecord {
     pub grant_key: String,
     pub request_digest: String,
     pub phase: TokenIssuancePhase,
+    pub claim_owner_id: Option<Uuid>,
     pub access_token_jti: Option<String>,
     pub access_token_expires_at: Option<i64>,
     pub response_body: Option<Vec<u8>>,
@@ -118,6 +119,18 @@ pub struct PrepareTokenIssuance {
 pub enum PrepareTokenIssuanceResult {
     Created(TokenIssuanceRecord),
     Existing(TokenIssuanceRecord),
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenIssuanceClaimResult {
+    /// This caller became the only side-effect owner for the prepared row.
+    Applied,
+    /// Another caller owns the prepared row. It must wait for a terminal response.
+    Busy,
+    /// The durable row no longer exists. Retrying is fail-closed.
+    Missing,
+    /// The row identity or phase no longer matches this claim attempt.
     Conflict,
 }
 
@@ -272,20 +285,32 @@ pub struct IssuedAuthorizationCodeTokens<'a> {
     pub consumed_state_ttl_seconds: u64,
 }
 
+pub struct RecordTokenIssuanceSigned<'a> {
+    pub issuance_id: Uuid,
+    pub request_digest: &'a str,
+    pub claim_owner_id: Uuid,
+    pub access_token_jti: &'a str,
+    pub access_token_expires_at: i64,
+    pub response_body: &'a [u8],
+    pub response_digest: &'a str,
+}
+
 pub trait TokenRepositoryPort: Send + Sync {
     fn prepare_token_issuance<'a>(
         &'a self,
         input: PrepareTokenIssuance,
     ) -> TokenFuture<'a, PrepareTokenIssuanceResult>;
 
-    fn record_token_issuance_signed<'a>(
+    fn claim_token_issuance<'a>(
         &'a self,
         issuance_id: Uuid,
         request_digest: &'a str,
-        access_token_jti: &'a str,
-        access_token_expires_at: i64,
-        response_body: &'a [u8],
-        response_digest: &'a str,
+        claim_owner_id: Uuid,
+    ) -> TokenFuture<'a, TokenIssuanceClaimResult>;
+
+    fn record_token_issuance_signed<'a>(
+        &'a self,
+        input: RecordTokenIssuanceSigned<'a>,
     ) -> TokenFuture<'a, TokenIssuanceTransitionResult>;
 
     fn mark_token_issuance_persisted<'a>(
@@ -462,25 +487,24 @@ where
         self.repository.prepare_token_issuance(input).await
     }
 
-    pub async fn record_token_issuance_signed(
+    pub async fn claim_token_issuance(
         &self,
         issuance_id: Uuid,
         request_digest: &str,
-        access_token_jti: &str,
-        access_token_expires_at: i64,
-        response_body: &[u8],
-        response_digest: &str,
-    ) -> Result<TokenIssuanceTransitionResult, TokenPortError> {
+        claim_owner_id: Uuid,
+    ) -> Result<TokenIssuanceClaimResult, TokenPortError> {
+        // Ownership is deliberately never stolen after a process crash: an
+        // uncompleted claim remains fail-closed until an operator repairs it.
         self.repository
-            .record_token_issuance_signed(
-                issuance_id,
-                request_digest,
-                access_token_jti,
-                access_token_expires_at,
-                response_body,
-                response_digest,
-            )
+            .claim_token_issuance(issuance_id, request_digest, claim_owner_id)
             .await
+    }
+
+    pub async fn record_token_issuance_signed(
+        &self,
+        input: RecordTokenIssuanceSigned<'_>,
+    ) -> Result<TokenIssuanceTransitionResult, TokenPortError> {
+        self.repository.record_token_issuance_signed(input).await
     }
 
     pub async fn mark_token_issuance_persisted(

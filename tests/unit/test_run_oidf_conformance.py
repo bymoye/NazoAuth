@@ -495,7 +495,7 @@ class RunOidfConformanceTests(unittest.TestCase):
                 return False
 
             @staticmethod
-            def read():
+            def read(_size=-1):
                 return b'{"ok": true}'
 
         with (
@@ -532,7 +532,7 @@ class RunOidfConformanceTests(unittest.TestCase):
                 return False
 
             @staticmethod
-            def read():
+            def read(_size=-1):
                 return b'{"ok": true}'
 
         error = module.urllib.error.HTTPError(
@@ -563,6 +563,115 @@ class RunOidfConformanceTests(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(2)
+
+    def test_oidf_api_request_rejects_empty_success_payload(self):
+        module = load_runner_module()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(_size=-1):
+                return b""
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(SystemExit, "empty HTTP 200"):
+                module.oidf_api_request(
+                    "GET",
+                    "https://localhost:8443/",
+                    "api/server",
+                    None,
+                    expected_statuses={200},
+                )
+
+    def test_oidf_api_request_rejects_invalid_success_json(self):
+        module = load_runner_module()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(_size=-1):
+                return b"not-json"
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(SystemExit, "invalid JSON for HTTP 200"):
+                module.oidf_api_request(
+                    "GET",
+                    "https://localhost:8443/",
+                    "api/server",
+                    None,
+                    expected_statuses={200},
+                )
+
+    def test_oidf_api_request_rejects_oversized_response(self):
+        module = load_runner_module()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=-1):
+                self.requested_size = size
+                return b"x" * (module.MAX_OIDF_API_RESPONSE_BYTES + 1)
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(SystemExit, "response exceeds 1 MiB"):
+                module.oidf_api_request(
+                    "GET",
+                    "https://localhost:8443/",
+                    "api/server",
+                    None,
+                    expected_statuses={200},
+                )
+
+    def test_fetch_alias_plans_rejects_malformed_success_schema(self):
+        module = load_runner_module()
+        with mock.patch.object(module, "oidf_api_request", return_value=(200, [])):
+            with self.assertRaisesRegex(SystemExit, "non-object JSON payload"):
+                module.fetch_alias_plans("https://suite.example", "token", {"alias"})
+
+    def test_inspect_state_rejects_empty_success_module_info(self):
+        module = load_runner_module()
+        with (
+            mock.patch.object(
+                module,
+                "fetch_alias_plans",
+                return_value=[
+                    {
+                        "_id": "plan-id",
+                        "planName": "oid4vci-1_0-issuer-test-plan",
+                        "modules": [{"instances": ["module-id"]}],
+                    }
+                ],
+            ),
+            mock.patch.object(module, "oidf_api_request", return_value=(200, None)),
+        ):
+            failure = module.inspect_oidf_state(
+                "https://suite.example",
+                "token",
+                {"alias"},
+                final=True,
+            )
+
+        self.assertIn("invalid HTTP 200 module info payload", failure)
 
     def test_monitor_interval_has_floor_when_aliases_are_present(self):
         module = load_runner_module()

@@ -12,6 +12,7 @@ pub type CredentialStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 
 pub trait AuthorizationOfferPort: Send + Sync {
     fn resolve_authorization_offer<'a>(
         &'a self,
+        tenant_id: Uuid,
         issuer_state_hash: &'a str,
         subject_id: Uuid,
         client_id: &'a str,
@@ -128,12 +129,14 @@ pub trait CredentialStorePort: Send + Sync {
 
     fn offer<'a>(
         &'a self,
+        tenant_id: Uuid,
         id: Uuid,
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>;
 
     fn consume_pre_authorized_offer<'a>(
         &'a self,
+        tenant_id: Uuid,
         code_hash: &'a str,
         tx_code: Option<&'a str>,
         client_id: &'a str,

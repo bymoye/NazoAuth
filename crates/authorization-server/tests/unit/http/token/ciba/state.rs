@@ -543,8 +543,8 @@ async fn approved_ciba_poll_lease_expiry_does_not_consume_terminal_state() {
         .poll_with_lease_deadline(auth_req_id, &state.client_id, initial, Some(900), || 1_001)
         .await;
 
-    assert_eq!(result, Ok(CibaPollCommit::Expired));
-    assert_eq!(store.calls(), vec![CibaStoreCall::Delete(Some(900))]);
+    assert!(matches!(result, Ok(CibaPollCommit::Approved(_))));
+    assert!(store.calls().is_empty());
     assert_eq!(
         service.load(auth_req_id).await.unwrap().unwrap().state(),
         &state
@@ -972,7 +972,7 @@ async fn three_concurrent_premature_polls_each_add_exactly_five_seconds() {
 }
 
 #[actix_web::test]
-async fn concurrent_approved_consumers_produce_exactly_one_issuance_outcome() {
+async fn concurrent_approved_polls_preserve_retryable_state() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
@@ -998,13 +998,8 @@ async fn concurrent_approved_consumers_produce_exactly_one_issuance_outcome() {
         .into_iter()
         .filter(|result| matches!(result, Ok(CibaPollCommit::Approved(_))))
         .count();
-    let missing_count = [&one, &two]
-        .into_iter()
-        .filter(|result| matches!(result, Err(CibaPollFailure::Missing)))
-        .count();
-    assert_eq!(approved_count, 1);
-    assert_eq!(missing_count, 1);
-    assert!(service.load(&auth_req_id).await.unwrap().is_none());
+    assert_eq!(approved_count, 2);
+    assert!(service.load(&auth_req_id).await.unwrap().is_some());
 }
 
 #[actix_web::test]
@@ -1048,7 +1043,7 @@ async fn ciba_poll_conflict_retry_consumes_assertion_once() {
 }
 
 #[actix_web::test]
-async fn consumed_approved_state_is_not_restored_after_downstream_failure() {
+async fn approved_state_survives_downstream_failure_for_retry() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
@@ -1071,5 +1066,8 @@ async fn consumed_approved_state_is_not_restored_after_downstream_failure() {
     assert!(matches!(committed, CibaPollCommit::Approved(_)));
     let downstream_result: Result<(), &str> = Err("deliberate issuance failure");
     assert!(downstream_result.is_err());
-    assert!(service.load(&auth_req_id).await.unwrap().is_none());
+    assert_eq!(
+        service.load(&auth_req_id).await.unwrap().unwrap().state(),
+        &state
+    );
 }

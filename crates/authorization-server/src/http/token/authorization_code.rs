@@ -15,8 +15,6 @@ use crate::domain::{
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 
 use actix_web::http::StatusCode;
 
@@ -30,9 +28,11 @@ use serde_json::json;
 // 只消费授权码并转入统一令牌签发逻辑。
 use super::issue::TokenIssuanceConfig;
 use super::{
-    ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
+    SenderConstraintValidationError, ServerTokenService, TokenForm,
+    consume_token_client_assertion_with_authorization_service,
     issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant},
     native_sso_requested, new_native_sso_token_binding, revoke_issued_authorization_code_tokens,
+    sender_constraint_multiple_error, validate_token_sender_constraints,
 };
 
 enum AuthorizationCodeConsumption {
@@ -354,42 +354,29 @@ pub(crate) async fn token_authorization_code_with_service(
     let expected_mtls_x5t_s256 = expected_payload
         .as_ref()
         .and_then(|payload| payload.mtls_x5t_s256.clone());
-    let dpop_jkt = match validate_dpop_proof_with_authorization_service(
-        issuance.authorization,
-        issuance.config.issuer(),
-        issuance.config.mtls_endpoint_base_url(),
-        issuance.config.dpop_nonce_policy(),
+    let sender = match validate_token_sender_constraints(
+        issuance,
         req,
+        client,
         None,
         expected_dpop_jkt.as_deref(),
+        expected_mtls_x5t_s256.as_deref(),
     )
     .await
     {
-        Ok(value) => value.or(expected_dpop_jkt),
-        Err(error) => return authorization_code_dpop_error_response(error),
-    };
-    if client.require_dpop_bound_tokens && dpop_jkt.is_none() {
-        return authorization_code_dpop_error_response(DpopError::MissingProof);
-    }
-    let request_mtls_x5t_s256 =
-        request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs());
-    let mtls_x5t_s256 = match (expected_mtls_x5t_s256, request_mtls_x5t_s256) {
-        (Some(expected), Some(actual))
-            if constant_time_eq(expected.as_bytes(), actual.as_bytes()) =>
-        {
-            Some(expected)
+        Ok(value) => value,
+        Err(SenderConstraintValidationError::Dpop(error)) => {
+            return authorization_code_dpop_error_response(error);
         }
-        (Some(_), _) => {
+        Err(SenderConstraintValidationError::MissingMtls) => {
             return authorization_code_mtls_holder_error_response();
         }
-        (None, actual) if client.require_mtls_bound_tokens => {
-            let Some(actual) = actual else {
-                return authorization_code_mtls_holder_error_response();
-            };
-            Some(actual)
+        Err(SenderConstraintValidationError::Multiple) => {
+            return sender_constraint_multiple_error();
         }
-        (None, _) => None,
     };
+    let dpop_jkt = sender.dpop_jkt;
+    let mtls_x5t_s256 = sender.mtls_x5t_s256;
     let authorization_code_grant_key = authorization_code_grant_key(
         &code_hash,
         form,

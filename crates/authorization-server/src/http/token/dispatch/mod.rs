@@ -10,7 +10,10 @@ use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::web::{Bytes, Data};
 use actix_web::{HttpRequest, HttpResponse};
-use nazo_http_actix::{TokenClientAuthForm, oauth_token_error, token_client_auth_transport_facts};
+use nazo_http_actix::{
+    TokenClientAuthForm, oauth_token_error, parse_token_form_with_pre_authorized,
+    token_client_auth_transport_facts,
+};
 
 mod client_auth;
 mod errors;
@@ -37,7 +40,7 @@ use super::client_auth::{
 use super::issue::{TokenIssuanceConfig, TokenIssuanceContext};
 use super::{
     CIBA_GRANT_TYPE, DEVICE_CODE_GRANT_TYPE, JWT_BEARER_GRANT_TYPE, ServerTokenService,
-    TOKEN_EXCHANGE_GRANT_TYPE, TokenFormError, client_auth_request_facts, parse_token_form,
+    TOKEN_EXCHANGE_GRANT_TYPE, TokenFormError, client_auth_request_facts,
     token_authorization_code_with_service, token_ciba, token_client_credentials_with_service,
     token_device_code_with_service, token_exchange, token_jwt_bearer_with_service,
     token_refresh_with_service,
@@ -109,7 +112,7 @@ pub(crate) async fn token_with_service(
         return response;
     }
 
-    let form = match parse_token_form(&req, &body) {
+    let parsed_form = match parse_token_form_with_pre_authorized(&req, &body) {
         Ok(form) => form,
         Err(TokenFormError::InvalidContentType) => {
             return oauth_token_error(
@@ -152,6 +155,8 @@ pub(crate) async fn token_with_service(
             );
         }
     };
+    let form = parsed_form.form;
+    let mut pre_authorized = parsed_form.pre_authorized;
     if form.has_audience_param && form.grant_type != TOKEN_EXCHANGE_GRANT_TYPE {
         return oauth_token_error(
             StatusCode::BAD_REQUEST,
@@ -208,10 +213,11 @@ pub(crate) async fn token_with_service(
                     false,
                 );
             };
-            let (pre_authorized_code, tx_code) = match pre_authorized_parameters(&body) {
-                Ok(parameters) => parameters,
-                Err(response) => return response,
-            };
+            let (pre_authorized_code, tx_code) =
+                match pre_authorized_parameters(&mut pre_authorized) {
+                    Ok(parameters) => parameters,
+                    Err(response) => return response,
+                };
             let response = endpoint
                 .pre_authorized_token(nazo_openid4vc_http_actix::PreAuthorizedTokenRequest {
                     pre_authorized_code,
@@ -603,10 +609,11 @@ pub(crate) async fn token_with_service(
                     false,
                 );
             };
-            let (pre_authorized_code, tx_code) = match pre_authorized_parameters(&body) {
-                Ok(parameters) => parameters,
-                Err(response) => return response,
-            };
+            let (pre_authorized_code, tx_code) =
+                match pre_authorized_parameters(&mut pre_authorized) {
+                    Ok(parameters) => parameters,
+                    Err(response) => return response,
+                };
             if let Err(error) = consume_token_client_assertion_with_authorization_service(
                 authorization_service,
                 &client,

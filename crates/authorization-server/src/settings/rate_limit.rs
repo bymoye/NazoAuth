@@ -16,6 +16,8 @@ pub(crate) struct RateLimitSettings {
     pub(crate) token_management_max_requests: u64,
     pub(crate) login_failure_window_seconds: u64,
     pub(crate) login_failure_ip_email_max_attempts: u64,
+    pub(crate) mfa_failure_window_seconds: u64,
+    pub(crate) mfa_failure_max_attempts: u64,
 }
 
 impl RateLimitSettings {
@@ -37,14 +39,20 @@ impl RateLimitSettings {
             login_failure_window_seconds: config.parse("LOGIN_FAILURE_WINDOW_SECONDS", 900)?,
             login_failure_ip_email_max_attempts: config
                 .parse("LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS", 5)?,
+            mfa_failure_window_seconds: config.parse("MFA_FAILURE_WINDOW_SECONDS", 900)?,
+            mfa_failure_max_attempts: config.parse("MFA_FAILURE_MAX_ATTEMPTS", 5)?,
         };
-        if settings.window_seconds == 0 || settings.login_failure_window_seconds == 0 {
+        if settings.window_seconds == 0
+            || settings.login_failure_window_seconds == 0
+            || settings.mfa_failure_window_seconds == 0
+        {
             bail!("rate limit windows must be greater than 0");
         }
         if settings.auth_max_requests == 0
             || settings.token_max_requests == 0
             || settings.token_management_max_requests == 0
             || settings.login_failure_ip_email_max_attempts == 0
+            || settings.mfa_failure_max_attempts == 0
         {
             bail!("rate limit request caps must be greater than 0");
         }

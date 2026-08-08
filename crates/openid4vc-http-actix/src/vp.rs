@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
 use nazo_openid4vp::{AuthorizationResponse, PresentationResult, PresentationTransaction};
@@ -187,12 +187,9 @@ fn parse_presentation_response(
             "Presentation responses must use application/x-www-form-urlencoded.",
         ));
     }
-    let mut values = std::collections::BTreeMap::new();
+    let mut values: BTreeMap<Cow<'_, str>, Cow<'_, str>> = BTreeMap::new();
     for (name, value) in url::form_urlencoded::parse(body) {
-        if values
-            .insert(name.into_owned(), value.into_owned())
-            .is_some()
-        {
+        if values.insert(name, value).is_some() {
             return Err(invalid_response(
                 "Presentation response parameters must not repeat.",
             ));
@@ -204,16 +201,18 @@ fn parse_presentation_response(
                 "direct_post.jwt cannot be mixed with plaintext parameters.",
             ));
         }
-        return Ok(PresentationResponseInput::DirectPostJwt(response));
+        return Ok(PresentationResponseInput::DirectPostJwt(
+            response.into_owned(),
+        ));
     }
-    let vp_token = values
-        .remove("vp_token")
-        .map(|value| serde_json::from_str(&value).unwrap_or(Value::String(value)));
+    let vp_token = values.remove("vp_token").map(|value| {
+        serde_json::from_str(value.as_ref()).unwrap_or_else(|_| Value::String(value.into_owned()))
+    });
     let response = AuthorizationResponse {
         vp_token,
-        state: values.remove("state"),
-        error: values.remove("error"),
-        error_description: values.remove("error_description"),
+        state: values.remove("state").map(Cow::into_owned),
+        error: values.remove("error").map(Cow::into_owned),
+        error_description: values.remove("error_description").map(Cow::into_owned),
     };
     if !values.is_empty() {
         return Err(invalid_response(

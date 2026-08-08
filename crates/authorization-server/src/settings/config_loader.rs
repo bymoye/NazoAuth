@@ -334,11 +334,11 @@ impl Settings {
         if !(1..=300).contains(&fapi_http_signature_max_age_seconds) {
             bail!("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS must be between 1 and 300");
         }
-        let data_dir = PathBuf::from(config.string("DATA_DIR", "runtime"));
-        let avatar_storage_dir = config
-            .optional_string("AVATAR_STORAGE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("avatars"));
+        let data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
+        let avatar_storage_dir = match config.optional_string("AVATAR_STORAGE_DIR") {
+            Some(_) => config.persistent_path("AVATAR_STORAGE_DIR", None)?,
+            None => data_dir.join("avatars"),
+        };
         let scim_event_retention_seconds = positive_u64(
             config,
             "SCIM_EVENT_RETENTION_SECONDS",
@@ -347,6 +347,18 @@ impl Settings {
         )?;
         if !(3_600..=2_592_000).contains(&scim_event_retention_seconds) {
             bail!("SCIM_EVENT_RETENTION_SECONDS must be between 3600 and 2592000");
+        }
+
+        let session_ttl_seconds =
+            positive_u64(config, "SESSION_TTL_SECONDS", 28_800, "SESSION_TTL_SECONDS")?;
+        let pending_mfa_session_ttl_seconds = positive_u64(
+            config,
+            "PENDING_MFA_SESSION_TTL_SECONDS",
+            600,
+            "PENDING_MFA_SESSION_TTL_SECONDS",
+        )?;
+        if pending_mfa_session_ttl_seconds >= session_ttl_seconds {
+            bail!("PENDING_MFA_SESSION_TTL_SECONDS must be less than SESSION_TTL_SECONDS");
         }
 
         Ok(Self {
@@ -417,12 +429,8 @@ impl Settings {
                 session_cookie_name,
                 csrf_cookie_name,
                 cookie_secure,
-                session_ttl_seconds: positive_u64(
-                    config,
-                    "SESSION_TTL_SECONDS",
-                    28_800,
-                    "SESSION_TTL_SECONDS",
-                )?,
+                session_ttl_seconds,
+                pending_mfa_session_ttl_seconds,
             },
             storage: StorageSettings {
                 avatar_max_bytes: config.parse("AVATAR_MAX_BYTES", 2_097_152)?,

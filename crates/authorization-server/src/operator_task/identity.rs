@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::adapters::security::constant_time_eq;
+
 pub(super) fn validate_embedded_identity(task: &TaskEnvelope) -> anyhow::Result<()> {
     let actual = embedded_identity();
     if actual != task.embedded {
@@ -11,6 +13,37 @@ pub(super) fn validate_embedded_identity(task: &TaskEnvelope) -> anyhow::Result<
     if matches!(task.config.secret_binding, SecretBinding::OpaqueRevision { ref revision } if revision.is_empty())
     {
         bail!("secret revision must not be empty");
+    }
+    Ok(())
+}
+
+pub(super) fn validate_secret_binding(task: &TaskEnvelope) -> anyhow::Result<()> {
+    let revision_path = configured_path(
+        "NAZOAUTH_OPERATOR_SECRET_REVISION_FILE",
+        SECRET_REVISION_PATH,
+    );
+    validate_secret_binding_at(task, &revision_path)
+}
+
+pub(super) fn validate_secret_binding_at(
+    task: &TaskEnvelope,
+    revision_path: &Path,
+) -> anyhow::Result<()> {
+    let SecretBinding::OpaqueRevision { revision } = &task.config.secret_binding else {
+        // The v1 controller emits OpaqueRevision from the single
+        // secret-revision authority.  HMAC bindings require a separately
+        // provisioned deployment key/provider, which this runtime does not
+        // have; accepting one without recomputing it would be fail-open.
+        bail!("operator task HMAC secret binding has no local provider");
+    };
+    let local_revision = read_identifier(revision_path).with_context(|| {
+        format!(
+            "operator task secret revision authority is unavailable: {}",
+            revision_path.display()
+        )
+    })?;
+    if !constant_time_eq(local_revision.as_bytes(), revision.as_bytes()) {
+        bail!("operator task secret revision binding mismatch");
     }
     Ok(())
 }

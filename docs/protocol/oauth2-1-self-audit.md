@@ -25,7 +25,7 @@ References:
 | Area | Status | Evidence |
 | --- | --- | --- |
 | Authorization code grant | Implemented | `/authorize`, `/token`, PAR, signed request object handling, authorization code one-time consumption, and redirect matching tests. |
-| PKCE | Implemented as an invariant | S256 is required for every authorization-code request; there is no client field, database column, or runtime flag that bypasses it. |
+| PKCE | Implemented as a profile-scoped invariant | S256 is required for public, FAPI, sender-constrained, and non-OIDC authorization-code requests. Baseline confidential OIDC may omit PKCE only through the explicit per-client compatibility policy; any supplied challenge must be S256 and `plain` is rejected. |
 | Refresh token grant | Implemented | Rotation, reuse detection, sender-constraint preservation, and documented lost-response retry state machine. |
 | Client credentials grant | Implemented | Confidential client authentication, resource/audience binding, and no `openid` user-subject overclaim. |
 | Implicit grant | Not supported | Discovery advertises `code`; no implicit response type is part of the profile matrix. |

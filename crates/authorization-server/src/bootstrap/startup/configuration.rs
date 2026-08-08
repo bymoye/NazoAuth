@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::config::DEFAULT_DATA_DIR;
+
 /// Values initialized once for the process and shared by all service
 /// adapters.  The pool, Valkey client, settings, runtime registry, and keyset
 /// have one owner here; service assembly borrows or clones their handles.
@@ -39,7 +41,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
 
     // 配置只在启动阶段读取；运行期只向 handler 注入其所需的 focused handles。
     let database_url = database_url(&config);
-    let audit_anchor_data_dir = PathBuf::from(config.string("DATA_DIR", "runtime"));
+    let audit_anchor_data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
         crate::adapters::audit_anchor::preflight_config_from_source(
             &config,
@@ -82,7 +84,8 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
     let instance_identity_dir = config
         .optional_string("INSTANCE_IDENTITY_DIR")
-        .map(PathBuf::from);
+        .map(|_| config.persistent_path("INSTANCE_IDENTITY_DIR", None))
+        .transpose()?;
     let control_discovery = web::Data::new(
         crate::control_discovery::ControlDiscoveryEndpoint::initialize(
             &settings.storage.data_dir,
@@ -95,16 +98,19 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
         settings.endpoint.mtls_certificate_source,
     ));
+    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
     let readiness_dependencies =
         web::Data::new(crate::http::well_known::ReadinessDependencies::new(
             diesel_db.clone(),
             valkey_connection.clone(),
+            keyset.clone(),
         ));
     let initial_admin_bootstrap = web::Data::new(
         crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint::initialize(
             diesel_db.clone(),
             &settings.storage.data_dir,
             &settings.endpoint.issuer,
+            nazo_identity::TenantContext::default_system(),
         )
         .await?,
     );
@@ -124,7 +130,6 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     );
     background::spawn_runtime_reconciler(runtime_modules.clone());
     tokio::fs::create_dir_all(&settings.storage.avatar_storage_dir).await?;
-    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
     background::spawn_key_lifecycle(keyset.clone());
 
     Ok(StartupConfiguration {

@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::{StreamExt as _, stream};
 #[cfg(not(test))]
 use nazo_auth::BackchannelLogoutDelivery;
+use nazo_auth::MAX_CIBA_LOGOUT_URI_BYTES;
 #[cfg(not(test))]
 use nazo_postgres::AuditRepository;
 use url::Url;
@@ -94,10 +95,11 @@ impl BackchannelLogoutWorker {
                     delivery_failure_state(outcome, delivery.attempts, now, delivery.expires_at);
                 let last_error = truncate_error(&delivery_error.to_string());
                 tracing::warn!(
-                    error = %last_error,
                     retry_scheduled = next_attempt_at.is_some(),
                     failure_recorded_at = %now,
-                    backchannel_logout_uri = %delivery.logout_uri,
+                    endpoint_origin = %validate_backchannel_endpoint(&delivery.logout_uri)
+                        .map(|endpoint| endpoint.origin().ascii_serialization())
+                        .unwrap_or_else(|_| "<invalid>".to_owned()),
                     "back-channel logout delivery failed"
                 );
                 self.deliveries
@@ -186,6 +188,10 @@ async fn post_logout_token(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
         )
+        .header(
+            reqwest::header::HeaderName::from_static("idempotency-key"),
+            backchannel_idempotency_key(logout_token),
+        )
         .body(body)
         .send()
         .await
@@ -203,6 +209,9 @@ async fn post_logout_token(
 }
 
 fn validate_backchannel_endpoint(raw: &str) -> Result<Url, &'static str> {
+    if raw.len() > MAX_CIBA_LOGOUT_URI_BYTES {
+        return Err("back-channel logout endpoint exceeds the maximum URI length");
+    }
     let endpoint = Url::parse(raw).map_err(|_| "back-channel logout endpoint is not a URI")?;
     let host = endpoint
         .host_str()
@@ -221,6 +230,13 @@ fn validate_backchannel_endpoint(raw: &str) -> Result<Url, &'static str> {
         _ => return Err("back-channel logout endpoint must use HTTPS or loopback HTTP"),
     }
     Ok(endpoint)
+}
+
+fn backchannel_idempotency_key(logout_token: &str) -> String {
+    format!(
+        "nazo-backchannel-logout-{}",
+        blake3::hash(logout_token.as_bytes()).to_hex()
+    )
 }
 
 fn classify_backchannel_status(status: u16) -> BackchannelResponseAction {

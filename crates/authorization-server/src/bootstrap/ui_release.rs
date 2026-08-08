@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use url::Url;
 
-use crate::config::ConfigSource;
+use crate::config::{ConfigSource, DEFAULT_DATA_DIR};
 
 const DEFAULT_FRONTEND: &str = include_str!("../../../../release/frontend.json");
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -42,16 +42,19 @@ struct FrontendArtifact {
 }
 
 pub(super) async fn resolve(config: &ConfigSource) -> anyhow::Result<Option<PathBuf>> {
-    if let Some(path) = config.optional_string("UI_STATIC_DIR") {
-        return Ok(Some(validate_static_directory(Path::new(&path))?));
+    if config.optional_string("UI_STATIC_DIR").is_some() {
+        let path = config.persistent_path("UI_STATIC_DIR", None)?;
+        return Ok(Some(validate_static_directory(&path)?));
     }
     let descriptor: FrontendDescriptor = serde_json::from_str(DEFAULT_FRONTEND)
         .context("embedded frontend descriptor is invalid")?;
     descriptor.validate()?;
-    let cache = config
-        .optional_string("UI_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(config.string("DATA_DIR", "data")).join("ui-releases"));
+    let cache = match config.optional_string("UI_CACHE_DIR") {
+        Some(_) => config.persistent_path("UI_CACHE_DIR", None)?,
+        None => config
+            .persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?
+            .join("ui-releases"),
+    };
     Ok(Some(ensure_cached(&cache, &descriptor).await?))
 }
 

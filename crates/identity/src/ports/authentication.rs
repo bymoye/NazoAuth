@@ -32,6 +32,35 @@ pub trait LoginThrottlePort: Send + Sync {
     fn clear_failure<'a>(&'a self, email: &'a str, source_ip: &'a str) -> RepositoryFuture<'a, ()>;
 }
 
+/// Atomic budget for MFA factor attempts on one authenticated login session.
+///
+/// The session-bound subject deliberately avoids a global email/account lock:
+/// an unrelated caller cannot consume another user's pending challenge budget,
+/// while the same challenge cannot evade the budget by changing source IPs.
+pub trait MfaAttemptThrottlePort: Send + Sync {
+    fn reserve_attempt<'a>(
+        &'a self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        session_id: &'a str,
+        window_seconds: u64,
+        max_attempts: u64,
+    ) -> RepositoryFuture<'a, MfaAttemptThrottleDecision>;
+
+    fn clear_attempts<'a>(
+        &'a self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        session_id: &'a str,
+    ) -> RepositoryFuture<'a, ()>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MfaAttemptThrottleDecision {
+    Allowed,
+    Limited { retry_after_seconds: u64 },
+}
+
 pub trait SecretVerifyPort: Send + Sync {
     fn verify_secret(&self, secret: String, password_hash: PasswordHash) -> SecretVerifyFuture<'_>;
 }

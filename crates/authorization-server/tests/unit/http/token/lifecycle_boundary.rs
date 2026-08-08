@@ -277,7 +277,7 @@ fn device_token_issuance_handoff_uses_focused_context_and_services() {
     assert!(source.contains("token_service: &ServerTokenService"));
     assert!(source.contains("issuance: &TokenIssuanceContext<'_>"));
     assert!(source.contains("issue_token_response_with_service"));
-    assert!(source.contains("validate_dpop_proof_with_authorization_service"));
+    assert!(source.contains("validate_token_sender_constraints"));
     assert!(source.contains("consume_token_client_assertion_with_authorization_service"));
     for forbidden in [
         "TestInfrastructure",

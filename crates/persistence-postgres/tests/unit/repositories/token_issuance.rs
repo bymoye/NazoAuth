@@ -28,6 +28,8 @@ fn row(phase: &str) -> TokenIssuanceRow {
         grant_key_blake3: "grant-hash".to_owned(),
         request_digest: "request-digest".to_owned(),
         phase: phase.to_owned(),
+        claim_owner_id: None,
+        claim_started_at: None,
         access_token_jti: None,
         access_token_expires_at: None,
         response_ciphertext: None,

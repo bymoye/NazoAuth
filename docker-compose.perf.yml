@@ -92,9 +92,11 @@ services:
           --embedded-release development \
           --embedded-revision development \
           --embedded-build-id local:development
+        printf '%s' perf-static-secrets > /tmp/operator/secret-revision
         NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
         NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
         NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
+        NAZOAUTH_OPERATOR_SECRET_REVISION_FILE=/tmp/operator/secret-revision \
         NAZOAUTH_OPERATOR_STATE_DIRECTORY=/tmp/operator/state \
         NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
         NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \

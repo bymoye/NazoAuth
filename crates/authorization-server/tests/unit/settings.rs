@@ -107,7 +107,7 @@ fn default_dpop_nonce_policy_is_required() {
 #[test]
 fn shared_ip_admission_defaults_do_not_replace_failed_login_throttling() {
     let settings = Settings::from_config(&ConfigSource::default()).unwrap();
-    let rate_limit = settings.identity.rate_limit;
+    let rate_limit = &settings.identity.rate_limit;
 
     assert_eq!(rate_limit.window_seconds, 60);
     assert_eq!(rate_limit.auth_max_requests, 100_000);
@@ -115,6 +115,25 @@ fn shared_ip_admission_defaults_do_not_replace_failed_login_throttling() {
     assert_eq!(rate_limit.token_management_max_requests, 100_000);
     assert_eq!(rate_limit.login_failure_window_seconds, 900);
     assert_eq!(rate_limit.login_failure_ip_email_max_attempts, 5);
+    assert_eq!(rate_limit.mfa_failure_window_seconds, 900);
+    assert_eq!(rate_limit.mfa_failure_max_attempts, 5);
+    assert_eq!(settings.session.pending_mfa_session_ttl_seconds, 600);
+}
+
+#[test]
+fn pending_mfa_session_ttl_must_be_shorter_than_full_session_ttl() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("SESSION_TTL_SECONDS", "600"),
+        ("PENDING_MFA_SESSION_TTL_SECONDS", "600"),
+    ]);
+    let error = settings_error(
+        &config,
+        "pending MFA session must expire before full session",
+    );
+    assert_eq!(
+        error.to_string(),
+        "PENDING_MFA_SESSION_TTL_SECONDS must be less than SESSION_TTL_SECONDS"
+    );
 }
 
 #[test]
@@ -850,35 +869,36 @@ fn protected_resource_identifier_rejects_fragment_and_non_https_remote_url() {
 
 #[test]
 fn data_dir_drives_default_persistent_storage_paths() {
-    let config = ConfigSource::from_pairs_for_test([("DATA_DIR", "/srv/nazo-oauth")]);
+    let config = ConfigSource::from_pairs_for_test([("DATA_DIR", "test-runtime/nazo-oauth")]);
     let settings = Settings::from_config(&config).unwrap();
+    let data_dir = std::fs::canonicalize(".")
+        .unwrap()
+        .join("test-runtime/nazo-oauth");
 
     assert_eq!(
         settings.storage.avatar_storage_dir,
-        std::path::PathBuf::from("/srv/nazo-oauth/avatars")
+        data_dir.join("avatars")
     );
-    assert_eq!(
-        settings.keys.jwk_keys_dir,
-        std::path::PathBuf::from("/srv/nazo-oauth/keys")
-    );
+    assert_eq!(settings.keys.jwk_keys_dir, data_dir.join("keys"));
 }
 
 #[test]
 fn explicit_storage_paths_override_data_dir_derivations() {
     let config = ConfigSource::from_pairs_for_test([
-        ("DATA_DIR", "/srv/nazo-oauth"),
-        ("AVATAR_STORAGE_DIR", "/data/avatars"),
-        ("JWK_KEYS_DIR", "/secure/keys"),
+        ("DATA_DIR", "test-runtime/nazo-oauth"),
+        ("AVATAR_STORAGE_DIR", "test-runtime/avatars"),
+        ("JWK_KEYS_DIR", "test-runtime/keys"),
     ]);
     let settings = Settings::from_config(&config).unwrap();
+    let config_dir = std::fs::canonicalize(".").unwrap();
 
     assert_eq!(
         settings.storage.avatar_storage_dir,
-        std::path::PathBuf::from("/data/avatars")
+        config_dir.join("test-runtime/avatars")
     );
     assert_eq!(
         settings.keys.jwk_keys_dir,
-        std::path::PathBuf::from("/secure/keys")
+        config_dir.join("test-runtime/keys")
     );
 }
 

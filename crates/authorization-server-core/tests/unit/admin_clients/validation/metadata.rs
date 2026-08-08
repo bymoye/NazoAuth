@@ -5,6 +5,26 @@ use super::test_support::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
+#[test]
+fn ciba_and_logout_callback_uri_lengths_share_one_bound() {
+    let prefix = "https://client.example/";
+    let at_limit = format!(
+        "{prefix}{}",
+        "x".repeat(super::MAX_CIBA_LOGOUT_URI_BYTES - prefix.len())
+    );
+    assert!(super::validate_ciba_notification_uri(&at_limit).is_ok());
+    assert!(super::validate_logout_uri("backchannel_logout_uri", &at_limit).is_ok());
+
+    let over_limit = format!("{at_limit}x");
+    for result in [
+        super::validate_ciba_notification_uri(&over_limit),
+        super::validate_logout_uri("frontchannel_logout_uri", &over_limit),
+    ] {
+        let error = result.expect_err("callback URI over the shared bound must fail");
+        assert!(error.to_string().contains("2048"));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn metadata<'a>(
     client_type: &'a str,

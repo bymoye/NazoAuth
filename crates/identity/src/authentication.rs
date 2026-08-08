@@ -18,6 +18,7 @@ pub struct AuthenticationServiceConfig {
     pub failure_window_seconds: u64,
     pub failure_ip_email_max_attempts: u64,
     pub session_ttl_seconds: u64,
+    pub pending_mfa_session_ttl_seconds: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,13 +218,18 @@ where
         );
         let session_id = random_urlsafe_token();
         let csrf_token = random_urlsafe_token();
+        let session_ttl_seconds = if session.pending_mfa() {
+            self.config.pending_mfa_session_ttl_seconds
+        } else {
+            self.config.session_ttl_seconds
+        };
         match self
             .sessions
             .create_replacing(
                 input.previous_session_id.as_deref(),
                 &session_id,
                 &session,
-                self.config.session_ttl_seconds,
+                session_ttl_seconds,
             )
             .await
             .map_err(AuthenticatePasswordError::Session)?

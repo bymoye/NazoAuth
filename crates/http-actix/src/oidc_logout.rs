@@ -7,7 +7,7 @@ use crate::{
 use actix_web::{
     HttpRequest, HttpResponse,
     http::{Method, StatusCode, header},
-    web::{Bytes, Data, Payload},
+    web::{Data, Payload},
 };
 use futures_util::StreamExt as _;
 
@@ -119,7 +119,7 @@ pub async fn oidc_logout(
         return csrf_error();
     }
     let user_confirmed = parsed.user_confirmed;
-    let logout_request = parsed.request.clone();
+    let logout_request = (!user_confirmed).then(|| parsed.request.clone());
     let command = OidcLogoutCommand {
         request: parsed.request,
         session_id,
@@ -128,11 +128,7 @@ pub async fn oidc_logout(
     };
     match endpoint.operations.logout(command).await {
         Ok(success) => success_response(&endpoint, success),
-        Err(error) => error_response(
-            error,
-            csrf_cookie.as_deref(),
-            (!user_confirmed).then_some(&logout_request),
-        ),
+        Err(error) => error_response(error, csrf_cookie.as_deref(), logout_request.as_ref()),
     }
 }
 
@@ -163,7 +159,7 @@ async fn parse_logout_request(
             "logout POST must use application/x-www-form-urlencoded.",
         ));
     }
-    let mut body = Bytes::new();
+    let mut body = Vec::with_capacity(LOGOUT_FORM_MAX_BYTES);
     while let Some(chunk) = payload.next().await {
         let chunk = chunk.map_err(|_| {
             oauth_error(
@@ -179,10 +175,7 @@ async fn parse_logout_request(
                 "logout request body is too large.",
             ));
         }
-        let mut combined = Vec::with_capacity(body.len() + chunk.len());
-        combined.extend_from_slice(&body);
-        combined.extend_from_slice(&chunk);
-        body = Bytes::from(combined);
+        body.extend_from_slice(&chunk);
     }
     merge_logout_pairs(&mut parsed, &body)?;
     Ok(parsed)

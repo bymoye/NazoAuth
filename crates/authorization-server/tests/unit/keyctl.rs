@@ -4,7 +4,7 @@ fn key_task_config(
     entries: impl IntoIterator<Item = (&'static str, &'static str)>,
 ) -> ConfigSource {
     ConfigSource::from_owned_pairs_for_test(
-        std::iter::once(("JWK_KEYS_DIR", "/tmp/nazoauth-keyctl-config"))
+        std::iter::once(("JWK_KEYS_DIR", "runtime/nazoauth-keyctl-config"))
             .chain(entries)
             .map(|(key, value)| (key.to_owned(), value.to_owned())),
     )
@@ -18,44 +18,59 @@ fn key_task_config_closes_the_openid4vc_certificate_contract() {
     let (_, paths) = key_task_config_from(&key_task_config([
         (
             "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "/tmp/openid4vc-chain.pem",
+            "runtime/openid4vc-chain.pem",
         ),
-        ("OPENID4VC_TRUST_ANCHORS_FILE", "/tmp/openid4vc-anchors.pem"),
+        (
+            "OPENID4VC_TRUST_ANCHORS_FILE",
+            "runtime/openid4vc-anchors.pem",
+        ),
         ("PUBLIC_BASE_URL", "https://auth.example"),
     ]))
     .unwrap();
     let paths = paths.unwrap();
-    assert_eq!(paths.chain, PathBuf::from("/tmp/openid4vc-chain.pem"));
-    assert_eq!(paths.anchors, PathBuf::from("/tmp/openid4vc-anchors.pem"));
+    assert_eq!(paths.chain, PathBuf::from("runtime/openid4vc-chain.pem"));
+    assert_eq!(
+        paths.anchors,
+        PathBuf::from("runtime/openid4vc-anchors.pem")
+    );
     assert_eq!(paths.hostname, "auth.example");
 
     for entries in [
         vec![(
             "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "/tmp/openid4vc-chain.pem",
+            "runtime/openid4vc-chain.pem",
         )],
         vec![
             (
                 "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-                "/tmp/openid4vc-chain.pem",
+                "runtime/openid4vc-chain.pem",
             ),
-            ("OPENID4VC_TRUST_ANCHORS_FILE", "/tmp/openid4vc-anchors.pem"),
+            (
+                "OPENID4VC_TRUST_ANCHORS_FILE",
+                "runtime/openid4vc-anchors.pem",
+            ),
             ("PUBLIC_BASE_URL", "http://auth.example"),
         ],
         vec![
             (
                 "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-                "/tmp/openid4vc-chain.pem",
+                "runtime/openid4vc-chain.pem",
             ),
-            ("OPENID4VC_TRUST_ANCHORS_FILE", "/tmp/openid4vc-anchors.pem"),
+            (
+                "OPENID4VC_TRUST_ANCHORS_FILE",
+                "runtime/openid4vc-anchors.pem",
+            ),
             ("ISSUER", "https://127.0.0.1"),
         ],
         vec![
             (
                 "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-                "/tmp/openid4vc-chain.pem",
+                "runtime/openid4vc-chain.pem",
             ),
-            ("OPENID4VC_TRUST_ANCHORS_FILE", "/tmp/openid4vc-anchors.pem"),
+            (
+                "OPENID4VC_TRUST_ANCHORS_FILE",
+                "runtime/openid4vc-anchors.pem",
+            ),
             ("PUBLIC_BASE_URL", "not-an-absolute-url"),
         ],
     ] {

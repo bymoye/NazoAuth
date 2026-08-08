@@ -516,6 +516,19 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let now = Utc::now();
     let data_key = [23_u8; 32];
     let issuer = Openid4vciRepository::new(pool.clone(), data_key);
+    let offer_tenant_b_id = Uuid::now_v7();
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "INSERT INTO tenants (id, slug, display_name, status) \
+         VALUES ($1, $2, $3, 'active')",
+    )
+    .bind::<SqlUuid, _>(offer_tenant_b_id)
+    .bind::<Text, _>(format!("openid4vc-offer-isolation-{offer_tenant_b_id}"))
+    .bind::<Text, _>("OpenID4VC offer isolation test tenant")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
     let issuer_state = format!("issuer-state-{}", Uuid::now_v7());
     let offer = StoredCredentialOffer {
         id: Uuid::now_v7(),
@@ -536,7 +549,19 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         .insert_offer(&offer, Some(&issuer_state_hash), None, None)
         .await
         .unwrap();
-    let loaded_offer = issuer.offer(offer.id, now).await.unwrap().unwrap();
+    let loaded_offer = issuer
+        .offer(tenant_id, offer.id, now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        issuer
+            .offer(offer_tenant_b_id, offer.id, now)
+            .await
+            .unwrap()
+            .is_none(),
+        "a credential offer must not be readable from another tenant"
+    );
     assert_eq!(loaded_offer.id, offer.id);
     assert_eq!(loaded_offer.tenant_id, offer.tenant_id);
     assert_eq!(loaded_offer.subject_id, offer.subject_id);
@@ -552,12 +577,32 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let resolve_at = Utc::now();
     for client_id in ["wallet", "wallet-2"] {
         let authorization = issuer
-            .resolve_authorization_offer(&issuer_state_hash, subject_id, client_id, resolve_at)
+            .resolve_authorization_offer(
+                tenant_id,
+                &issuer_state_hash,
+                subject_id,
+                client_id,
+                resolve_at,
+            )
             .await
             .unwrap()
             .expect("the offer should remain valid for multiple wallet clients");
         assert_eq!(authorization.client_id, client_id);
     }
+    assert!(
+        issuer
+            .resolve_authorization_offer(
+                offer_tenant_b_id,
+                &issuer_state_hash,
+                subject_id,
+                "cross-tenant-wallet",
+                resolve_at,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "issuer-state offers must not resolve from another tenant"
+    );
 
     let pre_authorized_code = format!("preauth-{}", Uuid::now_v7());
     let pre_authorized_hash = blake3::hash(pre_authorized_code.as_bytes())
@@ -591,6 +636,21 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     assert!(
         issuer
             .consume_pre_authorized_offer(
+                offer_tenant_b_id,
+                &pre_authorized_hash,
+                None,
+                "cross-tenant-wallet",
+                pre_authorized_consume_at,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a pre-authorized offer must not be consumable from another tenant"
+    );
+    assert!(
+        issuer
+            .consume_pre_authorized_offer(
+                tenant_id,
                 &pre_authorized_hash,
                 None,
                 "wallet-a",
@@ -598,23 +658,13 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
             )
             .await
             .unwrap()
-            .is_some()
+            .is_some(),
+        "the original tenant must still be able to consume its offer"
     );
     assert!(
         issuer
             .consume_pre_authorized_offer(
-                &pre_authorized_hash,
-                None,
-                "wallet-a",
-                pre_authorized_consume_at,
-            )
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        issuer
-            .consume_pre_authorized_offer(
+                tenant_id,
                 &pre_authorized_hash,
                 None,
                 "wallet-b",
@@ -839,6 +889,11 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         .unwrap();
     sql_query("DELETE FROM tenants WHERE id = $1")
         .bind::<SqlUuid, _>(tenant_b_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM tenants WHERE id = $1")
+        .bind::<SqlUuid, _>(offer_tenant_b_id)
         .execute(&mut connection)
         .await
         .unwrap();
@@ -1512,6 +1567,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     assert!(
         issuer
             .consume_pre_authorized_offer(
+                tenant_id,
                 &pre_authorized_hash,
                 Some("0000"),
                 "boundary-wallet",
@@ -1523,6 +1579,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     );
     let authorization = issuer
         .consume_pre_authorized_offer(
+            tenant_id,
             &pre_authorized_hash,
             Some("2468"),
             "boundary-wallet",
@@ -1535,6 +1592,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     assert!(
         issuer
             .consume_pre_authorized_offer(
+                tenant_id,
                 &pre_authorized_hash,
                 Some("2468"),
                 "boundary-wallet",
@@ -1570,7 +1628,13 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
         .unwrap();
     assert!(
         issuer
-            .consume_pre_authorized_offer(&no_subject_hash, None, "boundary-wallet", Utc::now(),)
+            .consume_pre_authorized_offer(
+                tenant_id,
+                &no_subject_hash,
+                None,
+                "boundary-wallet",
+                Utc::now(),
+            )
             .await
             .unwrap()
             .is_none(),
@@ -1591,6 +1655,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     assert!(
         issuer
             .offer(
+                tenant_id,
                 expired_offer.id,
                 expired_offer.expires_at + Duration::seconds(1)
             )
@@ -1619,7 +1684,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
         .unwrap();
     drop(connection);
     assert_eq!(
-        issuer.offer(corrupt_offer.id, Utc::now()).await,
+        issuer.offer(tenant_id, corrupt_offer.id, Utc::now()).await,
         Err(CredentialStoreError::InvalidTransition)
     );
 

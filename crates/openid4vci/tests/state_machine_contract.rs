@@ -275,6 +275,7 @@ impl CredentialStorePort for TransitionStore {
     fn offer<'a>(
         &'a self,
         _: Uuid,
+        _: Uuid,
         _: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>
     {
@@ -283,6 +284,7 @@ impl CredentialStorePort for TransitionStore {
 
     fn consume_pre_authorized_offer<'a>(
         &'a self,
+        _: Uuid,
         _: &'a str,
         _: Option<&'a str>,
         _: &'a str,
@@ -761,6 +763,7 @@ impl CredentialStorePort for DefaultMethodsStore {
     fn offer<'a>(
         &'a self,
         _: Uuid,
+        _: Uuid,
         _: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>
     {
@@ -769,6 +772,7 @@ impl CredentialStorePort for DefaultMethodsStore {
 
     fn consume_pre_authorized_offer<'a>(
         &'a self,
+        _: Uuid,
         _: &'a str,
         _: Option<&'a str>,
         _: &'a str,

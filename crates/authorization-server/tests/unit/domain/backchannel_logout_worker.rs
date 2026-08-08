@@ -41,6 +41,11 @@ async fn local_status_endpoint(status: u16) -> (String, tokio::task::JoinHandle<
                 .contains("content-type: application/x-www-form-urlencoded")
         );
         assert!(request.contains("logout_token=logout-token"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("idempotency-key: nazo-backchannel-logout-")
+        );
         stream
             .write_all(
                 format!(
@@ -134,6 +139,26 @@ fn backchannel_endpoint_validation_rejects_unsafe_transport_shapes() {
             "endpoint {endpoint}"
         );
     }
+}
+
+#[test]
+fn backchannel_endpoint_length_is_bounded_and_idempotency_is_stable() {
+    let prefix = "https://rp.example/";
+    let at_limit = format!(
+        "{prefix}{}",
+        "x".repeat(nazo_auth::MAX_CIBA_LOGOUT_URI_BYTES - prefix.len())
+    );
+    assert!(validate_backchannel_endpoint(&at_limit).is_ok());
+    assert!(validate_backchannel_endpoint(&format!("{at_limit}x")).is_err());
+
+    assert_eq!(
+        backchannel_idempotency_key("logout-token"),
+        backchannel_idempotency_key("logout-token")
+    );
+    assert_ne!(
+        backchannel_idempotency_key("logout-token"),
+        backchannel_idempotency_key("other-logout-token")
+    );
 }
 
 #[test]

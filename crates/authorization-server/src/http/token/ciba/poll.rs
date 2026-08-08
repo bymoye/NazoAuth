@@ -1,5 +1,10 @@
 use super::decision::ciba_poll_failure_response;
 use super::*;
+use crate::http::dpop::{DpopErrorContext, dpop_error_response};
+use crate::http::token::{
+    SenderConstraintValidationError, sender_constraint_multiple_error,
+    validate_token_sender_constraints,
+};
 use actix_web::body::MessageBody;
 use nazo_http_actix::OAuthJsonErrorFields;
 
@@ -383,40 +388,21 @@ async fn ciba_issue_binding(
     req: &HttpRequest,
     client: &ClientRow,
 ) -> Result<(Option<String>, Option<String>), HttpResponse> {
-    if client.require_dpop_bound_tokens {
-        let dpop_jkt = validate_dpop_proof_with_authorization_service(
-            issuance.authorization,
-            issuance.config.issuer(),
-            issuance.config.mtls_endpoint_base_url(),
-            issuance.config.dpop_nonce_policy(),
-            req,
-            None,
-            None,
-        )
+    let sender = validate_token_sender_constraints(issuance, req, client, None, None, None)
         .await
-        .map_err(|error| dpop_error_response(error, DpopErrorContext::TokenEndpoint))?;
-        if dpop_jkt.is_none() {
-            return Err(dpop_error_response(
-                DpopError::MissingProof,
-                DpopErrorContext::TokenEndpoint,
-            ));
-        }
-        return Ok((dpop_jkt, None));
-    }
-    if client.require_mtls_bound_tokens {
-        let Some(x5t_s256) =
-            request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        else {
-            return Err(oauth_token_error(
+        .map_err(|error| match error {
+            SenderConstraintValidationError::Dpop(error) => {
+                dpop_error_response(error, DpopErrorContext::TokenEndpoint)
+            }
+            SenderConstraintValidationError::MissingMtls => oauth_token_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
                 "CIBA requires mTLS sender constraint.",
                 false,
-            ));
-        };
-        return Ok((None, Some(x5t_s256)));
-    }
-    Ok((None, None))
+            ),
+            SenderConstraintValidationError::Multiple => sender_constraint_multiple_error(),
+        })?;
+    Ok((sender.dpop_jkt, sender.mtls_x5t_s256))
 }
 
 fn ciba_subject_for_client(

@@ -191,7 +191,7 @@ impl AuditLedgerRepository {
         connection
             .transaction::<SecurityAuditReceipt, diesel::result::Error, _>(async |connection| {
                 let canonical_payload = sql_query("SELECT $1::jsonb::text AS payload_canonical")
-                    .bind::<diesel::sql_types::Jsonb, _>(event.payload.clone())
+                    .bind::<diesel::sql_types::Jsonb, _>(&event.payload)
                     .get_result::<CanonicalAuditPayloadRow>(connection)
                     .await?;
                 let state = sql_query(
@@ -224,7 +224,7 @@ impl AuditLedgerRepository {
                 .bind::<diesel::sql_types::Uuid, _>(event.event_id)
                 .bind::<diesel::sql_types::Text, _>(&event.event_type)
                 .bind::<diesel::sql_types::Text, _>(&event.event_category)
-                .bind::<diesel::sql_types::Jsonb, _>(event.payload.clone())
+                .bind::<diesel::sql_types::Jsonb, _>(&event.payload)
                 .bind::<diesel::sql_types::Timestamptz, _>(event.occurred_at)
                 .bind::<diesel::sql_types::Binary, _>(state.last_hash)
                 .bind::<diesel::sql_types::Binary, _>(event_hash.to_vec())

@@ -64,7 +64,7 @@ pub(crate) async fn apply_request_object_with_context(
     .map_err(request_object_verification_error)?;
     let normalized = context
         .service
-        .admit_request_object(
+        .admit_request_object_owned(
             outer,
             &verified.claims,
             RequestObjectPolicy {

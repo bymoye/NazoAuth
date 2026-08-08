@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
@@ -28,6 +28,22 @@ pub const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@127.0.0.1
 pub const DEFAULT_DATABASE_MAX_CONNECTIONS: usize = 32;
 const GENERATED_SECRET_BYTES: usize = 48;
 const GENERATED_SECRETS_DIR: &str = "secrets";
+pub(crate) const DEFAULT_DATA_DIR: &str = "runtime";
+const PERSISTENT_PATH_CONFIG_KEYS: &[&str] = &[
+    "AUDIT_ANCHOR_STATUS_FILE",
+    "AVATAR_STORAGE_DIR",
+    "DATA_DIR",
+    "INSTANCE_IDENTITY_DIR",
+    "JWK_KEYS_DIR",
+    "UI_CACHE_DIR",
+    "UI_STATIC_DIR",
+];
+const NON_CONFIG_NAZOAUTH_ENV_PREFIXES: &[&str] =
+    &["NAZOAUTH_BUILD_", "NAZOAUTH_OPERATOR_", "NAZOAUTHCTL_"];
+const NON_CONFIG_NAZOAUTH_ENV_KEYS: &[&str] = &[
+    "NAZOAUTH_GENERATE_CONFORMANCE_SECRETS",
+    "NAZOAUTH_SERVER_CONFIG_FILE",
+];
 const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
     ("CLIENT_SECRET_PEPPER", "CLIENT_SECRET_PEPPER_FILE"),
     (
@@ -252,11 +268,23 @@ const AUDIT_ANCHOR_WORKER_CONFIG_KEYS: &[&str] = &[
     "AUDIT_ANCHOR_URL",
 ];
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ConfigSource {
     file_values: HashMap<String, String>,
     env_values: HashMap<String, String>,
     generated_values: HashMap<String, String>,
+    config_dir: PathBuf,
+}
+
+impl Default for ConfigSource {
+    fn default() -> Self {
+        Self {
+            file_values: HashMap::new(),
+            env_values: HashMap::new(),
+            generated_values: HashMap::new(),
+            config_dir: PathBuf::from("."),
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -308,8 +336,9 @@ impl ConfigSource {
 
     pub(crate) fn load_for_audit_anchor_worker() -> anyhow::Result<Self> {
         let mut source = Self::load_from_dir_with_env_mode(".", std::env::vars(), false, false)?;
+        let config_dir = source.config_dir.clone();
         source.merge_secret_file_inputs(
-            Path::new("."),
+            &config_dir,
             &[
                 (
                     "AUDIT_ANCHOR_DATABASE_URL",
@@ -331,7 +360,8 @@ impl ConfigSource {
     ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let mut source = Self::load_from_dir_with_env_mode(path, env, false, false)?;
-        source.merge_secret_file_inputs(path, &[("DATABASE_URL", "DATABASE_URL_FILE")])?;
+        let config_dir = source.config_dir.clone();
+        source.merge_secret_file_inputs(&config_dir, &[("DATABASE_URL", "DATABASE_URL_FILE")])?;
         Ok(source)
     }
 
@@ -358,17 +388,28 @@ impl ConfigSource {
         include_worker_config: bool,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref();
+        let config_dir = std::fs::canonicalize(path).with_context(|| {
+            format!(
+                "failed to resolve configuration directory {}",
+                path.display()
+            )
+        })?;
+        let path = config_dir.as_path();
         let dotenv_path = path.join(UNSUPPORTED_DOTENV_FILE);
         if dotenv_path.exists() {
             bail!(".env is not supported; use .env.yaml");
         }
 
-        let mut source = Self::default();
+        let mut source = Self {
+            config_dir: config_dir.clone(),
+            ..Self::default()
+        };
         let config_path = path.join(CONFIG_FILE);
         if config_path.exists() {
             source.merge_yaml_file_with_worker_policy(config_path, include_worker_config)?;
         }
         source.merge_env_with_worker_policy(env, include_worker_config)?;
+        source.normalize_persistent_paths()?;
         if resolve_secret_files {
             source.merge_secret_file_inputs(path, SECRET_FILE_INPUTS)?;
         }
@@ -430,6 +471,35 @@ impl ConfigSource {
         Ok(parsed)
     }
 
+    pub(crate) fn persistent_path(
+        &self,
+        key: &str,
+        default: Option<&str>,
+    ) -> anyhow::Result<PathBuf> {
+        let value = self
+            .optional_string(key)
+            .or_else(|| default.map(ToOwned::to_owned))
+            .ok_or_else(|| anyhow::anyhow!("{key} is required"))?;
+        resolve_persistent_path(&self.config_dir, key, &value)
+    }
+
+    fn normalize_persistent_paths(&mut self) -> anyhow::Result<()> {
+        let config_dir = self.config_dir.clone();
+        for key in PERSISTENT_PATH_CONFIG_KEYS {
+            if let Some(value) = self.file_values.get_mut(*key) {
+                *value = resolve_persistent_path(&config_dir, key, value)?
+                    .display()
+                    .to_string();
+            }
+            if let Some(value) = self.env_values.get_mut(*key) {
+                *value = resolve_persistent_path(&config_dir, key, value)?
+                    .display()
+                    .to_string();
+            }
+        }
+        Ok(())
+    }
+
     fn merge_yaml_file_with_worker_policy(
         &mut self,
         path: impl AsRef<Path>,
@@ -471,6 +541,9 @@ impl ConfigSource {
                 );
             }
             if !ENV_CONFIG_KEYS.contains(&key.as_str()) {
+                if is_unknown_nazoauth_environment_key(&key) {
+                    bail!("unknown NazoAuth environment config key {key}");
+                }
                 continue;
             }
             if !include_worker_config && AUDIT_ANCHOR_WORKER_CONFIG_KEYS.contains(&key.as_str()) {
@@ -510,8 +583,11 @@ impl ConfigSource {
     }
 
     fn merge_generated_secrets(&mut self, config_dir: &Path) -> anyhow::Result<()> {
-        let data_dir =
-            resolve_from_config_dir(config_dir, Path::new(&self.string("DATA_DIR", "runtime")));
+        let data_dir = resolve_persistent_path(
+            config_dir,
+            "DATA_DIR",
+            &self.string("DATA_DIR", DEFAULT_DATA_DIR),
+        )?;
         let secrets_dir = data_dir.join(GENERATED_SECRETS_DIR);
         let mut required = vec![
             ("CLIENT_SECRET_PEPPER", "client-secret-pepper"),
@@ -661,6 +737,85 @@ fn resolve_from_config_dir(config_dir: &Path, path: &Path) -> PathBuf {
     } else {
         config_dir.join(path)
     }
+}
+
+fn is_unknown_nazoauth_environment_key(key: &str) -> bool {
+    key.starts_with("NAZOAUTH_")
+        && !NON_CONFIG_NAZOAUTH_ENV_KEYS.contains(&key)
+        && !NON_CONFIG_NAZOAUTH_ENV_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
+fn resolve_persistent_path(
+    config_dir: &Path,
+    key: &str,
+    configured: &str,
+) -> anyhow::Result<PathBuf> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        bail!("{key} must not be empty");
+    }
+    let configured_path = Path::new(configured);
+    let relative = !configured_path.is_absolute();
+    let canonical_config_dir = std::fs::canonicalize(config_dir).with_context(|| {
+        format!(
+            "failed to resolve configuration directory {}",
+            config_dir.display()
+        )
+    })?;
+    let candidate = if relative {
+        canonical_config_dir.join(configured_path)
+    } else {
+        configured_path.to_owned()
+    };
+    let candidate = normalize_path_lexically(&candidate);
+    let resolved = canonicalize_existing_prefix(&candidate)?;
+    if relative && !resolved.starts_with(&canonical_config_dir) {
+        bail!(
+            "{key} relative path escapes configuration directory: {}",
+            configured
+        );
+    }
+    Ok(resolved)
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => normalized.push(".."),
+            },
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> anyhow::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path.to_owned();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            bail!("path has no existing ancestor: {}", path.display());
+        };
+        missing.push(name.to_owned());
+        if !existing.pop() {
+            bail!("path has no existing ancestor: {}", path.display());
+        }
+    }
+    let mut resolved = std::fs::canonicalize(&existing)
+        .with_context(|| format!("failed to resolve path {}", path.display()))?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn read_or_create_generated_secret(path: &Path) -> anyhow::Result<String> {

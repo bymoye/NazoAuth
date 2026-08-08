@@ -113,6 +113,7 @@ services:
         NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
         NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
         NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
+        NAZOAUTH_OPERATOR_SECRET_REVISION_FILE=/run/nazoauth-secrets/revision \
         NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
         NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
           nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws

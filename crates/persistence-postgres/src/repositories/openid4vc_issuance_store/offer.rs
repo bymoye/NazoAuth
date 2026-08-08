@@ -13,6 +13,7 @@ use super::decode_error;
 impl Openid4vciRepository {
     pub(super) fn offer_lookup<'a>(
         &'a self,
+        tenant_id: Uuid,
         id: Uuid,
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>
@@ -25,8 +26,10 @@ impl Openid4vciRepository {
                 .map_err(|_| CredentialStoreError::Unavailable)?;
             let row = sql_query(
                 "SELECT id,tenant_id,subject_id,credential_configuration_ids,grants_ciphertext,expires_at \
-                 FROM openid4vci_offers WHERE id = $1 AND consumed_at IS NULL AND expires_at > $2",
+                 FROM openid4vci_offers WHERE tenant_id = $1 AND id = $2 \
+                   AND consumed_at IS NULL AND expires_at > $3",
             )
+            .bind::<sql_types::Uuid, _>(tenant_id)
             .bind::<sql_types::Uuid, _>(id)
             .bind::<sql_types::Timestamptz, _>(now)
             .get_result::<OfferRow>(&mut connection)
@@ -39,6 +42,7 @@ impl Openid4vciRepository {
 
     pub(super) fn offer_consume_pre_authorized<'a>(
         &'a self,
+        tenant_id: Uuid,
         code_hash: &'a str,
         tx_code: Option<&'a str>,
         client_id: &'a str,
@@ -54,9 +58,11 @@ impl Openid4vciRepository {
             connection.transaction::<Option<CredentialAuthorization>, diesel::result::Error, _>(async move |connection| {
                 let row = sql_query(
                     "SELECT id,tenant_id,subject_id,credential_configuration_ids,tx_code_hash,expires_at \
-                     FROM openid4vci_offers WHERE pre_authorized_code_hash = $1 \
-                       AND consumed_at IS NULL AND expires_at > $2 FOR UPDATE",
+                     FROM openid4vci_offers WHERE tenant_id = $1 \
+                       AND pre_authorized_code_hash = $2 \
+                       AND consumed_at IS NULL AND expires_at > $3 FOR UPDATE",
                 )
+                .bind::<sql_types::Uuid, _>(tenant_id)
                 .bind::<sql_types::Text, _>(code_hash)
                 .bind::<sql_types::Timestamptz, _>(now)
                 .get_result::<PreAuthorizedOfferRow>(connection)
@@ -68,9 +74,10 @@ impl Openid4vciRepository {
                 let configuration_ids = serde_json::from_value(row.credential_configuration_ids)
                     .map_err(decode_error)?;
                 let consumed = sql_query(
-                    "UPDATE openid4vci_offers SET consumed_at = GREATEST($2, created_at) \
-                     WHERE id = $1 AND consumed_at IS NULL",
+                    "UPDATE openid4vci_offers SET consumed_at = GREATEST($3, created_at) \
+                     WHERE tenant_id = $1 AND id = $2 AND consumed_at IS NULL",
                 )
+                .bind::<sql_types::Uuid, _>(tenant_id)
                 .bind::<sql_types::Uuid, _>(row.id)
                 .bind::<sql_types::Timestamptz, _>(now)
                 .execute(connection)

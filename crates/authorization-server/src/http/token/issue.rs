@@ -398,6 +398,39 @@ async fn recover_conflicting_token_issuance_response(
     }
 }
 
+async fn wait_for_token_issuance_response(
+    token_service: &ServerTokenService,
+    client: &ClientRow,
+    grant_key: &str,
+) -> Option<HttpResponse> {
+    // A claimed Prepared row is never taken over. Waiting is bounded so a
+    // crashed owner fails closed instead of allowing a second mint.
+    const ATTEMPTS: usize = 80;
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
+    for attempt in 0..ATTEMPTS {
+        match token_service
+            .token_issuance_by_grant(client.tenant_id, client.id, grant_key)
+            .await
+        {
+            Ok(Some(record)) => {
+                if let Some(response) = response_from_token_issuance(&record) {
+                    return Some(response);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "failed to wait for token issuance response");
+                return None;
+            }
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(DELAY).await;
+        }
+    }
+    None
+}
+
 pub(crate) fn request_idempotency_key(req: &actix_web::HttpRequest) -> Option<String> {
     let value = req.headers().get("idempotency-key")?.to_str().ok()?.trim();
     if value.is_empty() || value.len() > 256 {

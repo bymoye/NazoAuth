@@ -85,6 +85,7 @@ OIDF_BAD_FINAL_RESULTS = {"FAILED", "INTERRUPTED", "WARNING"}
 OIDF_UNACCEPTABLE_FINAL_RESULTS = OIDF_BAD_FINAL_RESULTS | {"SKIPPED"}
 OIDF_BAD_STATUS_VALUES = {"FAILED", "INTERRUPTED"}
 OIDF_BAD_LOG_RESULTS = {"FAILURE", "WARNING"}
+MAX_OIDF_API_RESPONSE_BYTES = 1024 * 1024
 OIDF_LOG_CONTEXT_SOURCES = {
     "BROWSER",
     "CallBackchannelAuthenticationEndpoint",
@@ -1250,11 +1251,13 @@ def oidf_api_request(
                 context=OIDF_API_SSL_CONTEXT,
             ) as response:
                 status = response.status
-                body = response.read()
+                body = response.read(MAX_OIDF_API_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             with exc:
                 status = exc.code
-                body = exc.read()
+                body = exc.read(MAX_OIDF_API_RESPONSE_BYTES + 1)
+            if len(body) > MAX_OIDF_API_RESPONSE_BYTES:
+                fail(f"OIDF API {method} {path} response exceeds 1 MiB")
             if status < 500 or attempt == attempts:
                 break
             time.sleep(min(attempt * 2, 15))
@@ -1269,15 +1272,22 @@ def oidf_api_request(
     else:
         fail(f"OIDF API {method} {path} failed: {last_error}")
 
+    if len(body) > MAX_OIDF_API_RESPONSE_BYTES:
+        fail(f"OIDF API {method} {path} response exceeds 1 MiB")
+
     if status not in expected_statuses:
         text = body.decode("utf-8", "replace")[:300] if body else ""
         fail(f"OIDF API {method} {path} failed with HTTP {status}: {text}")
 
     if not body:
+        if method.upper() == "GET" and status == 200:
+            fail(f"OIDF API {method} {path} returned an empty HTTP 200 response")
         return status, None
     try:
         return status, json.loads(body.decode("utf-8"))
     except json.JSONDecodeError:
+        if method.upper() == "GET" and status == 200:
+            fail(f"OIDF API {method} {path} returned invalid JSON for HTTP 200")
         return status, None
 
 
@@ -1791,15 +1801,17 @@ def fetch_alias_plans(
             expected_statuses={200},
         )
         if not isinstance(payload, dict):
-            return matched
+            fail("OIDF API api/plan returned a non-object JSON payload")
 
         plans = payload.get("data")
-        if not isinstance(plans, list) or not plans:
+        if not isinstance(plans, list):
+            fail("OIDF API api/plan response data must be an array")
+        if not plans:
             return matched
 
         for plan in plans:
             if not isinstance(plan, dict):
-                continue
+                fail("OIDF API api/plan response contains a non-object plan")
             config = plan.get("config")
             alias = config.get("alias") if isinstance(config, dict) else None
             if alias in aliases:
@@ -1807,7 +1819,11 @@ def fetch_alias_plans(
 
         start += len(plans)
         total = payload.get("recordsTotal")
+        if total is not None and (not isinstance(total, int) or total < 0):
+            fail("OIDF API api/plan response recordsTotal must be a non-negative integer")
         if isinstance(total, int) and start >= total:
+            return matched
+        if total is None and len(plans) < length:
             return matched
 
 
@@ -1860,7 +1876,9 @@ def inspect_oidf_state(
             token,
             expected_statuses={200, 404},
         )
-        if status_code == 200 and info is not None:
+        if status_code == 200 and not isinstance(info, dict):
+            return f"{module_id} returned an invalid HTTP 200 module info payload"
+        if status_code == 200:
             result = value_as_upper(info.get("result")) if isinstance(info, dict) else ""
             if result == "SKIPPED" and is_allowed_expected_skip(
                 info,
@@ -1928,6 +1946,8 @@ def inspect_oidf_state(
             expected_statuses={200, 404},
         )
         if status_code == 200:
+            if not isinstance(logs, list):
+                return f"{module_id} returned an invalid HTTP 200 log payload"
             failure = oidf_log_failure(
                 module_id,
                 logs,
@@ -2119,19 +2139,27 @@ def cleanup_existing_alias_plans_pass(base_url: str, token: str, aliases: set[st
             expected_statuses={200},
         )
         if not isinstance(payload, dict):
-            return deleted
+            fail("OIDF API api/plan returned a non-object JSON payload during cleanup")
 
         plans = payload.get("data")
-        if not isinstance(plans, list) or not plans:
+        if not isinstance(plans, list):
+            fail("OIDF API api/plan response data must be an array during cleanup")
+        if not plans:
             return deleted
 
         for plan in plans:
+            if not isinstance(plan, dict):
+                fail("OIDF API api/plan response contains a non-object plan during cleanup")
             if cleanup_alias_plan(base_url, token, aliases, plan):
                 deleted += 1
 
         start += len(plans)
         total = payload.get("recordsTotal")
+        if total is not None and (not isinstance(total, int) or total < 0):
+            fail("OIDF API api/plan response recordsTotal must be a non-negative integer during cleanup")
         if isinstance(total, int) and start >= total:
+            return deleted
+        if total is None and len(plans) < length:
             return deleted
 
 

@@ -516,6 +516,46 @@ class PrepareOidfBlackBoxTests(unittest.TestCase):
         self.assertEqual(len(groups["10-frontchannel.json"]), 1)
         self.assertEqual(len(groups["11-session.json"]), 1)
 
+    def test_logout_plan_contract_uses_authoritative_oidf_names_and_configs(self):
+        module = load_setup_module()
+        configs = {
+            "oidf-oidcc-basic-plan-config.json": module.write_basic_plan_config(),
+            "oidf-oidcc-dynamic-plan-config.json": module.write_dynamic_plan_config(),
+            "oidf-oidcc-formpost-plan-config.json": module.write_formpost_plan_config(),
+            "oidf-oidcc-third-party-init-plan-config.json": module.write_third_party_init_plan_config(),
+            "oidf-oidcc-config-plan-config.json": module.write_oidcc_config_plan_config(),
+            "oidf-oidcc-rp-initiated-logout-plan-config.json": module.write_rp_initiated_logout_plan_config(),
+            "oidf-oidcc-backchannel-logout-plan-config.json": module.write_backchannel_logout_plan_config(),
+            "oidf-oidcc-frontchannel-logout-plan-config.json": module.write_frontchannel_logout_plan_config(),
+            "oidf-oidcc-session-management-plan-config.json": module.write_session_management_plan_config(),
+        }
+        configs.update(module.write_fapi_ciba_plan_config())
+        configs.update(module.write_fapi_matrix_plan_configs())
+
+        expressions = module.plan_expressions_for_configs(configs)
+        manifest = module.plan_manifest_for_expressions(expressions, configs)
+        by_config = {plan["config"]: plan for plan in manifest["plans"]}
+
+        self.assertEqual(len(expressions), 27)
+        self.assertEqual(
+            expressions[5],
+            "oidcc-rp-initiated-logout-certification-test-plan[client_registration=static_client][response_type=code] "
+            "oidf-oidcc-rp-initiated-logout-plan-config.json",
+        )
+        self.assertEqual(
+            expressions[6],
+            "oidcc-backchannel-rp-initiated-logout-certification-test-plan[client_registration=static_client][response_type=code] "
+            "oidf-oidcc-backchannel-logout-plan-config.json",
+        )
+        self.assertEqual(
+            by_config["oidf-oidcc-rp-initiated-logout-plan-config.json"]["title"],
+            "OIDC RP-Initiated Logout OP",
+        )
+        self.assertEqual(
+            by_config["oidf-oidcc-backchannel-logout-plan-config.json"]["title"],
+            "OIDC Back-Channel Logout OP",
+        )
+
     def test_help_exits_before_generating_runtime_files(self):
         module = load_setup_module()
 

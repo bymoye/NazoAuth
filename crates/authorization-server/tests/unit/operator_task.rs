@@ -716,6 +716,38 @@ fn embedded_identity_and_operation_names_are_closed() {
 }
 
 #[test]
+fn secret_binding_requires_the_local_revision_authority_and_rejects_rotation() {
+    let directory = temporary_directory();
+    let revision_path = directory.join("secret-revision");
+    fs::write(&revision_path, b"secret-revision").unwrap();
+
+    let valid = task(TaskOperation::KeysValidate);
+    validate_secret_binding_at(&valid, &revision_path).unwrap();
+
+    fs::write(&revision_path, b"rotated-revision").unwrap();
+    let error = validate_secret_binding_at(&valid, &revision_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("secret revision binding mismatch")
+    );
+
+    let mut hmac = valid;
+    hmac.config.secret_binding = SecretBinding::HmacSha256 {
+        key_id: "provider-key".to_owned(),
+        digest: "d".repeat(64),
+    };
+    let error = validate_secret_binding_at(&hmac, &revision_path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("HMAC secret binding has no local provider")
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn canonical_manifest_binds_only_the_authorized_non_secret_configuration() {
     let directory = temporary_directory();
     let manifest_path = directory.join("manifest.json");

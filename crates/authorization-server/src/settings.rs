@@ -13,7 +13,7 @@ use nazo_auth::{
 use url::Url;
 
 use crate::adapters::security::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER;
-use crate::config::ConfigSource;
+use crate::config::{ConfigSource, DEFAULT_DATA_DIR};
 use crate::http::mtls::MtlsCertificateSourceMode;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr, parse_trusted_proxy_cidrs};
 
@@ -90,6 +90,7 @@ pub(crate) struct SessionSettings {
     pub(crate) csrf_cookie_name: String,
     pub(crate) cookie_secure: bool,
     pub(crate) session_ttl_seconds: u64,
+    pub(crate) pending_mfa_session_ttl_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -515,7 +516,7 @@ pub(crate) fn key_settings_from_config(
             "SIGNING_KEY_PREPUBLISH_SECONDS must be less than SIGNING_KEY_ROTATION_INTERVAL_SECONDS"
         );
     }
-    let data_dir = PathBuf::from(config.string("DATA_DIR", "runtime"));
+    let data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let access_token_ttl_seconds = positive_i64(
         config,
         "ACCESS_TOKEN_TTL_SECONDS",
@@ -525,10 +526,10 @@ pub(crate) fn key_settings_from_config(
     let id_token_ttl_seconds =
         positive_i64(config, "ID_TOKEN_TTL_SECONDS", 600, "ID_TOKEN_TTL_SECONDS")?;
     Ok(nazo_key_management::KeySettings {
-        keys_dir: config
-            .optional_string("JWK_KEYS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("keys")),
+        keys_dir: match config.optional_string("JWK_KEYS_DIR") {
+            Some(_) => config.persistent_path("JWK_KEYS_DIR", None)?,
+            None => data_dir.join("keys"),
+        },
         external_command: parse_signing_external_command(
             config.optional_string("SIGNING_EXTERNAL_COMMAND"),
         ),

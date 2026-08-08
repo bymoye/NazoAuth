@@ -73,6 +73,10 @@ fn spawn_operator_task_inner(
             root.join("receipt.key"),
         )
         .env(
+            "NAZOAUTH_OPERATOR_SECRET_REVISION_FILE",
+            root.join("secret-revision"),
+        )
+        .env(
             "NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE",
             root.join("config-manifest.json"),
         )
@@ -139,6 +143,7 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         URL_SAFE_NO_PAD.encode(receipt.to_bytes()),
     )
     .unwrap();
+    fs::write(root.join("secret-revision"), b"secret-process-test").unwrap();
     fs::write(
         root.join("context.json"),
         br#"{"controller_key_id":"controller-test","receipt_key_id":"receipt-test"}"#,
@@ -507,6 +512,18 @@ fn signed_process_task_is_replay_safe_and_returns_a_verifiable_failure_receipt()
         )
         .is_ok()
     );
+
+    // Rotation revokes even a previously durable claim.  The claim proves
+    // that this exact envelope was accepted before a restart, but it cannot
+    // override the current deployment secret authority.
+    fs::write(root.join("secret-revision"), b"rotated-secret-process-test").unwrap();
+    let rotated = run_operator_task(&root, &accepted_compact);
+    assert!(!rotated.status.success());
+    assert!(
+        String::from_utf8_lossy(&rotated.stderr)
+            .contains("operator task secret revision binding mismatch")
+    );
+    fs::write(root.join("secret-revision"), b"secret-process-test").unwrap();
 
     let mut expired = task;
     expired.jti = "request-expired-process-test".to_owned();

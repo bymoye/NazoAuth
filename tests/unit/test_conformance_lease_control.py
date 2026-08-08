@@ -85,6 +85,22 @@ class ConformanceLeaseControlTests(unittest.TestCase):
         )
 
     @mock.patch("subprocess.run")
+    def test_cleanup_runs_even_when_revoke_fails(self, run):
+        run.side_effect = [
+            subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="secret-bearing diagnostic"
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr=""),
+        ]
+        lease_id = "018f8f5f-79b2-7a8a-b3f2-577b1a705a4d"
+
+        with self.assertRaises(self.module.ConformanceLeaseControlError):
+            self.module.revoke_and_cleanup(Path("/ctl"), None, lease_id)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].args[0][-2:], ["cleanup", "--yes"])
+
+    @mock.patch("subprocess.run")
     def test_nonzero_ctl_exit_fails_without_parsing_stderr(self, run):
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=1, stdout="", stderr="secret-bearing diagnostic"

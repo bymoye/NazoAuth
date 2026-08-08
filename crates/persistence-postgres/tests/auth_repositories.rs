@@ -393,6 +393,28 @@ async fn grants_upsert_cover_and_revoke_tokens_atomically() {
         )
         .await
         .expect("grant should update");
+    repository
+        .ensure(
+            tenant_id,
+            fixture.user_id,
+            fixture.client_id,
+            &["openid".to_owned(), "offline_access".to_owned()],
+            &["resource://default".to_owned()],
+            &json!([]),
+        )
+        .await
+        .expect("device grant retry should be idempotent");
+    repository
+        .ensure(
+            tenant_id,
+            fixture.user_id,
+            fixture.client_id,
+            &["openid".to_owned(), "offline_access".to_owned()],
+            &["resource://default".to_owned()],
+            &json!([]),
+        )
+        .await
+        .expect("duplicate device grant retry should remain idempotent");
     let stored = repository
         .authorization(tenant_id, fixture.user_id, fixture.client_id)
         .await

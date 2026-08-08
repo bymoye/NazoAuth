@@ -11,7 +11,7 @@ pub(crate) async fn parse_backchannel_authentication_form(
             "CIBA request must use application/x-www-form-urlencoded.",
         ));
     }
-    let mut body = Bytes::new();
+    let mut body = Vec::with_capacity(16 * 1024);
     while let Some(chunk) = payload.next().await {
         let chunk = chunk.map_err(|_| {
             oauth_error(
@@ -27,10 +27,7 @@ pub(crate) async fn parse_backchannel_authentication_form(
                 "CIBA body is too large.",
             ));
         }
-        let mut combined = Vec::with_capacity(body.len() + chunk.len());
-        combined.extend_from_slice(&body);
-        combined.extend_from_slice(&chunk);
-        body = Bytes::from(combined);
+        body.extend_from_slice(&chunk);
     }
     let mut form = BackchannelAuthenticationForm::default();
     let mut seen = HashSet::new();

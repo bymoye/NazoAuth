@@ -65,7 +65,7 @@ jobs:
       SUITE_BASE_URL: https://www.certification.openid.net
       TRUSTED_TARGET_ISSUER: ${{ vars.OIDF_TARGET_ISSUER }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -80,33 +80,31 @@ jobs:
           git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           git cat-file -e "$SOURCE_COMMIT^{commit}"
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_COMMIT"
-          if ! git merge-base --is-ancestor "$SOURCE_COMMIT" "origin/${{ github.event.repository.default_branch }}"; then
-            release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft)"
-            test "$(jq -r '.tagName' <<<"$release_json")" = "$RELEASE_TAG"
-            test "$(jq -r '.isDraft' <<<"$release_json")" = false
-            case "$(uname -m)" in
-              x86_64) bootstrap_subject="nazoauth-x86_64-unknown-linux-gnu" ;;
-              aarch64) bootstrap_subject="nazoauth-aarch64-unknown-linux-gnu" ;;
-              *) echo "unsupported Linux runner architecture: $(uname -m)" >&2; exit 1 ;;
-            esac
-            proof_dir="$RUNNER_TEMP/nazoauth-source-release-proof"
-            install -d -m 700 "$proof_dir"
-            gh release download "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern "$bootstrap_subject" \
-              --dir "$proof_dir"
-            subject="$proof_dir/$bootstrap_subject"
-            test -f "$subject"
-            gh attestation verify "$subject" \
-              --repo "$GITHUB_REPOSITORY" \
-              --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_TAG" \
-              --source-ref "refs/tags/$RELEASE_TAG" \
-              --source-digest "$SOURCE_COMMIT" \
-              --predicate-type "https://nazo.run/attestations/release-manifest/v1" \
-              --deny-self-hosted-runners \
-              --format json > "$proof_dir/attestation-verification.json"
-            test -s "$proof_dir/attestation-verification.json"
-          fi
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft)"
+          test "$(jq -r '.tagName' <<<"$release_json")" = "$RELEASE_TAG"
+          test "$(jq -r '.isDraft' <<<"$release_json")" = false
+          case "$(uname -m)" in
+            x86_64) bootstrap_subject="nazoauth-x86_64-unknown-linux-gnu" ;;
+            aarch64) bootstrap_subject="nazoauth-aarch64-unknown-linux-gnu" ;;
+            *) echo "unsupported Linux runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          proof_dir="$RUNNER_TEMP/nazoauth-source-release-proof"
+          install -d -m 700 "$proof_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$bootstrap_subject" \
+            --dir "$proof_dir"
+          subject="$proof_dir/$bootstrap_subject"
+          test -f "$subject"
+          gh attestation verify "$subject" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_TAG" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --source-digest "$SOURCE_COMMIT" \
+            --predicate-type "https://nazo.run/attestations/release-manifest/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$proof_dir/attestation-verification.json"
+          test -s "$proof_dir/attestation-verification.json"
           git checkout --detach "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
@@ -227,7 +225,7 @@ jobs:
         run: rm -f dynamic-registration-initial-access-token ciba-automated-decision-token oidf-plan-config.agekey oidf-mtls-material.agekey oidf-mtls-material.json oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json runtime/openid4vc/base.json runtime/openid4vc/mtls.json runtime/openid4vc/driver.json runtime/openid4vc/materialized/openid4vc-driver.json runtime/openid4vc/materialized/openid4vc-plan-configs.json
 
       - name: Upload public OIDF onboarding material
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: oidf-public-onboarding-material
           path: oidf-public-onboarding-material

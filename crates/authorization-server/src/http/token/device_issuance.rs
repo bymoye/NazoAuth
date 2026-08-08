@@ -8,11 +8,8 @@
 use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::blake3_hex;
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
-use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 use actix_web::{HttpRequest, HttpResponse, http::StatusCode};
 use chrono::Utc;
 use nazo_auth::{DevicePollCommit, DevicePollFailure};
@@ -20,9 +17,10 @@ use nazo_http_actix::oauth_token_error;
 
 use super::client_auth::consume_token_client_assertion_with_authorization_service;
 use super::{
-    ServerTokenService, TokenForm,
+    SenderConstraintValidationError, ServerTokenService, TokenForm,
     device::ServerDeviceGrantService,
     issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant},
+    sender_constraint_multiple_error, validate_token_sender_constraints,
 };
 
 pub(super) fn device_grant_key(
@@ -72,28 +70,13 @@ pub(crate) async fn token_device_code_with_service(
         Ok(device_code) => device_code,
         Err(response) => return response,
     };
-    let dpop_jkt = match validate_dpop_proof_with_authorization_service(
-        issuance.authorization,
-        issuance.config.issuer(),
-        issuance.config.mtls_endpoint_base_url(),
-        issuance.config.dpop_nonce_policy(),
-        req,
-        None,
-        None,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => return dpop_error_response(error, DpopErrorContext::TokenEndpoint),
-    };
-    if client.require_dpop_bound_tokens && dpop_jkt.is_none() {
-        return dpop_error_response(DpopError::MissingProof, DpopErrorContext::TokenEndpoint);
-    }
-    let mtls_x5t_s256 = if client.require_mtls_bound_tokens {
-        match request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        {
-            Some(value) => Some(value),
-            None => {
+    let sender =
+        match validate_token_sender_constraints(issuance, req, client, None, None, None).await {
+            Ok(value) => value,
+            Err(SenderConstraintValidationError::Dpop(error)) => {
+                return dpop_error_response(error, DpopErrorContext::TokenEndpoint);
+            }
+            Err(SenderConstraintValidationError::MissingMtls) => {
                 return oauth_token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
@@ -101,12 +84,15 @@ pub(crate) async fn token_device_code_with_service(
                     false,
                 );
             }
-        }
-    } else {
-        None
-    };
-    let device_grant_key =
-        device_grant_key(device_code, dpop_jkt.as_deref(), mtls_x5t_s256.as_deref());
+            Err(SenderConstraintValidationError::Multiple) => {
+                return sender_constraint_multiple_error();
+            }
+        };
+    let device_grant_key = device_grant_key(
+        device_code,
+        sender.dpop_jkt.as_deref(),
+        sender.mtls_x5t_s256.as_deref(),
+    );
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -173,10 +159,10 @@ pub(crate) async fn token_device_code_with_service(
                     refresh_id_token_sid: None,
                     include_refresh: true,
                     refresh_token_policy: RefreshTokenPolicy::IssueNew,
-                    refresh_token_dpop_jkt: dpop_jkt.clone(),
-                    dpop_jkt,
-                    mtls_x5t_s256: mtls_x5t_s256.clone(),
-                    refresh_token_mtls_x5t_s256: mtls_x5t_s256,
+                    refresh_token_dpop_jkt: sender.dpop_jkt.clone(),
+                    dpop_jkt: sender.dpop_jkt,
+                    mtls_x5t_s256: sender.mtls_x5t_s256.clone(),
+                    refresh_token_mtls_x5t_s256: sender.mtls_x5t_s256,
                     refresh_token_client_attestation_jkt: None,
                     refresh_token_scopes: None,
                     authorization_code_hash: None,

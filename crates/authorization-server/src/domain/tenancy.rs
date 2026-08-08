@@ -1,8 +1,6 @@
 use uuid::Uuid;
 
-pub(crate) const DEFAULT_TENANT_ID: Uuid = Uuid::from_u128(1);
-pub(crate) const DEFAULT_REALM_ID: Uuid = Uuid::from_u128(2);
-pub(crate) const DEFAULT_ORGANIZATION_ID: Uuid = Uuid::from_u128(3);
+pub(crate) use nazo_identity::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TenantContext {

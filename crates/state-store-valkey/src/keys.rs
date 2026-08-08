@@ -155,6 +155,10 @@ pub(crate) fn login_failure(dimension: &str, subject: &str) -> String {
         blake3_hex(subject.trim())
     )
 }
+
+pub(crate) fn mfa_failure(subject: &str) -> String {
+    format!("oauth:mfa_failure:{}", blake3_hex(subject.trim()))
+}
 pub(crate) fn access_token_subject(tenant_id: uuid::Uuid, jti: &str) -> String {
     format!("oauth:access_token:subject:{tenant_id}:{}", blake3_hex(jti))
 }

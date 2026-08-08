@@ -5,6 +5,36 @@ async fn signed_access_token(
     subject_id: Uuid,
     dpop_jkt: Option<&str>,
 ) -> String {
+    signed_access_token_with_binding(issuer, subject_id, dpop_jkt, None, Value::Array(Vec::new()))
+        .await
+}
+
+async fn signed_mtls_access_token(
+    issuer: &ServerCredentialIssuerOperations,
+    subject_id: Uuid,
+    configuration_id: &str,
+    mtls_x5t_s256: &str,
+) -> String {
+    signed_access_token_with_binding(
+        issuer,
+        subject_id,
+        None,
+        Some(mtls_x5t_s256),
+        json!([openid4vci_authorization_detail(
+            &issuer.issuer,
+            configuration_id
+        )]),
+    )
+    .await
+}
+
+async fn signed_access_token_with_binding(
+    issuer: &ServerCredentialIssuerOperations,
+    subject_id: Uuid,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    authorization_details: Value,
+) -> String {
     let subject = subject_id.to_string();
     issuer
         .token_service
@@ -17,12 +47,12 @@ async fn signed_access_token(
             client_id: "unit-client",
             audiences: std::slice::from_ref(&issuer.issuer),
             scopes: &[],
-            authorization_details: &Value::Array(Vec::new()),
+            authorization_details: &authorization_details,
             userinfo_claims: &[],
             userinfo_claim_requests: &[],
             ttl_seconds: 300,
             dpop_jkt,
-            mtls_x5t_s256: None,
+            mtls_x5t_s256,
             actor: None,
         })
         .await
@@ -54,7 +84,30 @@ async fn dpop_nonce_generation_fails_closed_when_nonce_state_is_unavailable() {
     );
 }
 
+#[tokio::test]
+async fn pre_authorized_token_rejects_invalid_dpop_before_consuming_offer_state() {
+    // The fixture uses deliberately unavailable PostgreSQL/Valkey endpoints.  A malformed
+    // sender proof must still be rejected at the protocol boundary before either single-use
+    // store can be touched; otherwise a retry with a valid proof could observe consumed state.
+    let issuer = operations(true).await;
+    let error = issuer
+        .pre_authorized_token(PreAuthorizedTokenRequest {
+            pre_authorized_code: "does-not-exist".to_owned(),
+            tx_code: None,
+            client_id: None,
+            dpop_proof: Some("malformed-dpop-proof".to_owned()),
+            client_attestation: None,
+            client_attestation_pop: None,
+            request_url: "https://issuer.example/token".to_owned(),
+        })
+        .await
+        .expect_err("invalid DPoP must fail before offer state is consumed");
+
+    assert_error(error, 400, "invalid_dpop_proof", "DPoP proof is invalid.");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires NAZO_TEST_DATABASE_URL/DATABASE_URL and VALKEY_URL; run explicitly with --ignored"]
 async fn live_access_enforces_dpop_binding_and_validates_presented_proof() {
     let Some(fixture) = LiveEndpointFixture::new("unit-live-dpop-access", false).await else {
         return;
@@ -148,10 +201,59 @@ async fn live_access_enforces_dpop_binding_and_validates_presented_proof() {
         "invalid_dpop_proof",
         "An unbound access token cannot be presented with DPoP.",
     );
+
+    let mtls_token = signed_mtls_access_token(
+        &fixture.issuer,
+        fixture.subject_id,
+        "unit-live-dpop-access",
+        "unit-mtls",
+    )
+    .await;
+    let error = fixture
+        .issuer
+        .access(&CredentialRequestContext {
+            bearer_token: mtls_token.clone(),
+            ..request_context()
+        })
+        .await
+        .expect_err("an mTLS-bound token must not be presented as bearer without a certificate");
+    assert_error(
+        error,
+        401,
+        "invalid_token",
+        "A mTLS-bound access token requires the matching client certificate.",
+    );
+
+    let error = fixture
+        .issuer
+        .access(&CredentialRequestContext {
+            bearer_token: mtls_token.clone(),
+            mtls_x5t_s256: Some("different-mtls".to_owned()),
+            ..request_context()
+        })
+        .await
+        .expect_err("an mTLS-bound token must reject a different certificate");
+    assert_error(
+        error,
+        401,
+        "invalid_token",
+        "The mTLS client certificate does not match the access token.",
+    );
+
+    fixture
+        .issuer
+        .access(&CredentialRequestContext {
+            bearer_token: mtls_token,
+            mtls_x5t_s256: Some("unit-mtls".to_owned()),
+            ..request_context()
+        })
+        .await
+        .expect("a matching mTLS certificate should authorize the credential token");
     fixture.cleanup().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires NAZO_TEST_DATABASE_URL/DATABASE_URL and VALKEY_URL; run explicitly with --ignored"]
 async fn live_offer_enforces_subject_dataset_lifetime_and_transaction_code_policy() {
     let Some(fixture) = LiveEndpointFixture::new("unit-live-offer-policy", false).await else {
         return;

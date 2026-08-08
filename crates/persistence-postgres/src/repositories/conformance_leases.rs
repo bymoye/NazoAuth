@@ -11,6 +11,11 @@ use crate::{DbPool, get_conn, schema::conformance_leases};
 pub const MIN_CONFORMANCE_LEASE_SECONDS: i64 = 60;
 pub const MAX_CONFORMANCE_LEASE_SECONDS: i64 = 24 * 60 * 60;
 const LEASED_DYNAMIC_REGISTRATION_PROFILE: &str = "oidc-fapi-ciba";
+const CIBA_DECISION_CLAIM_SECONDS: i64 = 30;
+// One immediate attempt plus 120 quarter-second waits covers the full
+// thirty-second claim deadline before returning a bounded conflict.
+const CIBA_REVOKE_WAIT_ATTEMPTS: usize = 121;
+const CIBA_REVOKE_WAIT_MILLIS: u64 = 250;
 
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::conformance_leases)]
@@ -162,40 +167,72 @@ impl ConformanceLeaseRepository {
     }
 
     pub async fn revoke(&self, tenant_id: Uuid, lease_id: Uuid) -> Result<i64, RepositoryError> {
-        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
-        // Keep the lease row update first in this single statement. CIBA
-        // decision guards take the same row lock and hold it through the
-        // Valkey CAS, so a successful revoke cannot be followed by a commit
-        // from a decision that observed the old active state.
-        let row = diesel::sql_query(
-            r#"
-            WITH revoked AS (
-                UPDATE conformance_leases
-                SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
-                    public_material = NULL
-                WHERE tenant_id = $1 AND id = $2
-                RETURNING id, tenant_id
-            ), deactivated AS (
-                UPDATE oauth_clients client
-                SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                FROM revoked
-                WHERE client.tenant_id = revoked.tenant_id
-                  AND client.conformance_lease_id = revoked.id
-                RETURNING client.id
+        for _ in 0..CIBA_REVOKE_WAIT_ATTEMPTS {
+            let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+            // Keep the lease row update first in this single statement. A
+            // CIBA decision claim excludes this update until the callback has
+            // completed or its bounded crash-recovery deadline has elapsed.
+            let row = diesel::sql_query(
+                r#"
+                WITH revoked AS (
+                    UPDATE conformance_leases
+                    SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
+                        public_material = NULL
+                    WHERE tenant_id = $1
+                      AND id = $2
+                      AND (ciba_decision_claim_id IS NULL
+                           OR ciba_decision_claim_expires_at <= CURRENT_TIMESTAMP)
+                    RETURNING id, tenant_id
+                ), deactivated AS (
+                    UPDATE oauth_clients client
+                    SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                    FROM revoked
+                    WHERE client.tenant_id = revoked.tenant_id
+                      AND client.conformance_lease_id = revoked.id
+                    RETURNING client.id
+                )
+                SELECT EXISTS(SELECT 1 FROM revoked) AS found,
+                       (SELECT COUNT(*) FROM deactivated)::BIGINT AS deactivated_clients
+                "#,
             )
-            SELECT EXISTS(SELECT 1 FROM revoked) AS found,
-                   (SELECT COUNT(*) FROM deactivated)::BIGINT AS deactivated_clients
-            "#,
-        )
-        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
-        .bind::<diesel::sql_types::Uuid, _>(lease_id)
-        .get_result::<RevokeRow>(&mut connection)
-        .await
-        .map_err(map_diesel_error)?;
-        if !row.found {
-            return Err(RepositoryError::NotFound);
+            .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+            .bind::<diesel::sql_types::Uuid, _>(lease_id)
+            .get_result::<RevokeRow>(&mut connection)
+            .await
+            .map_err(map_diesel_error)?;
+            if row.found {
+                return Ok(row.deactivated_clients);
+            }
+
+            let status = diesel::sql_query(
+                r#"
+                SELECT ciba_decision_claim_expires_at
+                FROM conformance_leases
+                WHERE tenant_id = $1 AND id = $2
+                "#,
+            )
+            .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+            .bind::<diesel::sql_types::Uuid, _>(lease_id)
+            .get_result::<LeaseClaimStatusRow>(&mut connection)
+            .await
+            .optional()
+            .map_err(map_diesel_error)?;
+            let Some(status) = status else {
+                return Err(RepositoryError::NotFound);
+            };
+            if status
+                .ciba_decision_claim_expires_at
+                .is_none_or(|expires_at| expires_at <= Utc::now())
+            {
+                // The row was present without a live claim but the update
+                // raced another state transition. Retry through the same
+                // single-statement boundary rather than reporting success.
+                continue;
+            }
+            drop(connection);
+            tokio::time::sleep(std::time::Duration::from_millis(CIBA_REVOKE_WAIT_MILLIS)).await;
         }
-        Ok(row.deactivated_clients)
+        Err(RepositoryError::Conflict)
     }
 
     pub async fn cleanup(&self) -> Result<ConformanceLeaseCleanup, RepositoryError> {
@@ -354,15 +391,14 @@ impl ConformanceLeaseRepository {
         .map_err(map_diesel_error)
     }
 
-    /// Runs one CIBA decision while holding the PostgreSQL lease row lock.
+    /// Runs one CIBA decision under a short-lived PostgreSQL claim.
     ///
-    /// The callback must perform the state-store CAS before this transaction
-    /// commits. `revoke` and expiry cleanup update the same lease row first,
-    /// so the two operations have a single ordering point: either the CIBA
-    /// CAS runs before the revoke commit, or the guard observes the inactive
-    /// lease and never invokes the callback. The optional expected lease id is
-    /// used by the per-run automated-decision credential; browser decisions
-    /// pass `None` and use the client's current binding.
+    /// The claim transaction ends before the callback starts, so token
+    /// issuance may acquire another connection even when the pool has one
+    /// connection. Revocation waits for the bounded claim deadline, and an
+    /// expired claim is safely reclaimable after a process crash. The optional
+    /// expected lease id is used by the per-run automated-decision credential;
+    /// browser decisions pass `None` and use the client's current binding.
     pub async fn with_active_ciba_decision<F, Fut, T>(
         &self,
         tenant_id: Uuid,
@@ -375,89 +411,159 @@ impl ConformanceLeaseRepository {
         Fut: Future<Output = T> + Send,
         T: Send,
     {
+        let claim_id = Uuid::now_v7();
+        let now = Utc::now();
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
-        connection
-            .transaction::<Option<T>, diesel::result::Error, _>(async move |connection| {
-                let initial = diesel::sql_query(
-                    r#"
-                    SELECT conformance_lease_id
-                    FROM oauth_clients
-                    WHERE tenant_id = $1 AND client_id = $2
-                    "#,
-                )
-                .bind::<diesel::sql_types::Uuid, _>(tenant_id)
-                .bind::<diesel::sql_types::Text, _>(client_id)
-                .get_result::<ClientLeaseIdRow>(connection)
-                .await
-                .optional()?;
-                let Some(initial) = initial else {
-                    return Ok(None);
-                };
-                if expected_lease_id
-                    .is_some_and(|expected| initial.conformance_lease_id != Some(expected))
-                {
-                    return Ok(None);
-                }
-
-                // Revocation and cleanup lock the lease before touching its
-                // clients. Follow that order here to avoid a lock inversion.
-                let lease_expires_at = if let Some(lease_id) = initial.conformance_lease_id {
-                    let lease = diesel::sql_query(
+        let claim = connection
+            .transaction::<CibaDecisionClaimOutcome, diesel::result::Error, _>(
+                async move |connection| {
+                    let initial = diesel::sql_query(
                         r#"
-                        SELECT expires_at
-                        FROM conformance_leases
-                        WHERE tenant_id = $1
-                          AND id = $2
-                          AND expires_at > CURRENT_TIMESTAMP
-                          AND revoked_at IS NULL
-                          AND cleaned_at IS NULL
+                        SELECT conformance_lease_id
+                        FROM oauth_clients
+                        WHERE tenant_id = $1 AND client_id = $2
+                        "#,
+                    )
+                    .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+                    .bind::<diesel::sql_types::Text, _>(client_id)
+                    .get_result::<ClientLeaseIdRow>(connection)
+                    .await
+                    .optional()?;
+                    let Some(initial) = initial else {
+                        return Ok(CibaDecisionClaimOutcome::Missing);
+                    };
+                    if expected_lease_id
+                        .is_some_and(|expected| initial.conformance_lease_id != Some(expected))
+                    {
+                        return Ok(CibaDecisionClaimOutcome::Missing);
+                    }
+
+                    // Revocation and cleanup lock the lease before touching
+                    // its clients. Follow that order here to avoid a lock
+                    // inversion. The row lock is held only through the claim
+                    // write, never through the callback.
+                    let lease = if let Some(lease_id) = initial.conformance_lease_id {
+                        let lease = diesel::sql_query(
+                            r#"
+                            SELECT expires_at,
+                                   ciba_decision_claim_expires_at
+                            FROM conformance_leases
+                            WHERE tenant_id = $1
+                              AND id = $2
+                              AND expires_at > CURRENT_TIMESTAMP
+                              AND revoked_at IS NULL
+                              AND cleaned_at IS NULL
+                            FOR UPDATE
+                            "#,
+                        )
+                        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+                        .bind::<diesel::sql_types::Uuid, _>(lease_id)
+                        .get_result::<CibaDecisionLeaseRow>(connection)
+                        .await
+                        .optional()?;
+                        let Some(lease) = lease else {
+                            return Ok(CibaDecisionClaimOutcome::Missing);
+                        };
+                        if lease
+                            .ciba_decision_claim_expires_at
+                            .is_some_and(|expires_at| expires_at > now)
+                        {
+                            return Ok(CibaDecisionClaimOutcome::Busy);
+                        }
+                        Some((lease_id, lease.expires_at))
+                    } else {
+                        if expected_lease_id.is_some() {
+                            return Ok(CibaDecisionClaimOutcome::Missing);
+                        }
+                        None
+                    };
+
+                    let client = diesel::sql_query(
+                        r#"
+                        SELECT is_active, conformance_lease_id
+                        FROM oauth_clients
+                        WHERE tenant_id = $1 AND client_id = $2
                         FOR UPDATE
                         "#,
                     )
                     .bind::<diesel::sql_types::Uuid, _>(tenant_id)
-                    .bind::<diesel::sql_types::Uuid, _>(lease_id)
-                    .get_result::<LeaseExpiryRow>(connection)
+                    .bind::<diesel::sql_types::Text, _>(client_id)
+                    .get_result::<CibaDecisionClientRow>(connection)
                     .await
                     .optional()?;
-                    let Some(lease) = lease else {
-                        return Ok(None);
+                    let Some(client) = client else {
+                        return Ok(CibaDecisionClaimOutcome::Missing);
                     };
-                    Some(lease.expires_at.timestamp())
-                } else {
-                    if expected_lease_id.is_some() {
-                        return Ok(None);
+                    if !client.is_active
+                        || client.conformance_lease_id != initial.conformance_lease_id
+                        || expected_lease_id
+                            .is_some_and(|expected| client.conformance_lease_id != Some(expected))
+                    {
+                        return Ok(CibaDecisionClaimOutcome::Missing);
                     }
-                    None
-                };
 
-                let client = diesel::sql_query(
+                    let Some((lease_id, lease_expires_at)) = lease else {
+                        return Ok(CibaDecisionClaimOutcome::Unleased);
+                    };
+                    let claim_expires_at = lease_expires_at.min(
+                        now.checked_add_signed(Duration::seconds(CIBA_DECISION_CLAIM_SECONDS))
+                            .unwrap_or(lease_expires_at),
+                    );
+                    if claim_expires_at <= now {
+                        return Ok(CibaDecisionClaimOutcome::Missing);
+                    }
+                    diesel::sql_query(
+                        r#"
+                        UPDATE conformance_leases
+                        SET ciba_decision_claim_id = $3,
+                            ciba_decision_claim_expires_at = $4
+                        WHERE tenant_id = $1 AND id = $2
+                        "#,
+                    )
+                    .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+                    .bind::<diesel::sql_types::Uuid, _>(lease_id)
+                    .bind::<diesel::sql_types::Uuid, _>(claim_id)
+                    .bind::<diesel::sql_types::Timestamptz, _>(claim_expires_at)
+                    .execute(connection)
+                    .await?;
+                    Ok(CibaDecisionClaimOutcome::Claimed {
+                        lease_expires_at: claim_expires_at.timestamp(),
+                        claim_id,
+                    })
+                },
+            )
+            .await
+            .map_err(map_diesel_error)?;
+
+        match claim {
+            CibaDecisionClaimOutcome::Missing => Ok(None),
+            CibaDecisionClaimOutcome::Busy => Err(RepositoryError::Conflict),
+            CibaDecisionClaimOutcome::Unleased => Ok(Some(operation(None).await)),
+            CibaDecisionClaimOutcome::Claimed {
+                lease_expires_at,
+                claim_id,
+            } => {
+                let result = operation(Some(lease_expires_at)).await;
+                let mut clear_connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+                let cleared = diesel::sql_query(
                     r#"
-                    SELECT is_active, conformance_lease_id
-                    FROM oauth_clients
-                    WHERE tenant_id = $1 AND client_id = $2
-                    FOR UPDATE
+                    UPDATE conformance_leases
+                    SET ciba_decision_claim_id = NULL,
+                        ciba_decision_claim_expires_at = NULL
+                    WHERE tenant_id = $1 AND ciba_decision_claim_id = $2
                     "#,
                 )
                 .bind::<diesel::sql_types::Uuid, _>(tenant_id)
-                .bind::<diesel::sql_types::Text, _>(client_id)
-                .get_result::<CibaDecisionClientRow>(connection)
+                .bind::<diesel::sql_types::Uuid, _>(claim_id)
+                .execute(&mut clear_connection)
                 .await
-                .optional()?;
-                let Some(client) = client else {
-                    return Ok(None);
-                };
-                if !client.is_active
-                    || client.conformance_lease_id != initial.conformance_lease_id
-                    || expected_lease_id
-                        .is_some_and(|expected| client.conformance_lease_id != Some(expected))
-                {
-                    return Ok(None);
+                .map_err(map_diesel_error)?;
+                if cleared != 1 {
+                    return Err(RepositoryError::Conflict);
                 }
-
-                Ok(Some(operation(lease_expires_at).await))
-            })
-            .await
-            .map_err(map_diesel_error)
+                Ok(Some(result))
+            }
+        }
     }
 
     pub async fn active_public_material_for_client(
@@ -666,9 +772,17 @@ struct ClientLeaseIdRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct LeaseExpiryRow {
+struct CibaDecisionLeaseRow {
     #[diesel(sql_type = diesel::sql_types::Timestamptz)]
     expires_at: DateTime<Utc>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    ciba_decision_claim_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(diesel::QueryableByName)]
+struct LeaseClaimStatusRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    ciba_decision_claim_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -677,6 +791,16 @@ struct CibaDecisionClientRow {
     is_active: bool,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Uuid>)]
     conformance_lease_id: Option<Uuid>,
+}
+
+enum CibaDecisionClaimOutcome {
+    Missing,
+    Busy,
+    Unleased,
+    Claimed {
+        lease_expires_at: i64,
+        claim_id: Uuid,
+    },
 }
 
 fn map_pool_error(error: anyhow::Error) -> RepositoryError {

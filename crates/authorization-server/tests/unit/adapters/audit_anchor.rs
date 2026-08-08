@@ -588,7 +588,9 @@ fn preflight_source_uses_safe_defaults_and_requires_identity_when_enabled() {
     assert_eq!(config.deployment_id, "deployment-test");
     assert_eq!(
         config.status_file,
-        PathBuf::from("runtime/custom-health.json")
+        std::fs::canonicalize(".")
+            .unwrap()
+            .join("runtime/custom-health.json")
     );
     assert_eq!(config.freshness, Duration::from_secs(9));
     assert_eq!(config.max_lag, Duration::from_secs(11));

@@ -1,4 +1,7 @@
-use crate::adapters::audit::{audit_event_required, audit_fields, ensure_audit_storage};
+use crate::adapters::{
+    audit::{audit_event_required, audit_fields, ensure_audit_storage},
+    security::constant_time_eq,
+};
 
 use super::poll::{ciba_error_no_store, ciba_state_error_response, load_ciba_request_payload};
 use super::*;
@@ -498,7 +501,7 @@ async fn set_ciba_request_decision_with_lease(
     {
         Ok(Some(result)) => result,
         Ok(None) => {
-            // A per-run OIDF credential is deliberately indistinguishable
+            // A per-run credential is deliberately indistinguishable
             // from an unknown transaction or an already revoked lease.  Do
             // not return a protocol body that would let the caller probe the
             // client/lease binding; the disabled production route is an

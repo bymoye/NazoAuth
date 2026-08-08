@@ -1,7 +1,8 @@
 use super::{AdminClientCryptoPort, AdminClientError, CreateClientRequest};
 use crate::{
-    OAuthClient, SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS, SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS,
-    normalize_sha256_thumbprint, validate_oauth_redirect_uri,
+    MAX_CIBA_LOGOUT_URI_BYTES, OAuthClient, SUPPORTED_CLIENT_JWE_CONTENT_ENC_ALGS,
+    SUPPORTED_CLIENT_JWE_KEY_MANAGEMENT_ALGS, normalize_sha256_thumbprint,
+    validate_oauth_redirect_uri,
 };
 use serde_json::Value;
 
@@ -430,6 +431,7 @@ pub(super) fn validate_client_metadata<C: AdminClientCryptoPort + ?Sized>(
         metadata.post_logout_redirect_uris,
     )?;
     for uri in metadata.post_logout_redirect_uris {
+        validate_uri_length("post_logout_redirect_uri", uri)?;
         validate_oauth_redirect_uri(metadata.client_type, uri)
             .map_err(|error| AdminClientError::InvalidRequest(error.to_string()))?;
     }
@@ -444,9 +446,7 @@ pub(super) fn validate_client_metadata<C: AdminClientCryptoPort + ?Sized>(
 }
 
 fn validate_ciba_notification_uri(uri: &str) -> Result<(), AdminClientError> {
-    if uri.len() > 2048 {
-        return invalid("backchannel_client_notification_endpoint 超过 2048 字节");
-    }
+    validate_uri_length("backchannel_client_notification_endpoint", uri)?;
     let parsed = url::Url::parse(uri).map_err(|_| {
         AdminClientError::InvalidRequest(
             "backchannel_client_notification_endpoint 必须是绝对 HTTPS URI".to_owned(),
@@ -643,6 +643,7 @@ impl ClientMtlsMetadata<'_> {
 }
 
 fn validate_logout_uri(field: &str, uri: &str) -> Result<(), AdminClientError> {
+    validate_uri_length(field, uri)?;
     let parsed = url::Url::parse(uri)
         .map_err(|error| AdminClientError::InvalidRequest(error.to_string()))?;
     if parsed.fragment().is_some() {
@@ -662,6 +663,13 @@ fn validate_logout_uri(field: &str, uri: &str) -> Result<(), AdminClientError> {
         }
         _ => invalid(format!("{field} 必须使用 https 或 loopback http")),
     }
+}
+
+fn validate_uri_length(field: &str, uri: &str) -> Result<(), AdminClientError> {
+    if uri.len() > MAX_CIBA_LOGOUT_URI_BYTES {
+        return invalid(format!("{field} 超过 {MAX_CIBA_LOGOUT_URI_BYTES} 字节"));
+    }
+    Ok(())
 }
 
 fn validate_frontchannel_logout_origin(

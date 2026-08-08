@@ -1197,7 +1197,7 @@ class Openid4vcOidfTests(unittest.TestCase):
             def __exit__(self, *_):
                 return None
 
-            def read(self):
+            def read(self, _size=-1):
                 return b""
 
         try:
@@ -1214,6 +1214,27 @@ class Openid4vcOidfTests(unittest.TestCase):
             self.assertIs(https_handler._context, context)
         finally:
             module.oidf.OIDF_API_SSL_CONTEXT = None
+
+    def test_driver_callback_get_rejects_oversized_response(self):
+        module = load("run_openid4vc_conformance.py")
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self, _size=-1):
+                return b"x" * (module.oidf.MAX_OIDF_API_RESPONSE_BYTES + 1)
+
+        class Opener:
+            def open(self, *_args, **_kwargs):
+                return Response()
+
+        with patch.object(module.urllib.request, "build_opener", return_value=Opener()):
+            with self.assertRaisesRegex(RuntimeError, "exceeds 1 MiB"):
+                module.get_url("https://suite.example/test/a/alias/callback")
 
     def test_wallet_redirect_handler_accepts_only_the_exact_completion_url(self):
         module = load("run_openid4vc_conformance.py")

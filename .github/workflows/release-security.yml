@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +22,38 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require successful main CI for exact tag commit
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" fetch \
+            --no-tags origin refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
+            echo "release tag commit $RELEASE_SHA is not reachable from origin/main" >&2
+            exit 1
+          fi
+          for workflow in code-quality.yml release-policy.yml; do
+            runs="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?event=push&branch=main&head_sha=${RELEASE_SHA}&per_page=100")"
+            if ! jq -e --arg sha "$RELEASE_SHA" '
+              any(.workflow_runs[]?;
+                .head_sha == $sha and
+                .head_branch == "main" and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success")
+            ' <<<"$runs" >/dev/null; then
+              echo "required workflow $workflow has no successful main push run for $RELEASE_SHA" >&2
+              exit 1
+            fi
+          done
       - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
       - name: Validate immutable release input
         shell: bash

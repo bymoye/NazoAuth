@@ -90,6 +90,7 @@ pub(super) async fn build(
         runtime_registry.clone(),
         startup.remote_client_documents.clone(),
         keyset.clone(),
+        DEFAULT_TENANT_ID,
         if settings.modules.enable_openid4vci_issuer {
             Some(Arc::new(nazo_postgres::Openid4vciRepository::new(
                 diesel_db.clone(),
@@ -263,6 +264,8 @@ pub(super) async fn build(
         identity_settings.rate_limit.window_seconds,
         identity_settings.rate_limit.auth_max_requests,
     ));
+    let mfa_attempt_throttle: Arc<dyn nazo_identity::ports::MfaAttemptThrottlePort> =
+        Arc::new(nazo_valkey::RateLimitStore::new(&valkey_connection));
     let mfa_totp_keys = mfa_totp_key_ring(&startup.config)?;
     let mfa_repository =
         nazo_postgres::MfaRepository::with_totp_key_ring(diesel_db.clone(), mfa_totp_keys.clone());
@@ -285,6 +288,9 @@ pub(super) async fn build(
             ),
             identity_session_service.clone(),
             authentication_rate_limit.clone(),
+            mfa_attempt_throttle,
+            identity_settings.rate_limit.mfa_failure_window_seconds,
+            identity_settings.rate_limit.mfa_failure_max_attempts,
             settings.endpoint.issuer.as_str(),
             session.session_ttl_seconds,
             MFA_REMEMBERED_TTL_SECONDS,
@@ -321,6 +327,7 @@ pub(super) async fn build(
                 .rate_limit
                 .login_failure_ip_email_max_attempts,
             session_ttl_seconds: session.session_ttl_seconds,
+            pending_mfa_session_ttl_seconds: session.pending_mfa_session_ttl_seconds,
         },
     );
     let password_login_endpoint = web::Data::new(PasswordLoginEndpoint::new(

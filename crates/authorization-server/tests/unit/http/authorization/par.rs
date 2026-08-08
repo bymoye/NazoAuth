@@ -961,6 +961,7 @@ async fn par_enforces_client_request_object_policy_after_authentication() {
 }
 
 #[actix_web::test]
+#[ignore = "requires DATABASE_URL and VALKEY_URL; run explicitly with --ignored"]
 async fn par_fapi2_rejects_shared_secret_client_auth_after_authentication() {
     let Some(fixture) = LiveParFixture::new_fapi2_security().await else {
         return;

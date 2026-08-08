@@ -253,7 +253,7 @@ class OidfWorkflowTests(unittest.TestCase):
                     f'test "$(git rev-parse "refs/tags/$RELEASE_TAG^{{commit}}")" = "${source_variable}"',
                     workflow,
                 )
-                self.assertIn(
+                self.assertNotIn(
                     f'if ! git merge-base --is-ancestor "${source_variable}" "origin/${{{{ github.event.repository.default_branch }}}}"; then',
                     workflow,
                 )
@@ -302,7 +302,25 @@ class OidfWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(full.count("needs: verify-release-source"), 2)
         self.assertEqual(full.count("ref: ${{ inputs.deployed_sha }}"), 2)
-        self.assertEqual(full.count("git merge-base --is-ancestor"), 1)
+        self.assertEqual(full.count("git merge-base --is-ancestor"), 0)
+
+    def test_public_runner_checks_out_the_exact_deployed_revision(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in ("oidf-conformance.yml", "openid4vc-conformance.yml"):
+            workflow = (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            with self.subTest(workflow=name):
+                self.assertIn('git checkout --detach "$DEPLOYED_SHA"', workflow)
+                self.assertIn('test "$(git rev-parse HEAD)" = "$DEPLOYED_SHA"', workflow)
+                self.assertIn(
+                    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                    workflow,
+                )
+
+        oidf = (root / ".github" / "workflows" / "oidf-conformance.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(oidf.count('"$RUNNER_TEMP/oidf-secrets/plan-config.agekey"'), 2)
+        self.assertNotIn("--identity oidf-plan-config.agekey", oidf)
 
     def test_oidf_workflows_default_to_latest_verified_release(self):
         root = Path(__file__).resolve().parents[2]

@@ -133,7 +133,7 @@ impl DeviceGrantRepositoryPort for AuthorizationFlowRepository {
     fn upsert_grant<'a>(&'a self, write: DeviceGrantWrite<'a>) -> DeviceGrantFuture<'a, ()> {
         Box::pin(async move {
             self.grants
-                .upsert(
+                .ensure(
                     write.tenant_id,
                     write.user_id,
                     write.client_id,

@@ -166,6 +166,37 @@ fn signed_request_object_is_normalized_only_after_all_claim_checks() {
 }
 
 #[test]
+fn owned_normalizer_reuses_outer_map_without_consuming_it_on_policy_failure() {
+    let now = 1_700_000_000;
+    let mut outer = HashMap::from([
+        ("client_id".to_owned(), "client".to_owned()),
+        ("request".to_owned(), "jwt".to_owned()),
+        ("state".to_owned(), "outer-state".to_owned()),
+    ]);
+    let normalized =
+        normalize_request_object_owned(&mut outer, &signed_claims(now), signed_policy(now))
+            .expect("valid signed request object");
+    assert!(outer.is_empty());
+    assert_eq!(
+        normalized.parameters.get("scope").map(String::as_str),
+        Some("openid")
+    );
+    assert!(!normalized.parameters.contains_key("state"));
+
+    let mut invalid_outer = HashMap::from([("request".to_owned(), "jwt".to_owned())]);
+    let mut invalid_claims = signed_claims(now);
+    invalid_claims.parameters.remove("redirect_uri");
+    assert_eq!(
+        normalize_request_object_owned(&mut invalid_outer, &invalid_claims, signed_policy(now)),
+        Err(AuthorizationRequestError::SignedRequestObjectMissingRedirectUri)
+    );
+    assert_eq!(
+        invalid_outer,
+        HashMap::from([("request".to_owned(), "jwt".to_owned())])
+    );
+}
+
+#[test]
 fn signed_request_object_crypto_uses_strict_shared_client_jwk_policy() {
     let now = 1_700_000_000;
     let token = signed_request_object(

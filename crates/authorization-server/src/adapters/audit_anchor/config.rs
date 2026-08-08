@@ -124,7 +124,8 @@ pub(crate) fn preflight_config_from_source(
         deployment_id,
         status_file: source
             .optional_string("AUDIT_ANCHOR_STATUS_FILE")
-            .map(PathBuf::from)
+            .map(|_| source.persistent_path("AUDIT_ANCHOR_STATUS_FILE", None))
+            .transpose()?
             .unwrap_or_else(|| data_dir.join("instance/audit-anchor-health.json")),
         freshness: Duration::from_secs(source.parse("AUDIT_ANCHOR_FRESHNESS_SECONDS", 120_u64)?),
         max_lag: Duration::from_secs(source.parse("AUDIT_ANCHOR_MAX_LAG_SECONDS", 300_u64)?),
@@ -136,7 +137,7 @@ pub(crate) fn preflight_config_from_source(
 pub(crate) fn worker_config_from_source(
     source: &ConfigSource,
 ) -> anyhow::Result<(String, usize, AuditAnchorWorkerConfig)> {
-    let data_dir = PathBuf::from(source.string("DATA_DIR", "runtime"));
+    let data_dir = source.persistent_path("DATA_DIR", Some(crate::config::DEFAULT_DATA_DIR))?;
     let preflight = preflight_config_from_source(source, &data_dir)?;
     let endpoint = Url::parse(&source.required_string("AUDIT_ANCHOR_URL")?)
         .map_err(|_| anyhow::anyhow!("AUDIT_ANCHOR_URL must be a valid absolute URL"))?;

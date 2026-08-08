@@ -14,12 +14,13 @@ const INITIAL_ADMIN_BOOTSTRAP_LOCK: i64 = 564_196_923_451_771_042;
 #[derive(Clone)]
 pub struct InitialAdminBootstrapRepository {
     pool: DbPool,
+    tenant: nazo_identity::TenantContext,
 }
 
 impl InitialAdminBootstrapRepository {
     #[must_use]
-    pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+    pub fn new(pool: DbPool, tenant: nazo_identity::TenantContext) -> Self {
+        Self { pool, tenant }
     }
 
     pub async fn ensure_claim(
@@ -29,6 +30,7 @@ impl InitialAdminBootstrapRepository {
     ) -> anyhow::Result<InitialAdminBootstrapState> {
         let mut connection = get_conn(&self.pool).await?;
         let token_hash = token_hash.to_owned();
+        let tenant_id = self.tenant.tenant_id.as_uuid();
         connection
             .transaction::<_, diesel::result::Error, _>(async move |connection| {
                 lock_initial_admin_bootstrap(connection).await?;
@@ -87,7 +89,7 @@ impl InitialAdminBootstrapRepository {
                         Ok(InitialAdminBootstrapState::Closed)
                     };
                 }
-                if administrator_exists(connection).await? {
+                if administrator_exists(connection, tenant_id).await? {
                     diesel::delete(initial_admin_bootstrap::table)
                         .execute(connection)
                         .await?;
@@ -162,6 +164,9 @@ impl InitialAdminBootstrapRepository {
         let email = email.to_owned();
         let email_hash = hash_value(&email);
         let password_hash = password_hash.into_persistence_value();
+        let tenant_id = self.tenant.tenant_id.as_uuid();
+        let realm_id = self.tenant.realm_id.as_uuid();
+        let organization_id = self.tenant.organization_id.as_uuid();
         connection
             .transaction::<_, diesel::result::Error, _>(async move |connection| {
                 lock_initial_admin_bootstrap(connection).await?;
@@ -229,6 +234,7 @@ impl InitialAdminBootstrapRepository {
                         .filter(identity_security_events::request_id.eq(&request_id))
                         .filter(identity_security_events::event_type.eq("initial_admin_bootstrap"))
                         .filter(identity_security_events::outcome.eq("success"))
+                        .filter(identity_security_events::tenant_id.eq(tenant_id))
                         .filter(identity_security_events::target_user_id.eq(Some(id)))
                         .select(diesel::dsl::count_star())
                         .first::<i64>(connection)
@@ -242,14 +248,14 @@ impl InitialAdminBootstrapRepository {
                         email,
                     });
                 }
-                if administrator_exists(connection).await? {
+                if administrator_exists(connection, tenant_id).await? {
                     return Ok(InitialAdminClaimOutcome::Closed);
                 }
                 if expected_hash != token_hash || expires_at <= Utc::now() {
                     return Ok(InitialAdminClaimOutcome::InvalidOrExpired);
                 }
                 if users::table
-                    .filter(users::tenant_id.eq(Uuid::from_u128(1)))
+                    .filter(users::tenant_id.eq(tenant_id))
                     .filter(users::email.eq(&email))
                     .select(users::id)
                     .first::<Uuid>(connection)
@@ -266,9 +272,9 @@ impl InitialAdminBootstrapRepository {
                 diesel::insert_into(users::table)
                     .values((
                         users::id.eq(id),
-                        users::tenant_id.eq(Uuid::from_u128(1)),
-                        users::realm_id.eq(Uuid::from_u128(2)),
-                        users::organization_id.eq(Uuid::from_u128(3)),
+                        users::tenant_id.eq(tenant_id),
+                        users::realm_id.eq(realm_id),
+                        users::organization_id.eq(organization_id),
                         users::username.eq(username),
                         users::email.eq(&email),
                         users::password_hash.eq(password_hash),
@@ -291,8 +297,14 @@ impl InitialAdminBootstrapRepository {
                     ))
                     .execute(connection)
                     .await?;
-                super::audit::insert_initial_admin_created_event(connection, &request_id, id, now)
-                    .await?;
+                super::audit::insert_initial_admin_created_event(
+                    connection,
+                    &request_id,
+                    id,
+                    tenant_id,
+                    now,
+                )
+                .await?;
                 Ok(InitialAdminClaimOutcome::Created {
                     request_id,
                     id,
@@ -343,10 +355,11 @@ fn hash_value(value: &str) -> String {
 
 async fn administrator_exists(
     connection: &mut diesel_async::AsyncPgConnection,
+    tenant_id: Uuid,
 ) -> diesel::QueryResult<bool> {
     diesel::select(diesel::dsl::exists(
         users::table
-            .filter(users::tenant_id.eq(Uuid::from_u128(1)))
+            .filter(users::tenant_id.eq(tenant_id))
             .filter(users::role.eq("admin"))
             .filter(users::admin_level.gt(0))
             .filter(users::is_active.eq(true)),

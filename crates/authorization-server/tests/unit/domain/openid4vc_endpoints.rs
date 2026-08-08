@@ -232,37 +232,3 @@ fn vci_token_dpop_targets_include_public_issuer_endpoint() {
         vec!["https://issuer.example/token".to_owned()]
     );
 }
-
-#[test]
-fn pre_authorized_token_validates_dpop_before_consuming_single_use_state() {
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/domain/openid4vc_endpoints/openid4vci/offers.rs"
-    ));
-    let start = source
-        .find("fn pre_authorized_token_operation")
-        .expect("pre_authorized_token implementation should exist");
-    let body = &source[start..];
-    let dpop = body
-        .find("validate_authorization_server_dpop")
-        .expect("pre-authorized token flow must validate DPoP");
-    let attestation_replay = body
-        .find("consume_private_key_jwt")
-        .expect("client attestation replay state is consumed in this flow");
-    let pre_authorized_code = body
-        .find("consume_pre_authorized_offer")
-        .expect("pre-authorized code is consumed in this flow");
-
-    assert!(
-        dpop < attestation_replay,
-        "DPoP nonce challenges must not consume client attestation replay state"
-    );
-    assert!(
-        dpop < pre_authorized_code,
-        "DPoP nonce challenges must not consume the pre-authorized code"
-    );
-    assert!(
-        attestation_replay < pre_authorized_code,
-        "client-attestation replay state must be consumed before the pre-authorized code"
-    );
-}

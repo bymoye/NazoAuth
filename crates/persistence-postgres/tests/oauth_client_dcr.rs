@@ -852,13 +852,13 @@ struct LeaseStillActive {
 }
 
 #[tokio::test]
-async fn ciba_decision_guard_holds_lease_lock_until_state_cas_finishes() {
+async fn ciba_decision_claim_releases_pool_connection_before_callback() {
     let Ok(database_url) =
         std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
     else {
         return;
     };
-    let pool = create_pool(database_url, 4).unwrap();
+    let pool = create_pool(database_url, 1).unwrap();
     let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
     let clients = OAuthClientRepository::new(pool.clone());
     let tenant = TenantContext::default_system();
@@ -883,6 +883,7 @@ async fn ciba_decision_guard_holds_lease_lock_until_state_cas_finishes() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let decision_leases = leases.clone();
     let decision_client_id = client.client_id.clone();
+    let callback_pool = pool.clone();
     let decision = tokio::spawn(async move {
         decision_leases
             .with_active_ciba_decision(
@@ -890,6 +891,19 @@ async fn ciba_decision_guard_holds_lease_lock_until_state_cas_finishes() {
                 &decision_client_id,
                 Some(lease.id),
                 |lease_expires_at| async move {
+                    // A pool of one proves that the callback did not inherit
+                    // the claim transaction's connection. Token issuance
+                    // performs the same nested-database acquisition.
+                    let mut nested = get_conn(&callback_pool).await.unwrap();
+                    let probe = sql_query(
+                        "SELECT EXISTS(SELECT 1 FROM conformance_leases WHERE id = $1) AS active",
+                    )
+                    .bind::<SqlUuid, _>(lease.id)
+                    .get_result::<LeaseStillActive>(&mut nested)
+                    .await
+                    .unwrap();
+                    assert!(probe.active);
+                    drop(nested);
                     decision_started_tx.send(lease_expires_at).unwrap();
                     release_rx.await.unwrap();
                     lease_expires_at
@@ -924,10 +938,12 @@ async fn ciba_decision_guard_holds_lease_lock_until_state_cas_finishes() {
         "revoke must wait for the decision CAS callback"
     );
 
+    drop(connection);
     release_tx.send(()).unwrap();
     assert!(decision.await.unwrap().unwrap().unwrap().is_some());
     assert_eq!(revoke.await.unwrap().unwrap(), 1);
 
+    let mut connection = get_conn(&pool).await.unwrap();
     sql_query("DELETE FROM oauth_clients WHERE id = $1")
         .bind::<SqlUuid, _>(client.id)
         .execute(&mut connection)

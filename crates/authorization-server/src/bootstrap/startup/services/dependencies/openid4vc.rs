@@ -142,16 +142,25 @@ pub(super) async fn build(
                     .clone(),
                 settings.protocol.dpop_nonce_policy,
             )?);
+            let trusted_proxy_cidrs = settings.endpoint.trusted_proxy_cidrs.clone();
             (
-                Some(web::Data::new(CredentialIssuerEndpoint::new(
-                    operations.clone(),
-                    settings
-                        .openid4vc
-                        .issuer_management_token
-                        .clone()
-                        .expect("enabled OpenID4VCI requires a management token")
-                        .into_bytes(),
-                ))),
+                Some(web::Data::new(
+                    CredentialIssuerEndpoint::new(
+                        operations.clone(),
+                        settings
+                            .openid4vc
+                            .issuer_management_token
+                            .clone()
+                            .expect("enabled OpenID4VCI requires a management token")
+                            .into_bytes(),
+                    )
+                    .with_client_certificate_extractor(move |request| {
+                        crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy(
+                            request,
+                            &trusted_proxy_cidrs,
+                        )
+                    }),
+                )),
                 Some(web::Data::new(CredentialDatasetAdminService::new(
                     operations,
                 ))),

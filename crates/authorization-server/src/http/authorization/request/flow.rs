@@ -66,7 +66,7 @@ pub(super) async fn authorize_request_with_context(
         return response;
     }
 
-    let original_authorization_query = q.clone();
+    let original_authorization_query = q.get("request_uri").is_some().then(|| q.clone());
     let reauth_started_at = consume_reauth_nonce_with_context(context, q).await;
     let mut pushed_dpop_jkt = None;
     let mut pushed_mtls_x5t_s256 = None;
@@ -383,7 +383,7 @@ pub(super) async fn authorize_request_with_context(
                 context,
                 &authorization_login_query(
                     q,
-                    &original_authorization_query,
+                    original_authorization_query.as_ref(),
                     pending_pushed_request_uri.as_ref(),
                 ),
                 fresh_authentication,
@@ -421,6 +421,7 @@ pub(super) async fn authorize_request_with_context(
         };
         let authorization = match offers
             .resolve_authorization_offer(
+                context.tenant_id,
                 &blake3_hex(issuer_state),
                 session.user.id(),
                 &client.client_id,

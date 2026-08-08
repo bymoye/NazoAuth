@@ -30,6 +30,7 @@ use crate::control_discovery::read_identifier;
 const CONTEXT_PATH: &str = "/run/nazoauth-operator/context.json";
 const CONTROLLER_PUBLIC_KEY_PATH: &str = "/run/nazoauth-operator/controller.pub";
 const RECEIPT_PRIVATE_KEY_PATH: &str = "/run/nazoauth-operator/receipt.key";
+const SECRET_REVISION_PATH: &str = "/run/nazoauth-operator/secret-revision";
 const EXTERNAL_PUBLIC_JWK_PATH: &str = "/run/nazoauth-operator/public.jwk";
 const STATE_DIRECTORY: &str = "/var/lib/nazoauth/operator-state";
 const CONFIG_MANIFEST_PATH: &str = "/run/nazoauth-operator/config-manifest.json";
@@ -75,10 +76,12 @@ use execution::execute;
 pub(crate) use identity::embedded_identity;
 use identity::{
     operation_name, persist_operator_state_identity, validate_config_manifest,
-    validate_embedded_identity, validate_local_task_identity,
+    validate_embedded_identity, validate_local_task_identity, validate_secret_binding,
 };
 #[cfg(test)]
-use identity::{validate_config_manifest_at, validate_local_task_identity_at};
+use identity::{
+    validate_config_manifest_at, validate_local_task_identity_at, validate_secret_binding_at,
+};
 use lifecycle::{
     acquire_task_lock, can_reenter_migration, claim_request, ensure_current_claim,
     load_or_prepare_lifecycle, mark_task_executing, write_lifecycle_atomic,
@@ -124,6 +127,11 @@ pub async fn run() -> anyhow::Result<()> {
     };
     validate_embedded_identity(&task)?;
     validate_config_manifest(&task)?;
+    // Secret rotation is an authorization boundary, not merely controller
+    // metadata.  Validate the local authority before creating or reusing a
+    // durable request claim so a rotated deployment cannot resume an older
+    // envelope, including one that was already claimed before restart.
+    validate_secret_binding(&task)?;
     let expected_deployment_id = validate_local_task_identity(&task)?;
     let state = configured_path("NAZOAUTH_OPERATOR_STATE_DIRECTORY", STATE_DIRECTORY);
     fs::create_dir_all(&state)?;

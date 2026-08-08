@@ -3,8 +3,12 @@ use std::{io::ErrorKind, path::Path, sync::Arc, time::Duration};
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use nazo_auth::SigningPurpose;
+#[cfg(test)]
+use nazo_auth::{SignRequest, Signer};
 use serde_json::{Value, json};
 
+#[cfg(test)]
+use crate::model::{KeyHealth, KeyHealthStatus};
 use crate::{
     KeyManager,
     model::{
@@ -22,19 +26,46 @@ use crate::{
 };
 
 impl KeyManager {
-    pub async fn run_lifecycle(self) -> ! {
-        let interval = refresh_interval(self.inner.settings.prepublish_window);
+    pub async fn run_lifecycle(self) {
+        let normal_interval = refresh_interval(self.inner.settings.prepublish_window);
+        let mut retry_interval = normal_interval;
+        let mut failure_backoff = MIN_FAILURE_BACKOFF;
+        let mut shutdown = self.inner.lifecycle_shutdown.subscribe();
+        if *shutdown.borrow() {
+            return;
+        }
         loop {
-            tokio::time::sleep(interval).await;
-            if let Err(error) = self.refresh().await {
-                tracing::error!(error = %error, "signing key lifecycle refresh failed; terminating process");
-                #[cfg(test)]
-                panic!("signing key lifecycle refresh failed: {error:#}");
-                #[cfg(not(test))]
-                std::process::abort();
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                () = tokio::time::sleep(retry_interval) => {}
+            }
+            match self.refresh().await {
+                Ok(()) => {
+                    retry_interval = normal_interval;
+                    failure_backoff = MIN_FAILURE_BACKOFF;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        retry_in_seconds = failure_backoff.as_secs(),
+                        "signing key lifecycle refresh failed; retaining the last good generation"
+                    );
+                    retry_interval = failure_backoff;
+                    failure_backoff = next_failure_backoff(failure_backoff);
+                }
             }
         }
     }
+}
+
+const MIN_FAILURE_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
+
+fn next_failure_backoff(current: Duration) -> Duration {
+    current
+        .checked_mul(2)
+        .unwrap_or(MAX_FAILURE_BACKOFF)
+        .min(MAX_FAILURE_BACKOFF)
 }
 
 fn refresh_interval(prepublish_window: chrono::Duration) -> Duration {

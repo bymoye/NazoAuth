@@ -388,11 +388,12 @@ pub(super) async fn insert_initial_admin_created_event(
     connection: &mut AsyncPgConnection,
     request_id: &str,
     user_id: Uuid,
+    tenant_id: Uuid,
     occurred_at: DateTime<Utc>,
 ) -> diesel::QueryResult<()> {
     diesel::insert_into(identity_security_events::table)
         .values((
-            identity_security_events::tenant_id.eq(Uuid::from_u128(1)),
+            identity_security_events::tenant_id.eq(tenant_id),
             identity_security_events::category.eq("admin"),
             identity_security_events::event_type.eq("initial_admin_bootstrap"),
             identity_security_events::outcome.eq("success"),

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     AuthorizationCodeState, ConsentPayload, OAuthClient, PushedAuthorizationRequest,
-    ValidatedClientRegistration,
+    RequestObjectClaims, RequestObjectJtiPolicy, RequestObjectPolicy, ValidatedClientRegistration,
 };
 
 use super::{
@@ -81,6 +81,7 @@ struct StoreState {
     replace_pushed_after_load: Mutex<Option<PushedAuthorizationRequest>>,
     stored_code: Mutex<Option<AuthorizationCodeState>>,
     code_error: Mutex<Option<AuthorizationPortError>>,
+    jar_error: Mutex<Option<AuthorizationPortError>>,
     delete_error: Mutex<Option<AuthorizationPortError>>,
     consent_takes: AtomicUsize,
     pushed_takes: AtomicUsize,
@@ -222,7 +223,8 @@ impl AuthorizationStateStorePort for FakeStore {
         _jti: &'a str,
         _ttl_seconds: u64,
     ) -> AuthorizationFuture<'a, bool> {
-        Box::pin(async { Ok(true) })
+        let error = self.0.jar_error.lock().unwrap().take();
+        Box::pin(async move { error.map_or(Ok(true), Err) })
     }
 
     fn consume_private_key_jwt<'a>(
@@ -431,6 +433,51 @@ fn ciba_request_object_replay_is_delegated_to_the_state_store() {
     )
     .unwrap();
     assert!(accepted);
+}
+
+#[test]
+fn owned_request_object_admission_keeps_outer_parameters_on_replay_dependency_failure() {
+    let store = FakeStore::default();
+    *store.0.jar_error.lock().unwrap() = Some(AuthorizationPortError::Unavailable);
+    let service = service(FakeRepository::default(), store);
+    let now = 1_700_000_000;
+    let claims = RequestObjectClaims {
+        client_id: "client".to_owned(),
+        iss: Some("client".to_owned()),
+        sub: Some("client".to_owned()),
+        aud: Some(json!("https://issuer.example")),
+        exp: Some(now + 120),
+        nbf: Some(now),
+        iat: Some(now),
+        jti: Some("replay-jti".to_owned()),
+        parameters: std::collections::HashMap::from([(
+            "redirect_uri".to_owned(),
+            json!("https://client.example/cb"),
+        )]),
+    };
+    let policy = RequestObjectPolicy {
+        issuer: "https://issuer.example",
+        client_id: "client",
+        jti_policy: RequestObjectJtiPolicy::RequiredForSignedJar,
+        require_integrity_protected_parameters: true,
+        now,
+    };
+    let mut outer = std::collections::HashMap::from([
+        ("client_id".to_owned(), "client".to_owned()),
+        ("request".to_owned(), "signed.jwt".to_owned()),
+        ("state".to_owned(), "outer-state".to_owned()),
+    ]);
+    let original = outer.clone();
+
+    assert_eq!(
+        futures_executor::block_on(
+            service.admit_request_object_owned(&mut outer, &claims, policy,)
+        ),
+        Err(crate::AuthorizationRequestError::Dependency(
+            AuthorizationPortError::Unavailable,
+        ))
+    );
+    assert_eq!(outer, original);
 }
 
 #[test]

@@ -34,7 +34,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    adapters::security::{blake3_hex, hash_password_blocking_limited, random_urlsafe_token},
+    adapters::security::{
+        blake3_hex, constant_time_eq, hash_password_blocking_limited, random_urlsafe_token,
+    },
     domain::{
         Openid4vcClientAttestationValidator, Openid4vcCredentialCrypto, Openid4vcProofValidator,
     },
@@ -283,22 +285,56 @@ impl ServerCredentialIssuerOperations {
                     vci_error(401, "invalid_token", "Access token subject is invalid.")
                 })?,
         };
-        let dpop_jkt = claims.cnf.as_ref().and_then(|cnf| cnf.jkt.clone());
+        let (dpop_jkt, mtls_x5t_s256) = claims
+            .cnf
+            .as_ref()
+            .map_or((None, None), |cnf| (cnf.jkt.clone(), cnf.x5t_s256.clone()));
         match (
             dpop_jkt.as_deref(),
+            mtls_x5t_s256.as_deref(),
             context.access_token_scheme,
             context.dpop_proof.as_deref(),
         ) {
-            (Some(_), AccessTokenScheme::Dpop, Some(_)) => {}
-            (None, AccessTokenScheme::Bearer, None) => {}
-            (Some(_), _, _) => {
+            (Some(_), None, AccessTokenScheme::Dpop, Some(_)) => {}
+            (None, Some(expected), AccessTokenScheme::Bearer, None) => {
+                let Some(actual) = context.mtls_x5t_s256.as_deref() else {
+                    return Err(vci_error(
+                        401,
+                        "invalid_token",
+                        "A mTLS-bound access token requires the matching client certificate.",
+                    ));
+                };
+                if !constant_time_eq(expected.as_bytes(), actual.as_bytes()) {
+                    return Err(vci_error(
+                        401,
+                        "invalid_token",
+                        "The mTLS client certificate does not match the access token.",
+                    ));
+                }
+            }
+            (None, None, AccessTokenScheme::Bearer, None) => {}
+            (Some(_), Some(_), _, _) => {
+                return Err(vci_error(
+                    401,
+                    "invalid_token",
+                    "Access token contains conflicting sender constraints.",
+                ));
+            }
+            (Some(_), None, _, _) => {
                 return Err(vci_error(
                     401,
                     "invalid_token",
                     "A DPoP-bound access token requires the DPoP authorization scheme and proof.",
                 ));
             }
-            (None, _, _) => {
+            (None, Some(_), _, _) => {
+                return Err(vci_error(
+                    401,
+                    "invalid_token",
+                    "A mTLS-bound access token requires the matching client certificate.",
+                ));
+            }
+            (None, None, _, _) => {
                 return Err(vci_error(
                     401,
                     "invalid_dpop_proof",

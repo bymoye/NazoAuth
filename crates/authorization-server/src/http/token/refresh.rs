@@ -10,11 +10,9 @@ use crate::domain::client_policy::json_array_to_strings;
 use crate::domain::client_policy::parse_scope;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue, TokenRow};
+use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::dpop_proof_present;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 
 use actix_web::http::StatusCode;
 
@@ -29,9 +27,11 @@ use uuid::Uuid;
 // 只处理 refresh token 校验、复用检测和轮换前置约束。
 
 use super::{
-    ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
+    SenderConstraintValidationError, ServerTokenService, TokenForm,
+    consume_token_client_assertion_with_authorization_service,
     issue::{TokenIssuanceContext, issue_token_response_with_service},
-    should_issue_refresh_token,
+    sender_constraint_multiple_error, should_issue_refresh_token,
+    validate_token_sender_constraints,
 };
 use crate::settings::AuthorizationServerProfile;
 
@@ -279,33 +279,9 @@ pub(crate) async fn token_refresh_with_service(
             }
         }
     }
-    let dpop_jkt = if dpop_proof_present(req) {
-        match validate_dpop_proof_with_authorization_service(
-            issuance.authorization,
-            issuance.config.issuer(),
-            issuance.config.mtls_endpoint_base_url(),
-            issuance.config.dpop_nonce_policy(),
-            req,
-            None,
-            token.dpop_jkt.as_deref(),
-        )
-        .await
-        {
-            Ok(value) => value.or(token.dpop_jkt.clone()),
-            Err(error) => return dpop_error_response(error, DpopErrorContext::TokenEndpoint),
-        }
-    } else if token.dpop_jkt.is_some() {
-        return oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token requires proof of possession.",
-            false,
-        );
-    } else {
-        None
-    };
     if client.client_type == "public"
         && client.require_dpop_bound_tokens
+        && !client.require_mtls_bound_tokens
         && token.dpop_jkt.is_none()
     {
         return oauth_token_error(
@@ -315,45 +291,42 @@ pub(crate) async fn token_refresh_with_service(
             false,
         );
     }
-    if client.require_dpop_bound_tokens && dpop_jkt.is_none() {
-        return oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token requires proof of possession.",
-            false,
-        );
-    }
-    let mtls_x5t_s256 = if let Some(expected) = token.mtls_x5t_s256.clone() {
-        match request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        {
-            Some(actual) if constant_time_eq(expected.as_bytes(), actual.as_bytes()) => {
-                Some(expected)
-            }
-            _ => {
-                return oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "refresh_token requires mTLS proof of possession.",
-                    false,
-                );
-            }
+    let sender = match validate_token_sender_constraints(
+        issuance,
+        req,
+        client,
+        None,
+        token.dpop_jkt.as_deref(),
+        token.mtls_x5t_s256.as_deref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(SenderConstraintValidationError::Dpop(DpopError::MissingProof)) => {
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token requires proof of possession.",
+                false,
+            );
         }
-    } else if client.require_mtls_bound_tokens {
-        match request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        {
-            Some(actual) => Some(actual),
-            None => {
-                return oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "refresh_token requires mTLS proof of possession.",
-                    false,
-                );
-            }
+        Err(SenderConstraintValidationError::Dpop(error)) => {
+            return dpop_error_response(error, DpopErrorContext::TokenEndpoint);
         }
-    } else {
-        None
+        Err(SenderConstraintValidationError::MissingMtls) => {
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token requires mTLS proof of possession.",
+                false,
+            );
+        }
+        Err(SenderConstraintValidationError::Multiple) => {
+            return sender_constraint_multiple_error();
+        }
     };
+    let dpop_jkt = sender.dpop_jkt;
+    let mtls_x5t_s256 = sender.mtls_x5t_s256;
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,

@@ -42,6 +42,17 @@ pub struct TokenOnlyForm {
     pub client_assertion: Option<String>,
 }
 
+pub struct PreAuthorizedTokenParameters {
+    pub pre_authorized_code: Option<String>,
+    pub tx_code: Option<String>,
+    pub invalid: bool,
+}
+
+pub struct ParsedTokenForm {
+    pub form: TokenForm,
+    pub pre_authorized: PreAuthorizedTokenParameters,
+}
+
 #[derive(Debug)]
 pub enum TokenFormError {
     InvalidContentType,
@@ -97,6 +108,13 @@ pub fn token_management_form_error(error: TokenManagementFormError) -> HttpRespo
 }
 
 pub fn parse_token_form(req: &HttpRequest, body: &Bytes) -> Result<TokenForm, TokenFormError> {
+    parse_token_form_with_pre_authorized(req, body).map(|parsed| parsed.form)
+}
+
+pub fn parse_token_form_with_pre_authorized(
+    req: &HttpRequest,
+    body: &Bytes,
+) -> Result<ParsedTokenForm, TokenFormError> {
     let content_type = req
         .headers()
         .get(header::CONTENT_TYPE)
@@ -112,7 +130,6 @@ pub fn parse_token_form(req: &HttpRequest, body: &Bytes) -> Result<TokenForm, To
 
     let raw = std::str::from_utf8(body).map_err(|_| TokenFormError::InvalidEncoding)?;
     let mut seen = HashSet::new();
-    let mut resource_values = HashSet::new();
     let mut form = TokenForm {
         grant_type: String::new(),
         code: None,
@@ -136,13 +153,16 @@ pub fn parse_token_form(req: &HttpRequest, body: &Bytes) -> Result<TokenForm, To
         audiences: Vec::new(),
         has_audience_param: false,
     };
+    let mut pre_authorized = PreAuthorizedTokenParameters {
+        pre_authorized_code: None,
+        tx_code: None,
+        invalid: false,
+    };
 
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
-        let key = key.into_owned();
-        let value = value.into_owned();
-        match key.as_str() {
+        match key.as_ref() {
             "resource" => {
-                let resource = parse_resource_indicators(&[value])
+                let resource = parse_resource_indicators(&[value.into_owned()])
                     .map_err(|_| TokenFormError::InvalidResourceParameter)?
                     .into_iter()
                     .next()
@@ -150,97 +170,111 @@ pub fn parse_token_form(req: &HttpRequest, body: &Bytes) -> Result<TokenForm, To
                 if seen.contains("audience") {
                     return Err(TokenFormError::DuplicateParameter);
                 }
-                seen.insert(key);
-                if !resource_values.insert(resource.clone()) {
+                seen.insert("resource");
+                if form.audiences.iter().any(|existing| existing == &resource) {
                     return Err(TokenFormError::DuplicateParameter);
                 }
                 form.audiences.push(resource);
             }
             "grant_type" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.grant_type = value;
+                accept_token_parameter_once(&mut seen, "grant_type")?;
+                form.grant_type = value.into_owned();
             }
             "code" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.code = non_empty(value);
+                accept_token_parameter_once(&mut seen, "code")?;
+                form.code = non_empty(value.into_owned());
             }
             "device_code" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.device_code = non_empty(value);
+                accept_token_parameter_once(&mut seen, "device_code")?;
+                form.device_code = non_empty(value.into_owned());
             }
             "auth_req_id" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.auth_req_id = non_empty(value);
+                accept_token_parameter_once(&mut seen, "auth_req_id")?;
+                form.auth_req_id = non_empty(value.into_owned());
             }
             "redirect_uri" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.redirect_uri = non_empty(value);
+                accept_token_parameter_once(&mut seen, "redirect_uri")?;
+                form.redirect_uri = non_empty(value.into_owned());
             }
             "code_verifier" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.code_verifier = non_empty(value);
+                accept_token_parameter_once(&mut seen, "code_verifier")?;
+                form.code_verifier = non_empty(value.into_owned());
             }
             "refresh_token" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.refresh_token = non_empty(value);
+                accept_token_parameter_once(&mut seen, "refresh_token")?;
+                form.refresh_token = non_empty(value.into_owned());
             }
             "device_secret" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.device_secret = non_empty(value);
+                accept_token_parameter_once(&mut seen, "device_secret")?;
+                form.device_secret = non_empty(value.into_owned());
             }
             "scope" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.scope = non_empty(value);
+                accept_token_parameter_once(&mut seen, "scope")?;
+                form.scope = non_empty(value.into_owned());
             }
             "client_id" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.client_id = non_empty(value);
+                accept_token_parameter_once(&mut seen, "client_id")?;
+                form.client_id = non_empty(value.into_owned());
             }
             "client_secret" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.client_secret = non_empty(value);
+                accept_token_parameter_once(&mut seen, "client_secret")?;
+                form.client_secret = non_empty(value.into_owned());
             }
             "client_assertion_type" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.client_assertion_type = non_empty(value);
+                accept_token_parameter_once(&mut seen, "client_assertion_type")?;
+                form.client_assertion_type = non_empty(value.into_owned());
             }
             "client_assertion" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.client_assertion = non_empty(value);
+                accept_token_parameter_once(&mut seen, "client_assertion")?;
+                form.client_assertion = non_empty(value.into_owned());
             }
             "assertion" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.assertion = non_empty(value);
+                accept_token_parameter_once(&mut seen, "assertion")?;
+                form.assertion = non_empty(value.into_owned());
             }
             "requested_token_type" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.requested_token_type = non_empty(value);
+                accept_token_parameter_once(&mut seen, "requested_token_type")?;
+                form.requested_token_type = non_empty(value.into_owned());
             }
             "subject_token" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.subject_token = non_empty(value);
+                accept_token_parameter_once(&mut seen, "subject_token")?;
+                form.subject_token = non_empty(value.into_owned());
             }
             "subject_token_type" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.subject_token_type = non_empty(value);
+                accept_token_parameter_once(&mut seen, "subject_token_type")?;
+                form.subject_token_type = non_empty(value.into_owned());
             }
             "actor_token" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.actor_token = non_empty(value);
+                accept_token_parameter_once(&mut seen, "actor_token")?;
+                form.actor_token = non_empty(value.into_owned());
             }
             "actor_token_type" => {
-                accept_token_parameter_once(&mut seen, key)?;
-                form.actor_token_type = non_empty(value);
+                accept_token_parameter_once(&mut seen, "actor_token_type")?;
+                form.actor_token_type = non_empty(value.into_owned());
             }
             "audience" => {
-                accept_token_parameter_once(&mut seen, key)?;
+                accept_token_parameter_once(&mut seen, "audience")?;
                 if !form.audiences.is_empty() {
                     return Err(TokenFormError::DuplicateParameter);
                 }
-                if let Some(value) = non_empty(value) {
+                if let Some(value) = non_empty(value.into_owned()) {
                     form.audiences.push(value);
                 }
                 form.has_audience_param = true;
+            }
+            "pre-authorized_code" => {
+                if pre_authorized.pre_authorized_code.is_some() || value.is_empty() {
+                    pre_authorized.invalid = true;
+                } else {
+                    pre_authorized.pre_authorized_code = Some(value.into_owned());
+                }
+            }
+            "tx_code" => {
+                if pre_authorized.tx_code.is_some() || value.is_empty() {
+                    pre_authorized.invalid = true;
+                } else {
+                    pre_authorized.tx_code = Some(value.into_owned());
+                }
             }
             _ => continue,
         }
@@ -249,7 +283,10 @@ pub fn parse_token_form(req: &HttpRequest, body: &Bytes) -> Result<TokenForm, To
     if form.grant_type.trim().is_empty() {
         return Err(TokenFormError::MissingGrantType);
     }
-    Ok(form)
+    Ok(ParsedTokenForm {
+        form,
+        pre_authorized,
+    })
 }
 
 pub fn parse_token_management_form(
@@ -281,32 +318,30 @@ pub fn parse_token_management_form(
     };
 
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
-        let key = key.into_owned();
-        let value = value.into_owned();
-        match key.as_str() {
+        match key.as_ref() {
             "token" => {
-                accept_token_management_parameter_once(&mut seen, key)?;
-                form.token = value;
+                accept_token_management_parameter_once(&mut seen, "token")?;
+                form.token = value.into_owned();
             }
             "token_type_hint" => {
-                accept_token_management_parameter_once(&mut seen, key)?;
-                form.token_type_hint = non_empty(value);
+                accept_token_management_parameter_once(&mut seen, "token_type_hint")?;
+                form.token_type_hint = non_empty(value.into_owned());
             }
             "client_id" => {
-                accept_token_management_parameter_once(&mut seen, key)?;
-                form.client_id = non_empty(value);
+                accept_token_management_parameter_once(&mut seen, "client_id")?;
+                form.client_id = non_empty(value.into_owned());
             }
             "client_secret" => {
-                accept_token_management_parameter_once(&mut seen, key)?;
-                form.client_secret = non_empty(value);
+                accept_token_management_parameter_once(&mut seen, "client_secret")?;
+                form.client_secret = non_empty(value.into_owned());
             }
             "client_assertion_type" => {
-                accept_token_management_parameter_once(&mut seen, key)?;
-                form.client_assertion_type = non_empty(value);
+                accept_token_management_parameter_once(&mut seen, "client_assertion_type")?;
+                form.client_assertion_type = non_empty(value.into_owned());
             }
             "client_assertion" => {
-                accept_token_management_parameter_once(&mut seen, key)?;
-                form.client_assertion = non_empty(value);
+                accept_token_management_parameter_once(&mut seen, "client_assertion")?;
+                form.client_assertion = non_empty(value.into_owned());
             }
             _ => continue,
         }
@@ -323,8 +358,8 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 fn accept_token_parameter_once(
-    seen: &mut HashSet<String>,
-    key: String,
+    seen: &mut HashSet<&'static str>,
+    key: &'static str,
 ) -> Result<(), TokenFormError> {
     if seen.insert(key) {
         Ok(())
@@ -334,8 +369,8 @@ fn accept_token_parameter_once(
 }
 
 fn accept_token_management_parameter_once(
-    seen: &mut HashSet<String>,
-    key: String,
+    seen: &mut HashSet<&'static str>,
+    key: &'static str,
 ) -> Result<(), TokenManagementFormError> {
     if seen.insert(key) {
         Ok(())

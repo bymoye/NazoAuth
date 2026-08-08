@@ -51,6 +51,7 @@ impl Openid4vciRepository {
 impl AuthorizationOfferPort for Openid4vciRepository {
     fn resolve_authorization_offer<'a>(
         &'a self,
+        tenant_id: Uuid,
         issuer_state_hash: &'a str,
         subject_id: Uuid,
         client_id: &'a str,
@@ -65,9 +66,10 @@ impl AuthorizationOfferPort for Openid4vciRepository {
                 .map_err(|_| CredentialStoreError::Unavailable)?;
             let row = sql_query(
                 "SELECT tenant_id,credential_configuration_ids,expires_at \
-                 FROM openid4vci_offers WHERE issuer_state_hash = $1 \
-                   AND subject_id = $2 AND expires_at > $3",
+                 FROM openid4vci_offers WHERE tenant_id = $1 \
+                   AND issuer_state_hash = $2 AND subject_id = $3 AND expires_at > $4",
             )
+            .bind::<sql_types::Uuid, _>(tenant_id)
             .bind::<sql_types::Text, _>(issuer_state_hash)
             .bind::<sql_types::Uuid, _>(subject_id)
             .bind::<sql_types::Timestamptz, _>(now)

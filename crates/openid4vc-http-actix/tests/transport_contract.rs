@@ -125,6 +125,43 @@ impl PresentationOperations for Verifier {
     }
 }
 
+struct CapturingVerifier {
+    responses: Mutex<Vec<PresentationResponseInput>>,
+}
+
+impl PresentationOperations for CapturingVerifier {
+    fn create<'a>(
+        &'a self,
+        _: CreatePresentationRequest,
+    ) -> PresentationFuture<'a, Result<CreatePresentationResponse, PresentationHttpError>> {
+        Box::pin(async { unreachable!() })
+    }
+
+    fn request<'a>(
+        &'a self,
+        _: Uuid,
+        _: Option<&'a str>,
+    ) -> PresentationFuture<'a, Result<PresentationResponseBody, PresentationHttpError>> {
+        Box::pin(async { unreachable!() })
+    }
+
+    fn respond<'a>(
+        &'a self,
+        _: Uuid,
+        response: PresentationResponseInput,
+    ) -> PresentationFuture<'a, Result<Option<String>, PresentationHttpError>> {
+        self.responses.lock().unwrap().push(response);
+        Box::pin(async { Ok(None) })
+    }
+
+    fn result<'a>(
+        &'a self,
+        _: Uuid,
+    ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>> {
+        Box::pin(async { unreachable!() })
+    }
+}
+
 struct DpopNonceIssuer;
 
 impl CredentialIssuerOperations for DpopNonceIssuer {
@@ -815,6 +852,7 @@ async fn credential_endpoint_preserves_dpop_authorization_scheme_and_proof() {
             .uri("/credential")
             .insert_header(("authorization", "DPoP access-token"))
             .insert_header(("dpop", "proof.jwt"))
+            .insert_header(("x-forwarded-tls-client-cert-sha256", "attacker-header"))
             .set_json(json!({
                 "credential_configuration_id": "pid",
                 "proofs": {"jwt": ["proof.jwt"]}
@@ -829,6 +867,43 @@ async fn credential_endpoint_preserves_dpop_authorization_scheme_and_proof() {
     assert_eq!(contexts[0].bearer_token, "access-token");
     assert_eq!(contexts[0].access_token_scheme, AccessTokenScheme::Dpop);
     assert_eq!(contexts[0].dpop_proof.as_deref(), Some("proof.jwt"));
+    assert_eq!(contexts[0].mtls_x5t_s256, None);
+}
+
+#[actix_web::test]
+async fn credential_endpoint_passes_injected_verified_certificate_thumbprint() {
+    let issuer = Arc::new(Issuer::default());
+    let endpoint = web::Data::new(
+        CredentialIssuerEndpoint::new(issuer.clone(), b"management-token".to_vec())
+            .with_client_certificate_extractor(|_| Some("verified-thumbprint".to_owned())),
+    );
+    let app = test::init_service(
+        App::new()
+            .app_data(endpoint)
+            .route("/credential", web::post().to(credential)),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/credential")
+            .insert_header(("authorization", "Bearer access-token"))
+            .set_json(json!({
+                "credential_configuration_id": "pid",
+                "proofs": {"jwt": ["proof.jwt"]}
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let contexts = issuer.credential_contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        contexts[0].mtls_x5t_s256.as_deref(),
+        Some("verified-thumbprint")
+    );
 }
 
 #[actix_web::test]
@@ -858,6 +933,58 @@ async fn direct_post_rejects_duplicate_and_mixed_response_parameters() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     }
+}
+
+#[actix_web::test]
+async fn direct_post_preserves_json_vp_token_and_jwt_response_shapes() {
+    let verifier = Arc::new(CapturingVerifier {
+        responses: Mutex::new(Vec::new()),
+    });
+    let endpoint = web::Data::new(PresentationEndpoint::new(
+        verifier.clone(),
+        b"management-token".to_vec(),
+    ));
+    let id = Uuid::now_v7();
+    let app = test::init_service(
+        App::new()
+            .app_data(endpoint)
+            .route("/response/{id}", web::post().to(presentation_response)),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/response/{id}"))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload("vp_token=%7B%22credential%22%3A%5B%22encoded%22%5D%7D&state=state")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/response/{id}"))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload("response=signed.jwt")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let responses = verifier.responses.lock().unwrap();
+    assert!(matches!(
+        &responses[0],
+        PresentationResponseInput::DirectPost(response)
+            if response.vp_token == Some(json!({"credential": ["encoded"]}))
+                && response.state.as_deref() == Some("state")
+    ));
+    assert_eq!(
+        responses[1],
+        PresentationResponseInput::DirectPostJwt("signed.jwt".to_owned())
+    );
 }
 
 fn _assert_transaction_type(_: &PresentationTransaction) {}

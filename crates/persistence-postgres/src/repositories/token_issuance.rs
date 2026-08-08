@@ -3,11 +3,13 @@ use aes_gcm::{
     aead::{Aead, Payload},
 };
 use chrono::{DateTime, Utc};
-use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
+use diesel::{
+    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper,
+};
 use diesel_async::RunQueryDsl;
 use nazo_auth::{
     NewRefreshToken, OAuthClient, RefreshToken, RefreshTokenPersistResult, TokenFuture,
-    TokenPortError, TokenRepositoryPort, TokenRevocation,
+    TokenIssuanceClaimResult, TokenPortError, TokenRepositoryPort, TokenRevocation,
 };
 use nazo_auth::{
     PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuancePhase, TokenIssuanceRecord,
@@ -246,6 +248,9 @@ struct TokenIssuanceRow {
     grant_key_blake3: String,
     request_digest: String,
     phase: String,
+    claim_owner_id: Option<Uuid>,
+    #[allow(dead_code)]
+    claim_started_at: Option<DateTime<Utc>>,
     access_token_jti: Option<String>,
     access_token_expires_at: Option<DateTime<Utc>>,
     response_ciphertext: Option<Vec<u8>>,
@@ -328,6 +333,7 @@ impl TokenIssuanceRow {
             grant_key: self.grant_key_blake3,
             request_digest: self.request_digest,
             phase,
+            claim_owner_id: self.claim_owner_id,
             access_token_jti: self.access_token_jti,
             access_token_expires_at: self.access_token_expires_at.map(|value| value.timestamp()),
             response_body,
@@ -469,7 +475,10 @@ impl TokenRepositoryPort for TokenIssuanceRepository {
                     .filter(oauth_token_issuances::tenant_id.eq(input.tenant_id))
                     .filter(oauth_token_issuances::client_id.eq(input.client_id))
                     .filter(oauth_token_issuances::grant_key_blake3.eq(&grant_hash))
-                    .filter(oauth_token_issuances::expires_at.le(Utc::now())),
+                    .filter(oauth_token_issuances::expires_at.le(Utc::now()))
+                    .filter(oauth_token_issuances::claim_owner_id.is_null().or(
+                        oauth_token_issuances::phase.ne(TokenIssuancePhase::Prepared.as_str()),
+                    )),
             )
             .execute(&mut connection)
             .await
@@ -515,20 +524,79 @@ impl TokenRepositoryPort for TokenIssuanceRepository {
         })
     }
 
-    fn record_token_issuance_signed<'a>(
+    fn claim_token_issuance<'a>(
         &'a self,
         issuance_id: Uuid,
         request_digest: &'a str,
-        access_token_jti: &'a str,
-        access_token_expires_at: i64,
-        response_body: &'a [u8],
-        response_digest: &'a str,
+        claim_owner_id: Uuid,
+    ) -> TokenFuture<'a, TokenIssuanceClaimResult> {
+        Box::pin(async move {
+            // The NULL-owner predicate is the concurrency boundary. There is
+            // intentionally no lease takeover path: a crashed owner leaves
+            // the row blocked until an operator repairs the durable record.
+            let mut connection = self.connection().await.map_err(map_repository_error)?;
+            let affected = diesel::update(
+                oauth_token_issuances::table
+                    .filter(oauth_token_issuances::issuance_id.eq(issuance_id))
+                    .filter(oauth_token_issuances::request_digest.eq(request_digest))
+                    .filter(oauth_token_issuances::phase.eq(TokenIssuancePhase::Prepared.as_str()))
+                    .filter(oauth_token_issuances::claim_owner_id.is_null()),
+            )
+            .set((
+                oauth_token_issuances::claim_owner_id.eq(claim_owner_id),
+                oauth_token_issuances::claim_started_at.eq(Utc::now()),
+                oauth_token_issuances::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut connection)
+            .await
+            .map_err(map_diesel_error)?;
+            if affected == 1 {
+                return Ok(TokenIssuanceClaimResult::Applied);
+            }
+
+            let current = oauth_token_issuances::table
+                .filter(oauth_token_issuances::issuance_id.eq(issuance_id))
+                .select((
+                    oauth_token_issuances::request_digest,
+                    oauth_token_issuances::phase,
+                    oauth_token_issuances::claim_owner_id,
+                ))
+                .first::<(String, String, Option<Uuid>)>(&mut connection)
+                .await
+                .optional()
+                .map_err(map_diesel_error)?;
+            Ok(match current {
+                None => TokenIssuanceClaimResult::Missing,
+                Some((digest, _phase, _)) if digest != request_digest => {
+                    TokenIssuanceClaimResult::Conflict
+                }
+                Some((_, phase, Some(_))) if phase == TokenIssuancePhase::Prepared.as_str() => {
+                    TokenIssuanceClaimResult::Busy
+                }
+                Some(_) => TokenIssuanceClaimResult::Conflict,
+            })
+        })
+    }
+
+    fn record_token_issuance_signed<'a>(
+        &'a self,
+        input: nazo_auth::RecordTokenIssuanceSigned<'a>,
     ) -> TokenFuture<'a, TokenIssuanceTransitionResult> {
         Box::pin(async move {
+            let nazo_auth::RecordTokenIssuanceSigned {
+                issuance_id,
+                request_digest,
+                claim_owner_id,
+                access_token_jti,
+                access_token_expires_at,
+                response_body,
+                response_digest,
+            } = input;
             let mut connection = self.connection().await.map_err(map_repository_error)?;
             let row = oauth_token_issuances::table
                 .filter(oauth_token_issuances::issuance_id.eq(issuance_id))
                 .filter(oauth_token_issuances::request_digest.eq(request_digest))
+                .filter(oauth_token_issuances::claim_owner_id.eq(claim_owner_id))
                 .select(TokenIssuanceRow::as_select())
                 .first::<TokenIssuanceRow>(&mut connection)
                 .await
@@ -566,6 +634,7 @@ impl TokenRepositoryPort for TokenIssuanceRepository {
                 oauth_token_issuances::table
                     .filter(oauth_token_issuances::issuance_id.eq(issuance_id))
                     .filter(oauth_token_issuances::request_digest.eq(request_digest))
+                    .filter(oauth_token_issuances::claim_owner_id.eq(claim_owner_id))
                     .filter(oauth_token_issuances::phase.eq(TokenIssuancePhase::Prepared.as_str())),
             )
             .set((

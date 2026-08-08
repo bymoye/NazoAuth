@@ -67,6 +67,7 @@ impl CredentialStorePort for RecordingStore {
     fn offer<'a>(
         &'a self,
         _: Uuid,
+        _: Uuid,
         _: chrono::DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>
     {
@@ -74,6 +75,7 @@ impl CredentialStorePort for RecordingStore {
     }
     fn consume_pre_authorized_offer<'a>(
         &'a self,
+        _: Uuid,
         _: &'a str,
         _: Option<&'a str>,
         _: &'a str,

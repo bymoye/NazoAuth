@@ -1,5 +1,12 @@
 use url::Url;
 
+/// Maximum UTF-8 byte length accepted for CIBA and logout callback URIs.
+///
+/// Callback endpoints are persisted and used by background workers.  Keeping a
+/// single bound across registration and delivery prevents an oversized URI
+/// from turning into unbounded state/log/request work later in the lifecycle.
+pub const MAX_CIBA_LOGOUT_URI_BYTES: usize = 2_048;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CibaPingResponseAction {
     Delivered,
@@ -8,6 +15,9 @@ pub enum CibaPingResponseAction {
 }
 
 pub fn validate_ciba_notification_endpoint(value: &str) -> Result<Url, &'static str> {
+    if value.len() > MAX_CIBA_LOGOUT_URI_BYTES {
+        return Err("CIBA ping endpoint exceeds the maximum URI length");
+    }
     let parsed = Url::parse(value).map_err(|_| "CIBA ping endpoint is not a valid URI")?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()

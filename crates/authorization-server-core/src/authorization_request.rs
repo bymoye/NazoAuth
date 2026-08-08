@@ -251,6 +251,41 @@ pub fn normalize_request_object(
     claims: &RequestObjectClaims,
     policy: RequestObjectPolicy<'_>,
 ) -> Result<NormalizedRequestObject, AuthorizationRequestError> {
+    let mut outer = outer.clone();
+    normalize_request_object_owned(&mut outer, claims, policy)
+}
+
+/// Applies request-object policy while reusing the caller's parameter map.
+///
+/// The map is moved only after all validation (including replay metadata
+/// derivation) succeeds, so policy failures leave the caller's outer
+/// parameters untouched.
+pub fn normalize_request_object_owned(
+    outer: &mut HashMap<String, String>,
+    claims: &RequestObjectClaims,
+    policy: RequestObjectPolicy<'_>,
+) -> Result<NormalizedRequestObject, AuthorizationRequestError> {
+    let plan = prepare_request_object(outer, claims, policy)?;
+    Ok(apply_request_object_plan(outer, plan))
+}
+
+pub(crate) struct RequestObjectNormalizationPlan {
+    request_parameters: HashMap<String, String>,
+    replay: Option<RequestObjectReplay>,
+    require_integrity_protected_parameters: bool,
+}
+
+impl RequestObjectNormalizationPlan {
+    pub(crate) fn replay(&self) -> Option<&RequestObjectReplay> {
+        self.replay.as_ref()
+    }
+}
+
+pub(crate) fn prepare_request_object(
+    outer: &HashMap<String, String>,
+    claims: &RequestObjectClaims,
+    policy: RequestObjectPolicy<'_>,
+) -> Result<RequestObjectNormalizationPlan, AuthorizationRequestError> {
     if claims.client_id != policy.client_id
         || !request_object_party_claims_valid(claims, policy)
         || !request_object_audience_valid(claims, policy)
@@ -278,14 +313,28 @@ pub fn normalize_request_object(
     }
 
     let replay = request_object_replay(claims, policy)?;
-    let mut parameters = outer.clone();
-    if policy.require_integrity_protected_parameters {
+    Ok(RequestObjectNormalizationPlan {
+        request_parameters,
+        replay,
+        require_integrity_protected_parameters: policy.require_integrity_protected_parameters,
+    })
+}
+
+pub(crate) fn apply_request_object_plan(
+    outer: &mut HashMap<String, String>,
+    plan: RequestObjectNormalizationPlan,
+) -> NormalizedRequestObject {
+    let mut parameters = std::mem::take(outer);
+    if plan.require_integrity_protected_parameters {
         parameters.retain(|key, _| matches!(key.as_str(), "request" | "client_id"));
     } else {
-        parameters.retain(|key, _| key == "request" || !request_parameters.contains_key(key));
+        parameters.retain(|key, _| key == "request" || !plan.request_parameters.contains_key(key));
     }
-    parameters.extend(request_parameters);
-    Ok(NormalizedRequestObject { parameters, replay })
+    parameters.extend(plan.request_parameters);
+    NormalizedRequestObject {
+        parameters,
+        replay: plan.replay,
+    }
 }
 
 fn request_object_party_claims_valid(

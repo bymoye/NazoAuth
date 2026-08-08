@@ -1,4 +1,5 @@
 use super::*;
+use nazo_auth::TokenIssuanceClaimResult;
 
 pub(super) async fn issue_token_response_with_service_and_grant(
     context: &TokenIssuanceContext<'_>,
@@ -137,6 +138,7 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             false,
         );
     }
+    let claim_owner_id = Uuid::now_v7();
     let issuance_id = match token_service
         .prepare_token_issuance(PrepareTokenIssuance {
             issuance_id: Uuid::now_v7(),
@@ -203,6 +205,51 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             );
         }
     };
+    match token_service
+        .claim_token_issuance(issuance_id, &request_digest, claim_owner_id)
+        .await
+    {
+        Ok(TokenIssuanceClaimResult::Applied) => {}
+        Ok(TokenIssuanceClaimResult::Busy) => {
+            if let Some(response) =
+                wait_for_token_issuance_response(token_service, client, &grant_key).await
+            {
+                return response;
+            }
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发事务仍在处理中，请稍后重试.",
+                false,
+            );
+        }
+        Ok(TokenIssuanceClaimResult::Conflict) => {
+            tracing::warn!(issuance_id = %issuance_id, "token issuance claim conflicted");
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发状态竞争.",
+                false,
+            );
+        }
+        Ok(TokenIssuanceClaimResult::Missing) => {
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发状态认领失败.",
+                false,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, issuance_id = %issuance_id, "failed to claim token issuance owner");
+            return oauth_token_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "令牌签发状态认领失败.",
+                false,
+            );
+        }
+    }
     let now = Utc::now();
     let next_dpop_nonce = if issue.dpop_jkt.is_some() {
         match issue_dpop_nonce_with_authorization_service(context.authorization).await {
@@ -670,20 +717,42 @@ pub(super) async fn issue_token_response_with_service_and_grant(
     };
     let response_digest = blake3::hash(&response_body).to_hex().to_string();
     match token_service
-        .record_token_issuance_signed(
+        .record_token_issuance_signed(nazo_auth::RecordTokenIssuanceSigned {
             issuance_id,
-            &request_digest,
-            &issued_access_token.jti,
-            issued_access_token.expires_at,
-            &response_body,
-            &response_digest,
-        )
+            request_digest: &request_digest,
+            claim_owner_id,
+            access_token_jti: &issued_access_token.jti,
+            access_token_expires_at: issued_access_token.expires_at,
+            response_body: &response_body,
+            response_digest: &response_digest,
+        })
         .await
     {
         Ok(TokenIssuanceTransitionResult::Applied) => {}
         Ok(TokenIssuanceTransitionResult::Conflict) => {
-            // A concurrent request may have won the transition.  Recover its
-            // durable response rather than minting a second credential.
+            // A concurrent request should not reach this point after the
+            // owner claim. If it does, this attempt already created side
+            // effects; revoke them before recovering the winning response.
+            if let Err(error) = token_service
+                .revoke_issued_tokens(
+                    client.tenant_id,
+                    client.id,
+                    &issued_access_token.jti,
+                    DateTime::<Utc>::from_timestamp(issued_access_token.expires_at, 0),
+                    refresh_token_family_id,
+                )
+                .await
+            {
+                tracing::warn!(%error, issuance_id = %issuance_id, "failed to revoke conflicting token issuance");
+                return oauth_token_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "令牌签发冲突回收失败.",
+                    false,
+                );
+            }
+            // Recover the durable response only after the losing side effects
+            // have been revoked.
             if let Some(response) =
                 recover_conflicting_token_issuance_response(token_service, client, &grant_key).await
             {

@@ -49,22 +49,24 @@ impl CredentialStorePort for Openid4vciRepository {
 
     fn offer<'a>(
         &'a self,
+        tenant_id: Uuid,
         id: Uuid,
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<StoredCredentialOffer>, CredentialStoreError>>
     {
-        self.offer_lookup(id, now)
+        self.offer_lookup(tenant_id, id, now)
     }
 
     fn consume_pre_authorized_offer<'a>(
         &'a self,
+        tenant_id: Uuid,
         code_hash: &'a str,
         tx_code: Option<&'a str>,
         client_id: &'a str,
         now: DateTime<Utc>,
     ) -> CredentialStoreFuture<'a, Result<Option<CredentialAuthorization>, CredentialStoreError>>
     {
-        self.offer_consume_pre_authorized(code_hash, tx_code, client_id, now)
+        self.offer_consume_pre_authorized(tenant_id, code_hash, tx_code, client_id, now)
     }
 
     fn issue_nonce<'a>(

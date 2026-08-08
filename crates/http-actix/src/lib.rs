@@ -142,8 +142,9 @@ pub use token_client_auth::{
     token_client_auth_transport_facts,
 };
 pub use token_forms::{
-    TokenForm, TokenFormError, TokenManagementFormError, TokenOnlyForm, parse_token_form,
-    parse_token_management_form, token_management_form_error,
+    ParsedTokenForm, PreAuthorizedTokenParameters, TokenForm, TokenFormError,
+    TokenManagementFormError, TokenOnlyForm, parse_token_form,
+    parse_token_form_with_pre_authorized, parse_token_management_form, token_management_form_error,
     token_management_has_conflicting_client_auth, token_management_oauth_error,
 };
 pub use token_management::{

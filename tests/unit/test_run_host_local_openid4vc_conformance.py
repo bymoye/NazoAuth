@@ -439,6 +439,29 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
             candidate=None,
         )
 
+    def test_ctl_lease_is_registered_before_prepared_trust_consumption(self):
+        lease_id = "018f3f2a-7b55-7a25-8f20-6d526f8f44e1"
+        args = self.module.argparse.Namespace(
+            nazoauthctl=Path("/usr/local/bin/nazoauthctl"),
+            nazoauthctl_config=Path("/etc/nazoauth/update.json"),
+            prepared_install_dir=Path("/run/nazoauth-host-local-oidf-install"),
+            prepared_trust_digest="a" * 64,
+            lease_ttl_seconds=28_800,
+        )
+
+        def consume_and_fail(*_args):
+            self.assertEqual(args.active_lease_id, lease_id)
+            raise RuntimeError("prepared trust consumption failed")
+
+        with (
+            mock.patch.object(self.module, "create_lease", return_value=lease_id),
+            mock.patch.object(self.module, "consume_prepared_trust", side_effect=consume_and_fail),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "consumption failed"):
+                self.module.create_conformance_lease(args)
+
+        self.assertEqual(args.active_lease_id, lease_id)
+
     def test_final_receipt_is_credential_free_and_states_no_proxy_trust(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1,9 +1,50 @@
 use super::{ServiceAssembly, *};
+use actix_web::body::MessageBody;
 use actix_web::dev::Service;
+use actix_web::dev::{ServiceRequest, ServiceResponse};
+use actix_web::error::ErrorRequestTimeout;
+use actix_web::middleware::Next;
 use actix_web::middleware::from_fn;
-use actix_web::{App, HttpServer, web};
+use actix_web::{App, Error, HttpServer, web};
 use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::time::timeout;
 use tracing::Instrument;
+
+/// Bounds the complete request future, including typed extractors and handlers
+/// that drain `web::Payload` themselves. Actix's client request timeout only
+/// covers request-head parsing, so this application-level guard is required to
+/// close a connection whose body trickles after the head has been accepted.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Keep the head timeout explicit even though Actix has a default. This
+/// protects the boundary if the framework default changes during an upgrade.
+const HTTP_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// `max_connections` is per worker in Actix. Four thousand is below the
+/// framework default (25,000) while retaining headroom for normal API use.
+const HTTP_MAX_CONNECTIONS_PER_WORKER: usize = 4_096;
+
+async fn request_timeout<B>(
+    request: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<B>, Error>
+where
+    B: MessageBody + 'static,
+{
+    request_timeout_with_duration(request, next, HTTP_REQUEST_TIMEOUT).await
+}
+
+async fn request_timeout_with_duration<B>(
+    request: ServiceRequest,
+    next: Next<B>,
+    duration: Duration,
+) -> Result<ServiceResponse<B>, Error>
+where
+    B: MessageBody + 'static,
+{
+    timeout(duration, next.call(request))
+        .await
+        .map_err(|_| ErrorRequestTimeout("request exceeded the configured time limit"))?
+}
 
 /// Owns the Actix worker factory, middleware, route registration, and
 /// listener setup.  All application data is assembled before entering this
@@ -33,6 +74,7 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
 
     let server = HttpServer::new(move || {
         let app = App::new()
+            .wrap(from_fn(request_timeout))
             .wrap_fn(|req, service| {
                 let method = req.method().clone();
                 let path = req.path().to_owned();
@@ -153,6 +195,8 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
             crate::bootstrap::routes::configure(cfg, &settings, perf_metrics_enabled)
         })
     })
+    .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
+    .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)
     .on_connect(|io, extensions| {
         let Some(stream) = io.downcast_ref::<
             actix_tls::accept::rustls_0_23::TlsStream<actix_web::rt::net::TcpStream>,
@@ -181,4 +225,84 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     };
     server.run().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{App, HttpResponse, test, web};
+    use futures_util::{StreamExt as _, stream};
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    async fn test_request_timeout<B>(
+        request: ServiceRequest,
+        next: Next<B>,
+    ) -> Result<ServiceResponse<B>, Error>
+    where
+        B: MessageBody + 'static,
+    {
+        request_timeout_with_duration(request, next, Duration::from_millis(10)).await
+    }
+
+    fn delayed_payload() -> actix_web::dev::Payload {
+        let stream = stream::once(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<web::Bytes, actix_web::error::PayloadError>(web::Bytes::from_static(
+                br#"{"value":"ok"}"#,
+            ))
+        });
+        let stream: Pin<
+            Box<
+                dyn futures_util::Stream<Item = Result<web::Bytes, actix_web::error::PayloadError>>,
+            >,
+        > = Box::pin(stream);
+        actix_web::dev::Payload::from(stream)
+    }
+
+    #[actix_web::test]
+    async fn request_timeout_covers_typed_json_extractor() {
+        let app = test::init_service(App::new().wrap(from_fn(test_request_timeout)).route(
+            "/json",
+            web::post().to(|_: web::Json<serde_json::Value>| async { HttpResponse::Ok().finish() }),
+        ))
+        .await;
+
+        let request = test::TestRequest::post()
+            .uri("/json")
+            .insert_header(("content-type", "application/json"))
+            .to_request();
+        let (request, _) = request.replace_payload(delayed_payload());
+        let error = test::try_call_service(&app, request)
+            .await
+            .expect_err("slow JSON body must time out");
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::REQUEST_TIMEOUT
+        );
+    }
+
+    #[actix_web::test]
+    async fn request_timeout_covers_raw_payload_extractor() {
+        let app = test::init_service(App::new().wrap(from_fn(test_request_timeout)).route(
+            "/raw",
+            web::post().to(|mut payload: web::Payload| async move {
+                while payload.next().await.is_some() {}
+                HttpResponse::Ok().finish()
+            }),
+        ))
+        .await;
+
+        let request = test::TestRequest::post().uri("/raw").to_request();
+        let (request, _) = request.replace_payload(delayed_payload());
+        let error = test::try_call_service(&app, request)
+            .await
+            .expect_err("slow raw payload must time out");
+
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::REQUEST_TIMEOUT
+        );
+    }
 }

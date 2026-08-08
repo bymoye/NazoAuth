@@ -1,6 +1,6 @@
 use nazo_auth::{
-    CibaPingResponseAction, classify_ciba_ping_status, next_ciba_ping_retry_at,
-    validate_ciba_notification_endpoint,
+    CibaPingResponseAction, MAX_CIBA_LOGOUT_URI_BYTES, classify_ciba_ping_status,
+    next_ciba_ping_retry_at, validate_ciba_notification_endpoint,
 };
 
 #[test]
@@ -17,6 +17,19 @@ fn ciba_ping_endpoint_requires_an_https_origin_without_ambiguous_authority() {
             "{invalid}"
         );
     }
+}
+
+#[test]
+fn ciba_ping_endpoint_length_is_bounded_consistently() {
+    let prefix = "https://client.example/";
+    let at_limit = format!(
+        "{prefix}{}",
+        "x".repeat(MAX_CIBA_LOGOUT_URI_BYTES - prefix.len())
+    );
+    assert!(validate_ciba_notification_endpoint(&at_limit).is_ok());
+
+    let over_limit = format!("{at_limit}x");
+    assert!(validate_ciba_notification_endpoint(&over_limit).is_err());
 }
 
 #[test]

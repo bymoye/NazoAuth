@@ -33,6 +33,7 @@ impl InitialAdminBootstrapEndpoint {
         pool: nazo_postgres::DbPool,
         data_dir: &std::path::Path,
         issuer: &str,
+        tenant: nazo_identity::TenantContext,
     ) -> anyhow::Result<Self> {
         let (token_path, token) =
             read_or_create_runtime_secret(data_dir, "bootstrap/initial-admin-token")?;
@@ -42,7 +43,7 @@ impl InitialAdminBootstrapEndpoint {
             );
         }
         let token_hash = hash_token(&token);
-        let repository = nazo_postgres::InitialAdminBootstrapRepository::new(pool);
+        let repository = nazo_postgres::InitialAdminBootstrapRepository::new(pool, tenant);
         let state = repository
             .ensure_claim(
                 &token_hash,

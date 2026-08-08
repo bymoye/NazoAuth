@@ -1,10 +1,10 @@
 use chrono::{Duration, Utc};
 use diesel::{
     QueryableByName, sql_query,
-    sql_types::{BigInt, Text},
+    sql_types::{BigInt, Text, Uuid as DieselUuid},
 };
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
-use nazo_identity::ports::PasswordHashInput;
+use nazo_identity::{OrganizationId, RealmId, TenantContext, TenantId, ports::PasswordHashInput};
 use nazo_postgres::{
     InitialAdminBootstrapRepository, InitialAdminBootstrapState, InitialAdminClaimOutcome,
     create_pool,
@@ -30,6 +30,22 @@ struct AdminRoleRow {
 struct CountRow {
     #[diesel(sql_type = BigInt)]
     count: i64,
+}
+
+#[derive(QueryableByName)]
+struct TenantAssignmentRow {
+    #[diesel(sql_type = DieselUuid)]
+    tenant_id: Uuid,
+    #[diesel(sql_type = DieselUuid)]
+    realm_id: Uuid,
+    #[diesel(sql_type = DieselUuid)]
+    organization_id: Uuid,
+}
+
+#[derive(QueryableByName)]
+struct TenantRow {
+    #[diesel(sql_type = DieselUuid)]
+    tenant_id: Uuid,
 }
 
 fn database_url() -> Option<String> {
@@ -59,6 +75,7 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
     run_isolated_application_migrations(&isolated_url).await;
     let repository = InitialAdminBootstrapRepository::new(
         create_pool(isolated_url.clone(), 4).expect("pool should create"),
+        TenantContext::default_system(),
     );
     let token_hash = "a".repeat(64);
     assert!(matches!(
@@ -127,6 +144,7 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
         .unwrap();
     let restarted = InitialAdminBootstrapRepository::new(
         create_pool(isolated_url.clone(), 2).expect("restart pool should create"),
+        TenantContext::default_system(),
     );
     assert_eq!(
         restarted
@@ -249,6 +267,25 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
         .unwrap();
     assert_eq!(admins.len(), 1);
     assert_eq!(admins[0].role, "admin");
+    let assignment =
+        sql_query("SELECT tenant_id, realm_id, organization_id FROM users WHERE id = $1")
+            .bind::<DieselUuid, _>(winning_id)
+            .get_result::<TenantAssignmentRow>(&mut isolated)
+            .await
+            .unwrap();
+    let default_tenant = TenantContext::default_system();
+    assert_eq!(
+        (
+            assignment.tenant_id,
+            assignment.realm_id,
+            assignment.organization_id,
+        ),
+        (
+            default_tenant.tenant_id.as_uuid(),
+            default_tenant.realm_id.as_uuid(),
+            default_tenant.organization_id.as_uuid(),
+        )
+    );
     let audit_count = sql_query(
         "SELECT count(*)::bigint AS count FROM identity_security_events WHERE event_type = 'initial_admin_bootstrap'",
     )
@@ -273,6 +310,117 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_admin_claim_respects_explicit_non_default_tenant_context() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let schema = format!("initial_admin_tenant_{}", Uuid::now_v7().simple());
+    let mut coordinator = AsyncPgConnection::establish(&database_url).await.unwrap();
+    coordinator
+        .batch_execute(&format!("CREATE SCHEMA \"{schema}\";"))
+        .await
+        .unwrap();
+    let isolated_url = schema_database_url(&database_url, &schema);
+    run_isolated_application_migrations(&isolated_url).await;
+    let mut isolated = AsyncPgConnection::establish(&isolated_url).await.unwrap();
+
+    let tenant_id = Uuid::now_v7();
+    let realm_id = Uuid::now_v7();
+    let organization_id = Uuid::now_v7();
+    let tenant = TenantContext {
+        tenant_id: TenantId::new(tenant_id).unwrap(),
+        realm_id: RealmId::new(realm_id).unwrap(),
+        organization_id: OrganizationId::new(organization_id).unwrap(),
+    };
+    sql_query("INSERT INTO tenants (id, slug, display_name, status) VALUES ($1, $2, $3, 'active')")
+        .bind::<DieselUuid, _>(tenant_id)
+        .bind::<Text, _>(format!("tenant-{}", tenant_id.simple()))
+        .bind::<Text, _>("Contract tenant")
+        .execute(&mut isolated)
+        .await
+        .unwrap();
+    sql_query(
+        "INSERT INTO realms (id, tenant_id, slug, display_name, status)
+         VALUES ($1, $2, 'contract', 'Contract realm', 'active')",
+    )
+    .bind::<DieselUuid, _>(realm_id)
+    .bind::<DieselUuid, _>(tenant_id)
+    .execute(&mut isolated)
+    .await
+    .unwrap();
+    sql_query(
+        "INSERT INTO organizations (id, tenant_id, slug, display_name, status)
+         VALUES ($1, $2, 'contract', 'Contract organization', 'active')",
+    )
+    .bind::<DieselUuid, _>(organization_id)
+    .bind::<DieselUuid, _>(tenant_id)
+    .execute(&mut isolated)
+    .await
+    .unwrap();
+
+    let repository =
+        InitialAdminBootstrapRepository::new(create_pool(isolated_url.clone(), 2).unwrap(), tenant);
+    let token_hash = "f".repeat(64);
+    assert!(matches!(
+        repository
+            .ensure_claim(&token_hash, Utc::now() + Duration::minutes(30))
+            .await
+            .unwrap(),
+        InitialAdminBootstrapState::Ready { .. }
+    ));
+    let outcome = repository
+        .claim(
+            "bootstrap-admin-ffffffffffffffffffffffffffffffff",
+            &token_hash,
+            "tenant-admin@example.com",
+            PasswordHashInput::new("tenant-password-hash").unwrap(),
+        )
+        .await
+        .unwrap();
+    let InitialAdminClaimOutcome::Created { id, .. } = outcome else {
+        panic!("explicit tenant context must permit its own initial admin claim");
+    };
+
+    let assignment =
+        sql_query("SELECT tenant_id, realm_id, organization_id FROM users WHERE id = $1")
+            .bind::<DieselUuid, _>(id)
+            .get_result::<TenantAssignmentRow>(&mut isolated)
+            .await
+            .unwrap();
+    assert_eq!(
+        (
+            assignment.tenant_id,
+            assignment.realm_id,
+            assignment.organization_id,
+        ),
+        (tenant_id, realm_id, organization_id)
+    );
+    let audit = sql_query(
+        "SELECT tenant_id
+         FROM identity_security_events
+         WHERE request_id = 'bootstrap-admin-ffffffffffffffffffffffffffffffff'
+           AND event_type = 'initial_admin_bootstrap'",
+    )
+    .get_result::<TenantRow>(&mut isolated)
+    .await
+    .unwrap();
+    assert_eq!(audit.tenant_id, tenant_id);
+    let default_admins = sql_query(
+        "SELECT count(*)::bigint AS count FROM users WHERE tenant_id = $1 AND role = 'admin'",
+    )
+    .bind::<DieselUuid, _>(TenantContext::default_system().tenant_id.as_uuid())
+    .get_result::<CountRow>(&mut isolated)
+    .await
+    .unwrap();
+    assert_eq!(default_admins.count, 0);
+
+    coordinator
+        .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE;"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_consumed_claim_is_closed_without_becoming_replayable() {
     let Some(database_url) = database_url() else {
         return;
@@ -285,8 +433,10 @@ async fn legacy_consumed_claim_is_closed_without_becoming_replayable() {
         .unwrap();
     let isolated_url = schema_database_url(&database_url, &schema);
     run_isolated_application_migrations(&isolated_url).await;
-    let repository =
-        InitialAdminBootstrapRepository::new(create_pool(isolated_url.clone(), 2).unwrap());
+    let repository = InitialAdminBootstrapRepository::new(
+        create_pool(isolated_url.clone(), 2).unwrap(),
+        TenantContext::default_system(),
+    );
     let mut isolated = AsyncPgConnection::establish(&isolated_url).await.unwrap();
     sql_query(
         "INSERT INTO initial_admin_bootstrap
@@ -337,8 +487,10 @@ async fn bootstrap_audit_failure_rolls_back_user_receipt_and_consumption() {
         .unwrap();
     let isolated_url = schema_database_url(&database_url, &schema);
     run_isolated_application_migrations(&isolated_url).await;
-    let repository =
-        InitialAdminBootstrapRepository::new(create_pool(isolated_url.clone(), 2).unwrap());
+    let repository = InitialAdminBootstrapRepository::new(
+        create_pool(isolated_url.clone(), 2).unwrap(),
+        TenantContext::default_system(),
+    );
     let token_hash = "d".repeat(64);
     repository
         .ensure_claim(&token_hash, Utc::now() + Duration::minutes(30))

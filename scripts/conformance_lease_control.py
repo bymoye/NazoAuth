@@ -189,21 +189,33 @@ def revoke_and_cleanup(
     *,
     candidate: CandidateTarget | None = None,
 ) -> None:
-    receipt(
-        nazoauthctl,
-        config,
-        candidate,
-        [
-            "lease",
-            "revoke",
-            "--lease-id",
-            str(uuid.UUID(lease_id)),
-            "--yes",
-        ],
-    )
-    receipt(
-        nazoauthctl,
-        config,
-        candidate,
-        ["lease", "cleanup", "--yes"],
-    )
+    lease_uuid = str(uuid.UUID(lease_id))
+    errors: list[BaseException] = []
+    try:
+        receipt(
+            nazoauthctl,
+            config,
+            candidate,
+            [
+                "lease",
+                "revoke",
+                "--lease-id",
+                lease_uuid,
+                "--yes",
+            ],
+        )
+    except BaseException as error:
+        errors.append(error)
+    try:
+        receipt(
+            nazoauthctl,
+            config,
+            candidate,
+            ["lease", "cleanup", "--yes"],
+        )
+    except BaseException as error:
+        errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise ExceptionGroup("conformance lease revoke and cleanup failed", errors)

@@ -927,7 +927,6 @@ def apply_public_onboarding(args: argparse.Namespace, secrets: dict[str, str]) -
         args.work_dir / "openid4vc-plan-configs.json",
     )
     lease_id = create_conformance_lease(args)
-    args.active_lease_id = lease_id
     with onboarding_credentials_fd(secrets) as descriptor:
         onboarding.apply_onboarding(
             onboarding_args(
@@ -957,6 +956,9 @@ def create_conformance_lease(args: argparse.Namespace) -> str:
         ttl_seconds=args.lease_ttl_seconds,
         candidate=getattr(args, "candidate_target", None),
     )
+    # Register the lease before consuming prepared trust.  If consumption fails,
+    # the outer run() finally block must still have an id to revoke and clean up.
+    args.active_lease_id = lease_id
     consume_prepared_trust(args.prepared_install_dir, args.prepared_trust_digest)
     return lease_id
 

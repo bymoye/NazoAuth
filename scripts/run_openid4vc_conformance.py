@@ -262,7 +262,9 @@ def get_url(url: str, *, expected_redirect_url: str | None = None) -> None:
         redirect_handler,
     )
     with opener.open(url, timeout=30) as response:
-        response.read()
+        body = response.read(oidf.MAX_OIDF_API_RESPONSE_BYTES + 1)
+        if len(body) > oidf.MAX_OIDF_API_RESPONSE_BYTES:
+            raise RuntimeError("browser callback response exceeds 1 MiB")
 
 
 def canonical_https_origin(value: str, *, label: str) -> str:
@@ -581,7 +583,9 @@ def module_entries(
         status, info = oidf.oidf_api_request(
             "GET", base_url, f"api/info/{module_id}", token, expected_statuses={200, 404}
         )
-        if status != 200 or not isinstance(info, dict):
+        if status == 200 and not isinstance(info, dict):
+            raise RuntimeError(f"OIDF module info for {module_id} is not a JSON object")
+        if status != 200:
             return None
         entry = {
             **info,
@@ -597,6 +601,8 @@ def module_entries(
             token,
             expected_statuses={200, 404},
         )
+        if runner_status == 200 and not isinstance(runner_info, dict):
+            raise RuntimeError(f"OIDF runner info for {module_id} is not a JSON object")
         exposed = (
             runner_info.get("exposed")
             if runner_status == 200 and isinstance(runner_info, dict)

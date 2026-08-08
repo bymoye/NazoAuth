@@ -72,13 +72,34 @@ async fn response_body(response: HttpResponse) -> Vec<u8> {
         .to_vec()
 }
 
+#[derive(diesel::QueryableByName)]
+struct TokenRowCount {
+    #[diesel(sql_type = BigInt)]
+    count: i64,
+}
+
+async fn refresh_token_row_count(state: &TestInfrastructure, client: &ClientRow) -> i64 {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("issue test database connection should be available");
+    sql_query(
+        "SELECT COUNT(*)::BIGINT AS count FROM oauth_tokens WHERE tenant_id = $1 AND client_id = $2",
+    )
+    .bind::<SqlUuid, _>(client.tenant_id)
+    .bind::<SqlUuid, _>(client.id)
+    .get_result::<TokenRowCount>(&mut connection)
+    .await
+    .expect("refresh token row count should load")
+    .count
+}
+
 use super::*;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use crate::config::ConfigSource;
 use diesel::sql_query;
-use diesel::sql_types::{Jsonb, Text, Uuid as SqlUuid};
+use diesel::sql_types::{BigInt, Jsonb, Text, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
 use fred::interfaces::ClientLike;
 use nazo_postgres::{create_pool, get_conn};
@@ -87,7 +108,10 @@ use crate::test_support::client_signing_fixture;
 use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
-use nazo_auth::{PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuanceTransitionResult};
+use nazo_auth::{
+    PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenIssuanceClaimResult,
+    TokenIssuanceTransitionResult,
+};
 
 const LIVE_VALKEY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
@@ -129,14 +153,22 @@ pub(crate) async fn persist_token_issuance_response_for_test(
     let access_token_jti = format!("replay-fixture-{issuance_id}");
     assert_eq!(
         service
-            .record_token_issuance_signed(
+            .claim_token_issuance(issuance_id, &request_digest, issuance_id)
+            .await
+            .expect("test token issuance should claim owner"),
+        TokenIssuanceClaimResult::Applied
+    );
+    assert_eq!(
+        service
+            .record_token_issuance_signed(nazo_auth::RecordTokenIssuanceSigned {
                 issuance_id,
-                &request_digest,
-                &access_token_jti,
-                expires_at.timestamp(),
+                request_digest: &request_digest,
+                claim_owner_id: issuance_id,
+                access_token_jti: &access_token_jti,
+                access_token_expires_at: expires_at.timestamp(),
                 response_body,
-                &response_digest,
-            )
+                response_digest: &response_digest,
+            },)
             .await
             .expect("test token issuance should record signed response"),
         TokenIssuanceTransitionResult::Applied
@@ -753,6 +785,7 @@ fn response_from_token_issuance_requires_a_signed_terminal_phase() {
         grant_key: "grant".to_owned(),
         request_digest: "digest".to_owned(),
         phase: TokenIssuancePhase::Prepared,
+        claim_owner_id: None,
         access_token_jti: None,
         access_token_expires_at: None,
         response_body: Some(br#"{}"#.to_vec()),
@@ -1220,11 +1253,16 @@ async fn concurrent_prepared_issuance_conflict_recovers_the_winning_response() {
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
-    let client = client_with_grants(&["client_credentials"]);
+    let client = client_with_grants(&["client_credentials", "refresh_token"]);
     let grant_key = format!("conflict-test-{}", Uuid::now_v7());
-    let mut prepared_issue = token_issue_without_openid();
-    prepared_issue.include_refresh = false;
-    let request_digest = issuance_request_digest(&client, &prepared_issue, &grant_key);
+    let initial_refresh_token_rows = refresh_token_row_count(&state, &client).await;
+    let mut first_issue = token_issue_without_openid();
+    first_issue.scopes.push("offline_access".to_owned());
+    first_issue.include_refresh = true;
+    let mut second_issue = token_issue_without_openid();
+    second_issue.scopes.push("offline_access".to_owned());
+    second_issue.include_refresh = true;
+    let request_digest = issuance_request_digest(&client, &first_issue, &grant_key);
 
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
@@ -1257,28 +1295,25 @@ async fn concurrent_prepared_issuance_conflict_recovers_the_winning_response() {
         &service,
         &client,
         Some(&grant_key),
-        {
-            let mut issue = token_issue_without_openid();
-            issue.include_refresh = false;
-            issue
-        },
+        first_issue,
     );
     let second_future = issue_token_response_with_service_and_grant(
         &context,
         &service,
         &client,
         Some(&grant_key),
-        {
-            let mut issue = token_issue_without_openid();
-            issue.include_refresh = false;
-            issue
-        },
+        second_issue,
     );
     let (first, second) = tokio::join!(first_future, second_future);
 
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(response_body(first).await, response_body(second).await);
+    assert_eq!(
+        refresh_token_row_count(&state, &client).await,
+        initial_refresh_token_rows + 1,
+        "one stable grant must persist only one refresh-token row",
+    );
 }
 
 #[actix_web::test]

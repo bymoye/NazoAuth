@@ -113,6 +113,8 @@ diesel::table! {
         grant_key_blake3 -> Varchar,
         request_digest -> Varchar,
         phase -> Varchar,
+        claim_owner_id -> Nullable<Uuid>,
+        claim_started_at -> Nullable<Timestamptz>,
         access_token_jti -> Nullable<Varchar>,
         access_token_expires_at -> Nullable<Timestamptz>,
         response_ciphertext -> Nullable<Binary>,

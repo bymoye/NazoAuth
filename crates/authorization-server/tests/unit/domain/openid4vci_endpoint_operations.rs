@@ -407,6 +407,7 @@ fn request_context() -> CredentialRequestContext {
         bearer_token: "not-a-token".to_owned(),
         access_token_scheme: AccessTokenScheme::Bearer,
         dpop_proof: None,
+        mtls_x5t_s256: None,
         request_url: "/openid4vci/credential".to_owned(),
         method: "POST",
     }
@@ -1085,6 +1086,7 @@ async fn create_offer_rejects_invalid_grant_shapes_and_subject_before_database_s
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires NAZO_TEST_DATABASE_URL/DATABASE_URL and VALKEY_URL; run explicitly with --ignored"]
 async fn live_immediate_offer_pre_authorized_credential_replay_and_notification() {
     let Some(fixture) = LiveEndpointFixture::new("unit-live-immediate", false).await else {
         return;
@@ -1197,6 +1199,7 @@ async fn live_immediate_offer_pre_authorized_credential_replay_and_notification(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires NAZO_TEST_DATABASE_URL/DATABASE_URL and VALKEY_URL; run explicitly with --ignored"]
 async fn live_deferred_credential_claim_response_replay_and_notification() {
     let Some(fixture) = LiveEndpointFixture::new("unit-live-deferred", true).await else {
         return;

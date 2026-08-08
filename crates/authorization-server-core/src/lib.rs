@@ -71,8 +71,9 @@ pub use authorization_request::{
     REQUEST_OBJECT_MAX_TTL_SECONDS, RawParAdmissionPolicy, RequestObjectClaims,
     RequestObjectJtiPolicy, RequestObjectPolicy, RequestObjectReplay,
     RequestObjectVerificationError, RequestObjectVerificationInput, VerifiedRequestObject,
-    normalize_request_object, unverified_signed_request_object_client_id,
-    validate_expanded_par_admission, validate_raw_par_admission, verify_request_object,
+    normalize_request_object, normalize_request_object_owned,
+    unverified_signed_request_object_client_id, validate_expanded_par_admission,
+    validate_raw_par_admission, verify_request_object,
 };
 pub use authorization_service::{
     AuthorizationApprovalCommitError, AuthorizationApprovalError, AuthorizationApprovalInput,
@@ -91,8 +92,8 @@ pub use ciba::{
     evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
 };
 pub use ciba_ping::{
-    CibaPingResponseAction, classify_ciba_ping_status, next_ciba_ping_retry_at,
-    validate_ciba_notification_endpoint,
+    CibaPingResponseAction, MAX_CIBA_LOGOUT_URI_BYTES, classify_ciba_ping_status,
+    next_ciba_ping_retry_at, validate_ciba_notification_endpoint,
 };
 pub use claims::{
     AccessTokenClaimsInput, AuthorizationResponseClaimsInput, BackchannelLogoutClaimsInput, Claims,
@@ -209,10 +210,11 @@ pub use token_endpoint::{
 pub use token_service::{
     AccessTokenRevocation, AccessTokenSignInput, AuthorizationCodeBeginResult,
     AuthorizationCodeTransitionResult, IdTokenSignInput, IntrospectionSignInput, IssuedAccessToken,
-    IssuedAuthorizationCodeTokens, PrepareTokenIssuance, PrepareTokenIssuanceResult, TokenFuture,
-    TokenInspection, TokenIssuancePhase, TokenIssuanceRecord, TokenIssuanceTransitionResult,
-    TokenPortError, TokenRepositoryPort, TokenRevocation, TokenService, TokenSignerPort,
-    TokenStateStorePort, validate_sender_constraint,
+    IssuedAuthorizationCodeTokens, PrepareTokenIssuance, PrepareTokenIssuanceResult,
+    RecordTokenIssuanceSigned, TokenFuture, TokenInspection, TokenIssuanceClaimResult,
+    TokenIssuancePhase, TokenIssuanceRecord, TokenIssuanceTransitionResult, TokenPortError,
+    TokenRepositoryPort, TokenRevocation, TokenService, TokenSignerPort, TokenStateStorePort,
+    validate_sender_constraint,
 };
 pub use transaction::{
     AuthorizationCodeState, CodePayload, ConsentPayload, ConsumedAuthorizationCode,

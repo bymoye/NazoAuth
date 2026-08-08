@@ -9,6 +9,7 @@ impl ConfigSource {
                 .collect(),
             env_values: HashMap::new(),
             generated_values: HashMap::new(),
+            config_dir: PathBuf::from("."),
         }
     }
 
@@ -20,6 +21,7 @@ impl ConfigSource {
             file_values: values.into_iter().collect(),
             env_values: HashMap::new(),
             generated_values: HashMap::new(),
+            config_dir: PathBuf::from("."),
         }
     }
 
@@ -658,7 +660,7 @@ fn migration_config_accepts_deployment_identity_without_materializing_state() {
         concat!(
             "DEPLOYMENT_ID: deployment-ci\n",
             "RUNTIME_INSTANCE_ID: runtime-ci\n",
-            "INSTANCE_IDENTITY_DIR: /var/lib/nazoauth/runtime-instance\n",
+            "INSTANCE_IDENTITY_DIR: runtime-instance\n",
         ),
     )
     .unwrap();
@@ -673,9 +675,14 @@ fn migration_config_accepts_deployment_identity_without_materializing_state() {
         source.get("RUNTIME_INSTANCE_ID").as_deref(),
         Some("runtime-ci")
     );
+    let expected_identity_dir = std::fs::canonicalize(&path)
+        .unwrap()
+        .join("runtime-instance")
+        .display()
+        .to_string();
     assert_eq!(
         source.get("INSTANCE_IDENTITY_DIR").as_deref(),
-        Some("/var/lib/nazoauth/runtime-instance")
+        Some(expected_identity_dir.as_str())
     );
     assert!(!path.join("runtime-instance").exists());
     let _ = std::fs::remove_dir_all(&path);
@@ -726,6 +733,7 @@ fn environment_overrides_yaml_by_allowlist() {
             ("DATABASE_MAX_CONNECTIONS".to_owned(), "24".to_owned()),
             ("PERF_METRICS_ENABLED".to_owned(), "true".to_owned()),
             ("UNKNOWN_ENV".to_owned(), "ignored".to_owned()),
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
         ])
         .unwrap();
 
@@ -745,6 +753,61 @@ fn environment_overrides_yaml_by_allowlist() {
     assert_eq!(source.string("DATABASE_MAX_CONNECTIONS", ""), "24");
     assert_eq!(source.string("PERF_METRICS_ENABLED", ""), "true");
     assert!(source.get("UNKNOWN_ENV").is_none());
+    assert!(source.get("PATH").is_none());
+}
+
+#[test]
+fn unknown_nazoauth_environment_key_is_rejected_without_rejecting_system_environment() {
+    let mut source = ConfigSource::default();
+    source
+        .merge_env([("PATH".to_owned(), "/usr/bin".to_owned())])
+        .unwrap();
+
+    let error = source
+        .merge_env([("NAZOAUTH_UNKNOWN_CONFIG".to_owned(), "value".to_owned())])
+        .expect_err("unknown NazoAuth environment keys must fail startup");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown NazoAuth environment config key NAZOAUTH_UNKNOWN_CONFIG")
+    );
+}
+
+#[test]
+fn relative_persistent_paths_are_anchored_to_the_configuration_directory() {
+    let path = temp_config_dir("relative_persistent_paths");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nUI_CACHE_DIR: cache/ui\n",
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+    let canonical_path = std::fs::canonicalize(&path).unwrap();
+    assert_eq!(
+        source.string("DATA_DIR", ""),
+        canonical_path.join("state").display().to_string()
+    );
+    assert_eq!(
+        source.string("UI_CACHE_DIR", ""),
+        canonical_path.join("cache/ui").display().to_string()
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn relative_persistent_paths_cannot_escape_the_configuration_directory() {
+    let path = temp_config_dir("relative_persistent_path_escape");
+    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: ../outside\n").unwrap();
+
+    let error = ConfigSource::load_from_dir(&path)
+        .expect_err("relative persistent roots must stay below the config directory");
+    assert!(
+        error
+            .to_string()
+            .contains("DATA_DIR relative path escapes configuration directory")
+    );
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]

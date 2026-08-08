@@ -18,7 +18,7 @@ impl ServerCredentialIssuerOperations {
             })?;
             let stored = self
                 .store
-                .offer(id, Utc::now())
+                .offer(self.tenant_id, id, Utc::now())
                 .await
                 .map_err(|_| {
                     vci_error(
@@ -156,6 +156,7 @@ impl ServerCredentialIssuerOperations {
             let authorization = self
                 .store
                 .consume_pre_authorized_offer(
+                    self.tenant_id,
                     &blake3_hex(&request.pre_authorized_code),
                     request.tx_code.as_deref(),
                     client_id,

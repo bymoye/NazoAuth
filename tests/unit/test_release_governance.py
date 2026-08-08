@@ -257,6 +257,45 @@ class ReleaseGovernanceTests(unittest.TestCase):
             policy.index("- name: Validate immutable release input"),
         )
 
+    def test_tag_release_requires_successful_main_ci_for_the_exact_commit(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "actions: read",
+            "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN",
+            "--no-tags origin refs/heads/main:refs/remotes/origin/main",
+            'git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main',
+            "/actions/workflows/${workflow}/runs?event=push&branch=main&head_sha=${RELEASE_SHA}",
+            "for workflow in code-quality.yml release-policy.yml; do",
+            '.head_sha == $sha',
+            '.head_branch == "main"',
+            '.status == "completed"',
+            '.conclusion == "success"',
+        ):
+            self.assertIn(required, release)
+
+        policy = (
+            ROOT / ".github" / "workflows" / "release-policy.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("push:\n    branches: [main]", policy)
+        self.assertIn('      - "release/**"', policy)
+
+        quality = (
+            ROOT / ".github" / "workflows" / "code-quality.yml"
+        ).read_text(encoding="utf-8")
+        self.assertGreaterEqual(quality.count('      - "release/**"'), 2)
+
+    def test_pull_request_coverage_never_sends_the_codecov_token(self) -> None:
+        coverage = (
+            ROOT / ".github" / "workflows" / "codecov.yml"
+        ).read_text(encoding="utf-8")
+        upload = coverage.split("- name: Upload coverage to Codecov", 1)[1].split(
+            "- name: Verify complete Git patch coverage", 1
+        )[0]
+        self.assertIn("if: github.event_name != 'pull_request'", upload)
+        self.assertIn("token: ${{ secrets.CODECOV_TOKEN }}", upload)
+
     def test_branch_dispatch_keeps_the_native_matrix_without_publishing(self) -> None:
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
@@ -412,7 +451,10 @@ class ReleaseGovernanceTests(unittest.TestCase):
             ROOT / ".github" / "workflows" / "conformance-security.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Swatinem/rust-cache@v2.9.1", quality)
+        self.assertIn(
+            "Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1",
+            quality,
+        )
         self.assertIn("cargo clippy --workspace --all-targets", quality)
         self.assertIn("cargo test --workspace --all-features", quality)
         self.assertNotIn("cargo check --workspace", quality)

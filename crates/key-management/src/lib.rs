@@ -20,8 +20,9 @@ pub use client_registration::{
 #[cfg(feature = "test-support")]
 pub use model::TestSigningBehavior;
 pub use model::{
-    ExternalKeyRegistration, HttpSigningLease, KeyManager, KeyRecord, KeyRecordStatus, KeySettings,
-    KeySnapshot, KeyState, LocalKeyRegistration, ManagedKey, VerificationKey,
+    ExternalKeyRegistration, HttpSigningLease, KeyHealth, KeyHealthStatus, KeyManager, KeyRecord,
+    KeyRecordStatus, KeySettings, KeySnapshot, KeyState, LocalKeyRegistration, ManagedKey,
+    VerificationKey,
 };
 pub use mtls_trust::{MtlsTrustAnchorError, ValidatedMtlsTrustAnchor, validate_mtls_trust_anchor};
 pub use store::{signing_algorithm_from_name, signing_algorithm_name};

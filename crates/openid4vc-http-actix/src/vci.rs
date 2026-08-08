@@ -10,6 +10,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 pub type CredentialIssuerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+type ClientCertificateExtractor = dyn Fn(&HttpRequest) -> Option<String> + Send + Sync;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessTokenScheme {
@@ -22,6 +23,10 @@ pub struct CredentialRequestContext {
     pub bearer_token: String,
     pub access_token_scheme: AccessTokenScheme,
     pub dpop_proof: Option<String>,
+    /// Verified client-certificate thumbprint supplied by the deployment's
+    /// certificate adapter.  The transport layer never derives this from an
+    /// ordinary request header.
+    pub mtls_x5t_s256: Option<String>,
     pub request_url: String,
     pub method: &'static str,
 }
@@ -142,6 +147,7 @@ pub trait CredentialIssuerOperations: Send + Sync {
 pub struct CredentialIssuerEndpoint {
     operations: Arc<dyn CredentialIssuerOperations>,
     management_token: Arc<[u8]>,
+    client_certificate_extractor: Option<Arc<ClientCertificateExtractor>>,
 }
 
 impl CredentialIssuerEndpoint {
@@ -152,7 +158,23 @@ impl CredentialIssuerEndpoint {
         Self {
             operations,
             management_token: management_token.into().into(),
+            client_certificate_extractor: None,
         }
+    }
+
+    /// Configure the deployment-specific, already-verified client-certificate
+    /// extractor used by protected credential endpoints.
+    ///
+    /// The extractor is intentionally injected by the server composition root:
+    /// only that layer knows whether certificates come from direct TLS or a
+    /// trusted, verified proxy.  The generic transport adapter does not read
+    /// certificate headers itself.
+    pub fn with_client_certificate_extractor(
+        mut self,
+        extractor: impl Fn(&HttpRequest) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.client_certificate_extractor = Some(Arc::new(extractor));
+        self
     }
 
     pub async fn pre_authorized_token(
@@ -255,7 +277,11 @@ pub async fn credential(
     request: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
-    let context = match protected_context(&request, "POST") {
+    let context = match protected_context(
+        &request,
+        "POST",
+        endpoint.client_certificate_extractor.as_deref(),
+    ) {
         Ok(context) => context,
         Err(error) => return credential_error(error),
     };
@@ -274,7 +300,11 @@ pub async fn deferred_credential(
     request: HttpRequest,
     body: web::Bytes,
 ) -> HttpResponse {
-    let context = match protected_context(&request, "POST") {
+    let context = match protected_context(
+        &request,
+        "POST",
+        endpoint.client_certificate_extractor.as_deref(),
+    ) {
         Ok(context) => context,
         Err(error) => return credential_error(error),
     };
@@ -293,7 +323,11 @@ pub async fn notification(
     request: HttpRequest,
     body: web::Json<NotificationRequest>,
 ) -> HttpResponse {
-    let context = match protected_context(&request, "POST") {
+    let context = match protected_context(
+        &request,
+        "POST",
+        endpoint.client_certificate_extractor.as_deref(),
+    ) {
         Ok(context) => context,
         Err(error) => return credential_error(error),
     };
@@ -311,6 +345,7 @@ pub async fn notification(
 fn protected_context(
     request: &HttpRequest,
     method: &'static str,
+    client_certificate_extractor: Option<&ClientCertificateExtractor>,
 ) -> Result<CredentialRequestContext, CredentialHttpError> {
     let (access_token_scheme, bearer_token) = request
         .headers()
@@ -354,6 +389,7 @@ fn protected_context(
         bearer_token: bearer_token.to_owned(),
         access_token_scheme,
         dpop_proof,
+        mtls_x5t_s256: client_certificate_extractor.and_then(|extractor| extractor(request)),
         request_url: request.uri().to_string(),
         method,
     })

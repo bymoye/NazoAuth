@@ -16,6 +16,9 @@ from pathlib import Path
 
 FORMAT_VERSION = 1
 MANIFEST_NAME = "evidence-manifest.json"
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_JSON_BYTES = 64 * 1024 * 1024
 SAFE_TEST_INFO_FIELDS = (
     "testId",
     "testName",
@@ -87,12 +90,40 @@ def summarize_archive(path: Path, root: Path) -> dict[str, object]:
     modules: list[dict[str, object]] = []
     try:
         with zipfile.ZipFile(path) as archive:
-            json_names = sorted(name for name in archive.namelist() if name.endswith(".json"))
+            members = archive.infolist()
+            if len(members) > MAX_ARCHIVE_MEMBERS:
+                raise EvidenceError(f"OIDF archive contains too many members: {path}")
+            total_size = 0
+            for member in members:
+                if member.file_size < 0:
+                    raise EvidenceError(
+                        f"OIDF archive member has a negative size: {path}:{member.filename}"
+                    )
+                total_size += member.file_size
+                if total_size > MAX_ARCHIVE_BYTES:
+                    raise EvidenceError(f"OIDF archive expands beyond the bounded size: {path}")
+
+            json_members = sorted(
+                (member for member in members if member.filename.endswith(".json")),
+                key=lambda member: member.filename,
+            )
+            json_names = [member.filename for member in json_members]
             if not json_names:
                 raise EvidenceError(f"OIDF archive contains no JSON modules: {path}")
-            names = set(archive.namelist())
-            for name in json_names:
-                payload = json.loads(archive.read(name))
+            names = {member.filename for member in members}
+            for member in json_members:
+                name = member.filename
+                if member.file_size > MAX_JSON_BYTES:
+                    raise EvidenceError(
+                        f"OIDF JSON module exceeds the bounded JSON size: {path}:{name}"
+                    )
+                with archive.open(member, "r") as source:
+                    encoded = source.read(MAX_JSON_BYTES + 1)
+                if len(encoded) > MAX_JSON_BYTES:
+                    raise EvidenceError(
+                        f"OIDF JSON module exceeds the bounded JSON size: {path}:{name}"
+                    )
+                payload = json.loads(encoded)
                 if not isinstance(payload, dict):
                     raise EvidenceError(f"OIDF module export must be an object: {path}:{name}")
                 test_info = payload.get("testInfo")
@@ -113,7 +144,7 @@ def summarize_archive(path: Path, root: Path) -> dict[str, object]:
                         "problem_conditions": problem_conditions(results),
                     }
                 )
-    except (OSError, zipfile.BadZipFile, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile, json.JSONDecodeError) as error:
         raise EvidenceError(f"invalid OIDF evidence archive {path}: {error}") from error
 
     return {

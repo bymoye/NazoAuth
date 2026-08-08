@@ -152,7 +152,7 @@ async fn ciba_cas_rejects_an_expired_lease_without_mutating_state() {
 }
 
 #[tokio::test]
-async fn concurrent_approved_ciba_polls_have_exactly_one_token_issuance_winner() {
+async fn concurrent_approved_ciba_polls_remain_retryable_for_owner_claim() {
     let Some((connection, inspector)) = setup().await else {
         return;
     };
@@ -192,9 +192,10 @@ async fn concurrent_approved_ciba_polls_have_exactly_one_token_issuance_winner()
             .into_iter()
             .filter(|result| matches!(result, Ok(CibaPollCommit::Approved(_))))
             .count(),
-        1,
-        "approved auth_req_id must be consumed once even under concurrent polling"
+        2,
+        "approved auth_req_id remains available while owner-claim issuance settles"
     );
+    assert!(first.load(&auth_req_id).await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -455,7 +456,7 @@ async fn concurrent_device_polls_atomically_accumulate_slow_down() {
 }
 
 #[tokio::test]
-async fn approved_device_code_has_exactly_one_consumer() {
+async fn approved_device_code_remains_retryable_for_owner_claim() {
     let Some((connection, inspector)) = setup().await else {
         return;
     };
@@ -493,12 +494,14 @@ async fn approved_device_code_has_exactly_one_consumer() {
         .into_iter()
         .filter(|result| matches!(result, Ok(DevicePollCommit::Approved(_))))
         .count();
-    let missing = [&first, &second]
-        .into_iter()
-        .filter(|result| matches!(result, Err(DevicePollFailure::Missing)))
-        .count();
-    assert_eq!(approved, 1);
-    assert_eq!(missing, 1);
+    assert_eq!(approved, 2);
+    assert!(
+        DeviceStore::new(&connection)
+            .load_by_device_code(&device_code)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
