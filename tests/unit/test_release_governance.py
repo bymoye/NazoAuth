@@ -264,7 +264,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         for required in (
             "actions: read",
             "NAZOAUTH_RELEASE_BRANCH: agent/extract-nazoauthctl",
-            "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN",
+            "printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 -w 0",
+            "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth",
             "refs/heads/main:refs/remotes/origin/main",
             '"refs/heads/$NAZOAUTH_RELEASE_BRANCH:$release_ref"',
             'git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main',
@@ -286,6 +287,11 @@ class ReleaseGovernanceTests(unittest.TestCase):
             '.conclusion == "success"',
         ):
             self.assertIn(required, release)
+
+        gate = release.split(
+            "- name: Require successful governed CI for exact tag commit", 1
+        )[1].split("- uses: dtolnay/rust-toolchain@", 1)[0]
+        self.assertNotIn("github.ref_type == 'tag'", gate)
 
         policy = (
             ROOT / ".github" / "workflows" / "release-policy.yml"

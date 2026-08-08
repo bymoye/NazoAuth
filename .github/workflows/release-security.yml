@@ -26,7 +26,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Require successful governed CI for exact tag commit
-        if: github.ref_type == 'tag'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,7 +33,8 @@ jobs:
         run: |
           set -euo pipefail
           release_ref="refs/remotes/origin/$NAZOAUTH_RELEASE_BRANCH"
-          git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" fetch \
+          basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" fetch \
             --no-tags origin \
             refs/heads/main:refs/remotes/origin/main \
             "refs/heads/$NAZOAUTH_RELEASE_BRANCH:$release_ref"
