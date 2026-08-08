@@ -811,7 +811,7 @@ async fn authorization_decision_rejects_malformed_consumed_par_without_issuing_c
     };
     let response = authorize_decision(fixture.state.clone(), req, Form(form)).await;
 
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let pairs = redirect_location(&response)
         .query_pairs()
         .into_owned()
@@ -842,7 +842,7 @@ async fn authorization_decision_accepts_deny_with_user_match() {
     };
 
     let response = authorize_decision(fixture.state.clone(), req, Form(form)).await;
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let pairs = redirect_location(&response)
         .query_pairs()
         .into_owned()
@@ -878,7 +878,7 @@ async fn authorization_decision_issues_code_for_matching_user_and_client() {
     };
 
     let response = authorize_decision(fixture.state.clone(), req, Form(form)).await;
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let pairs = redirect_location(&response)
         .query_pairs()
         .into_owned()
