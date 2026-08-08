@@ -171,3 +171,155 @@ fn prepare_event_normalizes_security_payload_and_rejects_unknown_or_oversized_ev
         Err("payload_too_large")
     ));
 }
+
+#[test]
+fn prepare_event_redacts_every_known_credential_from_intent_and_outcome_payloads() {
+    let mut fields = audit_fields(&[("request_id_hash", json!("request-hash"))]);
+    for key in SENSITIVE_FIELD_NAMES {
+        fields.insert((*key).to_owned(), json!(format!("{key}-raw-secret")));
+    }
+
+    for event in [
+        "authorization_decision_intent",
+        "ciba_decision_intent",
+        "device_decision_intent",
+        "token_issuance_intent",
+        "token_issued",
+    ] {
+        let queued = prepare_event(event, fields.clone())
+            .expect("high-impact audit event should be allowlisted");
+        let serialized = serde_json::to_string(&queued.payload).expect("payload should serialize");
+        for key in SENSITIVE_FIELD_NAMES {
+            assert!(
+                queued.payload.get(*key).is_none(),
+                "{event} must omit sensitive field {key}"
+            );
+            assert!(
+                !serialized.contains(&format!("{key}-raw-secret")),
+                "{event} must not serialize sensitive value {key}"
+            );
+        }
+        assert_eq!(queued.payload["request_id_hash"], json!("request-hash"));
+    }
+}
+
+fn assert_source_order(source: &str, earlier: &str, later: &str) {
+    let earlier_offset = source
+        .find(earlier)
+        .unwrap_or_else(|| panic!("missing source marker {earlier}"));
+    let later_offset = source
+        .find(later)
+        .unwrap_or_else(|| panic!("missing source marker {later}"));
+    assert!(
+        earlier_offset < later_offset,
+        "source marker {earlier} must precede {later}"
+    );
+}
+
+fn source_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    source
+        .split_once(start)
+        .unwrap_or_else(|| panic!("missing source boundary {start}"))
+        .1
+        .split_once(end)
+        .unwrap_or_else(|| panic!("missing source boundary {end}"))
+        .0
+}
+
+#[test]
+fn high_impact_state_changes_are_guarded_by_required_audit_intent() {
+    // This is a source-level architecture guard for the fail-closed ordering
+    // around mutations. Runtime audit serialization is exercised above; this
+    // guard prevents a future refactor from moving the required intent behind
+    // a state change without pretending to be a protocol E2E test.
+    let authorization = include_str!("../../../src/domain/authorization_decision.rs");
+    assert_source_order(
+        authorization,
+        "ensure_audit_storage().await",
+        "audit_event_required(\n            \"authorization_decision_intent\"",
+    );
+    assert_source_order(
+        authorization,
+        "audit_event_required(\n            \"authorization_decision_intent\"",
+        "admit_user_decision(",
+    );
+    assert!(authorization.contains("AuthorizationDecisionError::AuditUnavailable"));
+
+    let device = include_str!("../../../src/http/token/device.rs");
+    assert_source_order(
+        device,
+        "ensure_audit_storage().await",
+        "audit_event_required(\n        \"device_decision_intent\"",
+    );
+    assert_source_order(
+        device,
+        "audit_event_required(\n        \"device_decision_intent\"",
+        "let result = match form.decision.as_str()",
+    );
+    assert!(device.contains("设备授权审计无法持久化."));
+
+    let ciba = include_str!("../../../src/http/token/ciba/decision.rs");
+    let ciba_intent = source_body(
+        ciba,
+        "async fn prepare_ciba_decision_intent(",
+        "async fn set_ciba_request_decision_with_lease(",
+    );
+    assert_source_order(
+        ciba_intent,
+        "ensure_audit_storage().await",
+        "audit_event_required(\"ciba_decision_intent\"",
+    );
+    let ciba_automated = source_body(
+        ciba,
+        "pub(crate) async fn ciba_automated_decision(",
+        "pub(super) fn ciba_automated_decision_auth_req_id(",
+    );
+    assert!(
+        ciba_automated.contains("set_ciba_request_decision_with_lease("),
+        "automated CIBA decisions must use the lease-guarded mutation path"
+    );
+    let ciba_browser = source_body(
+        ciba,
+        "pub(crate) async fn ciba_decision(",
+        "async fn prepare_ciba_decision_intent(",
+    );
+    assert!(
+        ciba_browser.contains("set_ciba_request_decision_with_lease("),
+        "browser CIBA decisions must use the lease-guarded mutation path"
+    );
+    let ciba_lease = source_body(
+        ciba,
+        "async fn set_ciba_request_decision_with_lease(",
+        "pub(super) fn complete_ciba_decision(",
+    );
+    assert_source_order(
+        ciba_lease,
+        "prepare_ciba_decision_intent(",
+        ".with_active_ciba_decision(",
+    );
+    assert!(ciba.contains("CIBA decision audit could not be persisted."));
+
+    let issuance = include_str!("../../../src/http/token/issue_grant.rs");
+    assert_source_order(
+        issuance,
+        "ensure_audit_storage().await",
+        "audit_event_required(\n        \"token_issuance_intent\"",
+    );
+    assert_source_order(
+        issuance,
+        "audit_event_required(\n        \"token_issuance_intent\"",
+        "prepare_token_issuance(",
+    );
+    assert_source_order(
+        issuance,
+        "record_token_issuance_signed(",
+        "audit_event_required(\n        \"token_issued\"",
+    );
+    assert_source_order(
+        issuance,
+        "PrepareTokenIssuanceResult::Existing(record)",
+        "response_from_token_issuance(&record)",
+    );
+    assert!(issuance.contains("return response;"));
+    assert!(issuance.contains("令牌签发审计无法持久化."));
+}

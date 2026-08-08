@@ -69,6 +69,38 @@ async fn authentication_short_state_preserves_exact_keys_and_one_time_semantics(
 }
 
 #[tokio::test]
+async fn social_federation_state_is_consumed_once_and_keeps_provider_binding() {
+    let Some((connection, _inspector)) = setup().await else {
+        return;
+    };
+    let store = AuthenticationStore::new(&connection);
+    let state = format!("social-{}", uuid::Uuid::now_v7());
+    let value = nazo_identity::federation::SocialFederationState {
+        provider_id: "github".to_owned(),
+        pkce_verifier: "verifier".to_owned(),
+        created_at: 1_700_000_000,
+    };
+
+    FederationStatePort::store_social(&store, &state, &value, 30)
+        .await
+        .unwrap();
+    assert_eq!(
+        FederationStatePort::take_social(&store, &state)
+            .await
+            .unwrap()
+            .map(|stored| (stored.provider_id, stored.pkce_verifier, stored.created_at)),
+        Some(("github".to_owned(), "verifier".to_owned(), 1_700_000_000))
+    );
+    assert!(
+        FederationStatePort::take_social(&store, &state)
+            .await
+            .unwrap()
+            .is_none(),
+        "social federation callback state must be one-time"
+    );
+}
+
+#[tokio::test]
 async fn typed_passkey_ceremony_is_atomically_consumed_once_under_concurrency() {
     let Some((connection, _inspector)) = setup().await else {
         return;

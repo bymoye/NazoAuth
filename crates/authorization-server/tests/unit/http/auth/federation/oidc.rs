@@ -329,6 +329,38 @@ fn verify_oidc_id_token_accepts_matching_signed_claims_and_rejects_policy_mismat
 }
 
 #[test]
+fn verify_oidc_id_token_rejects_expired_and_wrong_issuer_claims() {
+    let provider = provider();
+    let key = client_signing_fixture(Algorithm::RS256);
+    let jwks = json!({"keys": [key.public_jwk("oidc-kid")]});
+    let nonce = random_urlsafe_token();
+
+    let expired = signed_id_token(
+        &provider,
+        "oidc-kid",
+        &key,
+        &nonce,
+        json!({"exp": Utc::now().timestamp() - 1}),
+    );
+    assert!(
+        verify_oidc_id_token(&provider, &jwks, &expired, &nonce).is_err(),
+        "an expired upstream ID Token must fail closed before federation login"
+    );
+
+    let wrong_issuer = signed_id_token(
+        &provider,
+        "oidc-kid",
+        &key,
+        &nonce,
+        json!({"iss": "https://attacker.example"}),
+    );
+    assert!(
+        verify_oidc_id_token(&provider, &jwks, &wrong_issuer, &nonce).is_err(),
+        "an ID Token from another issuer must not be accepted with a valid signature"
+    );
+}
+
+#[test]
 fn verify_oidc_id_token_requires_kid_and_matching_supported_jwk() {
     let provider = provider();
     let key = client_signing_fixture(Algorithm::RS256);

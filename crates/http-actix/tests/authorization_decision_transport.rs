@@ -140,7 +140,7 @@ async fn approved_transport_forwards_typed_command_and_preserves_redirect() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(response.headers().get(header::LOCATION).unwrap(), location);
     let commands = operations.commands.lock().unwrap();
     assert_eq!(commands.len(), 1);

@@ -85,6 +85,53 @@ fn token_form() -> TokenForm {
     }
 }
 
+fn native_sso_client(scopes: Value) -> ClientRow {
+    client_row! {
+        id: Uuid::now_v7(),
+        tenant_id: crate::domain::tenancy::DEFAULT_TENANT_ID,
+        realm_id: crate::domain::tenancy::DEFAULT_REALM_ID,
+        organization_id: crate::domain::tenancy::DEFAULT_ORGANIZATION_ID,
+        client_id: "native-client".to_owned(),
+        client_name: "Native client".to_owned(),
+        client_type: "confidential".to_owned(),
+        client_secret_hash: None,
+        redirect_uris: json!(["https://native.example/callback"]),
+        scopes: scopes,
+        allowed_audiences: json!(["https://issuer.example"]),
+        grant_types: json!(["urn:ietf:params:oauth:grant-type:token-exchange"]),
+        token_endpoint_auth_method: "client_secret_basic".to_owned(),
+        require_dpop_bound_tokens: false,
+        require_mtls_bound_tokens: false,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_cert_sha256: None,
+        tls_client_auth_san_dns: json!([]),
+        tls_client_auth_san_uri: json!([]),
+        tls_client_auth_san_ip: json!([]),
+        tls_client_auth_san_email: json!([]),
+        allow_client_assertion_audience_array: false,
+        allow_client_assertion_endpoint_audience: false,
+        require_par_request_object: false,
+        is_active: true,
+        jwks: None,
+        introspection_encrypted_response_alg: None,
+        introspection_encrypted_response_enc: None,
+        userinfo_signed_response_alg: None,
+        userinfo_encrypted_response_alg: None,
+        userinfo_encrypted_response_enc: None,
+        authorization_signed_response_alg: None,
+        authorization_encrypted_response_alg: None,
+        authorization_encrypted_response_enc: None,
+        post_logout_redirect_uris: json!([]),
+        backchannel_logout_uri: None,
+        backchannel_logout_session_required: false,
+        frontchannel_logout_uri: None,
+        frontchannel_logout_session_required: false,
+        subject_type: "public".to_owned(),
+        sector_identifier_uri: None,
+        sector_identifier_host: None,
+    }
+}
+
 #[test]
 fn native_sso_device_secret_hash_is_stable_and_non_raw() {
     let first = native_sso_device_secret_hash("secret");
@@ -118,6 +165,39 @@ fn native_sso_profile_requires_id_token_and_device_secret_token_types() {
     let mut wrong_subject_type = token_form();
     wrong_subject_type.subject_token_type = Some(NATIVE_SSO_DEVICE_SECRET_TYPE.to_owned());
     assert!(!native_sso_profile_requested(&wrong_subject_type));
+}
+
+#[test]
+fn native_sso_scope_and_client_admission_are_fail_closed() {
+    assert!(!native_sso_requested(&["openid".to_owned()]));
+    assert!(native_sso_requested(&[
+        "openid".to_owned(),
+        DEVICE_SSO_SCOPE.to_owned()
+    ]));
+
+    let authorized = native_sso_client(json!(["openid", "offline_access", "device_sso"]));
+    assert!(native_sso_client_authorized(&authorized));
+    let unauthorized = native_sso_client(json!(["openid", "offline_access"]));
+    assert!(!native_sso_client_authorized(&unauthorized));
+
+    let defaults = native_sso_requested_scopes(&authorized, None)
+        .expect("the documented Native SSO default scope set should be accepted");
+    assert_eq!(
+        defaults,
+        vec![
+            "openid".to_owned(),
+            "offline_access".to_owned(),
+            "device_sso".to_owned()
+        ]
+    );
+
+    for invalid in [
+        Some("offline_access device_sso"),
+        Some("openid offline_access"),
+    ] {
+        assert!(native_sso_requested_scopes(&authorized, invalid).is_err());
+    }
+    assert!(native_sso_requested_scopes(&authorized, Some("openid device_sso admin")).is_err());
 }
 
 #[test]

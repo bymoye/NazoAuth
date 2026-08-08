@@ -1,6 +1,8 @@
 use super::*;
 use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID};
+use actix_web::{body::to_bytes, http::StatusCode};
 use nazo_auth::ACCESS_TOKEN_TYPE;
+use nazo_http_actix::OAuthJsonErrorFields;
 
 fn client() -> ClientRow {
     client_row! {
@@ -301,4 +303,295 @@ fn token_exchange_binding_claims_preserve_sender_constraint_type() {
         )),
         (None, Some("mtls-thumbprint".to_owned()))
     );
+}
+
+#[actix_web::test]
+async fn token_exchange_error_responses_follow_rfc8693_error_classes() {
+    enum ErrorCase {
+        Policy(TokenExchangeError),
+        TokenState(TokenExchangeTokenError),
+    }
+
+    let cases = [
+        (
+            "disabled",
+            ErrorCase::Policy(TokenExchangeError::Disabled),
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+        ),
+        (
+            "unauthorized client",
+            ErrorCase::Policy(TokenExchangeError::UnauthorizedClient),
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+        ),
+        (
+            "missing parameter",
+            ErrorCase::Policy(TokenExchangeError::MissingParameter),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            "unsupported token type",
+            ErrorCase::Policy(TokenExchangeError::UnsupportedTokenType),
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+        ),
+        (
+            "invalid scope",
+            ErrorCase::Policy(TokenExchangeError::InvalidScope),
+            StatusCode::BAD_REQUEST,
+            "invalid_scope",
+        ),
+        (
+            "invalid target",
+            ErrorCase::Policy(TokenExchangeError::InvalidTarget),
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+        ),
+        (
+            "invalid grant",
+            ErrorCase::Policy(TokenExchangeError::InvalidGrant),
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+        ),
+        (
+            "invalid subject token",
+            ErrorCase::TokenState(TokenExchangeTokenError::Invalid),
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+        ),
+        (
+            "token state unavailable",
+            ErrorCase::TokenState(TokenExchangeTokenError::StoreUnavailable),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+        ),
+    ];
+
+    for (name, case, expected_status, expected_error) in cases {
+        let response = match case {
+            ErrorCase::Policy(error) => token_exchange_error_response(error),
+            ErrorCase::TokenState(error) => exchange_token_error_response(error),
+        };
+        assert_eq!(response.status(), expected_status, "{name} status");
+        assert_eq!(
+            response
+                .extensions()
+                .get::<OAuthJsonErrorFields>()
+                .map(|fields| fields.error.as_str()),
+            Some(expected_error),
+            "{name} extension error code",
+        );
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body())
+                .await
+                .expect("OAuth error response should be readable"),
+        )
+        .expect("OAuth error response should be JSON");
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some(expected_error),
+            "{name} JSON error code",
+        );
+        assert!(
+            body.get("error_description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| !description.is_empty()),
+            "{name} should include a safe error description",
+        );
+    }
+}
+
+#[actix_web::test]
+async fn token_exchange_subject_boundaries_and_safe_default_scope_are_table_driven() {
+    struct SubjectCase {
+        name: &'static str,
+        claims: Claims,
+        requested_scope: Option<&'static str>,
+        expected_scopes: &'static [&'static str],
+        expected_error: Option<TokenExchangeError>,
+        expected_description: &'static str,
+    }
+
+    let client = client();
+    let policy = policy(&client);
+    let mut wrong_client = claims(
+        "resource-server",
+        json!("https://backend.example/api"),
+        "accounts",
+    );
+    wrong_client.client_id = "frontend-client".to_owned();
+    let mut malformed_user = claims(
+        "resource-server",
+        json!("https://backend.example/api"),
+        "accounts",
+    );
+    malformed_user.user_id = Some("not-a-uuid".to_owned());
+    let mut wrong_tenant = claims(
+        "resource-server",
+        json!("https://backend.example/api"),
+        "accounts",
+    );
+    wrong_tenant.tenant_id = Uuid::now_v7().to_string();
+    let mut expired = claims(
+        "resource-server",
+        json!("https://backend.example/api"),
+        "accounts",
+    );
+    expired.exp = policy.now;
+    let mut dual_sender_binding = claims(
+        "resource-server",
+        json!("https://backend.example/api"),
+        "accounts",
+    );
+    dual_sender_binding.cnf = Some(nazo_auth::ConfirmationClaims {
+        jkt: Some("dpop-jkt".to_owned()),
+        x5t_s256: Some("mtls-thumbprint".to_owned()),
+    });
+
+    let cases = [
+        SubjectCase {
+            name: "subject client boundary",
+            claims: wrong_client,
+            requested_scope: None,
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidGrant),
+            expected_description: "client is not authorized to exchange this subject token.",
+        },
+        SubjectCase {
+            name: "subject user boundary",
+            claims: malformed_user,
+            requested_scope: None,
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidGrant),
+            expected_description: "subject token contains an invalid user boundary.",
+        },
+        SubjectCase {
+            name: "subject tenant boundary",
+            claims: wrong_tenant,
+            requested_scope: None,
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidGrant),
+            expected_description: "token exchange input token is invalid.",
+        },
+        SubjectCase {
+            name: "subject expiry boundary",
+            claims: expired,
+            requested_scope: None,
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidGrant),
+            expected_description: "token exchange input token is invalid.",
+        },
+        SubjectCase {
+            name: "subject sender binding boundary",
+            claims: dual_sender_binding,
+            requested_scope: None,
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidGrant),
+            expected_description: "token exchange input token is invalid.",
+        },
+        SubjectCase {
+            name: "safe default scope intersection",
+            claims: claims(
+                "resource-server",
+                json!("https://backend.example/api"),
+                "openid accounts payments",
+            ),
+            requested_scope: None,
+            expected_scopes: &["accounts", "payments"],
+            expected_error: None,
+            expected_description: "",
+        },
+        SubjectCase {
+            name: "safe default rejects OIDC-only subject",
+            claims: claims(
+                "resource-server",
+                json!("https://backend.example/api"),
+                "openid",
+            ),
+            requested_scope: None,
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidScope),
+            expected_description: "token exchange cannot issue an access token without non-OIDC scopes.",
+        },
+        SubjectCase {
+            name: "requested openid scope",
+            claims: claims(
+                "resource-server",
+                json!("https://backend.example/api"),
+                "accounts",
+            ),
+            requested_scope: Some("openid"),
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidScope),
+            expected_description: "token exchange scope must be a subset of the subject token and client scopes.",
+        },
+        SubjectCase {
+            name: "requested out-of-bound scope",
+            claims: claims(
+                "resource-server",
+                json!("https://backend.example/api"),
+                "accounts",
+            ),
+            requested_scope: Some("admin"),
+            expected_scopes: &[],
+            expected_error: Some(TokenExchangeError::InvalidScope),
+            expected_description: "token exchange scope must be a subset of the subject token and client scopes.",
+        },
+    ];
+
+    for case in cases {
+        let result = validate_token_exchange_subject(&case.claims, case.requested_scope, policy);
+        match (result, case.expected_error) {
+            (Ok(subject), None) => assert_eq!(
+                subject.scopes, case.expected_scopes,
+                "{} should retain only safe scopes",
+                case.name
+            ),
+            (Err(error), Some(expected_error)) => {
+                assert_eq!(error, expected_error, "{} error class", case.name);
+                let response = token_exchange_subject_error_response(
+                    error,
+                    &client,
+                    &TokenForm {
+                        scope: case.requested_scope.map(str::to_owned),
+                        ..form()
+                    },
+                    &case.claims,
+                );
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{} status",
+                    case.name
+                );
+                assert_eq!(
+                    response
+                        .extensions()
+                        .get::<OAuthJsonErrorFields>()
+                        .map(|fields| fields.error.as_str()),
+                    Some(expected_error.oauth_error()),
+                    "{} HTTP error class",
+                    case.name,
+                );
+                let body: Value = serde_json::from_slice(
+                    &to_bytes(response.into_body())
+                        .await
+                        .expect("subject error response should be readable"),
+                )
+                .expect("subject error response should be JSON");
+                assert_eq!(
+                    body.get("error_description").and_then(Value::as_str),
+                    Some(case.expected_description),
+                    "{} description",
+                    case.name,
+                );
+            }
+            (Ok(_), Some(expected_error)) => {
+                panic!("{} should reject with {expected_error:?}", case.name)
+            }
+            (Err(error), None) => panic!("{} should be valid, got {error:?}", case.name),
+        }
+    }
 }

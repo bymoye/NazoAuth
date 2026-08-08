@@ -1200,7 +1200,6 @@ async fn same_idempotent_grant_retry_reuses_the_persisted_response() {
     };
     let client = client_with_grants(&["client_credentials"]);
     let grant_key = format!("idempotent-test-{}", Uuid::now_v7());
-
     let mut first_issue = token_issue_without_openid();
     first_issue.include_refresh = false;
     let first =
