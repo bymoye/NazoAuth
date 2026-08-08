@@ -11,6 +11,7 @@ use super::*;
 use crate::config::ConfigSource;
 use crate::settings::Settings;
 use crate::test_support::TestInfrastructure;
+use nazo_http_actix::OAuthJsonErrorFields;
 use nazo_postgres::create_pool;
 
 use std::sync::Arc;
@@ -130,6 +131,51 @@ fn native_sso_client(scopes: Value) -> ClientRow {
         sector_identifier_uri: None,
         sector_identifier_host: None,
     }
+}
+
+#[actix_web::test]
+async fn native_sso_issue_binding_enforces_client_sender_policy() {
+    let state = native_sso_state_with_signing_key();
+    let config = crate::http::token::issue::TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = crate::http::token::issue::test_support::test_authorization_service(&state);
+    let issuance = TokenIssuanceContext {
+        config: &config,
+        modules: &modules,
+        authorization: &authorization,
+    };
+    let request = actix_web::test::TestRequest::post()
+        .uri("/token")
+        .to_http_request();
+
+    let client = native_sso_client(json!(["openid"]));
+    assert_eq!(
+        native_sso_issue_binding(&issuance, &request, &client)
+            .await
+            .expect("a client without sender constraints may issue an unbound token"),
+        (None, None)
+    );
+
+    let mut dpop_client = native_sso_client(json!(["openid"]));
+    dpop_client.require_dpop_bound_tokens = true;
+    let response = native_sso_issue_binding(&issuance, &request, &dpop_client)
+        .await
+        .expect_err("a DPoP-required client must present proof");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let mut mtls_client = native_sso_client(json!(["openid"]));
+    mtls_client.require_mtls_bound_tokens = true;
+    let response = native_sso_issue_binding(&issuance, &request, &mtls_client)
+        .await
+        .expect_err("an mTLS-required client must present a verified certificate");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
 }
 
 #[test]

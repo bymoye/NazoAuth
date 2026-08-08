@@ -1,8 +1,33 @@
 use super::*;
+use crate::config::ConfigSource;
 use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID};
+use crate::settings::Settings;
+use crate::test_support::TestInfrastructure;
 use actix_web::{body::to_bytes, http::StatusCode};
 use nazo_auth::ACCESS_TOKEN_TYPE;
 use nazo_http_actix::OAuthJsonErrorFields;
+use nazo_postgres::create_pool;
+use std::sync::Arc;
+
+fn token_exchange_state() -> TestInfrastructure {
+    TestInfrastructure {
+        diesel_db: create_pool(
+            "postgres://nazo_token_exchange_invalid:nazo_token_exchange_invalid@127.0.0.1:1/nazo"
+                .to_owned(),
+            1,
+        )
+        .expect("pool construction should not connect"),
+        valkey: fred::prelude::Builder::default_centralized()
+            .build()
+            .expect("Valkey client construction should not connect"),
+        settings: Arc::new(
+            Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
+        ),
+        keyset: crate::test_support::test_key_manager_with_algorithm(
+            jsonwebtoken::Algorithm::PS256,
+        ),
+    }
+}
 
 fn client() -> ClientRow {
     client_row! {
@@ -303,6 +328,159 @@ fn token_exchange_binding_claims_preserve_sender_constraint_type() {
         )),
         (None, Some("mtls-thumbprint".to_owned()))
     );
+}
+
+#[actix_web::test]
+async fn token_exchange_issue_binding_preserves_or_rejects_sender_constraints() {
+    let presented =
+        |dpop_jkt: Option<&str>, mtls_x5t_s256: Option<&str>| ValidatedSenderConstraints {
+            dpop_jkt: dpop_jkt.map(str::to_owned),
+            mtls_x5t_s256: mtls_x5t_s256.map(str::to_owned),
+        };
+
+    let bearer_client = client();
+    assert_eq!(
+        token_exchange_issue_binding(
+            &bearer_client,
+            &TokenExchangeSenderBinding::Bearer,
+            &presented(None, None),
+            policy(&bearer_client),
+        )
+        .expect("an unconstrained exchange may remain bearer"),
+        TokenExchangeSenderBinding::Bearer
+    );
+
+    let dpop_subject = TokenExchangeSenderBinding::Dpop("dpop-jkt".to_owned());
+    assert_eq!(
+        token_exchange_issue_binding(
+            &bearer_client,
+            &dpop_subject,
+            &presented(Some("dpop-jkt"), None),
+            policy(&bearer_client),
+        )
+        .expect("matching DPoP proof must preserve the subject binding"),
+        dpop_subject
+    );
+
+    let mut mtls_required = client();
+    mtls_required.require_mtls_bound_tokens = true;
+    let response = token_exchange_issue_binding(
+        &mtls_required,
+        &TokenExchangeSenderBinding::Dpop("dpop-jkt".to_owned()),
+        &presented(Some("dpop-jkt"), None),
+        policy(&mtls_required),
+    )
+    .expect_err("a DPoP subject binding must not be converted to mTLS");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+
+    let mut dpop_required = client();
+    dpop_required.require_dpop_bound_tokens = true;
+    let response = token_exchange_issue_binding(
+        &dpop_required,
+        &TokenExchangeSenderBinding::MutualTls("mtls-thumbprint".to_owned()),
+        &presented(None, Some("mtls-thumbprint")),
+        policy(&dpop_required),
+    )
+    .expect_err("an mTLS subject binding must not be converted to DPoP");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+
+    let response = token_exchange_issue_binding(
+        &bearer_client,
+        &TokenExchangeSenderBinding::Dpop("dpop-jkt".to_owned()),
+        &presented(Some("different-jkt"), None),
+        policy(&bearer_client),
+    )
+    .expect_err("a mismatched subject proof must fail closed");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+}
+
+#[actix_web::test]
+async fn token_exchange_subject_binding_requires_the_presented_sender_proof() {
+    let state = token_exchange_state();
+    let config = crate::http::token::issue::TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = crate::http::token::issue::test_support::test_authorization_service(&state);
+    let issuance = TokenIssuanceContext {
+        config: &config,
+        modules: &modules,
+        authorization: &authorization,
+    };
+    let request = actix_web::test::TestRequest::post()
+        .uri("/token")
+        .to_http_request();
+
+    let mut dpop_required = client();
+    dpop_required.require_dpop_bound_tokens = true;
+    let response = validate_subject_sender_binding(
+        &issuance,
+        &request,
+        &dpop_required,
+        "subject-token",
+        &TokenExchangeSenderBinding::MutualTls("mtls-thumbprint".to_owned()),
+    )
+    .await
+    .expect_err("an mTLS subject token cannot silently become DPoP-bound");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+
+    let mut mtls_required = client();
+    mtls_required.require_mtls_bound_tokens = true;
+    let response = validate_subject_sender_binding(
+        &issuance,
+        &request,
+        &mtls_required,
+        "subject-token",
+        &TokenExchangeSenderBinding::Bearer,
+    )
+    .await
+    .expect_err("an mTLS-required exchange needs a verified certificate");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+
+    let bearer_client = client();
+    let response = validate_subject_sender_binding(
+        &issuance,
+        &request,
+        &bearer_client,
+        "subject-token",
+        &TokenExchangeSenderBinding::Dpop("dpop-jkt".to_owned()),
+    )
+    .await
+    .expect_err("a DPoP subject token requires its proof");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[actix_web::test]

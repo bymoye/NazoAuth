@@ -1248,6 +1248,44 @@ fn ciba_poll_storage_failure_returns_503_and_never_protocol_progress() {
     );
 }
 
+#[test]
+fn ciba_poll_failures_preserve_invalid_grant_and_contention_boundaries() {
+    for (failure, expected_status, expected_error) in [
+        (
+            CibaPollFailure::Missing,
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+        ),
+        (
+            CibaPollFailure::ClientMismatch,
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+        ),
+        (
+            CibaPollFailure::Contended,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+        ),
+    ] {
+        let response = ciba_poll_failure_response(failure);
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(
+            response
+                .extensions()
+                .get::<OAuthJsonErrorFields>()
+                .map(|fields| fields.error.as_str()),
+            Some(expected_error)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+}
+
 #[actix_web::test]
 async fn ciba_automated_decision_oidf_query_mode_rejects_post() {
     let state = ciba_test_state_with(|settings| {

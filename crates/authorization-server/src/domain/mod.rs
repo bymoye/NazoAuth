@@ -2,7 +2,6 @@
 // 每个子模块只描述一种领域概念，本模块只负责向 crate 内部 re-export。
 mod authorization_decision;
 mod backchannel_logout_worker;
-#[cfg(not(test))]
 mod ciba_ping_delivery;
 #[cfg(test)]
 #[path = "../../tests/unit/domain/ciba_ping_delivery.rs"]

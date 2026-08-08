@@ -878,6 +878,39 @@ async fn ciba_decision_claim_releases_pool_connection_before_callback() {
         .insert(&client, None, None, Some(lease.id))
         .await
         .unwrap();
+    assert_eq!(
+        leases
+            .active_lease_id_for_client(
+                tenant.tenant_id.as_uuid(),
+                &client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap(),
+        Some(lease.id)
+    );
+    assert_eq!(
+        leases
+            .active_lease_id_for_client(
+                tenant.tenant_id.as_uuid(),
+                &client.client_id,
+                "different-profile",
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        leases
+            .active_lease_id_for_client(
+                tenant.tenant_id.as_uuid(),
+                "missing-client",
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap(),
+        None
+    );
 
     let (decision_started_tx, decision_started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
