@@ -12,6 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  NAZOAUTH_RELEASE_BRANCH: agent/extract-nazoauthctl
   NAZOAUTH_BUILD_RELEASE: ${{ github.ref_type == 'tag' && github.ref_name || format('sha-{0}', github.sha) }}
   NAZOAUTH_BUILD_REVISION: ${{ github.sha }}
   NAZOAUTH_BUILD_ID: github:${{ github.run_id }}:${{ github.run_attempt }}
@@ -24,7 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Require successful main CI for exact tag commit
+      - name: Require successful governed CI for exact tag commit
         if: github.ref_type == 'tag'
         shell: bash
         env:
@@ -32,25 +33,42 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          release_ref="refs/remotes/origin/$NAZOAUTH_RELEASE_BRANCH"
           git -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" fetch \
-            --no-tags origin refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
-            echo "release tag commit $RELEASE_SHA is not reachable from origin/main" >&2
+            --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            "refs/heads/$NAZOAUTH_RELEASE_BRANCH:$release_ref"
+          if git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
+            gate_event=push
+            gate_branch=main
+          elif [[ "$(git rev-parse "$release_ref")" = "$RELEASE_SHA" ]]; then
+            gate_event=workflow_dispatch
+            gate_branch=$NAZOAUTH_RELEASE_BRANCH
+          else
+            echo "release tag commit $RELEASE_SHA is neither reachable from main nor the exact release branch head" >&2
             exit 1
           fi
           for workflow in code-quality.yml release-policy.yml; do
             runs="$(gh api \
+              --method GET \
               -H 'Accept: application/vnd.github+json' \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?event=push&branch=main&head_sha=${RELEASE_SHA}&per_page=100")"
-            if ! jq -e --arg sha "$RELEASE_SHA" '
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
+              -f event="$gate_event" \
+              -f branch="$gate_branch" \
+              -f head_sha="$RELEASE_SHA" \
+              -F per_page=100)"
+            if ! jq -e \
+              --arg sha "$RELEASE_SHA" \
+              --arg event "$gate_event" \
+              --arg branch "$gate_branch" '
               any(.workflow_runs[]?;
                 .head_sha == $sha and
-                .head_branch == "main" and
-                .event == "push" and
+                .head_branch == $branch and
+                .event == $event and
                 .status == "completed" and
                 .conclusion == "success")
             ' <<<"$runs" >/dev/null; then
-              echo "required workflow $workflow has no successful main push run for $RELEASE_SHA" >&2
+              echo "required workflow $workflow has no successful $gate_event run on $gate_branch for $RELEASE_SHA" >&2
               exit 1
             fi
           done

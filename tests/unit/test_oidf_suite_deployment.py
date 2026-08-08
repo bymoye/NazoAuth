@@ -5,7 +5,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-UPSTREAM_REVISION = "932b46f1e507871eb0b34621aaef65ff04442e6f"
+UPSTREAM_REVISION = "321bc5bc53601b9690b54c023c0cbfac0f0230f2"
 
 
 class OidfSuiteDeploymentTests(unittest.TestCase):
@@ -92,7 +92,7 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-932b46f1}",
+            "image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-321bc5bc}",
             compose,
         )
         self.assertIn('"0.0.0.0:8443:8443"', compose)

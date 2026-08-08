@@ -257,19 +257,31 @@ class ReleaseGovernanceTests(unittest.TestCase):
             policy.index("- name: Validate immutable release input"),
         )
 
-    def test_tag_release_requires_successful_main_ci_for_the_exact_commit(self) -> None:
+    def test_tag_release_requires_successful_governed_ci_for_the_exact_commit(self) -> None:
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
         for required in (
             "actions: read",
+            "NAZOAUTH_RELEASE_BRANCH: agent/extract-nazoauthctl",
             "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN",
-            "--no-tags origin refs/heads/main:refs/remotes/origin/main",
+            "refs/heads/main:refs/remotes/origin/main",
+            '"refs/heads/$NAZOAUTH_RELEASE_BRANCH:$release_ref"',
             'git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main',
-            "/actions/workflows/${workflow}/runs?event=push&branch=main&head_sha=${RELEASE_SHA}",
+            '[[ "$(git rev-parse "$release_ref")" = "$RELEASE_SHA" ]]',
+            "gate_event=push",
+            "gate_branch=main",
+            "gate_event=workflow_dispatch",
+            "gate_branch=$NAZOAUTH_RELEASE_BRANCH",
+            'neither reachable from main nor the exact release branch head',
+            "/actions/workflows/${workflow}/runs",
+            '-f event="$gate_event"',
+            '-f branch="$gate_branch"',
+            '-f head_sha="$RELEASE_SHA"',
             "for workflow in code-quality.yml release-policy.yml; do",
             '.head_sha == $sha',
-            '.head_branch == "main"',
+            '.head_branch == $branch',
+            '.event == $event',
             '.status == "completed"',
             '.conclusion == "success"',
         ):

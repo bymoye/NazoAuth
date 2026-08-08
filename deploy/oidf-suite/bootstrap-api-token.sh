@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-# Keep the historical release revision as the safe default, while allowing an
+# Keep the reviewed release revision as the safe default, while allowing an
 # operator to bind this deployment to an explicitly fetched GitLab baseline.
 # The value is always checked against the clean checkout before any image is
 # reused or built.
-expected_revision=${OIDF_SUITE_UPSTREAM_REVISION:-932b46f1e507871eb0b34621aaef65ff04442e6f}
+expected_revision=${OIDF_SUITE_UPSTREAM_REVISION:-321bc5bc53601b9690b54c023c0cbfac0f0230f2}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 NAZOAUTH_SOURCE_DIR=${NAZOAUTH_SOURCE_DIR:-$(CDPATH= cd -- "$script_dir/../.." && pwd)}
 export NAZOAUTH_SOURCE_DIR

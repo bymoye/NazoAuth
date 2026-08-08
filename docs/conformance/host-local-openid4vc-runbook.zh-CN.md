@@ -56,11 +56,11 @@ FD 接收 Suite token，绝不使用 token file。run-local CA 仅用于 client-
 key-attestation 和 credential 测试材料；它不是 ingress client CA，绝不安装进反向代理。
 
 本轮 `credential.signing_jwk` 包含由本轮 CA 签发、带 ISO/IEC 18013-5 mDL Document
-Signer EKU `1.0.18013.5.1.2` 的证书。固定 revision 的 Suite 在 VP mdoc 路径上没有读取
-该计划字段，而是生成使用源码内固定证书的凭据；该证书已于 2026-07-30 过期。私有 Suite
-保持官方源码不修改。上游 fixture 修复并完成新 revision 复核前，受影响的 mdoc plans
-必须报告为上游阻塞且未验证，不能改成 expected skip 或伪装为通过。NazoAuth 继续完整
-验证证书有效期、用途、签发链和 mdoc 签名；Suite 更新后必须重跑这些 plans。
+Signer EKU `1.0.18013.5.1.2` 的证书。固定的 `release-v5.2.2` 已通过上游 !2123
+重新生成源码内固定的 mdoc Document Signer 证书，修复了 `release-v5.2.1` 的过期
+fixture。私有 Suite 保持官方源码不修改，NazoAuth 继续完整验证证书有效期、用途、
+签发链和 mdoc 签名；先前受阻的 mdoc plans 必须真实重跑，不能改成 expected skip
+或沿用旧结果。
 
 ## 私有服务器命令
 
@@ -79,7 +79,7 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
   --target-issuer https://auth.nazo.run \
   --conformance-server https://oauth-test.nazo.run \
   --suite-dir /opt/nazo-oauth/conformance/operator-suite \
-  --suite-revision 932b46f1e507871eb0b34621aaef65ff04442e6f \
+  --suite-revision 321bc5bc53601b9690b54c023c0cbfac0f0230f2 \
   --work-dir "$work_dir" \
   --export-dir "$export_dir" \
   --run-namespace "$run_id" \

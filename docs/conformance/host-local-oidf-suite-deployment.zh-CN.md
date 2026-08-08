@@ -6,7 +6,7 @@ TLS，并把 `8443` 映射到宿主机 `0.0.0.0:8443`；Spring Boot 的明文 HT
 宿主机公开。本部署只使用 Podman。
 
 固定套件 revision：
-`932b46f1e507871eb0b34621aaef65ff04442e6f`（`release-v5.2.1`）。
+`321bc5bc53601b9690b54c023c0cbfac0f0230f2`（`release-v5.2.2`）。
 
 ## 1. 获取并核验官方源码
 
@@ -15,9 +15,9 @@ install -d -m 0755 /opt/nazo-oauth/conformance
 git clone https://gitlab.com/openid/conformance-suite.git \
   /opt/nazo-oauth/conformance/operator-suite
 git -C /opt/nazo-oauth/conformance/operator-suite checkout --detach \
-  932b46f1e507871eb0b34621aaef65ff04442e6f
+  321bc5bc53601b9690b54c023c0cbfac0f0230f2
 test "$(git -C /opt/nazo-oauth/conformance/operator-suite rev-parse HEAD)" = \
-  932b46f1e507871eb0b34621aaef65ff04442e6f
+  321bc5bc53601b9690b54c023c0cbfac0f0230f2
 test -z "$(git -C /opt/nazo-oauth/conformance/operator-suite status --porcelain)"
 ```
 
@@ -42,10 +42,10 @@ test -f /opt/nazo-oauth/conformance/operator-suite/pom.xml
 才允许复用。整个过程只在私有服务器的 Podman builder 中编译；不使用开发机 Cargo 或
 容器构建，也不使用 GitHub 生成材料。
 
-当前固定 revision 的 OpenID4VP mdoc fixture 未读取计划中的
-`credential.signing_jwk`，而是使用已过期的源码内固定 Document Signer 证书。该问题
-由上游 Suite 修复；本地不修改 Suite，也不放宽服务端证书时效、用途或链验证。受影响的
-计划在上游更新前记录为阻塞并留待重测，不能记为通过或 expected skip。
+`release-v5.2.2` 已通过上游 !2123 重新生成源码内固定的 mdoc Document Signer
+证书，修复了 `release-v5.2.1` 的过期 fixture。私有 Suite 仍保持官方源码不修改，
+服务端证书时效、用途、签发链和签名验证也不放宽；受影响的计划必须在该固定 revision
+上真实重跑，不能沿用旧阻塞结论或记为 expected skip。
 
 ## 3. 生成短期 API Token 并切换到严格鉴权模式
 

@@ -22,7 +22,7 @@ services:
         max-file: "5"
 
   server:
-    image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-932b46f1}
+    image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-321bc5bc}
     restart: unless-stopped
     environment:
       <<: *suite-environment
@@ -46,7 +46,7 @@ services:
         max-file: "5"
 
   nginx:
-    image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-932b46f1}
+    image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-321bc5bc}
     restart: unless-stopped
     ports:
       - "0.0.0.0:8443:8443"

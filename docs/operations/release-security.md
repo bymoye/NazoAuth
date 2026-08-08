@@ -38,6 +38,11 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
   `cargo metadata --locked` must resolve every workspace member to that same
   version. A mismatch stops the policy job before artifacts are built or
   published
+- the tag commit must either be reachable from `main` with successful exact-SHA
+  `main` push quality gates, or be the exact remote HEAD of the governed
+  `agent/extract-nazoauthctl` release branch with successful manually dispatched
+  `code-quality` and `release-policy` runs for that SHA. Arbitrary branches,
+  commits behind the release-branch HEAD, and unverified tags fail closed
 - a branch-triggered `workflow_dispatch` remains a non-publishing native-matrix
   rehearsal. It embeds `sha-<commit>` as the release identity, runs the policy,
   native tests, binary builds, and OCI assembly, and skips every tag-only

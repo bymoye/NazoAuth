@@ -46,14 +46,12 @@ The preparation directory is `0700` and its four files are `0600`. Immediately a
 
 The run-local `credential.signing_jwk` contains a Document Signer certificate
 with the ISO/IEC 18013-5 mDL Document Signer EKU `1.0.18013.5.1.2`, signed by
-that run's CA. The pinned Suite revision currently ignores this plan field for
-VP mdoc and emits credentials with a source-embedded certificate that expired
-on 2026-07-30. The private Suite must remain unmodified. Until the upstream
-fixture is corrected and a reviewed revision is pinned, report the affected
-mdoc plans as upstream-blocked and unverified; do not convert them to expected
-skips or passes. NazoAuth continues to validate certificate time, purpose,
-chain, and mdoc signatures, and the affected plans must be rerun after the
-Suite update.
+that run's CA. The pinned `release-v5.2.2` includes upstream !2123, which
+regenerated the source-embedded mdoc Document Signer certificate and fixed the
+expired `release-v5.2.1` fixture. The private Suite remains unmodified and
+NazoAuth continues to validate certificate time, purpose, chain, and mdoc
+signatures. Rerun the previously blocked mdoc plans; do not convert them to
+expected skips or reuse stale results.
 
 ## Private-server command
 
@@ -72,7 +70,7 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
   --target-issuer https://auth.nazo.run \
   --conformance-server https://oauth-test.nazo.run \
   --suite-dir /opt/nazo-oauth/conformance/operator-suite \
-  --suite-revision 932b46f1e507871eb0b34621aaef65ff04442e6f \
+  --suite-revision 321bc5bc53601b9690b54c023c0cbfac0f0230f2 \
   --work-dir "$work_dir" \
   --export-dir "$export_dir" \
   --run-namespace "$run_id" \
