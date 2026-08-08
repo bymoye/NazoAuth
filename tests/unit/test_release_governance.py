@@ -472,6 +472,18 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("name: Download scanned service image", conformance)
         self.assertIn("sha256sum --check nazo-oauth-service.tar.sha256", conformance)
         self.assertIn("docker load --input target/ci-service-image/nazo-oauth-service.tar", conformance)
+
+    def test_conformance_operator_task_mounts_secret_revision_authority(self) -> None:
+        conformance = (
+            ROOT / ".github" / "workflows" / "conformance-security.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('secret_revision=ci-secret-revision', conformance)
+        self.assertIn(
+            'printf \'%s\' "$secret_revision" >runtime/e2e/operator/secret-revision',
+            conformance,
+        )
+        self.assertIn("chmod 0400 runtime/e2e/operator/secret-revision", conformance)
         self.assertIn(
             "operator/secret-revision:/run/nazoauth-operator/secret-revision:ro",
             conformance,
