@@ -386,6 +386,21 @@ cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
 cargo test --locked --workspace --all-features --lib --bins --tests
 
+# These integration-heavy protocol tests are intentionally excluded from the
+# default workspace run because they require live PostgreSQL and Valkey. This
+# coverage phase owns both services, so execute the explicit allowlist here.
+# Keep the allowlist narrow: future ignored tests may depend on external state.
+COVERAGE_LIVE_TESTS=(
+  live_immediate_offer_pre_authorized_credential_replay_and_notification
+  live_deferred_credential_claim_response_replay_and_notification
+  live_access_enforces_dpop_binding_and_validates_presented_proof
+  live_offer_enforces_subject_dataset_lifetime_and_transaction_code_policy
+  par_fapi2_rejects_shared_secret_client_auth_after_authentication
+)
+for test_name in "${COVERAGE_LIVE_TESTS[@]}"; do
+  cargo test --locked -p nazo-oauth-server --lib "$test_name" -- --ignored
+done
+
 # Let cargo-llvm-cov resolve the complete workspace object graph as an
 # independent report. `show-env` deliberately points cargo-llvm-cov at the
 # Cargo target root so it can discover every instrumented object there, while

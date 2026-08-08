@@ -48,6 +48,28 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
         self.assertLess(switch_database, migrate_workspace)
         self.assertLess(migrate_workspace, run_workspace)
 
+    def test_live_protocol_coverage_uses_an_explicit_local_service_allowlist(self) -> None:
+        workspace_tests = self.source.index(
+            "cargo test --locked --workspace --all-features --lib --bins --tests\n"
+        )
+        live_tests = self.source.index("COVERAGE_LIVE_TESTS=(", workspace_tests)
+        coverage_report = self.source.index("cargo llvm-cov report", live_tests)
+
+        for test_name in (
+            "live_immediate_offer_pre_authorized_credential_replay_and_notification",
+            "live_deferred_credential_claim_response_replay_and_notification",
+            "live_access_enforces_dpop_binding_and_validates_presented_proof",
+            "live_offer_enforces_subject_dataset_lifetime_and_transaction_code_policy",
+            "par_fapi2_rejects_shared_secret_client_auth_after_authentication",
+        ):
+            self.assertIn(test_name, self.source[live_tests:coverage_report])
+        self.assertIn(
+            'cargo test --locked -p nazo-oauth-server --lib "$test_name" -- --ignored',
+            self.source[live_tests:coverage_report],
+        )
+        self.assertLess(workspace_tests, live_tests)
+        self.assertLess(live_tests, coverage_report)
+
     def test_parallel_server_instances_use_distinct_identity_directories(self) -> None:
         self.assertIn(
             'PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"',
