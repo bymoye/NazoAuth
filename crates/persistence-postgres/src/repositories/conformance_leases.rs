@@ -534,6 +534,9 @@ impl ConformanceLeaseRepository {
             )
             .await
             .map_err(map_diesel_error)?;
+        // The callback may use the same pool (including a pool with one
+        // connection). Release the transaction connection before invoking it.
+        drop(connection);
 
         match claim {
             CibaDecisionClaimOutcome::Missing => Ok(None),
