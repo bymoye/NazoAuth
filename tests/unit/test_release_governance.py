@@ -472,6 +472,10 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("name: Download scanned service image", conformance)
         self.assertIn("sha256sum --check nazo-oauth-service.tar.sha256", conformance)
         self.assertIn("docker load --input target/ci-service-image/nazo-oauth-service.tar", conformance)
+        self.assertIn(
+            "operator/secret-revision:/run/nazoauth-operator/secret-revision:ro",
+            conformance,
+        )
 
     def test_official_suite_is_never_patched(self) -> None:
         tracked = [
