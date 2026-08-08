@@ -570,9 +570,7 @@ impl TokenRepositoryPort for TokenIssuanceRepository {
                 Some((digest, _phase, _)) if digest != request_digest => {
                     TokenIssuanceClaimResult::Conflict
                 }
-                Some((_, phase, Some(_))) if phase == TokenIssuancePhase::Prepared.as_str() => {
-                    TokenIssuanceClaimResult::Busy
-                }
+                Some((_, _, Some(_))) => TokenIssuanceClaimResult::Busy,
                 Some(_) => TokenIssuanceClaimResult::Conflict,
             })
         })

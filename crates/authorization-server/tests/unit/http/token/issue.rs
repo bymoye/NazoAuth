@@ -781,7 +781,7 @@ fn request_idempotency_key_trims_and_rejects_invalid_values() {
 }
 
 #[test]
-fn response_from_token_issuance_requires_a_signed_terminal_phase() {
+fn response_from_token_issuance_requires_a_signed_terminal_phase_and_matching_digest() {
     let mut record = TokenIssuanceRecord {
         issuance_id: Uuid::now_v7(),
         tenant_id: DEFAULT_TENANT_ID,
@@ -806,6 +806,8 @@ fn response_from_token_issuance_requires_a_signed_terminal_phase() {
         response.headers().get(header::CACHE_CONTROL).unwrap(),
         "no-store"
     );
+    assert!(matching_response_from_token_issuance(&record, "different-digest").is_none());
+    assert!(matching_response_from_token_issuance(&record, "digest").is_some());
 
     record.response_body = None;
     assert!(response_from_token_issuance(&record).is_none());
@@ -1253,11 +1255,73 @@ async fn same_idempotent_grant_retry_reuses_the_persisted_response() {
 }
 
 #[actix_web::test]
-async fn concurrent_prepared_issuance_conflict_recovers_the_winning_response() {
+async fn terminal_issuance_owned_by_another_claim_is_busy() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let issuance_id = Uuid::now_v7();
+    let first_owner_id = Uuid::now_v7();
+    let request_digest = blake3::hash(issuance_id.as_bytes()).to_hex().to_string();
+    let expires_at = Utc::now() + chrono::Duration::minutes(5);
+    let prepared = service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id,
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: format!("terminal-claim-{issuance_id}"),
+            request_digest: request_digest.clone(),
+            expires_at,
+        })
+        .await
+        .expect("terminal claim fixture should prepare");
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+    assert_eq!(
+        service
+            .claim_token_issuance(issuance_id, &request_digest, first_owner_id)
+            .await
+            .expect("first owner should claim issuance"),
+        TokenIssuanceClaimResult::Applied
+    );
+    let response_body = br#"{"access_token":"stable","token_type":"Bearer"}"#;
+    let response_digest = blake3::hash(response_body).to_hex().to_string();
+    assert_eq!(
+        service
+            .record_token_issuance_signed(nazo_auth::RecordTokenIssuanceSigned {
+                issuance_id,
+                request_digest: &request_digest,
+                claim_owner_id: first_owner_id,
+                access_token_jti: "terminal-claim-jti",
+                access_token_expires_at: expires_at.timestamp(),
+                response_body,
+                response_digest: &response_digest,
+            })
+            .await
+            .expect("first owner should persist signed response"),
+        TokenIssuanceTransitionResult::Applied
+    );
+    assert_eq!(
+        service
+            .claim_token_issuance(issuance_id, &request_digest, Uuid::now_v7())
+            .await
+            .expect("second owner claim should be classified"),
+        TokenIssuanceClaimResult::Busy
+    );
+}
+
+#[actix_web::test]
+async fn concurrent_prepared_issuance_recovers_the_winning_response() {
     let Some(state) = issue_state_with_live_database_pool_size(4) else {
         return;
     };
-    let client = client_with_grants(&["client_credentials", "refresh_token"]);
+    let mut client = client_with_grants(&["client_credentials", "refresh_token"]);
+    client.client_id = format!("concurrent-issue-client-{}", Uuid::now_v7());
+    insert_issue_client(&state, &client).await;
     let grant_key = format!("conflict-test-{}", Uuid::now_v7());
     let initial_refresh_token_rows = refresh_token_row_count(&state, &client).await;
     let mut first_issue = token_issue_without_openid();

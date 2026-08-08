@@ -126,7 +126,7 @@ pub enum PrepareTokenIssuanceResult {
 pub enum TokenIssuanceClaimResult {
     /// This caller became the only side-effect owner for the prepared row.
     Applied,
-    /// Another caller owns the prepared row. It must wait for a terminal response.
+    /// Another caller owns the row. It must wait for or recover the terminal response.
     Busy,
     /// The durable row no longer exists. Retrying is fail-closed.
     Missing,

@@ -212,7 +212,8 @@ pub(super) async fn issue_token_response_with_service_and_grant(
         Ok(TokenIssuanceClaimResult::Applied) => {}
         Ok(TokenIssuanceClaimResult::Busy) => {
             if let Some(response) =
-                wait_for_token_issuance_response(token_service, client, &grant_key).await
+                wait_for_token_issuance_response(token_service, client, &grant_key, &request_digest)
+                    .await
             {
                 return response;
             }
@@ -753,8 +754,13 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             }
             // Recover the durable response only after the losing side effects
             // have been revoked.
-            if let Some(response) =
-                recover_conflicting_token_issuance_response(token_service, client, &grant_key).await
+            if let Some(response) = recover_conflicting_token_issuance_response(
+                token_service,
+                client,
+                &grant_key,
+                &request_digest,
+            )
+            .await
             {
                 return response;
             }

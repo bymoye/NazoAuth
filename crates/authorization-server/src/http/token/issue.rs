@@ -376,6 +376,16 @@ fn response_from_token_issuance(record: &TokenIssuanceRecord) -> Option<HttpResp
     )
 }
 
+fn matching_response_from_token_issuance(
+    record: &TokenIssuanceRecord,
+    request_digest: &str,
+) -> Option<HttpResponse> {
+    if record.request_digest != request_digest {
+        return None;
+    }
+    response_from_token_issuance(record)
+}
+
 /// Recover only after this request lost the signed-response CAS to the same
 /// issuance transaction. This is intentionally private: one-time grant
 /// handlers must consume their grant before reaching issuance and must never
@@ -384,12 +394,13 @@ async fn recover_conflicting_token_issuance_response(
     token_service: &ServerTokenService,
     client: &ClientRow,
     grant_key: &str,
+    request_digest: &str,
 ) -> Option<HttpResponse> {
     match token_service
         .token_issuance_by_grant(client.tenant_id, client.id, grant_key)
         .await
     {
-        Ok(Some(record)) => response_from_token_issuance(&record),
+        Ok(Some(record)) => matching_response_from_token_issuance(&record, request_digest),
         Ok(None) => None,
         Err(error) => {
             tracing::warn!(%error, "failed to recover token issuance response");
@@ -402,6 +413,7 @@ async fn wait_for_token_issuance_response(
     token_service: &ServerTokenService,
     client: &ClientRow,
     grant_key: &str,
+    request_digest: &str,
 ) -> Option<HttpResponse> {
     // A claimed Prepared row is never taken over. Waiting is bounded so a
     // crashed owner fails closed instead of allowing a second mint.
@@ -414,7 +426,9 @@ async fn wait_for_token_issuance_response(
             .await
         {
             Ok(Some(record)) => {
-                if let Some(response) = response_from_token_issuance(&record) {
+                if let Some(response) =
+                    matching_response_from_token_issuance(&record, request_digest)
+                {
                     return Some(response);
                 }
             }
