@@ -2121,6 +2121,7 @@ def run() -> None:
             health_body.get("checks")
             == {
                 "postgresql": {"status": "up"},
+                "signing_keys": {"status": "up"},
                 "valkey": {"status": "up"},
             },
         )
