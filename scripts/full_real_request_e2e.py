@@ -1706,7 +1706,7 @@ def approve_authorization(
         allow_redirects=False,
         timeout=10,
     )
-    expect_status(f"authorize_decision_approve_{state}", response, 302)
+    expect_status(f"authorize_decision_approve_{state}", response, 303)
     query = location_query(response)
     code = query.get("code", [None])[0]
     check(
@@ -3967,7 +3967,7 @@ def run() -> None:
             allow_redirects=False,
             timeout=10,
         )
-        expect_status("POST /authorize/decision deny", deny_response, 302)
+        expect_status("POST /authorize/decision deny", deny_response, 303)
         check("authorize_deny_error", location_query(deny_response).get("error") == ["access_denied"])
 
         dpop_key = ed25519.Ed25519PrivateKey.generate()
