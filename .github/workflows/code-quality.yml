@@ -102,7 +102,7 @@ jobs:
       CARGO_BUILD_JOBS: "1"
       RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
@@ -157,7 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-python@v6.3.0
         with:

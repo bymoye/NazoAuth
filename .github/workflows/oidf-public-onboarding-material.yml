@@ -64,7 +64,7 @@ jobs:
       TRUSTED_TARGET_ISSUER: ${{ vars.OIDF_TARGET_ISSUER }}
       TRUSTED_SUITE_BASE_URL: ${{ vars.OIDF_CONFORMANCE_SERVER }}
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0

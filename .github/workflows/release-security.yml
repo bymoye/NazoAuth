@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate release tag and frontend lock
         id: release
         shell: bash
@@ -29,7 +29,7 @@ jobs:
             echo "version=sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
             echo "tag_release=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: nazozero/NazoAuthWeb
           ref: ${{ steps.release.outputs.frontend_commit }}
@@ -168,7 +168,7 @@ jobs:
       attestations: write
     steps:
       - name: Download unsigned release artifacts
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: nazo-oauth-release-unsigned
           path: target

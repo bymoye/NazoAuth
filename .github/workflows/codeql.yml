@@ -54,7 +54,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: dtolnay/rust-toolchain@1.97.0
 
