@@ -321,9 +321,6 @@ def check_rust_test_structure() -> None:
         "crates/authorization-server/src/bootstrap/startup/services/identity.rs": (
             "let session_profiles = web::Data::new(SessionProfileHandles::new(",
         ),
-        "crates/key-management/src/lifecycle.rs": (
-            'panic!("signing key lifecycle refresh failed: {error:#}");',
-        ),
     }
 
     violations = []
