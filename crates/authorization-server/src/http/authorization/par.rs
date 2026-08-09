@@ -232,6 +232,7 @@ async fn par_after_rate_limit_inner(
     // Request Object, invalid PKCE is independent of client identity and RFC
     // 7636 requires invalid_request before client authentication is attempted.
     if !params.contains_key("request")
+        && (params.contains_key("code_challenge") || params.contains_key("code_challenge_method"))
         && let Err(error) = validate_par_pkce(&params)
     {
         return par_admission_error(error);
