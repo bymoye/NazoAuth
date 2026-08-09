@@ -592,14 +592,7 @@ pub fn validate_expanded_par_admission(
     {
         return Err(ParAdmissionError::UnsupportedResponseType);
     }
-    match (
-        parameters.get("code_challenge").map(String::as_str),
-        parameters.get("code_challenge_method").map(String::as_str),
-    ) {
-        (None, None) => return Err(ParAdmissionError::PkceRequired),
-        (Some(challenge), Some("S256")) if is_valid_pkce_value(challenge) => {}
-        _ => return Err(ParAdmissionError::InvalidPkce),
-    }
+    validate_par_pkce(parameters)?;
     if policy.fapi2_requires_explicit_redirect_uri && !parameters.contains_key("redirect_uri") {
         return Err(ParAdmissionError::ExplicitRedirectUriRequired);
     }
@@ -622,6 +615,22 @@ pub fn validate_expanded_par_admission(
         redirect_uri,
         resources,
     })
+}
+
+/// Validates PKCE parameters that are independent of client identity.
+///
+/// Callers may use this before client authentication only after determining
+/// that no signed Request Object can add or replace authorization parameters.
+pub fn validate_par_pkce(parameters: &HashMap<String, String>) -> Result<(), ParAdmissionError> {
+    match (
+        parameters.get("code_challenge").map(String::as_str),
+        parameters.get("code_challenge_method").map(String::as_str),
+    ) {
+        (None, None) => return Err(ParAdmissionError::PkceRequired),
+        (Some(challenge), Some("S256")) if is_valid_pkce_value(challenge) => {}
+        _ => return Err(ParAdmissionError::InvalidPkce),
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

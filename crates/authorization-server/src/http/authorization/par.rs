@@ -25,7 +25,7 @@ use chrono::{Duration, Utc};
 use nazo_auth::{
     ExpandedParAdmissionPolicy, ParAdmissionError, RawParAdmissionPolicy,
     encode_resource_indicators, is_valid_dpop_jkt, unverified_client_assertion_client_id,
-    validate_expanded_par_admission, validate_raw_par_admission,
+    validate_expanded_par_admission, validate_par_pkce, validate_raw_par_admission,
 };
 
 use serde_json::json;
@@ -225,6 +225,16 @@ async fn par_after_rate_limit_inner(
             "invalid_request",
             "authorization_details 未启用.",
         );
+    }
+
+    // A Request Object can add or replace PKCE parameters, so its expanded
+    // parameters remain subject to the later full admission check. Without a
+    // Request Object, invalid PKCE is independent of client identity and RFC
+    // 7636 requires invalid_request before client authentication is attempted.
+    if !params.contains_key("request")
+        && let Err(error) = validate_par_pkce(&params)
+    {
+        return par_admission_error(error);
     }
 
     if !params.contains_key("client_id")
