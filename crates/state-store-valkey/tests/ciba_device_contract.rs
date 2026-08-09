@@ -152,7 +152,7 @@ async fn ciba_cas_rejects_an_expired_lease_without_mutating_state() {
 }
 
 #[tokio::test]
-async fn concurrent_approved_ciba_polls_remain_retryable_for_owner_claim() {
+async fn concurrent_approved_ciba_polls_consume_auth_req_id_once() {
     let Some((connection, inspector)) = setup().await else {
         return;
     };
@@ -192,10 +192,10 @@ async fn concurrent_approved_ciba_polls_remain_retryable_for_owner_claim() {
             .into_iter()
             .filter(|result| matches!(result, Ok(CibaPollCommit::Approved(_))))
             .count(),
-        2,
-        "approved auth_req_id remains available while owner-claim issuance settles"
+        1,
+        "approved auth_req_id must have exactly one successful redemption"
     );
-    assert!(first.load(&auth_req_id).await.unwrap().is_some());
+    assert!(first.load(&auth_req_id).await.unwrap().is_none());
 }
 
 #[tokio::test]

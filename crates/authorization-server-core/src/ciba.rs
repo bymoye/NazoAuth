@@ -510,13 +510,17 @@ where
                     }
                 }
                 CibaPollTransition::Approved => {
-                    // Keep the approved request available until its bounded
-                    // retention TTL. Polling is only the read/decision step;
-                    // downstream token issuance may fail after this method
-                    // returns and must be able to retry the same grant. The
-                    // issuance owner claim provides the idempotency boundary
-                    // for concurrent duplicate polls.
-                    return Ok(CibaPollCommit::Approved(Box::new(stored.state)));
+                    match self
+                        .store
+                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
+                        .await
+                        .map_err(CibaPollFailure::Storage)?
+                    {
+                        CibaAtomicResult::Applied => {
+                            return Ok(CibaPollCommit::Approved(Box::new(stored.state)));
+                        }
+                        result => result,
+                    }
                 }
                 CibaPollTransition::Denied => {
                     match self

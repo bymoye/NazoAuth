@@ -525,7 +525,7 @@ async fn ciba_poll_lease_expiry_returns_expired_without_advancing_poll_state() {
 }
 
 #[actix_web::test]
-async fn approved_ciba_poll_lease_expiry_does_not_consume_terminal_state() {
+async fn approved_ciba_poll_lease_expiry_does_not_redeem_terminal_state() {
     let store = RecordingCibaStore::new(false);
     let mut state = pending_state(1_000);
     state.status = CibaStatus::Approved;
@@ -543,8 +543,8 @@ async fn approved_ciba_poll_lease_expiry_does_not_consume_terminal_state() {
         .poll_with_lease_deadline(auth_req_id, &state.client_id, initial, Some(900), || 1_001)
         .await;
 
-    assert!(matches!(result, Ok(CibaPollCommit::Approved(_))));
-    assert!(store.calls().is_empty());
+    assert_eq!(result, Ok(CibaPollCommit::Expired));
+    assert_eq!(store.calls(), vec![CibaStoreCall::Delete(Some(900))]);
     assert_eq!(
         service.load(auth_req_id).await.unwrap().unwrap().state(),
         &state
@@ -972,7 +972,7 @@ async fn three_concurrent_premature_polls_each_add_exactly_five_seconds() {
 }
 
 #[actix_web::test]
-async fn concurrent_approved_polls_preserve_retryable_state() {
+async fn concurrent_approved_polls_consume_state_once() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
@@ -998,8 +998,8 @@ async fn concurrent_approved_polls_preserve_retryable_state() {
         .into_iter()
         .filter(|result| matches!(result, Ok(CibaPollCommit::Approved(_))))
         .count();
-    assert_eq!(approved_count, 2);
-    assert!(service.load(&auth_req_id).await.unwrap().is_some());
+    assert_eq!(approved_count, 1);
+    assert!(service.load(&auth_req_id).await.unwrap().is_none());
 }
 
 #[actix_web::test]
@@ -1043,7 +1043,7 @@ async fn ciba_poll_conflict_retry_consumes_assertion_once() {
 }
 
 #[actix_web::test]
-async fn approved_state_survives_downstream_failure_for_retry() {
+async fn approved_state_is_consumed_before_downstream_issuance() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
@@ -1066,8 +1066,5 @@ async fn approved_state_survives_downstream_failure_for_retry() {
     assert!(matches!(committed, CibaPollCommit::Approved(_)));
     let downstream_result: Result<(), &str> = Err("deliberate issuance failure");
     assert!(downstream_result.is_err());
-    assert_eq!(
-        service.load(&auth_req_id).await.unwrap().unwrap().state(),
-        &state
-    );
+    assert!(service.load(&auth_req_id).await.unwrap().is_none());
 }

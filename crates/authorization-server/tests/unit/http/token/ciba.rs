@@ -2674,7 +2674,7 @@ async fn ciba_token_approved_state_issues_access_and_id_tokens_for_an_active_use
     let auth_req_id = format!("approved-issue-{}", Uuid::now_v7());
     store_ciba_state_with_user(&state, &client, &auth_req_id, user_id, CibaStatus::Approved).await;
 
-    let response = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id).await;
+    let response = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id.clone()).await;
     if response.status() != StatusCode::OK {
         let status = response.status();
         let body = actix_web::body::to_bytes(response.into_body())
@@ -2700,6 +2700,10 @@ async fn ciba_token_approved_state_issues_access_and_id_tokens_for_an_active_use
             .is_some_and(|token| !token.is_empty())
     );
     assert!(value.get("refresh_token").is_none());
+
+    let replay = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id).await;
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&replay), "invalid_grant");
 }
 
 #[actix_web::test]
