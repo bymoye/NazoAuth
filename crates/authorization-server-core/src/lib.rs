@@ -72,7 +72,7 @@ pub use authorization_request::{
     RequestObjectJtiPolicy, RequestObjectPolicy, RequestObjectReplay,
     RequestObjectVerificationError, RequestObjectVerificationInput, VerifiedRequestObject,
     normalize_request_object, normalize_request_object_owned,
-    unverified_signed_request_object_client_id, validate_expanded_par_admission, validate_par_pkce,
+    unverified_signed_request_object_client_id, validate_expanded_par_admission,
     validate_raw_par_admission, verify_request_object,
 };
 pub use authorization_service::{

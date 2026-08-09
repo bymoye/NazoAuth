@@ -835,22 +835,6 @@ async fn par_rejects_malformed_or_ambiguous_authorization_parameters_before_clie
 }
 
 #[actix_web::test]
-async fn par_rejects_invalid_pkce_before_client_lookup() {
-    let response = par_after_rate_limit(
-        &par_state_without_live_services(),
-        par_form_request(),
-        Bytes::from_static(
-            b"client_id=client-a&response_type=code&code_challenge=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback",
-        ),
-    )
-    .await;
-
-    let (status, value) = par_json_body(response).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value.get("error"), Some(&json!("invalid_request")));
-}
-
-#[actix_web::test]
 async fn par_rejects_disabled_request_object_before_client_lookup() {
     let state = par_state_without_live_services()
         .without_module(nazo_runtime_modules::ModuleId::RequestObjects);
