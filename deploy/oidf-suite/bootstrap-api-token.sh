@@ -269,7 +269,7 @@ PY
 cleanup_bootstrap
 trap - EXIT HUP INT TERM
 
-compose up -d --no-build
+compose up -d --no-build --force-recreate --no-deps server nginx
 
 python3 - "$OIDF_SUITE_BASE_URL" "$OIDF_SUITE_TOKEN_FILE" <<'PY'
 import os

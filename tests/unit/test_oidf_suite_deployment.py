@@ -57,7 +57,10 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         self.assertIn('git -C "$NAZOAUTH_SOURCE_DIR" status --porcelain', bootstrap)
         self.assertIn("run.nazoauth.source.revision", bootstrap)
         self.assertIn("compose up -d --no-build mongodb", bootstrap)
-        self.assertIn("compose up -d --no-build\n", bootstrap)
+        self.assertIn(
+            "compose up -d --no-build --force-recreate --no-deps server nginx",
+            bootstrap,
+        )
         self.assertIn("Reusing exact OIDF Suite image", bootstrap)
 
     def test_suite_token_is_a_fresh_temporary_lease_with_protected_metadata(self):
@@ -90,6 +93,9 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         compose = (ROOT / "deploy" / "oidf-suite" / "compose.yml").read_text(
             encoding="utf-8"
         )
+        proxy = (ROOT / "deploy" / "oidf-proxy" / "nginx.conf").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn(
             "image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-321bc5bc}",
@@ -110,6 +116,13 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         self.assertIn('"$container_runtime" rm -f "$bootstrap_container"', bootstrap)
         self.assertIn('"$OIDF_SUITE_SOURCE_DIR/nginx/Dockerfile"', bootstrap)
         self.assertIn("Reusing exact OIDF Suite TLS ingress image", bootstrap)
+        self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", proxy)
+        self.assertIn(
+            "ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:"
+            "ECDHE-RSA-AES256-GCM-SHA384;",
+            proxy,
+        )
+        self.assertIn("ssl_prefer_server_ciphers on;", proxy)
 
 
 if __name__ == "__main__":
