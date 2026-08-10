@@ -177,7 +177,14 @@ OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG = {
     **{
         f"openid4vc-{slug}.json": (
             plan,
-            frozenset({"oid4vp-1final-verifier-happy-flow"}),
+            frozenset(
+                {
+                    "oid4vp-1final-verifier-happy-flow",
+                    "oid4vp-1final-verifier-minimal-cnf-jwk",
+                    "oid4vp-1final-verifier-request-uri-method-post",
+                    "oid4vp-1final-verifier-request-uri-fetched-twice",
+                }
+            ),
         )
         for plan, slugs in (
             (

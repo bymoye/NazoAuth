@@ -1271,7 +1271,7 @@ class RunOidfConformanceTests(unittest.TestCase):
             },
         )
 
-    def test_openid4vc_review_allowlist_is_exactly_the_seven_vp_happy_flows(self):
+    def test_openid4vc_review_allowlist_is_exactly_the_seven_vp_positive_sets(self):
         module = load_runner_module()
         entries = {
             filename: context
@@ -1302,7 +1302,12 @@ class RunOidfConformanceTests(unittest.TestCase):
             )
             self.assertEqual(
                 review_modules,
-                {"oid4vp-1final-verifier-happy-flow"},
+                {
+                    "oid4vp-1final-verifier-happy-flow",
+                    "oid4vp-1final-verifier-minimal-cnf-jwk",
+                    "oid4vp-1final-verifier-request-uri-method-post",
+                    "oid4vp-1final-verifier-request-uri-fetched-twice",
+                },
             )
 
     def test_unexpected_review_is_not_hidden_by_successful_completion_log(self):
