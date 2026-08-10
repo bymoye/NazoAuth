@@ -3,6 +3,51 @@ use uuid::Uuid;
 
 use crate::{OAuthClient, ValidatedClientRegistration};
 
+/// Caller-supplied client secret used only by the privileged conformance
+/// onboarding path. It is deliberately not serializable and its debug output
+/// is redacted. The backing bytes are wiped when the value is dropped.
+pub struct SuppliedClientSecret(Vec<u8>);
+
+impl SuppliedClientSecret {
+    pub fn new(value: impl AsRef<[u8]>) -> Result<Self, &'static str> {
+        let value = value.as_ref();
+        if value.len() < 32
+            || value.len() > 512
+            || value.iter().any(|byte| {
+                *byte == 0 || *byte == b'\r' || *byte == b'\n' || (*byte).is_ascii_control()
+            })
+        {
+            return Err("supplied client secret has invalid size or characters");
+        }
+        let distinct = value
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if distinct.len() < 16 {
+            return Err("supplied client secret has insufficient entropy");
+        }
+        Ok(Self(value.to_vec()))
+    }
+
+    pub(crate) fn as_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.0)
+    }
+}
+
+impl std::fmt::Debug for SuppliedClientSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl Drop for SuppliedClientSecret {
+    fn drop(&mut self) {
+        for byte in &mut self.0 {
+            *byte = 0;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedClientRegistration {
     pub tenant: TenantContext,
@@ -41,6 +86,12 @@ impl std::fmt::Debug for PreparedClientRegistration {
     }
 }
 
+impl Drop for PreparedClientRegistration {
+    fn drop(&mut self) {
+        wipe_secret_string(&mut self.issued_secret);
+    }
+}
+
 impl std::ops::Deref for PreparedClientRegistration {
     type Target = ValidatedClientRegistration;
 
@@ -71,5 +122,18 @@ impl std::fmt::Debug for CreatedClient {
                 &self.issued_secret.as_ref().map(|_| "[REDACTED]"),
             )
             .finish()
+    }
+}
+
+impl Drop for CreatedClient {
+    fn drop(&mut self) {
+        wipe_secret_string(&mut self.issued_secret);
+    }
+}
+
+fn wipe_secret_string(value: &mut Option<String>) {
+    if let Some(secret) = value.take() {
+        let mut bytes = secret.into_bytes();
+        bytes.fill(0);
     }
 }

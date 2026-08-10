@@ -179,6 +179,11 @@ pub enum SecretBinding {
 #[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TaskOperation {
     MigrateApply,
+    /// Read the deployment-owned, machine-readable OIDF matrix descriptor.
+    ///
+    /// The descriptor is public capability metadata.  It must never contain
+    /// credentials, private keys, or generated client material.
+    ConformanceMatrixDescribe,
     ConformanceLeaseCreate {
         profile: String,
         material_sha256: String,
@@ -196,6 +201,20 @@ pub enum TaskOperation {
         ciba_automated_decision_token_sha256: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_material: Option<Openid4vcConformanceTrust>,
+        ttl_seconds: u64,
+    },
+    /// Atomically provisions a short-lived OIDF conformance environment.
+    ///
+    /// The signed task contains only non-secret onboarding commitments.  The
+    /// runtime reads the matching bundle from its fixed, privileged material
+    /// channel; bundle bytes (including applicant credentials) never cross
+    /// this protocol boundary.
+    ConformanceOnboardingApply {
+        profile: String,
+        bundle_schema: u32,
+        bundle_sha256: String,
+        matrix_sha256: String,
+        client_count: u32,
         ttl_seconds: u64,
     },
     ConformanceLeaseList,
@@ -333,6 +352,9 @@ pub enum TaskResult {
     Migration {
         applied: bool,
     },
+    ConformanceMatrix {
+        summary: ConformanceMatrixSummary,
+    },
     KeyList {
         keyset_revision: String,
     },
@@ -349,6 +371,9 @@ pub enum TaskResult {
     },
     ConformanceLeaseCreated {
         lease: ConformanceLeaseSummary,
+    },
+    ConformanceOnboardingApplied {
+        onboarding: ConformanceOnboardingSummary,
     },
     ConformanceLeaseList {
         leases: Vec<ConformanceLeaseSummary>,
@@ -373,6 +398,143 @@ pub struct ConformanceLeaseSummary {
     pub expires_at: i64,
     pub revoked_at: Option<i64>,
     pub cleaned_at: Option<i64>,
+}
+
+/// Non-secret output of an atomic conformance onboarding transaction.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceOnboardingSummary {
+    pub lease_id: String,
+    pub request_jti: String,
+    pub applicant_id: String,
+    pub client_mappings: Vec<ConformanceClientIdMapping>,
+    pub client_count: u32,
+    pub matrix_sha256: String,
+    pub bundle_sha256: String,
+    pub expires_at: i64,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceClientIdMapping {
+    pub logical_client_id: String,
+    pub client_id: String,
+}
+
+/// Bounded metadata returned by MatrixDescribe. The descriptor itself is
+/// written to the fixed secure output channel; it never enters a receipt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixSummary {
+    pub schema: u32,
+    pub sha256: String,
+    pub size: u64,
+    pub group_count: u32,
+    pub plan_count: u32,
+    pub source_release: String,
+}
+
+/// Deployment-owned OIDF capability matrix. This is the single non-secret
+/// authority consumed by both the server and CTL. `config_template` values
+/// contain only bounded placeholders; generated credentials and private keys
+/// are injected by CTL after onboarding and never appear in this document.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixDescriptor {
+    pub schema: u32,
+    pub source: ConformanceMatrixSource,
+    pub groups: Vec<ConformanceMatrixGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixSource {
+    pub release: String,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixGroup {
+    pub id: String,
+    pub profile: String,
+    pub variant: ConformanceMatrixVariant,
+    #[serde(default)]
+    pub required_roles: Vec<ConformanceMatrixRoleRequirement>,
+    pub plans: Vec<ConformanceMatrixPlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixVariant {
+    pub id: String,
+    #[serde(default)]
+    pub values: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixPlan {
+    pub id: String,
+    pub plan: String,
+    pub config_template: serde_json::Value,
+    #[serde(default)]
+    pub variant: BTreeMap<String, String>,
+    #[serde(default)]
+    pub required_roles: Vec<ConformanceMatrixRoleRequirement>,
+    #[serde(default)]
+    pub secret_bindings: BTreeMap<String, String>,
+    #[serde(default)]
+    pub crypto: ConformanceMatrixCryptoPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixRoleRequirement {
+    pub role: String,
+    #[serde(default)]
+    pub logical_client_id: Option<String>,
+    #[serde(default)]
+    pub secret_refs: Vec<String>,
+    /// Optional public client-registration template. It may contain only the
+    /// same scalar placeholders as a plan config template; secrets/private
+    /// keys are generated by CTL and never embedded here.
+    #[serde(default)]
+    pub registration_template: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixCryptoPolicy {
+    #[serde(default = "default_conformance_rsa_bits")]
+    pub rsa_bits: u16,
+    #[serde(default = "default_conformance_ec_curve")]
+    pub ec_curve: String,
+    #[serde(default = "default_conformance_mtls_signature")]
+    pub mtls_signature: String,
+}
+
+impl Default for ConformanceMatrixCryptoPolicy {
+    fn default() -> Self {
+        Self {
+            rsa_bits: default_conformance_rsa_bits(),
+            ec_curve: default_conformance_ec_curve(),
+            mtls_signature: default_conformance_mtls_signature(),
+        }
+    }
+}
+
+fn default_conformance_rsa_bits() -> u16 {
+    2048
+}
+
+fn default_conformance_ec_curve() -> String {
+    "P-256".to_owned()
+}
+
+fn default_conformance_mtls_signature() -> String {
+    "ECDSA-P256-SHA256".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

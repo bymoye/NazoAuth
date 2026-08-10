@@ -29,9 +29,10 @@ pub use authorization::AuthorizationRepository;
 pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::OAuthClientRepository;
 pub use conformance_leases::{
-    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeasePublicMaterial,
-    ConformanceLeaseRepository, ConformanceLeaseTokenDigests, MAX_CONFORMANCE_LEASE_SECONDS,
-    MIN_CONFORMANCE_LEASE_SECONDS,
+    ConformanceApplicant, ConformanceClient, ConformanceClientMapping, ConformanceLease,
+    ConformanceLeaseCleanup, ConformanceLeasePublicMaterial, ConformanceLeaseRepository,
+    ConformanceLeaseTokenDigests, ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest,
+    ConformanceOnboardingResult, MAX_CONFORMANCE_LEASE_SECONDS, MIN_CONFORMANCE_LEASE_SECONDS,
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};

@@ -21,6 +21,39 @@ where
     S: SectorIdentifierResolverPort + ?Sized,
     C: AdminClientCryptoPort + ?Sized,
 {
+    let (issued_secret, client_secret_hash) = if request.client_type == "confidential"
+        && matches!(
+            request.token_endpoint_auth_method.as_str(),
+            "client_secret_basic" | "client_secret_post"
+        ) {
+        let (secret, digest) = crypto.issue_client_secret(&policy.client_secret_pepper);
+        (Some(secret), Some(digest))
+    } else {
+        (None, None)
+    };
+    prepare_client_registration_with_material(
+        request,
+        policy,
+        sector_identifiers,
+        crypto,
+        issued_secret,
+        client_secret_hash,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_client_registration_with_material<S, C>(
+    request: CreateClientRequest,
+    policy: &AdminClientPolicy,
+    sector_identifiers: &S,
+    crypto: &C,
+    issued_secret: Option<String>,
+    client_secret_hash: Option<String>,
+) -> Result<PreparedClientRegistration, AdminClientError>
+where
+    S: SectorIdentifierResolverPort + ?Sized,
+    C: AdminClientCryptoPort + ?Sized,
+{
     request
         .security_policy
         .validate()
@@ -43,16 +76,6 @@ where
         },
         crypto,
     )?;
-    let (issued_secret, client_secret_hash) = if request.client_type == "confidential"
-        && matches!(
-            request.token_endpoint_auth_method.as_str(),
-            "client_secret_basic" | "client_secret_post"
-        ) {
-        let (secret, digest) = crypto.issue_client_secret(&policy.client_secret_pepper);
-        (Some(secret), Some(digest))
-    } else {
-        (None, None)
-    };
     let subject_type = request.subject_type.unwrap_or_else(|| "public".to_owned());
     let redirect_uris = request.redirect_uris;
     let (sector_identifier_uri, sector_identifier_host) = pairwise_subject(

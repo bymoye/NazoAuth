@@ -15,6 +15,9 @@ pub const CONTROL_DISCOVERY_PRODUCT: &str = "nazoauth";
 pub const MAX_COMPACT_JWS_BYTES: usize = 64 * 1024;
 pub const MAX_TASK_LIFETIME_SECONDS: i64 = 60;
 pub const MAX_DISCOVERY_LIFETIME_SECONDS: i64 = 60;
+pub const MAX_CONFORMANCE_ONBOARDING_CLIENTS: u32 = 256;
+pub const MAX_CONFORMANCE_MATRIX_GROUPS: usize = 64;
+pub const MAX_CONFORMANCE_MATRIX_PLANS: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
@@ -48,11 +51,12 @@ pub use signing::{
     sign_runtime_receipt, sign_task, sign_trust_transition,
 };
 pub use verification::{
-    validate_discovery_request, validate_file_identifier_value,
-    validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
-    verify_adoption_receipt, verify_deployment_statement, verify_discovery_statement,
-    verify_final_receipt, verify_management_event, verify_runtime_receipt, verify_task,
-    verify_task_signature, verify_task_window, verify_trust_transition,
+    validate_conformance_matrix_descriptor, validate_discovery_request,
+    validate_file_identifier_value, validate_runtime_receipt_deployment_binding,
+    validate_task_deployment_binding, verify_adoption_receipt, verify_deployment_statement,
+    verify_discovery_statement, verify_final_receipt, verify_management_event,
+    verify_runtime_receipt, verify_task, verify_task_signature, verify_task_window,
+    verify_trust_transition,
 };
 pub use wire::*;
 

@@ -1,10 +1,12 @@
+use base64::Engine as _;
 use uuid::Uuid;
 
 use super::{
     AdminClientCryptoPort, AdminClientError, AdminClientPolicy, AdminClientRepositoryPort,
     CreateClientRequest, CreatedClient, PatchClientRequest, PreparedClientRegistration,
-    SectorIdentifierResolverPort,
+    SectorIdentifierResolverPort, SuppliedClientSecret,
 };
+use crate::ClientSecretDigesterPort;
 use crate::OAuthClient;
 
 pub struct AdminClientService<R, S, C> {
@@ -135,4 +137,49 @@ pub async fn insert_prepared_client<R: AdminClientRepositoryPort>(
         ));
     }
     Ok(inserted)
+}
+
+impl<R, S, C> AdminClientService<R, S, C>
+where
+    R: AdminClientRepositoryPort,
+    S: SectorIdentifierResolverPort,
+    C: AdminClientCryptoPort + ClientSecretDigesterPort,
+{
+    /// Prepare a registration while binding a caller-supplied secret. This is
+    /// restricted to the privileged conformance onboarding adapter; ordinary
+    /// administrative registration continues to generate a fresh secret.
+    pub async fn prepare_registration_with_secret(
+        &self,
+        request: CreateClientRequest,
+        secret: SuppliedClientSecret,
+    ) -> Result<PreparedClientRegistration, AdminClientError> {
+        let requires_secret = request.client_type == "confidential"
+            && matches!(
+                request.token_endpoint_auth_method.as_str(),
+                "client_secret_basic" | "client_secret_post"
+            );
+        if !requires_secret {
+            return Err(AdminClientError::InvalidRequest(
+                "supplied client secret is only valid for confidential client_secret auth"
+                    .to_owned(),
+            ));
+        }
+        let secret = secret.as_str().map_err(|_| {
+            AdminClientError::InvalidRequest("supplied client secret is not UTF-8".to_owned())
+        })?;
+        let salt =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        let client_secret_hash =
+            self.crypto
+                .client_secret_digest(secret, &self.policy.client_secret_pepper, &salt);
+        super::registration::prepare_client_registration_with_material(
+            request,
+            &self.policy,
+            &self.sector_identifiers,
+            &self.crypto,
+            Some(secret.to_owned()),
+            Some(client_secret_hash),
+        )
+        .await
+    }
 }

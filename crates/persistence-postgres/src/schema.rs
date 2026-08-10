@@ -234,6 +234,36 @@ diesel::table! {
         expires_at -> Timestamptz,
         revoked_at -> Nullable<Timestamptz>,
         cleaned_at -> Nullable<Timestamptz>,
+        task_jti -> Varchar,
+        bundle_schema -> Int4,
+        bundle_sha256 -> Varchar,
+        client_count -> Int4,
+    }
+}
+
+diesel::table! {
+    conformance_lease_applicants (tenant_id, lease_id) {
+        tenant_id -> Uuid,
+        lease_id -> Uuid,
+        applicant_user_id -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+        cleaned_at -> Nullable<Timestamptz>,
+        deleted_at -> Nullable<Timestamptz>,
+        deleted_token_count -> Int4,
+        deleted_grant_count -> Int4,
+        deleted_access_request_count -> Int4,
+        deleted_mtls_request_count -> Int4,
+        deleted_user_state_count -> Int4,
+    }
+}
+
+diesel::table! {
+    conformance_lease_clients (tenant_id, lease_id, logical_client_id) {
+        tenant_id -> Uuid,
+        lease_id -> Uuid,
+        logical_client_id -> Varchar,
+        client_id -> Uuid,
+        created_at -> Timestamptz,
     }
 }
 
@@ -412,6 +442,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_client_grants,
     client_access_requests,
     conformance_leases,
+    conformance_lease_applicants,
+    conformance_lease_clients,
     oauth_clients,
     access_token_revocations,
     scim_tokens,

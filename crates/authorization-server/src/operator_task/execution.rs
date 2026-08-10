@@ -1,10 +1,18 @@
 use super::*;
 
+#[cfg(test)]
 pub(super) async fn execute(operation: &TaskOperation) -> TaskOutcome {
+    execute_with_jti(operation, "request-00000000000000000000000000000000").await
+}
+
+pub(super) async fn execute_with_jti(operation: &TaskOperation, task_jti: &str) -> TaskOutcome {
     let result = match operation {
         TaskOperation::MigrateApply => crate::cli::run_migrations()
             .await
             .map(|applied| TaskResult::Migration { applied }),
+        TaskOperation::ConformanceMatrixDescribe => {
+            crate::conformance_lease::operator_matrix_describe().await
+        }
         TaskOperation::ConformanceLeaseCreate {
             profile,
             material_sha256,
@@ -19,6 +27,25 @@ pub(super) async fn execute(operation: &TaskOperation) -> TaskOutcome {
                 dynamic_registration_initial_access_token_sha256.as_deref(),
                 ciba_automated_decision_token_sha256.as_deref(),
                 public_material.clone(),
+                *ttl_seconds,
+            )
+            .await
+        }
+        TaskOperation::ConformanceOnboardingApply {
+            profile,
+            bundle_schema,
+            bundle_sha256,
+            matrix_sha256,
+            client_count,
+            ttl_seconds,
+        } => {
+            crate::conformance_lease::operator_onboarding_apply(
+                task_jti,
+                profile,
+                *bundle_schema,
+                bundle_sha256,
+                matrix_sha256,
+                *client_count,
                 *ttl_seconds,
             )
             .await

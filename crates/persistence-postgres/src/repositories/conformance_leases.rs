@@ -1,12 +1,29 @@
 use chrono::{DateTime, Duration, Utc};
-use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
-use diesel_async::{AsyncConnection, RunQueryDsl};
-use nazo_identity::ports::RepositoryError;
+use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper, sql_query};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use nazo_auth::PreparedClientRegistration;
+use nazo_identity::{
+    TenantContext,
+    ports::{PasswordHashInput, RepositoryError},
+};
 use serde_json::Value;
-use std::future::Future;
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+};
 use uuid::Uuid;
 
-use crate::{DbPool, get_conn, schema::conformance_leases};
+use crate::{
+    DbPool, get_conn,
+    repositories::{
+        access_requests::insert_client,
+        mtls_trust::{
+            ConformanceApprovedTrustAnchor, insert_conformance_approved_trust_anchor_on_connection,
+        },
+        users::insert_conformance_applicant_on_connection,
+    },
+    schema::{conformance_lease_applicants, conformance_lease_clients, conformance_leases},
+};
 
 pub const MIN_CONFORMANCE_LEASE_SECONDS: i64 = 60;
 pub const MAX_CONFORMANCE_LEASE_SECONDS: i64 = 24 * 60 * 60;
@@ -16,6 +33,121 @@ const CIBA_DECISION_CLAIM_SECONDS: i64 = 30;
 // thirty-second claim deadline before returning a bounded conflict.
 const CIBA_REVOKE_WAIT_ATTEMPTS: usize = 121;
 const CIBA_REVOKE_WAIT_MILLIS: u64 = 250;
+const MAX_ONBOARDING_CLIENTS: usize = 512;
+const MAX_ONBOARDING_TASK_JTI_BYTES: usize = 255;
+const MAX_ONBOARDING_LOGICAL_ID_BYTES: usize = 128;
+const ATOMIC_CONFORMANCE_PROFILE: &str = "nazoauth-full";
+
+/// Input to the one-transaction conformance provisioning boundary.  The
+/// bundle has already been parsed and cryptographically verified by the
+/// operator layer; persistence still binds its canonical digest and checks all
+/// tenant/role/foreign-key invariants before writing.
+#[derive(Clone)]
+pub struct ConformanceOnboardingRequest {
+    pub tenant: TenantContext,
+    pub task_jti: String,
+    pub profile: String,
+    pub bundle_schema: i32,
+    pub bundle_sha256: String,
+    pub material_sha256: String,
+    /// DCR initial-access token digest; plaintext token material is never
+    /// accepted by this persistence boundary.
+    pub dynamic_registration_initial_access_token_sha256: Option<String>,
+    /// CIBA automated-decision token digest; plaintext token material is never
+    /// accepted by this persistence boundary.
+    pub ciba_automated_decision_token_sha256: Option<String>,
+    pub client_count: i32,
+    pub ttl_seconds: i64,
+    pub applicant: ConformanceApplicant,
+    pub clients: Vec<ConformanceClient>,
+    pub mtls_trust_anchors: Vec<ConformanceMtlsTrustAnchor>,
+}
+
+impl std::fmt::Debug for ConformanceOnboardingRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConformanceOnboardingRequest")
+            .field("tenant", &self.tenant)
+            .field("task_jti", &self.task_jti)
+            .field("profile", &self.profile)
+            .field("bundle_schema", &self.bundle_schema)
+            .field("bundle_sha256", &self.bundle_sha256)
+            .field("material_sha256", &self.material_sha256)
+            .field(
+                "dynamic_registration_initial_access_token_sha256",
+                &self
+                    .dynamic_registration_initial_access_token_sha256
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field(
+                "ciba_automated_decision_token_sha256",
+                &self
+                    .ciba_automated_decision_token_sha256
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("client_count", &self.client_count)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("applicant", &self.applicant)
+            .field("clients", &self.clients)
+            .field("mtls_trust_anchors", &self.mtls_trust_anchors)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct ConformanceApplicant {
+    pub username: String,
+    pub email: String,
+    pub password_hash: PasswordHashInput,
+    pub email_verified: bool,
+}
+
+impl std::fmt::Debug for ConformanceApplicant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConformanceApplicant")
+            .field("username", &self.username)
+            .field("email", &self.email)
+            .field("password_hash", &"[REDACTED]")
+            .field("email_verified", &self.email_verified)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ConformanceClient {
+    pub logical_client_id: String,
+    pub prepared: PreparedClientRegistration,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConformanceMtlsTrustAnchor {
+    pub logical_client_id: String,
+    pub certificate_pem: String,
+    pub certificate_sha256: String,
+    pub subject_dn: String,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConformanceOnboardingResult {
+    pub lease_id: Uuid,
+    pub applicant_user_id: Option<Uuid>,
+    pub client_mappings: Vec<ConformanceClientMapping>,
+    pub client_count: i32,
+    pub bundle_sha256: String,
+    pub expires_at: DateTime<Utc>,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConformanceClientMapping {
+    pub logical_client_id: String,
+    pub client_id: Uuid,
+}
 
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::conformance_leases)]
@@ -31,6 +163,10 @@ pub struct ConformanceLease {
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub cleaned_at: Option<DateTime<Utc>>,
+    pub task_jti: String,
+    pub bundle_schema: i32,
+    pub bundle_sha256: String,
+    pub client_count: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -62,6 +198,202 @@ impl ConformanceLeaseRepository {
     #[must_use]
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
+    }
+
+    /// Atomically provisions one conformance run.  The task JTI is the
+    /// tenant-scoped idempotency key; `bundle_sha256` and the semantic fields
+    /// are compared on every replay before any existing rows are returned.
+    ///
+    /// The transaction writes the lease, ordinary applicant, lease-bound
+    /// clients, and explicitly sourced operator mTLS trust state.  No
+    /// repository called here acquires its own connection, so a failed step
+    /// rolls all preceding writes back together.
+    pub async fn onboard(
+        &self,
+        request: ConformanceOnboardingRequest,
+    ) -> Result<ConformanceOnboardingResult, RepositoryError> {
+        validate_onboarding_request(&request)?;
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        let request = request.clone();
+        connection
+            .transaction::<ConformanceOnboardingResult, OnboardingTxError, _>(
+                async move |connection| {
+                    let existing = sql_query(
+                        "SELECT id, tenant_id, profile, material_sha256,
+                                dynamic_registration_initial_access_token_sha256,
+                                ciba_automated_decision_token_sha256,
+                                expires_at, revoked_at, cleaned_at,
+                                task_jti, bundle_schema, bundle_sha256, client_count
+                         FROM conformance_leases
+                         WHERE tenant_id = $1 AND task_jti = $2
+                         FOR UPDATE",
+                    )
+                    .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+                    .bind::<diesel::sql_types::Text, _>(&request.task_jti)
+                    .get_result::<OnboardingLeaseRow>(connection)
+                    .await
+                    .optional()?;
+
+                    if let Some(existing) = existing {
+                        return replay_or_conflict(connection, &request, existing).await;
+                    }
+
+                    let lease_id = Uuid::now_v7();
+                    let now = Utc::now();
+                    let expires_at = now
+                        .checked_add_signed(Duration::seconds(request.ttl_seconds))
+                        .ok_or_else(|| {
+                            OnboardingTxError::Repository(RepositoryError::Consistency(
+                                "conformance onboarding ttl overflow".to_owned(),
+                            ))
+                        })?;
+                    let inserted = sql_query(
+                        "INSERT INTO conformance_leases (
+                             id, tenant_id, profile, material_sha256,
+                             dynamic_registration_initial_access_token_sha256,
+                             ciba_automated_decision_token_sha256,
+                             created_at, expires_at, task_jti, bundle_schema,
+                             bundle_sha256, client_count, public_material
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL)
+                         ON CONFLICT (tenant_id, task_jti) DO NOTHING
+                         RETURNING id, tenant_id, profile, material_sha256,
+                                   dynamic_registration_initial_access_token_sha256,
+                                   ciba_automated_decision_token_sha256,
+                                   expires_at, revoked_at, cleaned_at,
+                                   task_jti, bundle_schema, bundle_sha256,
+                                   client_count",
+                    )
+                    .bind::<diesel::sql_types::Uuid, _>(lease_id)
+                    .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+                    .bind::<diesel::sql_types::Text, _>(&request.profile)
+                    .bind::<diesel::sql_types::Text, _>(&request.material_sha256)
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(
+                        request
+                            .dynamic_registration_initial_access_token_sha256
+                            .as_deref(),
+                    )
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(
+                        request.ciba_automated_decision_token_sha256.as_deref(),
+                    )
+                    .bind::<diesel::sql_types::Timestamptz, _>(now)
+                    .bind::<diesel::sql_types::Timestamptz, _>(expires_at)
+                    .bind::<diesel::sql_types::Text, _>(&request.task_jti)
+                    .bind::<diesel::sql_types::Integer, _>(request.bundle_schema)
+                    .bind::<diesel::sql_types::Text, _>(&request.bundle_sha256)
+                    .bind::<diesel::sql_types::Integer, _>(request.client_count)
+                    .get_result::<OnboardingLeaseRow>(connection)
+                    .await
+                    .optional()?;
+                    let Some(lease) = inserted else {
+                        // A concurrent transaction won the unique key race.
+                        // It committed before the INSERT returned, so the
+                        // locked replay path is now deterministic.
+                        let existing = sql_query(
+                            "SELECT id, tenant_id, profile, material_sha256,
+                                    dynamic_registration_initial_access_token_sha256,
+                                    ciba_automated_decision_token_sha256,
+                                    expires_at, revoked_at, cleaned_at,
+                                    task_jti, bundle_schema, bundle_sha256,
+                                    client_count
+                             FROM conformance_leases
+                             WHERE tenant_id = $1 AND task_jti = $2
+                             FOR UPDATE",
+                        )
+                        .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+                        .bind::<diesel::sql_types::Text, _>(&request.task_jti)
+                        .get_result::<OnboardingLeaseRow>(connection)
+                        .await?;
+                        return replay_or_conflict(connection, &request, existing).await;
+                    };
+
+                    let applicant_user_id = insert_conformance_applicant_on_connection(
+                        connection,
+                        request.tenant,
+                        &request.applicant.username,
+                        &request.applicant.email,
+                        request.applicant.password_hash.clone(),
+                        request.applicant.email_verified,
+                    )
+                    .await?;
+                    diesel::insert_into(conformance_lease_applicants::table)
+                        .values((
+                            conformance_lease_applicants::tenant_id
+                                .eq(request.tenant.tenant_id.as_uuid()),
+                            conformance_lease_applicants::lease_id.eq(lease.id),
+                            conformance_lease_applicants::applicant_user_id.eq(applicant_user_id),
+                        ))
+                        .execute(connection)
+                        .await?;
+
+                    let mut client_mappings = Vec::with_capacity(request.clients.len());
+                    for client in &request.clients {
+                        let mut prepared = client.prepared.clone();
+                        prepared.conformance_lease_id = Some(lease.id);
+                        let approved = insert_client(connection, request.tenant, &prepared)
+                            .await
+                            .map_err(OnboardingTxError::Repository)?;
+                        diesel::insert_into(conformance_lease_clients::table)
+                            .values((
+                                conformance_lease_clients::tenant_id
+                                    .eq(request.tenant.tenant_id.as_uuid()),
+                                conformance_lease_clients::lease_id.eq(lease.id),
+                                conformance_lease_clients::logical_client_id
+                                    .eq(&client.logical_client_id),
+                                conformance_lease_clients::client_id.eq(approved.id),
+                            ))
+                            .execute(connection)
+                            .await?;
+                        client_mappings.push(ConformanceClientMapping {
+                            logical_client_id: client.logical_client_id.clone(),
+                            client_id: approved.id,
+                        });
+                    }
+
+                    for anchor in &request.mtls_trust_anchors {
+                        let client_id = request
+                            .clients
+                            .iter()
+                            .zip(client_mappings.iter().map(|mapping| mapping.client_id))
+                            .find(|(client, _)| {
+                                client.logical_client_id == anchor.logical_client_id
+                            })
+                            .map(|(_, client_id)| client_id)
+                            .ok_or_else(|| {
+                                OnboardingTxError::Repository(RepositoryError::Consistency(
+                                    "conformance trust anchor references an unknown logical client"
+                                        .to_owned(),
+                                ))
+                            })?;
+                        insert_conformance_approved_trust_anchor_on_connection(
+                            connection,
+                            ConformanceApprovedTrustAnchor {
+                                tenant_id: request.tenant.tenant_id,
+                                applicant_user_id,
+                                client_id,
+                                certificate_pem: &anchor.certificate_pem,
+                                certificate_sha256: &anchor.certificate_sha256,
+                                subject_dn: &anchor.subject_dn,
+                                not_before: anchor.not_before,
+                                not_after: anchor.not_after,
+                            },
+                        )
+                        .await
+                        .map_err(OnboardingTxError::Repository)?;
+                    }
+
+                    Ok(ConformanceOnboardingResult {
+                        lease_id: lease.id,
+                        applicant_user_id: Some(applicant_user_id),
+                        client_mappings,
+                        client_count: request.client_count,
+                        bundle_sha256: request.bundle_sha256,
+                        expires_at: lease.expires_at,
+                        idempotent_replay: false,
+                    })
+                },
+            )
+            .await
+            .map_err(OnboardingTxError::into_repository)
     }
 
     pub async fn create(
@@ -134,9 +466,11 @@ impl ConformanceLeaseRepository {
             .ok_or_else(|| {
                 RepositoryError::Consistency("conformance lease ttl overflow".to_owned())
             })?;
+        let lease_id = Uuid::now_v7();
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
         diesel::insert_into(conformance_leases::table)
             .values((
+                conformance_leases::id.eq(lease_id),
                 conformance_leases::tenant_id.eq(tenant_id),
                 conformance_leases::profile.eq(profile),
                 conformance_leases::material_sha256.eq(material_sha256),
@@ -147,6 +481,10 @@ impl ConformanceLeaseRepository {
                 conformance_leases::public_material.eq(public_material),
                 conformance_leases::created_at.eq(now),
                 conformance_leases::expires_at.eq(expires_at),
+                conformance_leases::task_jti.eq(format!("legacy:{lease_id}")),
+                conformance_leases::bundle_schema.eq(1),
+                conformance_leases::bundle_sha256.eq(material_sha256),
+                conformance_leases::client_count.eq(0),
             ))
             .returning(ConformanceLease::as_returning())
             .get_result(&mut connection)
@@ -735,6 +1073,383 @@ impl ConformanceLeaseRepository {
 }
 
 #[derive(diesel::QueryableByName)]
+struct OnboardingLeaseRow {
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    id: Uuid,
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    tenant_id: Uuid,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    profile: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    material_sha256: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    dynamic_registration_initial_access_token_sha256: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    ciba_automated_decision_token_sha256: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+    expires_at: DateTime<Utc>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    revoked_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    cleaned_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    task_jti: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    bundle_schema: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    bundle_sha256: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    client_count: i32,
+}
+
+#[derive(diesel::QueryableByName)]
+struct ApplicantOwnerRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Uuid>)]
+    applicant_user_id: Option<Uuid>,
+}
+
+#[derive(diesel::QueryableByName)]
+struct ClientMappingRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    logical_client_id: String,
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    client_id: Uuid,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    client_is_active: bool,
+}
+
+#[derive(diesel::QueryableByName)]
+struct MtlsAnchorReplayRow {
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    client_id: Uuid,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    certificate_sha256: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    source: String,
+    #[diesel(sql_type = diesel::sql_types::SmallInt)]
+    status: i16,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    active: bool,
+}
+
+async fn replay_or_conflict(
+    connection: &mut AsyncPgConnection,
+    request: &ConformanceOnboardingRequest,
+    existing: OnboardingLeaseRow,
+) -> Result<ConformanceOnboardingResult, OnboardingTxError> {
+    if existing.tenant_id != request.tenant.tenant_id.as_uuid()
+        || existing.task_jti != request.task_jti
+        || existing.profile != request.profile
+        || existing.material_sha256 != request.material_sha256
+        || existing.dynamic_registration_initial_access_token_sha256
+            != request.dynamic_registration_initial_access_token_sha256
+        || existing.ciba_automated_decision_token_sha256
+            != request.ciba_automated_decision_token_sha256
+        || existing.bundle_schema != request.bundle_schema
+        || existing.bundle_sha256 != request.bundle_sha256
+        || existing.client_count != request.client_count
+    {
+        return Err(OnboardingTxError::Repository(RepositoryError::Conflict));
+    }
+    if existing.expires_at <= Utc::now()
+        || existing.revoked_at.is_some()
+        || existing.cleaned_at.is_some()
+    {
+        return Err(OnboardingTxError::Repository(RepositoryError::Conflict));
+    }
+    let owner = sql_query(
+        "SELECT owner.applicant_user_id
+         FROM conformance_lease_applicants owner
+         JOIN users applicant
+           ON applicant.tenant_id = owner.tenant_id
+          AND applicant.id = owner.applicant_user_id
+          AND applicant.is_active = TRUE
+          AND applicant.role = 'user'
+          AND applicant.admin_level = 0
+         WHERE owner.tenant_id = $1 AND owner.lease_id = $2
+           AND owner.cleaned_at IS NULL
+           AND owner.deleted_at IS NULL",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(existing.id)
+    .get_result::<ApplicantOwnerRow>(connection)
+    .await
+    .optional()?;
+    let mappings = sql_query(
+        "SELECT mapping.logical_client_id, mapping.client_id, client.is_active AS client_is_active
+         FROM conformance_lease_clients mapping
+         JOIN oauth_clients client
+           ON client.tenant_id = mapping.tenant_id
+          AND client.id = mapping.client_id
+          AND client.conformance_lease_id = mapping.lease_id
+         WHERE mapping.tenant_id = $1 AND mapping.lease_id = $2
+         ORDER BY mapping.logical_client_id",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(existing.id)
+    .load::<ClientMappingRow>(connection)
+    .await?;
+    let Some(owner) = owner.filter(|owner| owner.applicant_user_id.is_some()) else {
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease is missing its live onboarding applicant".to_owned(),
+        )));
+    };
+    if mappings.len() != request.clients.len() {
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease is missing its onboarding ownership rows".to_owned(),
+        )));
+    }
+    let mut by_logical_id = HashMap::with_capacity(mappings.len());
+    for mapping in mappings {
+        if !mapping.client_is_active
+            || by_logical_id
+                .insert(mapping.logical_client_id, mapping.client_id)
+                .is_some()
+        {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease client ownership mapping is inconsistent".to_owned(),
+            )));
+        }
+    }
+    let mut client_mappings = Vec::with_capacity(request.clients.len());
+    for client in &request.clients {
+        let Some(client_id) = by_logical_id.remove(&client.logical_client_id) else {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease client logical IDs do not match the onboarding bundle"
+                    .to_owned(),
+            )));
+        };
+        client_mappings.push(ConformanceClientMapping {
+            logical_client_id: client.logical_client_id.clone(),
+            client_id,
+        });
+    }
+    if !by_logical_id.is_empty() {
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease contains an unexpected logical client mapping".to_owned(),
+        )));
+    }
+    let mut expected_anchors = HashMap::with_capacity(request.mtls_trust_anchors.len());
+    for anchor in &request.mtls_trust_anchors {
+        let Some(mapping) = client_mappings
+            .iter()
+            .find(|mapping| mapping.logical_client_id == anchor.logical_client_id)
+        else {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance trust anchor references an unknown logical client".to_owned(),
+            )));
+        };
+        expected_anchors.insert(mapping.client_id, anchor.certificate_sha256.as_str());
+    }
+    let persisted_anchors = sql_query(
+        "SELECT request.client_id, request.certificate_sha256, request.source,
+                request.status,
+                (request.status = 1
+                 AND request.source = 'operator-conformance'
+                 AND request.not_before <= CURRENT_TIMESTAMP
+                 AND request.not_after > CURRENT_TIMESTAMP) AS active
+         FROM oauth_client_mtls_trust_anchor_requests request
+         JOIN conformance_lease_clients mapping
+           ON mapping.tenant_id = request.tenant_id
+          AND mapping.lease_id = $2
+          AND mapping.client_id = request.client_id
+         WHERE request.tenant_id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(existing.id)
+    .load::<MtlsAnchorReplayRow>(connection)
+    .await?;
+    if persisted_anchors.len() != expected_anchors.len() {
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease trust-anchor ownership rows are incomplete".to_owned(),
+        )));
+    }
+    for anchor in persisted_anchors {
+        let Some(expected_digest) = expected_anchors.remove(&anchor.client_id) else {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease contains an unexpected trust-anchor row".to_owned(),
+            )));
+        };
+        if !anchor.active
+            || anchor.status != 1
+            || anchor.source != "operator-conformance"
+            || anchor.certificate_sha256.as_str() != expected_digest
+        {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease trust-anchor row is inconsistent".to_owned(),
+            )));
+        }
+    }
+    if !expected_anchors.is_empty() {
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease trust-anchor rows are missing".to_owned(),
+        )));
+    }
+    Ok(ConformanceOnboardingResult {
+        lease_id: existing.id,
+        applicant_user_id: owner.applicant_user_id,
+        client_mappings,
+        client_count: existing.client_count,
+        bundle_sha256: existing.bundle_sha256,
+        expires_at: existing.expires_at,
+        idempotent_replay: true,
+    })
+}
+
+fn validate_onboarding_request(
+    request: &ConformanceOnboardingRequest,
+) -> Result<(), RepositoryError> {
+    if request.task_jti.trim().is_empty()
+        || request.task_jti.len() > MAX_ONBOARDING_TASK_JTI_BYTES
+        || request.task_jti != request.task_jti.trim()
+        || request.task_jti.chars().any(char::is_control)
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance task_jti must be a bounded, printable identifier".to_owned(),
+        ));
+    }
+    if request.profile.trim().is_empty()
+        || request.profile.len() > 64
+        || request.profile != request.profile.trim()
+        || request.profile.chars().any(char::is_control)
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance profile must contain 1 to 64 bytes".to_owned(),
+        ));
+    }
+    if !(MIN_CONFORMANCE_LEASE_SECONDS..=MAX_CONFORMANCE_LEASE_SECONDS)
+        .contains(&request.ttl_seconds)
+    {
+        return Err(RepositoryError::Consistency(format!(
+            "conformance onboarding ttl_seconds must be between {MIN_CONFORMANCE_LEASE_SECONDS} and {MAX_CONFORMANCE_LEASE_SECONDS}"
+        )));
+    }
+    for (digest, label) in [
+        (&request.bundle_sha256, "bundle_sha256"),
+        (&request.material_sha256, "material_sha256"),
+    ] {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance {label} must be a lowercase SHA-256 digest"
+            )));
+        }
+    }
+    for (digest, label) in [
+        (
+            &request.dynamic_registration_initial_access_token_sha256,
+            "dynamic_registration_initial_access_token_sha256",
+        ),
+        (
+            &request.ciba_automated_decision_token_sha256,
+            "ciba_automated_decision_token_sha256",
+        ),
+    ] {
+        if digest.as_deref().is_some_and(|digest| {
+            digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance {label} must be a lowercase SHA-256 digest"
+            )));
+        }
+    }
+    if request.profile != ATOMIC_CONFORMANCE_PROFILE {
+        return Err(RepositoryError::Consistency(
+            "atomic conformance onboarding only supports the nazoauth-full profile".to_owned(),
+        ));
+    }
+    if request
+        .dynamic_registration_initial_access_token_sha256
+        .is_none()
+        || request.ciba_automated_decision_token_sha256.is_none()
+    {
+        return Err(RepositoryError::Consistency(
+            "nazoauth-full onboarding requires both conformance token digests".to_owned(),
+        ));
+    }
+    if !(1..=32).contains(&request.bundle_schema)
+        || request.client_count <= 0
+        || usize::try_from(request.client_count).ok() != Some(request.clients.len())
+        || request.clients.len() > MAX_ONBOARDING_CLIENTS
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance bundle schema or client count is outside the supported bounds".to_owned(),
+        ));
+    }
+    if request.applicant.username.trim().is_empty()
+        || request.applicant.username.len() > 150
+        || request.applicant.username != request.applicant.username.trim()
+        || request.applicant.username.chars().any(char::is_control)
+        || request.applicant.email.trim().is_empty()
+        || request.applicant.email.len() > 254
+        || request.applicant.email != request.applicant.email.trim()
+        || request.applicant.email.chars().any(char::is_control)
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance applicant identity exceeds the persisted bounds".to_owned(),
+        ));
+    }
+    let mut logical_ids = HashSet::with_capacity(request.clients.len());
+    for client in &request.clients {
+        if client.logical_client_id.trim().is_empty()
+            || client.logical_client_id.len() > MAX_ONBOARDING_LOGICAL_ID_BYTES
+            || client.logical_client_id != client.logical_client_id.trim()
+            || client.logical_client_id.chars().any(char::is_control)
+            || !logical_ids.insert(client.logical_client_id.as_str())
+        {
+            return Err(RepositoryError::Consistency(
+                "conformance bundle contains a duplicate or invalid logical client id".to_owned(),
+            ));
+        }
+        if client.prepared.tenant != request.tenant
+            || client.prepared.conformance_lease_id.is_some()
+        {
+            return Err(RepositoryError::Consistency(
+                "conformance prepared client has an inconsistent tenant or lease binding"
+                    .to_owned(),
+            ));
+        }
+    }
+    let mut anchor_ids = HashSet::with_capacity(request.mtls_trust_anchors.len());
+    for anchor in &request.mtls_trust_anchors {
+        if !logical_ids.contains(anchor.logical_client_id.as_str())
+            || !anchor_ids.insert(anchor.logical_client_id.as_str())
+        {
+            return Err(RepositoryError::Consistency(
+                "conformance trust anchors must reference unique known logical clients".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+enum OnboardingTxError {
+    Diesel(diesel::result::Error),
+    Repository(RepositoryError),
+}
+
+impl From<diesel::result::Error> for OnboardingTxError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::Diesel(error)
+    }
+}
+
+impl OnboardingTxError {
+    fn into_repository(self) -> RepositoryError {
+        match self {
+            Self::Diesel(error) => map_diesel_error(error),
+            Self::Repository(error) => error,
+        }
+    }
+}
+
+#[derive(diesel::QueryableByName)]
 struct RevokeRow {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     found: bool,
@@ -821,5 +1536,87 @@ fn map_diesel_error(error: diesel::result::Error) -> RepositoryError {
             details,
         ) => RepositoryError::Consistency(details.message().to_owned()),
         other => RepositoryError::Unexpected(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_request() -> ConformanceOnboardingRequest {
+        ConformanceOnboardingRequest {
+            tenant: TenantContext::default_system(),
+            task_jti: "task-1".to_owned(),
+            profile: ATOMIC_CONFORMANCE_PROFILE.to_owned(),
+            bundle_schema: 1,
+            bundle_sha256: "a".repeat(64),
+            material_sha256: "b".repeat(64),
+            dynamic_registration_initial_access_token_sha256: Some("c".repeat(64)),
+            ciba_automated_decision_token_sha256: Some("d".repeat(64)),
+            client_count: 0,
+            ttl_seconds: MIN_CONFORMANCE_LEASE_SECONDS,
+            applicant: ConformanceApplicant {
+                username: "oidf-applicant".to_owned(),
+                email: "oidf-applicant@example.invalid".to_owned(),
+                password_hash: PasswordHashInput::new("opaque-test-hash").unwrap(),
+                email_verified: true,
+            },
+            clients: Vec::new(),
+            mtls_trust_anchors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn onboarding_rejects_empty_client_bundle_before_database_access() {
+        let request = minimal_request();
+        let error = validate_onboarding_request(&request).unwrap_err();
+        assert!(error.to_string().contains("client count"));
+    }
+
+    #[test]
+    fn onboarding_rejects_control_character_task_jti() {
+        let mut request = minimal_request();
+        request.task_jti = "task-\n1".to_owned();
+        let error = validate_onboarding_request(&request).unwrap_err();
+        assert!(error.to_string().contains("task_jti"));
+    }
+
+    #[test]
+    fn onboarding_rejects_out_of_range_ttl_before_database_access() {
+        let mut request = minimal_request();
+        request.ttl_seconds = MAX_CONFORMANCE_LEASE_SECONDS + 1;
+        let error = validate_onboarding_request(&request).unwrap_err();
+        assert!(error.to_string().contains("ttl_seconds"));
+    }
+
+    #[test]
+    fn full_onboarding_requires_both_token_digests() {
+        let mut request = minimal_request();
+        request.ciba_automated_decision_token_sha256 = None;
+        let error = validate_onboarding_request(&request).unwrap_err();
+        assert!(error.to_string().contains("requires both"));
+    }
+
+    #[test]
+    fn onboarding_rejects_malformed_or_misprofiled_token_digest() {
+        let mut request = minimal_request();
+        request.dynamic_registration_initial_access_token_sha256 = Some("not-a-digest".to_owned());
+        let error = validate_onboarding_request(&request).unwrap_err();
+        assert!(error.to_string().contains("dynamic_registration"));
+
+        request.dynamic_registration_initial_access_token_sha256 = Some("a".repeat(64));
+        request.profile = "oidc-core".to_owned();
+        let error = validate_onboarding_request(&request).unwrap_err();
+        assert!(error.to_string().contains("only supports"));
+    }
+
+    #[test]
+    fn onboarding_debug_never_contains_password_hash_material() {
+        let request = minimal_request();
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("opaque-test-hash"));
+        assert!(!debug.contains(&"c".repeat(64)));
+        assert!(!debug.contains(&"d".repeat(64)));
+        assert!(debug.contains("REDACTED"));
     }
 }

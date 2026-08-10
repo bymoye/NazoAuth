@@ -1,5 +1,93 @@
 use super::*;
 
+#[test]
+fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix must validate");
+    assert_eq!(descriptor.groups.len(), 11);
+    assert_eq!(
+        descriptor
+            .groups
+            .iter()
+            .map(|group| group.plans.len())
+            .sum::<usize>(),
+        44
+    );
+    assert_eq!(
+        descriptor
+            .groups
+            .iter()
+            .map(|group| group.plans.len())
+            .sum::<usize>(),
+        44
+    );
+    assert_eq!(
+        descriptor
+            .groups
+            .iter()
+            .filter(|group| group.profile != "openid4vc")
+            .map(|group| group.plans.len())
+            .sum::<usize>(),
+        27
+    );
+    assert_eq!(
+        descriptor
+            .groups
+            .iter()
+            .filter(|group| group.profile == "openid4vc")
+            .map(|group| group.plans.len())
+            .sum::<usize>(),
+        17
+    );
+    let encoded = serde_json::to_string(&descriptor).expect("matrix serialization");
+    let value: serde_json::Value = serde_json::from_str(&encoded).expect("matrix JSON");
+    assert!(encoded.contains("{{generated.dynamic_registration_initial_access_token}}"));
+    assert!(encoded.contains("{{generated.ciba_automated_decision_token}}"));
+    assert!(!encoded.contains("$secret"));
+    assert_no_embedded_sensitive_values(&value);
+}
+
+fn assert_no_embedded_sensitive_values(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if matches!(
+                    key.as_str(),
+                    "password"
+                        | "token"
+                        | "access_token"
+                        | "refresh_token"
+                        | "password_hash"
+                        | "client_secret"
+                        | "private_key"
+                        | "private_jwk"
+                        | "d"
+                        | "p"
+                        | "q"
+                        | "dp"
+                        | "dq"
+                        | "qi"
+                        | "oth"
+                        | "k"
+                ) {
+                    assert!(
+                        child
+                            .as_str()
+                            .is_some_and(|text| { text.starts_with("{{") && text.ends_with("}}") }),
+                        "sensitive descriptor value must be a placeholder"
+                    );
+                }
+                assert_no_embedded_sensitive_values(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                assert_no_embedded_sensitive_values(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn database_is_available() -> bool {
     if std::env::var_os("DATABASE_URL").is_some() {
         true

@@ -8,15 +8,18 @@ use crate::{
 use diesel::{
     ExpressionMethods, OptionalExtension, PgExpressionMethods, QueryDsl, SelectableHelper,
 };
+use diesel_async::AsyncPgConnection;
 use diesel_async::RunQueryDsl;
 use nazo_identity::{
     AdminPolicyError, AdminUserUpdateOutcome, AuthenticationIdentity, IdentitySecurityEvent,
     IdentitySecurityEventType, IdentitySecurityOutcome, IdentitySecurityReason, Principal,
     PublicAccount, SubjectClaims, TenantContext, TenantId, UserId, authorize_admin_update,
     ports::{
-        AdminUserUpdate, NewUser, ProfileUpdate, RepositoryError, UserPage, UserRepositoryPort,
+        AdminUserUpdate, NewUser, PasswordHashInput, ProfileUpdate, RepositoryError, UserPage,
+        UserRepositoryPort,
     },
 };
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct UserRepository {
@@ -485,6 +488,38 @@ impl UserRepository {
             .transpose()
             .map_err(|error| RepositoryError::Consistency(error.0))
     }
+}
+
+/// Inserts the ordinary applicant used by an atomic conformance onboarding
+/// transaction without acquiring another database connection.  This helper
+/// deliberately writes the role boundary explicitly instead of relying on
+/// database defaults: a conformance applicant can never become an admin as a
+/// side effect of a malformed or replayed bundle.
+pub(crate) async fn insert_conformance_applicant_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant: nazo_identity::TenantContext,
+    username: &str,
+    email: &str,
+    password_hash: PasswordHashInput,
+    email_verified: bool,
+) -> Result<Uuid, diesel::result::Error> {
+    diesel::insert_into(users::table)
+        .values((
+            users::tenant_id.eq(tenant.tenant_id.as_uuid()),
+            users::realm_id.eq(tenant.realm_id.as_uuid()),
+            users::organization_id.eq(tenant.organization_id.as_uuid()),
+            users::username.eq(username),
+            users::email.eq(email),
+            users::password_hash.eq(password_hash.into_persistence_value()),
+            users::is_active.eq(true),
+            users::mfa_enabled.eq(false),
+            users::email_verified.eq(email_verified),
+            users::role.eq("user"),
+            users::admin_level.eq(0),
+        ))
+        .returning(users::id)
+        .get_result(connection)
+        .await
 }
 
 fn admin_event(

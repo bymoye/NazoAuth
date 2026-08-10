@@ -456,6 +456,118 @@ fn conformance_lease_task_is_public_material_only_and_time_bounded() {
 }
 
 #[test]
+fn conformance_onboarding_task_is_strictly_bound_and_non_secret() {
+    let operation =
+        |bundle_schema, bundle_sha256: String, matrix_sha256: String, client_count, ttl_seconds| {
+            TaskOperation::ConformanceOnboardingApply {
+                profile: "nazoauth-full".to_owned(),
+                bundle_schema,
+                bundle_sha256,
+                matrix_sha256,
+                client_count,
+                ttl_seconds,
+            }
+        };
+    let valid = operation(2, "a".repeat(64), "b".repeat(64), 55, 28_800);
+    validate_operation(&valid).unwrap();
+    let encoded = serde_json::to_string(&valid).unwrap();
+    assert!(!encoded.contains("password"));
+    assert!(!encoded.contains("secret"));
+
+    for bundle_schema in [0, 1, 3] {
+        assert!(
+            validate_operation(&operation(
+                bundle_schema,
+                "a".repeat(64),
+                "b".repeat(64),
+                55,
+                28_800
+            ))
+            .is_err()
+        );
+    }
+    for client_count in [0, MAX_CONFORMANCE_ONBOARDING_CLIENTS + 1] {
+        assert!(
+            validate_operation(&operation(
+                2,
+                "a".repeat(64),
+                "b".repeat(64),
+                client_count,
+                28_800
+            ))
+            .is_err()
+        );
+    }
+    assert!(validate_operation(&operation(2, "A".repeat(64), "b".repeat(64), 55, 28_800)).is_err());
+    assert!(validate_operation(&operation(2, "a".repeat(64), "B".repeat(64), 55, 28_800)).is_err());
+    assert!(validate_operation(&operation(2, "a".repeat(64), "b".repeat(64), 55, 59)).is_err());
+}
+
+#[test]
+fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
+    let descriptor = ConformanceMatrixDescriptor {
+        schema: 1,
+        source: ConformanceMatrixSource {
+            release: "v0.1.0".to_owned(),
+            digest: "a".repeat(64),
+        },
+        groups: vec![ConformanceMatrixGroup {
+            id: "oidc-core".to_owned(),
+            profile: "oidc-core".to_owned(),
+            variant: ConformanceMatrixVariant {
+                id: "default".to_owned(),
+                values: BTreeMap::new(),
+            },
+            required_roles: vec![],
+            plans: vec![ConformanceMatrixPlan {
+                id: "oidc-core-default".to_owned(),
+                plan: "oidc-core".to_owned(),
+                config_template: serde_json::json!({
+                    "issuer": "{{target.issuer}}",
+                    "client_id": "{{client.rp.id}}"
+                }),
+                variant: BTreeMap::new(),
+                required_roles: vec![ConformanceMatrixRoleRequirement {
+                    role: "rp".to_owned(),
+                    logical_client_id: None,
+                    secret_refs: vec![],
+                    registration_template: Some(serde_json::json!({
+                        "client_name": "oidc-core-rp",
+                        "client_type": "confidential",
+                        "redirect_uris": ["{{target.suite}}"],
+                        "post_logout_redirect_uris": [],
+                        "scopes": ["openid"],
+                        "allowed_audiences": ["resource://default"],
+                        "grant_types": ["authorization_code"],
+                        "token_endpoint_auth_method": "private_key_jwt",
+                        "jwks": "{{client.rp.rsa.public_jwks}}"
+                    })),
+                }],
+                secret_bindings: BTreeMap::new(),
+                crypto: ConformanceMatrixCryptoPolicy {
+                    rsa_bits: 2048,
+                    ec_curve: "P-256".to_owned(),
+                    mtls_signature: "ECDSA-P256-SHA256".to_owned(),
+                },
+            }],
+        }],
+    };
+    validate_conformance_matrix_descriptor(&descriptor).unwrap();
+
+    let mut duplicate = descriptor.clone();
+    let duplicate_plan = duplicate.groups[0].plans[0].clone();
+    duplicate.groups[0].plans.push(duplicate_plan);
+    assert!(validate_conformance_matrix_descriptor(&duplicate).is_err());
+
+    let mut drift = descriptor;
+    drift.groups[0].plans[0].id = "oidc-core-default-2".to_owned();
+    drift.groups[0].plans[0].config_template = serde_json::json!({
+        "client_id": "{{unknown.client.id}}"
+    });
+    assert!(validate_conformance_matrix_descriptor(&drift).is_err());
+}
+
+#[test]
 fn dynamic_registration_initial_access_token_binding_is_lowercase_and_profile_scoped() {
     let digest = "b".repeat(64);
     let operation = TaskOperation::ConformanceLeaseCreate {

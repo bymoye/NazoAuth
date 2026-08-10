@@ -9,9 +9,10 @@ use crate::wire::*;
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
     CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA, DEPLOYMENT_STATEMENT_JWS_TYPE,
-    FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE, MAX_DISCOVERY_LIFETIME_SECONDS,
-    MAX_TASK_LIFETIME_SECONDS, PROTOCOL_VERSION, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE,
-    TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
+    FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE, MAX_CONFORMANCE_MATRIX_GROUPS,
+    MAX_CONFORMANCE_MATRIX_PLANS, MAX_CONFORMANCE_ONBOARDING_CLIENTS,
+    MAX_DISCOVERY_LIFETIME_SECONDS, MAX_TASK_LIFETIME_SECONDS, PROTOCOL_VERSION, ProtocolError,
+    RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
 };
 
 pub fn validate_discovery_request(request: &DiscoveryRequest) -> Result<(), ProtocolError> {
@@ -463,6 +464,7 @@ pub(crate) fn validate_final_receipt(receipt: &FinalReceipt) -> Result<(), Proto
 pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
     match operation {
         TaskOperation::MigrateApply
+        | TaskOperation::ConformanceMatrixDescribe
         | TaskOperation::ConformanceLeaseList
         | TaskOperation::ConformanceLeaseCleanup
         | TaskOperation::KeysList
@@ -522,6 +524,38 @@ pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), Protoc
         TaskOperation::ConformanceLeaseRevoke { lease_id } => {
             validate_file_identifier(lease_id)?;
         }
+        TaskOperation::ConformanceOnboardingApply {
+            profile,
+            bundle_schema,
+            bundle_sha256,
+            matrix_sha256,
+            client_count,
+            ttl_seconds,
+        } => {
+            validate_identifier(profile)?;
+            if profile != "nazoauth-full" {
+                return Err(ProtocolError::Policy(
+                    "unsupported conformance onboarding profile",
+                ));
+            }
+            if *bundle_schema != 2 {
+                return Err(ProtocolError::Policy(
+                    "unsupported conformance onboarding bundle schema",
+                ));
+            }
+            validate_lower_hex(bundle_sha256, 64)?;
+            validate_lower_hex(matrix_sha256, 64)?;
+            if !(1..=MAX_CONFORMANCE_ONBOARDING_CLIENTS).contains(client_count) {
+                return Err(ProtocolError::Policy(
+                    "conformance onboarding client count is out of bounds",
+                ));
+            }
+            if !(60..=86_400).contains(ttl_seconds) {
+                return Err(ProtocolError::Policy(
+                    "conformance onboarding ttl must be between 60 and 86400 seconds",
+                ));
+            }
+        }
         TaskOperation::KeysGenerateLocal { alg, purposes } => {
             validate_identifier(alg)?;
             if purposes.is_empty() || purposes.len() > 8 {
@@ -556,6 +590,443 @@ pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), Protoc
         }
     }
     Ok(())
+}
+
+pub fn validate_conformance_matrix_descriptor(
+    descriptor: &ConformanceMatrixDescriptor,
+) -> Result<(), ProtocolError> {
+    if descriptor.schema != 1 {
+        return Err(ProtocolError::Policy(
+            "unsupported conformance matrix schema",
+        ));
+    }
+    validate_identifier(&descriptor.source.release)?;
+    validate_lower_hex(&descriptor.source.digest, 64)?;
+    if descriptor.groups.is_empty() || descriptor.groups.len() > MAX_CONFORMANCE_MATRIX_GROUPS {
+        return Err(ProtocolError::Policy(
+            "conformance matrix group count is out of bounds",
+        ));
+    }
+    let mut groups = std::collections::BTreeSet::new();
+    let mut plans = std::collections::BTreeSet::new();
+    let mut logical_clients =
+        std::collections::BTreeMap::<String, ConformanceMatrixCryptoPolicy>::new();
+    let mut registrations = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    let mut plan_count = 0usize;
+    for group in &descriptor.groups {
+        validate_identifier(&group.id)?;
+        validate_identifier(&group.profile)?;
+        validate_conformance_matrix_variant(&group.variant)?;
+        if !groups.insert(&group.id) {
+            return Err(ProtocolError::Policy("duplicate conformance matrix group"));
+        }
+        validate_conformance_matrix_roles(&group.required_roles, None, &mut logical_clients)?;
+        if group.plans.is_empty() {
+            return Err(ProtocolError::Policy("duplicate conformance matrix group"));
+        }
+        for plan in &group.plans {
+            plan_count = plan_count.saturating_add(1);
+            if plan_count > MAX_CONFORMANCE_MATRIX_PLANS {
+                return Err(ProtocolError::Policy(
+                    "conformance matrix plan count is out of bounds",
+                ));
+            }
+            validate_identifier(&plan.id)?;
+            validate_identifier(&plan.plan)?;
+            if !plans.insert(&plan.id) {
+                return Err(ProtocolError::Policy("duplicate conformance matrix plan"));
+            }
+            if !plan.config_template.is_object() {
+                return Err(ProtocolError::Policy(
+                    "conformance matrix plan config must be an object",
+                ));
+            }
+            validate_conformance_matrix_variant_map(&plan.variant)?;
+            validate_conformance_matrix_crypto(&plan.crypto)?;
+            // Group roles participate in every plan's client materialization;
+            // bind them to each plan's crypto policy just as CTL does.
+            validate_conformance_matrix_roles(
+                &group.required_roles,
+                Some(&plan.crypto),
+                &mut logical_clients,
+            )?;
+            validate_conformance_matrix_roles(
+                &plan.required_roles,
+                Some(&plan.crypto),
+                &mut logical_clients,
+            )?;
+            let mut plan_logical_ids = std::collections::BTreeSet::new();
+            for role in group.required_roles.iter().chain(&plan.required_roles) {
+                if let Some(template) = &role.registration_template {
+                    let logical = role.logical_client_id.as_deref().unwrap_or(&role.role);
+                    if let Some(previous) = registrations.get(logical)
+                        && previous != template
+                    {
+                        return Err(ProtocolError::Policy(
+                            "conformance matrix client registration is inconsistent",
+                        ));
+                    }
+                    registrations.insert(logical.to_owned(), template.clone());
+                }
+                let logical = role.logical_client_id.as_deref().unwrap_or(&role.role);
+                if !plan_logical_ids.insert(logical) {
+                    return Err(ProtocolError::Policy(
+                        "duplicate conformance matrix role in plan",
+                    ));
+                }
+            }
+        }
+    }
+    if plan_count == 0 {
+        return Err(ProtocolError::Policy(
+            "conformance matrix must contain at least one plan",
+        ));
+    }
+    // Resolve placeholders only after all groups/plans have contributed their
+    // logical clients, allowing a role declared in one plan to be referenced
+    // by another plan without making validation order observable.
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            validate_conformance_matrix_bindings(&plan.secret_bindings, &logical_clients)?;
+            validate_conformance_matrix_template(
+                &plan.config_template,
+                &plan.secret_bindings,
+                &logical_clients,
+            )?;
+            for role in group.required_roles.iter().chain(&plan.required_roles) {
+                if let Some(template) = &role.registration_template {
+                    validate_conformance_registration_template_shape(template)?;
+                    validate_conformance_matrix_template(
+                        template,
+                        &plan.secret_bindings,
+                        &logical_clients,
+                    )?;
+                }
+                for reference in &role.secret_refs {
+                    validate_conformance_matrix_reference(
+                        reference,
+                        &plan.secret_bindings,
+                        &logical_clients,
+                        &mut std::collections::BTreeSet::new(),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_conformance_matrix_variant(
+    variant: &ConformanceMatrixVariant,
+) -> Result<(), ProtocolError> {
+    validate_identifier(&variant.id)?;
+    validate_conformance_matrix_variant_map(&variant.values)
+}
+
+fn validate_conformance_registration_template_shape(
+    template: &serde_json::Value,
+) -> Result<(), ProtocolError> {
+    let object = template.as_object().ok_or(ProtocolError::Policy(
+        "conformance matrix registration template must be an object",
+    ))?;
+    for field in [
+        "client_name",
+        "client_type",
+        "redirect_uris",
+        "scopes",
+        "allowed_audiences",
+        "grant_types",
+        "token_endpoint_auth_method",
+    ] {
+        if !object.contains_key(field) {
+            return Err(ProtocolError::Policy(
+                "conformance matrix registration template is incomplete",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_conformance_matrix_variant_map(
+    values: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ProtocolError> {
+    if values.len() > 64 {
+        return Err(ProtocolError::Policy(
+            "conformance matrix variant is too large",
+        ));
+    }
+    for (key, value) in values {
+        validate_identifier(key)?;
+        validate_identifier(value)?;
+    }
+    Ok(())
+}
+
+fn validate_conformance_matrix_roles(
+    roles: &[ConformanceMatrixRoleRequirement],
+    crypto: Option<&ConformanceMatrixCryptoPolicy>,
+    clients: &mut std::collections::BTreeMap<String, ConformanceMatrixCryptoPolicy>,
+) -> Result<(), ProtocolError> {
+    if roles.len() > 64 {
+        return Err(ProtocolError::Policy(
+            "conformance matrix role count is too large",
+        ));
+    }
+    let mut local = std::collections::BTreeSet::new();
+    for role in roles {
+        validate_identifier(&role.role)?;
+        let logical = role.logical_client_id.as_deref().unwrap_or(&role.role);
+        validate_identifier(logical)?;
+        if !local.insert(logical) {
+            return Err(ProtocolError::Policy("duplicate conformance matrix role"));
+        }
+        if role.secret_refs.len() > 32 {
+            return Err(ProtocolError::Policy(
+                "conformance matrix secret references are too large",
+            ));
+        }
+        for reference in &role.secret_refs {
+            if reference.is_empty()
+                || reference.len() > 256
+                || reference.chars().any(char::is_control)
+            {
+                return Err(ProtocolError::Policy(
+                    "conformance matrix secret reference is invalid",
+                ));
+            }
+        }
+        if let Some(template) = &role.registration_template
+            && !template.is_object()
+        {
+            return Err(ProtocolError::Policy(
+                "conformance matrix registration template must be an object",
+            ));
+        }
+        if let Some(crypto) = crypto
+            && role.registration_template.is_some()
+        {
+            if let Some(previous) = clients.get(logical)
+                && previous != crypto
+            {
+                return Err(ProtocolError::Policy(
+                    "conformance matrix client crypto policy is inconsistent",
+                ));
+            }
+            clients.insert(logical.to_owned(), crypto.clone());
+        }
+    }
+    Ok(())
+}
+
+fn validate_conformance_matrix_crypto(
+    crypto: &ConformanceMatrixCryptoPolicy,
+) -> Result<(), ProtocolError> {
+    if !matches!(crypto.rsa_bits, 2048 | 3072 | 4096)
+        || crypto.ec_curve != "P-256"
+        || crypto.mtls_signature != "ECDSA-P256-SHA256"
+    {
+        return Err(ProtocolError::Policy(
+            "conformance matrix crypto policy is weak",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_conformance_matrix_bindings(
+    bindings: &std::collections::BTreeMap<String, String>,
+    clients: &std::collections::BTreeMap<String, ConformanceMatrixCryptoPolicy>,
+) -> Result<(), ProtocolError> {
+    if bindings.len() > 64 {
+        return Err(ProtocolError::Policy(
+            "conformance matrix secret bindings are too large",
+        ));
+    }
+    for (name, value) in bindings {
+        validate_identifier(name)?;
+        let reference = parse_conformance_matrix_placeholder(value)?;
+        validate_conformance_matrix_reference(
+            reference,
+            bindings,
+            clients,
+            &mut std::collections::BTreeSet::new(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_conformance_matrix_template(
+    value: &serde_json::Value,
+    bindings: &std::collections::BTreeMap<String, String>,
+    clients: &std::collections::BTreeMap<String, ConformanceMatrixCryptoPolicy>,
+) -> Result<(), ProtocolError> {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .try_for_each(|child| validate_conformance_matrix_template(child, bindings, clients)),
+        serde_json::Value::Object(values) => {
+            for (key, child) in values {
+                if is_conformance_sensitive_key(key)
+                    && matches!(child, serde_json::Value::String(text) if !is_conformance_placeholder(text))
+                {
+                    return Err(ProtocolError::Policy(
+                        "conformance matrix embeds sensitive material",
+                    ));
+                }
+                validate_conformance_matrix_template(child, bindings, clients)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::String(text)
+            if text.contains("{{") || text.contains("}}") || text.contains("${") =>
+        {
+            let reference = parse_conformance_matrix_placeholder(text)?;
+            validate_conformance_matrix_reference(
+                reference,
+                bindings,
+                clients,
+                &mut std::collections::BTreeSet::new(),
+            )
+        }
+        _ => Ok(()),
+    }
+}
+
+fn parse_conformance_matrix_placeholder(value: &str) -> Result<&str, ProtocolError> {
+    if !value.starts_with("{{") || !value.ends_with("}}") || value.len() < 5 {
+        return Err(ProtocolError::Policy(
+            "conformance matrix placeholder is invalid",
+        ));
+    }
+    let name = value[2..value.len() - 2].trim();
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || name.contains("{{")
+        || name.contains("}}")
+    {
+        return Err(ProtocolError::Policy(
+            "conformance matrix placeholder is invalid",
+        ));
+    }
+    Ok(name)
+}
+
+fn is_conformance_placeholder(value: &str) -> bool {
+    value.starts_with("{{")
+        && value.ends_with("}}")
+        && parse_conformance_matrix_placeholder(value).is_ok()
+}
+
+fn validate_conformance_matrix_reference(
+    reference: &str,
+    bindings: &std::collections::BTreeMap<String, String>,
+    clients: &std::collections::BTreeMap<String, ConformanceMatrixCryptoPolicy>,
+    stack: &mut std::collections::BTreeSet<String>,
+) -> Result<(), ProtocolError> {
+    let name = reference.trim();
+    if name.starts_with("plan.") || name.starts_with("group.") || name.contains("::") {
+        return Err(ProtocolError::Policy(
+            "conformance matrix cross-plan reference is forbidden",
+        ));
+    }
+    if let Some(binding) = name.strip_prefix("secret.") {
+        let value = bindings.get(binding).ok_or(ProtocolError::Policy(
+            "conformance matrix references an unknown secret",
+        ))?;
+        if !stack.insert(binding.to_owned()) {
+            return Err(ProtocolError::Policy(
+                "conformance matrix secret reference cycle",
+            ));
+        }
+        let nested = parse_conformance_matrix_placeholder(value)?;
+        let result = validate_conformance_matrix_reference(nested, bindings, clients, stack);
+        stack.remove(binding);
+        return result;
+    }
+    if bindings.contains_key(name) {
+        return validate_conformance_matrix_reference(
+            &format!("secret.{name}"),
+            bindings,
+            clients,
+            stack,
+        );
+    }
+    if let Some(rest) = name.strip_prefix("client.") {
+        let (logical, field) = rest.split_once('.').ok_or(ProtocolError::Policy(
+            "conformance matrix client reference is invalid",
+        ))?;
+        if !clients.contains_key(logical)
+            || !matches!(
+                field,
+                "id" | "client_secret"
+                    | "rsa.private_jwk"
+                    | "rsa.public_jwks"
+                    | "ec.private_jwk"
+                    | "ec.public_jwks"
+                    | "mtls.ca_cert"
+                    | "mtls.client_cert"
+                    | "mtls.client_key"
+            )
+        {
+            return Err(ProtocolError::Policy(
+                "conformance matrix client reference is invalid",
+            ));
+        }
+        return Ok(());
+    }
+    if matches!(
+        name,
+        "target.issuer"
+            | "target.suite"
+            | "suite.origin"
+            | "generated.applicant_password"
+            | "generated.client_secret"
+            | "generated.rsa.private_jwk"
+            | "generated.rsa.public_jwks"
+            | "generated.ec.private_jwk"
+            | "generated.ec.public_jwks"
+            | "generated.mtls.ca_cert"
+            | "generated.mtls.client_cert"
+            | "generated.mtls.client_key"
+            | "generated.dynamic_registration_initial_access_token"
+            | "generated.ciba_automated_decision_token"
+    ) {
+        return Ok(());
+    }
+    if matches!(name, "onboarding.client_id" | "onboarding.client_secret") {
+        if clients.len() != 1 {
+            return Err(ProtocolError::Policy(
+                "conformance matrix onboarding reference is ambiguous",
+            ));
+        }
+        return Ok(());
+    }
+    Err(ProtocolError::Policy(
+        "conformance matrix references an unknown secret",
+    ))
+}
+
+fn is_conformance_sensitive_key(key: &str) -> bool {
+    matches!(
+        key,
+        "password"
+            | "token"
+            | "access_token"
+            | "refresh_token"
+            | "password_hash"
+            | "client_secret"
+            | "private_key"
+            | "private_jwk"
+            | "d"
+            | "p"
+            | "q"
+            | "dp"
+            | "dq"
+            | "qi"
+            | "oth"
+            | "k"
+    )
 }
 
 fn validate_openid4vc_conformance_trust(

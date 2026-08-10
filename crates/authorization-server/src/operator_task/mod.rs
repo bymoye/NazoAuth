@@ -72,7 +72,9 @@ mod identity;
 mod lifecycle;
 mod receipts;
 
+#[cfg(test)]
 use execution::execute;
+use execution::execute_with_jti;
 pub(crate) use identity::embedded_identity;
 use identity::{
     operation_name, persist_operator_state_identity, validate_config_manifest,
@@ -207,7 +209,7 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     let started_at = Utc::now().timestamp();
-    let outcome = execute(&task.operation).await;
+    let outcome = execute_with_jti(&task.operation, &task.jti).await;
     pause_at_test_failpoint("after-operation")?;
     let completed_at = Utc::now().timestamp();
     let compact_receipt = sign_task_outcome(

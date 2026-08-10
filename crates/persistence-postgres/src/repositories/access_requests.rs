@@ -460,7 +460,7 @@ impl nazo_identity::ports::AccessRequestRepositoryPort for AccessRequestReposito
     }
 }
 
-async fn insert_client(
+pub(crate) async fn insert_client(
     connection: &mut diesel_async::AsyncPgConnection,
     tenant: nazo_identity::TenantContext,
     client: &PreparedClientRegistration,

@@ -140,7 +140,7 @@ fn prepared_and_created_client_debug_redacts_all_secret_material() {
             tenant_id: Uuid::now_v7(),
             realm_id: Uuid::now_v7(),
             organization_id: Uuid::now_v7(),
-            registration: value.registration,
+            registration: value.registration.clone(),
             require_mtls_bound_tokens: true,
             is_active: true,
         },
@@ -151,6 +151,18 @@ fn prepared_and_created_client_debug_redacts_all_secret_material() {
     assert!(created_debug.contains("[REDACTED]"));
     assert_eq!(created.client.client_id, "client-types");
     assert_eq!(json!(created.client.scopes), json!(["openid"]));
+}
+
+#[test]
+fn supplied_client_secret_is_bounded_and_redacted() {
+    let value = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    let secret = nazo_auth::SuppliedClientSecret::new(value).unwrap();
+    let debug = format!("{secret:?}");
+    assert_eq!(debug, "[REDACTED]");
+    assert!(!debug.contains(value));
+    assert!(nazo_auth::SuppliedClientSecret::new("short").is_err());
+    assert!(nazo_auth::SuppliedClientSecret::new("0".repeat(64)).is_err());
+    assert!(nazo_auth::SuppliedClientSecret::new(format!("{}\n", "A".repeat(64))).is_err());
 }
 
 fn oauth_client() -> OAuthClient {
