@@ -27,8 +27,13 @@ in the repository.
 - Project-owned RFC 9967 regression scope: [RFC 9967 SCIM SET black-box matrix](rfc9967-scim-set-matrix.md)
 - Latest OpenID4VC Final / HAIP alpha regression: [2026-07-16 OpenID4VC Final / HAIP OIDF results](2026-07-16-openid4vc-final-oidf-results.md)
 - Historical public black-box full baseline: [2026-07-20 final automated OIDF results](2026-07-20-final-automated-oidf-results.md)
+- Current local official `27 + 17 = 44` evidence: [2026-08-10 v0.1.29 local official full matrix](2026-08-10-v0.1.29-local-official-full-matrix.md)
 
-The latest retained historical public black-box baseline is the 2026-07-20 final run set.
+The current conformance evidence is the 2026-08-10 v0.1.29 local official full
+matrix: 44 unique plans, 1,196 modules, and zero failed modules. Its suite and
+runner ran locally against the official production server without GitHub as an
+execution dependency. The 2026-07-20 final run set remains the latest retained
+historical public black-box baseline.
 The final production revision is
 `0a747b42228962e562af012638297c56e3af5505`; GitHub Actions runs
 [`29705159845`](https://github.com/nazozero/NazoAuth/actions/runs/29705159845)
@@ -41,9 +46,9 @@ automation, pinned suite/source revisions, run/job URLs, and exact
 expected-result contracts.
 
 Archived diagnostic records remain useful for debugging regressions, but they
-are not current conformance evidence. The `25 + 17 = 42` baseline above also
-does not satisfy the current `27 + 17 = 44` release gate; a new exact-release
-record becomes current only after that entire host-local matrix completes.
+are not current conformance evidence. The historical `25 + 17 = 42` baseline
+does not satisfy the current gate; the 2026-08-10 record above supersedes it
+with the complete `27 + 17 = 44` host-local matrix.
 
 The archived diagnostic full-matrix regression record is the 2026-07-01 TP/PS run
 against `https://issuer.example` at runtime commit `31e8f9f`. It used the

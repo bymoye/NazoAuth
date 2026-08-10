@@ -23,14 +23,18 @@
 - 项目自有 RFC 9967 回归范围：[RFC 9967 SCIM SET 黑盒矩阵](rfc9967-scim-set-matrix.md)
 - 最新 OpenID4VC Final / HAIP alpha 回归：[2026-07-16 OpenID4VC Final / HAIP OIDF results](2026-07-16-openid4vc-final-oidf-results.md)
 - 历史公网黑盒完整基线：[2026-07-20 自动化 OIDF 最终结果](2026-07-20-final-automated-oidf-results.zh-CN.md)
+- 当前本地官方 `27 + 17 = 44` 证据：[2026-08-10 v0.1.29 本地官方完整矩阵](2026-08-10-v0.1.29-local-official-full-matrix.zh-CN.md)
 
 `2026-06-09` full matrix 是已发布 OIDF 认证列表对应的历史认证证据，针对 `https://issuer.example` 执行，覆盖 OIDC Basic、OIDC Config、FAPI2 Security Profile Final、FAPI2 Message Signing Final、mTLS、DPoP、`private_key_jwt`、client credentials 变体。结果为全计划完成，`0 failures`，`0 warnings`。
 
-最近保留的历史公网黑盒 OIDF 基线是 2026-07-20 最终运行组。最终生产 revision 为 `0a747b42228962e562af012638297c56e3af5505`；GitHub Actions runs [`29705159845`](https://github.com/nazozero/NazoAuth/actions/runs/29705159845) 和 [`29700527789`](https://github.com/nazozero/NazoAuth/actions/runs/29700527789) 均成功。操作者公网套件完成 25 个 OIDC/FAPI/FAPI-CIBA plan 和 17 个 OpenID4VC Final/HAIP plan。公开文档将实际 issuer 脱敏为 `https://issuer.example`。原始套件 ZIP 不属于可提交证据；该历史记录只接受由自动化生成的无凭据 manifest、固定 suite/source revision、run/job URL 和精确 expected-result 契约。
+当前一致性证据是 2026-08-10 v0.1.29 本地官方完整矩阵：44 个唯一 plan、
+1,196 个模块、0 个失败模块。suite 和 runner 均在本地执行，直接连接官方生产
+server，不以 GitHub 作为执行依赖。最近保留的历史公网黑盒 OIDF 基线仍是
+2026-07-20 最终运行组。最终生产 revision 为 `0a747b42228962e562af012638297c56e3af5505`；GitHub Actions runs [`29705159845`](https://github.com/nazozero/NazoAuth/actions/runs/29705159845) 和 [`29700527789`](https://github.com/nazozero/NazoAuth/actions/runs/29700527789) 均成功。操作者公网套件完成 25 个 OIDC/FAPI/FAPI-CIBA plan 和 17 个 OpenID4VC Final/HAIP plan。公开文档将实际 issuer 脱敏为 `https://issuer.example`。原始套件 ZIP 不属于可提交证据；该历史记录只接受由自动化生成的无凭据 manifest、固定 suite/source revision、run/job URL 和精确 expected-result 契约。
 
-已归档的诊断记录仍可用于调试回归，但不是当前一致性证据。上面的 `25 + 17 = 42`
-历史基线同样不满足当前 `27 + 17 = 44` Release 门禁；只有完整 host-local 矩阵针对精确
-Release 全部完成后，新记录才可标为当前证据。
+已归档的诊断记录仍可用于调试回归，但不是当前一致性证据。历史
+`25 + 17 = 42` 基线不满足当前门禁；上面的 2026-08-10 记录已用完整
+`27 + 17 = 44` host-local 矩阵取代它。
 
 已归档诊断 full-matrix 回归记录是 2026-07-01 TP/PS 运行，测试对象为 `https://issuer.example`，runtime commit 为 `31e8f9f`。该运行使用仓库原有 16-plan 完整矩阵，导出 16 个 plan archives，共执行 578 个测试模块，结果为 `0 failures`、`0 warnings`。
 
