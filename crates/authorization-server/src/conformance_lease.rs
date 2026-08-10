@@ -556,9 +556,7 @@ async fn validate_bundle(
         bail!("conformance onboarding client set does not match the deployment matrix");
     }
 
-    let applicant_password_hash = hash_applicant_password(applicant_password)
-        .await
-        .map_err(|_| anyhow::anyhow!("conformance applicant password preparation failed"))?;
+    let applicant_password_hash = hash_applicant_password(applicant_password).await?;
     validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
     let clients = prepare_client_registrations(raw_clients).await?;
 
@@ -587,15 +585,20 @@ async fn validate_bundle(
 async fn hash_applicant_password(
     password: &str,
 ) -> anyhow::Result<nazo_identity::ports::PasswordHashInput> {
-    let config = ConfigSource::load()?;
-    let max_concurrency = config.parse(
-        "PASSWORD_HASH_MAX_CONCURRENCY",
-        crate::adapters::security::default_password_hash_max_concurrency(),
-    )?;
-    let queue_timeout_ms = config.parse(
-        "PASSWORD_HASH_QUEUE_TIMEOUT_MS",
-        crate::adapters::security::default_password_hash_queue_timeout_ms(),
-    )?;
+    let config = ConfigSource::load()
+        .map_err(|_| anyhow::anyhow!("conformance password hash configuration is unavailable"))?;
+    let max_concurrency = config
+        .parse(
+            "PASSWORD_HASH_MAX_CONCURRENCY",
+            crate::adapters::security::default_password_hash_max_concurrency(),
+        )
+        .map_err(|_| anyhow::anyhow!("conformance password hash concurrency limit is invalid"))?;
+    let queue_timeout_ms = config
+        .parse(
+            "PASSWORD_HASH_QUEUE_TIMEOUT_MS",
+            crate::adapters::security::default_password_hash_queue_timeout_ms(),
+        )
+        .map_err(|_| anyhow::anyhow!("conformance password hash queue timeout is invalid"))?;
     if let Err(error) =
         crate::adapters::security::configure_password_hash_limits(max_concurrency, queue_timeout_ms)
     {
@@ -604,12 +607,22 @@ async fn hash_applicant_password(
         if error.to_string()
             != "password hash limits must be configured before password verification"
         {
-            return Err(error);
+            bail!("conformance password hash limiter configuration failed");
         }
     }
     let hash = crate::adapters::security::hash_password_blocking_limited(password.to_owned())
         .await
-        .map_err(|_| anyhow::anyhow!("failed to hash conformance applicant password"))?;
+        .map_err(|error| match error {
+            crate::adapters::security::PasswordHashingError::Saturated => {
+                anyhow::anyhow!("conformance password hash capacity is saturated")
+            }
+            crate::adapters::security::PasswordHashingError::WorkerFailed => {
+                anyhow::anyhow!("conformance password hash worker failed")
+            }
+            crate::adapters::security::PasswordHashingError::HashFailed => {
+                anyhow::anyhow!("conformance password hashing failed")
+            }
+        })?;
     nazo_identity::ports::PasswordHashInput::new(hash)
         .map_err(|_| anyhow::anyhow!("generated conformance applicant password hash is invalid"))
 }
