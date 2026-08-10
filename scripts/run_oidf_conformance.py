@@ -86,6 +86,7 @@ OIDF_UNACCEPTABLE_FINAL_RESULTS = OIDF_BAD_FINAL_RESULTS | {"SKIPPED"}
 OIDF_BAD_STATUS_VALUES = {"FAILED", "INTERRUPTED"}
 OIDF_BAD_LOG_RESULTS = {"FAILURE", "WARNING"}
 MAX_OIDF_API_RESPONSE_BYTES = 1024 * 1024
+OIDF_PLAN_PAGE_LENGTH = 20
 OIDF_LOG_CONTEXT_SOURCES = {
     "BROWSER",
     "CallBackchannelAuthenticationEndpoint",
@@ -1789,7 +1790,7 @@ def fetch_alias_plans(
         return []
 
     start = 0
-    length = 200
+    length = OIDF_PLAN_PAGE_LENGTH
     matched: list[dict[str, object]] = []
     while True:
         _, payload = oidf_api_request(
@@ -2127,7 +2128,7 @@ def cleanup_existing_alias_plans(base_url: str, token: str, aliases: set[str]) -
 
 def cleanup_existing_alias_plans_pass(base_url: str, token: str, aliases: set[str]) -> int:
     start = 0
-    length = 200
+    length = OIDF_PLAN_PAGE_LENGTH
     deleted = 0
     while True:
         _, payload = oidf_api_request(

@@ -648,6 +648,45 @@ class RunOidfConformanceTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "non-object JSON payload"):
                 module.fetch_alias_plans("https://suite.example", "token", {"alias"})
 
+    def test_fetch_alias_plans_uses_bounded_pages(self):
+        module = load_runner_module()
+        responses = [
+            (200, {"data": [{"config": {"alias": "alias"}}], "recordsTotal": 2}),
+            (200, {"data": [{"config": {"alias": "other"}}], "recordsTotal": 2}),
+        ]
+        with mock.patch.object(module, "oidf_api_request", side_effect=responses) as request:
+            plans = module.fetch_alias_plans(
+                "https://suite.example", "token", {"alias"}
+            )
+
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            request.call_args_list[0].kwargs["query"],
+            {"start": 0, "length": module.OIDF_PLAN_PAGE_LENGTH},
+        )
+        self.assertEqual(
+            request.call_args_list[1].kwargs["query"],
+            {"start": 1, "length": module.OIDF_PLAN_PAGE_LENGTH},
+        )
+
+    def test_cleanup_alias_plans_uses_bounded_pages(self):
+        module = load_runner_module()
+        response = (200, {"data": [{"config": {"alias": "other"}}], "recordsTotal": 1})
+        with (
+            mock.patch.object(module, "oidf_api_request", return_value=response) as request,
+            mock.patch.object(module, "cleanup_alias_plan", return_value=False),
+        ):
+            deleted = module.cleanup_existing_alias_plans_pass(
+                "https://suite.example", "token", {"alias"}
+            )
+
+        self.assertEqual(deleted, 0)
+        self.assertEqual(
+            request.call_args.kwargs["query"],
+            {"start": 0, "length": module.OIDF_PLAN_PAGE_LENGTH},
+        )
+
     def test_inspect_state_rejects_empty_success_module_info(self):
         module = load_runner_module()
         with (
