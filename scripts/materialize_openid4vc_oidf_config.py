@@ -115,6 +115,39 @@ def plan_alias(prefix: str, slug: str, run_namespace: str | None) -> str:
     )
 
 
+def vp_verification_evidence_browser_automation(
+    conformance_server: str,
+) -> list[dict[str, object]]:
+    evidence_url = (
+        conformance_server.rstrip("/") + "/test/a/*/verification-evidence"
+    )
+    return [
+        {
+            "comment": (
+                "capture the suite-served evidence page to fill the verification-result "
+                "screenshot placeholder without human interaction"
+            ),
+            "match": evidence_url,
+            "tasks": [
+                {
+                    "task": "Capture verification evidence",
+                    "match": evidence_url,
+                    "commands": [
+                        [
+                            "wait",
+                            "xpath",
+                            "//*",
+                            10,
+                            ".*Deferred verification evidence.*",
+                            "update-image-placeholder",
+                        ]
+                    ],
+                }
+            ],
+        }
+    ]
+
+
 def bind_subject_id(
     issuer_settings: dict[str, object],
     onboarding_profile: str,
@@ -503,6 +536,9 @@ def main() -> int:
             client["client_id"] = target_hostname
             if plan == VP_HAIP or variants.get("request_method") == "request_uri_signed":
                 client["request_object_trust_anchor_pem"] = request_object_trust_anchor_pem
+            config["browser"] = vp_verification_evidence_browser_automation(
+                str(driver["conformance_server"])
+            )
         prefix = str(config.get("alias", "nazo-openid4vc"))
         alias = plan_alias(prefix, slug, namespace)
         config["alias"] = alias

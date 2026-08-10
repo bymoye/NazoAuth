@@ -174,6 +174,29 @@ OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG = {
             "oidcc-ensure-registered-redirect-uri",
         }),
     ),
+    **{
+        f"openid4vc-{slug}.json": (
+            plan,
+            frozenset({"oid4vp-1final-verifier-happy-flow"}),
+        )
+        for plan, slugs in (
+            (
+                "oid4vp-1final-verifier-test-plan",
+                (
+                    "vp-sd-redirect-query",
+                    "vp-sd-x509dns-signed",
+                    "vp-mdoc-x509dns-signed-jwt",
+                    "vp-sd-x509hash-signed-jwt",
+                    "vp-mdoc-x509hash-signed",
+                ),
+            ),
+            (
+                "oid4vp-1final-verifier-haip-test-plan",
+                ("vp-haip-sd", "vp-haip-mdoc"),
+            ),
+        )
+        for slug in slugs
+    },
 }
 OIDF_CALLBACK_PATH_PATTERN = re.compile(r"/test/a/[^/]+/callback")
 OIDF_BROWSER_CALLBACK_TIMEOUT_SECONDS = max(

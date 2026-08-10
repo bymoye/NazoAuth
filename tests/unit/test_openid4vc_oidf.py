@@ -1770,6 +1770,12 @@ class Openid4vcOidfTests(unittest.TestCase):
             for filename, config in configs.items():
                 if "vp-" in filename:
                     self.assertEqual(config["client"]["client_id"], "issuer.example")
+                    self.assertEqual(
+                        config["browser"],
+                        module.vp_verification_evidence_browser_automation(
+                            "https://suite.example"
+                        ),
+                    )
                     if "redirect-query" in filename:
                         self.assertNotIn("request_object_trust_anchor_pem", config["client"])
                     else:

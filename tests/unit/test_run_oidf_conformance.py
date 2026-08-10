@@ -1271,6 +1271,40 @@ class RunOidfConformanceTests(unittest.TestCase):
             },
         )
 
+    def test_openid4vc_review_allowlist_is_exactly_the_seven_vp_happy_flows(self):
+        module = load_runner_module()
+        entries = {
+            filename: context
+            for filename, context in module.OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG.items()
+            if filename.startswith("openid4vc-vp-")
+        }
+
+        self.assertEqual(
+            set(entries),
+            {
+                "openid4vc-vp-sd-redirect-query.json",
+                "openid4vc-vp-sd-x509dns-signed.json",
+                "openid4vc-vp-mdoc-x509dns-signed-jwt.json",
+                "openid4vc-vp-sd-x509hash-signed-jwt.json",
+                "openid4vc-vp-mdoc-x509hash-signed.json",
+                "openid4vc-vp-haip-sd.json",
+                "openid4vc-vp-haip-mdoc.json",
+            },
+        )
+        for filename, (plan, review_modules) in entries.items():
+            self.assertEqual(
+                plan,
+                (
+                    "oid4vp-1final-verifier-haip-test-plan"
+                    if "-haip-" in filename
+                    else "oid4vp-1final-verifier-test-plan"
+                ),
+            )
+            self.assertEqual(
+                review_modules,
+                {"oid4vp-1final-verifier-happy-flow"},
+            )
+
     def test_unexpected_review_is_not_hidden_by_successful_completion_log(self):
         module = load_runner_module()
         info = {
