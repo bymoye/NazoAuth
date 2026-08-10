@@ -79,6 +79,13 @@ claimed by RFC 8705 or RFC 6024.
 - The suite reaches only public HTTPS endpoints. Private DNS names, raw IPs,
   loopback addresses, service-network aliases, and disabled TLS verification are
   forbidden.
+- A shared TLS origin serving the FAPI 1.0 Advanced endpoints uses an RSA
+  certificate of at least 2048 bits and, for TLS 1.2, only
+  `ECDHE-RSA-AES128-GCM-SHA256` and `ECDHE-RSA-AES256-GCM-SHA384`. This is the
+  forward-secret intersection of [FAPI 1.0 Advanced section 8.5](https://openid.net/specs/openid-financial-api-part-2-1_0.html#tls-considerations)
+  and [RFC 9325 section 4.2](https://www.rfc-editor.org/rfc/rfc9325.html#section-4.2);
+  TLS 1.3 remains enabled. The authorization-endpoint interoperability exception
+  does not widen other endpoints on the same TLS listener.
 - Product behavior cannot branch on plan names, suite aliases, callback paths,
   test headers, or a conformance build flag.
 - Conformance preparation cannot execute SQL or load production server crates.
@@ -130,7 +137,7 @@ Then start the full matrix with one closed eight-field JSON document. The
 
 ```sh
 umask 077
-run_id="official-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+run_id="oidf-$(date -u +%m%d%H%M)-$(openssl rand -hex 2)"
 secret-provider read nazoauth/official-oidf-run | \
 python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
   --deployed-sha <deployed-sha> \
@@ -149,6 +156,16 @@ python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
   --nazoauthctl-config /etc/nazoauth/update.json \
   --lease-ttl-seconds 28800
 ```
+
+Keep the base `run_id` at 22 characters or fewer. The coordinator appends
+`-protocol` and `-openid4vc`, and each resulting namespace must remain within
+the downstream 32-character contract.
+
+The command runs in the foreground. When the operator reaches the host through
+an SSH session that may disappear, supervise this exact local command with the
+host's service manager and send stdout/stderr to a root/operator-owned mode-`0600`
+file. The execution lifecycle must not depend on the SSH transport; a supervisor
+is only an operating-system wrapper and does not add a GitHub dependency.
 
 The strict JSON fields are exactly `applicant_email`, `applicant_password`,
 `admin_email`, `admin_password`, `admin_mfa_totp_secret`,
@@ -192,8 +209,15 @@ single-link, current-user/root-owned mode-`0600` `--secret-file` on POSIX.
 Windows operators must use stdin or an inherited descriptor because POSIX mode
 bits do not prove a Windows DACL. No secret has an argv or environment fallback.
 
-For a private pre-release gate, the same runner may bind every lease operation
-to an unreleased container by adding all four options below. The active
+When the active deployment was installed with the generic
+`nazoauthctl development activate` path, omit all candidate options: the
+controller reads and verifies the active local image's embedded build identity
+and digest. This local path is available to any operator and does not depend on
+GitHub or a particular host.
+
+The four options below are a separate signed-candidate path. For a private
+pre-release gate, the same runner may bind every lease operation to an
+unreleased container by adding all four options. The active
 container must itself use the matching digest-pinned image reference, and its
 embedded identity must match every value. Omitting any option fails closed.
 

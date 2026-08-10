@@ -55,6 +55,12 @@ issuer、账号、客户端材料和 suite token；仓库不提供共享被测�
 - 发行方和套件地址由运行者输入，必须是公网 HTTPS origin；仓库不提供任何部署域名默认值。
 - Discovery 中的 `issuer` 必须等于被测公网 origin。
 - 套件只能访问公网 HTTPS。禁止私有 DNS、裸 IP、loopback、容器服务名和关闭 TLS 校验。
+- 如果 FAPI 1.0 Advanced 各端点共用同一个 TLS origin，证书必须使用至少 2048-bit
+  RSA；TLS 1.2 只启用 `ECDHE-RSA-AES128-GCM-SHA256` 和
+  `ECDHE-RSA-AES256-GCM-SHA384`。这是 [FAPI 1.0 Advanced 第 8.5 节](https://openid.net/specs/openid-financial-api-part-2-1_0.html#tls-considerations)
+  与 [RFC 9325 第 4.2 节](https://www.rfc-editor.org/rfc/rfc9325.html#section-4.2)
+  的前向保密交集；TLS 1.3 仍需启用。授权端点的互操作例外不能放宽同一 TLS listener
+  上的其他端点。
 - 产品逻辑不得根据 plan 名称、suite alias、callback path、测试 header 或 conformance 编译开关分支。
 - 准备工具不得执行 SQL，也不得加载生产 server crate。
 - 申请人与审批人必须是两个不同的有效账号；审批人的 `admin_level` 必须大于 0。自动化账号仍遵守正常账号生命周期和 MFA 策略。
@@ -87,7 +93,7 @@ python scripts/prepare_host_local_oidf_install.py \
 
 ```sh
 umask 077
-run_id="official-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+run_id="oidf-$(date -u +%m%d%H%M)-$(openssl rand -hex 2)"
 secret-provider read nazoauth/official-oidf-run | \
 python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
   --deployed-sha <已部署-sha> \
@@ -106,6 +112,14 @@ python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
   --nazoauthctl-config /etc/nazoauth/update.json \
   --lease-ttl-seconds 28800
 ```
+
+基础 `run_id` 最长 22 个字符。协调器还会追加 `-protocol` 和 `-openid4vc`，两个派生
+namespace 都必须满足下游最长 32 个字符的契约。
+
+该命令默认以前台方式运行。如果运行者通过可能中断的 SSH 会话登录主机，应由该主机的
+服务管理器托管同一条本地命令，并把 stdout/stderr 写入 root/运行者所有、权限为 `0600`
+的文件。执行生命周期不得依赖 SSH 传输；服务管理器只是操作系统包装层，不会引入 GitHub
+依赖。
 
 严格 JSON 字段恰好为 `applicant_email`、`applicant_password`、`admin_email`、
 `admin_password`、`admin_mfa_totp_secret`、`oidf_conformance_token`、
@@ -144,7 +158,11 @@ stdin 或继承 FD。所有秘密都没有 argv 或环境变量回退。
 
 该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，并先通过 `nazoauthctl` 创建有时效的 conformance lease，把本轮分别随机生成的动态注册 token、CIBA 自动决策 token 的 SHA-256 与全部临时 client 绑定到同一租约。两个 token 只能操作该租约拥有的 DCR/CIBA 事务，并在租约过期或吊销后立即失效。官方套件会在并发模块间共享浏览器 cookie/session，因此所有驱动浏览器的模块和 plan 组均串行执行。它通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销并物理清理租约数据、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
 
-私有预发布门禁可以在同一 runner 中同时传入
+如果当前部署通过通用的 `nazoauthctl development activate` 路径安装，运行 runner
+时必须省略全部 candidate 参数：控制器会读取并校验当前本地镜像内嵌的 build identity
+和 digest。这个本地路径适用于任何运行者，不依赖 GitHub，也不绑定某一台主机。
+
+下面四项属于另一条“签名候选版本”路径。私有预发布门禁可以在同一 runner 中同时传入
 `--candidate-release`、`--candidate-revision`、`--candidate-build-id` 和
 `--candidate-oci-digest`。四项缺一即失败；运行中的容器必须使用同一
 digest 固定的镜像引用，二进制内嵌身份也必须逐项匹配。该例外只作用于

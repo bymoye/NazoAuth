@@ -11,10 +11,13 @@ and environment variables are not secret providers.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -48,6 +51,7 @@ SECRET_FIELDS = (
     "verifier_management_token",
 )
 EXPECTED_PLAN_COUNT = 44
+RUN_NAMESPACE_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?")
 
 
 class OfficialFullMatrixError(RuntimeError):
@@ -59,7 +63,21 @@ def append_option(arguments: list[str], name: str, value: object | None) -> None
         arguments.extend((name, str(value)))
 
 
-def common_arguments(args: argparse.Namespace) -> list[str]:
+def child_run_namespaces(base: str) -> tuple[str, str]:
+    namespaces = (f"{base}-protocol", f"{base}-openid4vc")
+    if any(RUN_NAMESPACE_PATTERN.fullmatch(value) is None for value in namespaces):
+        raise OfficialFullMatrixError(
+            "--run-namespace must produce 1-32 character lowercase child namespaces "
+            "containing only letters, digits, or internal hyphens"
+        )
+    return namespaces
+
+
+def common_arguments(
+    args: argparse.Namespace,
+    *,
+    suite_dir: Path | None = None,
+) -> list[str]:
     arguments = [
         "--deployed-sha",
         args.deployed_sha,
@@ -70,7 +88,7 @@ def common_arguments(args: argparse.Namespace) -> list[str]:
         "--conformance-server",
         OFFICIAL_CONFORMANCE_SERVER,
         "--suite-dir",
-        str(args.suite_dir),
+        str(suite_dir or args.suite_dir),
         "--suite-revision",
         args.suite_revision,
         "--nazoauthctl",
@@ -95,6 +113,45 @@ def common_arguments(args: argparse.Namespace) -> list[str]:
             )
         )
     return arguments
+
+
+def command(arguments: list[str], *, cwd: Path = ROOT) -> None:
+    subprocess.run(
+        arguments,
+        cwd=cwd,
+        env=sanitized_environment(),
+        check=True,
+    )
+
+
+def create_suite_worktree(source: Path, destination: Path, revision: str) -> None:
+    command(
+        ["git", "-C", str(source), "worktree", "add", "--detach", str(destination), revision]
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=destination,
+        env=sanitized_environment(),
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=destination,
+        env=sanitized_environment(),
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    if head != revision or status:
+        raise OfficialFullMatrixError("isolated OpenID4VC suite worktree is not exact and clean")
+
+
+def remove_suite_worktree(source: Path, destination: Path) -> None:
+    command(
+        ["git", "-C", str(source), "worktree", "remove", "--force", str(destination)]
+    )
 
 
 def public_secret_document(secrets: dict[str, str]) -> dict[str, str]:
@@ -199,8 +256,20 @@ def run(args: argparse.Namespace) -> None:
         raise OfficialFullMatrixError(
             "--lease-ttl-seconds must be between 60 and 86400"
         )
+    protocol_namespace, openid4vc_namespace = child_run_namespaces(
+        args.run_namespace
+    )
     args.work_dir = args.work_dir.resolve()
     args.export_dir = args.export_dir.resolve()
+    args.suite_dir = args.suite_dir.resolve()
+    configured_prior_manifest = getattr(args, "prior_evidence_manifest", None)
+    prior_manifest = (
+        configured_prior_manifest.resolve()
+        if configured_prior_manifest is not None
+        else None
+    )
+    if prior_manifest is not None:
+        load_manifest(prior_manifest)
     if args.work_dir.exists() or args.export_dir.exists():
         raise OfficialFullMatrixError("--work-dir and --export-dir must not already exist")
     if args.work_dir == args.export_dir:
@@ -210,59 +279,107 @@ def run(args: argparse.Namespace) -> None:
     args.export_dir.mkdir(parents=True, mode=0o700)
     args.work_dir.chmod(0o700)
     args.export_dir.chmod(0o700)
-    common = common_arguments(args)
+    if prior_manifest is not None:
+        prior_dir = args.export_dir / "prior"
+        prior_dir.mkdir(mode=0o700)
+        copied = prior_dir / "evidence-manifest.json"
+        shutil.copyfile(prior_manifest, copied)
+        copied.chmod(0o600)
+    openid4vc_suite_dir = args.work_dir / "openid4vc-suite"
+    worktree_created = False
     failure: BaseException | None = None
     manifest_path: Path | None = None
     try:
-        run_child(
-            "run_public_oidf_conformance.py",
-            [
-                *common,
-                "--work-dir",
-                str(args.work_dir / "oidc-fapi-ciba"),
-                "--export-dir",
-                str(args.export_dir / "oidc-fapi-ciba"),
-                "--run-namespace",
-                f"{args.run_namespace}-protocol",
-                "--proxy-trust-bundle",
-                str(args.proxy_trust_bundle),
-                "--proxy-executable",
-                str(args.proxy_executable),
-                "--timeout-seconds",
-                str(args.protocol_timeout_seconds),
-                "--monitor-interval-seconds",
-                str(args.protocol_monitor_interval_seconds),
-                "--final-stabilization-seconds",
-                str(args.final_stabilization_seconds),
-            ],
-            public_secret_document(secrets),
+        create_suite_worktree(args.suite_dir, openid4vc_suite_dir, args.suite_revision)
+        worktree_created = True
+        protocol_common = common_arguments(args)
+        openid4vc_common = common_arguments(args, suite_dir=openid4vc_suite_dir)
+        protocol_arguments = [
+            *protocol_common,
+            "--work-dir",
+            str(args.work_dir / "oidc-fapi-ciba"),
+            "--export-dir",
+            str(args.export_dir / "oidc-fapi-ciba"),
+            "--run-namespace",
+            protocol_namespace,
+            "--proxy-trust-bundle",
+            str(args.proxy_trust_bundle),
+            "--proxy-executable",
+            str(args.proxy_executable),
+            "--safe-group-workers",
+            str(getattr(args, "protocol_safe_group_workers", 2)),
+            "--browser-group-workers",
+            str(getattr(args, "protocol_browser_group_workers", 2)),
+            "--timeout-seconds",
+            str(args.protocol_timeout_seconds),
+            "--monitor-interval-seconds",
+            str(args.protocol_monitor_interval_seconds),
+            "--final-stabilization-seconds",
+            str(args.final_stabilization_seconds),
+        ]
+        for group in getattr(args, "protocol_groups", None) or ():
+            protocol_arguments.extend(("--group", group))
+        openid4vc_arguments = [
+            *openid4vc_common,
+            "--work-dir",
+            str(args.work_dir / "openid4vc"),
+            "--export-dir",
+            str(args.export_dir / "openid4vc"),
+            "--run-namespace",
+            openid4vc_namespace,
+            "--prepared-install-dir",
+            str(args.prepared_install_dir),
+            "--request-object-trust-anchor-pem",
+            str(args.request_object_trust_anchor_pem),
+            "--plan-group-size",
+            str(args.openid4vc_plan_group_size),
+            "--timeout-seconds",
+            str(args.openid4vc_timeout_seconds),
+            "--monitor-interval-seconds",
+            str(args.openid4vc_monitor_interval_seconds),
+        ]
+        jobs = (
+            (
+                "protocol",
+                "run_public_oidf_conformance.py",
+                protocol_arguments,
+                public_secret_document(secrets),
+            ),
+            (
+                "openid4vc",
+                "run_host_local_openid4vc_conformance.py",
+                openid4vc_arguments,
+                openid4vc_secret_document(secrets),
+            ),
         )
-        run_child(
-            "run_host_local_openid4vc_conformance.py",
-            [
-                *common,
-                "--work-dir",
-                str(args.work_dir / "openid4vc"),
-                "--export-dir",
-                str(args.export_dir / "openid4vc"),
-                "--run-namespace",
-                f"{args.run_namespace}-openid4vc",
-                "--prepared-install-dir",
-                str(args.prepared_install_dir),
-                "--request-object-trust-anchor-pem",
-                str(args.request_object_trust_anchor_pem),
-                "--plan-group-size",
-                str(args.openid4vc_plan_group_size),
-                "--timeout-seconds",
-                str(args.openid4vc_timeout_seconds),
-                "--monitor-interval-seconds",
-                str(args.openid4vc_monitor_interval_seconds),
-            ],
-            openid4vc_secret_document(secrets),
-        )
+        errors: list[BaseException] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                executor.submit(run_child, script, arguments, child_secrets): name
+                for name, script, arguments, child_secrets in jobs
+            }
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except BaseException as error:
+                    error.add_note(f"official {futures[future]} matrix failed")
+                    errors.append(error)
+        if errors:
+            raise ExceptionGroup("official parallel matrix execution failed", errors)
     except BaseException as error:
         failure = error
     finally:
+        if worktree_created:
+            try:
+                remove_suite_worktree(args.suite_dir, openid4vc_suite_dir)
+            except BaseException as cleanup_error:
+                if failure is not None:
+                    failure = ExceptionGroup(
+                        "official execution and suite worktree cleanup failed",
+                        [failure, cleanup_error],
+                    )
+                else:
+                    failure = cleanup_error
         try:
             manifest_path = sanitize_evidence_tree(args.export_dir)
             write_receipt(
@@ -303,8 +420,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_secret_source_arguments(parser)
     parser.add_argument("--protocol-timeout-seconds", type=int, default=14_400)
     parser.add_argument("--protocol-monitor-interval-seconds", type=int, default=30)
+    parser.add_argument("--protocol-safe-group-workers", type=int, default=2)
+    parser.add_argument("--protocol-browser-group-workers", type=int, default=2)
+    parser.add_argument(
+        "--protocol-group",
+        dest="protocol_groups",
+        action="append",
+        help="run only this bounded protocol group; repeat when resuming",
+    )
+    parser.add_argument(
+        "--prior-evidence-manifest",
+        type=Path,
+        help="sanitized manifest from already completed plans to merge into this receipt",
+    )
     parser.add_argument("--final-stabilization-seconds", type=int, default=45)
-    parser.add_argument("--openid4vc-plan-group-size", type=int, default=4)
+    parser.add_argument("--openid4vc-plan-group-size", type=int, default=17)
     parser.add_argument("--openid4vc-timeout-seconds", type=int, default=4_800)
     parser.add_argument("--openid4vc-monitor-interval-seconds", type=int, default=10)
     return parser.parse_args(argv)

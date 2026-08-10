@@ -50,8 +50,12 @@ class OfficialOidfFullMatrixTests(unittest.TestCase):
             secret_file=None,
             protocol_timeout_seconds=14_400,
             protocol_monitor_interval_seconds=30,
+            protocol_safe_group_workers=2,
+            protocol_browser_group_workers=2,
+            protocol_groups=None,
+            prior_evidence_manifest=None,
             final_stabilization_seconds=45,
-            openid4vc_plan_group_size=4,
+            openid4vc_plan_group_size=17,
             openid4vc_timeout_seconds=4_800,
             openid4vc_monitor_interval_seconds=10,
         )
@@ -98,6 +102,8 @@ class OfficialOidfFullMatrixTests(unittest.TestCase):
                     self.module, "read_secret_document", return_value=self.secrets()
                 ),
                 mock.patch.object(self.module, "run_child", side_effect=run_child),
+                mock.patch.object(self.module, "create_suite_worktree"),
+                mock.patch.object(self.module, "remove_suite_worktree"),
                 mock.patch.object(
                     self.module, "sanitize_evidence_tree", side_effect=sanitize
                 ),
@@ -105,18 +111,19 @@ class OfficialOidfFullMatrixTests(unittest.TestCase):
                 self.module.run(args)
 
             self.assertEqual(
-                [invocation[0] for invocation in invocations],
-                [
+                {invocation[0] for invocation in invocations},
+                {
                     "run_public_oidf_conformance.py",
                     "run_host_local_openid4vc_conformance.py",
-                ],
+                },
             )
+            by_script = {invocation[0]: invocation for invocation in invocations}
             for _, arguments, _ in invocations:
                 self.assertIn(self.module.OFFICIAL_CONFORMANCE_SERVER, arguments)
                 self.assertNotIn("gh", arguments)
                 self.assertNotIn("github", " ".join(arguments).lower())
             self.assertEqual(
-                set(invocations[0][2]),
+                set(by_script["run_public_oidf_conformance.py"][2]),
                 {
                     "oidf_applicant_email",
                     "oidf_applicant_password",
@@ -127,7 +134,7 @@ class OfficialOidfFullMatrixTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                set(invocations[1][2]),
+                set(by_script["run_host_local_openid4vc_conformance.py"][2]),
                 {
                     "applicant_email",
                     "applicant_password",
@@ -165,6 +172,30 @@ class OfficialOidfFullMatrixTests(unittest.TestCase):
         self.assertEqual(
             json.loads(invocation.kwargs["input"]), {"token": "private-token"}
         )
+
+    def test_namespace_is_rejected_before_secrets_or_output_are_created(self):
+        for namespace in ("contains_underscore", "a" * 23):
+            with self.subTest(namespace=namespace), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = self.args(root)
+                args.run_namespace = namespace
+                with (
+                    mock.patch.object(self.module, "read_secret_document") as read_secrets,
+                    self.assertRaisesRegex(
+                        self.module.OfficialFullMatrixError,
+                        "must produce 1-32 character lowercase child namespaces",
+                    ),
+                ):
+                    self.module.run(args)
+
+                read_secrets.assert_not_called()
+                self.assertFalse(args.work_dir.exists())
+                self.assertFalse(args.export_dir.exists())
+
+    def test_longest_valid_base_namespace_produces_valid_child_namespaces(self):
+        protocol, openid4vc = self.module.child_run_namespaces("a" * 22)
+        self.assertEqual(len(protocol), 31)
+        self.assertEqual(len(openid4vc), 32)
 
     def test_success_refuses_incomplete_matrix_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

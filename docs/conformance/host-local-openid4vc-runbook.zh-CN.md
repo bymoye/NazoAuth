@@ -95,10 +95,12 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
 
 `secret_provider_for_this_host` 由运营者维护，只能把这一份文档写到 stdout，不得记录内容、导出到环境变量或写入 shell history。FD 方式等价：传入 `--secret-fd N` 并确保 `N >= 3` 被 Python 继承。
 
-私有预发布门禁应同时传入 `oidf-public-black-box-runbook.zh-CN.md` 所述四个
-candidate target 参数。runner 会把同一组 release、revision、build ID 和 OCI
-manifest digest 绑定到租约创建、撤销与清理；已发布部署不传这些参数，继续
-严格绑定已签名 active Release。
+如果当前部署通过通用 `nazoauthctl development activate` 安装，应省略 candidate
+target 参数，让控制器校验当前本地镜像的内嵌 identity 与 digest。
+`oidf-public-black-box-runbook.zh-CN.md` 所述四项属于另一条签名候选版本路径；只有选择
+该路径时 runner 才会把同一组 release、revision、build ID 和 OCI manifest digest
+绑定到租约创建、撤销与清理。已发布部署也不传这些参数，继续严格绑定已签名 active
+Release。
 
 ## 完成与失败
 

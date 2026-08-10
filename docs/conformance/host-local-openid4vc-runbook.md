@@ -86,11 +86,14 @@ secret_provider_for_this_host | python3 /opt/nazoauth/source/scripts/run_host_lo
 
 `secret_provider_for_this_host` is operator-owned and writes only this document to stdout without logging it, exporting it into the environment, or appending it to shell history. The FD equivalent is `--secret-fd N` with inherited `N >= 3`.
 
-When this is a private pre-release gate, add the four candidate target options
-documented in `oidf-public-black-box-runbook.md`. The runner forwards the same
-exact release, revision, build ID, and OCI manifest digest to lease creation,
-revocation, and cleanup; released deployments omit them and remain bound to the
-signed active Release.
+For an active deployment installed through generic `nazoauthctl development
+activate`, omit candidate target options so the controller verifies the active
+local image's embedded identity and digest. The four candidate options in
+`oidf-public-black-box-runbook.md` belong to the separate signed-candidate path.
+When that path is selected, the runner forwards the same exact release,
+revision, build ID, and OCI manifest digest to lease creation, revocation, and
+cleanup. Released deployments also omit them and remain bound to the signed
+active Release.
 
 ## Completion and failure
 

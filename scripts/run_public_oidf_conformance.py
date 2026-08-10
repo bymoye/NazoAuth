@@ -57,8 +57,10 @@ REQUIRED_SECRET_FIELDS = (
 )
 SECRET_INPUT_FIELDS = tuple(name.lower() for name in REQUIRED_SECRET_FIELDS)
 OFFICIAL_INGRESS_ONLY_WARNING_CONDITIONS = frozenset({"EnsureIncomingTls13"})
-MAX_SAFE_GROUP_WORKERS = 1
-MAX_BROWSER_GROUP_WORKERS = 1
+DEFAULT_SAFE_GROUP_WORKERS = 2
+DEFAULT_BROWSER_GROUP_WORKERS = 2
+MAX_SAFE_GROUP_WORKERS = 4
+MAX_BROWSER_GROUP_WORKERS = 2
 MAX_DISCOVERY_METADATA_BYTES = 1024 * 1024
 SENSITIVE_DISCOVERY_URL_FIELDS = (
     "authorization_endpoint",
@@ -792,7 +794,19 @@ def prepare_group_invocations(
         if isolated:
             invocation.append("--no-parallel")
         invocations.append((name, invocation))
-    return tuple(invocations)
+    requested_groups = getattr(args, "groups", None)
+    if requested_groups is None:
+        return tuple(invocations)
+    available = {name for name, _ in invocations}
+    requested = set(requested_groups)
+    if len(requested) != len(requested_groups):
+        raise PublicRunError("--group values must be unique")
+    unknown = requested - available
+    if unknown:
+        raise PublicRunError(
+            "unknown --group value(s): " + ", ".join(sorted(unknown))
+        )
+    return tuple(item for item in invocations if item[0] in requested)
 
 
 def group_lane(name: str) -> str:
@@ -1040,10 +1054,10 @@ def run(args: argparse.Namespace) -> None:
     if not 60 <= args.lease_ttl_seconds <= 86_400:
         raise PublicRunError("--lease-ttl-seconds must be between 60 and 86400")
     args.safe_group_workers = getattr(
-        args, "safe_group_workers", MAX_SAFE_GROUP_WORKERS
+        args, "safe_group_workers", DEFAULT_SAFE_GROUP_WORKERS
     )
     args.browser_group_workers = getattr(
-        args, "browser_group_workers", MAX_BROWSER_GROUP_WORKERS
+        args, "browser_group_workers", DEFAULT_BROWSER_GROUP_WORKERS
     )
     if not 1 <= args.safe_group_workers <= MAX_SAFE_GROUP_WORKERS:
         raise PublicRunError(
@@ -1242,14 +1256,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--safe-group-workers",
         type=int,
-        default=MAX_SAFE_GROUP_WORKERS,
-        help="OIDC/FAPI plan group workers; browser state safety requires 1",
+        default=DEFAULT_SAFE_GROUP_WORKERS,
+        help="parallel workers for independent OIDC/FAPI plan groups (1-4)",
     )
     parser.add_argument(
         "--browser-group-workers",
         type=int,
-        default=MAX_BROWSER_GROUP_WORKERS,
-        help="logout/session plan group workers; browser state safety requires 1",
+        default=DEFAULT_BROWSER_GROUP_WORKERS,
+        help="parallel workers for isolated logout/session plan groups (1-2)",
+    )
+    parser.add_argument(
+        "--group",
+        dest="groups",
+        action="append",
+        help="run only this bounded plan group; repeat for a resumable subset",
     )
     parser.add_argument(
         "--final-stabilization-seconds",

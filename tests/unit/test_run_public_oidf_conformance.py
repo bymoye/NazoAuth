@@ -150,8 +150,8 @@ class PublicOidfRunnerTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args.safe_group_workers, 1)
-        self.assertEqual(args.browser_group_workers, 1)
+        self.assertEqual(args.safe_group_workers, 2)
+        self.assertEqual(args.browser_group_workers, 2)
         self.assertEqual(args.lease_ttl_seconds, 28_800)
 
     def test_secret_input_excludes_per_run_capability_tokens(self):
