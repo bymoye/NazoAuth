@@ -200,10 +200,9 @@ fn load_matrix_descriptor() -> anyhow::Result<ConformanceMatrixDescriptor> {
         bail!("conformance matrix descriptor exceeds the size limit");
     }
     let descriptor: ConformanceMatrixDescriptor = serde_json::from_slice(CONFORMANCE_MATRIX_BYTES)
-        .context("conformance matrix descriptor is invalid")?;
-    validate_conformance_matrix_descriptor(&descriptor).map_err(|error| {
-        anyhow::anyhow!("conformance matrix descriptor violates protocol policy: {error}")
-    })?;
+        .map_err(|_| anyhow::anyhow!("conformance matrix descriptor is invalid"))?;
+    validate_conformance_matrix_descriptor(&descriptor)
+        .map_err(|_| anyhow::anyhow!("conformance matrix descriptor violates protocol policy"))?;
     Ok(descriptor)
 }
 
@@ -231,7 +230,7 @@ pub(crate) async fn operator_onboarding_apply(
         bail!("conformance matrix digest mismatch");
     }
     let bundle: ConformanceOnboardingBundle = serde_json::from_slice(&bundle_bytes)
-        .context("conformance onboarding bundle is invalid")?;
+        .map_err(|_| anyhow::anyhow!("conformance onboarding bundle is invalid"))?;
     let request = validate_bundle(
         SignedOnboardingClaims {
             task_jti,
@@ -245,7 +244,10 @@ pub(crate) async fn operator_onboarding_apply(
         bundle,
     )
     .await?;
-    let repository = PostgresOnboardingRepository::new(repository()?);
+    let repository = PostgresOnboardingRepository::new(
+        repository()
+            .map_err(|_| anyhow::anyhow!("conformance onboarding repository is unavailable"))?,
+    );
     let result = repository.apply_onboarding(request).await?;
     let client_count = result.client_count;
     if client_count != expected_client_count
@@ -411,7 +413,9 @@ async fn validate_bundle(
         bail!("conformance onboarding client count does not match the bundle");
     }
     let target_issuer = validate_target_issuer(&bundle.target_issuer)?;
-    let configured_issuer = configured_issuer()?;
+    let configured_issuer = configured_issuer().map_err(|_| {
+        anyhow::anyhow!("conformance deployment issuer configuration is unavailable")
+    })?;
     if target_issuer != configured_issuer {
         bail!("conformance onboarding target issuer does not match this deployment");
     }
@@ -552,7 +556,9 @@ async fn validate_bundle(
         bail!("conformance onboarding client set does not match the deployment matrix");
     }
 
-    let applicant_password_hash = hash_applicant_password(applicant_password).await?;
+    let applicant_password_hash = hash_applicant_password(applicant_password)
+        .await
+        .map_err(|_| anyhow::anyhow!("conformance applicant password preparation failed"))?;
     validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
     let clients = prepare_client_registrations(raw_clients).await?;
 
@@ -611,10 +617,15 @@ async fn hash_applicant_password(
 async fn prepare_client_registrations(
     raw_clients: Vec<ConformanceClientBundle>,
 ) -> anyhow::Result<Vec<ConformanceOnboardingClient>> {
-    let config = ConfigSource::load()?;
-    let settings = crate::settings::Settings::from_config(&config)?;
-    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
-    let pool = nazo_postgres::create_pool(crate::config::database_url(&config), 1)?;
+    let config = ConfigSource::load()
+        .map_err(|_| anyhow::anyhow!("conformance client policy configuration is unavailable"))?;
+    let settings = crate::settings::Settings::from_config(&config)
+        .map_err(|_| anyhow::anyhow!("conformance client policy configuration is invalid"))?;
+    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings())
+        .await
+        .map_err(|_| anyhow::anyhow!("conformance client key material is unavailable"))?;
+    let pool = nazo_postgres::create_pool(crate::config::database_url(&config), 1)
+        .map_err(|_| anyhow::anyhow!("conformance client policy storage is unavailable"))?;
     let service = crate::http::admin::clients::ServerAdminClientService::new(
         nazo_postgres::OAuthClientRepository::new(pool),
         crate::http::admin::clients::ServerSectorIdentifierResolver,
