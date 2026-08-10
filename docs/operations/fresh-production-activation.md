@@ -36,6 +36,8 @@ The normal first-install and upgrade interface remains
    sudo python3 /opt/nazoauth/source/scripts/prepare_host_local_oidf_install.py \
      --source-dir /opt/nazoauth/source \
      --source-commit "$DEPLOYED_SOURCE_SHA" \
+     --suite-dir /opt/nazo-oauth/conformance/operator-suite \
+     --suite-revision 321bc5bc53601b9690b54c023c0cbfac0f0230f2 \
      --suite-origin https://oauth-test.nazo.run \
      --output-dir /run/nazoauth-host-local-oidf-install
    sudo nazoauthctl install --runtime auto --public-url https://auth.example.com \

@@ -47,7 +47,7 @@ pub(crate) async fn operator_create(
         }
     }
     if let Some(material) = public_material.as_ref() {
-        crate::domain::parse_conformance_credential_trust_anchor(
+        crate::domain::parse_conformance_credential_trust_anchors(
             &material.credential_trust_anchor_pem,
         )
         .context("invalid OpenID4VC conformance credential trust anchor")?;

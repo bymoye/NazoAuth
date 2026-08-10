@@ -13,7 +13,7 @@ mod mdoc;
 mod sd_jwt;
 mod signer;
 
-pub(crate) use certificates::parse_conformance_credential_trust_anchor;
+pub(crate) use certificates::parse_conformance_credential_trust_anchors;
 #[cfg(test)]
 pub(crate) use mdoc::{
     mdoc_failed_assessments_accepted, mdoc_holder_key, standard_device_authentication_bytes,

@@ -432,20 +432,26 @@ fn sd_presentation_fixture() -> (
 }
 
 #[test]
-fn conformance_trust_anchor_requires_one_current_ca() {
+fn conformance_trust_anchors_require_a_bounded_unique_current_ca_set() {
     let certs = certificate_fixture("issuer.example");
+    let other = certificate_fixture("other-issuer.example");
     assert_eq!(
-        parse_conformance_credential_trust_anchor(&certs.ca_pem).expect("valid CA"),
-        certs.ca_der
+        parse_conformance_credential_trust_anchors(&certs.ca_pem).expect("valid CA"),
+        vec![certs.ca_der.clone()]
     );
-    assert!(parse_conformance_credential_trust_anchor("").is_err());
+    assert_eq!(
+        parse_conformance_credential_trust_anchors(&format!("{}{}", certs.ca_pem, other.ca_pem))
+            .expect("two independent CA anchors"),
+        vec![certs.ca_der.clone(), other.ca_der]
+    );
+    assert!(parse_conformance_credential_trust_anchors("").is_err());
     assert!(
-        parse_conformance_credential_trust_anchor(&format!("{}{}", certs.ca_pem, certs.ca_pem))
+        parse_conformance_credential_trust_anchors(&format!("{}{}", certs.ca_pem, certs.ca_pem))
             .is_err()
     );
-    assert!(parse_conformance_credential_trust_anchor(&certs.leaf_pem).is_err());
+    assert!(parse_conformance_credential_trust_anchors(&certs.leaf_pem).is_err());
     assert!(
-        parse_conformance_credential_trust_anchor(
+        parse_conformance_credential_trust_anchors(
             "-----BEGIN CERTIFICATE-----\nAQ==\n-----END CERTIFICATE-----"
         )
         .is_err()

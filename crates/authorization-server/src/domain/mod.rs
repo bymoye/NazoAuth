@@ -58,7 +58,7 @@ pub(crate) use oauth::{
 pub(crate) use oidc_logout::{OidcLogoutConfig, OidcLogoutHandles};
 pub(crate) use openid4vc::{
     Openid4vcClientAttestationValidator, Openid4vcCredentialCrypto, Openid4vcProofValidator,
-    parse_conformance_credential_trust_anchor,
+    parse_conformance_credential_trust_anchors,
 };
 pub(crate) use openid4vc_endpoints::{
     CredentialDatasetAdminService, PresentationVerifierConfig, PutCredentialDatasetRequest,

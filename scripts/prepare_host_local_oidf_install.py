@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_host_local_openid4vc_conformance as host_local  # noqa: E402
-from run_public_oidf_conformance import verify_source  # noqa: E402
+from run_public_oidf_conformance import verify_source, verify_suite  # noqa: E402
 
 
 PROFILE_FILE = "standards-full-profile.json"
@@ -46,6 +46,8 @@ def prepare(
     *,
     source_dir: Path,
     source_commit: str,
+    suite_dir: Path,
+    suite_revision: str,
     suite_origin: str,
     output_dir: Path,
 ) -> Path:
@@ -55,6 +57,8 @@ def prepare(
         raise PreparationError("--output-dir must not already exist")
     source_dir = source_dir.resolve()
     verify_source(source_dir, source_commit, "host-local preparation")
+    suite_dir = suite_dir.resolve()
+    verify_suite(suite_dir, suite_revision)
     suite_origin = host_local.canonical_suite_origin(suite_origin)
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +72,8 @@ def prepare(
         material = host_local.generate_certificate_material(
             generation_dir, suite_origin=suite_origin
         )
+        suite_mdoc_anchor = host_local.suite_mdoc_fixture_trust_anchor(suite_dir)
+        material["suite_mdoc_trust_anchor_pem"] = suite_mdoc_anchor
         host_local.validate_generated_material(material)
         profile = host_local.build_prepared_install_profile(material, suite_origin)
         trust = host_local.build_prepared_conformance_trust(material, suite_origin)
@@ -80,6 +86,7 @@ def prepare(
             "schema": 1,
             "source_commit": source_commit,
             "suite_origin": suite_origin,
+            "suite_revision": suite_revision,
             "files": {
                 PROFILE_FILE: profile_digest,
                 TRUST_FILE: trust_digest,
@@ -117,6 +124,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=Path, default=ROOT)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--suite-dir", required=True, type=Path)
+    parser.add_argument("--suite-revision", required=True)
     parser.add_argument("--suite-origin", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args(argv)
@@ -128,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         prepare(
             source_dir=args.source_dir,
             source_commit=args.source_commit,
+            suite_dir=args.suite_dir,
+            suite_revision=args.suite_revision,
             suite_origin=args.suite_origin,
             output_dir=args.output_dir,
         )

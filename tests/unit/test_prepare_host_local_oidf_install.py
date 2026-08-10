@@ -43,6 +43,13 @@ def fake_material() -> dict[str, object]:
     return material
 
 
+SUITE_MDOC_ANCHOR = (
+    "-----BEGIN CERTIFICATE-----\n"
+    "suite-mdoc\n"
+    "-----END CERTIFICATE-----\n"
+)
+
+
 class PrepareHostLocalOidfInstallTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
@@ -53,21 +60,30 @@ class PrepareHostLocalOidfInstallTests(unittest.TestCase):
             material = fake_material()
             with (
                 mock.patch.object(self.module, "verify_source") as verify,
+                mock.patch.object(self.module, "verify_suite") as verify_suite,
                 mock.patch.object(
                     self.module.host_local,
                     "generate_certificate_material",
                     return_value=material,
                 ),
+                mock.patch.object(
+                    self.module.host_local,
+                    "suite_mdoc_fixture_trust_anchor",
+                    return_value=SUITE_MDOC_ANCHOR,
+                ),
             ):
                 result = self.module.prepare(
                     source_dir=ROOT,
                     source_commit="a" * 40,
+                    suite_dir=ROOT / "suite",
+                    suite_revision="b" * 40,
                     suite_origin="https://suite.example/",
                     output_dir=output,
                 )
 
             self.assertEqual(result, output)
             verify.assert_called_once_with(ROOT.resolve(), "a" * 40, "host-local preparation")
+            verify_suite.assert_called_once_with((ROOT / "suite").resolve(), "b" * 40)
             self.assertEqual(
                 {path.name for path in output.iterdir()},
                 {
@@ -93,6 +109,11 @@ class PrepareHostLocalOidfInstallTests(unittest.TestCase):
             self.assertEqual(trust["client_attestation_issuer"], "https://suite.example/")
             self.assertEqual(manifest["source_commit"], "a" * 40)
             self.assertEqual(manifest["suite_origin"], "https://suite.example")
+            self.assertEqual(manifest["suite_revision"], "b" * 40)
+            self.assertEqual(
+                trust["credential_trust_anchor_pem"],
+                material["trust_anchor_pem"] + SUITE_MDOC_ANCHOR,
+            )
             for filename, digest in manifest["files"].items():
                 self.assertEqual(
                     hashlib.sha256((output / filename).read_bytes()).hexdigest(), digest
@@ -106,6 +127,8 @@ class PrepareHostLocalOidfInstallTests(unittest.TestCase):
                 self.module.prepare(
                     source_dir=ROOT,
                     source_commit="a" * 40,
+                    suite_dir=ROOT / "suite",
+                    suite_revision="b" * 40,
                     suite_origin="https://suite.example",
                     output_dir=output,
                 )

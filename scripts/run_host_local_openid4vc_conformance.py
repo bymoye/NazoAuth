@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets as secure_random
 import shutil
 import signal
@@ -87,6 +88,10 @@ PREPARED_MATERIAL_FILE = "openid4vc-run-material.json"
 PREPARED_MANIFEST_FILE = "host-local-oidf-install-manifest.json"
 VCI_SD_JWT_CONFIGURATION_ID = "eu.europa.ec.eudi.pid.1"
 VCI_MDOC_CONFIGURATION_ID = "org.iso.18013.5.1.mDL"
+SUITE_MDOC_FIXTURE_SOURCES = (
+    Path("src/main/kotlin/org/multipaz/testapp/VciMdocUtils.kt"),
+    Path("src/main/kotlin/com/android/identity/testapp/TestAppUtils.kt"),
+)
 PRIVATE_CONFIG_NAMES = frozenset(
     {
         "base-input.json",
@@ -116,6 +121,41 @@ def canonical_suite_origin(value: str) -> str:
         return install_profile.origin(value, "suite origin")
     except install_profile.ProfileError as error:
         raise HostLocalOpenid4vcError(str(error)) from error
+
+
+def suite_mdoc_fixture_trust_anchor(suite_dir: Path) -> str:
+    """Extract the exact self-signed mdoc fixture pinned by the Suite source."""
+    anchors: list[str] = []
+    pattern = re.compile(
+        r'documentSignerCert\s*=\s*X509Cert\.fromPem\(\s*"""'
+        r'(-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----)\s*"""',
+        re.DOTALL,
+    )
+    for relative in SUITE_MDOC_FIXTURE_SOURCES:
+        path = suite_dir / relative
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise HostLocalOpenid4vcError(
+                f"Suite mdoc fixture source is not readable: {relative.as_posix()}"
+            ) from error
+        matches = pattern.findall(source)
+        if len(matches) != 1:
+            fail(
+                "Suite mdoc fixture source must contain exactly one document signer certificate: "
+                f"{relative.as_posix()}"
+            )
+        anchor = matches[0].strip() + "\n"
+        try:
+            ssl.PEM_cert_to_DER_cert(anchor)
+        except ValueError as error:
+            raise HostLocalOpenid4vcError(
+                f"Suite mdoc fixture certificate is invalid: {relative.as_posix()}"
+            ) from error
+        anchors.append(anchor)
+    if len(set(anchors)) != 1:
+        fail("Suite mdoc fixture sources do not pin the same certificate")
+    return anchors[0]
 
 
 def build_prepared_install_profile(
@@ -148,12 +188,23 @@ def build_prepared_conformance_trust(
     key_attestation = material["key_attestation"]
     if not isinstance(client_attestation, dict) or not isinstance(key_attestation, dict):
         fail("generated OpenID4VC attestation material has an invalid shape")
+    run_anchor = material["trust_anchor_pem"]
+    suite_mdoc_anchor = material.get("suite_mdoc_trust_anchor_pem")
+    if (
+        not isinstance(run_anchor, str)
+        or not isinstance(suite_mdoc_anchor, str)
+        or "-----BEGIN CERTIFICATE-----" not in suite_mdoc_anchor
+        or "PRIVATE KEY" in suite_mdoc_anchor
+        or run_anchor.strip() == suite_mdoc_anchor.strip()
+    ):
+        fail("generated OpenID4VC material lacks the independent Suite mdoc trust anchor")
+    credential_trust_bundle = run_anchor.rstrip() + "\n" + suite_mdoc_anchor.lstrip()
     return {
         "schema": 1,
         "client_attestation_issuer": f"{suite}/",
         "client_attestation_jwks": {"keys": [public_jwk(client_attestation)]},
         "key_attestation_jwks": {"keys": [public_jwk(key_attestation)]},
-        "credential_trust_anchor_pem": material["trust_anchor_pem"],
+        "credential_trust_anchor_pem": credential_trust_bundle,
     }
 
 
@@ -514,6 +565,7 @@ def prepared_material(
         "schema": 1,
         "source_commit": args.deployed_sha,
         "suite_origin": args.conformance_server,
+        "suite_revision": args.suite_revision,
         "files": {
             PREPARED_PROFILE_FILE: profile_digest,
             PREPARED_TRUST_FILE: trust_digest,
@@ -523,6 +575,10 @@ def prepared_material(
     if manifest != expected_manifest:
         fail("prepared install manifest does not match this source, Suite, and file set")
     validate_generated_material(material)
+    if material["suite_mdoc_trust_anchor_pem"] != suite_mdoc_fixture_trust_anchor(
+        args.suite_dir
+    ):
+        fail("prepared Suite mdoc trust anchor does not match the pinned Suite source")
     if profile != build_prepared_install_profile(material, args.conformance_server):
         fail("prepared standards-full profile does not match the private run identity")
     if trust != build_prepared_conformance_trust(material, args.conformance_server):

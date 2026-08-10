@@ -178,10 +178,9 @@ impl ServerPresentationOperations {
             serde_json::from_value(material).map_err(|_| {
                 vp_error(503, "server_error", "Conformance trust state is invalid.")
             })?;
-        crate::domain::parse_conformance_credential_trust_anchor(
+        crate::domain::parse_conformance_credential_trust_anchors(
             &material.credential_trust_anchor_pem,
         )
-        .map(|anchor| vec![anchor])
         .map_err(|_| {
             vp_error(
                 503,

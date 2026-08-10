@@ -30,7 +30,8 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
 
     def fake_material(self) -> dict[str, object]:
         material: dict[str, object] = {
-            "trust_anchor_pem": "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n"
+            "trust_anchor_pem": "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n",
+            "suite_mdoc_trust_anchor_pem": "-----BEGIN CERTIFICATE-----\nsuite-mdoc\n-----END CERTIFICATE-----\n",
         }
         for index, name in enumerate(
             ("wallet_private", "wallet_attested", "client_attestation", "key_attestation", "credential")
@@ -77,6 +78,7 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 "schema": 1,
                 "source_commit": "a" * 40,
                 "suite_origin": "https://suite.example",
+                "suite_revision": "c" * 40,
                 "files": {
                     self.module.PREPARED_PROFILE_FILE: profile_digest,
                     self.module.PREPARED_TRUST_FILE: trust_digest,
@@ -170,13 +172,14 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
         self.assertEqual(result["issuer"]["credential_configuration_ids"]["mdoc"], "org.iso.18013.5.1.mDL")
         self.assertEqual(len(result["issuer"]["tx_code"]), 6)
 
-    def test_conformance_lease_carries_only_the_public_run_credential_anchor(self):
+    def test_conformance_lease_carries_the_run_and_pinned_suite_mdoc_anchors(self):
         material = self.fake_material()
         trust = self.module.build_prepared_conformance_trust(
             material, "https://suite.example"
         )
         self.assertEqual(
-            trust["credential_trust_anchor_pem"], material["trust_anchor_pem"]
+            trust["credential_trust_anchor_pem"],
+            material["trust_anchor_pem"] + material["suite_mdoc_trust_anchor_pem"],
         )
         self.assertNotIn("PRIVATE KEY", trust["credential_trust_anchor_pem"])
         self.assertNotIn("d", trust["client_attestation_jwks"]["keys"][0])
@@ -372,9 +375,16 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 prepared_install_dir=directory.resolve(),
                 deployed_sha="a" * 40,
                 conformance_server="https://suite.example",
+                suite_dir=Path(temporary) / "suite",
+                suite_revision="c" * 40,
             )
 
-            loaded = self.module.prepared_material(args)
+            with mock.patch.object(
+                self.module,
+                "suite_mdoc_fixture_trust_anchor",
+                return_value=material["suite_mdoc_trust_anchor_pem"],
+            ):
+                loaded = self.module.prepared_material(args)
 
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded, (material, expected_digest, trust_digest))
@@ -396,11 +406,18 @@ class HostLocalOpenid4vcTests(unittest.TestCase):
                 prepared_install_dir=directory.resolve(),
                 deployed_sha="a" * 40,
                 conformance_server="https://suite.example",
+                suite_dir=Path(temporary) / "suite",
+                suite_revision="c" * 40,
             )
             with self.assertRaisesRegex(
                 self.module.HostLocalOpenid4vcError, "manifest does not match"
             ):
-                self.module.prepared_material(args)
+                with mock.patch.object(
+                    self.module,
+                    "suite_mdoc_fixture_trust_anchor",
+                    return_value=self.fake_material()["suite_mdoc_trust_anchor_pem"],
+                ):
+                    self.module.prepared_material(args)
 
     def test_ctl_lease_is_created_from_public_trust_and_revoked(self):
         lease_id = "018f3f2a-7b55-7a25-8f20-6d526f8f44e1"

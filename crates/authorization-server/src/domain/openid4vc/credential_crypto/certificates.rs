@@ -15,23 +15,35 @@ use super::super::crypto_helpers::{
 };
 use super::Openid4vcCredentialCrypto;
 
-pub(crate) fn parse_conformance_credential_trust_anchor(pem: &str) -> anyhow::Result<Vec<u8>> {
+const MAX_CONFORMANCE_CREDENTIAL_TRUST_ANCHORS: usize = 4;
+
+pub(crate) fn parse_conformance_credential_trust_anchors(
+    pem: &str,
+) -> anyhow::Result<Vec<Vec<u8>>> {
     let certificates = parse_pem_certificates(pem.as_bytes())?;
-    if certificates.len() != 1 {
+    if certificates.is_empty() || certificates.len() > MAX_CONFORMANCE_CREDENTIAL_TRUST_ANCHORS {
         anyhow::bail!(
-            "OpenID4VC conformance credential trust must contain exactly one certificate"
+            "OpenID4VC conformance credential trust must contain 1 through {MAX_CONFORMANCE_CREDENTIAL_TRUST_ANCHORS} certificates"
         );
     }
-    let der = certificates[0].clone();
-    let (remainder, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
-        anyhow::anyhow!("failed to parse OpenID4VC conformance credential trust anchor: {error}")
-    })?;
-    if !remainder.is_empty() || !parsed.is_ca() || !parsed.validity().is_valid() {
-        anyhow::bail!(
-            "OpenID4VC conformance credential trust anchor must be a currently valid CA certificate"
-        );
+    let mut anchors = Vec::with_capacity(certificates.len());
+    for der in certificates {
+        let (remainder, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to parse OpenID4VC conformance credential trust anchor: {error}"
+            )
+        })?;
+        if !remainder.is_empty() || !parsed.is_ca() || !parsed.validity().is_valid() {
+            anyhow::bail!(
+                "OpenID4VC conformance credential trust anchors must be currently valid CA certificates"
+            );
+        }
+        if anchors.contains(&der) {
+            anyhow::bail!("OpenID4VC conformance credential trust anchors must be unique");
+        }
+        anchors.push(der);
     }
-    Ok(der)
+    Ok(anchors)
 }
 
 impl Openid4vcCredentialCrypto {
