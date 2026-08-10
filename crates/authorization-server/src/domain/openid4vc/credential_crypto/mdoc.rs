@@ -293,9 +293,9 @@ fn verify_mdoc_issuer_certificate_chains(
             .validity_info
             .signed
             .timestamp();
-        let direct_conformance_anchor =
-            verify_direct_conformance_anchor(&certificates, conformance_trust_anchors, signed_at)?;
-        if !direct_conformance_anchor
+        let direct_scoped_trust_anchor =
+            verify_direct_scoped_trust_anchor(&certificates, conformance_trust_anchors, signed_at)?;
+        if !direct_scoped_trust_anchor
             && !verify_certificate_chain_at(&certificates, trust_anchors, signed_at)?
         {
             return Ok(false);
@@ -310,10 +310,10 @@ fn verify_mdoc_issuer_certificate_chains(
     Ok(true)
 }
 
-/// Accept the OIDF suite's self-signed IACA fixture only when the active
-/// conformance lease pins that exact certificate. The ordinary mdoc chain path
-/// remains strict and continues to require a non-CA Document Signer leaf.
-pub(super) fn verify_direct_conformance_anchor(
+/// Accept a single self-signed IACA only when an explicit, scoped trust policy
+/// pins that exact certificate. The ordinary mdoc chain path remains strict and
+/// continues to require a non-CA Document Signer leaf.
+pub(super) fn verify_direct_scoped_trust_anchor(
     certificates: &[Vec<u8>],
     conformance_trust_anchors: &[Vec<u8>],
     unix_time: i64,

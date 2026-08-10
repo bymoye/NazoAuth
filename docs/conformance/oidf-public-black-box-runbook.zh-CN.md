@@ -2,18 +2,23 @@
 
 本文规定唯一受支持的 OIDF 一致性测试流程。被测对象是正常的公网生产部署；测试工具不得获得数据库访问权、私有服务网络地址、特权运行时挂载或另一套协议行为。
 
-## 四步复现
+## 本地四步复现
 
-生产接入的安全边界不能省略，但操作者入口固定为四步：
+生产接入的安全边界不能省略，但 GitHub 不是执行依赖。操作者入口固定为四步：
 
 1. 部署一个精确且不可变的 Release tag，并同时记录 tag 与其完整源码 commit SHA。
-2. 运行 `oidf-conformance-full.yml`，输入 `release_tag`、`deployed_sha`、
-   `target_issuer`，并将 `onboarding_material_only` 设为 `true`；下载并校验生成的 bundle。
-3. 由普通申请人与不同的审批人，通过 `apply_public_conformance_onboarding.py`
-   和正式公开控制面完成接入。禁止数据库 seed 和私有网络访问。
-4. 使用相同输入、将 `onboarding_material_only` 设为 `false` 运行 27-plan
-   OIDC/FAPI/FAPI-CIBA/Logout 矩阵，再运行 17-plan OpenID4VC Final/HAIP 矩阵。
-   workflow 会检出已部署 SHA、克隆精确官方套件提交，并在发现受版本控制的修改时拒绝运行。
+2. 在操作者自己的 Linux 主机检出该源码 commit 和精确的官方 Suite commit；运行
+   `prepare_host_local_oidf_install.py` 生成本轮一次性的 OpenID4VC 安装材料。
+3. 准备两个不同的公网产品身份、官方 Suite 的短期 API token、VCI/VP 管理 token，
+   只通过 stdin、继承 FD 或 POSIX `0600` 文件把封闭 JSON 交给本地 runner。
+4. 运行 `run_official_oidf_full_matrix.py`。该入口固定连接
+   `https://www.certification.openid.net`，依次运行 27-plan
+   OIDC/FAPI/FAPI-CIBA/Logout/Session 与 17-plan OpenID4VC Final/HAIP，完成公开控制面
+   清理，并把原始 ZIP 归约成一份无凭据的 44-plan evidence manifest 和 receipt。
+
+`.github/workflows/oidf-conformance-full.yml` 和 OpenID4VC workflow 只是可选的远程包装层，
+不得成为 Suite token、源码材料、执行逻辑或证据归约的唯一来源。本地入口不调用 `gh`、
+GitHub API 或 Actions artifact。
 
 `--ref` 只选择要运行的 workflow 定义，不是源码信任 allowlist。两个 workflow 都会先
 要求所给 tag 解引用后精确等于所给 commit。若该 commit 不是默认分支的祖先，还必须确认
@@ -23,7 +28,7 @@ GitHub Release 存在且不是 draft，下载当前 runner 对应的 Linux `nazo
 自定义 Release predicate 和 hosted-runner 策略。全部证明通过后才允许检出或执行目标
 commit 的源码；不存在按分支名称放行的例外。
 
-所需 Secret 名称和轮换规则见
+可选 GitHub 包装层所需 Secret 名称和轮换规则见
 [`GitHub Actions Secrets`](../operations/github-actions-secrets.zh-CN.md)。每个 fork 必须提供自己的
 issuer、账号、客户端材料和 suite token；仓库不提供共享被测部署。
 
@@ -63,7 +68,52 @@ issuer、账号、客户端材料和 suite token；仓库不提供共享被测�
 
 公网开放前必须关闭套件的 development profile。普通非管理员用户随后通过 OIDC 登录，并从套件正式 `/api/token` 端点创建短期 API token。该 token 只保存在 root 可读的运行时 secret 文件中。创建 plan 前同时验证两个边界：携带 Bearer token 的请求返回 `200`，不携带 token 的相同 API 请求返回 `401`。禁止直接向 MongoDB 写入套件 token、禁止把产品管理员 session 当成套件 Bearer token，也不得依赖源码托管平台账号。
 
-## 推荐入口：单次可逆运行
+## 推荐入口：本地单次可逆 44-plan 运行
+
+先在同一次连续验收中生成全新的 source-bound OpenID4VC 材料：
+
+```sh
+python scripts/prepare_host_local_oidf_install.py \
+  --source-dir /opt/nazoauth/source \
+  --source-commit <已部署-sha> \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <精确-suite-sha> \
+  --suite-origin https://www.certification.openid.net \
+  --output-dir /run/nazoauth-official-oidf-install
+```
+
+再以一个封闭八字段 JSON 启动完整矩阵。示例中的 `secret-provider` 是操作者自己的本地
+秘密来源，不是 GitHub Secret：
+
+```sh
+umask 077
+run_id="official-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+secret-provider read nazoauth/official-oidf-run | \
+python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
+  --deployed-sha <已部署-sha> \
+  --runner-sha <runner-sha> \
+  --target-issuer https://issuer.example \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <精确-suite-sha> \
+  --work-dir "/var/lib/nazo-oidf/runs/$run_id" \
+  --export-dir "/var/lib/nazo-oidf/results/$run_id" \
+  --run-namespace "$run_id" \
+  --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
+  --proxy-executable /usr/sbin/nginx \
+  --prepared-install-dir /run/nazoauth-official-oidf-install \
+  --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
+```
+
+严格 JSON 字段恰好为 `applicant_email`、`applicant_password`、`admin_email`、
+`admin_password`、`admin_mfa_totp_secret`、`oidf_conformance_token`、
+`issuer_management_token` 和 `verifier_management_token`。入口内部只通过子进程 stdin
+把必要字段分别交给现有 27-plan 和 17-plan runner，不把秘密放进 argv 或环境变量。
+成功 receipt 必须绑定恰好 `27 + 17 = 44` 个不同 plan ID；否则整个运行失败。
+
+## 独立 27-plan 入口
 
 操作者公网 OIDC/FAPI/FAPI-CIBA 矩阵应使用统一入口，不应手工拼接后续各节的内部命令。运行前只准备两个彼此独立的生产身份、CIBA 决策令牌和公网套件短期 API token；动态注册初始 token 由 runner 为每条租约单独生成：
 

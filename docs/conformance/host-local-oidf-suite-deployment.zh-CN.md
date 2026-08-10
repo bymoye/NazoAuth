@@ -113,9 +113,9 @@ curl -fsS https://oauth-test.nazo.run/login.html >/dev/null
 
 ## 5. 矩阵执行顺序
 
-先按公开黑盒 runner 运行 27 个 OIDC/FAPI/CIBA/logout/session plans：safe group
-workers 为 `2`，browser group workers 为 `2`，CIBA 组保持串行。完成并清理 suite
-worktree 后，再运行 17 个 OpenID4VC plans，`--plan-group-size 4`。具体参数和秘密输入
-契约分别见[公开黑盒手册](oidf-public-black-box-runbook.zh-CN.md)、
+官方全矩阵使用 `run_official_oidf_full_matrix.py` 从宿主机本地一次启动。薄编排层先运行
+27 个 OIDC/FAPI/CIBA/logout/session plans，完成并清理 Suite worktree 后，再运行
+17 个 OpenID4VC plans；两个底层 runner 仍各自拥有独立的信任、租约和清理边界。
+具体参数和封闭秘密输入契约分别见[公开黑盒手册](oidf-public-black-box-runbook.zh-CN.md)、
 [OpenID4VC 宿主机手册](host-local-openid4vc-runbook.zh-CN.md)和
 [并发调优记录](../operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md)。

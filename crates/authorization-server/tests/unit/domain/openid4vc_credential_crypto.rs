@@ -1060,12 +1060,12 @@ fn certificate_chain_at_checks_leaf_intermediates_anchor_and_time() {
 }
 
 #[test]
-fn mdoc_direct_conformance_anchor_is_exact_self_signed_and_lease_scoped() {
+fn mdoc_direct_scoped_trust_anchor_is_exact_self_signed_and_lease_scoped() {
     let certs = certificate_fixture("issuer.example");
     let now = Utc::now().timestamp();
 
     assert!(
-        verify_direct_conformance_anchor(
+        verify_direct_scoped_trust_anchor(
             std::slice::from_ref(&certs.ca_der),
             std::slice::from_ref(&certs.ca_der),
             now,
@@ -1073,11 +1073,11 @@ fn mdoc_direct_conformance_anchor_is_exact_self_signed_and_lease_scoped() {
         .expect("exact direct conformance anchor")
     );
     assert!(
-        !verify_direct_conformance_anchor(std::slice::from_ref(&certs.ca_der), &[], now)
+        !verify_direct_scoped_trust_anchor(std::slice::from_ref(&certs.ca_der), &[], now)
             .expect("no active conformance anchor")
     );
     assert!(
-        !verify_direct_conformance_anchor(
+        !verify_direct_scoped_trust_anchor(
             std::slice::from_ref(&certs.leaf_der),
             std::slice::from_ref(&certs.leaf_der),
             now,
@@ -1085,7 +1085,7 @@ fn mdoc_direct_conformance_anchor_is_exact_self_signed_and_lease_scoped() {
         .expect("non-CA signer cannot become a direct conformance anchor")
     );
     assert!(
-        !verify_direct_conformance_anchor(
+        !verify_direct_scoped_trust_anchor(
             &[certs.ca_der.clone(), certs.leaf_der],
             std::slice::from_ref(&certs.ca_der),
             now,

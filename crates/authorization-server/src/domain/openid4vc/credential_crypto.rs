@@ -20,7 +20,7 @@ pub(crate) use mdoc::{
 };
 
 #[cfg(test)]
-use mdoc::verify_direct_conformance_anchor;
+use mdoc::verify_direct_scoped_trust_anchor;
 #[cfg(test)]
 use mdoc::{AsyncCoseSigner, mdoc_assessments_accepted, verify_certificate_chain_at};
 

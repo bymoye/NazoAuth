@@ -5,23 +5,29 @@ system under test is the normal public production deployment. Conformance tools
 must not receive database access, private service-network addresses, privileged
 runtime mounts, or alternate protocol behavior.
 
-## Reproduction in four steps
+## Local reproduction in four steps
 
 The security boundary makes production onboarding unavoidable, but the operator
-path is fixed and short:
+path is fixed and does not depend on GitHub:
 
 1. Deploy an exact immutable Release tag and record both the tag and its full
    source commit SHA.
-2. Run `oidf-conformance-full.yml` with `release_tag`, `deployed_sha`,
-   `target_issuer`, and `onboarding_material_only=true`; download and verify the
-   generated bundle.
-3. Apply the bundle through `apply_public_conformance_onboarding.py` using a
-   normal applicant and a distinct approver. No database seed or private network
-   access is permitted.
-4. Run the 27-plan OIDC/FAPI/FAPI-CIBA/Logout matrix with the same inputs and
-   `onboarding_material_only=false`, then run the 17-plan OpenID4VC Final/HAIP
-   matrix. The workflows check out the deployed SHA, clone the exact official
-   suite revision, and refuse tracked modifications before execution.
+2. On the operator's own Linux host, check out that source commit and an exact
+   official Suite commit. Run `prepare_host_local_oidf_install.py` to create
+   one-use OpenID4VC installation material for this run.
+3. Prepare two distinct public product identities, a short-lived official Suite
+   API token, and VCI/VP management tokens. Supply the closed secret document
+   only through stdin, an inherited descriptor, or a POSIX mode-`0600` file.
+4. Run `run_official_oidf_full_matrix.py`. It is pinned to
+   `https://www.certification.openid.net`, runs the 27-plan
+   OIDC/FAPI/FAPI-CIBA/Logout/Session matrix followed by the 17-plan OpenID4VC
+   Final/HAIP matrix, cleans up through the public control plane, and reduces
+   raw ZIPs to one credential-free 44-plan evidence manifest and receipt.
+
+`.github/workflows/oidf-conformance-full.yml` and the OpenID4VC workflow are
+optional remote wrappers. They are not the sole source of the Suite token,
+source material, execution logic, or evidence reduction. The local entry point
+does not call `gh`, the GitHub API, or Actions artifacts.
 
 `--ref` selects the workflow definition to run; it is not a source-trust
 allowlist. Both workflows always require the supplied tag to dereference to the
@@ -34,7 +40,7 @@ source digest, custom Release predicate, and hosted-runner policy. Source from
 the requested commit is not checked out or executed until this proof succeeds.
 No branch-name exception exists.
 
-The required repository Secret names and their rotation rules are listed in
+Secret names and rotation rules for the optional GitHub wrappers are listed in
 [`GitHub Actions secrets`](../operations/github-actions-secrets.md). Each fork
 supplies its own issuer, accounts, client material, and suite token; this
 repository provides no shared deployment target.
@@ -104,7 +110,55 @@ token returns `401`. Do not create suite tokens in MongoDB, reuse a product
 administrator session as a suite bearer token, or depend on a source-control
 provider account.
 
-## Recommended entry point: one reversible run
+## Recommended entry point: one local reversible 44-plan run
+
+First create fresh source-bound OpenID4VC material in the same continuous
+acceptance operation:
+
+```sh
+python scripts/prepare_host_local_oidf_install.py \
+  --source-dir /opt/nazoauth/source \
+  --source-commit <deployed-sha> \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <exact-suite-sha> \
+  --suite-origin https://www.certification.openid.net \
+  --output-dir /run/nazoauth-official-oidf-install
+```
+
+Then start the full matrix with one closed eight-field JSON document. The
+`secret-provider` below is local operator infrastructure, not GitHub Secrets:
+
+```sh
+umask 077
+run_id="official-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+secret-provider read nazoauth/official-oidf-run | \
+python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
+  --deployed-sha <deployed-sha> \
+  --runner-sha <runner-sha> \
+  --target-issuer https://issuer.example \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <exact-suite-sha> \
+  --work-dir "/var/lib/nazo-oidf/runs/$run_id" \
+  --export-dir "/var/lib/nazo-oidf/results/$run_id" \
+  --run-namespace "$run_id" \
+  --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
+  --proxy-executable /usr/sbin/nginx \
+  --prepared-install-dir /run/nazoauth-official-oidf-install \
+  --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
+```
+
+The strict JSON fields are exactly `applicant_email`, `applicant_password`,
+`admin_email`, `admin_password`, `admin_mfa_totp_secret`,
+`oidf_conformance_token`, `issuer_management_token`, and
+`verifier_management_token`. The coordinator forwards only the required subset
+to the existing 27-plan and 17-plan runners through child-process stdin; it
+does not put secrets in argv or the environment. A successful receipt must bind
+exactly `27 + 17 = 44` distinct plan IDs, or the operation fails.
+
+## Independent 27-plan entry point
 
 Use the unified runner for the operator-run public OIDC/FAPI/FAPI-CIBA matrix
 instead of assembling the internal commands below by hand. Provide only the

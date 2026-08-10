@@ -3,6 +3,22 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.29 - 2026-08-10
+
+### Added
+
+- Added a local, GitHub-independent entry point for the official OpenID
+  Foundation `27 + 17` full matrix. It reuses the existing public-control-plane
+  runners, accepts a closed secret document only through protected input
+  channels, and produces one credential-free 44-plan manifest and receipt.
+
+### Fixed
+
+- Expressed the scoped, exact self-signed mdoc trust-anchor exception in
+  standards-derived language while retaining strict ordinary Document Signer
+  chain validation and the release policy that forbids suite-specific product
+  behavior.
+
 ## 0.1.0 - 2026-07-31
 
 ### Added
