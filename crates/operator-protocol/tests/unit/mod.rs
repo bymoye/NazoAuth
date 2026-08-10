@@ -568,6 +568,154 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
 }
 
 #[test]
+fn conformance_matrix_registration_vectors_are_arrays_of_strings() {
+    let vector_fields = [
+        "redirect_uris",
+        "post_logout_redirect_uris",
+        "scopes",
+        "allowed_audiences",
+        "grant_types",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+    ];
+    let template = serde_json::json!({
+        "client_name": "conformance-client",
+        "client_type": "confidential",
+        "redirect_uris": ["{{suite.origin}}"],
+        "post_logout_redirect_uris": [],
+        "scopes": ["openid"],
+        "allowed_audiences": ["{{target.issuer}}"],
+        "grant_types": ["authorization_code"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "tls_client_auth_san_dns": [],
+        "tls_client_auth_san_uri": [],
+        "tls_client_auth_san_ip": [],
+        "tls_client_auth_san_email": []
+    });
+    let descriptor_for = |registration_template: serde_json::Value| ConformanceMatrixDescriptor {
+        schema: 1,
+        source: ConformanceMatrixSource {
+            release: "v0.1.0".to_owned(),
+            digest: "a".repeat(64),
+        },
+        groups: vec![ConformanceMatrixGroup {
+            id: "oidc-core".to_owned(),
+            profile: "oidc-core".to_owned(),
+            variant: ConformanceMatrixVariant {
+                id: "default".to_owned(),
+                values: BTreeMap::new(),
+            },
+            required_roles: vec![],
+            plans: vec![ConformanceMatrixPlan {
+                id: "oidc-core-default".to_owned(),
+                plan: "oidc-core".to_owned(),
+                config_template: serde_json::json!({
+                    "issuer": "{{target.issuer}}"
+                }),
+                variant: BTreeMap::new(),
+                required_roles: vec![ConformanceMatrixRoleRequirement {
+                    role: "rp".to_owned(),
+                    logical_client_id: None,
+                    secret_refs: vec![],
+                    registration_template: Some(registration_template),
+                }],
+                secret_bindings: BTreeMap::new(),
+                crypto: ConformanceMatrixCryptoPolicy {
+                    rsa_bits: 2048,
+                    ec_curve: "P-256".to_owned(),
+                    mtls_signature: "ECDSA-P256-SHA256".to_owned(),
+                },
+            }],
+        }],
+    };
+
+    validate_conformance_matrix_descriptor(&descriptor_for(template.clone())).unwrap();
+    for field in vector_fields {
+        let mut scalar = template.clone();
+        scalar[field] = serde_json::json!("scalar");
+        assert!(matches!(
+            validate_conformance_matrix_descriptor(&descriptor_for(scalar)),
+            Err(ProtocolError::Policy(
+                "conformance matrix registration vector field must be an array"
+            ))
+        ));
+
+        let mut non_string = template.clone();
+        non_string[field] = serde_json::json!([1]);
+        assert!(matches!(
+            validate_conformance_matrix_descriptor(&descriptor_for(non_string)),
+            Err(ProtocolError::Policy(
+                "conformance matrix registration vector field must contain strings"
+            ))
+        ));
+    }
+}
+
+#[test]
+fn checked_in_matrix_registration_templates_match_onboarding_policy_primitives() {
+    let bytes = include_bytes!(
+        "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"
+    );
+    let descriptor: ConformanceMatrixDescriptor =
+        serde_json::from_slice(bytes).expect("checked-in conformance matrix JSON");
+    validate_conformance_matrix_descriptor(&descriptor)
+        .expect("checked-in conformance matrix must satisfy protocol policy");
+
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            for role in group.required_roles.iter().chain(&plan.required_roles) {
+                let Some(template) = &role.registration_template else {
+                    continue;
+                };
+                let object = template
+                    .as_object()
+                    .expect("registration template shape was validated");
+                let grants = object
+                    .get("grant_types")
+                    .expect("grant_types is required")
+                    .as_array()
+                    .expect("grant_types must be an array")
+                    .iter()
+                    .map(|value| value.as_str().expect("grant type must be a string"))
+                    .collect::<Vec<_>>();
+                let scopes = object
+                    .get("scopes")
+                    .expect("scopes is required")
+                    .as_array()
+                    .expect("scopes must be an array")
+                    .iter()
+                    .map(|value| value.as_str().expect("scope must be a string"))
+                    .collect::<Vec<_>>();
+                if scopes.contains(&"offline_access") {
+                    assert!(
+                        grants.contains(&"refresh_token"),
+                        "offline_access registration must enable refresh_token: {}",
+                        plan.id
+                    );
+                }
+                assert!(
+                    !grants.contains(&"urn:openid:params:oauth:grant-type:ciba"),
+                    "registration uses the obsolete CIBA grant URI: {}",
+                    plan.id
+                );
+                if object
+                    .get("backchannel_authentication_request_signing_alg")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    assert!(
+                        object.get("jwks").is_some_and(|value| !value.is_null()),
+                        "backchannel signing requires a public JWKS: {}",
+                        plan.id
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn dynamic_registration_initial_access_token_binding_is_lowercase_and_profile_scoped() {
     let digest = "b".repeat(64);
     let operation = TaskOperation::ConformanceLeaseCreate {

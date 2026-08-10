@@ -744,6 +744,41 @@ fn validate_conformance_registration_template_shape(
             ));
         }
     }
+    // These fields map directly to `Vec<String>` members of
+    // `CreateClientRequest`.  Keeping the descriptor as arbitrary JSON here
+    // would defer a schema error until the privileged onboarding path, after
+    // the bundle has been materialized.  Reject scalar (or non-string element)
+    // vectors at the signed Matrix boundary instead.
+    const VECTOR_FIELDS: &[&str] = &[
+        "redirect_uris",
+        "post_logout_redirect_uris",
+        "scopes",
+        "allowed_audiences",
+        "grant_types",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+    ];
+    for field in VECTOR_FIELDS {
+        let Some(value) = object.get(*field) else {
+            // Optional vector fields (`post_logout_redirect_uris` and SAN
+            // selectors) are defaulted by CreateClientRequest.  Required
+            // vectors were checked above and therefore cannot reach here as
+            // missing values.
+            continue;
+        };
+        let Some(values) = value.as_array() else {
+            return Err(ProtocolError::Policy(
+                "conformance matrix registration vector field must be an array",
+            ));
+        };
+        if values.iter().any(|value| !value.is_string()) {
+            return Err(ProtocolError::Policy(
+                "conformance matrix registration vector field must contain strings",
+            ));
+        }
+    }
     Ok(())
 }
 

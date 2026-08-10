@@ -82,6 +82,49 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
     assert!(encoded.contains("{{generated.ciba_automated_decision_token}}"));
     assert!(!encoded.contains("$secret"));
     assert_no_embedded_sensitive_values(&value);
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            for role in group.required_roles.iter().chain(&plan.required_roles) {
+                let Some(template) = role.registration_template.as_ref() else {
+                    continue;
+                };
+                let scopes = template["scopes"]
+                    .as_array()
+                    .expect("registration scopes must be an array");
+                let grants = template["grant_types"]
+                    .as_array()
+                    .expect("registration grant_types must be an array");
+                if scopes.iter().any(|scope| scope == "offline_access") {
+                    assert!(
+                        grants.iter().any(|grant| grant == "refresh_token"),
+                        "{} / {} / {} enables offline_access without refresh_token",
+                        group.id,
+                        plan.id,
+                        role.role
+                    );
+                }
+                if template
+                    .get("backchannel_authentication_request_signing_alg")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    assert!(
+                        template.get("jwks").is_some_and(|value| !value.is_null()),
+                        "{} / {} / {} signs CIBA requests without a client JWKS",
+                        group.id,
+                        plan.id,
+                        role.role
+                    );
+                }
+                for grant in grants.iter().filter_map(serde_json::Value::as_str) {
+                    assert_ne!(
+                        grant, "urn:openid:params:oauth:grant-type:ciba",
+                        "{} / {} / {} uses the non-canonical CIBA grant URI",
+                        group.id, plan.id, role.role
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn assert_no_embedded_sensitive_values(value: &serde_json::Value) {
