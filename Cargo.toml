@@ -80,6 +80,7 @@ process-wrap = { version = "9.1.0", default-features = false, features = ["creat
 proptest = "1"
 rand = "0.10.1"
 rpassword = "7.4.0"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "std"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["aws_lc_rs", "pem"] }
 semver = "1.0.27"

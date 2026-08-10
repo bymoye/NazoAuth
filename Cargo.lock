@@ -2754,6 +2754,7 @@ dependencies = [
  "rand 0.10.2",
  "rcgen",
  "reqwest",
+ "rustix 1.1.4",
  "rustls",
  "semver",
  "serde",

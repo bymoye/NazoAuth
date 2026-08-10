@@ -1,5 +1,43 @@
 use super::*;
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+#[cfg(unix)]
+fn secure_material_fixture(name: &str, mode: u32) -> std::path::PathBuf {
+    let directory = std::env::temp_dir().join(format!("nazoauth-{name}-{}", Uuid::now_v7()));
+    fs::create_dir(&directory).expect("create secure material directory");
+    let path = directory.join("material.json");
+    fs::write(&path, b"{}\n").expect("write secure material");
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("set secure material mode");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_material_accepts_owner_and_service_group_read_only_modes() {
+    for mode in [0o400, 0o440] {
+        let path = secure_material_fixture("accepted-mode", mode);
+        let metadata = fs::metadata(&path).expect("material metadata");
+        assert_eq!(metadata.gid(), rustix::process::getegid().as_raw());
+        assert_eq!(read_fixed_material(&path, 16).unwrap(), b"{}\n");
+        fs::remove_dir_all(path.parent().unwrap()).expect("remove fixture");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_material_rejects_broad_permissions_and_hard_links() {
+    let broad = secure_material_fixture("broad-mode", 0o640);
+    assert!(read_fixed_material(&broad, 16).is_err());
+    fs::remove_dir_all(broad.parent().unwrap()).expect("remove broad fixture");
+
+    let linked = secure_material_fixture("hard-link", 0o400);
+    fs::hard_link(&linked, linked.with_extension("alias")).expect("create hard link");
+    assert!(read_fixed_material(&linked, 16).is_err());
+    fs::remove_dir_all(linked.parent().unwrap()).expect("remove linked fixture");
+}
+
 #[test]
 fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
     let descriptor = load_matrix_descriptor().expect("built-in matrix must validate");

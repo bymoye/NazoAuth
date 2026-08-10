@@ -11,7 +11,10 @@ use std::{
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
 
 use anyhow::{Context as _, bail};
 use chrono::{DateTime, Utc};
@@ -782,17 +785,22 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
 }
 
 fn read_fixed_material(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)
+    let path_metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect secure material {}", path.display()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
         bail!("secure conformance material is not a regular file");
     }
     #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0 {
-        bail!("secure conformance material permissions are too broad");
-    }
-
-    let file = OpenOptions::new()
+    let mut file = File::from(
+        rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| format!("failed to open secure material {}", path.display()))?,
+    );
+    #[cfg(not(unix))]
+    let mut file = OpenOptions::new()
         .read(true)
         .open(path)
         .with_context(|| format!("failed to open secure material {}", path.display()))?;
@@ -801,19 +809,54 @@ fn read_fixed_material(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
         bail!("secure conformance material is not a regular file");
     }
     #[cfg(unix)]
-    if opened.permissions().mode() & 0o077 != 0 {
-        bail!("secure conformance material permissions are too broad");
+    {
+        validate_secure_material_metadata(&opened)?;
+        if path_metadata.dev() != opened.dev() || path_metadata.ino() != opened.ino() {
+            bail!("secure conformance material changed while opening");
+        }
     }
     if opened.len() == 0 || opened.len() > u64::try_from(maximum).unwrap_or(u64::MAX) {
         bail!("secure conformance material size is out of bounds");
     }
     let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(maximum));
-    file.take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
+    (&mut file)
+        .take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
         .read_to_end(&mut bytes)?;
     if bytes.is_empty() || bytes.len() > maximum {
         bail!("secure conformance material size is out of bounds");
     }
+    #[cfg(unix)]
+    {
+        let after = file.metadata()?;
+        validate_secure_material_metadata(&after)?;
+        if opened.dev() != after.dev() || opened.ino() != after.ino() || opened.len() != after.len()
+        {
+            bail!("secure conformance material changed while reading");
+        }
+    }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn validate_secure_material_metadata(metadata: &fs::Metadata) -> anyhow::Result<()> {
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        bail!("secure conformance material is not a single-link regular file");
+    }
+    let effective_uid = rustix::process::geteuid().as_raw();
+    let effective_gid = rustix::process::getegid().as_raw();
+    let owner_is_trusted = metadata.uid() == 0 || metadata.uid() == effective_uid;
+    let mode = metadata.mode() & 0o777;
+    let permissions_are_bound = match mode {
+        0o400 => owner_is_trusted,
+        0o440 => owner_is_trusted && metadata.gid() == effective_gid,
+        _ => false,
+    };
+    if !permissions_are_bound {
+        bail!(
+            "secure conformance material permissions are not owner-bound or service-group-bound read-only"
+        );
+    }
+    Ok(())
 }
 
 fn conformance_bundle_path() -> anyhow::Result<std::path::PathBuf> {
