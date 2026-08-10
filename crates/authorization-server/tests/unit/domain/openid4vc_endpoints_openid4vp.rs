@@ -712,7 +712,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         Uuid::now_v7().simple()
     );
     let conformance_endpoint = format!("{conformance_origin}/authorize");
-    let anchor_pem = valid_ca_pem();
+    let anchor_pem = format!("{}{}", valid_ca_pem(), valid_ca_pem());
     let valid_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
@@ -735,8 +735,8 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .conformance_credential_trust_anchors(Some(valid_lease.id))
         .await
         .expect("valid conformance lease should provide a trust anchor");
-    assert_eq!(anchors.len(), 1);
-    assert!(!anchors[0].is_empty());
+    assert_eq!(anchors.len(), 2);
+    assert!(anchors.iter().all(|anchor| !anchor.is_empty()));
 
     leases
         .create(
