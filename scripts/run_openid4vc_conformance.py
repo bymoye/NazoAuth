@@ -674,26 +674,33 @@ class Openid4vcDriver:
         triggered_before = self.completed_trigger_count()
         for info in entries:
             module_id = str(info["_driver_module_id"])
-            status = str(info.get("status", "")).upper()
-            if status in OIDF_TERMINAL_MODULE_STATUSES:
-                self.terminal_modules.add(module_id)
-                self.completed_hosted_authorizations.pop(module_id, None)
-                continue
-            if status != "WAITING":
-                continue
-            plan_name = str(info.get("_driver_plan", ""))
-            variant = info.get("variant") if isinstance(info.get("variant"), dict) else {}
-            if plan_name.startswith("oid4vci-"):
-                if variant.get("vci_authorization_code_flow_variant") == "issuer_initiated":
-                    if module_id not in self.triggered:
-                        self.drive_issuer(module_id, info, variant)
-                    if str(variant.get("vci_grant_type", "authorization_code")) == "authorization_code":
+            try:
+                status = str(info.get("status", "")).upper()
+                if status in OIDF_TERMINAL_MODULE_STATUSES:
+                    self.terminal_modules.add(module_id)
+                    self.completed_hosted_authorizations.pop(module_id, None)
+                    continue
+                if status != "WAITING":
+                    continue
+                plan_name = str(info.get("_driver_plan", ""))
+                variant = info.get("variant") if isinstance(info.get("variant"), dict) else {}
+                if plan_name.startswith("oid4vci-"):
+                    if variant.get("vci_authorization_code_flow_variant") == "issuer_initiated":
+                        if module_id not in self.triggered:
+                            self.drive_issuer(module_id, info, variant)
+                        if str(variant.get("vci_grant_type", "authorization_code")) == "authorization_code":
+                            self.drive_wallet_initiated_issuer(module_id, info)
+                    elif variant.get("vci_authorization_code_flow_variant") == "wallet_initiated":
                         self.drive_wallet_initiated_issuer(module_id, info)
-                elif variant.get("vci_authorization_code_flow_variant") == "wallet_initiated":
-                    self.drive_wallet_initiated_issuer(module_id, info)
-            elif plan_name.startswith("oid4vp-"):
-                if module_id not in self.triggered:
-                    self.drive_verifier(module_id, info, variant, "haip" in plan_name)
+                elif plan_name.startswith("oid4vp-"):
+                    if module_id not in self.triggered:
+                        self.drive_verifier(module_id, info, variant, "haip" in plan_name)
+            except Exception as exc:  # retry this module without starving its peers
+                print(
+                    "OpenID4VC driver retryable module error: "
+                    f"{module_id} {type(exc).__name__}",
+                    flush=True,
+                )
         if entries:
             print(
                 "OpenID4VC driver scan completed: "

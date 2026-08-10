@@ -263,6 +263,45 @@ class Openid4vcOidfTests(unittest.TestCase):
         self.assertNotIn("finished-module", driver.completed_hosted_authorizations)
         self.assertEqual(entries.call_args_list[1].kwargs["ignored_module_ids"], {"finished-module"})
 
+    def test_driver_retryable_module_error_does_not_starve_later_modules(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "test-token",
+                "aliases": ["issuer-alias", "verifier-alias"],
+            },
+            module.threading.Event(),
+        )
+        issuer = {
+            "_driver_module_id": "issuer-module",
+            "_driver_plan": "oid4vci-1_0-issuer-test-plan",
+            "status": "WAITING",
+            "variant": {"vci_authorization_code_flow_variant": "wallet_initiated"},
+        }
+        verifier = {
+            "_driver_module_id": "verifier-module",
+            "_driver_plan": "oid4vp-1final-verifier-test-plan",
+            "status": "WAITING",
+            "variant": {},
+        }
+        output = io.StringIO()
+        with (
+            patch.object(module, "module_entries", return_value=[issuer, verifier]),
+            patch.object(
+                driver,
+                "drive_wallet_initiated_issuer",
+                side_effect=RuntimeError("module-secret-canary"),
+            ),
+            patch.object(driver, "drive_verifier") as drive_verifier,
+            contextlib.redirect_stdout(output),
+        ):
+            driver.drive_once()
+
+        drive_verifier.assert_called_once_with("verifier-module", verifier, {}, False)
+        self.assertIn("issuer-module RuntimeError", output.getvalue())
+        self.assertNotIn("module-secret-canary", output.getvalue())
+
     def test_driver_loop_scans_before_first_sleep(self):
         module = load("run_openid4vc_conformance.py")
         stop = module.threading.Event()
