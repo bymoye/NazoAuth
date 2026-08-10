@@ -46,6 +46,7 @@ from apply_public_conformance_onboarding import (  # noqa: E402
 
 
 PRE_AUTHORIZED_CODE_GRANT = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+VCI_MULTIPLE_CLIENTS_MODULE = "oid4vci-1_0-issuer-happy-flow-multiple-clients"
 OIDF_TERMINAL_MODULE_STATUSES = {"FINISHED", "FAILED", "INTERRUPTED"}
 INITIAL_ANONYMOUS_AUTHORIZATION_VISIT_MODULES = frozenset(
     {
@@ -724,38 +725,50 @@ class Openid4vcDriver:
         grant = str(variant.get("vci_grant_type", "authorization_code"))
         grant_type = PRE_AUTHORIZED_CODE_GRANT if grant == "pre_authorization_code" else "authorization_code"
         tx_code = issuer.get("tx_code") if grant == "pre_authorization_code" else None
-        offer = request_json(
-            "POST",
-            urllib.parse.urljoin(
-                str(self.config["target_origin"]), "/openid4vci/offers"
-            ),
-            str(issuer["management_token"]),
-            {
-                "subject_id": issuer["subject_id"],
-                "credential_configuration_ids": [configuration_id],
-                "grant_types": [grant_type],
-                **({"tx_code": tx_code} if tx_code else {}),
-                "expires_in": 300,
-            },
+        offer_count = (
+            2
+            if grant == "pre_authorization_code"
+            and info.get("testName") == VCI_MULTIPLE_CLIENTS_MODULE
+            else 1
         )
-        if issuer.get("offer_delivery", "uri") == "value":
-            value = json.dumps(offer["credential_offer"], separators=(",", ":"))
-            callback = (
-                f"{endpoint}?"
-                f"{urllib.parse.urlencode({'credential_offer': value})}"
+        for offer_index in range(offer_count):
+            offer = request_json(
+                "POST",
+                urllib.parse.urljoin(
+                    str(self.config["target_origin"]), "/openid4vci/offers"
+                ),
+                str(issuer["management_token"]),
+                {
+                    "subject_id": issuer["subject_id"],
+                    "credential_configuration_ids": [configuration_id],
+                    "grant_types": [grant_type],
+                    **({"tx_code": tx_code} if tx_code else {}),
+                    "expires_in": 300,
+                },
             )
-        else:
-            callback = (
-                f"{endpoint}?"
-                f"{urllib.parse.urlencode({'credential_offer_uri': offer['credential_offer_uri']})}"
+            if issuer.get("offer_delivery", "uri") == "value":
+                value = json.dumps(offer["credential_offer"], separators=(",", ":"))
+                callback = (
+                    f"{endpoint}?"
+                    f"{urllib.parse.urlencode({'credential_offer': value})}"
+                )
+            else:
+                callback = (
+                    f"{endpoint}?"
+                    f"{urllib.parse.urlencode({'credential_offer_uri': offer['credential_offer_uri']})}"
+                )
+            # The callback is synchronous: for the multiple-client module the
+            # first request returns only after client 1 completes and the suite
+            # has entered its second credential-offer wait state.  A fresh offer
+            # therefore preserves pre-authorized-code single use for client 2.
+            get_url(callback)
+            print(
+                "OpenID4VC driver delivered credential offer "
+                f"{offer_index + 1}/{offer_count} to {module_id}",
+                flush=True,
             )
-        get_url(callback)
-        print(
-            f"OpenID4VC driver delivered credential offer to {module_id}",
-            flush=True,
-        )
         self.triggered.add(module_id)
-        self.completed_trigger_total += 1
+        self.completed_trigger_total += offer_count
 
     def drive_wallet_initiated_issuer(
         self,

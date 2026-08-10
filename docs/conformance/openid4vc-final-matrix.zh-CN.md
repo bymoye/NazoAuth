@@ -81,14 +81,11 @@ OIDC 专用的 `offline_access` scope。使用 Wallet Attestation 时，refresh 
 attestation `cnf.jwk` 中的 Client Instance 公钥；刷新请求必须使用同一密钥完成客户端
 认证。矩阵不接受任何 HAIP refresh-token warning 或 skip。
 
-标准 VCI 的两个预授权码组合还登记了一项精确 expected failure：
-`oid4vci-1_0-issuer-happy-flow-multiple-clients`。该上游模块只接收一份 Credential
-Offer，却让第二个客户端再次兑换同一 `pre-authorized_code`；OpenID4VCI 1.0 Final
-第 4.1.1 节明确要求该代码短期有效且只能使用一次。服务端不得为满足测试而允许按
-客户端分别重放同一代码。该预期失败精确绑定两个预授权码 configuration、完整
-variant、`Second client: Verify token endpoint response` block 和
-`CheckTokenEndpointHttpStatus200` condition；授权码组合中的同名多客户端模块仍必须
-执行并通过。任何其他 failure、warning 或 skip 仍视为失败。
+标准 VCI 的两个预授权码组合均包含
+`oid4vci-1_0-issuer-happy-flow-multiple-clients`。driver 为两个模拟客户端分别创建并
+投递独立的 Credential Offer，因此每份 offer 都拥有自己的短期、单次使用
+`pre-authorized_code`，符合 OpenID4VCI 1.0 Final 第 4.1.1 节。该模块不得从 plan
+中筛除并且必须通过；服务端也不得允许第二个客户端重放第一份 code。
 
 上游计划标题明确标为 **alpha**，并注明可能不完整/不正确或尚未纳入认证计划。
 因此全绿只能称为“官方套件回归通过”，不能称为 OpenID Foundation 正式认证，
