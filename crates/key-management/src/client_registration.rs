@@ -21,33 +21,62 @@ pub use nazo_auth::SUPPORTED_CLIENT_JWT_SIGNING_ALGS;
 /// Concrete client-registration crypto bound to the active signing key snapshot.
 #[derive(Clone)]
 pub struct ClientRegistrationCrypto {
-    keyset: KeyManager,
+    keyset: Option<KeyManager>,
 }
 
 impl ClientRegistrationCrypto {
     #[must_use]
     pub fn new(keyset: KeyManager) -> Self {
-        Self { keyset }
+        Self {
+            keyset: Some(keyset),
+        }
+    }
+
+    /// Build the stateless registration validator used by the privileged
+    /// conformance onboarding task. It deliberately has no signing-key
+    /// handle: onboarding validates client-owned JWKS and supplied secrets,
+    /// but must not gain access to server private signing material.
+    #[must_use]
+    pub fn for_policy_validation() -> Self {
+        Self { keyset: None }
     }
 }
 
 impl AdminClientCryptoPort for ClientRegistrationCrypto {
     fn response_signing_algorithms(&self) -> Vec<String> {
-        self.keyset
-            .snapshot()
-            .response_signing_alg_values_supported()
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect()
+        self.keyset.as_ref().map_or_else(
+            || {
+                ["EdDSA", "RS256", "ES256", "PS256"]
+                    .map(str::to_owned)
+                    .to_vec()
+            },
+            |keyset| {
+                keyset
+                    .snapshot()
+                    .response_signing_alg_values_supported()
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            },
+        )
     }
 
     fn id_token_signing_algorithms(&self) -> Vec<String> {
-        self.keyset
-            .snapshot()
-            .id_token_signing_alg_values_supported()
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect()
+        self.keyset.as_ref().map_or_else(
+            || {
+                ["EdDSA", "RS256", "ES256", "PS256"]
+                    .map(str::to_owned)
+                    .to_vec()
+            },
+            |keyset| {
+                keyset
+                    .snapshot()
+                    .id_token_signing_alg_values_supported()
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            },
+        )
     }
 
     fn issue_client_secret(&self, pepper: &str) -> (String, String) {

@@ -35,6 +35,9 @@ use crate::{
 };
 
 const CONFORMANCE_BUNDLE_PATH: &str = "/run/nazoauth-operator/conformance-bundle.json";
+const CONFORMANCE_CLIENT_SECRET_PEPPER_PATH: &str = "/run/nazoauth-operator/client-secret-pepper";
+const CONFORMANCE_PAIRWISE_SUBJECT_SECRET_PATH: &str =
+    "/run/nazoauth-operator/pairwise-subject-secret";
 const CONFORMANCE_OUTPUT_DIRECTORY: &str = "/run/nazoauth-operator-output";
 const MAX_CONFORMANCE_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CONFORMANCE_CLIENT_REQUEST_BYTES: usize = 256 * 1024;
@@ -585,7 +588,7 @@ async fn validate_bundle(
 async fn hash_applicant_password(
     password: &str,
 ) -> anyhow::Result<nazo_identity::ports::PasswordHashInput> {
-    let config = ConfigSource::load()
+    let config = ConfigSource::load_without_secret_values()
         .map_err(|_| anyhow::anyhow!("conformance password hash configuration is unavailable"))?;
     let max_concurrency = config
         .parse(
@@ -630,20 +633,42 @@ async fn hash_applicant_password(
 async fn prepare_client_registrations(
     raw_clients: Vec<ConformanceClientBundle>,
 ) -> anyhow::Result<Vec<ConformanceOnboardingClient>> {
-    let config = ConfigSource::load()
+    let config = ConfigSource::load_for_migrations()
         .map_err(|_| anyhow::anyhow!("conformance client policy configuration is unavailable"))?;
-    let settings = crate::settings::Settings::from_config(&config)
-        .map_err(|_| anyhow::anyhow!("conformance client policy configuration is invalid"))?;
-    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings())
-        .await
-        .map_err(|_| anyhow::anyhow!("conformance client key material is unavailable"))?;
     let pool = nazo_postgres::create_pool(crate::config::database_url(&config), 1)
         .map_err(|_| anyhow::anyhow!("conformance client policy storage is unavailable"))?;
+    let client_secret_pepper = read_fixed_secret_string(
+        &conformance_policy_secret_path(
+            "NAZOAUTH_OPERATOR_CLIENT_SECRET_PEPPER_FILE",
+            CONFORMANCE_CLIENT_SECRET_PEPPER_PATH,
+            "client-secret-pepper",
+        )?,
+        "conformance client secret pepper",
+    )?;
+    let pairwise_subject_secret = if config
+        .string("SUBJECT_TYPE", "public")
+        .eq_ignore_ascii_case("pairwise")
+    {
+        Some(read_fixed_secret_string(
+            &conformance_policy_secret_path(
+                "NAZOAUTH_OPERATOR_PAIRWISE_SUBJECT_SECRET_FILE",
+                CONFORMANCE_PAIRWISE_SUBJECT_SECRET_PATH,
+                "pairwise-subject-secret",
+            )?,
+            "conformance pairwise subject secret",
+        )?)
+    } else {
+        None
+    };
     let service = crate::http::admin::clients::ServerAdminClientService::new(
         nazo_postgres::OAuthClientRepository::new(pool),
         crate::http::admin::clients::ServerSectorIdentifierResolver,
-        crate::http::admin::clients::ServerAdminClientCrypto::new(keyset),
-        crate::http::admin::clients::admin_client_policy(&settings),
+        crate::http::admin::clients::ServerAdminClientCrypto::for_policy_validation(),
+        nazo_auth::AdminClientPolicy {
+            tenant: nazo_identity::TenantContext::default_system(),
+            pairwise_subject_secret,
+            client_secret_pepper,
+        },
     );
     let mut clients = Vec::with_capacity(raw_clients.len());
     for client in raw_clients {
@@ -809,6 +834,26 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
 }
 
 fn read_fixed_material(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
+    read_fixed_material_with_policy(path, maximum, false)
+}
+
+fn read_fixed_secret_string(path: &Path, label: &str) -> anyhow::Result<String> {
+    let bytes = read_fixed_material_with_policy(path, 4096, true)
+        .with_context(|| format!("{label} is unavailable"))?;
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| anyhow::anyhow!("{label} is not UTF-8"))?
+        .trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        bail!("{label} is invalid");
+    }
+    Ok(value.to_owned())
+}
+
+fn read_fixed_material_with_policy(
+    path: &Path,
+    maximum: usize,
+    #[cfg_attr(not(unix), allow(unused_variables))] allow_owner_write: bool,
+) -> anyhow::Result<Vec<u8>> {
     let path_metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect secure material {}", path.display()))?;
     if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
@@ -834,7 +879,7 @@ fn read_fixed_material(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
     }
     #[cfg(unix)]
     {
-        validate_secure_material_metadata(&opened)?;
+        validate_secure_material_metadata(&opened, allow_owner_write)?;
         if path_metadata.dev() != opened.dev() || path_metadata.ino() != opened.ino() {
             bail!("secure conformance material changed while opening");
         }
@@ -852,7 +897,7 @@ fn read_fixed_material(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
     #[cfg(unix)]
     {
         let after = file.metadata()?;
-        validate_secure_material_metadata(&after)?;
+        validate_secure_material_metadata(&after, allow_owner_write)?;
         if opened.dev() != after.dev() || opened.ino() != after.ino() || opened.len() != after.len()
         {
             bail!("secure conformance material changed while reading");
@@ -862,7 +907,10 @@ fn read_fixed_material(path: &Path, maximum: usize) -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn validate_secure_material_metadata(metadata: &fs::Metadata) -> anyhow::Result<()> {
+fn validate_secure_material_metadata(
+    metadata: &fs::Metadata,
+    allow_owner_write: bool,
+) -> anyhow::Result<()> {
     if !metadata.is_file() || metadata.nlink() != 1 {
         bail!("secure conformance material is not a single-link regular file");
     }
@@ -873,6 +921,7 @@ fn validate_secure_material_metadata(metadata: &fs::Metadata) -> anyhow::Result<
     let permissions_are_bound = match mode {
         0o400 => owner_is_trusted,
         0o440 => owner_is_trusted && metadata.gid() == effective_gid,
+        0o600 => allow_owner_write && metadata.uid() == effective_uid,
         _ => false,
     };
     if !permissions_are_bound {
@@ -881,6 +930,28 @@ fn validate_secure_material_metadata(metadata: &fs::Metadata) -> anyhow::Result<
         );
     }
     Ok(())
+}
+
+fn conformance_policy_secret_path(
+    environment_key: &str,
+    fixed_path: &str,
+    credential_name: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let value = std::env::var_os(environment_key)
+        .with_context(|| format!("{environment_key} is unavailable"))?;
+    let path = std::path::PathBuf::from(value);
+    if path == Path::new(fixed_path) {
+        return Ok(path);
+    }
+    let is_systemd_credential = path.is_absolute()
+        && path.file_name().is_some_and(|name| name == credential_name)
+        && path.parent().is_some_and(|parent| {
+            parent.starts_with("/run/credentials") || parent.starts_with("/run/systemd/credentials")
+        });
+    if !is_systemd_credential {
+        bail!("conformance policy secret path is not a controller-owned fixed mapping");
+    }
+    Ok(path)
 }
 
 fn conformance_bundle_path() -> anyhow::Result<std::path::PathBuf> {

@@ -38,6 +38,18 @@ fn secure_material_rejects_broad_permissions_and_hard_links() {
     fs::remove_dir_all(linked.parent().unwrap()).expect("remove linked fixture");
 }
 
+#[cfg(unix)]
+#[test]
+fn fixed_policy_secret_accepts_owner_only_source_without_weakening_bundle_mode() {
+    let path = secure_material_fixture("owner-secret", 0o600);
+    assert!(read_fixed_material(&path, 16).is_err());
+    assert_eq!(
+        read_fixed_secret_string(&path, "policy secret").unwrap(),
+        "{}"
+    );
+    fs::remove_dir_all(path.parent().unwrap()).expect("remove owner secret fixture");
+}
+
 #[test]
 fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
     let descriptor = load_matrix_descriptor().expect("built-in matrix must validate");

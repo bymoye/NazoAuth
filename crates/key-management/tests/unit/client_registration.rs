@@ -7,6 +7,19 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn policy_validation_crypto_has_no_keyset_and_exposes_compiled_algorithms() {
+    let crypto = ClientRegistrationCrypto::for_policy_validation();
+    assert_eq!(
+        crypto.response_signing_algorithms(),
+        ["EdDSA", "RS256", "ES256", "PS256"].map(str::to_owned)
+    );
+    assert_eq!(
+        crypto.id_token_signing_algorithms(),
+        ["EdDSA", "RS256", "ES256", "PS256"].map(str::to_owned)
+    );
+}
+
+#[test]
 fn client_secret_digest_preserves_persisted_v1_format() {
     assert_eq!(
         client_secret_digest("secret", "pepper", "salt"),
