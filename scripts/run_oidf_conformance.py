@@ -86,6 +86,7 @@ OIDF_UNACCEPTABLE_FINAL_RESULTS = OIDF_BAD_FINAL_RESULTS | {"SKIPPED"}
 OIDF_BAD_STATUS_VALUES = {"FAILED", "INTERRUPTED"}
 OIDF_BAD_LOG_RESULTS = {"FAILURE", "WARNING"}
 MAX_OIDF_API_RESPONSE_BYTES = 1024 * 1024
+MAX_OIDF_LOG_RESPONSE_BYTES = 8 * 1024 * 1024
 OIDF_PLAN_PAGE_LENGTH = 20
 OIDF_LOG_CONTEXT_SOURCES = {
     "BROWSER",
@@ -1233,6 +1234,7 @@ def oidf_api_request(
     *,
     query: dict[str, str | int] | None = None,
     expected_statuses: set[int],
+    max_response_bytes: int = MAX_OIDF_API_RESPONSE_BYTES,
 ) -> tuple[int, object | None]:
     headers = {"Accept": "application/json"}
     if token is not None:
@@ -1252,13 +1254,16 @@ def oidf_api_request(
                 context=OIDF_API_SSL_CONTEXT,
             ) as response:
                 status = response.status
-                body = response.read(MAX_OIDF_API_RESPONSE_BYTES + 1)
+                body = response.read(max_response_bytes + 1)
         except urllib.error.HTTPError as exc:
             with exc:
                 status = exc.code
-                body = exc.read(MAX_OIDF_API_RESPONSE_BYTES + 1)
-            if len(body) > MAX_OIDF_API_RESPONSE_BYTES:
-                fail(f"OIDF API {method} {path} response exceeds 1 MiB")
+                body = exc.read(max_response_bytes + 1)
+            if len(body) > max_response_bytes:
+                fail(
+                    f"OIDF API {method} {path} response exceeds "
+                    f"{max_response_bytes} bytes"
+                )
             if status < 500 or attempt == attempts:
                 break
             time.sleep(min(attempt * 2, 15))
@@ -1273,8 +1278,11 @@ def oidf_api_request(
     else:
         fail(f"OIDF API {method} {path} failed: {last_error}")
 
-    if len(body) > MAX_OIDF_API_RESPONSE_BYTES:
-        fail(f"OIDF API {method} {path} response exceeds 1 MiB")
+    if len(body) > max_response_bytes:
+        fail(
+            f"OIDF API {method} {path} response exceeds "
+            f"{max_response_bytes} bytes"
+        )
 
     if status not in expected_statuses:
         text = body.decode("utf-8", "replace")[:300] if body else ""
@@ -1917,6 +1925,7 @@ def inspect_oidf_state(
                     f"api/log/{module_id}",
                     token,
                     expected_statuses={200, 404},
+                    max_response_bytes=MAX_OIDF_LOG_RESPONSE_BYTES,
                 )
                 log_failure = oidf_log_failure(
                     module_id,
@@ -1945,6 +1954,7 @@ def inspect_oidf_state(
             f"api/log/{module_id}",
             token,
             expected_statuses={200, 404},
+            max_response_bytes=MAX_OIDF_LOG_RESPONSE_BYTES,
         )
         if status_code == 200:
             if not isinstance(logs, list):

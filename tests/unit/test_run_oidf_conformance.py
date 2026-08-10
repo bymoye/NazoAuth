@@ -633,7 +633,10 @@ class RunOidfConformanceTests(unittest.TestCase):
                 return b"x" * (module.MAX_OIDF_API_RESPONSE_BYTES + 1)
 
         with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
-            with self.assertRaisesRegex(SystemExit, "response exceeds 1 MiB"):
+            with self.assertRaisesRegex(
+                SystemExit,
+                f"response exceeds {module.MAX_OIDF_API_RESPONSE_BYTES} bytes",
+            ):
                 module.oidf_api_request(
                     "GET",
                     "https://localhost:8443/",
@@ -641,6 +644,69 @@ class RunOidfConformanceTests(unittest.TestCase):
                     None,
                     expected_statuses={200},
                 )
+
+    def test_oidf_api_request_accepts_explicit_larger_response_limit(self):
+        module = load_runner_module()
+        body = b'["' + (b"x" * module.MAX_OIDF_API_RESPONSE_BYTES) + b'"]'
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(_size=-1):
+                return body
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            status, payload = module.oidf_api_request(
+                "GET",
+                "https://localhost:8443/",
+                "api/log/module",
+                None,
+                expected_statuses={200},
+                max_response_bytes=module.MAX_OIDF_LOG_RESPONSE_BYTES,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload[0]), module.MAX_OIDF_API_RESPONSE_BYTES)
+
+    def test_inspect_state_uses_dedicated_log_response_limit(self):
+        module = load_runner_module()
+        info = {
+            "_id": "module-id",
+            "status": "FINISHED",
+            "result": "PASSED",
+        }
+        with (
+            mock.patch.object(
+                module,
+                "fetch_alias_plans",
+                return_value=[{"modules": [{"instances": ["module-id"]}]}],
+            ),
+            mock.patch.object(
+                module,
+                "oidf_api_request",
+                side_effect=[(200, info), (200, [])],
+            ) as request,
+        ):
+            failure = module.inspect_oidf_state(
+                "https://suite.example",
+                "token",
+                {"alias"},
+                final=True,
+            )
+
+        self.assertIsNone(failure)
+        self.assertNotIn("max_response_bytes", request.call_args_list[0].kwargs)
+        self.assertEqual(
+            request.call_args_list[1].kwargs["max_response_bytes"],
+            module.MAX_OIDF_LOG_RESPONSE_BYTES,
+        )
 
     def test_fetch_alias_plans_rejects_malformed_success_schema(self):
         module = load_runner_module()
