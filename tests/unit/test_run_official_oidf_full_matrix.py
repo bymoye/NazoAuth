@@ -93,6 +93,9 @@ class OfficialOidfFullMatrixTests(unittest.TestCase):
 
             def run_child(script, arguments, secrets):
                 invocations.append((script, arguments, secrets))
+                if script == "run_public_oidf_conformance.py":
+                    marker = Path(arguments[arguments.index("--parallel-ready-file") + 1])
+                    marker.write_text("ready\n", encoding="utf-8")
 
             def sanitize(export):
                 return self.write_manifest(export)

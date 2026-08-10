@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -316,6 +317,8 @@ def run(args: argparse.Namespace) -> None:
             str(args.protocol_monitor_interval_seconds),
             "--final-stabilization-seconds",
             str(args.final_stabilization_seconds),
+            "--parallel-ready-file",
+            str(args.work_dir / "protocol-parallel-ready"),
         ]
         for group in getattr(args, "protocol_groups", None) or ():
             protocol_arguments.extend(("--group", group))
@@ -338,25 +341,37 @@ def run(args: argparse.Namespace) -> None:
             "--monitor-interval-seconds",
             str(args.openid4vc_monitor_interval_seconds),
         ]
-        jobs = (
-            (
-                "protocol",
+        ready_file = args.work_dir / "protocol-parallel-ready"
+        errors: list[BaseException] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            protocol_future = executor.submit(
+                run_child,
                 "run_public_oidf_conformance.py",
                 protocol_arguments,
                 public_secret_document(secrets),
-            ),
-            (
-                "openid4vc",
+            )
+            deadline = time.monotonic() + 300
+            while not ready_file.is_file():
+                if protocol_future.done():
+                    protocol_future.result()
+                    raise OfficialFullMatrixError(
+                        "protocol runner exited before its parallel readiness signal"
+                    )
+                if time.monotonic() >= deadline:
+                    raise OfficialFullMatrixError(
+                        "protocol runner did not reach parallel readiness within 300 seconds"
+                    )
+                time.sleep(0.1)
+            ready_file.unlink()
+            openid4vc_future = executor.submit(
+                run_child,
                 "run_host_local_openid4vc_conformance.py",
                 openid4vc_arguments,
                 openid4vc_secret_document(secrets),
-            ),
-        )
-        errors: list[BaseException] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            )
             futures = {
-                executor.submit(run_child, script, arguments, child_secrets): name
-                for name, script, arguments, child_secrets in jobs
+                protocol_future: "protocol",
+                openid4vc_future: "openid4vc",
             }
             for future in concurrent.futures.as_completed(futures):
                 try:

@@ -960,6 +960,13 @@ def run_plan_groups(
             raise
         suite_dirs = worktrees
 
+    ready_file = getattr(args, "parallel_ready_file", None)
+    if ready_file is not None:
+        temporary = ready_file.with_name(f".{ready_file.name}.tmp")
+        temporary.write_text("ready\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, ready_file)
+
     failure: BaseException | None = None
     try:
         run_group_phase("safe", phases["safe"], suite_dirs, safe_workers, env, suite_token)
@@ -1073,6 +1080,13 @@ def run(args: argparse.Namespace) -> None:
     args.export_dir = args.export_dir.resolve()
     args.suite_dir = args.suite_dir.resolve()
     args.nazoauthctl = args.nazoauthctl.resolve()
+    args.parallel_ready_file = getattr(args, "parallel_ready_file", None)
+    if args.parallel_ready_file is not None:
+        if not args.parallel_ready_file.is_absolute():
+            raise PublicRunError("--parallel-ready-file must be absolute")
+        args.parallel_ready_file = args.parallel_ready_file.resolve()
+        if args.parallel_ready_file.exists():
+            raise PublicRunError("--parallel-ready-file must not already exist")
     if not args.nazoauthctl.is_file():
         raise PublicRunError("--nazoauthctl must resolve to a regular file")
     if args.nazoauthctl_config is not None:
@@ -1270,6 +1284,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="groups",
         action="append",
         help="run only this bounded plan group; repeat for a resumable subset",
+    )
+    parser.add_argument(
+        "--parallel-ready-file",
+        type=Path,
+        help="atomically signal that onboarding and isolated suite workers are ready",
     )
     parser.add_argument(
         "--final-stabilization-seconds",
