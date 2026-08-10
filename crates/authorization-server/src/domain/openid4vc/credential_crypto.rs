@@ -20,6 +20,8 @@ pub(crate) use mdoc::{
 };
 
 #[cfg(test)]
+use mdoc::verify_direct_conformance_anchor;
+#[cfg(test)]
 use mdoc::{AsyncCoseSigner, mdoc_assessments_accepted, verify_certificate_chain_at};
 
 #[derive(Clone)]

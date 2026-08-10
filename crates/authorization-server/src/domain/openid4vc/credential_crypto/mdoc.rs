@@ -144,6 +144,8 @@ pub(super) fn verify(
         tracing::warn!(
             document_count = verified.mdoc.documents.len(),
             %session_transcript_sha256,
+            standard_device_authentication_valid,
+            issuer_chain_valid,
             ?assessments,
             "OpenID4VP mdoc credential failed verification"
         );
@@ -291,7 +293,11 @@ fn verify_mdoc_issuer_certificate_chains(
             .validity_info
             .signed
             .timestamp();
-        if !verify_certificate_chain_at(&certificates, trust_anchors, signed_at)? {
+        let direct_conformance_anchor =
+            verify_direct_conformance_anchor(&certificates, conformance_trust_anchors, signed_at)?;
+        if !direct_conformance_anchor
+            && !verify_certificate_chain_at(&certificates, trust_anchors, signed_at)?
+        {
             return Ok(false);
         }
         revocation_policy.check_chain_with_conformance_trust(
@@ -302,6 +308,30 @@ fn verify_mdoc_issuer_certificate_chains(
         )?;
     }
     Ok(true)
+}
+
+/// Accept the OIDF suite's self-signed IACA fixture only when the active
+/// conformance lease pins that exact certificate. The ordinary mdoc chain path
+/// remains strict and continues to require a non-CA Document Signer leaf.
+pub(super) fn verify_direct_conformance_anchor(
+    certificates: &[Vec<u8>],
+    conformance_trust_anchors: &[Vec<u8>],
+    unix_time: i64,
+) -> Result<bool, CredentialTrustError> {
+    let [certificate] = certificates else {
+        return Ok(false);
+    };
+    if !conformance_trust_anchors.contains(certificate) {
+        return Ok(false);
+    }
+    let at = x509_parser::time::ASN1Time::from_timestamp(unix_time)
+        .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+    let (_, anchor) = x509_parser::parse_x509_certificate(certificate)
+        .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+    Ok(anchor.is_ca()
+        && anchor.validity().is_valid_at(at)
+        && anchor.issuer() == anchor.subject()
+        && anchor.verify_signature(Some(anchor.public_key())).is_ok())
 }
 
 pub(super) fn verify_certificate_chain_at(

@@ -1054,6 +1054,41 @@ fn certificate_chain_at_checks_leaf_intermediates_anchor_and_time() {
 }
 
 #[test]
+fn mdoc_direct_conformance_anchor_is_exact_self_signed_and_lease_scoped() {
+    let certs = certificate_fixture("issuer.example");
+    let now = Utc::now().timestamp();
+
+    assert!(
+        verify_direct_conformance_anchor(
+            std::slice::from_ref(&certs.ca_der),
+            std::slice::from_ref(&certs.ca_der),
+            now,
+        )
+        .expect("exact direct conformance anchor")
+    );
+    assert!(
+        !verify_direct_conformance_anchor(std::slice::from_ref(&certs.ca_der), &[], now)
+            .expect("no active conformance anchor")
+    );
+    assert!(
+        !verify_direct_conformance_anchor(
+            std::slice::from_ref(&certs.leaf_der),
+            std::slice::from_ref(&certs.leaf_der),
+            now,
+        )
+        .expect("non-CA signer cannot become a direct conformance anchor")
+    );
+    assert!(
+        !verify_direct_conformance_anchor(
+            &[certs.ca_der.clone(), certs.leaf_der],
+            std::slice::from_ref(&certs.ca_der),
+            now,
+        )
+        .expect("direct-anchor mode requires an exact one-certificate chain")
+    );
+}
+
+#[test]
 fn mdoc_assessment_and_holder_helpers_fail_closed() {
     let passed = mdoc_rs::verifier::VerificationAssessment {
         status: mdoc_rs::verifier::VerificationStatus::Passed,
