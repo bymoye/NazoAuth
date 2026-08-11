@@ -134,6 +134,16 @@ fn applicant(username: String, email: String, password_hash: &str) -> Conformanc
         birthdate: "2000-01-01".to_owned(),
         zoneinfo: "UTC".to_owned(),
         locale: "en-US".to_owned(),
+        address: nazo_identity::PostalAddress {
+            formatted: Some("100 Universal City Plaza\nUniversal City, CA 91608\nUS".to_owned()),
+            street_address: Some("100 Universal City Plaza".to_owned()),
+            locality: Some("Universal City".to_owned()),
+            region: Some("CA".to_owned()),
+            postal_code: Some("91608".to_owned()),
+            country: Some("US".to_owned()),
+        },
+        phone_number: "+1 555 5550000".to_owned(),
+        phone_number_verified: true,
     }
 }
 
@@ -366,6 +376,50 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     assert_eq!(claims.birthdate.as_deref(), Some("2000-01-01"));
     assert_eq!(claims.zoneinfo.as_deref(), Some("UTC"));
     assert_eq!(claims.locale.as_deref(), Some("en-US"));
+    assert_eq!(
+        claims
+            .address
+            .as_ref()
+            .and_then(|address| address.formatted.as_deref()),
+        Some("100 Universal City Plaza\nUniversal City, CA 91608\nUS")
+    );
+    assert_eq!(
+        claims
+            .address
+            .as_ref()
+            .and_then(|address| address.street_address.as_deref()),
+        Some("100 Universal City Plaza")
+    );
+    assert_eq!(
+        claims
+            .address
+            .as_ref()
+            .and_then(|address| address.locality.as_deref()),
+        Some("Universal City")
+    );
+    assert_eq!(
+        claims
+            .address
+            .as_ref()
+            .and_then(|address| address.region.as_deref()),
+        Some("CA")
+    );
+    assert_eq!(
+        claims
+            .address
+            .as_ref()
+            .and_then(|address| address.postal_code.as_deref()),
+        Some("91608")
+    );
+    assert_eq!(
+        claims
+            .address
+            .as_ref()
+            .and_then(|address| address.country.as_deref()),
+        Some("US")
+    );
+    assert_eq!(claims.phone_number.as_deref(), Some("+1 555 5550000"));
+    assert!(claims.phone_number_verified);
     assert!(claims.updated_at > 0);
     assert_eq!(
         first

@@ -60,6 +60,14 @@ const CONFORMANCE_PROFILE_GENDER: &str = "unspecified";
 const CONFORMANCE_PROFILE_BIRTHDATE: &str = "2000-01-01";
 const CONFORMANCE_PROFILE_ZONEINFO: &str = "UTC";
 const CONFORMANCE_PROFILE_LOCALE: &str = "en-US";
+const CONFORMANCE_PROFILE_ADDRESS_FORMATTED: &str =
+    "100 Universal City Plaza\nUniversal City, CA 91608\nUS";
+const CONFORMANCE_PROFILE_ADDRESS_STREET: &str = "100 Universal City Plaza";
+const CONFORMANCE_PROFILE_ADDRESS_LOCALITY: &str = "Universal City";
+const CONFORMANCE_PROFILE_ADDRESS_REGION: &str = "CA";
+const CONFORMANCE_PROFILE_ADDRESS_POSTAL_CODE: &str = "91608";
+const CONFORMANCE_PROFILE_ADDRESS_COUNTRY: &str = "US";
+const CONFORMANCE_PROFILE_PHONE_NUMBER: &str = "+1 555 5550000";
 
 /// The non-secret, already validated input passed to the persistence port.
 ///
@@ -109,6 +117,9 @@ pub(crate) struct ConformanceOnboardingApplicant {
     pub birthdate: String,
     pub zoneinfo: String,
     pub locale: String,
+    pub address: nazo_identity::PostalAddress,
+    pub phone_number: String,
+    pub phone_number_verified: bool,
 }
 
 pub(crate) struct ConformanceOnboardingClient {
@@ -599,6 +610,16 @@ async fn validate_bundle(
             birthdate: CONFORMANCE_PROFILE_BIRTHDATE.to_owned(),
             zoneinfo: CONFORMANCE_PROFILE_ZONEINFO.to_owned(),
             locale: CONFORMANCE_PROFILE_LOCALE.to_owned(),
+            address: nazo_identity::PostalAddress {
+                formatted: Some(CONFORMANCE_PROFILE_ADDRESS_FORMATTED.to_owned()),
+                street_address: Some(CONFORMANCE_PROFILE_ADDRESS_STREET.to_owned()),
+                locality: Some(CONFORMANCE_PROFILE_ADDRESS_LOCALITY.to_owned()),
+                region: Some(CONFORMANCE_PROFILE_ADDRESS_REGION.to_owned()),
+                postal_code: Some(CONFORMANCE_PROFILE_ADDRESS_POSTAL_CODE.to_owned()),
+                country: Some(CONFORMANCE_PROFILE_ADDRESS_COUNTRY.to_owned()),
+            },
+            phone_number: CONFORMANCE_PROFILE_PHONE_NUMBER.to_owned(),
+            phone_number_verified: true,
         },
         clients,
         mtls_trust_anchors,
@@ -882,6 +903,9 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
                 birthdate: applicant.birthdate,
                 zoneinfo: applicant.zoneinfo,
                 locale: applicant.locale,
+                address: applicant.address,
+                phone_number: applicant.phone_number,
+                phone_number_verified: applicant.phone_number_verified,
             },
             clients: clients
                 .into_iter()

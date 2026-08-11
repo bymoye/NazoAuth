@@ -121,6 +121,9 @@ pub struct ConformanceApplicant {
     pub birthdate: String,
     pub zoneinfo: String,
     pub locale: String,
+    pub address: nazo_identity::PostalAddress,
+    pub phone_number: String,
+    pub phone_number_verified: bool,
 }
 
 impl std::fmt::Debug for ConformanceApplicant {
@@ -1546,6 +1549,40 @@ fn validate_onboarding_request(
             )));
         }
     }
+    let address = &request.applicant.address;
+    for (value, max_len, label) in [
+        (&address.formatted, 512, "address.formatted"),
+        (&address.street_address, 512, "address.street_address"),
+        (&address.locality, 128, "address.locality"),
+        (&address.region, 128, "address.region"),
+        (&address.postal_code, 32, "address.postal_code"),
+        (&address.country, 2, "address.country"),
+    ] {
+        let Some(value) = value.as_deref() else {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance applicant {label} is missing"
+            )));
+        };
+        if value.trim().is_empty()
+            || value.len() > max_len
+            || value != value.trim()
+            || value.chars().any(char::is_control)
+        {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance applicant {label} exceeds the persisted bounds"
+            )));
+        }
+    }
+    if request.applicant.phone_number.trim().is_empty()
+        || request.applicant.phone_number.len() > 64
+        || request.applicant.phone_number != request.applicant.phone_number.trim()
+        || request.applicant.phone_number.chars().any(char::is_control)
+        || !request.applicant.phone_number_verified
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance applicant phone number is invalid".to_owned(),
+        ));
+    }
     let mut logical_ids = HashSet::with_capacity(request.clients.len());
     let mut public_client_ids = HashSet::with_capacity(request.clients.len());
     for client in &request.clients {
@@ -1726,6 +1763,18 @@ mod tests {
                 birthdate: "2000-01-01".to_owned(),
                 zoneinfo: "UTC".to_owned(),
                 locale: "en-US".to_owned(),
+                address: nazo_identity::PostalAddress {
+                    formatted: Some(
+                        "100 Universal City Plaza\nUniversal City, CA 91608\nUS".to_owned(),
+                    ),
+                    street_address: Some("100 Universal City Plaza".to_owned()),
+                    locality: Some("Universal City".to_owned()),
+                    region: Some("CA".to_owned()),
+                    postal_code: Some("91608".to_owned()),
+                    country: Some("US".to_owned()),
+                },
+                phone_number: "+1 555 5550000".to_owned(),
+                phone_number_verified: true,
             },
             clients: Vec::new(),
             mtls_trust_anchors: Vec::new(),
