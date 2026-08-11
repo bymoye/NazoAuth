@@ -1549,40 +1549,11 @@ fn validate_onboarding_request(
             )));
         }
     }
-    let address = &request.applicant.address;
-    for (value, max_len, label) in [
-        (&address.formatted, 512, "address.formatted"),
-        (&address.street_address, 512, "address.street_address"),
-        (&address.locality, 128, "address.locality"),
-        (&address.region, 128, "address.region"),
-        (&address.postal_code, 32, "address.postal_code"),
-        (&address.country, 2, "address.country"),
-    ] {
-        let Some(value) = value.as_deref() else {
-            return Err(RepositoryError::Consistency(format!(
-                "conformance applicant {label} is missing"
-            )));
-        };
-        if value.trim().is_empty()
-            || value.len() > max_len
-            || value != value.trim()
-            || value.chars().any(char::is_control)
-        {
-            return Err(RepositoryError::Consistency(format!(
-                "conformance applicant {label} exceeds the persisted bounds"
-            )));
-        }
-    }
-    if request.applicant.phone_number.trim().is_empty()
-        || request.applicant.phone_number.len() > 64
-        || request.applicant.phone_number != request.applicant.phone_number.trim()
-        || request.applicant.phone_number.chars().any(char::is_control)
-        || !request.applicant.phone_number_verified
-    {
-        return Err(RepositoryError::Consistency(
-            "conformance applicant phone number is invalid".to_owned(),
-        ));
-    }
+    validate_conformance_postal_address(&request.applicant.address)?;
+    validate_conformance_phone_number(
+        &request.applicant.phone_number,
+        request.applicant.phone_number_verified,
+    )?;
     let mut logical_ids = HashSet::with_capacity(request.clients.len());
     let mut public_client_ids = HashSet::with_capacity(request.clients.len());
     for client in &request.clients {
@@ -1615,6 +1586,54 @@ fn validate_onboarding_request(
                 "conformance trust anchors must reference unique known logical clients".to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_conformance_postal_address(
+    address: &nazo_identity::PostalAddress,
+) -> Result<(), RepositoryError> {
+    for (value, max_len, label, allows_line_feeds) in [
+        (&address.formatted, 512, "address.formatted", true),
+        (&address.street_address, 256, "address.street_address", true),
+        (&address.locality, 128, "address.locality", false),
+        (&address.region, 128, "address.region", false),
+        (&address.postal_code, 64, "address.postal_code", false),
+        (&address.country, 64, "address.country", false),
+    ] {
+        let Some(value) = value.as_deref() else {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance applicant {label} is missing"
+            )));
+        };
+        if value.trim().is_empty()
+            || value.len() > max_len
+            || value != value.trim()
+            || value.chars().any(|character| {
+                character.is_control() && !(allows_line_feeds && character == '\n')
+            })
+        {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance applicant {label} exceeds the persisted bounds"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_conformance_phone_number(
+    phone_number: &str,
+    phone_number_verified: bool,
+) -> Result<(), RepositoryError> {
+    if phone_number.trim().is_empty()
+        || phone_number.len() > 32
+        || phone_number != phone_number.trim()
+        || phone_number.chars().any(char::is_control)
+        || !phone_number_verified
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance applicant phone number is invalid".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1802,6 +1821,21 @@ mod tests {
         request.ttl_seconds = MAX_CONFORMANCE_LEASE_SECONDS + 1;
         let error = validate_onboarding_request(&request).unwrap_err();
         assert!(error.to_string().contains("ttl_seconds"));
+    }
+
+    #[test]
+    fn onboarding_address_accepts_oidc_line_feeds_but_rejects_other_controls() {
+        let mut address = minimal_request().applicant.address;
+        validate_conformance_postal_address(&address).unwrap();
+
+        address.formatted = Some("100 Universal City Plaza\r\nUniversal City, CA 91608".to_owned());
+        let error = validate_conformance_postal_address(&address).unwrap_err();
+        assert!(error.to_string().contains("address.formatted"));
+
+        address.formatted = Some("100 Universal City Plaza".to_owned());
+        address.street_address = Some("100 Universal City Plaza\tSuite 1".to_owned());
+        let error = validate_conformance_postal_address(&address).unwrap_err();
+        assert!(error.to_string().contains("address.street_address"));
     }
 
     #[test]
