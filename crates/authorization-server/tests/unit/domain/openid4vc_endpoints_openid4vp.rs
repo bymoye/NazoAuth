@@ -1,5 +1,8 @@
 use super::*;
 
+const CONFORMANCE_MATERIAL_SHA256: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -745,7 +748,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &valid_task_jti,
+            CONFORMANCE_MATERIAL_SHA256,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&conformance_origin, &anchor_pem)),
             60,
@@ -796,7 +799,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &static_task_jti,
+            CONFORMANCE_MATERIAL_SHA256,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material("https://wallet.example", &anchor_pem)),
             60,
@@ -901,7 +904,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &duplicate_task_jti,
+            CONFORMANCE_MATERIAL_SHA256,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&conformance_origin, &anchor_pem)),
             60,
@@ -979,7 +982,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &expired_task_jti,
+            CONFORMANCE_MATERIAL_SHA256,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&expired_origin, &anchor_pem)),
             60,
