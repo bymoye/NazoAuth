@@ -601,29 +601,23 @@ impl ConformanceLeaseRepository {
         Ok(result)
     }
 
-    /// Resolves exactly one effective lease for the tenant, profile, and
-    /// dynamic-registration credential digest. Duplicate matches indicate a
-    /// corrupt capability boundary and fail closed.
+    /// Resolves exactly one effective lease for the tenant and
+    /// dynamic-registration credential digest across the supported lease
+    /// profiles. The digest is tenant-unique, so profile selection must not
+    /// hide the lease that owns the capability.
     pub async fn active_dynamic_registration_lease_id(
         &self,
         tenant_id: Uuid,
-        profile: &str,
         initial_access_token_sha256: &str,
     ) -> Result<Option<Uuid>, RepositoryError> {
-        if profile != LEASED_DYNAMIC_REGISTRATION_PROFILE {
-            return Err(RepositoryError::Consistency(
-                "dynamic registration conformance lease lookup is only valid for the oidc-fapi-ciba profile"
-                    .to_owned(),
-            ));
-        }
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
         let matches = diesel::sql_query(
             r#"
             SELECT id AS lease_id
             FROM conformance_leases
             WHERE tenant_id = $1
-              AND profile = $2
-              AND dynamic_registration_initial_access_token_sha256 = $3
+              AND profile IN ($2, $3)
+              AND dynamic_registration_initial_access_token_sha256 = $4
               AND expires_at > CURRENT_TIMESTAMP
               AND revoked_at IS NULL
               AND cleaned_at IS NULL
@@ -632,7 +626,8 @@ impl ConformanceLeaseRepository {
             "#,
         )
         .bind::<diesel::sql_types::Uuid, _>(tenant_id)
-        .bind::<diesel::sql_types::Text, _>(profile)
+        .bind::<diesel::sql_types::Text, _>(LEASED_DYNAMIC_REGISTRATION_PROFILE)
+        .bind::<diesel::sql_types::Text, _>(ATOMIC_CONFORMANCE_PROFILE)
         .bind::<diesel::sql_types::Text, _>(initial_access_token_sha256)
         .load::<LeaseIdRow>(&mut connection)
         .await
@@ -647,30 +642,22 @@ impl ConformanceLeaseRepository {
         }
     }
 
-    /// Resolves exactly one effective lease for the tenant, profile, and
-    /// per-run CIBA automated-decision credential digest. The caller must
-    /// still verify that the transaction client is bound to the returned
-    /// lease after loading the transaction state.
+    /// Resolves exactly one effective lease for the tenant and per-run CIBA
+    /// automated-decision credential digest across the supported lease
+    /// profiles. The caller must still verify the transaction client binding.
     pub async fn active_ciba_automated_decision_lease_id(
         &self,
         tenant_id: Uuid,
-        profile: &str,
         token_sha256: &str,
     ) -> Result<Option<Uuid>, RepositoryError> {
-        if profile != LEASED_DYNAMIC_REGISTRATION_PROFILE {
-            return Err(RepositoryError::Consistency(
-                "CIBA automated-decision token lookup is only valid for the oidc-fapi-ciba profile"
-                    .to_owned(),
-            ));
-        }
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
         let matches = diesel::sql_query(
             r#"
             SELECT id AS lease_id
             FROM conformance_leases
             WHERE tenant_id = $1
-              AND profile = $2
-              AND ciba_automated_decision_token_sha256 = $3
+              AND profile IN ($2, $3)
+              AND ciba_automated_decision_token_sha256 = $4
               AND expires_at > CURRENT_TIMESTAMP
               AND revoked_at IS NULL
               AND cleaned_at IS NULL
@@ -679,7 +666,8 @@ impl ConformanceLeaseRepository {
             "#,
         )
         .bind::<diesel::sql_types::Uuid, _>(tenant_id)
-        .bind::<diesel::sql_types::Text, _>(profile)
+        .bind::<diesel::sql_types::Text, _>(LEASED_DYNAMIC_REGISTRATION_PROFILE)
+        .bind::<diesel::sql_types::Text, _>(ATOMIC_CONFORMANCE_PROFILE)
         .bind::<diesel::sql_types::Text, _>(token_sha256)
         .load::<LeaseIdRow>(&mut connection)
         .await

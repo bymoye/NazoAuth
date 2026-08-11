@@ -340,6 +340,32 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .iter()
             .all(|mapping| Uuid::parse_str(&mapping.client_id).is_err())
     );
+    assert_eq!(
+        repository
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                request
+                    .dynamic_registration_initial_access_token_sha256
+                    .as_deref()
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        Some(first.lease_id)
+    );
+    assert_eq!(
+        repository
+            .active_ciba_automated_decision_lease_id(
+                tenant.tenant_id.as_uuid(),
+                request
+                    .ciba_automated_decision_token_sha256
+                    .as_deref()
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        Some(first.lease_id)
+    );
 
     let replay = repository.onboard(request).await.unwrap();
     assert!(replay.idempotent_replay);

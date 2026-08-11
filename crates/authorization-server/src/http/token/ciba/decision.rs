@@ -112,11 +112,7 @@ pub(crate) async fn ciba_automated_decision(
                 return empty_response(StatusCode::NOT_FOUND);
             };
             let lease_id = match conformance_leases
-                .active_ciba_automated_decision_lease_id(
-                    config.tenant_id,
-                    CIBA_AUTOMATED_DECISION_PROFILE,
-                    &actual_token_sha256,
-                )
+                .active_ciba_automated_decision_lease_id(config.tenant_id, &actual_token_sha256)
                 .await
             {
                 Ok(Some(lease_id)) => lease_id,

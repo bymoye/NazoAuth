@@ -17,8 +17,6 @@ use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use crate::settings::Settings;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 
-const CONFORMANCE_DCR_PROFILE: &str = "oidc-fapi-ciba";
-
 #[derive(Clone)]
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) struct DynamicRegistrationConfig {
@@ -145,11 +143,7 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
         Box::pin(async move {
             let token_sha256 = sha256_hex(token.as_bytes());
             self.conformance_leases
-                .active_dynamic_registration_lease_id(
-                    DEFAULT_TENANT_ID,
-                    CONFORMANCE_DCR_PROFILE,
-                    &token_sha256,
-                )
+                .active_dynamic_registration_lease_id(DEFAULT_TENANT_ID, &token_sha256)
                 .await
                 .map_err(|_error| {
                     tracing::warn!("dynamic registration conformance lease lookup failed");

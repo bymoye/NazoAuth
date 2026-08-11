@@ -383,28 +383,16 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         leases
             .active_dynamic_registration_lease_id(
                 tenant.tenant_id.as_uuid(),
-                "oidc-fapi-ciba",
                 &initial_access_token_sha256,
             )
             .await
             .unwrap(),
         Some(lease.id)
     );
-    assert!(matches!(
-        leases
-            .active_dynamic_registration_lease_id(
-                tenant.tenant_id.as_uuid(),
-                "openid4vc",
-                &initial_access_token_sha256,
-            )
-            .await,
-        Err(RepositoryError::Consistency(_))
-    ));
     assert_eq!(
         leases
             .active_dynamic_registration_lease_id(
                 tenant.tenant_id.as_uuid(),
-                "oidc-fapi-ciba",
                 &unknown_initial_access_token_sha256,
             )
             .await
@@ -420,7 +408,6 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         leases
             .active_ciba_automated_decision_lease_id(
                 leased_client.tenant_id,
-                "oidc-fapi-ciba",
                 &ciba_decision_token_sha256,
             )
             .await
@@ -450,7 +437,6 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         leases
             .active_ciba_automated_decision_lease_id(
                 other_leased_client.tenant_id,
-                "oidc-fapi-ciba",
                 &other_ciba_decision_token_sha256,
             )
             .await
@@ -511,7 +497,6 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         leases
             .active_dynamic_registration_lease_id(
                 tenant.tenant_id.as_uuid(),
-                "oidc-fapi-ciba",
                 &initial_access_token_sha256,
             )
             .await
@@ -547,7 +532,6 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         leases
             .active_ciba_automated_decision_lease_id(
                 leased_client.tenant_id,
-                "oidc-fapi-ciba",
                 &ciba_decision_token_sha256,
             )
             .await
@@ -558,7 +542,6 @@ async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
         leases
             .active_ciba_automated_decision_lease_id(
                 other_leased_client.tenant_id,
-                "oidc-fapi-ciba",
                 &other_ciba_decision_token_sha256,
             )
             .await
