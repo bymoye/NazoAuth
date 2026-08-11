@@ -5,9 +5,6 @@ use nazo_auth::{
     SectorIdentifierFuture, SectorIdentifierResolverPort,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
 #[test]
 fn empty_optional_mtls_selectors_do_not_require_a_trust_anchor() {
     let baseline = serde_json::json!({
