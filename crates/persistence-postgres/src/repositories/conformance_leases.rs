@@ -146,7 +146,9 @@ pub struct ConformanceOnboardingResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceClientMapping {
     pub logical_client_id: String,
-    pub client_id: Uuid,
+    /// Public OAuth client identifier. The database primary key is retained
+    /// only inside the transaction for foreign-key and mTLS operations.
+    pub client_id: String,
 }
 
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
@@ -326,12 +328,20 @@ impl ConformanceLeaseRepository {
                         .await?;
 
                     let mut client_mappings = Vec::with_capacity(request.clients.len());
+                    let mut client_storage_ids = HashMap::with_capacity(request.clients.len());
                     for client in &request.clients {
                         let mut prepared = client.prepared.clone();
                         prepared.conformance_lease_id = Some(lease.id);
                         let approved = insert_client(connection, request.tenant, &prepared)
                             .await
                             .map_err(OnboardingTxError::Repository)?;
+                        if approved.client_id.as_str() != prepared.registration.client_id.as_str() {
+                            return Err(OnboardingTxError::Repository(
+                                RepositoryError::Consistency(
+                                    "persistence returned a different public client ID".to_owned(),
+                                ),
+                            ));
+                        }
                         diesel::insert_into(conformance_lease_clients::table)
                             .values((
                                 conformance_lease_clients::tenant_id
@@ -343,21 +353,17 @@ impl ConformanceLeaseRepository {
                             ))
                             .execute(connection)
                             .await?;
+                        client_storage_ids.insert(client.logical_client_id.clone(), approved.id);
                         client_mappings.push(ConformanceClientMapping {
                             logical_client_id: client.logical_client_id.clone(),
-                            client_id: approved.id,
+                            client_id: approved.client_id,
                         });
                     }
 
                     for anchor in &request.mtls_trust_anchors {
-                        let client_id = request
-                            .clients
-                            .iter()
-                            .zip(client_mappings.iter().map(|mapping| mapping.client_id))
-                            .find(|(client, _)| {
-                                client.logical_client_id == anchor.logical_client_id
-                            })
-                            .map(|(_, client_id)| client_id)
+                        let client_id = client_storage_ids
+                            .get(&anchor.logical_client_id)
+                            .copied()
                             .ok_or_else(|| {
                                 OnboardingTxError::Repository(RepositoryError::Consistency(
                                     "conformance trust anchor references an unknown logical client"
@@ -1113,7 +1119,9 @@ struct ClientMappingRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     logical_client_id: String,
     #[diesel(sql_type = diesel::sql_types::Uuid)]
-    client_id: Uuid,
+    storage_client_id: Uuid,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    public_client_id: String,
     #[diesel(sql_type = diesel::sql_types::Bool)]
     client_is_active: bool,
 }
@@ -1176,13 +1184,16 @@ async fn replay_or_conflict(
     .await
     .optional()?;
     let mappings = sql_query(
-        "SELECT mapping.logical_client_id, mapping.client_id, client.is_active AS client_is_active
+        "SELECT mapping.logical_client_id, mapping.client_id AS storage_client_id,
+                client.client_id AS public_client_id,
+                client.is_active AS client_is_active
          FROM conformance_lease_clients mapping
          JOIN oauth_clients client
            ON client.tenant_id = mapping.tenant_id
           AND client.id = mapping.client_id
           AND client.conformance_lease_id = mapping.lease_id
          WHERE mapping.tenant_id = $1 AND mapping.lease_id = $2
+           AND client.is_active = TRUE
          ORDER BY mapping.logical_client_id",
     )
     .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
@@ -1203,7 +1214,10 @@ async fn replay_or_conflict(
     for mapping in mappings {
         if !mapping.client_is_active
             || by_logical_id
-                .insert(mapping.logical_client_id, mapping.client_id)
+                .insert(
+                    mapping.logical_client_id,
+                    (mapping.storage_client_id, mapping.public_client_id),
+                )
                 .is_some()
         {
             return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
@@ -1212,16 +1226,25 @@ async fn replay_or_conflict(
         }
     }
     let mut client_mappings = Vec::with_capacity(request.clients.len());
+    let mut client_storage_ids = HashMap::with_capacity(request.clients.len());
     for client in &request.clients {
-        let Some(client_id) = by_logical_id.remove(&client.logical_client_id) else {
+        let Some((storage_client_id, public_client_id)) =
+            by_logical_id.remove(&client.logical_client_id)
+        else {
             return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
                 "conformance lease client logical IDs do not match the onboarding bundle"
                     .to_owned(),
             )));
         };
+        if client.prepared.registration.client_id.as_str() != public_client_id.as_str() {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease public client IDs do not match the onboarding bundle".to_owned(),
+            )));
+        }
+        client_storage_ids.insert(client.logical_client_id.clone(), storage_client_id);
         client_mappings.push(ConformanceClientMapping {
             logical_client_id: client.logical_client_id.clone(),
-            client_id,
+            client_id: public_client_id,
         });
     }
     if !by_logical_id.is_empty() {
@@ -1231,15 +1254,12 @@ async fn replay_or_conflict(
     }
     let mut expected_anchors = HashMap::with_capacity(request.mtls_trust_anchors.len());
     for anchor in &request.mtls_trust_anchors {
-        let Some(mapping) = client_mappings
-            .iter()
-            .find(|mapping| mapping.logical_client_id == anchor.logical_client_id)
-        else {
+        let Some(client_id) = client_storage_ids.get(&anchor.logical_client_id).copied() else {
             return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
                 "conformance trust anchor references an unknown logical client".to_owned(),
             )));
         };
-        expected_anchors.insert(mapping.client_id, anchor.certificate_sha256.as_str());
+        expected_anchors.insert(client_id, anchor.certificate_sha256.as_str());
     }
     let persisted_anchors = sql_query(
         "SELECT request.client_id, request.certificate_sha256, request.source,
@@ -1396,6 +1416,7 @@ fn validate_onboarding_request(
         ));
     }
     let mut logical_ids = HashSet::with_capacity(request.clients.len());
+    let mut public_client_ids = HashSet::with_capacity(request.clients.len());
     for client in &request.clients {
         if client.logical_client_id.trim().is_empty()
             || client.logical_client_id.len() > MAX_ONBOARDING_LOGICAL_ID_BYTES
@@ -1409,9 +1430,10 @@ fn validate_onboarding_request(
         }
         if client.prepared.tenant != request.tenant
             || client.prepared.conformance_lease_id.is_some()
+            || !public_client_ids.insert(client.prepared.registration.client_id.as_str())
         {
             return Err(RepositoryError::Consistency(
-                "conformance prepared client has an inconsistent tenant or lease binding"
+                "conformance prepared clients have inconsistent tenant, lease, or public IDs"
                     .to_owned(),
             ));
         }

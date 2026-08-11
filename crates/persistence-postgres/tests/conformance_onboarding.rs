@@ -306,6 +306,11 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     let suffix = Uuid::now_v7().simple().to_string();
     let repository = ConformanceLeaseRepository::new(pool);
     let request = replay_request(tenant, &suffix);
+    let expected_public_client_ids = request
+        .clients
+        .iter()
+        .map(|client| client.prepared.registration.client_id.clone())
+        .collect::<Vec<_>>();
 
     let first = repository.onboard(request.clone()).await.unwrap();
     assert!(!first.idempotent_replay);
@@ -317,6 +322,23 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .map(|mapping| mapping.logical_client_id.as_str())
             .collect::<Vec<_>>(),
         vec!["logical-b", "logical-a"]
+    );
+    assert_eq!(
+        first
+            .client_mappings
+            .iter()
+            .map(|mapping| mapping.client_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_public_client_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        first
+            .client_mappings
+            .iter()
+            .all(|mapping| Uuid::parse_str(&mapping.client_id).is_err())
     );
 
     let replay = repository.onboard(request).await.unwrap();

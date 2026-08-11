@@ -199,6 +199,19 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
     }
 }
 
+#[test]
+fn onboarding_mapping_preserves_the_public_oauth_client_id() {
+    let mappings = map_persistence_client_mappings(vec![nazo_postgres::ConformanceClientMapping {
+        logical_client_id: "fapi-rp".to_owned(),
+        client_id: "client-fapi-rp".to_owned(),
+    }]);
+
+    assert_eq!(
+        mappings,
+        vec![("fapi-rp".to_owned(), "client-fapi-rp".to_owned())]
+    );
+}
+
 #[derive(Clone, Copy)]
 struct UnusedClientRepository;
 

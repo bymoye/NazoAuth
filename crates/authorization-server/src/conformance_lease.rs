@@ -749,6 +749,15 @@ struct PostgresOnboardingRepository {
     inner: ConformanceLeaseRepository,
 }
 
+fn map_persistence_client_mappings(
+    mappings: Vec<nazo_postgres::ConformanceClientMapping>,
+) -> Vec<(String, String)> {
+    mappings
+        .into_iter()
+        .map(|mapping| (mapping.logical_client_id, mapping.client_id))
+        .collect()
+}
+
 impl PostgresOnboardingRepository {
     fn new(inner: ConformanceLeaseRepository) -> Self {
         Self { inner }
@@ -888,11 +897,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
                 lease_id: result.lease_id,
                 request_jti: task_jti_for_result,
                 applicant_id: applicant_id.to_string(),
-                client_mappings: result
-                    .client_mappings
-                    .into_iter()
-                    .map(|mapping| (mapping.logical_client_id, mapping.client_id.to_string()))
-                    .collect(),
+                client_mappings: map_persistence_client_mappings(result.client_mappings),
                 client_count: u32::try_from(client_count)
                     .map_err(|_| anyhow::anyhow!("conformance onboarding result is invalid"))?,
                 matrix_sha256: matrix_sha256_for_result,
