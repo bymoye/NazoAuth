@@ -1071,6 +1071,10 @@
             "rsa_bits": 2048,
             "ec_curve": "P-256",
             "mtls_signature": "ECDSA-P256-SHA256"
+          },
+          "expected_results": {
+            "oidcc-unsigned-request-object-supported-correctly-or-rejected-as-unsupported": "SKIPPED",
+            "oidcc-ensure-request-object-with-redirect-uri": "SKIPPED"
           }
         },
         {

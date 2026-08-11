@@ -643,6 +643,19 @@ pub fn validate_conformance_matrix_descriptor(
             }
             validate_conformance_matrix_variant_map(&plan.variant)?;
             validate_conformance_matrix_crypto(&plan.crypto)?;
+            if plan.expected_results.len() > 64 {
+                return Err(ProtocolError::Policy(
+                    "conformance matrix expected result count is out of bounds",
+                ));
+            }
+            for (test_name, result) in &plan.expected_results {
+                validate_identifier(test_name)?;
+                if result != "SKIPPED" {
+                    return Err(ProtocolError::Policy(
+                        "conformance matrix expected result must be SKIPPED",
+                    ));
+                }
+            }
             // Group roles participate in every plan's client materialization;
             // bind them to each plan's crypto policy just as CTL does.
             validate_conformance_matrix_roles(

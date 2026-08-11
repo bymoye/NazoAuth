@@ -487,6 +487,10 @@ pub struct ConformanceMatrixPlan {
     pub secret_bindings: BTreeMap<String, String>,
     #[serde(default)]
     pub crypto: ConformanceMatrixCryptoPolicy,
+    /// Exact Suite modules allowed to finish as `SKIPPED`.
+    /// `REVIEW` is a live human-review outcome and is never pre-approved here.
+    #[serde(default)]
+    pub expected_results: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

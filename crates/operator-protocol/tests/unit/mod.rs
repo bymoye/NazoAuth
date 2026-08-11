@@ -549,6 +549,7 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
                     ec_curve: "P-256".to_owned(),
                     mtls_signature: "ECDSA-P256-SHA256".to_owned(),
                 },
+                expected_results: BTreeMap::new(),
             }],
         }],
     };
@@ -559,12 +560,24 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
     duplicate.groups[0].plans.push(duplicate_plan);
     assert!(validate_conformance_matrix_descriptor(&duplicate).is_err());
 
-    let mut drift = descriptor;
+    let mut drift = descriptor.clone();
     drift.groups[0].plans[0].id = "oidc-core-default-2".to_owned();
     drift.groups[0].plans[0].config_template = serde_json::json!({
         "client_id": "{{unknown.client.id}}"
     });
     assert!(validate_conformance_matrix_descriptor(&drift).is_err());
+
+    let mut invalid_result = descriptor.clone();
+    invalid_result.groups[0].plans[0]
+        .expected_results
+        .insert("oidcc-test".to_owned(), "PASSED".to_owned());
+    assert!(validate_conformance_matrix_descriptor(&invalid_result).is_err());
+
+    let mut review_is_not_preapproved = descriptor;
+    review_is_not_preapproved.groups[0].plans[0]
+        .expected_results
+        .insert("oidcc-test".to_owned(), "REVIEW".to_owned());
+    assert!(validate_conformance_matrix_descriptor(&review_is_not_preapproved).is_err());
 }
 
 #[test]
@@ -627,6 +640,7 @@ fn conformance_matrix_registration_vectors_are_arrays_of_strings() {
                     ec_curve: "P-256".to_owned(),
                     mtls_signature: "ECDSA-P256-SHA256".to_owned(),
                 },
+                expected_results: BTreeMap::new(),
             }],
         }],
     };
