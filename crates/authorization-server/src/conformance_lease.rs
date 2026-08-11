@@ -44,6 +44,23 @@ const MAX_CONFORMANCE_CLIENT_REQUEST_BYTES: usize = 256 * 1024;
 const CONFORMANCE_MATRIX_BYTES: &[u8] =
     include_bytes!("../resources/nazoauth-conformance-matrix-v1.json");
 
+// The OIDF scope conformance checks require every standard `profile` claim to
+// be present in UserInfo.  Keep these values lease-owned and non-secret: they
+// are test-user facts, never copied from a real account or accepted from the
+// operator bundle.
+const CONFORMANCE_PROFILE_DISPLAY_NAME: &str = "Conformance Test User";
+const CONFORMANCE_PROFILE_GIVEN_NAME: &str = "Conformance";
+const CONFORMANCE_PROFILE_FAMILY_NAME: &str = "User";
+const CONFORMANCE_PROFILE_MIDDLE_NAME: &str = "Test";
+const CONFORMANCE_PROFILE_NICKNAME: &str = "ctu";
+const CONFORMANCE_PROFILE_URL: &str = "https://example.invalid/conformance/profile";
+const CONFORMANCE_PROFILE_AVATAR_URL: &str = "https://example.invalid/conformance/avatar";
+const CONFORMANCE_PROFILE_WEBSITE_URL: &str = "https://example.invalid/conformance";
+const CONFORMANCE_PROFILE_GENDER: &str = "unspecified";
+const CONFORMANCE_PROFILE_BIRTHDATE: &str = "2000-01-01";
+const CONFORMANCE_PROFILE_ZONEINFO: &str = "UTC";
+const CONFORMANCE_PROFILE_LOCALE: &str = "en-US";
+
 /// The non-secret, already validated input passed to the persistence port.
 ///
 /// This type deliberately lives in the authorization-server domain.  The
@@ -80,6 +97,18 @@ pub(crate) struct ConformanceOnboardingApplicant {
     pub email: String,
     pub password_hash: nazo_identity::ports::PasswordHashInput,
     pub email_verified: bool,
+    pub display_name: String,
+    pub given_name: String,
+    pub family_name: String,
+    pub middle_name: String,
+    pub nickname: String,
+    pub profile_url: String,
+    pub avatar_url: String,
+    pub website_url: String,
+    pub gender: String,
+    pub birthdate: String,
+    pub zoneinfo: String,
+    pub locale: String,
 }
 
 pub(crate) struct ConformanceOnboardingClient {
@@ -558,6 +587,18 @@ async fn validate_bundle(
             email: applicant_email,
             password_hash: applicant_password_hash,
             email_verified: true,
+            display_name: CONFORMANCE_PROFILE_DISPLAY_NAME.to_owned(),
+            given_name: CONFORMANCE_PROFILE_GIVEN_NAME.to_owned(),
+            family_name: CONFORMANCE_PROFILE_FAMILY_NAME.to_owned(),
+            middle_name: CONFORMANCE_PROFILE_MIDDLE_NAME.to_owned(),
+            nickname: CONFORMANCE_PROFILE_NICKNAME.to_owned(),
+            profile_url: CONFORMANCE_PROFILE_URL.to_owned(),
+            avatar_url: CONFORMANCE_PROFILE_AVATAR_URL.to_owned(),
+            website_url: CONFORMANCE_PROFILE_WEBSITE_URL.to_owned(),
+            gender: CONFORMANCE_PROFILE_GENDER.to_owned(),
+            birthdate: CONFORMANCE_PROFILE_BIRTHDATE.to_owned(),
+            zoneinfo: CONFORMANCE_PROFILE_ZONEINFO.to_owned(),
+            locale: CONFORMANCE_PROFILE_LOCALE.to_owned(),
         },
         clients,
         mtls_trust_anchors,
@@ -829,6 +870,18 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
                 email: applicant.email,
                 password_hash: applicant.password_hash,
                 email_verified: applicant.email_verified,
+                display_name: applicant.display_name,
+                given_name: applicant.given_name,
+                family_name: applicant.family_name,
+                middle_name: applicant.middle_name,
+                nickname: applicant.nickname,
+                profile_url: applicant.profile_url,
+                avatar_url: applicant.avatar_url,
+                website_url: applicant.website_url,
+                gender: applicant.gender,
+                birthdate: applicant.birthdate,
+                zoneinfo: applicant.zoneinfo,
+                locale: applicant.locale,
             },
             clients: clients
                 .into_iter()

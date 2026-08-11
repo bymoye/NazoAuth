@@ -105,6 +105,22 @@ pub struct ConformanceApplicant {
     pub email: String,
     pub password_hash: PasswordHashInput,
     pub email_verified: bool,
+    /// Lease-owned, non-secret profile fixture used by the OIDF conformance
+    /// user.  These values are deliberately part of the atomic onboarding
+    /// input so the ordinary UserInfo projection sees the same durable user
+    /// facts that the conformance suite requests through `scope=profile`.
+    pub display_name: String,
+    pub given_name: String,
+    pub family_name: String,
+    pub middle_name: String,
+    pub nickname: String,
+    pub profile_url: String,
+    pub avatar_url: String,
+    pub website_url: String,
+    pub gender: String,
+    pub birthdate: String,
+    pub zoneinfo: String,
+    pub locale: String,
 }
 
 impl std::fmt::Debug for ConformanceApplicant {
@@ -320,10 +336,7 @@ impl ConformanceLeaseRepository {
                     let applicant_user_id = insert_conformance_applicant_on_connection(
                         connection,
                         request.tenant,
-                        &request.applicant.username,
-                        &request.applicant.email,
-                        request.applicant.password_hash.clone(),
-                        request.applicant.email_verified,
+                        &request.applicant,
                     )
                     .await?;
                     diesel::insert_into(conformance_lease_applicants::table)
@@ -1509,6 +1522,30 @@ fn validate_onboarding_request(
             "conformance applicant identity exceeds the persisted bounds".to_owned(),
         ));
     }
+    for (value, max_len, label) in [
+        (&request.applicant.display_name, 80, "display_name"),
+        (&request.applicant.given_name, 80, "given_name"),
+        (&request.applicant.family_name, 80, "family_name"),
+        (&request.applicant.middle_name, 80, "middle_name"),
+        (&request.applicant.nickname, 80, "nickname"),
+        (&request.applicant.profile_url, 512, "profile_url"),
+        (&request.applicant.avatar_url, 512, "avatar_url"),
+        (&request.applicant.website_url, 512, "website_url"),
+        (&request.applicant.gender, 40, "gender"),
+        (&request.applicant.birthdate, 10, "birthdate"),
+        (&request.applicant.zoneinfo, 64, "zoneinfo"),
+        (&request.applicant.locale, 35, "locale"),
+    ] {
+        if value.trim().is_empty()
+            || value.len() > max_len
+            || value != value.trim()
+            || value.chars().any(char::is_control)
+        {
+            return Err(RepositoryError::Consistency(format!(
+                "conformance applicant {label} exceeds the persisted bounds"
+            )));
+        }
+    }
     let mut logical_ids = HashSet::with_capacity(request.clients.len());
     let mut public_client_ids = HashSet::with_capacity(request.clients.len());
     for client in &request.clients {
@@ -1677,6 +1714,18 @@ mod tests {
                 email: "oidf-applicant@example.invalid".to_owned(),
                 password_hash: PasswordHashInput::new("opaque-test-hash").unwrap(),
                 email_verified: true,
+                display_name: "Conformance Test User".to_owned(),
+                given_name: "Conformance".to_owned(),
+                family_name: "User".to_owned(),
+                middle_name: "Test".to_owned(),
+                nickname: "ctu".to_owned(),
+                profile_url: "https://example.invalid/conformance/profile".to_owned(),
+                avatar_url: "https://example.invalid/conformance/avatar".to_owned(),
+                website_url: "https://example.invalid/conformance".to_owned(),
+                gender: "unspecified".to_owned(),
+                birthdate: "2000-01-01".to_owned(),
+                zoneinfo: "UTC".to_owned(),
+                locale: "en-US".to_owned(),
             },
             clients: Vec::new(),
             mtls_trust_anchors: Vec::new(),

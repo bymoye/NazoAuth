@@ -11,7 +11,8 @@ use nazo_identity::{
 };
 use nazo_postgres::{
     ConformanceApplicant, ConformanceClient, ConformanceLeaseRepository,
-    ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest, create_pool, get_conn,
+    ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest, UserRepository, create_pool,
+    get_conn,
 };
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -115,6 +116,27 @@ fn digest_text(value: &str) -> String {
         })
 }
 
+fn applicant(username: String, email: String, password_hash: &str) -> ConformanceApplicant {
+    ConformanceApplicant {
+        username,
+        email,
+        password_hash: PasswordHashInput::new(password_hash).unwrap(),
+        email_verified: true,
+        display_name: "Conformance Test User".to_owned(),
+        given_name: "Conformance".to_owned(),
+        family_name: "User".to_owned(),
+        middle_name: "Test".to_owned(),
+        nickname: "ctu".to_owned(),
+        profile_url: "https://example.invalid/conformance/profile".to_owned(),
+        avatar_url: "https://example.invalid/conformance/avatar".to_owned(),
+        website_url: "https://example.invalid/conformance".to_owned(),
+        gender: "unspecified".to_owned(),
+        birthdate: "2000-01-01".to_owned(),
+        zoneinfo: "UTC".to_owned(),
+        locale: "en-US".to_owned(),
+    }
+}
+
 fn replay_request(tenant: TenantContext, suffix: &str) -> ConformanceOnboardingRequest {
     let certificate_b =
         format!("-----BEGIN CERTIFICATE-----\nREPLAY-B-{suffix}\n-----END CERTIFICATE-----\n");
@@ -134,12 +156,11 @@ fn replay_request(tenant: TenantContext, suffix: &str) -> ConformanceOnboardingR
         ciba_automated_decision_token_sha256: Some(digest_text(&format!("ciba-token-{suffix}"))),
         client_count: 2,
         ttl_seconds: 300,
-        applicant: ConformanceApplicant {
-            username: format!("conformance-replay-{suffix}"),
-            email: format!("conformance-replay-{suffix}@example.invalid"),
-            password_hash: PasswordHashInput::new("opaque-replay-test-hash").unwrap(),
-            email_verified: true,
-        },
+        applicant: applicant(
+            format!("conformance-replay-{suffix}"),
+            format!("conformance-replay-{suffix}@example.invalid"),
+            "opaque-replay-test-hash",
+        ),
         clients: vec![
             ConformanceClient {
                 logical_client_id: "logical-b".to_owned(),
@@ -200,12 +221,7 @@ async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails(
         ciba_automated_decision_token_sha256: Some("d".repeat(64)),
         client_count: 2,
         ttl_seconds: 300,
-        applicant: ConformanceApplicant {
-            username: username.clone(),
-            email,
-            password_hash: PasswordHashInput::new("opaque-test-hash").unwrap(),
-            email_verified: true,
-        },
+        applicant: applicant(username.clone(), email, "opaque-test-hash"),
         clients: vec![
             ConformanceClient {
                 logical_client_id: "rollback-client-a".to_owned(),
@@ -306,7 +322,7 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     let pool = create_pool(database_url, 4).unwrap();
     let tenant = TenantContext::default_system();
     let suffix = Uuid::now_v7().simple().to_string();
-    let repository = ConformanceLeaseRepository::new(pool);
+    let repository = ConformanceLeaseRepository::new(pool.clone());
     let request = replay_request(tenant, &suffix);
     let expected_public_client_ids = request
         .clients
@@ -318,6 +334,39 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     let suite_origin = request.suite_origin.clone();
     assert!(!first.idempotent_replay);
     assert_eq!(first.client_count, 2);
+
+    let applicant_id = first.applicant_user_id.expect("onboarding applicant");
+    let claims = UserRepository::new(pool)
+        .active_subject_claims_by_tenant_id(
+            tenant.tenant_id,
+            nazo_identity::UserId::new(applicant_id).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("active conformance applicant claims");
+    assert_eq!(claims.preferred_username, request.applicant.username);
+    assert_eq!(claims.name.as_deref(), Some("Conformance Test User"));
+    assert_eq!(claims.given_name.as_deref(), Some("Conformance"));
+    assert_eq!(claims.family_name.as_deref(), Some("User"));
+    assert_eq!(claims.middle_name.as_deref(), Some("Test"));
+    assert_eq!(claims.nickname.as_deref(), Some("ctu"));
+    assert_eq!(
+        claims.profile.as_deref(),
+        Some("https://example.invalid/conformance/profile")
+    );
+    assert_eq!(
+        claims.picture.as_deref(),
+        Some("https://example.invalid/conformance/avatar")
+    );
+    assert_eq!(
+        claims.website.as_deref(),
+        Some("https://example.invalid/conformance")
+    );
+    assert_eq!(claims.gender.as_deref(), Some("unspecified"));
+    assert_eq!(claims.birthdate.as_deref(), Some("2000-01-01"));
+    assert_eq!(claims.zoneinfo.as_deref(), Some("UTC"));
+    assert_eq!(claims.locale.as_deref(), Some("en-US"));
+    assert!(claims.updated_at > 0);
     assert_eq!(
         first
             .client_mappings
