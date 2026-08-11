@@ -508,24 +508,7 @@ async fn validate_bundle(
         if requires_supplied_secret != client.client_secret.is_some() {
             bail!("conformance client secret binding does not match auth method");
         }
-        let requires_mtls_anchor = matches!(
-            auth_method,
-            "tls_client_auth" | "self_signed_tls_client_auth"
-        ) || client
-            .request
-            .get("require_mtls_bound_tokens")
-            .and_then(Value::as_bool)
-            == Some(true)
-            || [
-                "tls_client_auth_subject_dn",
-                "tls_client_auth_cert_sha256",
-                "tls_client_auth_san_dns",
-                "tls_client_auth_san_uri",
-                "tls_client_auth_san_ip",
-                "tls_client_auth_san_email",
-            ]
-            .iter()
-            .any(|field| client.request.get(*field).is_some());
+        let requires_mtls_anchor = registration_requires_mtls_anchor(&client.request);
         if requires_mtls_anchor != client.mtls_trust_anchor_pem.is_some() {
             bail!("conformance mTLS trust anchor binding does not match client registration");
         }
@@ -583,6 +566,38 @@ async fn validate_bundle(
         clients,
         mtls_trust_anchors,
     })
+}
+
+fn registration_requires_mtls_anchor(request: &Value) -> bool {
+    request
+        .get("token_endpoint_auth_method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| matches!(method, "tls_client_auth" | "self_signed_tls_client_auth"))
+        || request
+            .get("require_mtls_bound_tokens")
+            .and_then(Value::as_bool)
+            == Some(true)
+        || ["tls_client_auth_subject_dn", "tls_client_auth_cert_sha256"]
+            .iter()
+            .any(|field| {
+                request
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        || [
+            "tls_client_auth_san_dns",
+            "tls_client_auth_san_uri",
+            "tls_client_auth_san_ip",
+            "tls_client_auth_san_email",
+        ]
+        .iter()
+        .any(|field| {
+            request
+                .get(*field)
+                .and_then(Value::as_array)
+                .is_some_and(|values| !values.is_empty())
+        })
 }
 
 async fn hash_applicant_password(

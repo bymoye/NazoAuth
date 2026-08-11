@@ -3,6 +3,29 @@ use super::*;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
+#[test]
+fn empty_optional_mtls_selectors_do_not_require_a_trust_anchor() {
+    let baseline = serde_json::json!({
+        "token_endpoint_auth_method": "client_secret_basic",
+        "require_mtls_bound_tokens": false,
+        "tls_client_auth_subject_dn": null,
+        "tls_client_auth_cert_sha256": null,
+        "tls_client_auth_san_dns": [],
+        "tls_client_auth_san_uri": [],
+        "tls_client_auth_san_ip": [],
+        "tls_client_auth_san_email": []
+    });
+    assert!(!registration_requires_mtls_anchor(&baseline));
+
+    let mut mtls = baseline.clone();
+    mtls["require_mtls_bound_tokens"] = serde_json::json!(true);
+    assert!(registration_requires_mtls_anchor(&mtls));
+
+    let mut san_bound = baseline;
+    san_bound["tls_client_auth_san_dns"] = serde_json::json!(["client.example"]);
+    assert!(registration_requires_mtls_anchor(&san_bound));
+}
+
 #[cfg(unix)]
 fn secure_material_fixture(name: &str, mode: u32) -> std::path::PathBuf {
     let directory = std::env::temp_dir().join(format!("nazoauth-{name}-{}", Uuid::now_v7()));
