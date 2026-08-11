@@ -798,6 +798,60 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         (partial_task_binding.status, partial_task_binding.error),
         (400, "invalid_request")
     );
+
+    let legacy_static_presentation = operations
+        .create(create_input(None, None, None, false))
+        .await
+        .expect("static origins without a binding should retain legacy behavior");
+    let legacy_static_transaction = operations
+        .store
+        .request(
+            legacy_static_presentation.transaction_id,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("legacy static transaction should be readable")
+        .expect("legacy static transaction should exist");
+    assert_eq!(legacy_static_transaction.conformance_lease_id, None);
+
+    let static_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
+    let static_lease = leases
+        .create(
+            crate::domain::tenancy::DEFAULT_TENANT_ID,
+            "nazoauth-full",
+            &static_task_jti,
+            nazo_postgres::ConformanceLeaseTokenDigests::default(),
+            Some(conformance_material("https://wallet.example", &anchor_pem)),
+            60,
+        )
+        .await
+        .expect("static-origin conformance lease should be created");
+    bind_suite_origin(
+        &pool,
+        static_lease.id,
+        "https://wallet.example",
+        &static_task_jti,
+    )
+    .await;
+    let static_presentation = operations
+        .create(CreatePresentationRequest {
+            conformance_lease_id: Some(static_lease.id),
+            conformance_task_jti: Some(static_task_jti.clone()),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect("static origins with an exact binding should be accepted");
+    let static_transaction = operations
+        .store
+        .request(static_presentation.transaction_id, chrono::Utc::now())
+        .await
+        .expect("static-bound transaction should be readable")
+        .expect("static-bound transaction should exist");
+    assert_eq!(
+        static_transaction.conformance_lease_id,
+        Some(static_lease.id),
+        "a complete binding must be stored even for a static Suite origin"
+    );
     let static_binding = operations
         .create(CreatePresentationRequest {
             conformance_lease_id: Some(valid_lease.id),
@@ -805,7 +859,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("static wallet origins must not accept dynamic bindings");
+        .expect_err("static wallet origins must reject a cross-origin lease binding");
     assert_eq!(
         (static_binding.status, static_binding.error),
         (400, "invalid_request")

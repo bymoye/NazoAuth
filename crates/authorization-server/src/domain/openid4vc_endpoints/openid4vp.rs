@@ -251,23 +251,7 @@ impl PresentationOperations for ServerPresentationOperations {
                     ));
                 }
             };
-            let conformance_lease_id = if static_wallet_allowed {
-                if binding.is_some() {
-                    return Err(vp_error(
-                        400,
-                        "invalid_request",
-                        "Static wallet origins must not include a conformance lease binding.",
-                    ));
-                }
-                None
-            } else {
-                let Some((lease_id, task_jti)) = binding else {
-                    return Err(vp_error(
-                        400,
-                        "invalid_request",
-                        "Dynamic Suite origins require a conformance lease binding.",
-                    ));
-                };
+            let conformance_lease_id = if let Some((lease_id, task_jti)) = binding {
                 let matched = self
                     .conformance_lease_for_binding(&wallet_origin, lease_id, &task_jti)
                     .await?;
@@ -279,6 +263,14 @@ impl PresentationOperations for ServerPresentationOperations {
                     ));
                 }
                 Some(lease_id)
+            } else if static_wallet_allowed {
+                None
+            } else {
+                return Err(vp_error(
+                    400,
+                    "invalid_request",
+                    "Dynamic Suite origins require a conformance lease binding.",
+                ));
             };
             input
                 .dcql_query
