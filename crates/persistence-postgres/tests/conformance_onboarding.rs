@@ -209,6 +209,7 @@ struct BindingLeaseFixture<'a> {
     lease_id: Uuid,
     task_jti: &'a str,
     suite_origin: &'a str,
+    created_at: chrono::DateTime<Utc>,
     expires_at: chrono::DateTime<Utc>,
     revoked_at: Option<chrono::DateTime<Utc>>,
     cleaned_at: Option<chrono::DateTime<Utc>>,
@@ -228,7 +229,7 @@ async fn insert_binding_lease(
     .bind::<diesel::sql_types::Uuid, _>(fixture.lease_id)
     .bind::<diesel::sql_types::Uuid, _>(fixture.tenant_id)
     .bind::<Text, _>("a".repeat(64))
-    .bind::<diesel::sql_types::Timestamptz, _>(Utc::now())
+    .bind::<diesel::sql_types::Timestamptz, _>(fixture.created_at)
     .bind::<diesel::sql_types::Timestamptz, _>(fixture.expires_at)
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>, _>(fixture.revoked_at)
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>, _>(fixture.cleaned_at)
@@ -686,6 +687,7 @@ async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
             lease_id: lease_a,
             task_jti: &task_a,
             suite_origin: &origin,
+            created_at: now,
             expires_at: now + Duration::minutes(5),
             revoked_at: None,
             cleaned_at: None,
@@ -699,6 +701,7 @@ async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
             lease_id: lease_b,
             task_jti: &task_b,
             suite_origin: &origin,
+            created_at: now,
             expires_at: now + Duration::minutes(5),
             revoked_at: None,
             cleaned_at: None,
@@ -712,6 +715,7 @@ async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
             lease_id: lease_expired,
             task_jti: &task_expired,
             suite_origin: &origin,
+            created_at: now - Duration::minutes(10),
             expires_at: now - Duration::minutes(1),
             revoked_at: None,
             cleaned_at: None,
@@ -725,6 +729,7 @@ async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
             lease_id: lease_revoked,
             task_jti: &task_revoked,
             suite_origin: &origin,
+            created_at: now,
             expires_at: now + Duration::minutes(5),
             revoked_at: Some(now),
             cleaned_at: None,
@@ -738,6 +743,7 @@ async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
             lease_id: lease_cleaned,
             task_jti: &task_cleaned,
             suite_origin: &origin,
+            created_at: now,
             expires_at: now + Duration::minutes(5),
             revoked_at: None,
             cleaned_at: Some(now),
