@@ -793,10 +793,30 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
         };
         let repository = self.inner.clone();
         Box::pin(async move {
-            let result = repository
-                .onboard(persistence_request)
-                .await
-                .map_err(|_| anyhow::anyhow!("conformance onboarding transaction failed"))?;
+            let result =
+                repository
+                    .onboard(persistence_request)
+                    .await
+                    .map_err(|error| match error {
+                        nazo_identity::ports::RepositoryError::Conflict
+                        | nazo_identity::ports::RepositoryError::AlreadyProcessed => {
+                            anyhow::anyhow!("conformance onboarding transaction conflicted")
+                        }
+                        nazo_identity::ports::RepositoryError::Consistency(_) => {
+                            anyhow::anyhow!(
+                                "conformance onboarding transaction failed consistency checks"
+                            )
+                        }
+                        nazo_identity::ports::RepositoryError::Unavailable => {
+                            anyhow::anyhow!("conformance onboarding storage is unavailable")
+                        }
+                        nazo_identity::ports::RepositoryError::NotFound => {
+                            anyhow::anyhow!("conformance onboarding dependency was not found")
+                        }
+                        nazo_identity::ports::RepositoryError::Unexpected(_) => {
+                            anyhow::anyhow!("conformance onboarding storage operation failed")
+                        }
+                    })?;
             let applicant_id = result
                 .applicant_user_id
                 .ok_or_else(|| anyhow::anyhow!("conformance onboarding result is incomplete"))?;
