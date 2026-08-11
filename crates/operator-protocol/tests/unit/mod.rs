@@ -654,6 +654,66 @@ fn conformance_matrix_registration_vectors_are_arrays_of_strings() {
 }
 
 #[test]
+fn conformance_matrix_registration_security_policy_is_versioned_and_typed() {
+    let bytes = include_bytes!(
+        "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"
+    );
+    let descriptor: ConformanceMatrixDescriptor = serde_json::from_slice(bytes).unwrap();
+    let (group_index, plan_index, role_index) = descriptor
+        .groups
+        .iter()
+        .enumerate()
+        .find_map(|(group_index, group)| {
+            group
+                .plans
+                .iter()
+                .enumerate()
+                .find_map(|(plan_index, plan)| {
+                    plan.required_roles
+                        .iter()
+                        .position(|role| role.registration_template.is_some())
+                        .map(|role_index| (group_index, plan_index, role_index))
+                })
+        })
+        .unwrap();
+    let template = descriptor.groups[group_index].plans[plan_index].required_roles[role_index]
+        .registration_template
+        .clone()
+        .unwrap();
+    let descriptor_for = |policy: serde_json::Value| {
+        let mut descriptor = descriptor.clone();
+        descriptor.groups[group_index].plans[plan_index].required_roles[role_index]
+            .registration_template
+            .as_mut()
+            .unwrap()["security_policy"] = policy;
+        descriptor
+    };
+
+    validate_conformance_matrix_descriptor(&descriptor_for(serde_json::json!({
+        "version": 1,
+        "assurance": "fapi2",
+        "require_signed_authorization_request": true
+    })))
+    .unwrap();
+    for invalid in [
+        serde_json::json!({}),
+        serde_json::json!({"version": 2}),
+        serde_json::json!({"version": 1, "assurance": "unknown"}),
+        serde_json::json!({"version": 1, "session_management": "yes"}),
+        serde_json::json!({"version": 1, "unexpected": true}),
+    ] {
+        assert!(validate_conformance_matrix_descriptor(&descriptor_for(invalid)).is_err());
+    }
+
+    let mut not_an_object = template;
+    not_an_object["security_policy"] = serde_json::json!("baseline");
+    let mut malformed = descriptor;
+    malformed.groups[group_index].plans[plan_index].required_roles[role_index]
+        .registration_template = Some(not_an_object);
+    assert!(validate_conformance_matrix_descriptor(&malformed).is_err());
+}
+
+#[test]
 fn checked_in_matrix_registration_templates_match_onboarding_policy_primitives() {
     let bytes = include_bytes!(
         "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"

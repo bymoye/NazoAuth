@@ -100,6 +100,20 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
                 let Some(template) = role.registration_template.as_ref() else {
                     continue;
                 };
+                let mut deserializable = template.clone();
+                if deserializable
+                    .get("jwks")
+                    .is_some_and(serde_json::Value::is_string)
+                {
+                    deserializable["jwks"] = serde_json::json!({ "keys": [] });
+                }
+                serde_json::from_value::<nazo_auth::CreateClientRequest>(deserializable)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{} / {} / {} is not a CreateClientRequest: {error}",
+                            group.id, plan.id, role.role
+                        )
+                    });
                 let scopes = template["scopes"]
                     .as_array()
                     .expect("registration scopes must be an array");

@@ -779,6 +779,48 @@ fn validate_conformance_registration_template_shape(
             ));
         }
     }
+    if let Some(policy) = object.get("security_policy") {
+        let policy = policy.as_object().ok_or(ProtocolError::Policy(
+            "conformance matrix registration security policy must be an object",
+        ))?;
+        if policy.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(ProtocolError::Policy(
+                "conformance matrix registration security policy version must be 1",
+            ));
+        }
+        const BOOLEAN_FIELDS: &[&str] = &[
+            "require_signed_authorization_request",
+            "require_signed_authorization_response",
+            "require_signed_introspection_response",
+            "session_management",
+            "allow_cross_device_flows",
+            "allow_confidential_oidc_without_pkce",
+        ];
+        for (field, value) in policy {
+            match field.as_str() {
+                "version" => {}
+                "assurance" => {
+                    if !matches!(value.as_str(), Some("baseline" | "fapi2")) {
+                        return Err(ProtocolError::Policy(
+                            "conformance matrix registration assurance is invalid",
+                        ));
+                    }
+                }
+                field if BOOLEAN_FIELDS.contains(&field) => {
+                    if !value.is_boolean() {
+                        return Err(ProtocolError::Policy(
+                            "conformance matrix registration security policy flag must be boolean",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(ProtocolError::Policy(
+                        "conformance matrix registration security policy field is unknown",
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
