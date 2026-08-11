@@ -33,6 +33,7 @@ pub use conformance_leases::{
     ConformanceLeaseCleanup, ConformanceLeasePublicMaterial, ConformanceLeaseRepository,
     ConformanceLeaseTokenDigests, ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest,
     ConformanceOnboardingResult, MAX_CONFORMANCE_LEASE_SECONDS, MIN_CONFORMANCE_LEASE_SECONDS,
+    canonicalize_suite_origin,
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};

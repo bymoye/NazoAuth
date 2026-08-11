@@ -127,6 +127,7 @@ fn replay_request(tenant: TenantContext, suffix: &str) -> ConformanceOnboardingR
         bundle_schema: 1,
         bundle_sha256: digest_text(&format!("bundle-{suffix}")),
         material_sha256: digest_text(&format!("matrix-{suffix}")),
+        suite_origin: format!("https://suite-{suffix}.example.test"),
         dynamic_registration_initial_access_token_sha256: Some(digest_text(&format!(
             "dcr-token-{suffix}"
         ))),
@@ -194,6 +195,7 @@ async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails(
         bundle_schema: 1,
         bundle_sha256: "a".repeat(64),
         material_sha256: "b".repeat(64),
+        suite_origin: format!("https://rollback-suite-{suffix}.example.test"),
         dynamic_registration_initial_access_token_sha256: Some("c".repeat(64)),
         ciba_automated_decision_token_sha256: Some("d".repeat(64)),
         client_count: 2,
@@ -313,6 +315,7 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
         .collect::<Vec<_>>();
 
     let first = repository.onboard(request.clone()).await.unwrap();
+    let suite_origin = request.suite_origin.clone();
     assert!(!first.idempotent_replay);
     assert_eq!(first.client_count, 2);
     assert_eq!(
@@ -366,6 +369,17 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .unwrap(),
         Some(first.lease_id)
     );
+    assert_eq!(
+        repository
+            .active_lease_for_suite_origin(
+                tenant.tenant_id.as_uuid(),
+                "nazoauth-full",
+                &suite_origin,
+            )
+            .await
+            .unwrap(),
+        Some(first.lease_id)
+    );
 
     let replay = repository.onboard(request).await.unwrap();
     assert!(replay.idempotent_replay);
@@ -379,4 +393,15 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
         .unwrap();
     let cleanup = repository.cleanup().await.unwrap();
     assert!(cleanup.cleaned_leases >= 1);
+    assert_eq!(
+        repository
+            .active_lease_for_suite_origin(
+                tenant.tenant_id.as_uuid(),
+                "nazoauth-full",
+                &suite_origin,
+            )
+            .await
+            .unwrap(),
+        None
+    );
 }

@@ -72,14 +72,36 @@ impl ServerPresentationOperations {
             admission,
         )
     }
-    fn wallet_allowed(&self, endpoint: &str) -> bool {
-        url::Url::parse(endpoint).ok().is_some_and(|url| {
-            url.scheme() == "https"
-                && self
-                    .wallet_origins
-                    .iter()
-                    .any(|origin| url.origin().ascii_serialization() == *origin)
-        })
+    fn wallet_origin(endpoint: &str) -> Result<String, PresentationHttpError> {
+        let url = url::Url::parse(endpoint).map_err(|_| {
+            vp_error(
+                400,
+                "invalid_request",
+                "Wallet authorization endpoint is invalid.",
+            )
+        })?;
+        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+            return Err(vp_error(
+                400,
+                "invalid_request",
+                "Wallet authorization endpoint is invalid.",
+            ));
+        }
+        nazo_postgres::canonicalize_suite_origin(&url.origin().ascii_serialization()).map_err(
+            |_| {
+                vp_error(
+                    400,
+                    "invalid_request",
+                    "Wallet authorization endpoint is invalid.",
+                )
+            },
+        )
+    }
+
+    fn static_wallet_origin_allowed(&self, origin: &str) -> bool {
+        self.wallet_origins
+            .iter()
+            .any(|configured| configured == origin)
     }
     async fn request_object(
         &self,
@@ -103,18 +125,9 @@ impl ServerPresentationOperations {
         &self,
         wallet_authorization_endpoint: &str,
     ) -> Result<Option<Uuid>, PresentationHttpError> {
-        let wallet_origin = url::Url::parse(wallet_authorization_endpoint)
-            .map(|url| url.origin().ascii_serialization())
-            .map_err(|_| {
-                vp_error(
-                    400,
-                    "invalid_request",
-                    "Wallet authorization endpoint is invalid.",
-                )
-            })?;
-        let materials = self
-            .conformance
-            .active_public_materials_for_profile(self.tenant_id, "openid4vc")
+        let wallet_origin = Self::wallet_origin(wallet_authorization_endpoint)?;
+        self.conformance
+            .active_lease_for_suite_origin(self.tenant_id, "nazoauth-full", &wallet_origin)
             .await
             .map_err(|_| {
                 vp_error(
@@ -122,31 +135,7 @@ impl ServerPresentationOperations {
                     "server_error",
                     "Conformance trust state is unavailable.",
                 )
-            })?;
-        let mut matches = Vec::new();
-        for entry in materials {
-            let material: nazo_operator_protocol::Openid4vcConformanceTrust =
-                serde_json::from_value(entry.public_material).map_err(|_| {
-                    vp_error(503, "server_error", "Conformance trust state is invalid.")
-                })?;
-            let issuer_origin = url::Url::parse(&material.client_attestation_issuer)
-                .map(|url| url.origin().ascii_serialization())
-                .map_err(|_| {
-                    vp_error(503, "server_error", "Conformance trust state is invalid.")
-                })?;
-            if issuer_origin == wallet_origin {
-                matches.push(entry.lease_id);
-            }
-        }
-        match matches.as_slice() {
-            [] => Ok(None),
-            [lease_id] => Ok(Some(*lease_id)),
-            _ => Err(vp_error(
-                503,
-                "server_error",
-                "Conformance trust state is ambiguous.",
-            )),
-        }
+            })
     }
 
     async fn conformance_credential_trust_anchors(
@@ -204,7 +193,15 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation verifier is unavailable.",
                 ));
             }
-            if !self.wallet_allowed(&input.wallet_authorization_endpoint) {
+            let wallet_origin = Self::wallet_origin(&input.wallet_authorization_endpoint)?;
+            let static_wallet_allowed = self.static_wallet_origin_allowed(&wallet_origin);
+            let conformance_lease_id = if static_wallet_allowed {
+                None
+            } else {
+                self.conformance_lease_for_wallet(&input.wallet_authorization_endpoint)
+                    .await?
+            };
+            if !static_wallet_allowed && conformance_lease_id.is_none() {
                 return Err(vp_error(
                     400,
                     "invalid_request",
@@ -324,9 +321,6 @@ impl PresentationOperations for ServerPresentationOperations {
             } else {
                 Some(self.request_object(&request).await?)
             };
-            let conformance_lease_id = self
-                .conformance_lease_for_wallet(&input.wallet_authorization_endpoint)
-                .await?;
             let now = Utc::now();
             let transaction = PresentationTransaction {
                 id,

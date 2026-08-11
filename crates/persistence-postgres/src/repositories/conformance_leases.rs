@@ -50,6 +50,8 @@ pub struct ConformanceOnboardingRequest {
     pub bundle_schema: i32,
     pub bundle_sha256: String,
     pub material_sha256: String,
+    /// Canonical HTTPS origin of the Suite used for this run.
+    pub suite_origin: String,
     /// DCR initial-access token digest; plaintext token material is never
     /// accepted by this persistence boundary.
     pub dynamic_registration_initial_access_token_sha256: Option<String>,
@@ -73,6 +75,7 @@ impl std::fmt::Debug for ConformanceOnboardingRequest {
             .field("bundle_schema", &self.bundle_schema)
             .field("bundle_sha256", &self.bundle_sha256)
             .field("material_sha256", &self.material_sha256)
+            .field("suite_origin", &self.suite_origin)
             .field(
                 "dynamic_registration_initial_access_token_sha256",
                 &self
@@ -139,6 +142,7 @@ pub struct ConformanceOnboardingResult {
     pub client_mappings: Vec<ConformanceClientMapping>,
     pub client_count: i32,
     pub bundle_sha256: String,
+    pub suite_origin: String,
     pub expires_at: DateTime<Utc>,
     pub idempotent_replay: bool,
 }
@@ -169,6 +173,7 @@ pub struct ConformanceLease {
     pub bundle_schema: i32,
     pub bundle_sha256: String,
     pub client_count: i32,
+    pub suite_origin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -214,6 +219,8 @@ impl ConformanceLeaseRepository {
         &self,
         request: ConformanceOnboardingRequest,
     ) -> Result<ConformanceOnboardingResult, RepositoryError> {
+        let mut request = request;
+        request.suite_origin = canonicalize_suite_origin(&request.suite_origin)?;
         validate_onboarding_request(&request)?;
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
         let request = request.clone();
@@ -225,7 +232,8 @@ impl ConformanceLeaseRepository {
                                 dynamic_registration_initial_access_token_sha256,
                                 ciba_automated_decision_token_sha256,
                                 expires_at, revoked_at, cleaned_at,
-                                task_jti, bundle_schema, bundle_sha256, client_count
+                                task_jti, bundle_schema, bundle_sha256, client_count,
+                                suite_origin
                          FROM conformance_leases
                          WHERE tenant_id = $1 AND task_jti = $2
                          FOR UPDATE",
@@ -255,15 +263,15 @@ impl ConformanceLeaseRepository {
                              dynamic_registration_initial_access_token_sha256,
                              ciba_automated_decision_token_sha256,
                              created_at, expires_at, task_jti, bundle_schema,
-                             bundle_sha256, client_count, public_material
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL)
+                             bundle_sha256, client_count, suite_origin, public_material
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL)
                          ON CONFLICT (tenant_id, task_jti) DO NOTHING
                          RETURNING id, tenant_id, profile, material_sha256,
                                    dynamic_registration_initial_access_token_sha256,
                                    ciba_automated_decision_token_sha256,
                                    expires_at, revoked_at, cleaned_at,
                                    task_jti, bundle_schema, bundle_sha256,
-                                   client_count",
+                                   client_count, suite_origin",
                     )
                     .bind::<diesel::sql_types::Uuid, _>(lease_id)
                     .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
@@ -283,6 +291,7 @@ impl ConformanceLeaseRepository {
                     .bind::<diesel::sql_types::Integer, _>(request.bundle_schema)
                     .bind::<diesel::sql_types::Text, _>(&request.bundle_sha256)
                     .bind::<diesel::sql_types::Integer, _>(request.client_count)
+                    .bind::<diesel::sql_types::Text, _>(&request.suite_origin)
                     .get_result::<OnboardingLeaseRow>(connection)
                     .await
                     .optional()?;
@@ -296,7 +305,7 @@ impl ConformanceLeaseRepository {
                                     ciba_automated_decision_token_sha256,
                                     expires_at, revoked_at, cleaned_at,
                                     task_jti, bundle_schema, bundle_sha256,
-                                    client_count
+                                    client_count, suite_origin
                              FROM conformance_leases
                              WHERE tenant_id = $1 AND task_jti = $2
                              FOR UPDATE",
@@ -393,6 +402,11 @@ impl ConformanceLeaseRepository {
                         client_mappings,
                         client_count: request.client_count,
                         bundle_sha256: request.bundle_sha256,
+                        suite_origin: lease.suite_origin.clone().ok_or_else(|| {
+                            OnboardingTxError::Repository(RepositoryError::Consistency(
+                                "new conformance lease is missing its Suite origin".to_owned(),
+                            ))
+                        })?,
                         expires_at: lease.expires_at,
                         idempotent_replay: false,
                     })
@@ -599,6 +613,51 @@ impl ConformanceLeaseRepository {
         .await
         .map_err(map_diesel_error)?;
         Ok(result)
+    }
+
+    /// Resolves exactly one active atomic lease for a canonical Suite origin.
+    /// Legacy leases have no origin and are deliberately excluded; accepting
+    /// an unscoped legacy match would make Suite credentials ambiguous.
+    pub async fn active_lease_for_suite_origin(
+        &self,
+        tenant_id: Uuid,
+        profile: &str,
+        suite_origin: &str,
+    ) -> Result<Option<Uuid>, RepositoryError> {
+        if profile != ATOMIC_CONFORMANCE_PROFILE {
+            return Err(RepositoryError::Consistency(
+                "suite-origin lookup only supports the nazoauth-full profile".to_owned(),
+            ));
+        }
+        let suite_origin = canonicalize_suite_origin(suite_origin)?;
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        let matches = diesel::sql_query(
+            r#"
+            SELECT id AS lease_id
+            FROM conformance_leases
+            WHERE tenant_id = $1
+              AND profile = $2
+              AND suite_origin = $3
+              AND expires_at > CURRENT_TIMESTAMP
+              AND revoked_at IS NULL
+              AND cleaned_at IS NULL
+            ORDER BY created_at, id
+            LIMIT 2
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .bind::<diesel::sql_types::Text, _>(&suite_origin)
+        .load::<LeaseIdRow>(&mut connection)
+        .await
+        .map_err(map_diesel_error)?;
+        match matches.as_slice() {
+            [] => Ok(None),
+            [lease] => Ok(Some(lease.lease_id)),
+            _ => Err(RepositoryError::Consistency(
+                "multiple active nazoauth-full leases matched one Suite origin".to_owned(),
+            )),
+        }
     }
 
     /// Resolves exactly one effective lease for the tenant and
@@ -1094,6 +1153,8 @@ struct OnboardingLeaseRow {
     bundle_sha256: String,
     #[diesel(sql_type = diesel::sql_types::Integer)]
     client_count: i32,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    suite_origin: Option<String>,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -1144,6 +1205,7 @@ async fn replay_or_conflict(
         || existing.bundle_schema != request.bundle_schema
         || existing.bundle_sha256 != request.bundle_sha256
         || existing.client_count != request.client_count
+        || existing.suite_origin.as_deref() != Some(request.suite_origin.as_str())
     {
         return Err(OnboardingTxError::Repository(RepositoryError::Conflict));
     }
@@ -1299,14 +1361,58 @@ async fn replay_or_conflict(
         client_mappings,
         client_count: existing.client_count,
         bundle_sha256: existing.bundle_sha256,
+        suite_origin: existing.suite_origin.clone().ok_or_else(|| {
+            OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease is missing its Suite origin".to_owned(),
+            ))
+        })?,
         expires_at: existing.expires_at,
         idempotent_replay: true,
     })
 }
 
+/// Canonicalizes the Suite origin without accepting credentials, paths, query
+/// strings, fragments, or an unusable port. `url::Origin` is the single parser
+/// for DNS, IPv4, IPv6, IDNA, host case, and default-port normalization.
+pub fn canonicalize_suite_origin(value: &str) -> Result<String, RepositoryError> {
+    if value.is_empty()
+        || value.len() > 2048
+        || value != value.trim()
+        || value.chars().any(char::is_control)
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance Suite origin is invalid".to_owned(),
+        ));
+    }
+    let parsed = url::Url::parse(value).map_err(|_| {
+        RepositoryError::Consistency("conformance Suite origin is invalid".to_owned())
+    })?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.cannot_be_a_base()
+        || parsed.host().is_none()
+        || parsed.port() == Some(0)
+        || parsed.path() != "/"
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance Suite origin must be an HTTPS origin without credentials, path, query, or fragment"
+                .to_owned(),
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
 fn validate_onboarding_request(
     request: &ConformanceOnboardingRequest,
 ) -> Result<(), RepositoryError> {
+    if canonicalize_suite_origin(&request.suite_origin)? != request.suite_origin {
+        return Err(RepositoryError::Consistency(
+            "conformance Suite origin must be canonical".to_owned(),
+        ));
+    }
     if request.task_jti.trim().is_empty()
         || request.task_jti.len() > MAX_ONBOARDING_TASK_JTI_BYTES
         || request.task_jti != request.task_jti.trim()
@@ -1561,6 +1667,7 @@ mod tests {
             bundle_schema: 1,
             bundle_sha256: "a".repeat(64),
             material_sha256: "b".repeat(64),
+            suite_origin: "https://suite.example.test".to_owned(),
             dynamic_registration_initial_access_token_sha256: Some("c".repeat(64)),
             ciba_automated_decision_token_sha256: Some("d".repeat(64)),
             client_count: 0,
@@ -1628,5 +1735,44 @@ mod tests {
         assert!(!debug.contains(&"c".repeat(64)));
         assert!(!debug.contains(&"d".repeat(64)));
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn suite_origin_canonicalizes_scheme_host_and_default_port() {
+        assert_eq!(
+            canonicalize_suite_origin("HTTPS://Suite.Example.test:443").unwrap(),
+            "https://suite.example.test"
+        );
+        assert_eq!(
+            canonicalize_suite_origin("https://Suite.Example.test:8443").unwrap(),
+            "https://suite.example.test:8443"
+        );
+        assert_eq!(
+            canonicalize_suite_origin("https://[2001:DB8::1]:443").unwrap(),
+            "https://[2001:db8::1]"
+        );
+        assert_eq!(
+            canonicalize_suite_origin("https://[2001:0db8:0:0:0:0:0:1]").unwrap(),
+            "https://[2001:db8::1]"
+        );
+    }
+
+    #[test]
+    fn suite_origin_rejects_non_origin_components_and_invalid_ports() {
+        for value in [
+            "http://suite.example.test",
+            "https://suite.example.test/path",
+            "https://suite.example.test?query",
+            "https://suite.example.test#fragment",
+            "https://user@suite.example.test",
+            "https://suite.example.test:0",
+            "https://suite.example.test:65536",
+            "https://2001:db8::1",
+        ] {
+            assert!(
+                canonicalize_suite_origin(value).is_err(),
+                "accepted {value}"
+            );
+        }
     }
 }

@@ -32,6 +32,7 @@ tokio = { workspace = true, features = ["rt"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 tracing.workspace = true
+url.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 
 [dev-dependencies]

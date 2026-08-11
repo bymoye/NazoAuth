@@ -3,6 +3,8 @@ use super::*;
 use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use diesel::sql_query;
+use diesel_async::RunQueryDsl;
 use nazo_digital_credentials::{
     CertificateRevocationPolicy, CredentialFormat, CredentialSignInput, CredentialSignerPort,
     DcqlQuery, EphemeralEncryptionKey, HolderBinding, VcIssuerTrustPolicy, encrypt_ecdh_es,
@@ -201,6 +203,39 @@ fn valid_ca_pem() -> String {
         .pem()
 }
 
+async fn bind_suite_origin(pool: &nazo_postgres::DbPool, lease_id: Uuid, origin: &str) {
+    let mut connection = nazo_postgres::get_conn(pool)
+        .await
+        .expect("suite-origin fixture connection should be available");
+    sql_query(
+        "UPDATE conformance_leases
+         SET profile = 'nazoauth-full', suite_origin = $1
+         WHERE tenant_id = $2 AND id = $3",
+    )
+    .bind::<diesel::sql_types::Text, _>(origin)
+    .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
+    .bind::<diesel::sql_types::Uuid, _>(lease_id)
+    .execute(&mut connection)
+    .await
+    .expect("suite-origin fixture should be bound");
+}
+
+async fn expire_lease(pool: &nazo_postgres::DbPool, lease_id: Uuid) {
+    let mut connection = nazo_postgres::get_conn(pool)
+        .await
+        .expect("expiry fixture connection should be available");
+    sql_query(
+        "UPDATE conformance_leases
+         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
+    .bind::<diesel::sql_types::Uuid, _>(lease_id)
+    .execute(&mut connection)
+    .await
+    .expect("expiry fixture should be updated");
+}
+
 #[tokio::test]
 async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() {
     let root = std::env::temp_dir().join(format!("nazo-openid4vp-disabled-{}", Uuid::now_v7()));
@@ -320,7 +355,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     let root = std::env::temp_dir().join(format!("nazo-openid4vp-live-{}", Uuid::now_v7()));
     let pool = nazo_postgres::create_pool(database_url, 2).expect("live pool should build");
     let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
-    let operations = operations(pool, &root, true).await;
+    let operations = operations(pool.clone(), &root, true).await;
 
     let url_query = operations
         .create(create_input(
@@ -716,7 +751,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     let valid_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "openid4vc",
+            "nazoauth-full",
             &format!("{:064x}", Uuid::now_v7().as_u128()),
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&conformance_origin, &anchor_pem)),
@@ -724,12 +759,31 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         )
         .await
         .expect("valid OpenID4VC conformance lease should be created");
+    bind_suite_origin(&pool, valid_lease.id, &conformance_origin).await;
     assert_eq!(
         operations
             .conformance_lease_for_wallet(&conformance_endpoint)
             .await
             .expect("wallet should resolve to its sole conformance lease"),
         Some(valid_lease.id)
+    );
+    let dynamic_presentation = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: conformance_endpoint.clone(),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect("dynamic Suite origin should be accepted");
+    let dynamic_transaction = operations
+        .store
+        .request(dynamic_presentation.transaction_id, chrono::Utc::now())
+        .await
+        .expect("dynamic presentation transaction should be readable")
+        .expect("dynamic presentation transaction should exist");
+    assert_eq!(
+        dynamic_transaction.conformance_lease_id,
+        Some(valid_lease.id),
+        "dynamic Suite origins must bind the presentation transaction to the matching lease"
     );
     let anchors = operations
         .conformance_credential_trust_anchors(Some(valid_lease.id))
@@ -738,10 +792,18 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     assert_eq!(anchors.len(), 2);
     assert!(anchors.iter().all(|anchor| !anchor.is_empty()));
 
-    leases
+    assert_eq!(
+        operations
+            .conformance_lease_for_wallet("https://different-suite.example/authorize")
+            .await
+            .expect("a cross-origin wallet must not match the lease"),
+        None
+    );
+
+    let duplicate_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "openid4vc",
+            "nazoauth-full",
             &format!("{:064x}", Uuid::now_v7().as_u128()),
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&conformance_origin, &anchor_pem)),
@@ -749,33 +811,60 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         )
         .await
         .expect("duplicate-origin conformance lease should be created");
+    bind_suite_origin(&pool, duplicate_lease.id, &conformance_origin).await;
     let ambiguous = operations
         .conformance_lease_for_wallet(&conformance_endpoint)
         .await
         .expect_err("duplicate wallet trust must fail closed");
     assert_eq!((ambiguous.status, ambiguous.error), (503, "server_error"));
 
-    let invalid_issuer_lease = leases
+    leases
+        .revoke(
+            crate::domain::tenancy::DEFAULT_TENANT_ID,
+            duplicate_lease.id,
+        )
+        .await
+        .expect("duplicate lease should be revocable");
+    assert_eq!(
+        operations
+            .conformance_lease_for_wallet(&conformance_endpoint)
+            .await
+            .expect("revoked duplicate must no longer make the origin ambiguous"),
+        Some(valid_lease.id)
+    );
+
+    leases
+        .revoke(crate::domain::tenancy::DEFAULT_TENANT_ID, valid_lease.id)
+        .await
+        .expect("valid lease should be revocable");
+    assert_eq!(
+        operations
+            .conformance_lease_for_wallet(&conformance_endpoint)
+            .await
+            .expect("revoked lease lookup should succeed"),
+        None
+    );
+
+    let expired_origin = format!("https://wallet-expired-{}.example", Uuid::now_v7().simple());
+    let expired_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "openid4vc",
+            "nazoauth-full",
             &format!("{:064x}", Uuid::now_v7().as_u128()),
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(conformance_material("not a url", &anchor_pem)),
+            Some(conformance_material(&expired_origin, &anchor_pem)),
             60,
         )
         .await
-        .expect("invalid issuer conformance lease should be created for the error test");
-    let invalid_issuer = operations
-        .conformance_lease_for_wallet(&format!(
-            "https://wallet-invalid-issuer-{}.example/authorize",
-            invalid_issuer_lease.id.simple()
-        ))
-        .await
-        .expect_err("invalid conformance issuer must fail closed");
+        .expect("expired-origin conformance lease should be created");
+    bind_suite_origin(&pool, expired_lease.id, &expired_origin).await;
+    expire_lease(&pool, expired_lease.id).await;
     assert_eq!(
-        (invalid_issuer.status, invalid_issuer.error),
-        (503, "server_error")
+        operations
+            .conformance_lease_for_wallet(&format!("{expired_origin}/authorize"))
+            .await
+            .expect("expired lease lookup should succeed"),
+        None
     );
 
     let malformed_material_lease = leases

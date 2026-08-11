@@ -200,6 +200,19 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
 }
 
 #[test]
+fn suite_origin_is_canonical_and_cannot_alias_the_issuer_origin() {
+    assert_eq!(
+        validate_suite_origin("https://Suite.Example:443/path", "https://issuer.example")
+            .expect("suite origin should canonicalize"),
+        "https://suite.example"
+    );
+    assert!(
+        validate_suite_origin("https://issuer.example:443", "https://issuer.example/").is_err(),
+        "default-port and trailing-slash aliases must not bypass the issuer-origin boundary"
+    );
+}
+
+#[test]
 fn onboarding_mapping_preserves_the_public_oauth_client_id() {
     let mappings = map_persistence_client_mappings(vec![nazo_postgres::ConformanceClientMapping {
         logical_client_id: "fapi-rp".to_owned(),

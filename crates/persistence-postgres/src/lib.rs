@@ -37,4 +37,5 @@ pub use repositories::{
     SecurityAuditAnchorFreshness, SecurityAuditAnchorHealth, SecurityAuditEvent,
     SecurityAuditOutboxDelivery, SecurityAuditReceipt, TokenIssuanceRepository,
     TokenIssuanceResponseKeyError, TokenIssuanceResponseKeyRing, TokenRepository, UserRepository,
+    canonicalize_suite_origin,
 };

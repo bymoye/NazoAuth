@@ -56,6 +56,7 @@ pub(crate) struct ConformanceOnboardingRequest {
     pub bundle_schema: u32,
     pub bundle_sha256: String,
     pub matrix_sha256: String,
+    pub suite_origin: String,
     pub dynamic_registration_initial_access_token_sha256: Option<String>,
     pub ciba_automated_decision_token_sha256: Option<String>,
     pub client_count: u32,
@@ -537,7 +538,7 @@ async fn validate_bundle(
     }
 
     let applicant_password_hash = hash_applicant_password(applicant_password).await?;
-    validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
+    let suite_origin = validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
     let clients = prepare_client_registrations(raw_clients).await?;
 
     Ok(ConformanceOnboardingRequest {
@@ -547,6 +548,7 @@ async fn validate_bundle(
         bundle_schema,
         bundle_sha256: expected_bundle_sha256.to_owned(),
         matrix_sha256: expected_matrix_sha256.to_owned(),
+        suite_origin,
         dynamic_registration_initial_access_token_sha256,
         ciba_automated_decision_token_sha256,
         client_count: u32::try_from(expected_client_count)?,
@@ -789,6 +791,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
             profile,
             matrix_sha256,
             bundle_sha256,
+            suite_origin,
             dynamic_registration_initial_access_token_sha256,
             ciba_automated_decision_token_sha256,
             client_count,
@@ -816,6 +819,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
             bundle_schema,
             material_sha256: matrix_sha256,
             bundle_sha256,
+            suite_origin,
             dynamic_registration_initial_access_token_sha256,
             ciba_automated_decision_token_sha256,
             client_count: persistence_client_count,
@@ -1234,7 +1238,12 @@ fn validate_suite_origin(value: &str, target_issuer: &str) -> anyhow::Result<Str
         url.port()
             .map_or_else(String::new, |port| format!(":{port}")),
     );
-    if origin == target_issuer {
+    let origin = nazo_postgres::canonicalize_suite_origin(&origin)
+        .map_err(|_| anyhow::anyhow!("suite origin is invalid"))?;
+    let target_origin = url::Url::parse(target_issuer).ok().and_then(|url| {
+        nazo_postgres::canonicalize_suite_origin(&url.origin().ascii_serialization()).ok()
+    });
+    if target_origin.as_deref() == Some(origin.as_str()) {
         bail!("suite origin must differ from target issuer");
     }
     Ok(origin)

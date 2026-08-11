@@ -238,6 +238,7 @@ diesel::table! {
         bundle_schema -> Int4,
         bundle_sha256 -> Varchar,
         client_count -> Int4,
+        suite_origin -> Nullable<Varchar>,
     }
 }
 
