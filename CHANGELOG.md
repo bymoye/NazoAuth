@@ -3,6 +3,36 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.30 - 2026-08-12
+
+### Added
+
+- Added an atomic, lease-owned OIDF onboarding contract that provisions the
+  conformance applicant, OAuth clients, mTLS anchors, OpenID4VC credential
+  datasets, per-run tokens, public attestation material, and cleanup evidence
+  in one replay-safe transaction.
+- Added the executable 44-plan OIDC/FAPI/OpenID4VC matrix and exact Suite-origin,
+  request-JTI, client-mapping, token-digest, and OpenID4VP presentation bindings
+  needed by independently parallel conformance sessions.
+
+### Changed
+
+- Generate and validate conformance credentials, JWKs, certificates, profile
+  claims, contact claims, and OpenID4VC trust material per run instead of
+  relying on static test secrets.
+- Bind dynamic registration, CIBA decisions, credential datasets, and
+  OpenID4VP presentation transactions to the active conformance lease and
+  reject ambiguous, expired, revoked, cleaned, or cross-run state.
+
+### Fixed
+
+- Fixed OpenID4VP creation for statically allowlisted Suite origins so a
+  complete lease/JTI binding still takes the exact lease path rather than being
+  rejected or falling back to origin-only resolution.
+- Fixed conformance registration policy, public OAuth client identifiers,
+  executable-plan variants, expected skips, standard profile/contact claims,
+  and configuration loading used by the official OIDF runner.
+
 ## 0.1.29 - 2026-08-10
 
 ### Added

@@ -9,9 +9,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReleaseGovernanceTests(unittest.TestCase):
-    def test_production_rust_sources_do_not_contain_oidf_specific_behavior(self) -> None:
+    def test_production_rust_sources_do_not_contain_suite_plan_specific_behavior(self) -> None:
         forbidden = re.compile(
-            r"(?i)(?:\boidf\b|conformance-suite|certification\.openid\.net|"
+            r"(?i)(?:conformance-suite|certification\.openid\.net|"
             r"oidcc-[a-z0-9-]+-test-plan|fapi2-[a-z0-9-]+-test-plan)"
         )
         offenders: list[str] = []
@@ -21,7 +21,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertEqual(
             offenders,
             [],
-            "production Rust sources must implement standards, not OIDF plan-specific behavior",
+            "production Rust sources must implement standards and conformance control planes, "
+            "not Suite plan-specific behavior",
         )
 
     def test_runtime_container_copies_only_the_unified_product_binary(self) -> None:
