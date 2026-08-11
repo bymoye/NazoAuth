@@ -601,7 +601,11 @@ pub(crate) async fn insert_conformance_approved_trust_anchor_on_connection(
     .await
     .optional()
     .map_err(map_error)?
-    .ok_or(RepositoryError::Conflict)?;
+    .ok_or_else(|| {
+        RepositoryError::Consistency(
+            "conformance trust anchor client or lease is not eligible".to_owned(),
+        )
+    })?;
     let request_id = Uuid::now_v7();
     let inserted = sql_query(
         "INSERT INTO oauth_client_mtls_trust_anchor_requests (
@@ -692,7 +696,9 @@ pub(crate) async fn insert_conformance_approved_trust_anchor_on_connection(
     .optional()
     .map_err(map_error)?;
     let Some(inserted) = inserted else {
-        return Err(RepositoryError::Conflict);
+        return Err(RepositoryError::Consistency(
+            "conformance trust anchor activation policy rejected the request".to_owned(),
+        ));
     };
 
     sql_query(

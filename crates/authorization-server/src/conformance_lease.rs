@@ -802,10 +802,16 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
                         | nazo_identity::ports::RepositoryError::AlreadyProcessed => {
                             anyhow::anyhow!("conformance onboarding transaction conflicted")
                         }
-                        nazo_identity::ports::RepositoryError::Consistency(_) => {
-                            anyhow::anyhow!(
-                                "conformance onboarding transaction failed consistency checks"
-                            )
+                    nazo_identity::ports::RepositoryError::Consistency(message) => {
+                        // This port is fed only by the bounded onboarding
+                        // repository, whose consistency messages are static
+                        // invariant names and never contain SQL, credentials,
+                        // applicant data, or client material. Preserve that
+                        // safe stage so an operator can repair the invariant
+                        // instead of receiving an opaque transaction failure.
+                        anyhow::anyhow!(
+                            "conformance onboarding transaction failed consistency checks: {message}"
+                        )
                         }
                         nazo_identity::ports::RepositoryError::Unavailable => {
                             anyhow::anyhow!("conformance onboarding storage is unavailable")
