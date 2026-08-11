@@ -460,22 +460,16 @@ async fn validate_bundle(
             }
         }
     }
-    let requires_dynamic_token = descriptor.groups.iter().any(|group| {
-        group.plans.iter().any(|plan| {
-            value_contains_reference(
-                &plan.config_template,
-                "generated.dynamic_registration_initial_access_token",
-            )
-        })
-    });
-    let requires_ciba_token = descriptor.groups.iter().any(|group| {
-        group.plans.iter().any(|plan| {
-            value_contains_reference(
-                &plan.config_template,
-                "generated.ciba_automated_decision_token",
-            )
-        })
-    });
+    let requires_dynamic_token = descriptor_requires_reference(
+        &descriptor,
+        "generated.dynamic_registration_initial_access_token",
+    );
+    // The CIBA secret is embedded in the generated decision URL, rather than
+    // exposed as a second independent Matrix value. Both forms are protocol
+    // references to the same lease-bound secret.
+    let requires_ciba_token =
+        descriptor_requires_reference(&descriptor, "generated.ciba_automated_decision_token")
+            || descriptor_requires_reference(&descriptor, "target.ciba_automated_decision_url");
     if dynamic_registration_initial_access_token.is_some() != requires_dynamic_token
         || ciba_automated_decision_token.is_some() != requires_ciba_token
     {
@@ -1394,6 +1388,18 @@ fn value_contains_reference(value: &Value, reference: &str) -> bool {
         Value::String(text) => text == &format!("{{{{{reference}}}}}"),
         _ => false,
     }
+}
+
+fn descriptor_requires_reference(
+    descriptor: &ConformanceMatrixDescriptor,
+    reference: &str,
+) -> bool {
+    descriptor.groups.iter().any(|group| {
+        group
+            .plans
+            .iter()
+            .any(|plan| value_contains_reference(&plan.config_template, reference))
+    })
 }
 
 pub(crate) async fn operator_list() -> anyhow::Result<TaskResult> {
