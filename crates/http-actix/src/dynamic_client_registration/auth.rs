@@ -37,16 +37,13 @@ pub(super) async fn authorize_initial_access(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    if initial_access_token_authorized(
-        endpoint.security.registration_tokens.as_ref(),
-        authorization_header,
-        endpoint.config.initial_access_token.as_deref(),
-    ) {
-        return Ok(DynamicRegistrationInitialAccessGrant::Configured);
-    }
     let Some(actual) = bearer_token(request) else {
         return Err(initial_access_denied());
     };
+    // A deployment token can also be activated as a lease-bound conformance
+    // token. Resolve that narrower ownership first so clients remain tied to
+    // lease cleanup and policy; falling through to the configured grant would
+    // silently create durable, unowned clients.
     match endpoint
         .request_guard
         .conformance_lease_for_initial_access_token(actual)
@@ -55,6 +52,15 @@ pub(super) async fn authorize_initial_access(
         Ok(Some(lease_id)) => Ok(DynamicRegistrationInitialAccessGrant::ConformanceLease(
             lease_id,
         )),
+        Ok(None)
+            if initial_access_token_authorized(
+                endpoint.security.registration_tokens.as_ref(),
+                authorization_header,
+                endpoint.config.initial_access_token.as_deref(),
+            ) =>
+        {
+            Ok(DynamicRegistrationInitialAccessGrant::Configured)
+        }
         Ok(None) => Err(initial_access_denied()),
         Err(_) => Err(oauth_error(
             StatusCode::SERVICE_UNAVAILABLE,
