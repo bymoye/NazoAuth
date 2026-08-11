@@ -186,13 +186,7 @@ async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails(
     let email = format!("{username}@example.invalid");
     let certificate =
         format!("-----BEGIN CERTIFICATE-----\nVALID-{suffix}\n-----END CERTIFICATE-----\n");
-    let valid_certificate_sha256 = Sha256::digest(certificate.as_bytes()).iter().fold(
-        String::with_capacity(64),
-        |mut encoded, byte| {
-            let _ = write!(encoded, "{byte:02x}");
-            encoded
-        },
-    );
+    let valid_certificate_sha256 = digest_text("validated-certificate-der");
     let request = ConformanceOnboardingRequest {
         tenant,
         task_jti: task_jti.clone(),
@@ -234,8 +228,11 @@ async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails(
                 certificate_pem: format!(
                     "-----BEGIN CERTIFICATE-----\nINVALID-{suffix}\n-----END CERTIFICATE-----\n"
                 ),
-                certificate_sha256: "0".repeat(64),
-                subject_dn: "CN=Rollback B".to_owned(),
+                certificate_sha256: digest_text("late-step-certificate-der"),
+                // Persistence rejects this metadata after the lease,
+                // applicant, and clients have been staged, proving that the
+                // surrounding transaction rolls every earlier write back.
+                subject_dn: String::new(),
                 not_before: Utc::now() - Duration::minutes(1),
                 not_after: Utc::now() + Duration::minutes(5),
             },

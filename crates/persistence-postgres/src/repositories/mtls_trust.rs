@@ -5,8 +5,6 @@ use nazo_identity::{
     MtlsTrustAnchorRequest, MtlsTrustAnchorRequestPage, MtlsTrustAnchorStatus,
     NewMtlsTrustAnchorRequest, TenantId, UserId, ports::RepositoryError,
 };
-use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use uuid::Uuid;
 
 use crate::DbPool;
@@ -549,16 +547,19 @@ pub(crate) async fn insert_conformance_approved_trust_anchor_on_connection(
             "conformance trust anchor metadata is invalid".to_owned(),
         ));
     }
-    let actual_digest = Sha256::digest(certificate_pem.as_bytes()).iter().fold(
-        String::with_capacity(64),
-        |mut encoded, byte| {
-            let _ = write!(encoded, "{byte:02x}");
-            encoded
-        },
-    );
-    if certificate_sha256 != actual_digest {
+    // The authoritative trust-boundary validator computes this digest over
+    // the certificate DER, not over the presentation-dependent PEM text.
+    // Persistence must preserve that identity instead of inventing a second,
+    // incompatible PEM digest. The authorization domain has already parsed
+    // the X.509 CA and supplied its canonical DER digest; this layer only
+    // enforces the persisted encoding before binding it transactionally.
+    if certificate_sha256.len() != 64
+        || !certificate_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(RepositoryError::Consistency(
-            "conformance trust anchor digest does not match certificate PEM".to_owned(),
+            "conformance trust anchor digest is not a lowercase SHA-256 value".to_owned(),
         ));
     }
 
