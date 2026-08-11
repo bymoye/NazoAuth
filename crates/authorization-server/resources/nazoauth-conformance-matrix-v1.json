@@ -5102,7 +5102,7 @@
             "automated_ciba_approval_url": "{{target.ciba_automated_decision_url}}",
             "client": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-poll-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-poll-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-poll-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -5114,7 +5114,7 @@
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-poll-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-poll-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-poll-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -5463,7 +5463,7 @@
             "automated_ciba_approval_url": "{{target.ciba_automated_decision_url}}",
             "client": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -5475,7 +5475,7 @@
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -5840,7 +5840,7 @@
             "automated_ciba_approval_url": "{{target.ciba_automated_decision_url}}",
             "client": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-ping-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-ping-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-ping-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -5853,7 +5853,7 @@
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-ping-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-ping-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-private-key-jwt-ping-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -6203,7 +6203,7 @@
             "automated_ciba_approval_url": "{{target.ciba_automated_decision_url}}",
             "client": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -6216,7 +6216,7 @@
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256",
               "acr_value": "1",
@@ -6592,13 +6592,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -7848,13 +7848,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -9100,13 +9100,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-openid-connect-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-openid-connect-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -10356,13 +10356,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -11608,13 +11608,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -12880,13 +12880,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -14148,13 +14148,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -15420,13 +15420,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -16699,13 +16699,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-plain-response-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -17960,13 +17960,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-jarm-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-jarm-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-jarm-client-1.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-jarm-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-jarm-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-message-final-private-key-jwt-dpop-openid-connect-plain-fapi-jarm-client-2.rsa.private_jwks}}",
               "scope": "openid profile email offline_access",
               "dpop_signing_alg": "ES256"
             },
@@ -19233,13 +19233,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
@@ -20480,13 +20480,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-private-key-jwt-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
@@ -21727,13 +21727,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
@@ -22990,13 +22990,13 @@
             },
             "client": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
             "client2": {
               "client_id": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.id}}",
-              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwk}}",
+              "jwks": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.rsa.private_jwks}}",
               "scope": "accounts",
               "dpop_signing_alg": "ES256"
             },
@@ -24251,12 +24251,12 @@
             "alias": "{{run.alias.openid4vc-vci-p028}}",
             "client": {
               "client_id": "{{client.openid4vc-private-key-client-1.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwks}}",
               "scope": "accounts"
             },
             "client2": {
               "client_id": "{{client.openid4vc-private-key-client-2.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwks}}",
               "scope": "accounts"
             },
             "mtls": {
@@ -24443,12 +24443,12 @@
             "alias": "{{run.alias.openid4vc-vci-p029}}",
             "client": {
               "client_id": "{{client.openid4vc-private-key-client-1.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwks}}",
               "scope": "accounts"
             },
             "client2": {
               "client_id": "{{client.openid4vc-private-key-client-2.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwks}}",
               "scope": "accounts"
             },
             "mtls": {
@@ -24641,12 +24641,12 @@
             "alias": "{{run.alias.openid4vc-vci-p030}}",
             "client": {
               "client_id": "{{client.openid4vc-private-key-client-1.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwks}}",
               "scope": "accounts"
             },
             "client2": {
               "client_id": "{{client.openid4vc-private-key-client-2.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwks}}",
               "scope": "accounts"
             },
             "mtls": {
@@ -24833,12 +24833,12 @@
             "alias": "{{run.alias.openid4vc-vci-p031}}",
             "client": {
               "client_id": "{{client.openid4vc-private-key-client-1.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwks}}",
               "scope": "accounts"
             },
             "client2": {
               "client_id": "{{client.openid4vc-private-key-client-2.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwks}}",
               "scope": "accounts"
             },
             "mtls": {
@@ -25031,12 +25031,12 @@
             "alias": "{{run.alias.openid4vc-vci-p032}}",
             "client": {
               "client_id": "{{client.openid4vc-private-key-client-1.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwks}}",
               "scope": "accounts"
             },
             "client2": {
               "client_id": "{{client.openid4vc-private-key-client-2.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwks}}",
               "scope": "accounts"
             },
             "mtls": {
@@ -25223,12 +25223,12 @@
             "alias": "{{run.alias.openid4vc-vci-p033}}",
             "client": {
               "client_id": "{{client.openid4vc-private-key-client-1.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-1.ec.private_jwks}}",
               "scope": "accounts"
             },
             "client2": {
               "client_id": "{{client.openid4vc-private-key-client-2.id}}",
-              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-private-key-client-2.ec.private_jwks}}",
               "scope": "accounts"
             },
             "mtls": {
@@ -25432,12 +25432,12 @@
             "alias": "{{run.alias.openid4vc-vci-haip-p034}}",
             "client": {
               "client_id": "{{client.openid4vc-attested-client-1.id}}",
-              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "client2": {
               "client_id": "{{client.openid4vc-attested-client-2.id}}",
-              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "mtls": {
@@ -25611,12 +25611,12 @@
             "alias": "{{run.alias.openid4vc-vci-haip-p035}}",
             "client": {
               "client_id": "{{client.openid4vc-attested-client-1.id}}",
-              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "client2": {
               "client_id": "{{client.openid4vc-attested-client-2.id}}",
-              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "mtls": {
@@ -25796,12 +25796,12 @@
             "alias": "{{run.alias.openid4vc-vci-haip-p036}}",
             "client": {
               "client_id": "{{client.openid4vc-attested-client-1.id}}",
-              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "client2": {
               "client_id": "{{client.openid4vc-attested-client-2.id}}",
-              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "mtls": {
@@ -25975,12 +25975,12 @@
             "alias": "{{run.alias.openid4vc-vci-haip-p037}}",
             "client": {
               "client_id": "{{client.openid4vc-attested-client-1.id}}",
-              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-1.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "client2": {
               "client_id": "{{client.openid4vc-attested-client-2.id}}",
-              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwk}}",
+              "jwks": "{{client.openid4vc-attested-client-2.ec.private_jwks}}",
               "scope": "accounts offline_access"
             },
             "mtls": {

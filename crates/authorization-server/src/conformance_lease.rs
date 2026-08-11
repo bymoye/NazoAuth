@@ -1380,6 +1380,7 @@ fn contains_secret_field(value: &Value) -> bool {
                     | "password_hash"
                     | "private_key"
                     | "private_jwk"
+                    | "private_jwks"
                     | "d"
                     | "p"
                     | "q"

@@ -362,6 +362,7 @@ fn assert_no_embedded_sensitive_values(value: &serde_json::Value) {
                         | "client_secret"
                         | "private_key"
                         | "private_jwk"
+                        | "private_jwks"
                         | "d"
                         | "p"
                         | "q"
