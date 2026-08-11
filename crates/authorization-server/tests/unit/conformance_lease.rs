@@ -82,6 +82,13 @@ fn fixed_policy_secret_accepts_owner_only_source_without_weakening_bundle_mode()
 fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
     let descriptor = load_matrix_descriptor().expect("built-in matrix must validate");
     assert_eq!(descriptor.groups.len(), 11);
+    assert!(
+        descriptor
+            .groups
+            .iter()
+            .all(|group| group.variant.values.is_empty()),
+        "presentation-only group variants must not leak into official Suite requests"
+    );
     assert_eq!(
         descriptor
             .groups
