@@ -681,9 +681,10 @@ async fn prepare_client_registrations(
     );
     let mut clients = Vec::with_capacity(raw_clients.len());
     for client in raw_clients {
-        let request: nazo_auth::CreateClientRequest =
-            serde_json::from_value(client.request.clone())
-                .map_err(|_| anyhow::anyhow!("conformance client request is invalid"))?;
+        let mut request = client.request.clone();
+        canonicalize_conformance_registration_sets(&mut request)?;
+        let request: nazo_auth::CreateClientRequest = serde_json::from_value(request)
+            .map_err(|_| anyhow::anyhow!("conformance client request is invalid"))?;
         let prepared = if let Some(secret) = client.client_secret {
             let secret = nazo_auth::SuppliedClientSecret::new(secret.as_str().as_bytes())
                 .map_err(|_| anyhow::anyhow!("conformance client secret is invalid"))?;
@@ -704,6 +705,41 @@ async fn prepare_client_registrations(
         });
     }
     Ok(clients)
+}
+
+fn canonicalize_conformance_registration_sets(request: &mut Value) -> anyhow::Result<()> {
+    let object = request
+        .as_object_mut()
+        .context("conformance client request is not an object")?;
+    for field in [
+        "redirect_uris",
+        "post_logout_redirect_uris",
+        "scopes",
+        "allowed_audiences",
+        "grant_types",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+        "request_uris",
+    ] {
+        let Some(value) = object.get_mut(field) else {
+            continue;
+        };
+        let values = value
+            .as_array_mut()
+            .with_context(|| format!("conformance client {field} is not an array"))?;
+        if values.iter().any(|value| !value.is_string()) {
+            bail!("conformance client {field} contains a non-string value");
+        }
+        let mut seen = BTreeSet::new();
+        values.retain(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| seen.insert(value.to_owned()))
+        });
+    }
+    Ok(())
 }
 
 /// Temporary adapter seam. The persistence crate provides the transaction

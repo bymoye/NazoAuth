@@ -5751,7 +5751,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -5804,7 +5810,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-fapi-ciba-plain-mtls-poll-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -6481,7 +6493,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -6534,7 +6552,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-fapi-ciba-plain-mtls-ping-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -12770,7 +12794,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -12823,7 +12853,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-dpop-openid-connect-plain-fapi-plain-response-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -14028,7 +14064,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -14079,7 +14121,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-plain-fapi-plain-response-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -15286,7 +15334,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -15339,7 +15393,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-mtls-openid-connect-plain-fapi-plain-response-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -16544,7 +16604,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -16595,7 +16661,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-plain-fapi-plain-response-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -22840,7 +22912,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -22889,7 +22967,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-dpop-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],
@@ -24091,7 +24175,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-1.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             },
             {
@@ -24140,7 +24230,13 @@
                 },
                 "tls_client_auth_cert_sha256": "{{client.oidf-fapi-security-final-mtls-mtls-plain-oauth-fapi-client-credentials-grant-plain-response-client-2.mtls.cert_sha256}}",
                 "tls_client_auth_subject_dn": null,
-                "token_endpoint_auth_method": "tls_client_auth"
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_auth_san_dns": [
+                  "nazoauthctl-client"
+                ],
+                "tls_client_auth_san_uri": [],
+                "tls_client_auth_san_ip": [],
+                "tls_client_auth_san_email": []
               }
             }
           ],

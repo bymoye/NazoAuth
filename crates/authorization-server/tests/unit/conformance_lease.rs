@@ -1,5 +1,10 @@
 use super::*;
 
+use nazo_auth::{
+    AdminClientFuture, AdminClientPortError, AdminClientRepositoryPort, OAuthClient,
+    SectorIdentifierFuture, SectorIdentifierResolverPort,
+};
+
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -182,6 +187,142 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
                         group.id, plan.id, role.role
                     );
                 }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UnusedClientRepository;
+
+impl AdminClientRepositoryPort for UnusedClientRepository {
+    fn page(&self, _offset: i64, _limit: i64) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
+        Box::pin(async { Err(AdminClientPortError::Unexpected) })
+    }
+
+    fn by_client_id<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _client_id: &'a str,
+    ) -> AdminClientFuture<'a, Option<OAuthClient>> {
+        Box::pin(async { Err(AdminClientPortError::Unexpected) })
+    }
+
+    fn insert<'a>(
+        &'a self,
+        _client: &'a OAuthClient,
+        _client_secret_hash: Option<&'a str>,
+        _registration_access_token_blake3: Option<&'a str>,
+        _conformance_lease_id: Option<Uuid>,
+    ) -> AdminClientFuture<'a, OAuthClient> {
+        Box::pin(async { Err(AdminClientPortError::Unexpected) })
+    }
+
+    fn update<'a>(&'a self, _client: &'a OAuthClient) -> AdminClientFuture<'a, OAuthClient> {
+        Box::pin(async { Err(AdminClientPortError::Unexpected) })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UnusedSectorIdentifierResolver;
+
+impl SectorIdentifierResolverPort for UnusedSectorIdentifierResolver {
+    fn resolve<'a>(&'a self, _uri: &'a str) -> SectorIdentifierFuture<'a> {
+        Box::pin(async { Err("unexpected sector identifier lookup".to_owned()) })
+    }
+}
+
+fn materialize_registration_fixture(
+    value: &mut serde_json::Value,
+    rsa_jwks: &serde_json::Value,
+    ec_jwks: &serde_json::Value,
+) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                materialize_registration_fixture(value, rsa_jwks, ec_jwks);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                materialize_registration_fixture(value, rsa_jwks, ec_jwks);
+            }
+        }
+        serde_json::Value::String(text) if text.starts_with("{{client.") => {
+            if text.ends_with(".rsa.public_jwks}}") {
+                *value = rsa_jwks.clone();
+            } else if text.ends_with(".ec.public_jwks}}") {
+                *value = ec_jwks.clone();
+            } else if text.ends_with(".mtls.cert_sha256}}") {
+                *text = "a".repeat(64);
+            } else {
+                panic!("unsupported client registration placeholder: {text}");
+            }
+        }
+        serde_json::Value::String(text) if text == "{{target.issuer}}" => {
+            *text = "https://server.example".to_owned();
+        }
+        serde_json::Value::String(text) if text.starts_with("{{target.url.") => {
+            let path = text
+                .strip_prefix("{{target.url.")
+                .and_then(|value| value.strip_suffix("}}"))
+                .expect("target URL placeholder");
+            *text = format!("https://server.example{path}");
+        }
+        serde_json::Value::String(text)
+            if text.starts_with("{{suite.test.") || text.starts_with("{{suite.test_query.") =>
+        {
+            *text = "https://suite.example/test/a/callback".to_owned();
+        }
+        serde_json::Value::String(text) if text.starts_with("{{") => {
+            panic!("unsupported registration placeholder: {text}");
+        }
+        _ => {}
+    }
+}
+
+#[actix_web::test]
+async fn built_in_registration_templates_pass_the_real_admin_policy() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix must validate");
+    let rsa = crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let ec = crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::ES256);
+    let rsa_jwks = serde_json::json!({"keys": [rsa.public_jwk("matrix-rsa")]});
+    let ec_jwks = serde_json::json!({"keys": [ec.public_jwk("matrix-ec")]});
+    let service = nazo_auth::AdminClientService::new(
+        UnusedClientRepository,
+        UnusedSectorIdentifierResolver,
+        crate::http::admin::clients::ServerAdminClientCrypto::for_policy_validation(),
+        nazo_auth::AdminClientPolicy {
+            tenant: nazo_identity::TenantContext::default_system(),
+            pairwise_subject_secret: Some("test-pairwise-subject-secret".to_owned()),
+            client_secret_pepper: "test-client-secret-pepper".to_owned(),
+        },
+    );
+
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            for role in group.required_roles.iter().chain(&plan.required_roles) {
+                let Some(mut template) = role.registration_template.clone() else {
+                    continue;
+                };
+                materialize_registration_fixture(&mut template, &rsa_jwks, &ec_jwks);
+                canonicalize_conformance_registration_sets(&mut template)
+                    .expect("registration set canonicalization");
+                let request = serde_json::from_value(template).unwrap_or_else(|error| {
+                    panic!(
+                        "{} / {} / {} is not a CreateClientRequest: {error}",
+                        group.id, plan.id, role.role
+                    )
+                });
+                service
+                    .prepare_registration(request)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{} / {} / {} fails admin policy: {error}",
+                            group.id, plan.id, role.role
+                        )
+                    });
             }
         }
     }
