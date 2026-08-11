@@ -676,6 +676,56 @@ impl ConformanceLeaseRepository {
         }
     }
 
+    /// Resolves one active atomic lease only when every run binding matches.
+    ///
+    /// The origin-only resolver above is useful for detecting an ambiguous
+    /// deployment state, but it cannot safely select a lease when two runs
+    /// share a Suite origin.  Callers handling a signed task must therefore
+    /// supply the lease id and task JTI as well; no latest-row or origin-only
+    /// fallback is permitted here.
+    pub async fn active_lease_for_binding(
+        &self,
+        tenant_id: Uuid,
+        lease_id: Uuid,
+        profile: &str,
+        suite_origin: &str,
+        task_jti: &str,
+    ) -> Result<Option<Uuid>, RepositoryError> {
+        if profile != ATOMIC_CONFORMANCE_PROFILE {
+            return Err(RepositoryError::Consistency(
+                "lease binding lookup only supports the nazoauth-full profile".to_owned(),
+            ));
+        }
+        let suite_origin = canonicalize_suite_origin(suite_origin)?;
+        validate_binding_task_jti(task_jti)?;
+        let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
+        diesel::sql_query(
+            r#"
+            SELECT id AS lease_id
+            FROM conformance_leases
+            WHERE tenant_id = $1
+              AND id = $2
+              AND profile = $3
+              AND suite_origin = $4
+              AND task_jti = $5
+              AND expires_at > CURRENT_TIMESTAMP
+              AND revoked_at IS NULL
+              AND cleaned_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind::<diesel::sql_types::Uuid, _>(tenant_id)
+        .bind::<diesel::sql_types::Uuid, _>(lease_id)
+        .bind::<diesel::sql_types::Text, _>(profile)
+        .bind::<diesel::sql_types::Text, _>(&suite_origin)
+        .bind::<diesel::sql_types::Text, _>(task_jti)
+        .get_result::<LeaseIdRow>(&mut connection)
+        .await
+        .optional()
+        .map(|row| row.map(|row| row.lease_id))
+        .map_err(map_diesel_error)
+    }
+
     /// Resolves exactly one effective lease for the tenant and
     /// dynamic-registration credential digest across the supported lease
     /// profiles. The digest is tenant-unique, so profile selection must not
@@ -1419,6 +1469,25 @@ pub fn canonicalize_suite_origin(value: &str) -> Result<String, RepositoryError>
         ));
     }
     Ok(parsed.origin().ascii_serialization())
+}
+
+fn validate_binding_task_jti(value: &str) -> Result<(), RepositoryError> {
+    let Some(suffix) = value.strip_prefix("request-") else {
+        return Err(RepositoryError::Consistency(
+            "conformance lease binding task_jti must use the request- prefix".to_owned(),
+        ));
+    };
+    if suffix.len() != 32
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance lease binding task_jti must contain 32 lowercase hexadecimal bytes"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_onboarding_request(

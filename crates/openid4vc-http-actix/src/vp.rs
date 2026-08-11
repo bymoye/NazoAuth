@@ -42,6 +42,15 @@ pub struct CreatePresentationRequest {
     pub response_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_data: Option<Vec<Value>>,
+    /// The exact conformance lease that owns this verifier transaction.
+    ///
+    /// Dynamic Suite origins are per-run trust boundaries.  The transport
+    /// keeps the binding opaque and leaves its tenant/profile/origin/JTI
+    /// validation to the authorization-server domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_lease_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_task_jti: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

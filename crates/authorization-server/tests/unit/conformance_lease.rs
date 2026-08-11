@@ -125,14 +125,14 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
     );
     let encoded = serde_json::to_string(&descriptor).expect("matrix serialization");
     let value: serde_json::Value = serde_json::from_str(&encoded).expect("matrix JSON");
-    assert!(encoded.contains("{{deployment.dynamic_registration_initial_access_token}}"));
+    assert!(encoded.contains("{{generated.dynamic_registration_initial_access_token}}"));
     assert!(descriptor_requires_reference(
         &descriptor,
-        "deployment.dynamic_registration_initial_access_token"
+        "generated.dynamic_registration_initial_access_token"
     ));
     assert!(!descriptor_requires_reference(
         &descriptor,
-        "deployment.ciba_automated_decision_token"
+        "generated.ciba_automated_decision_token"
     ));
     assert!(descriptor_requires_reference(
         &descriptor,

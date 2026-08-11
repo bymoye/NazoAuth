@@ -202,6 +202,50 @@ fn replay_request(tenant: TenantContext, suffix: &str) -> ConformanceOnboardingR
     }
 }
 
+struct BindingLeaseFixture<'a> {
+    tenant_id: Uuid,
+    lease_id: Uuid,
+    task_jti: &'a str,
+    suite_origin: &'a str,
+    expires_at: chrono::DateTime<Utc>,
+    revoked_at: Option<chrono::DateTime<Utc>>,
+    cleaned_at: Option<chrono::DateTime<Utc>>,
+}
+
+async fn insert_binding_lease(
+    connection: &mut diesel_async::AsyncPgConnection,
+    fixture: BindingLeaseFixture<'_>,
+) {
+    sql_query(
+        "INSERT INTO conformance_leases (
+             id, tenant_id, profile, material_sha256, created_at, expires_at,
+             revoked_at, cleaned_at, task_jti, bundle_schema, bundle_sha256,
+             client_count, suite_origin
+         ) VALUES ($1, $2, 'nazoauth-full', $3, $4, $5, $6, $7, $8, 1, $9, 0, $10)",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(fixture.lease_id)
+    .bind::<diesel::sql_types::Uuid, _>(fixture.tenant_id)
+    .bind::<Text, _>("a".repeat(64))
+    .bind::<diesel::sql_types::Timestamptz, _>(Utc::now())
+    .bind::<diesel::sql_types::Timestamptz, _>(fixture.expires_at)
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>, _>(fixture.revoked_at)
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>, _>(fixture.cleaned_at)
+    .bind::<Text, _>(fixture.task_jti)
+    .bind::<Text, _>("b".repeat(64))
+    .bind::<Text, _>(fixture.suite_origin)
+    .execute(connection)
+    .await
+    .unwrap();
+}
+
+async fn delete_binding_lease(connection: &mut diesel_async::AsyncPgConnection, lease_id: Uuid) {
+    sql_query("DELETE FROM conformance_leases WHERE id = $1")
+        .bind::<diesel::sql_types::Uuid, _>(lease_id)
+        .execute(connection)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails() {
     let Some(database_url) = database_url() else {
@@ -507,4 +551,219 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .unwrap();
+    let pool = create_pool(database_url, 4).unwrap();
+    let tenant = TenantContext::default_system();
+    let suffix = Uuid::now_v7().simple().to_string();
+    let origin = format!("https://binding-{suffix}.example.test");
+    let other_origin = format!("https://other-binding-{suffix}.example.test");
+    let task_a = format!("request-{}", Uuid::now_v7().simple());
+    let task_b = format!("request-{}", Uuid::now_v7().simple());
+    let task_expired = format!("request-{}", Uuid::now_v7().simple());
+    let task_revoked = format!("request-{}", Uuid::now_v7().simple());
+    let task_cleaned = format!("request-{}", Uuid::now_v7().simple());
+    let lease_a = Uuid::now_v7();
+    let lease_b = Uuid::now_v7();
+    let lease_expired = Uuid::now_v7();
+    let lease_revoked = Uuid::now_v7();
+    let lease_cleaned = Uuid::now_v7();
+    let now = Utc::now();
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    insert_binding_lease(
+        &mut connection,
+        BindingLeaseFixture {
+            tenant_id: tenant.tenant_id.as_uuid(),
+            lease_id: lease_a,
+            task_jti: &task_a,
+            suite_origin: &origin,
+            expires_at: now + Duration::minutes(5),
+            revoked_at: None,
+            cleaned_at: None,
+        },
+    )
+    .await;
+    insert_binding_lease(
+        &mut connection,
+        BindingLeaseFixture {
+            tenant_id: tenant.tenant_id.as_uuid(),
+            lease_id: lease_b,
+            task_jti: &task_b,
+            suite_origin: &origin,
+            expires_at: now + Duration::minutes(5),
+            revoked_at: None,
+            cleaned_at: None,
+        },
+    )
+    .await;
+    insert_binding_lease(
+        &mut connection,
+        BindingLeaseFixture {
+            tenant_id: tenant.tenant_id.as_uuid(),
+            lease_id: lease_expired,
+            task_jti: &task_expired,
+            suite_origin: &origin,
+            expires_at: now - Duration::minutes(1),
+            revoked_at: None,
+            cleaned_at: None,
+        },
+    )
+    .await;
+    insert_binding_lease(
+        &mut connection,
+        BindingLeaseFixture {
+            tenant_id: tenant.tenant_id.as_uuid(),
+            lease_id: lease_revoked,
+            task_jti: &task_revoked,
+            suite_origin: &origin,
+            expires_at: now + Duration::minutes(5),
+            revoked_at: Some(now),
+            cleaned_at: None,
+        },
+    )
+    .await;
+    insert_binding_lease(
+        &mut connection,
+        BindingLeaseFixture {
+            tenant_id: tenant.tenant_id.as_uuid(),
+            lease_id: lease_cleaned,
+            task_jti: &task_cleaned,
+            suite_origin: &origin,
+            expires_at: now + Duration::minutes(5),
+            revoked_at: None,
+            cleaned_at: Some(now),
+        },
+    )
+    .await;
+    drop(connection);
+
+    let repository = ConformanceLeaseRepository::new(pool.clone());
+    assert_eq!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_a,
+                "nazoauth-full",
+                &origin,
+                &task_a,
+            )
+            .await
+            .unwrap(),
+        Some(lease_a)
+    );
+    assert_eq!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_b,
+                "nazoauth-full",
+                &origin,
+                &task_b,
+            )
+            .await
+            .unwrap(),
+        Some(lease_b)
+    );
+    assert_eq!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_a,
+                "nazoauth-full",
+                &origin,
+                &task_b,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_b,
+                "nazoauth-full",
+                &origin,
+                &task_a,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_b,
+                "nazoauth-full",
+                &other_origin,
+                &task_b,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    for (lease_id, task_jti) in [
+        (lease_expired, task_expired.as_str()),
+        (lease_revoked, task_revoked.as_str()),
+        (lease_cleaned, task_cleaned.as_str()),
+    ] {
+        assert_eq!(
+            repository
+                .active_lease_for_binding(
+                    tenant.tenant_id.as_uuid(),
+                    lease_id,
+                    "nazoauth-full",
+                    &origin,
+                    task_jti,
+                )
+                .await
+                .unwrap(),
+            None
+        );
+    }
+    assert!(matches!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_a,
+                "nazoauth-full",
+                &origin,
+                "replay-not-a-request-jti",
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+    assert!(matches!(
+        repository
+            .active_lease_for_binding(
+                tenant.tenant_id.as_uuid(),
+                lease_a,
+                "oidc-fapi-ciba",
+                &origin,
+                &task_a,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    for lease_id in [
+        lease_a,
+        lease_b,
+        lease_expired,
+        lease_revoked,
+        lease_cleaned,
+    ] {
+        delete_binding_lease(&mut connection, lease_id).await;
+    }
 }

@@ -121,6 +121,7 @@ impl ServerPresentationOperations {
             .map_err(|_| vp_error(503, "server_error", "Presentation request signing failed."))
     }
 
+    #[cfg(test)]
     async fn conformance_lease_for_wallet(
         &self,
         wallet_authorization_endpoint: &str,
@@ -128,6 +129,47 @@ impl ServerPresentationOperations {
         let wallet_origin = Self::wallet_origin(wallet_authorization_endpoint)?;
         self.conformance
             .active_lease_for_suite_origin(self.tenant_id, "nazoauth-full", &wallet_origin)
+            .await
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Conformance trust state is unavailable.",
+                )
+            })
+    }
+
+    fn validate_conformance_task_jti(task_jti: &str) -> bool {
+        let Some(suffix) = task_jti.strip_prefix("request-") else {
+            return false;
+        };
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    async fn conformance_lease_for_binding(
+        &self,
+        wallet_origin: &str,
+        lease_id: Uuid,
+        task_jti: &str,
+    ) -> Result<Option<Uuid>, PresentationHttpError> {
+        if !Self::validate_conformance_task_jti(task_jti) {
+            return Err(vp_error(
+                400,
+                "invalid_request",
+                "Conformance lease binding is invalid.",
+            ));
+        }
+        self.conformance
+            .active_lease_for_binding(
+                self.tenant_id,
+                lease_id,
+                "nazoauth-full",
+                wallet_origin,
+                task_jti,
+            )
             .await
             .map_err(|_| {
                 vp_error(
@@ -195,19 +237,49 @@ impl PresentationOperations for ServerPresentationOperations {
             }
             let wallet_origin = Self::wallet_origin(&input.wallet_authorization_endpoint)?;
             let static_wallet_allowed = self.static_wallet_origin_allowed(&wallet_origin);
+            let binding = match (
+                input.conformance_lease_id,
+                input.conformance_task_jti.clone(),
+            ) {
+                (None, None) => None,
+                (Some(lease_id), Some(task_jti)) => Some((lease_id, task_jti)),
+                _ => {
+                    return Err(vp_error(
+                        400,
+                        "invalid_request",
+                        "Conformance lease binding is incomplete.",
+                    ));
+                }
+            };
             let conformance_lease_id = if static_wallet_allowed {
+                if binding.is_some() {
+                    return Err(vp_error(
+                        400,
+                        "invalid_request",
+                        "Static wallet origins must not include a conformance lease binding.",
+                    ));
+                }
                 None
             } else {
-                self.conformance_lease_for_wallet(&input.wallet_authorization_endpoint)
-                    .await?
+                let Some((lease_id, task_jti)) = binding else {
+                    return Err(vp_error(
+                        400,
+                        "invalid_request",
+                        "Dynamic Suite origins require a conformance lease binding.",
+                    ));
+                };
+                let matched = self
+                    .conformance_lease_for_binding(&wallet_origin, lease_id, &task_jti)
+                    .await?;
+                if matched != Some(lease_id) {
+                    return Err(vp_error(
+                        400,
+                        "invalid_request",
+                        "Conformance lease binding is not active for this Suite origin.",
+                    ));
+                }
+                Some(lease_id)
             };
-            if !static_wallet_allowed && conformance_lease_id.is_none() {
-                return Err(vp_error(
-                    400,
-                    "invalid_request",
-                    "Wallet authorization endpoint is not allowlisted.",
-                ));
-            }
             input
                 .dcql_query
                 .validate()

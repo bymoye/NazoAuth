@@ -1085,8 +1085,8 @@ fn validate_conformance_matrix_reference(
             | "generated.mtls.client_cert"
             | "generated.mtls.client_key"
             | "generated.mtls.cert_sha256"
-            | "deployment.dynamic_registration_initial_access_token"
-            | "deployment.ciba_automated_decision_token"
+            | "generated.dynamic_registration_initial_access_token"
+            | "generated.ciba_automated_decision_token"
             | "onboarding.applicant_id"
             | "onboarding.openid4vc_request_object_trust_anchor_pem"
     ) {

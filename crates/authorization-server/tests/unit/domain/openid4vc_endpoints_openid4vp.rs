@@ -177,6 +177,8 @@ fn create_input(
         request_method: request_method.map(str::to_owned),
         response_mode: response_mode.map(str::to_owned),
         transaction_data: None,
+        conformance_lease_id: None,
+        conformance_task_jti: None,
     }
 }
 
@@ -203,16 +205,22 @@ fn valid_ca_pem() -> String {
         .pem()
 }
 
-async fn bind_suite_origin(pool: &nazo_postgres::DbPool, lease_id: Uuid, origin: &str) {
+async fn bind_suite_origin(
+    pool: &nazo_postgres::DbPool,
+    lease_id: Uuid,
+    origin: &str,
+    task_jti: &str,
+) {
     let mut connection = nazo_postgres::get_conn(pool)
         .await
         .expect("suite-origin fixture connection should be available");
     sql_query(
         "UPDATE conformance_leases
-         SET profile = 'nazoauth-full', suite_origin = $1
-         WHERE tenant_id = $2 AND id = $3",
+         SET profile = 'nazoauth-full', suite_origin = $1, task_jti = $2
+         WHERE tenant_id = $3 AND id = $4",
     )
     .bind::<diesel::sql_types::Text, _>(origin)
+    .bind::<diesel::sql_types::Text, _>(task_jti)
     .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
     .bind::<diesel::sql_types::Uuid, _>(lease_id)
     .execute(&mut connection)
@@ -747,19 +755,20 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         Uuid::now_v7().simple()
     );
     let conformance_endpoint = format!("{conformance_origin}/authorize");
+    let valid_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
     let anchor_pem = format!("{}{}", valid_ca_pem(), valid_ca_pem());
     let valid_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &format!("{:064x}", Uuid::now_v7().as_u128()),
+            &valid_task_jti,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&conformance_origin, &anchor_pem)),
             60,
         )
         .await
         .expect("valid OpenID4VC conformance lease should be created");
-    bind_suite_origin(&pool, valid_lease.id, &conformance_origin).await;
+    bind_suite_origin(&pool, valid_lease.id, &conformance_origin, &valid_task_jti).await;
     assert_eq!(
         operations
             .conformance_lease_for_wallet(&conformance_endpoint)
@@ -767,9 +776,59 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
             .expect("wallet should resolve to its sole conformance lease"),
         Some(valid_lease.id)
     );
+    let partial_lease_binding = operations
+        .create(CreatePresentationRequest {
+            conformance_lease_id: Some(valid_lease.id),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("a partial conformance lease binding must be rejected");
+    assert_eq!(
+        (partial_lease_binding.status, partial_lease_binding.error),
+        (400, "invalid_request")
+    );
+    let partial_task_binding = operations
+        .create(CreatePresentationRequest {
+            conformance_task_jti: Some(valid_task_jti.clone()),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("a partial conformance task binding must be rejected");
+    assert_eq!(
+        (partial_task_binding.status, partial_task_binding.error),
+        (400, "invalid_request")
+    );
+    let static_binding = operations
+        .create(CreatePresentationRequest {
+            conformance_lease_id: Some(valid_lease.id),
+            conformance_task_jti: Some(valid_task_jti.clone()),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("static wallet origins must not accept dynamic bindings");
+    assert_eq!(
+        (static_binding.status, static_binding.error),
+        (400, "invalid_request")
+    );
+    let missing_dynamic_binding = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: conformance_endpoint.clone(),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("dynamic Suite origins must require an exact binding");
+    assert_eq!(
+        (
+            missing_dynamic_binding.status,
+            missing_dynamic_binding.error
+        ),
+        (400, "invalid_request")
+    );
     let dynamic_presentation = operations
         .create(CreatePresentationRequest {
             wallet_authorization_endpoint: conformance_endpoint.clone(),
+            conformance_lease_id: Some(valid_lease.id),
+            conformance_task_jti: Some(valid_task_jti.clone()),
             ..create_input(None, None, None, false)
         })
         .await
@@ -799,19 +858,71 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
             .expect("a cross-origin wallet must not match the lease"),
         None
     );
+    let cross_origin_binding = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: "https://different-suite.example/authorize".to_owned(),
+            conformance_lease_id: Some(valid_lease.id),
+            conformance_task_jti: Some(valid_task_jti.clone()),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("a lease binding must not cross Suite origins");
+    assert_eq!(
+        (cross_origin_binding.status, cross_origin_binding.error),
+        (400, "invalid_request")
+    );
 
+    let duplicate_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
     let duplicate_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &format!("{:064x}", Uuid::now_v7().as_u128()),
+            &duplicate_task_jti,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&conformance_origin, &anchor_pem)),
             60,
         )
         .await
         .expect("duplicate-origin conformance lease should be created");
-    bind_suite_origin(&pool, duplicate_lease.id, &conformance_origin).await;
+    bind_suite_origin(
+        &pool,
+        duplicate_lease.id,
+        &conformance_origin,
+        &duplicate_task_jti,
+    )
+    .await;
+    let cross_run_binding = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: conformance_endpoint.clone(),
+            conformance_lease_id: Some(valid_lease.id),
+            conformance_task_jti: Some(duplicate_task_jti.clone()),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("a lease and JTI from different runs must not be mixed");
+    assert_eq!(
+        (cross_run_binding.status, cross_run_binding.error),
+        (400, "invalid_request")
+    );
+    let duplicate_presentation = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: conformance_endpoint.clone(),
+            conformance_lease_id: Some(duplicate_lease.id),
+            conformance_task_jti: Some(duplicate_task_jti.clone()),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect("exact binding must select the requested lease despite same-origin concurrency");
+    let duplicate_transaction = operations
+        .store
+        .request(duplicate_presentation.transaction_id, chrono::Utc::now())
+        .await
+        .expect("duplicate-bound transaction should be readable")
+        .expect("duplicate-bound transaction should exist");
+    assert_eq!(
+        duplicate_transaction.conformance_lease_id,
+        Some(duplicate_lease.id)
+    );
     let ambiguous = operations
         .conformance_lease_for_wallet(&conformance_endpoint)
         .await
@@ -832,6 +943,19 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
             .expect("revoked duplicate must no longer make the origin ambiguous"),
         Some(valid_lease.id)
     );
+    let revoked_binding = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: conformance_endpoint.clone(),
+            conformance_lease_id: Some(duplicate_lease.id),
+            conformance_task_jti: Some(duplicate_task_jti),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("a revoked lease must not be selectable");
+    assert_eq!(
+        (revoked_binding.status, revoked_binding.error),
+        (400, "invalid_request")
+    );
 
     leases
         .revoke(crate::domain::tenancy::DEFAULT_TENANT_ID, valid_lease.id)
@@ -846,18 +970,19 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     );
 
     let expired_origin = format!("https://wallet-expired-{}.example", Uuid::now_v7().simple());
+    let expired_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
     let expired_lease = leases
         .create(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
             "nazoauth-full",
-            &format!("{:064x}", Uuid::now_v7().as_u128()),
+            &expired_task_jti,
             nazo_postgres::ConformanceLeaseTokenDigests::default(),
             Some(conformance_material(&expired_origin, &anchor_pem)),
             60,
         )
         .await
         .expect("expired-origin conformance lease should be created");
-    bind_suite_origin(&pool, expired_lease.id, &expired_origin).await;
+    bind_suite_origin(&pool, expired_lease.id, &expired_origin, &expired_task_jti).await;
     expire_lease(&pool, expired_lease.id).await;
     assert_eq!(
         operations
@@ -865,6 +990,19 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
             .await
             .expect("expired lease lookup should succeed"),
         None
+    );
+    let expired_binding = operations
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: format!("{expired_origin}/authorize"),
+            conformance_lease_id: Some(expired_lease.id),
+            conformance_task_jti: Some(expired_task_jti),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("an expired lease must not be selectable");
+    assert_eq!(
+        (expired_binding.status, expired_binding.error),
+        (400, "invalid_request")
     );
 
     let malformed_material_lease = leases

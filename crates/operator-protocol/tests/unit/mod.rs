@@ -743,6 +743,37 @@ fn conformance_matrix_registration_security_policy_is_versioned_and_typed() {
 }
 
 #[test]
+fn conformance_matrix_lease_tokens_are_per_run_generated_values() {
+    let bytes = include_bytes!(
+        "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"
+    );
+    let descriptor: ConformanceMatrixDescriptor =
+        serde_json::from_slice(bytes).expect("checked-in conformance matrix JSON");
+    let mut generated = descriptor.clone();
+    generated.groups[0].plans[0].config_template = serde_json::json!({
+        "dynamic_registration_initial_access_token":
+            "{{generated.dynamic_registration_initial_access_token}}",
+        "ciba_automated_decision_token": "{{generated.ciba_automated_decision_token}}"
+    });
+    validate_conformance_matrix_descriptor(&generated)
+        .expect("per-run generated token placeholders must be accepted");
+
+    let mut deployment_scoped = descriptor;
+    deployment_scoped.groups[0].plans[0].config_template = serde_json::json!({
+        "dynamic_registration_initial_access_token":
+            "{{deployment.dynamic_registration_initial_access_token}}",
+        "ciba_automated_decision_token": "{{deployment.ciba_automated_decision_token}}"
+    });
+    assert!(
+        validate_conformance_matrix_descriptor(&deployment_scoped).is_err(),
+        "deployment-scoped token placeholders must remain forbidden"
+    );
+    let asset = String::from_utf8_lossy(bytes);
+    assert!(!asset.contains("{{deployment.dynamic_registration_initial_access_token}}"));
+    assert!(!asset.contains("{{deployment.ciba_automated_decision_token}}"));
+}
+
+#[test]
 fn checked_in_matrix_registration_templates_match_onboarding_policy_primitives() {
     let bytes = include_bytes!(
         "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"

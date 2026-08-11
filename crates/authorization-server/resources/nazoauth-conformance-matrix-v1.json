@@ -1090,15 +1090,15 @@
               ]
             },
             "client": {
-              "initial_access_token": "{{deployment.dynamic_registration_initial_access_token}}",
+              "initial_access_token": "{{generated.dynamic_registration_initial_access_token}}",
               "scope": "openid profile email address phone offline_access"
             },
             "client2": {
-              "initial_access_token": "{{deployment.dynamic_registration_initial_access_token}}",
+              "initial_access_token": "{{generated.dynamic_registration_initial_access_token}}",
               "scope": "openid profile email address phone offline_access"
             },
             "client_secret_post": {
-              "initial_access_token": "{{deployment.dynamic_registration_initial_access_token}}",
+              "initial_access_token": "{{generated.dynamic_registration_initial_access_token}}",
               "scope": "openid profile email address phone offline_access"
             },
             "nazo": {
@@ -3073,15 +3073,15 @@
               ]
             },
             "client": {
-              "initial_access_token": "{{deployment.dynamic_registration_initial_access_token}}",
+              "initial_access_token": "{{generated.dynamic_registration_initial_access_token}}",
               "scope": "openid profile email address phone offline_access"
             },
             "client2": {
-              "initial_access_token": "{{deployment.dynamic_registration_initial_access_token}}",
+              "initial_access_token": "{{generated.dynamic_registration_initial_access_token}}",
               "scope": "openid profile email address phone offline_access"
             },
             "client_secret_post": {
-              "initial_access_token": "{{deployment.dynamic_registration_initial_access_token}}",
+              "initial_access_token": "{{generated.dynamic_registration_initial_access_token}}",
               "scope": "openid profile email address phone offline_access"
             },
             "nazo": {
