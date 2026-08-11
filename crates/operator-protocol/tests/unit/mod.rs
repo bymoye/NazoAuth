@@ -680,12 +680,27 @@ fn conformance_matrix_registration_security_policy_is_versioned_and_typed() {
         .registration_template
         .clone()
         .unwrap();
+    let logical_client_id = descriptor.groups[group_index].plans[plan_index].required_roles
+        [role_index]
+        .logical_client_id
+        .clone();
     let descriptor_for = |policy: serde_json::Value| {
         let mut descriptor = descriptor.clone();
-        descriptor.groups[group_index].plans[plan_index].required_roles[role_index]
-            .registration_template
-            .as_mut()
-            .unwrap()["security_policy"] = policy;
+        for group in &mut descriptor.groups {
+            for plan in &mut group.plans {
+                for role in group
+                    .required_roles
+                    .iter_mut()
+                    .chain(&mut plan.required_roles)
+                {
+                    if role.logical_client_id == logical_client_id
+                        && let Some(template) = &mut role.registration_template
+                    {
+                        template["security_policy"] = policy.clone();
+                    }
+                }
+            }
+        }
         descriptor
     };
 

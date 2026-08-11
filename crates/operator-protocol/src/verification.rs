@@ -1044,6 +1044,7 @@ fn validate_conformance_matrix_reference(
                     | "mtls.ca_cert"
                     | "mtls.client_cert"
                     | "mtls.client_key"
+                    | "mtls.cert_sha256"
             )
         {
             return Err(ProtocolError::Policy(
@@ -1057,7 +1058,11 @@ fn validate_conformance_matrix_reference(
         "target.issuer"
             | "target.suite"
             | "suite.origin"
+            | "target.host"
+            | "target.ciba_automated_decision_url"
+            | "generated.applicant_email"
             | "generated.applicant_password"
+            | "generated.credential_holder_email_sha256"
             | "generated.client_secret"
             | "generated.rsa.private_jwk"
             | "generated.rsa.public_jwks"
@@ -1066,9 +1071,15 @@ fn validate_conformance_matrix_reference(
             | "generated.mtls.ca_cert"
             | "generated.mtls.client_cert"
             | "generated.mtls.client_key"
+            | "generated.mtls.cert_sha256"
             | "generated.dynamic_registration_initial_access_token"
             | "generated.ciba_automated_decision_token"
+            | "onboarding.applicant_id"
+            | "onboarding.openid4vc_request_object_trust_anchor_pem"
     ) {
+        return Ok(());
+    }
+    if valid_conformance_dynamic_reference(name) {
         return Ok(());
     }
     if matches!(name, "onboarding.client_id" | "onboarding.client_secret") {
@@ -1082,6 +1093,52 @@ fn validate_conformance_matrix_reference(
     Err(ProtocolError::Policy(
         "conformance matrix references an unknown secret",
     ))
+}
+
+fn valid_conformance_dynamic_reference(name: &str) -> bool {
+    if let Some(path) = name.strip_prefix("target.url.") {
+        return valid_conformance_path(path, false);
+    }
+    if let Some(path) = name.strip_prefix("target.pattern.") {
+        return valid_conformance_path(path, true);
+    }
+    if let Some(segment) = name.strip_prefix("run.alias.") {
+        return valid_conformance_segment(segment);
+    }
+    if let Some(reference) = name.strip_prefix("suite.test.") {
+        return reference.split_once('.').is_some_and(|(alias, endpoint)| {
+            valid_conformance_segment(alias) && valid_conformance_segment(endpoint)
+        });
+    }
+    if let Some(reference) = name.strip_prefix("suite.test_query.") {
+        return reference.split_once('.').is_some_and(|(alias, endpoint)| {
+            valid_conformance_segment(alias) && valid_conformance_segment(endpoint)
+        });
+    }
+    if let Some(endpoint) = name.strip_prefix("suite.pattern.") {
+        return valid_conformance_segment(endpoint);
+    }
+    false
+}
+
+fn valid_conformance_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_conformance_path(value: &str, allow_trailing_wildcard: bool) -> bool {
+    let path = value.strip_suffix('*').unwrap_or(value);
+    let has_wildcard = path.len() != value.len();
+    path.starts_with('/')
+        && path.len() <= 512
+        && !path.contains("//")
+        && !path.contains(['?', '#', '\\', '{', '}'])
+        && !path.split('/').any(|segment| segment == "..")
+        && !path.contains('*')
+        && (!has_wildcard || allow_trailing_wildcard)
 }
 
 fn is_conformance_sensitive_key(key: &str) -> bool {
