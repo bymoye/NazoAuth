@@ -60,11 +60,11 @@ pub use signing::{
 };
 pub use verification::{
     validate_conformance_matrix_descriptor, validate_discovery_request,
-    validate_file_identifier_value, validate_runtime_receipt_deployment_binding,
-    validate_task_deployment_binding, verify_adoption_receipt, verify_deployment_statement,
-    verify_discovery_statement, verify_final_receipt, verify_management_event,
-    verify_runtime_receipt, verify_task, verify_task_signature, verify_task_window,
-    verify_trust_transition,
+    validate_file_identifier_value, validate_openid4vc_conformance_trust,
+    validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
+    verify_adoption_receipt, verify_deployment_statement, verify_discovery_statement,
+    verify_final_receipt, verify_management_event, verify_runtime_receipt, verify_task,
+    verify_task_signature, verify_task_window, verify_trust_transition,
 };
 pub use wire::*;
 

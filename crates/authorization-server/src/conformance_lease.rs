@@ -24,7 +24,7 @@ use nazo_operator_protocol::{
     MAX_CONFORMANCE_ONBOARDING_CLIENTS, MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES,
     MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES,
     MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS, Openid4vcConformanceTrust, TaskResult,
-    validate_conformance_matrix_descriptor,
+    validate_conformance_matrix_descriptor, validate_openid4vc_conformance_trust,
 };
 use nazo_postgres::{ConformanceLease, ConformanceLeaseRepository, ConformanceLeaseTokenDigests};
 use serde::Deserialize;
@@ -87,6 +87,7 @@ pub(crate) struct ConformanceOnboardingRequest {
     pub bundle_sha256: String,
     pub matrix_sha256: String,
     pub suite_origin: String,
+    pub public_material: Openid4vcConformanceTrust,
     pub dynamic_registration_initial_access_token_sha256: Option<String>,
     pub ciba_automated_decision_token_sha256: Option<String>,
     pub client_count: u32,
@@ -345,6 +346,7 @@ struct ConformanceOnboardingBundle {
     profile: String,
     target_issuer: String,
     suite_base_url: String,
+    openid4vc_conformance_trust: Openid4vcConformanceTrust,
     applicant: ConformanceApplicantBundle,
     #[serde(default)]
     dynamic_registration_initial_access_token: Option<SecretText>,
@@ -435,7 +437,7 @@ async fn validate_bundle(
     {
         bail!("operator task idempotency binding is invalid");
     }
-    if bundle.schema != bundle_schema || bundle.schema != 2 {
+    if bundle.schema != bundle_schema || bundle.schema != 3 {
         bail!("conformance onboarding bundle schema does not match the signed task");
     }
     if bundle.request_jti != task_jti {
@@ -477,6 +479,8 @@ async fn validate_bundle(
     if target_issuer != configured_issuer {
         bail!("conformance onboarding target issuer does not match this deployment");
     }
+    let suite_origin = validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
+    validate_conformance_trust_material(&bundle.openid4vc_conformance_trust, &suite_origin)?;
     let applicant_email = validate_email(&bundle.applicant.email)?;
     let applicant_password = validate_secret_text(
         bundle.applicant.password.as_str(),
@@ -593,7 +597,6 @@ async fn validate_bundle(
     }
 
     let applicant_password_hash = hash_applicant_password(applicant_password).await?;
-    let suite_origin = validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
     let clients = prepare_client_registrations(raw_clients).await?;
 
     Ok(ConformanceOnboardingRequest {
@@ -604,6 +607,7 @@ async fn validate_bundle(
         bundle_sha256: expected_bundle_sha256.to_owned(),
         matrix_sha256: expected_matrix_sha256.to_owned(),
         suite_origin,
+        public_material: bundle.openid4vc_conformance_trust,
         dynamic_registration_initial_access_token_sha256,
         ciba_automated_decision_token_sha256,
         client_count: u32::try_from(expected_client_count)?,
@@ -937,6 +941,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
             matrix_sha256,
             bundle_sha256,
             suite_origin,
+            public_material,
             dynamic_registration_initial_access_token_sha256,
             ciba_automated_decision_token_sha256,
             client_count,
@@ -958,6 +963,12 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
             }
         };
         let matrix_sha256_for_result = matrix_sha256.clone();
+        let public_material = match serde_json::to_value(public_material) {
+            Ok(value) => value,
+            Err(_) => {
+                return Box::pin(async { bail!("conformance trust material cannot be persisted") });
+            }
+        };
         let persistence_request = nazo_postgres::ConformanceOnboardingRequest {
             tenant,
             task_jti,
@@ -966,6 +977,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
             material_sha256: matrix_sha256,
             bundle_sha256,
             suite_origin,
+            public_material,
             dynamic_registration_initial_access_token_sha256,
             ciba_automated_decision_token_sha256,
             client_count: persistence_client_count,
@@ -1409,6 +1421,23 @@ fn validate_suite_origin(value: &str, target_issuer: &str) -> anyhow::Result<Str
         bail!("suite origin must differ from target issuer");
     }
     Ok(origin)
+}
+
+fn validate_conformance_trust_material(
+    material: &Openid4vcConformanceTrust,
+    suite_origin: &str,
+) -> anyhow::Result<()> {
+    validate_openid4vc_conformance_trust(material)
+        .map_err(|_| anyhow::anyhow!("conformance trust material is invalid"))?;
+    let expected_issuer = format!("{}/", suite_origin);
+    if material.client_attestation_issuer != expected_issuer {
+        bail!("conformance client-attestation issuer does not match the Suite origin");
+    }
+    crate::domain::parse_conformance_credential_trust_anchors(
+        &material.credential_trust_anchor_pem,
+    )
+    .map_err(|_| anyhow::anyhow!("conformance credential trust anchor is invalid"))?;
+    Ok(())
 }
 
 fn validate_email(value: &str) -> anyhow::Result<String> {

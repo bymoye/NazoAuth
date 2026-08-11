@@ -245,6 +245,49 @@ fn onboarding_mapping_preserves_the_public_oauth_client_id() {
     );
 }
 
+fn trust_material_fixture() -> Openid4vcConformanceTrust {
+    Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example/".to_owned(),
+        client_attestation_jwks: serde_json::json!({
+            "keys": [{
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "y": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }]
+        }),
+        key_attestation_jwks: serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "kid": "holder"
+            }]
+        }),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n".to_owned(),
+    }
+}
+
+#[test]
+fn conformance_trust_material_is_bound_to_the_suite_origin() {
+    let mut material = trust_material_fixture();
+    material.client_attestation_issuer = "https://other-suite.example/".to_owned();
+    assert!(validate_conformance_trust_material(&material, "https://suite.example").is_err());
+}
+
+#[test]
+fn conformance_trust_material_rejects_private_or_unsupported_keys() {
+    let mut private = trust_material_fixture();
+    private.client_attestation_jwks["keys"][0]["d"] = serde_json::json!("private");
+    assert!(validate_conformance_trust_material(&private, "https://suite.example").is_err());
+
+    let mut unsupported = trust_material_fixture();
+    unsupported.key_attestation_jwks["keys"][0]["kty"] = serde_json::json!("RSA");
+    assert!(validate_conformance_trust_material(&unsupported, "https://suite.example").is_err());
+}
+
 #[derive(Clone, Copy)]
 struct UnusedClientRepository;
 

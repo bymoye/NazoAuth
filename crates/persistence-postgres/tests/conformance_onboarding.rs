@@ -160,6 +160,10 @@ fn replay_request(tenant: TenantContext, suffix: &str) -> ConformanceOnboardingR
         bundle_schema: 1,
         bundle_sha256: digest_text(&format!("bundle-{suffix}")),
         material_sha256: digest_text(&format!("matrix-{suffix}")),
+        public_material: serde_json::json!({
+            "schema": 1,
+            "credential_trust_anchor_pem": format!("PUBLIC-MATERIAL-{suffix}"),
+        }),
         suite_origin: format!("https://suite-{suffix}.example.test"),
         dynamic_registration_initial_access_token_sha256: Some(digest_text(&format!(
             "dcr-token-{suffix}"
@@ -273,6 +277,7 @@ async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails(
         bundle_schema: 1,
         bundle_sha256: "a".repeat(64),
         material_sha256: "b".repeat(64),
+        public_material: serde_json::json!({"schema": 1}),
         suite_origin: format!("https://rollback-suite-{suffix}.example.test"),
         dynamic_registration_initial_access_token_sha256: Some("c".repeat(64)),
         ciba_automated_decision_token_sha256: Some("d".repeat(64)),
@@ -531,12 +536,29 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .unwrap(),
         Some(first.lease_id)
     );
+    assert_eq!(
+        repository
+            .active_public_material_for_lease(tenant.tenant_id.as_uuid(), first.lease_id)
+            .await
+            .unwrap(),
+        Some(request.public_material.clone())
+    );
 
-    let replay = repository.onboard(request).await.unwrap();
+    let replay = repository.onboard(request.clone()).await.unwrap();
     assert!(replay.idempotent_replay);
     assert_eq!(replay.lease_id, first.lease_id);
     assert_eq!(replay.applicant_user_id, first.applicant_user_id);
     assert_eq!(replay.client_mappings, first.client_mappings);
+
+    let mut drifted_request = request;
+    drifted_request.public_material = serde_json::json!({
+        "schema": 1,
+        "credential_trust_anchor_pem": "DIFFERENT-PUBLIC-MATERIAL",
+    });
+    assert!(matches!(
+        repository.onboard(drifted_request).await,
+        Err(RepositoryError::Conflict)
+    ));
 
     repository
         .revoke(tenant.tenant_id.as_uuid(), first.lease_id)
@@ -551,6 +573,13 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
                 "nazoauth-full",
                 &suite_origin,
             )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repository
+            .active_public_material_for_lease(tenant.tenant_id.as_uuid(), first.lease_id)
             .await
             .unwrap(),
         None

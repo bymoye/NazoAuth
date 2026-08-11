@@ -468,13 +468,13 @@ fn conformance_onboarding_task_is_strictly_bound_and_non_secret() {
                 ttl_seconds,
             }
         };
-    let valid = operation(2, "a".repeat(64), "b".repeat(64), 55, 28_800);
+    let valid = operation(3, "a".repeat(64), "b".repeat(64), 55, 28_800);
     validate_operation(&valid).unwrap();
     let encoded = serde_json::to_string(&valid).unwrap();
     assert!(!encoded.contains("password"));
     assert!(!encoded.contains("secret"));
 
-    for bundle_schema in [0, 1, 3] {
+    for bundle_schema in [0, 1, 2, 4] {
         assert!(
             validate_operation(&operation(
                 bundle_schema,
@@ -489,7 +489,7 @@ fn conformance_onboarding_task_is_strictly_bound_and_non_secret() {
     for client_count in [0, MAX_CONFORMANCE_ONBOARDING_CLIENTS + 1] {
         assert!(
             validate_operation(&operation(
-                2,
+                3,
                 "a".repeat(64),
                 "b".repeat(64),
                 client_count,
@@ -498,9 +498,9 @@ fn conformance_onboarding_task_is_strictly_bound_and_non_secret() {
             .is_err()
         );
     }
-    assert!(validate_operation(&operation(2, "A".repeat(64), "b".repeat(64), 55, 28_800)).is_err());
-    assert!(validate_operation(&operation(2, "a".repeat(64), "B".repeat(64), 55, 28_800)).is_err());
-    assert!(validate_operation(&operation(2, "a".repeat(64), "b".repeat(64), 55, 59)).is_err());
+    assert!(validate_operation(&operation(3, "A".repeat(64), "b".repeat(64), 55, 28_800)).is_err());
+    assert!(validate_operation(&operation(3, "a".repeat(64), "B".repeat(64), 55, 28_800)).is_err());
+    assert!(validate_operation(&operation(3, "a".repeat(64), "b".repeat(64), 55, 59)).is_err());
 }
 
 #[test]
@@ -1076,8 +1076,8 @@ fn openid4vc_lease_accepts_only_closed_public_trust_material() {
     let material = Openid4vcConformanceTrust {
         schema: 1,
         client_attestation_issuer: "https://suite.example/".to_owned(),
-        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
-        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "y": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kid": "client"}]}),
+        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "y": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kid": "holder"}]}),
         credential_trust_anchor_pem:
             "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
     };
@@ -1089,24 +1089,29 @@ fn openid4vc_lease_accepts_only_closed_public_trust_material() {
         public_material: material,
         ttl_seconds: 28_800,
     };
+    validate_openid4vc_conformance_trust(&material).unwrap();
     validate_operation(&operation(Some(material.clone()))).unwrap();
     assert!(validate_operation(&operation(None)).is_err());
 
-    let mut private = material;
+    let mut private = material.clone();
     private.client_attestation_jwks["keys"][0]["d"] = serde_json::json!("secret");
     assert!(validate_operation(&operation(Some(private))).is_err());
 
     let mut private_anchor = Openid4vcConformanceTrust {
         schema: 1,
         client_attestation_issuer: "https://suite.example/".to_owned(),
-        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "client"}]}),
-        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "kid": "holder"}]}),
+        client_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "y": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kid": "client"}]}),
+        key_attestation_jwks: serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "y": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kid": "holder"}]}),
         credential_trust_anchor_pem:
             "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
     };
     private_anchor.credential_trust_anchor_pem =
         "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n".to_owned();
     assert!(validate_operation(&operation(Some(private_anchor))).is_err());
+
+    let mut unsupported = material;
+    unsupported.client_attestation_jwks["keys"][0]["kty"] = serde_json::json!("RSA");
+    assert!(validate_openid4vc_conformance_trust(&unsupported).is_err());
 }
 
 #[test]

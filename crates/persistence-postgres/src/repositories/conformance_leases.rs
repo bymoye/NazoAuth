@@ -41,6 +41,8 @@ const MAX_ONBOARDING_CLIENTS: usize = 512;
 const MAX_ONBOARDING_CREDENTIAL_DATASETS: usize = 64;
 const MAX_ONBOARDING_CREDENTIAL_DATASET_BYTES: usize = 64 * 1024;
 const MAX_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES: usize = 512 * 1024;
+const MAX_ONBOARDING_PUBLIC_MATERIAL_BYTES: usize = 32 * 1024;
+const MAX_ONBOARDING_PUBLIC_MATERIAL_STRING_BYTES: usize = 16 * 1024;
 const MAX_ONBOARDING_TASK_JTI_BYTES: usize = 255;
 const MAX_ONBOARDING_LOGICAL_ID_BYTES: usize = 128;
 const ATOMIC_CONFORMANCE_PROFILE: &str = "nazoauth-full";
@@ -57,6 +59,9 @@ pub struct ConformanceOnboardingRequest {
     pub bundle_schema: i32,
     pub bundle_sha256: String,
     pub material_sha256: String,
+    /// Public OpenID4VC trust material bound to this lease.  Persistence
+    /// accepts only a bounded JSON object and rejects private-key material.
+    pub public_material: Value,
     /// Canonical HTTPS origin of the Suite used for this run.
     pub suite_origin: String,
     /// DCR initial-access token digest; plaintext token material is never
@@ -85,6 +90,7 @@ impl std::fmt::Debug for ConformanceOnboardingRequest {
             .field("bundle_schema", &self.bundle_schema)
             .field("bundle_sha256", &self.bundle_sha256)
             .field("material_sha256", &self.material_sha256)
+            .field("public_material_present", &true)
             .field("suite_origin", &self.suite_origin)
             .field(
                 "dynamic_registration_initial_access_token_sha256",
@@ -287,7 +293,7 @@ impl ConformanceLeaseRepository {
                                 ciba_automated_decision_token_sha256,
                                 expires_at, revoked_at, cleaned_at,
                                 task_jti, bundle_schema, bundle_sha256, client_count,
-                                suite_origin
+                                suite_origin, public_material
                          FROM conformance_leases
                          WHERE tenant_id = $1 AND task_jti = $2
                          FOR UPDATE",
@@ -324,14 +330,14 @@ impl ConformanceLeaseRepository {
                              ciba_automated_decision_token_sha256,
                              created_at, expires_at, task_jti, bundle_schema,
                              bundle_sha256, client_count, suite_origin, public_material
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL)
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                          ON CONFLICT (tenant_id, task_jti) DO NOTHING
                          RETURNING id, tenant_id, profile, material_sha256,
                                    dynamic_registration_initial_access_token_sha256,
                                    ciba_automated_decision_token_sha256,
                                    expires_at, revoked_at, cleaned_at,
                                    task_jti, bundle_schema, bundle_sha256,
-                                   client_count, suite_origin",
+                                   client_count, suite_origin, public_material",
                     )
                     .bind::<diesel::sql_types::Uuid, _>(lease_id)
                     .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
@@ -352,6 +358,7 @@ impl ConformanceLeaseRepository {
                     .bind::<diesel::sql_types::Text, _>(&request.bundle_sha256)
                     .bind::<diesel::sql_types::Integer, _>(request.client_count)
                     .bind::<diesel::sql_types::Text, _>(&request.suite_origin)
+                    .bind::<diesel::sql_types::Jsonb, _>(&request.public_material)
                     .get_result::<OnboardingLeaseRow>(connection)
                     .await
                     .optional()?;
@@ -365,7 +372,7 @@ impl ConformanceLeaseRepository {
                                     ciba_automated_decision_token_sha256,
                                     expires_at, revoked_at, cleaned_at,
                                     task_jti, bundle_schema, bundle_sha256,
-                                    client_count, suite_origin
+                                    client_count, suite_origin, public_material
                              FROM conformance_leases
                              WHERE tenant_id = $1 AND task_jti = $2
                              FOR UPDATE",
@@ -1308,6 +1315,8 @@ struct OnboardingLeaseRow {
     client_count: i32,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     suite_origin: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
+    public_material: Option<Value>,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -1374,6 +1383,7 @@ async fn replay_or_conflict(
         || existing.bundle_sha256 != request.bundle_sha256
         || existing.client_count != request.client_count
         || existing.suite_origin.as_deref() != Some(request.suite_origin.as_str())
+        || existing.public_material.as_ref() != Some(&request.public_material)
     {
         return Err(OnboardingTxError::Repository(RepositoryError::Conflict));
     }
@@ -1762,6 +1772,7 @@ fn validate_onboarding_request(
         ));
     }
     validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)?;
+    validate_onboarding_public_material(&request.public_material)?;
     if request.applicant.username.trim().is_empty()
         || request.applicant.username.len() > 150
         || request.applicant.username != request.applicant.username.trim()
@@ -1892,6 +1903,69 @@ fn validate_onboarding_credential_datasets(
         }
     }
     Ok(())
+}
+
+fn validate_onboarding_public_material(value: &Value) -> Result<(), RepositoryError> {
+    if value.as_object().is_none_or(|object| object.is_empty()) {
+        return Err(RepositoryError::Consistency(
+            "conformance public material must be a non-empty object".to_owned(),
+        ));
+    }
+    let encoded = serde_json::to_vec(value).map_err(|_| {
+        RepositoryError::Consistency("conformance public material is not serializable".to_owned())
+    })?;
+    if encoded.len() > MAX_ONBOARDING_PUBLIC_MATERIAL_BYTES {
+        return Err(RepositoryError::Consistency(
+            "conformance public material exceeds the supported bound".to_owned(),
+        ));
+    }
+    let mut nodes = 0usize;
+    if !bounded_public_material_json(value, 0, &mut nodes) {
+        return Err(RepositoryError::Consistency(
+            "conformance public material exceeds structural limits".to_owned(),
+        ));
+    }
+    if contains_private_material(value) {
+        return Err(RepositoryError::Consistency(
+            "conformance public material contains private-key material".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_public_material_json(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+    *nodes += 1;
+    if depth > 8 || *nodes > 512 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => object.iter().all(|(key, value)| {
+            key.len() <= 255 && bounded_public_material_json(value, depth + 1, nodes)
+        }),
+        Value::Array(array) => array
+            .iter()
+            .all(|value| bounded_public_material_json(value, depth + 1, nodes)),
+        Value::String(value) => value.len() <= MAX_ONBOARDING_PUBLIC_MATERIAL_STRING_BYTES,
+        _ => true,
+    }
+}
+
+fn contains_private_material(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            key.contains("private")
+                || key.contains("secret")
+                || matches!(
+                    key.as_str(),
+                    "d" | "p" | "q" | "dp" | "dq" | "qi" | "oth" | "k"
+                )
+                || contains_private_material(value)
+        }),
+        Value::Array(array) => array.iter().any(contains_private_material),
+        Value::String(value) => value.to_ascii_uppercase().contains("PRIVATE KEY"),
+        _ => false,
+    }
 }
 
 fn bounded_onboarding_json(value: &Value, depth: usize, nodes: &mut usize) -> bool {
@@ -2083,6 +2157,7 @@ mod tests {
             bundle_schema: 1,
             bundle_sha256: "a".repeat(64),
             material_sha256: "b".repeat(64),
+            public_material: serde_json::json!({"schema": 1}),
             suite_origin: "https://suite.example.test".to_owned(),
             dynamic_registration_initial_access_token_sha256: Some("c".repeat(64)),
             ciba_automated_decision_token_sha256: Some("d".repeat(64)),
@@ -2212,6 +2287,36 @@ mod tests {
         let error = validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)
             .unwrap_err();
         assert!(error.to_string().contains("per-dataset bound"));
+    }
+
+    #[test]
+    fn onboarding_public_material_rejects_private_or_unbounded_values() {
+        let error = validate_onboarding_public_material(&Value::Array(Vec::new())).unwrap_err();
+        assert!(error.to_string().contains("non-empty object"));
+
+        let error = validate_onboarding_public_material(
+            &serde_json::json!({"key_attestation_jwks": {"keys": [{"d": "private"}]}}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("private-key"));
+
+        let error = validate_onboarding_public_material(
+            &serde_json::json!({"credential_trust_anchor_pem": "-----BEGIN PRIVATE KEY-----"}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("private-key"));
+
+        let error = validate_onboarding_public_material(&serde_json::json!({
+            "credential_trust_anchor_pem": "x".repeat(MAX_ONBOARDING_PUBLIC_MATERIAL_BYTES),
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("supported bound"));
+
+        validate_onboarding_public_material(&serde_json::json!({
+            "schema": 1,
+            "credential_trust_anchor_pem": "public",
+        }))
+        .unwrap();
     }
 
     #[test]

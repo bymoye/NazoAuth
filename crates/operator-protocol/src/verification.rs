@@ -541,7 +541,7 @@ pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), Protoc
                     "unsupported conformance onboarding profile",
                 ));
             }
-            if *bundle_schema != 2 {
+            if *bundle_schema != 3 {
                 return Err(ProtocolError::Policy(
                     "unsupported conformance onboarding bundle schema",
                 ));
@@ -1343,7 +1343,10 @@ fn is_conformance_sensitive_key(key: &str) -> bool {
     )
 }
 
-fn validate_openid4vc_conformance_trust(
+/// Validate the public trust material carried by an OpenID4VC conformance
+/// lease.  This is deliberately closed here, at the protocol boundary, so
+/// the runtime and controller cannot silently accept a different key shape.
+pub fn validate_openid4vc_conformance_trust(
     material: &Openid4vcConformanceTrust,
 ) -> Result<(), ProtocolError> {
     if material.schema != 1
@@ -1368,30 +1371,92 @@ fn validate_openid4vc_conformance_trust(
             "OpenID4VC conformance trust material exceeds 32 KiB",
         ));
     }
-    for jwks in [
-        &material.client_attestation_jwks,
-        &material.key_attestation_jwks,
-    ] {
-        let keys = jwks
-            .get("keys")
-            .and_then(serde_json::Value::as_array)
-            .filter(|keys| !keys.is_empty())
-            .ok_or(ProtocolError::Policy(
-                "OpenID4VC conformance trust requires non-empty JWK Sets",
-            ))?;
-        if keys.iter().any(|key| {
-            key.as_object().is_none_or(|object| {
-                ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
-                    .iter()
-                    .any(|name| object.contains_key(*name))
-            })
-        }) {
+    validate_openid4vc_trust_jwks(&material.client_attestation_jwks, true)?;
+    validate_openid4vc_trust_jwks(&material.key_attestation_jwks, false)?;
+    Ok(())
+}
+
+fn validate_openid4vc_trust_jwks(
+    jwks: &serde_json::Value,
+    client_attestation: bool,
+) -> Result<(), ProtocolError> {
+    let keys = jwks
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .filter(|keys| !keys.is_empty())
+        .ok_or(ProtocolError::Policy(
+            "OpenID4VC conformance trust requires non-empty JWK Sets",
+        ))?;
+    let mut key_ids = std::collections::BTreeSet::new();
+    for key in keys {
+        let object = key.as_object().ok_or(ProtocolError::Policy(
+            "OpenID4VC conformance trust must contain public keys only",
+        ))?;
+        if ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+            .iter()
+            .any(|name| object.contains_key(*name))
+        {
             return Err(ProtocolError::Policy(
                 "OpenID4VC conformance trust must contain public keys only",
             ));
         }
+        let kid = object
+            .get("kid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|kid| !kid.is_empty() && kid.len() <= 256);
+        if let Some(kid) = kid {
+            if !key_ids.insert(kid.to_owned()) {
+                return Err(ProtocolError::Policy(
+                    "OpenID4VC conformance trust keys require unique key ids",
+                ));
+            }
+        } else if !client_attestation || keys.len() != 1 {
+            return Err(ProtocolError::Policy(
+                "OpenID4VC conformance trust keys require unique key ids",
+            ));
+        }
+        let key_type = object.get("kty").and_then(serde_json::Value::as_str);
+        let algorithm = object
+            .get("alg")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(match key_type {
+                Some("EC") => "ES256",
+                Some("OKP") => "EdDSA",
+                _ => "",
+            });
+        match (key_type, algorithm) {
+            (Some("EC"), "ES256")
+                if object.get("crv").and_then(serde_json::Value::as_str) == Some("P-256")
+                    && valid_jwk_coordinate(object.get("x"), 32)
+                    && valid_jwk_coordinate(object.get("y"), 32) =>
+            {
+                // Key-attestation ES256 keys may omit alg; the JWT header
+                // still selects the supported algorithm at verification.
+            }
+            (Some("OKP"), "EdDSA")
+                if !client_attestation
+                    && object.get("crv").and_then(serde_json::Value::as_str) == Some("Ed25519")
+                    && valid_jwk_coordinate(object.get("x"), 32) =>
+            {
+                // Supported holder key-attestation Ed25519 key.
+            }
+            _ => {
+                return Err(ProtocolError::Policy(
+                    "OpenID4VC conformance trust contains an unsupported public key",
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn valid_jwk_coordinate(value: Option<&serde_json::Value>, expected_len: usize) -> bool {
+    let Some(value) = value.and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .is_ok_and(|decoded| decoded.len() == expected_len)
 }
 
 pub(crate) fn validate_transition(
