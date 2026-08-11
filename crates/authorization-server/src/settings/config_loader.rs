@@ -1,5 +1,19 @@
 use super::*;
 
+pub(crate) fn credential_configurations_from_config(
+    config: &ConfigSource,
+) -> anyhow::Result<BTreeMap<String, nazo_openid4vci::CredentialConfiguration>> {
+    let configurations: BTreeMap<String, nazo_openid4vci::CredentialConfiguration> = config
+        .optional_string("OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON")
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?
+        .unwrap_or_default();
+    for configuration in configurations.values() {
+        configuration.validate().map_err(anyhow::Error::from)?;
+    }
+    Ok(configurations)
+}
+
 impl Settings {
     pub(crate) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
         let public_base_url = config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000");
@@ -181,18 +195,7 @@ impl Settings {
         )?;
         let openid4vc_client_attestation_issuer =
             config.optional_string("OPENID4VC_CLIENT_ATTESTATION_ISSUER");
-        let credential_configurations = config
-            .optional_string("OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON")
-            .map(|value| {
-                serde_json::from_str::<BTreeMap<String, nazo_openid4vci::CredentialConfiguration>>(
-                    &value,
-                )
-            })
-            .transpose()?
-            .unwrap_or_default();
-        for configuration in credential_configurations.values() {
-            configuration.validate().map_err(anyhow::Error::from)?;
-        }
+        let credential_configurations = credential_configurations_from_config(config)?;
         let deferred_credential_configurations = config
             .optional_string("OPENID4VCI_DEFERRED_CREDENTIAL_CONFIGURATIONS")
             .map(|value| {

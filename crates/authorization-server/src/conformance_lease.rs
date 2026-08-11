@@ -41,6 +41,8 @@ const CONFORMANCE_BUNDLE_PATH: &str = "/run/nazoauth-operator/conformance-bundle
 const CONFORMANCE_CLIENT_SECRET_PEPPER_PATH: &str = "/run/nazoauth-operator/client-secret-pepper";
 const CONFORMANCE_PAIRWISE_SUBJECT_SECRET_PATH: &str =
     "/run/nazoauth-operator/pairwise-subject-secret";
+const CONFORMANCE_OPENID4VC_DATA_ENCRYPTION_KEY_PATH: &str =
+    "/run/nazoauth-operator/openid4vc-data-encryption-key";
 const CONFORMANCE_OUTPUT_DIRECTORY: &str = "/run/nazoauth-operator-output";
 const MAX_CONFORMANCE_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CONFORMANCE_CLIENT_REQUEST_BYTES: usize = 256 * 1024;
@@ -688,14 +690,12 @@ fn validate_onboarding_credential_datasets(
     // limits (SD-JWT reserved claims and mdoc namespace shape).  No admin
     // session is created: this is validation only; persistence receives the
     // already-validated map in the atomic onboarding transaction.
-    let config = ConfigSource::load()
+    let config = ConfigSource::load_without_secret_values()
         .map_err(|_| anyhow::anyhow!("conformance credential configuration is unavailable"))?;
-    let settings = crate::settings::Settings::from_config(&config)
+    let credential_configurations = crate::settings::credential_configurations_from_config(&config)
         .map_err(|_| anyhow::anyhow!("conformance credential configuration is unavailable"))?;
     for (configuration_id, claims) in datasets {
-        let configuration = settings
-            .openid4vc
-            .credential_configurations
+        let configuration = credential_configurations
             .get(configuration_id)
             .ok_or_else(|| anyhow::anyhow!("conformance credential configuration is unknown"))?;
         let request = crate::domain::PutCredentialDatasetRequest {
@@ -1654,8 +1654,15 @@ fn repository() -> anyhow::Result<ConformanceLeaseRepository> {
 }
 
 fn repository_for_onboarding() -> anyhow::Result<ConformanceLeaseRepository> {
-    let config = ConfigSource::load()?;
-    let encoded_key = config.required_string("OPENID4VC_DATA_ENCRYPTION_KEY")?;
+    let config = ConfigSource::load_for_migrations()?;
+    let encoded_key = read_fixed_secret_string(
+        &conformance_policy_secret_path(
+            "NAZOAUTH_OPERATOR_OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
+            CONFORMANCE_OPENID4VC_DATA_ENCRYPTION_KEY_PATH,
+            "openid4vc-data-encryption-key",
+        )?,
+        "conformance OpenID4VC data encryption key",
+    )?;
     let data_key = URL_SAFE_NO_PAD
         .decode(encoded_key)
         .map_err(|_| anyhow::anyhow!("OpenID4VC data encryption key is invalid"))?;
