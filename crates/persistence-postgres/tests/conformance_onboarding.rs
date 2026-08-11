@@ -745,7 +745,7 @@ async fn active_lease_binding_requires_exact_run_identity_and_live_state() {
             suite_origin: &origin,
             created_at: now,
             expires_at: now + Duration::minutes(5),
-            revoked_at: None,
+            revoked_at: Some(now),
             cleaned_at: Some(now),
         },
     )
