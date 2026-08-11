@@ -462,13 +462,13 @@ async fn validate_bundle(
     }
     let requires_dynamic_token = descriptor_requires_reference(
         &descriptor,
-        "generated.dynamic_registration_initial_access_token",
+        "deployment.dynamic_registration_initial_access_token",
     );
     // The CIBA secret is embedded in the generated decision URL, rather than
     // exposed as a second independent Matrix value. Both forms are protocol
     // references to the same lease-bound secret.
     let requires_ciba_token =
-        descriptor_requires_reference(&descriptor, "generated.ciba_automated_decision_token")
+        descriptor_requires_reference(&descriptor, "deployment.ciba_automated_decision_token")
             || descriptor_requires_reference(&descriptor, "target.ciba_automated_decision_url");
     if dynamic_registration_initial_access_token.is_some() != requires_dynamic_token
         || ciba_automated_decision_token.is_some() != requires_ciba_token
