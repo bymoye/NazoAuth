@@ -9,6 +9,10 @@ use std::{
 
 use super::*;
 
+async fn execute(operation: &TaskOperation) -> TaskOutcome {
+    execute_with_jti(operation, "request-00000000000000000000000000000000").await
+}
+
 fn temporary_directory() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "nazoauth-operator-task-test-{}",

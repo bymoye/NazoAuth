@@ -72,8 +72,6 @@ mod identity;
 mod lifecycle;
 mod receipts;
 
-#[cfg(test)]
-use execution::execute;
 use execution::execute_with_jti;
 pub(crate) use identity::embedded_identity;
 use identity::{

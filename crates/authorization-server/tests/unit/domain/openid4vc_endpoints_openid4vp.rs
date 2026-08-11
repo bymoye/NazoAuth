@@ -290,22 +290,6 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
         (500, "server_error")
     );
 
-    let invalid_wallet_url = disabled
-        .conformance_lease_for_wallet("not a url")
-        .await
-        .expect_err("invalid conformance wallet URL must fail closed");
-    assert_eq!(
-        (invalid_wallet_url.status, invalid_wallet_url.error),
-        (400, "invalid_request")
-    );
-    let unavailable_lease = disabled
-        .conformance_lease_for_wallet("https://wallet.example/authorize")
-        .await
-        .expect_err("conformance lease lookup must report unavailable storage");
-    assert_eq!(
-        (unavailable_lease.status, unavailable_lease.error),
-        (503, "server_error")
-    );
     assert!(
         disabled
             .conformance_credential_trust_anchors(None)
@@ -769,13 +753,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .await
         .expect("valid OpenID4VC conformance lease should be created");
     bind_suite_origin(&pool, valid_lease.id, &conformance_origin, &valid_task_jti).await;
-    assert_eq!(
-        operations
-            .conformance_lease_for_wallet(&conformance_endpoint)
-            .await
-            .expect("wallet should resolve to its sole conformance lease"),
-        Some(valid_lease.id)
-    );
     let partial_lease_binding = operations
         .create(CreatePresentationRequest {
             conformance_lease_id: Some(valid_lease.id),
@@ -905,13 +882,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     assert_eq!(anchors.len(), 2);
     assert!(anchors.iter().all(|anchor| !anchor.is_empty()));
 
-    assert_eq!(
-        operations
-            .conformance_lease_for_wallet("https://different-suite.example/authorize")
-            .await
-            .expect("a cross-origin wallet must not match the lease"),
-        None
-    );
     let cross_origin_binding = operations
         .create(CreatePresentationRequest {
             wallet_authorization_endpoint: "https://different-suite.example/authorize".to_owned(),
@@ -977,12 +947,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         duplicate_transaction.conformance_lease_id,
         Some(duplicate_lease.id)
     );
-    let ambiguous = operations
-        .conformance_lease_for_wallet(&conformance_endpoint)
-        .await
-        .expect_err("duplicate wallet trust must fail closed");
-    assert_eq!((ambiguous.status, ambiguous.error), (503, "server_error"));
-
     leases
         .revoke(
             crate::domain::tenancy::DEFAULT_TENANT_ID,
@@ -990,13 +954,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         )
         .await
         .expect("duplicate lease should be revocable");
-    assert_eq!(
-        operations
-            .conformance_lease_for_wallet(&conformance_endpoint)
-            .await
-            .expect("revoked duplicate must no longer make the origin ambiguous"),
-        Some(valid_lease.id)
-    );
     let revoked_binding = operations
         .create(CreatePresentationRequest {
             wallet_authorization_endpoint: conformance_endpoint.clone(),
@@ -1015,13 +972,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .revoke(crate::domain::tenancy::DEFAULT_TENANT_ID, valid_lease.id)
         .await
         .expect("valid lease should be revocable");
-    assert_eq!(
-        operations
-            .conformance_lease_for_wallet(&conformance_endpoint)
-            .await
-            .expect("revoked lease lookup should succeed"),
-        None
-    );
 
     let expired_origin = format!("https://wallet-expired-{}.example", Uuid::now_v7().simple());
     let expired_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
@@ -1038,13 +988,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .expect("expired-origin conformance lease should be created");
     bind_suite_origin(&pool, expired_lease.id, &expired_origin, &expired_task_jti).await;
     expire_lease(&pool, expired_lease.id).await;
-    assert_eq!(
-        operations
-            .conformance_lease_for_wallet(&format!("{expired_origin}/authorize"))
-            .await
-            .expect("expired lease lookup should succeed"),
-        None
-    );
     let expired_binding = operations
         .create(CreatePresentationRequest {
             wallet_authorization_endpoint: format!("{expired_origin}/authorize"),

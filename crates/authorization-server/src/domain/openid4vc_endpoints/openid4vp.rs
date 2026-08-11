@@ -121,24 +121,6 @@ impl ServerPresentationOperations {
             .map_err(|_| vp_error(503, "server_error", "Presentation request signing failed."))
     }
 
-    #[cfg(test)]
-    async fn conformance_lease_for_wallet(
-        &self,
-        wallet_authorization_endpoint: &str,
-    ) -> Result<Option<Uuid>, PresentationHttpError> {
-        let wallet_origin = Self::wallet_origin(wallet_authorization_endpoint)?;
-        self.conformance
-            .active_lease_for_suite_origin(self.tenant_id, "nazoauth-full", &wallet_origin)
-            .await
-            .map_err(|_| {
-                vp_error(
-                    503,
-                    "server_error",
-                    "Conformance trust state is unavailable.",
-                )
-            })
-    }
-
     fn validate_conformance_task_jti(task_jti: &str) -> bool {
         let Some(suffix) = task_jti.strip_prefix("request-") else {
             return false;
