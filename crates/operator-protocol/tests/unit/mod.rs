@@ -511,6 +511,7 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
             release: "v0.1.0".to_owned(),
             digest: "a".repeat(64),
         },
+        openid4vc_credential_datasets: BTreeMap::new(),
         groups: vec![ConformanceMatrixGroup {
             id: "oidc-core".to_owned(),
             profile: "oidc-core".to_owned(),
@@ -613,6 +614,7 @@ fn conformance_matrix_registration_vectors_are_arrays_of_strings() {
             release: "v0.1.0".to_owned(),
             digest: "a".repeat(64),
         },
+        openid4vc_credential_datasets: BTreeMap::new(),
         groups: vec![ConformanceMatrixGroup {
             id: "oidc-core".to_owned(),
             profile: "oidc-core".to_owned(),
@@ -665,6 +667,80 @@ fn conformance_matrix_registration_vectors_are_arrays_of_strings() {
             ))
         ));
     }
+}
+
+#[test]
+fn conformance_matrix_openid4vc_datasets_are_bounded_public_objects() {
+    let bytes = include_bytes!(
+        "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"
+    );
+    let descriptor: ConformanceMatrixDescriptor =
+        serde_json::from_slice(bytes).expect("checked-in matrix JSON");
+    validate_conformance_matrix_descriptor(&descriptor)
+        .expect("checked-in credential datasets must satisfy protocol policy");
+    assert_eq!(descriptor.openid4vc_credential_datasets.len(), 2);
+    assert_eq!(
+        descriptor
+            .openid4vc_credential_datasets
+            .get("eu.europa.ec.eudi.pid.1")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|claims| claims.get("email"))
+            .and_then(serde_json::Value::as_str),
+        Some("credential-holder@example.test")
+    );
+
+    let mut secret = descriptor.clone();
+    secret.openid4vc_credential_datasets.insert(
+        "test-secret".to_owned(),
+        serde_json::json!({"nested": {"private_jwk": "forbidden"}}),
+    );
+    assert!(validate_conformance_matrix_descriptor(&secret).is_err());
+
+    let mut scalar = descriptor.clone();
+    scalar
+        .openid4vc_credential_datasets
+        .insert("test-scalar".to_owned(), serde_json::json!("not an object"));
+    assert!(validate_conformance_matrix_descriptor(&scalar).is_err());
+
+    let mut placeholder = descriptor.clone();
+    placeholder.openid4vc_credential_datasets.insert(
+        "test-placeholder".to_owned(),
+        serde_json::json!({"given_name": "{{generated.applicant_password}}"}),
+    );
+    assert!(validate_conformance_matrix_descriptor(&placeholder).is_err());
+
+    let mut drift = descriptor.clone();
+    let mut changed = false;
+    for group in &mut drift.groups {
+        for plan in &mut group.plans {
+            if plan
+                .config_template
+                .get("vci")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|vci| vci.get("credential_configuration_id"))
+                .is_some()
+            {
+                plan.config_template["nazo"]["credential_dataset"]["given_name"] =
+                    serde_json::json!("drifted");
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            break;
+        }
+    }
+    assert!(changed);
+    assert!(validate_conformance_matrix_descriptor(&drift).is_err());
+
+    let mut too_many = descriptor.clone();
+    for index in 0..=64 {
+        too_many.openid4vc_credential_datasets.insert(
+            format!("test-dataset-{index}"),
+            serde_json::json!({"given_name": "Conformance"}),
+        );
+    }
+    assert!(validate_conformance_matrix_descriptor(&too_many).is_err());
 }
 
 #[test]

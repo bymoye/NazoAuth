@@ -4,6 +4,44 @@
     "release": "oidf-conformance-suite-v5.2.2",
     "digest": "69385bc13aa415f6ee6143884d417c7a3d47e565ec0f17e285ede6c8c253944f"
   },
+  "openid4vc_credential_datasets": {
+    "eu.europa.ec.eudi.pid.1": {
+      "address": {
+        "country": "UT",
+        "formatted": "1 Conformance Way, Test City",
+        "locality": "Test City",
+        "postal_code": "00000",
+        "street_address": "1 Conformance Way"
+      },
+      "birthdate": "1990-01-01",
+      "email": "credential-holder@example.test",
+      "email_verified": true,
+      "family_name": "Specimen",
+      "given_name": "Conformance",
+      "name": "Conformance Specimen"
+    },
+    "org.iso.18013.5.1.mDL": {
+      "org.iso.18013.5.1": {
+        "birth_date": "1990-01-01",
+        "document_number": "SPECIMEN-0001",
+        "driving_privileges": [
+          {
+            "expiry_date": "2036-07-16",
+            "issue_date": "2026-07-16",
+            "vehicle_category_code": "B"
+          }
+        ],
+        "expiry_date": "2036-07-16",
+        "family_name": "Specimen",
+        "given_name": "Conformance",
+        "issue_date": "2026-07-16",
+        "issuing_authority": "Conformance Credential Authority",
+        "issuing_country": "UT",
+        "portrait": "conformance-specimen-portrait",
+        "un_distinguishing_sign": "UT"
+      }
+    }
+  },
   "groups": [
     {
       "id": "oidc-core",

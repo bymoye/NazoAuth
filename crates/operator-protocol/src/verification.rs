@@ -11,8 +11,11 @@ use crate::{
     CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA, DEPLOYMENT_STATEMENT_JWS_TYPE,
     FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE, MAX_CONFORMANCE_MATRIX_GROUPS,
     MAX_CONFORMANCE_MATRIX_PLANS, MAX_CONFORMANCE_ONBOARDING_CLIENTS,
-    MAX_DISCOVERY_LIFETIME_SECONDS, MAX_TASK_LIFETIME_SECONDS, PROTOCOL_VERSION, ProtocolError,
-    RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
+    MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES,
+    MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES,
+    MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS, MAX_DISCOVERY_LIFETIME_SECONDS,
+    MAX_TASK_LIFETIME_SECONDS, PROTOCOL_VERSION, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE,
+    TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
 };
 
 pub fn validate_discovery_request(request: &DiscoveryRequest) -> Result<(), ProtocolError> {
@@ -602,6 +605,7 @@ pub fn validate_conformance_matrix_descriptor(
     }
     validate_identifier(&descriptor.source.release)?;
     validate_lower_hex(&descriptor.source.digest, 64)?;
+    validate_conformance_openid4vc_credential_datasets(&descriptor.openid4vc_credential_datasets)?;
     if descriptor.groups.is_empty() || descriptor.groups.len() > MAX_CONFORMANCE_MATRIX_GROUPS {
         return Err(ProtocolError::Policy(
             "conformance matrix group count is out of bounds",
@@ -695,6 +699,10 @@ pub fn validate_conformance_matrix_descriptor(
             "conformance matrix must contain at least one plan",
         ));
     }
+    validate_conformance_openid4vc_dataset_references(
+        descriptor,
+        &descriptor.openid4vc_credential_datasets,
+    )?;
     // Resolve placeholders only after all groups/plans have contributed their
     // logical clients, allowing a role declared in one plan to be referenced
     // by another plan without making validation order observable.
@@ -727,6 +735,164 @@ pub fn validate_conformance_matrix_descriptor(
         }
     }
     Ok(())
+}
+
+fn validate_conformance_openid4vc_dataset_references(
+    descriptor: &ConformanceMatrixDescriptor,
+    datasets: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), ProtocolError> {
+    let mut referenced = std::collections::BTreeSet::new();
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            let Some(config_id) = plan
+                .config_template
+                .get("vci")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|vci| vci.get("credential_configuration_id"))
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            // Multiple plans may intentionally use the same credential
+            // configuration; the map remains one value per ID.
+            referenced.insert(config_id.to_owned());
+            let Some(claims) = datasets.get(config_id) else {
+                return Err(ProtocolError::Policy(
+                    "conformance VCI plan references an unknown credential dataset",
+                ));
+            };
+            if let Some(plan_claims) = plan
+                .config_template
+                .get("nazo")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|nazo| nazo.get("credential_dataset"))
+                && plan_claims != claims
+            {
+                return Err(ProtocolError::Policy(
+                    "conformance VCI plan credential dataset drifts from the Matrix map",
+                ));
+            }
+        }
+    }
+    if referenced
+        != datasets
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    {
+        return Err(ProtocolError::Policy(
+            "conformance Matrix credential dataset map does not match VCI plans",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates the public claims that are copied into a lease-owned OpenID4VC
+/// applicant.  This is intentionally independent of issuer storage: the
+/// checked-in Matrix is the authority for which configuration IDs are
+/// available, while the runtime performs its normal credential-format checks
+/// before writing the values.
+fn validate_conformance_openid4vc_credential_datasets(
+    datasets: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), ProtocolError> {
+    if datasets.len() > usize::try_from(MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS).unwrap() {
+        return Err(ProtocolError::Policy(
+            "conformance OpenID4VC credential dataset count is out of bounds",
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for (configuration_id, claims) in datasets {
+        validate_identifier(configuration_id)?;
+        let Some(object) = claims.as_object() else {
+            return Err(ProtocolError::Policy(
+                "conformance OpenID4VC credential dataset must be an object",
+            ));
+        };
+        if object.is_empty() {
+            return Err(ProtocolError::Policy(
+                "conformance OpenID4VC credential dataset must not be empty",
+            ));
+        }
+        let encoded = serde_json::to_vec(claims).map_err(|_| ProtocolError::Json)?;
+        if encoded.len() > MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES
+            || total_bytes.saturating_add(encoded.len())
+                > MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES
+        {
+            return Err(ProtocolError::Policy(
+                "conformance OpenID4VC credential dataset size is out of bounds",
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(encoded.len());
+        let mut nodes = 0usize;
+        validate_public_credential_claims(claims, 0, &mut nodes)?;
+    }
+    Ok(())
+}
+
+fn validate_public_credential_claims(
+    value: &serde_json::Value,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), ProtocolError> {
+    *nodes = nodes.saturating_add(1);
+    if depth > 8 || *nodes > 512 {
+        return Err(ProtocolError::Policy(
+            "conformance OpenID4VC credential dataset structure is too deep",
+        ));
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if key.is_empty()
+                    || key.len() > 255
+                    || key.chars().any(char::is_control)
+                    || is_forbidden_public_credential_claim_key(key)
+                {
+                    return Err(ProtocolError::Policy(
+                        "conformance OpenID4VC credential dataset contains a forbidden claim",
+                    ));
+                }
+                validate_public_credential_claims(child, depth + 1, nodes)?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for child in array {
+                validate_public_credential_claims(child, depth + 1, nodes)?;
+            }
+        }
+        serde_json::Value::String(string) => {
+            if string.len() > 4096 || string.contains("{{") || string.contains("}}") {
+                return Err(ProtocolError::Policy(
+                    "conformance OpenID4VC credential dataset contains an invalid value",
+                ));
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn is_forbidden_public_credential_claim_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "password"
+            | "password_hash"
+            | "token"
+            | "access_token"
+            | "refresh_token"
+            | "client_secret"
+            | "private_key"
+            | "private_jwk"
+            | "private_jwks"
+            | "d"
+            | "p"
+            | "q"
+            | "dp"
+            | "dq"
+            | "qi"
+            | "oth"
+            | "k"
+    )
 }
 
 fn validate_conformance_matrix_variant(

@@ -56,10 +56,157 @@ INITIAL_ANONYMOUS_AUTHORIZATION_VISIT_MODULES = frozenset(
 REPEATED_HOSTED_AUTHORIZATION_MODULES = frozenset(
     {"fapi2-security-profile-final-par-attempt-reuse-request_uri"}
 )
+DATASET_SOURCE_ADMIN = "admin"
+DATASET_SOURCE_LEASE = "lease"
+DATASET_SOURCES = (DATASET_SOURCE_ADMIN, DATASET_SOURCE_LEASE)
+LEASE_BINDING_REQUIRED_FIELDS = frozenset(
+    {
+        "lease_id",
+        "applicant_id",
+        "request_jti",
+        "matrix_sha256",
+        "bundle_sha256",
+        "expires_at",
+    }
+)
+LEASE_BINDING_OPTIONAL_FIELDS = frozenset(
+    {"client_mappings", "client_count", "idempotent_replay"}
+)
 
 
 def fail(message: str) -> None:
     raise SystemExit(message)
+
+
+def _canonical_uuid(value: object, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError(f"lease binding {field} must be a UUID")
+    try:
+        return str(uuid.UUID(value))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise RuntimeError(f"lease binding {field} must be a UUID") from error
+
+
+def _require_digest(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise RuntimeError(f"lease binding {field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def validate_lease_dataset_binding(config: dict[str, object]) -> dict[str, object]:
+    """Validate the non-secret evidence for a lease-provisioned dataset set."""
+    if config.get("dataset_source") != DATASET_SOURCE_LEASE:
+        raise RuntimeError(
+            "lease dataset mode requires driver config dataset_source=lease"
+        )
+    binding = config.get("lease_binding")
+    if not isinstance(binding, dict):
+        raise RuntimeError("lease dataset mode requires driver config lease_binding")
+    fields = set(binding)
+    allowed = LEASE_BINDING_REQUIRED_FIELDS | LEASE_BINDING_OPTIONAL_FIELDS
+    missing = LEASE_BINDING_REQUIRED_FIELDS - fields
+    unknown = fields - allowed
+    if missing:
+        raise RuntimeError(
+            "lease binding is missing required fields: " + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise RuntimeError(
+            "lease binding contains unknown fields: " + ", ".join(sorted(unknown))
+        )
+
+    _canonical_uuid(binding["lease_id"], field="lease_id")
+    applicant_id = _canonical_uuid(binding["applicant_id"], field="applicant_id")
+    issuer = config.get("issuer")
+    if not isinstance(issuer, dict) or issuer.get("dedicated_conformance_subject") is not True:
+        raise RuntimeError(
+            "lease dataset mode requires an explicitly dedicated conformance subject"
+        )
+    subject_id = _canonical_uuid(issuer.get("subject_id"), field="issuer.subject_id")
+    if subject_id != applicant_id:
+        raise RuntimeError(
+            "lease binding applicant_id does not match issuer subject_id"
+        )
+
+    request_jti = binding["request_jti"]
+    if (
+        not isinstance(request_jti, str)
+        or not request_jti
+        or len(request_jti) > 256
+        or any(character.isspace() for character in request_jti)
+    ):
+        raise RuntimeError("lease binding request_jti is invalid")
+    _require_digest(binding["matrix_sha256"], field="matrix_sha256")
+    _require_digest(binding["bundle_sha256"], field="bundle_sha256")
+    expires_at = binding["expires_at"]
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int) or expires_at <= 0:
+        raise RuntimeError("lease binding expires_at must be a positive integer")
+    if expires_at <= int(time.time()):
+        raise RuntimeError("lease binding expires_at is not in the future")
+
+    client_mappings = binding.get("client_mappings")
+    if client_mappings is not None:
+        if not isinstance(client_mappings, dict) or any(
+            not isinstance(logical, str)
+            or not logical
+            or not isinstance(actual, str)
+            or not actual
+            for logical, actual in client_mappings.items()
+        ):
+            raise RuntimeError("lease binding client_mappings is invalid")
+    client_count = binding.get("client_count")
+    if client_count is not None:
+        if isinstance(client_count, bool) or not isinstance(client_count, int) or client_count < 1:
+            raise RuntimeError("lease binding client_count is invalid")
+        if client_mappings is not None and client_count != len(client_mappings):
+            raise RuntimeError(
+                "lease binding client_count does not match client_mappings"
+            )
+    idempotent_replay = binding.get("idempotent_replay")
+    if idempotent_replay is not None and not isinstance(idempotent_replay, bool):
+        raise RuntimeError("lease binding idempotent_replay must be a boolean")
+    return binding
+
+
+def validate_dataset_source(config: dict[str, object], source: str) -> None:
+    if source not in DATASET_SOURCES:
+        raise RuntimeError(f"unsupported OpenID4VC dataset source: {source}")
+    binding = config.get("lease_binding")
+    declared = config.get("dataset_source")
+    if source == DATASET_SOURCE_LEASE:
+        validate_lease_dataset_binding(config)
+        return
+    if declared not in (None, DATASET_SOURCE_ADMIN):
+        raise RuntimeError("admin dataset mode cannot use lease dataset evidence")
+    if binding is not None:
+        raise RuntimeError("admin dataset mode cannot include lease_binding")
+
+
+def install_credential_datasets_if_needed(
+    config: dict[str, object],
+    credentials: dict[str, str],
+    source: str,
+) -> list[tuple[str, str]]:
+    validate_dataset_source(config, source)
+    if source == DATASET_SOURCE_LEASE:
+        return []
+    _, installed = install_credential_datasets(config, credentials)
+    return installed
+
+
+def cleanup_credential_datasets_if_needed(
+    config: dict[str, object],
+    credentials: dict[str, str],
+    source: str,
+    installed: list[tuple[str, str]],
+) -> None:
+    if source != DATASET_SOURCE_ADMIN or not installed:
+        return
+    cleanup_credential_datasets(
+        canonical_https_origin(str(config.get("target_origin", "")), label="target_origin"),
+        credentials,
+        installed,
+    )
 
 
 def install_credential_datasets(
@@ -970,6 +1117,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver-config-json-file", required=True)
     parser.add_argument(
+        "--dataset-source",
+        choices=DATASET_SOURCES,
+        default=DATASET_SOURCE_ADMIN,
+        help=(
+            "dataset provisioning authority: admin performs the legacy PUT/DELETE "
+            "flow; lease requires atomic lease evidence in the driver config"
+        ),
+    )
+    parser.add_argument(
+        "--p028-only",
+        action="store_true",
+        help=(
+            "run only the canonical VCI p028 expression while still validating "
+            "the complete 17-plan materialized artifact"
+        ),
+    )
+    parser.add_argument(
         "--plan-group-size",
         type=int,
         default=0,
@@ -986,7 +1150,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "strict diagnostic runs against a patched conformance suite"
         ),
     )
-    operator_credentials = parser.add_mutually_exclusive_group(required=True)
+    operator_credentials = parser.add_mutually_exclusive_group(required=False)
     operator_credentials.add_argument(
         "--operator-credentials-file",
         type=Path,
@@ -1009,7 +1173,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="read the suite token from an inherited descriptor >= 3",
     )
     parser.add_argument("runner_args", nargs=argparse.REMAINDER)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    has_operator_credentials = (
+        args.operator_credentials_file is not None
+        or args.operator_credentials_fd is not None
+    )
+    if args.dataset_source == DATASET_SOURCE_LEASE and has_operator_credentials:
+        parser.error(
+            "--dataset-source lease cannot be combined with operator credentials"
+        )
+    if args.dataset_source == DATASET_SOURCE_ADMIN and not has_operator_credentials:
+        parser.error(
+            "admin dataset source requires --operator-credentials-file or "
+            "--operator-credentials-fd"
+        )
+    return args
 
 
 def option_value(arguments: list[str], option: str) -> str | None:
@@ -1224,6 +1402,26 @@ def grouped_runner_args(runner_args: list[str], group_size: int, temp_dir: Path)
     return invocations
 
 
+def apply_targeted_plan_selection(
+    runner_args: list[str],
+    *,
+    p028_only: bool,
+    plan_group_size: int,
+) -> list[str]:
+    """Select p028 without weakening the full materialized-matrix checks."""
+    if not p028_only:
+        return runner_args
+    if plan_group_size != 0:
+        fail("--p028-only requires --plan-group-size 0")
+    if option_value(runner_args, "--plan-expression") is not None:
+        fail("--p028-only cannot be combined with --plan-expression")
+    return [
+        *runner_args,
+        "--plan-expression",
+        materializer.p028_plan_expression(),
+    ]
+
+
 def terminate_runner_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
@@ -1305,27 +1503,38 @@ def main(argv: list[str] | None = None) -> int:
         fail("arguments for run_oidf_conformance.py are required after --")
     if args.plan_group_size < 0:
         fail("--plan-group-size must be zero or greater")
-    config = json.loads(read_private_text(Path(args.driver_config_json_file)))
-    credentials = read_secret_document(
-        argparse.Namespace(
-            secrets_stdin=False,
-            secret_fd=args.operator_credentials_fd,
-            secret_file=args.operator_credentials_file,
-        ),
-        required_fields=(
-            "admin_email",
-            "admin_password",
-            "admin_mfa_totp_secret",
-        ),
+    runner_args = apply_targeted_plan_selection(
+        runner_args,
+        p028_only=args.p028_only,
+        plan_group_size=args.plan_group_size,
     )
+    config = json.loads(read_private_text(Path(args.driver_config_json_file)))
+    if not isinstance(config, dict):
+        fail("OpenID4VC driver config must be a JSON object")
+    try:
+        validate_dataset_source(config, args.dataset_source)
+    except RuntimeError as error:
+        fail(str(error))
+    credentials: dict[str, str] = {}
+    if args.dataset_source == DATASET_SOURCE_ADMIN:
+        credentials = read_secret_document(
+            argparse.Namespace(
+                secrets_stdin=False,
+                secret_fd=args.operator_credentials_fd,
+                secret_file=args.operator_credentials_file,
+            ),
+            required_fields=(
+                "admin_email",
+                "admin_password",
+                "admin_mfa_totp_secret",
+            ),
+        )
     suite_token = read_secret_value(
         descriptor=args.suite_token_fd
         if args.suite_token_fd is not None
         else None,
         path=args.suite_token_file,
     )
-    if not isinstance(config, dict):
-        fail("OpenID4VC driver config must be a JSON object")
     config["conformance_token"] = suite_token
     if "--no-api-token" in runner_args or "--disable-ssl-verify" in runner_args:
         fail("public black-box OpenID4VC runs require API authentication and TLS verification")
@@ -1341,7 +1550,11 @@ def main(argv: list[str] | None = None) -> int:
             "OpenID4VC suite contains stale generated plan configs: "
             + ", ".join(path.name for path in existing_plan_configs)
         )
-    admin, installed_datasets = install_credential_datasets(config, credentials)
+    installed_datasets = install_credential_datasets_if_needed(
+        config,
+        credentials,
+        args.dataset_source,
+    )
     stop = threading.Event()
     driver = Openid4vcDriver(config, stop)
     thread = threading.Thread(target=driver.run, name="openid4vc-oidf-driver", daemon=True)
@@ -1357,9 +1570,10 @@ def main(argv: list[str] | None = None) -> int:
         stop.set()
         thread.join(timeout=5)
         try:
-            cleanup_credential_datasets(
-                canonical_https_origin(str(config.get("target_origin", "")), label="target_origin"),
+            cleanup_credential_datasets_if_needed(
+                config,
                 credentials,
+                args.dataset_source,
                 installed_datasets,
             )
         finally:

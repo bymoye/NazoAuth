@@ -385,6 +385,7 @@ pub enum TaskResult {
     ConformanceLeaseCleaned {
         cleaned_leases: u64,
         deleted_clients: u64,
+        deleted_credential_datasets: u64,
     },
 }
 
@@ -444,6 +445,10 @@ pub struct ConformanceMatrixSummary {
 pub struct ConformanceMatrixDescriptor {
     pub schema: u32,
     pub source: ConformanceMatrixSource,
+    /// Public lease-owned OpenID4VC claims keyed by credential
+    /// configuration ID.  The server and CTL consume this map verbatim;
+    /// secrets, private keys, and applicant credentials are never part of it.
+    pub openid4vc_credential_datasets: BTreeMap<String, serde_json::Value>,
     pub groups: Vec<ConformanceMatrixGroup>,
 }
 

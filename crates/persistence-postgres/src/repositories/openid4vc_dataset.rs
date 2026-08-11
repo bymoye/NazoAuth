@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use chrono::{DateTime, Utc};
 use diesel::{OptionalExtension, QueryableByName, sql_query, sql_types};
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use nazo_openid4vci::CredentialStoreError;
 use rand::Rng;
 use uuid::Uuid;
@@ -32,6 +32,42 @@ pub struct ManagedCredentialDatasetWrite<'a> {
     pub claims: &'a serde_json::Value,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_until: Option<DateTime<Utc>>,
+}
+
+/// Inserts one lease-owned dataset and its append-only audit event through a
+/// caller-owned transaction connection.  The caller supplies ciphertext so
+/// encryption happens before the SQL write while still using this repository's
+/// canonical AAD/envelope format.
+pub(crate) async fn insert_operator_conformance_dataset_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    subject_id: Uuid,
+    actor_user_id: Uuid,
+    credential_configuration_id: &str,
+    claims_ciphertext: Vec<u8>,
+) -> Result<usize, diesel::result::Error> {
+    sql_query(
+        "WITH inserted AS (
+            INSERT INTO openid4vci_credential_datasets
+                (tenant_id, subject_id, credential_configuration_id,
+                 claims_ciphertext, source, valid_from, valid_until)
+            VALUES ($1, $2, $3, $4, 'operator-conformance', NULL, NULL)
+            RETURNING tenant_id, subject_id, credential_configuration_id
+         )
+         INSERT INTO openid4vci_credential_dataset_events
+            (tenant_id, subject_id, credential_configuration_id, action,
+             actor_user_id, source)
+         SELECT tenant_id, subject_id, credential_configuration_id, 1, $5,
+                'operator-conformance'
+         FROM inserted",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Uuid, _>(subject_id)
+    .bind::<sql_types::Text, _>(credential_configuration_id)
+    .bind::<sql_types::Binary, _>(claims_ciphertext)
+    .bind::<sql_types::Uuid, _>(actor_user_id)
+    .execute(connection)
+    .await
 }
 
 impl Openid4vciDatasetRepository {
@@ -244,7 +280,11 @@ fn dataset_aad(tenant_id: Uuid, subject_id: Uuid, credential_configuration_id: &
     aad
 }
 
-fn protect_dataset_claims(
+/// Encrypts issuer-authoritative claims with the same AAD and data key used by
+/// the managed-dataset repository.  Conformance onboarding calls this helper
+/// before inserting through its own transaction connection; it must not call
+/// the pool-backed methods above because that would split the transaction.
+pub(crate) fn protect_dataset_claims(
     key: &[u8; 32],
     tenant_id: Uuid,
     subject_id: Uuid,
@@ -271,7 +311,10 @@ fn protect_dataset_claims(
     Ok(protected)
 }
 
-fn unprotect_dataset_claims(
+/// Decrypts a dataset read through a caller-owned connection.  Keeping this
+/// primitive next to the normal dataset repository prevents onboarding replay
+/// from creating a second encryption format.
+pub(crate) fn unprotect_dataset_claims(
     key: &[u8; 32],
     tenant_id: Uuid,
     subject_id: Uuid,

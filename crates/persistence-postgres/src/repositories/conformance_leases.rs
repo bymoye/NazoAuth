@@ -8,7 +8,7 @@ use nazo_identity::{
 };
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
 };
 use uuid::Uuid;
@@ -19,6 +19,10 @@ use crate::{
         access_requests::insert_client,
         mtls_trust::{
             ConformanceApprovedTrustAnchor, insert_conformance_approved_trust_anchor_on_connection,
+        },
+        openid4vc::{
+            insert_operator_conformance_dataset_on_connection, protect_dataset_claims,
+            unprotect_dataset_claims,
         },
         users::insert_conformance_applicant_on_connection,
     },
@@ -34,6 +38,9 @@ const CIBA_DECISION_CLAIM_SECONDS: i64 = 30;
 const CIBA_REVOKE_WAIT_ATTEMPTS: usize = 121;
 const CIBA_REVOKE_WAIT_MILLIS: u64 = 250;
 const MAX_ONBOARDING_CLIENTS: usize = 512;
+const MAX_ONBOARDING_CREDENTIAL_DATASETS: usize = 64;
+const MAX_ONBOARDING_CREDENTIAL_DATASET_BYTES: usize = 64 * 1024;
+const MAX_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES: usize = 512 * 1024;
 const MAX_ONBOARDING_TASK_JTI_BYTES: usize = 255;
 const MAX_ONBOARDING_LOGICAL_ID_BYTES: usize = 128;
 const ATOMIC_CONFORMANCE_PROFILE: &str = "nazoauth-full";
@@ -63,6 +70,9 @@ pub struct ConformanceOnboardingRequest {
     pub applicant: ConformanceApplicant,
     pub clients: Vec<ConformanceClient>,
     pub mtls_trust_anchors: Vec<ConformanceMtlsTrustAnchor>,
+    /// Public, non-secret OpenID4VC claims keyed by credential configuration.
+    /// The repository encrypts each value before writing the dataset table.
+    pub openid4vc_credential_datasets: BTreeMap<String, Value>,
 }
 
 impl std::fmt::Debug for ConformanceOnboardingRequest {
@@ -95,6 +105,13 @@ impl std::fmt::Debug for ConformanceOnboardingRequest {
             .field("applicant", &self.applicant)
             .field("clients", &self.clients)
             .field("mtls_trust_anchors", &self.mtls_trust_anchors)
+            .field(
+                "openid4vc_credential_dataset_ids",
+                &self
+                    .openid4vc_credential_datasets
+                    .keys()
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -205,6 +222,7 @@ pub struct ConformanceLeaseTokenDigests<'a> {
 pub struct ConformanceLeaseCleanup {
     pub cleaned_leases: i32,
     pub deleted_clients: i32,
+    pub deleted_credential_datasets: i32,
 }
 
 #[derive(Clone, Debug, diesel::QueryableByName)]
@@ -218,12 +236,28 @@ pub struct ConformanceLeasePublicMaterial {
 #[derive(Clone)]
 pub struct ConformanceLeaseRepository {
     pool: DbPool,
+    openid4vc_data_key: Option<[u8; 32]>,
 }
 
 impl ConformanceLeaseRepository {
     #[must_use]
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            openid4vc_data_key: None,
+        }
+    }
+
+    /// Constructs an onboarding repository with the application encryption
+    /// key required for lease-owned OpenID4VC datasets.  The key remains in
+    /// the repository capability and is never part of the onboarding request
+    /// or its debug/audit projections.
+    #[must_use]
+    pub fn new_with_openid4vc_data_key(pool: DbPool, data_key: [u8; 32]) -> Self {
+        Self {
+            pool,
+            openid4vc_data_key: Some(data_key),
+        }
     }
 
     /// Atomically provisions one conformance run.  The task JTI is the
@@ -243,6 +277,7 @@ impl ConformanceLeaseRepository {
         validate_onboarding_request(&request)?;
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
         let request = request.clone();
+        let openid4vc_data_key = self.openid4vc_data_key;
         connection
             .transaction::<ConformanceOnboardingResult, OnboardingTxError, _>(
                 async move |connection| {
@@ -264,7 +299,13 @@ impl ConformanceLeaseRepository {
                     .optional()?;
 
                     if let Some(existing) = existing {
-                        return replay_or_conflict(connection, &request, existing).await;
+                        return replay_or_conflict(
+                            connection,
+                            &request,
+                            existing,
+                            openid4vc_data_key.as_ref(),
+                        )
+                        .await;
                     }
 
                     let lease_id = Uuid::now_v7();
@@ -333,7 +374,13 @@ impl ConformanceLeaseRepository {
                         .bind::<diesel::sql_types::Text, _>(&request.task_jti)
                         .get_result::<OnboardingLeaseRow>(connection)
                         .await?;
-                        return replay_or_conflict(connection, &request, existing).await;
+                        return replay_or_conflict(
+                            connection,
+                            &request,
+                            existing,
+                            openid4vc_data_key.as_ref(),
+                        )
+                        .await;
                     };
 
                     let applicant_user_id = insert_conformance_applicant_on_connection(
@@ -351,6 +398,44 @@ impl ConformanceLeaseRepository {
                         ))
                         .execute(connection)
                         .await?;
+
+                    if !request.openid4vc_credential_datasets.is_empty()
+                        && openid4vc_data_key.is_none()
+                    {
+                        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                            "OpenID4VC dataset onboarding requires the application data key"
+                                .to_owned(),
+                        )));
+                    }
+                    if let Some(data_key) = openid4vc_data_key.as_ref() {
+                        for (configuration_id, claims) in &request.openid4vc_credential_datasets {
+                            let claims_ciphertext = protect_dataset_claims(
+                                data_key,
+                                request.tenant.tenant_id.as_uuid(),
+                                applicant_user_id,
+                                configuration_id,
+                                claims,
+                            )
+                            .map_err(map_dataset_crypto_error)?;
+                            let affected = insert_operator_conformance_dataset_on_connection(
+                                connection,
+                                request.tenant.tenant_id.as_uuid(),
+                                applicant_user_id,
+                                applicant_user_id,
+                                configuration_id,
+                                claims_ciphertext,
+                            )
+                            .await?;
+                            if affected != 1 {
+                                return Err(OnboardingTxError::Repository(
+                                    RepositoryError::Consistency(
+                                        "conformance OpenID4VC dataset insert did not record exactly one audit event"
+                                            .to_owned(),
+                                    ),
+                                ));
+                            }
+                        }
+                    }
 
                     let mut client_mappings = Vec::with_capacity(request.clients.len());
                     let mut client_storage_ids = HashMap::with_capacity(request.clients.len());
@@ -612,13 +697,15 @@ impl ConformanceLeaseRepository {
     pub async fn cleanup(&self) -> Result<ConformanceLeaseCleanup, RepositoryError> {
         let mut connection = get_conn(&self.pool).await.map_err(map_pool_error)?;
         let result = diesel::sql_query(
-            "SELECT cleaned_leases, deleted_clients FROM nazo_oauth_cleanup_expired_conformance_leases()",
+            "SELECT cleaned_leases, deleted_clients, deleted_credential_datasets
+             FROM nazo_oauth_cleanup_expired_conformance_leases()",
         )
         .get_result::<CleanupRow>(&mut connection)
         .await
         .map(|row| ConformanceLeaseCleanup {
             cleaned_leases: row.cleaned_leases,
             deleted_clients: row.deleted_clients,
+            deleted_credential_datasets: row.deleted_credential_datasets,
         })
         .map_err(map_diesel_error)?;
         diesel::update(
@@ -1255,10 +1342,25 @@ struct MtlsAnchorReplayRow {
     active: bool,
 }
 
+#[derive(diesel::QueryableByName)]
+struct Openid4vcDatasetReplayRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    credential_configuration_id: String,
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    claims_ciphertext: Vec<u8>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    source: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    valid_from: Option<DateTime<Utc>>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    valid_until: Option<DateTime<Utc>>,
+}
+
 async fn replay_or_conflict(
     connection: &mut AsyncPgConnection,
     request: &ConformanceOnboardingRequest,
     existing: OnboardingLeaseRow,
+    openid4vc_data_key: Option<&[u8; 32]>,
 ) -> Result<ConformanceOnboardingResult, OnboardingTxError> {
     if existing.tenant_id != request.tenant.tenant_id.as_uuid()
         || existing.task_jti != request.task_jti
@@ -1321,6 +1423,11 @@ async fn replay_or_conflict(
             "conformance lease is missing its live onboarding applicant".to_owned(),
         )));
     };
+    let applicant_user_id = owner.applicant_user_id.ok_or_else(|| {
+        OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease is missing its live onboarding applicant".to_owned(),
+        ))
+    })?;
     if mappings.len() != request.clients.len() {
         return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
             "conformance lease is missing its onboarding ownership rows".to_owned(),
@@ -1421,9 +1528,11 @@ async fn replay_or_conflict(
             "conformance lease trust-anchor rows are missing".to_owned(),
         )));
     }
+    verify_openid4vc_datasets_on_replay(connection, request, applicant_user_id, openid4vc_data_key)
+        .await?;
     Ok(ConformanceOnboardingResult {
         lease_id: existing.id,
-        applicant_user_id: owner.applicant_user_id,
+        applicant_user_id: Some(applicant_user_id),
         client_mappings,
         client_count: existing.client_count,
         bundle_sha256: existing.bundle_sha256,
@@ -1434,6 +1543,77 @@ async fn replay_or_conflict(
         })?,
         expires_at: existing.expires_at,
         idempotent_replay: true,
+    })
+}
+
+async fn verify_openid4vc_datasets_on_replay(
+    connection: &mut AsyncPgConnection,
+    request: &ConformanceOnboardingRequest,
+    applicant_user_id: Uuid,
+    openid4vc_data_key: Option<&[u8; 32]>,
+) -> Result<(), OnboardingTxError> {
+    let rows = sql_query(
+        "SELECT credential_configuration_id, claims_ciphertext, source,
+                valid_from, valid_until
+         FROM openid4vci_credential_datasets
+         WHERE tenant_id = $1 AND subject_id = $2
+         ORDER BY credential_configuration_id
+         FOR SHARE",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(request.tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(applicant_user_id)
+    .load::<Openid4vcDatasetReplayRow>(connection)
+    .await?;
+    if rows.len() != request.openid4vc_credential_datasets.len() {
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "conformance lease OpenID4VC dataset ownership rows are incomplete".to_owned(),
+        )));
+    }
+    let Some(data_key) = openid4vc_data_key else {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+            "OpenID4VC dataset replay requires the application data key".to_owned(),
+        )));
+    };
+    for row in rows {
+        let Some(expected_claims) = request
+            .openid4vc_credential_datasets
+            .get(&row.credential_configuration_id)
+        else {
+            return Err(OnboardingTxError::Repository(RepositoryError::Conflict));
+        };
+        if row.source != "operator-conformance"
+            || row.valid_from.is_some()
+            || row.valid_until.is_some()
+        {
+            return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
+                "conformance lease OpenID4VC dataset ownership row has an invalid source or validity"
+                    .to_owned(),
+            )));
+        }
+        let claims = unprotect_dataset_claims(
+            data_key,
+            request.tenant.tenant_id.as_uuid(),
+            applicant_user_id,
+            &row.credential_configuration_id,
+            &row.claims_ciphertext,
+        )
+        .map_err(map_dataset_crypto_error)?;
+        if &claims != expected_claims {
+            return Err(OnboardingTxError::Repository(RepositoryError::Conflict));
+        }
+    }
+    Ok(())
+}
+
+fn map_dataset_crypto_error(error: nazo_openid4vci::CredentialStoreError) -> OnboardingTxError {
+    OnboardingTxError::Repository(match error {
+        nazo_openid4vci::CredentialStoreError::Unavailable => RepositoryError::Unavailable,
+        nazo_openid4vci::CredentialStoreError::InvalidTransition => RepositoryError::Consistency(
+            "conformance OpenID4VC dataset claims could not be encrypted or decrypted".to_owned(),
+        ),
     })
 }
 
@@ -1581,6 +1761,7 @@ fn validate_onboarding_request(
             "conformance bundle schema or client count is outside the supported bounds".to_owned(),
         ));
     }
+    validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)?;
     if request.applicant.username.trim().is_empty()
         || request.applicant.username.len() > 150
         || request.applicant.username != request.applicant.username.trim()
@@ -1657,6 +1838,77 @@ fn validate_onboarding_request(
         }
     }
     Ok(())
+}
+
+fn validate_onboarding_credential_datasets(
+    datasets: &BTreeMap<String, Value>,
+) -> Result<(), RepositoryError> {
+    if datasets.len() > MAX_ONBOARDING_CREDENTIAL_DATASETS {
+        return Err(RepositoryError::Consistency(
+            "conformance OpenID4VC dataset count exceeds the supported bound".to_owned(),
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for (configuration_id, claims) in datasets {
+        if configuration_id.trim().is_empty()
+            || configuration_id.len() > 255
+            || configuration_id != configuration_id.trim()
+            || configuration_id.chars().any(char::is_control)
+        {
+            return Err(RepositoryError::Consistency(
+                "conformance OpenID4VC dataset configuration id is invalid".to_owned(),
+            ));
+        }
+        if claims.as_object().is_none_or(|object| object.is_empty()) {
+            return Err(RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims must be a non-empty object".to_owned(),
+            ));
+        }
+        let encoded = serde_json::to_vec(claims).map_err(|_| {
+            RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims are not serializable".to_owned(),
+            )
+        })?;
+        if encoded.len() > MAX_ONBOARDING_CREDENTIAL_DATASET_BYTES {
+            return Err(RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims exceed the per-dataset bound".to_owned(),
+            ));
+        }
+        total_bytes = total_bytes.checked_add(encoded.len()).ok_or_else(|| {
+            RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims size overflow".to_owned(),
+            )
+        })?;
+        if total_bytes > MAX_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES {
+            return Err(RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims exceed the aggregate bound".to_owned(),
+            ));
+        }
+        let mut nodes = 0usize;
+        if !bounded_onboarding_json(claims, 0, &mut nodes) {
+            return Err(RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims exceed structural limits".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn bounded_onboarding_json(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+    *nodes += 1;
+    if depth > 8 || *nodes > 512 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => object.iter().all(|(key, value)| {
+            key.len() <= 255 && bounded_onboarding_json(value, depth + 1, nodes)
+        }),
+        Value::Array(array) => array
+            .iter()
+            .all(|value| bounded_onboarding_json(value, depth + 1, nodes)),
+        Value::String(value) => value.len() <= 4096,
+        _ => true,
+    }
 }
 
 fn validate_conformance_postal_address(
@@ -1741,6 +1993,8 @@ struct CleanupRow {
     cleaned_leases: i32,
     #[diesel(sql_type = diesel::sql_types::Integer)]
     deleted_clients: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    deleted_credential_datasets: i32,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -1866,6 +2120,7 @@ mod tests {
             },
             clients: Vec::new(),
             mtls_trust_anchors: Vec::new(),
+            openid4vc_credential_datasets: BTreeMap::new(),
         }
     }
 
@@ -1936,6 +2191,27 @@ mod tests {
         assert!(!debug.contains(&"c".repeat(64)));
         assert!(!debug.contains(&"d".repeat(64)));
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn onboarding_rejects_unbounded_or_non_object_credential_dataset_claims() {
+        let mut request = minimal_request();
+        request.openid4vc_credential_datasets.insert(
+            "org.example.pid".to_owned(),
+            Value::String("not-an-object".to_owned()),
+        );
+        let error = validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)
+            .unwrap_err();
+        assert!(error.to_string().contains("non-empty object"));
+
+        request.openid4vc_credential_datasets.clear();
+        request.openid4vc_credential_datasets.insert(
+            "org.example.pid".to_owned(),
+            serde_json::json!({"claim": "x".repeat(MAX_ONBOARDING_CREDENTIAL_DATASET_BYTES)}),
+        );
+        let error = validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)
+            .unwrap_err();
+        assert!(error.to_string().contains("per-dataset bound"));
     }
 
     #[test]

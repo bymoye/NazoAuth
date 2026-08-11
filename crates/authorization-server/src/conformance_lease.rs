@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     future::Future,
     io::{Read as _, Write as _},
@@ -17,10 +17,13 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as
 use rustix::fs::{Mode, OFlags};
 
 use anyhow::{Context as _, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use nazo_operator_protocol::{
     ConformanceLeaseSummary, ConformanceMatrixDescriptor, ConformanceOnboardingSummary,
-    MAX_CONFORMANCE_ONBOARDING_CLIENTS, Openid4vcConformanceTrust, TaskResult,
+    MAX_CONFORMANCE_ONBOARDING_CLIENTS, MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES,
+    MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES,
+    MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS, Openid4vcConformanceTrust, TaskResult,
     validate_conformance_matrix_descriptor,
 };
 use nazo_postgres::{ConformanceLease, ConformanceLeaseRepository, ConformanceLeaseTokenDigests};
@@ -89,6 +92,10 @@ pub(crate) struct ConformanceOnboardingRequest {
     pub applicant: ConformanceOnboardingApplicant,
     pub clients: Vec<ConformanceOnboardingClient>,
     pub mtls_trust_anchors: Vec<ConformanceOnboardingMtlsTrustAnchor>,
+    /// Public claims keyed by credential configuration ID.  These values are
+    /// validated against the signed Matrix before crossing the persistence
+    /// boundary and are written in the same lease transaction.
+    pub openid4vc_credential_datasets: BTreeMap<String, Value>,
 }
 
 pub(crate) struct ConformanceOnboardingMtlsTrustAnchor {
@@ -289,7 +296,7 @@ pub(crate) async fn operator_onboarding_apply(
     )
     .await?;
     let repository = PostgresOnboardingRepository::new(
-        repository()
+        repository_for_onboarding()
             .map_err(|_| anyhow::anyhow!("conformance onboarding repository is unavailable"))?,
     );
     let result = repository.apply_onboarding(request).await?;
@@ -342,6 +349,11 @@ struct ConformanceOnboardingBundle {
     #[serde(default)]
     ciba_automated_decision_token: Option<SecretText>,
     clients: Vec<ConformanceClientBundle>,
+    /// Public, lease-owned OpenID4VC claims keyed by credential
+    /// configuration ID.  This is secure material only because the bundle is
+    /// read through the fixed operator channel; values are still strictly
+    /// bounded and secret-field free before persistence.
+    openid4vc_credential_datasets: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -486,6 +498,7 @@ async fn validate_bundle(
         bail!("conformance token bindings are only valid for the nazoauth-full profile");
     }
     let descriptor = load_matrix_descriptor()?;
+    validate_onboarding_credential_datasets(&bundle.openid4vc_credential_datasets, &descriptor)?;
     let mut expected_logical_ids = BTreeSet::new();
     for group in &descriptor.groups {
         for plan in &group.plans {
@@ -623,7 +636,77 @@ async fn validate_bundle(
         },
         clients,
         mtls_trust_anchors,
+        openid4vc_credential_datasets: bundle.openid4vc_credential_datasets,
     })
+}
+
+fn validate_onboarding_credential_datasets(
+    datasets: &BTreeMap<String, Value>,
+    descriptor: &ConformanceMatrixDescriptor,
+) -> anyhow::Result<()> {
+    if datasets.len()
+        > usize::try_from(MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS)
+            .context("conformance credential dataset count limit overflow")?
+    {
+        bail!("conformance OpenID4VC credential dataset count is out of bounds");
+    }
+    if datasets != &descriptor.openid4vc_credential_datasets {
+        bail!("conformance OpenID4VC credential datasets do not match the deployment matrix");
+    }
+    let total_bytes = datasets.values().try_fold(0usize, |total, claims| {
+        let object = claims.as_object().filter(|object| !object.is_empty());
+        if object.is_none() {
+            return Err(anyhow::anyhow!(
+                "conformance OpenID4VC credential dataset must be a non-empty object"
+            ));
+        }
+        let encoded = serde_json::to_vec(claims).map_err(|_| {
+            anyhow::anyhow!("conformance OpenID4VC credential dataset cannot be encoded")
+        })?;
+        if encoded.len() > MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES {
+            return Err(anyhow::anyhow!(
+                "conformance OpenID4VC credential dataset size is out of bounds"
+            ));
+        }
+        if contains_secret_field(claims) {
+            return Err(anyhow::anyhow!(
+                "conformance OpenID4VC credential dataset contains a forbidden claim"
+            ));
+        }
+        total
+            .checked_add(encoded.len())
+            .filter(|total| *total <= MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "conformance OpenID4VC credential dataset total size is out of bounds"
+                )
+            })
+    })?;
+    let _ = total_bytes;
+
+    // Reuse the issuer's production dataset validator for all format-specific
+    // limits (SD-JWT reserved claims and mdoc namespace shape).  No admin
+    // session is created: this is validation only; persistence receives the
+    // already-validated map in the atomic onboarding transaction.
+    let config = ConfigSource::load()
+        .map_err(|_| anyhow::anyhow!("conformance credential configuration is unavailable"))?;
+    let settings = crate::settings::Settings::from_config(&config)
+        .map_err(|_| anyhow::anyhow!("conformance credential configuration is unavailable"))?;
+    for (configuration_id, claims) in datasets {
+        let configuration = settings
+            .openid4vc
+            .credential_configurations
+            .get(configuration_id)
+            .ok_or_else(|| anyhow::anyhow!("conformance credential configuration is unknown"))?;
+        let request = crate::domain::PutCredentialDatasetRequest {
+            claims: claims.clone(),
+            valid_from: None,
+            valid_until: None,
+        };
+        crate::domain::validate_managed_dataset(configuration, &request)
+            .map_err(|_| anyhow::anyhow!("conformance OpenID4VC credential dataset is invalid"))?;
+    }
+    Ok(())
 }
 
 fn registration_requires_mtls_anchor(request: &Value) -> bool {
@@ -860,6 +943,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
             applicant,
             clients,
             mtls_trust_anchors,
+            openid4vc_credential_datasets,
             ..
         } = request;
         let task_jti_for_result = task_jti.clone();
@@ -925,6 +1009,7 @@ impl ConformanceOnboardingRepository for PostgresOnboardingRepository {
                     not_after: anchor.not_after,
                 })
                 .collect(),
+            openid4vc_credential_datasets,
         };
         let repository = self.inner.clone();
         Box::pin(async move {
@@ -1557,6 +1642,8 @@ pub(crate) async fn operator_cleanup() -> anyhow::Result<TaskResult> {
             .context("negative conformance lease cleanup count")?,
         deleted_clients: u64::try_from(result.deleted_clients)
             .context("negative conformance client cleanup count")?,
+        deleted_credential_datasets: u64::try_from(result.deleted_credential_datasets)
+            .context("negative conformance credential dataset cleanup count")?,
     })
 }
 
@@ -1564,6 +1651,20 @@ fn repository() -> anyhow::Result<ConformanceLeaseRepository> {
     let config = ConfigSource::load_for_migrations()?;
     let pool = nazo_postgres::create_pool(database_url(&config), 1)?;
     Ok(ConformanceLeaseRepository::new(pool))
+}
+
+fn repository_for_onboarding() -> anyhow::Result<ConformanceLeaseRepository> {
+    let config = ConfigSource::load()?;
+    let encoded_key = config.required_string("OPENID4VC_DATA_ENCRYPTION_KEY")?;
+    let data_key = URL_SAFE_NO_PAD
+        .decode(encoded_key)
+        .map_err(|_| anyhow::anyhow!("OpenID4VC data encryption key is invalid"))?;
+    let data_key = <[u8; 32]>::try_from(data_key)
+        .map_err(|_| anyhow::anyhow!("OpenID4VC data encryption key is invalid"))?;
+    let pool = nazo_postgres::create_pool(database_url(&config), 1)?;
+    Ok(ConformanceLeaseRepository::new_with_openid4vc_data_key(
+        pool, data_key,
+    ))
 }
 
 fn summary(lease: ConformanceLease) -> ConformanceLeaseSummary {
@@ -1586,6 +1687,7 @@ pub(crate) fn spawn_cleanup(pool: nazo_postgres::DbPool) {
                 Ok(result) if result.cleaned_leases > 0 => tracing::info!(
                     cleaned_leases = result.cleaned_leases,
                     deleted_clients = result.deleted_clients,
+                    deleted_credential_datasets = result.deleted_credential_datasets,
                     "cleaned expired conformance leases"
                 ),
                 Ok(_) => {}

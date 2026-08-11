@@ -22,6 +22,132 @@ def load(name: str):
 
 
 class Openid4vcOidfTests(unittest.TestCase):
+    def test_p028_selector_is_derived_from_the_matrix_registry(self):
+        materializer = load("materialize_openid4vc_oidf_config.py")
+        self.assertEqual(
+            materializer.p028_plan_expression(),
+            (
+                "oid4vci-1_0-issuer-test-plan[fapi_profile=vci]"
+                "[client_auth_type=private_key_jwt][sender_constrain=dpop]"
+                "[fapi_request_method=unsigned][authorization_request_type=simple]"
+                "[openid=plain_oauth][fapi_response_mode=plain_response]"
+                "[vci_grant_type=authorization_code]"
+                "[vci_authorization_code_flow_variant=wallet_initiated]"
+                "[credential_format=sd_jwt_vc]"
+                "[vci_credential_encryption=plain] "
+                "openid4vc-vci-sd-wallet-plain.json"
+            ),
+        )
+
+    def test_lease_dataset_source_validates_binding_without_admin_mutation(self):
+        module = load("run_openid4vc_conformance.py")
+        config = {
+            "dataset_source": "lease",
+            "target_origin": "https://issuer.example",
+            "issuer": {
+                "dedicated_conformance_subject": True,
+                "subject_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "lease_binding": {
+                "lease_id": "00000000-0000-0000-0000-000000000456",
+                "applicant_id": "00000000-0000-0000-0000-000000000123",
+                "request_jti": "request-abc123",
+                "matrix_sha256": "a" * 64,
+                "bundle_sha256": "b" * 64,
+                "expires_at": 1_900_000_000,
+            },
+        }
+        with patch.object(module, "install_credential_datasets") as install:
+            self.assertEqual(
+                module.install_credential_datasets_if_needed(config, {}, "lease"),
+                [],
+            )
+        install.assert_not_called()
+        with patch.object(module, "cleanup_credential_datasets") as cleanup:
+            module.cleanup_credential_datasets_if_needed(config, {}, "lease", [])
+        cleanup.assert_not_called()
+
+    def test_lease_dataset_source_rejects_mixed_admin_binding(self):
+        module = load("run_openid4vc_conformance.py")
+        config = {
+            "dataset_source": "admin",
+            "lease_binding": {},
+        }
+        with self.assertRaisesRegex(RuntimeError, "cannot include lease_binding"):
+            module.validate_dataset_source(config, "admin")
+        with self.assertRaisesRegex(RuntimeError, "dataset_source=lease"):
+            module.validate_dataset_source({"dataset_source": "admin"}, "lease")
+
+    def test_lease_dataset_source_rejects_expired_binding(self):
+        module = load("run_openid4vc_conformance.py")
+        config = {
+            "dataset_source": "lease",
+            "issuer": {
+                "dedicated_conformance_subject": True,
+                "subject_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "lease_binding": {
+                "lease_id": "00000000-0000-0000-0000-000000000456",
+                "applicant_id": "00000000-0000-0000-0000-000000000123",
+                "request_jti": "request-abc123",
+                "matrix_sha256": "a" * 64,
+                "bundle_sha256": "b" * 64,
+                "expires_at": 1,
+            },
+        }
+        with self.assertRaisesRegex(RuntimeError, "not in the future"):
+            module.validate_dataset_source(config, "lease")
+
+    def test_cli_rejects_operator_credentials_in_lease_mode(self):
+        module = load("run_openid4vc_conformance.py")
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "run_openid4vc_conformance.py",
+                    "--driver-config-json-file",
+                    "driver.json",
+                    "--dataset-source",
+                    "lease",
+                    "--operator-credentials-file",
+                    "operator.json",
+                    "--suite-token-file",
+                    "suite.token",
+                    "--",
+                    "--suite-dir",
+                    "suite",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            module.parse_args()
+
+    def test_p028_target_selection_preserves_full_matrix_inputs(self):
+        module = load("run_openid4vc_conformance.py")
+        arguments = [
+            "--config-json-file",
+            "configs.json",
+            "--plan-set-json-file",
+            "plans.json",
+        ]
+        selected = module.apply_targeted_plan_selection(
+            arguments,
+            p028_only=True,
+            plan_group_size=0,
+        )
+        self.assertEqual(selected[:4], arguments)
+        self.assertEqual(selected[-2], "--plan-expression")
+        self.assertEqual(
+            selected[-1],
+            load("materialize_openid4vc_oidf_config.py").p028_plan_expression(),
+        )
+        with self.assertRaisesRegex(SystemExit, "requires --plan-group-size 0"):
+            module.apply_targeted_plan_selection(
+                arguments,
+                p028_only=True,
+                plan_group_size=4,
+            )
+
     def test_admin_credentials_have_only_a_private_file_contract(self):
         source = (
             Path(__file__).resolve().parents[2]

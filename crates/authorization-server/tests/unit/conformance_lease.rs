@@ -123,6 +123,26 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
             .sum::<usize>(),
         17
     );
+    assert_eq!(descriptor.openid4vc_credential_datasets.len(), 2);
+    assert!(
+        descriptor
+            .openid4vc_credential_datasets
+            .get("eu.europa.ec.eudi.pid.1")
+            .is_some_and(
+                |claims| claims.get("email").and_then(serde_json::Value::as_str)
+                    == Some("credential-holder@example.test")
+            )
+    );
+    assert!(
+        descriptor
+            .openid4vc_credential_datasets
+            .get("org.iso.18013.5.1.mDL")
+            .is_some_and(|claims| claims
+                .get("org.iso.18013.5.1")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|claims| claims.get("document_number")
+                    == Some(&serde_json::json!("SPECIMEN-0001"))))
+    );
     let encoded = serde_json::to_string(&descriptor).expect("matrix serialization");
     let value: serde_json::Value = serde_json::from_str(&encoded).expect("matrix JSON");
     assert!(encoded.contains("{{generated.dynamic_registration_initial_access_token}}"));

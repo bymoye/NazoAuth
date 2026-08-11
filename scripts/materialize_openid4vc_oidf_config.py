@@ -177,6 +177,20 @@ def plan_expression(plan: str, variants: dict[str, str], filename: str) -> str:
     return f"{expression} {filename}"
 
 
+def p028_plan_expression() -> str:
+    """Return the canonical expression for the diagnostic VCI p028 case.
+
+    The materializer remains the authority for both the full 17-plan registry
+    and the variant ordering used by the upstream runner.  Keeping this helper
+    here prevents a targeted invocation from retyping (and potentially
+    drifting from) the p028 selector.
+    """
+    for plan, slug, variants in matrix_cases():
+        if slug == "vci-sd-wallet-plain":
+            return plan_expression(plan, variants, f"openid4vc-{slug}.json")
+    raise RuntimeError("OpenID4VC matrix no longer contains the p028 VCI case")
+
+
 def expected_skips_for_cases(cases: list[tuple[str, str, dict[str, str]]]) -> list[dict[str, object]]:
     unsupported_encryption = [
         {

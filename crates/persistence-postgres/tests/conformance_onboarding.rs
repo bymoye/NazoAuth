@@ -14,6 +14,7 @@ use nazo_postgres::{
     ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest, UserRepository, create_pool,
     get_conn,
 };
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use uuid::Uuid;
@@ -199,6 +200,7 @@ fn replay_request(tenant: TenantContext, suffix: &str) -> ConformanceOnboardingR
                 not_after: Utc::now() + Duration::minutes(5),
             },
         ],
+        openid4vc_credential_datasets: std::collections::BTreeMap::new(),
     }
 }
 
@@ -309,6 +311,7 @@ async fn onboarding_rolls_back_lease_applicant_and_clients_when_late_step_fails(
                 not_after: Utc::now() + Duration::minutes(5),
             },
         ],
+        openid4vc_credential_datasets: std::collections::BTreeMap::new(),
     };
     let repository = ConformanceLeaseRepository::new(pool.clone());
     assert!(matches!(
@@ -551,6 +554,103 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn onboarding_owns_encrypted_openid4vc_datasets_and_replay_compares_claims() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .unwrap();
+    let pool = create_pool(database_url, 4).unwrap();
+    let tenant = TenantContext::default_system();
+    let suffix = Uuid::now_v7().simple().to_string();
+    let mut request = replay_request(tenant, &format!("dataset-{suffix}"));
+    request.clients.truncate(1);
+    request.clients[0].prepared.require_mtls_bound_tokens = false;
+    request.client_count = 1;
+    request.mtls_trust_anchors.clear();
+    request.openid4vc_credential_datasets.insert(
+        "org.example.pid".to_owned(),
+        json!({"given_name": "Conformance", "family_name": "User"}),
+    );
+    let repository =
+        ConformanceLeaseRepository::new_with_openid4vc_data_key(pool.clone(), [0x51; 32]);
+    let first = repository.onboard(request.clone()).await.unwrap();
+    let applicant_id = first.applicant_user_id.expect("onboarding applicant");
+
+    #[derive(QueryableByName)]
+    struct DatasetSummary {
+        #[diesel(sql_type = BigInt)]
+        count: i64,
+        #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+        source: Option<String>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+        ciphertext_size: Option<i64>,
+    }
+    let mut connection = get_conn(&pool).await.unwrap();
+    let summary = sql_query(
+        "SELECT COUNT(*)::BIGINT AS count, MIN(source) AS source,
+                MIN(octet_length(claims_ciphertext))::BIGINT AS ciphertext_size
+         FROM openid4vci_credential_datasets
+         WHERE tenant_id = $1 AND subject_id = $2",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(applicant_id)
+    .get_result::<DatasetSummary>(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(summary.count, 1);
+    assert_eq!(summary.source.as_deref(), Some("operator-conformance"));
+    assert!(summary.ciphertext_size.unwrap_or_default() > 0);
+    drop(connection);
+
+    let replay = repository.onboard(request.clone()).await.unwrap();
+    assert!(replay.idempotent_replay);
+
+    request
+        .openid4vc_credential_datasets
+        .get_mut("org.example.pid")
+        .expect("dataset fixture")
+        .as_object_mut()
+        .expect("object fixture")
+        .insert("given_name".to_owned(), json!("Changed"));
+    assert!(matches!(
+        repository.onboard(request).await,
+        Err(RepositoryError::Conflict)
+    ));
+
+    repository
+        .revoke(tenant.tenant_id.as_uuid(), first.lease_id)
+        .await
+        .unwrap();
+    let cleanup = repository.cleanup().await.unwrap();
+    assert!(cleanup.deleted_credential_datasets >= 1);
+    let mut connection = get_conn(&pool).await.unwrap();
+    let tombstone = sql_query(
+        "SELECT deleted_credential_dataset_count::BIGINT AS count
+         FROM conformance_lease_applicants
+         WHERE tenant_id = $1 AND lease_id = $2",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(first.lease_id)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(tombstone.count, 1);
+    let remaining = sql_query(
+        "SELECT COUNT(*)::BIGINT AS count
+         FROM openid4vci_credential_datasets
+         WHERE tenant_id = $1 AND subject_id = $2",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<diesel::sql_types::Uuid, _>(applicant_id)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(remaining.count, 0);
 }
 
 #[tokio::test]

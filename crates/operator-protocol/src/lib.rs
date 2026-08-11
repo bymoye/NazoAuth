@@ -16,6 +16,14 @@ pub const MAX_COMPACT_JWS_BYTES: usize = 64 * 1024;
 pub const MAX_TASK_LIFETIME_SECONDS: i64 = 60;
 pub const MAX_DISCOVERY_LIFETIME_SECONDS: i64 = 60;
 pub const MAX_CONFORMANCE_ONBOARDING_CLIENTS: u32 = 256;
+/// Maximum number of lease-owned OpenID4VC credential datasets accepted by
+/// the signed Matrix and secure onboarding bundle.
+pub const MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS: u32 = 16;
+/// Maximum encoded JSON size of one lease-owned credential dataset.
+pub const MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES: usize = 64 * 1024;
+/// Maximum encoded JSON size of all lease-owned credential datasets in one
+/// onboarding request.
+pub const MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES: usize = 512 * 1024;
 pub const MAX_CONFORMANCE_MATRIX_GROUPS: usize = 64;
 pub const MAX_CONFORMANCE_MATRIX_PLANS: usize = 512;
 

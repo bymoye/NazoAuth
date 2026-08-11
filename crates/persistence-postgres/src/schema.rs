@@ -255,6 +255,7 @@ diesel::table! {
         deleted_access_request_count -> Int4,
         deleted_mtls_request_count -> Int4,
         deleted_user_state_count -> Int4,
+        deleted_credential_dataset_count -> Int4,
     }
 }
 
