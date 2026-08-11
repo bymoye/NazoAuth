@@ -912,6 +912,32 @@ fn checked_in_matrix_registration_templates_match_onboarding_policy_primitives()
 }
 
 #[test]
+fn checked_in_vci_plans_define_browser_automation_in_the_matrix() {
+    let bytes = include_bytes!(
+        "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"
+    );
+    let descriptor: ConformanceMatrixDescriptor =
+        serde_json::from_slice(bytes).expect("checked-in conformance matrix JSON");
+    let vci_plans = descriptor
+        .groups
+        .iter()
+        .flat_map(|group| &group.plans)
+        .filter(|plan| plan.plan.starts_with("oid4vci-"))
+        .collect::<Vec<_>>();
+    assert_eq!(vci_plans.len(), 10, "the signed VCI plan set drifted");
+    for plan in vci_plans {
+        assert!(
+            plan.config_template
+                .get("browser")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| !entries.is_empty()),
+            "VCI browser automation must be Matrix-owned: {}",
+            plan.id
+        );
+    }
+}
+
+#[test]
 fn dynamic_registration_initial_access_token_binding_is_lowercase_and_profile_scoped() {
     let digest = "b".repeat(64);
     let operation = TaskOperation::ConformanceLeaseCreate {

@@ -24342,7 +24342,126 @@
             },
             "vci": {
               "credential_configuration_id": "eu.europa.ec.eudi.pid.1"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "fapi_profile": "vci",
@@ -24540,7 +24659,126 @@
             },
             "vci": {
               "credential_configuration_id": "org.iso.18013.5.1.mDL"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "fapi_profile": "vci",
@@ -24732,7 +24970,126 @@
             },
             "vci": {
               "credential_configuration_id": "eu.europa.ec.eudi.pid.1"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "fapi_profile": "vci",
@@ -24930,7 +25287,126 @@
             },
             "vci": {
               "credential_configuration_id": "org.iso.18013.5.1.mDL"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "fapi_profile": "vci",
@@ -25122,7 +25598,126 @@
             },
             "vci": {
               "credential_configuration_id": "eu.europa.ec.eudi.pid.1"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "fapi_profile": "vci",
@@ -25320,7 +25915,126 @@
             },
             "vci": {
               "credential_configuration_id": "org.iso.18013.5.1.mDL"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "fapi_profile": "vci",
@@ -25523,7 +26237,126 @@
             },
             "vci": {
               "credential_configuration_id": "eu.europa.ec.eudi.pid.1"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "vci_authorization_code_flow_variant": "wallet_initiated",
@@ -25708,7 +26541,126 @@
             },
             "vci": {
               "credential_configuration_id": "org.iso.18013.5.1.mDL"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "vci_authorization_code_flow_variant": "wallet_initiated",
@@ -25887,7 +26839,126 @@
             },
             "vci": {
               "credential_configuration_id": "eu.europa.ec.eudi.pid.1"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "vci_authorization_code_flow_variant": "issuer_initiated",
@@ -26072,7 +27143,126 @@
             },
             "vci": {
               "credential_configuration_id": "org.iso.18013.5.1.mDL"
-            }
+            },
+            "browser": [
+              {
+                "comment": "NazoAuth conformance browser automation.",
+                "match": "{{target.pattern./authorize*}}",
+                "tasks": [
+                  {
+                    "task": "Capture authorization error response",
+                    "optional": true,
+                    "match": "{{target.pattern./authorize*}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "css",
+                        "body",
+                        10,
+                        "(\"error\"\\s*:\\s*\"(invalid_request|invalid_request_object|access_denied|login_required|server_error)\"|invalid_request|invalid_request_object|access_denied|login_required|server_error)",
+                        "update-image-placeholder-optional"
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete login page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/auth*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-email",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-password",
+                        30
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-email",
+                        "{{generated.applicant_email}}"
+                      ],
+                      [
+                        "text",
+                        "id",
+                        "nazo-login-password",
+                        "{{generated.applicant_password}}"
+                      ],
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-login-submit",
+                        30
+                      ],
+                      [
+                        "wait-element-visible",
+                        "css",
+                        "#nazo-login-submit:not([disabled])",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-login-submit"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/ui/consent",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Complete consent page",
+                    "optional": true,
+                    "match": "{{target.pattern./ui/consent*}}",
+                    "commands": [
+                      [
+                        "wait-element-visible",
+                        "id",
+                        "nazo-consent-approve",
+                        30
+                      ],
+                      [
+                        "click",
+                        "id",
+                        "nazo-consent-approve"
+                      ],
+                      [
+                        "wait",
+                        "contains",
+                        "/test/",
+                        30
+                      ],
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  },
+                  {
+                    "task": "Verify callback completion",
+                    "match": "{{suite.pattern.callback}}",
+                    "commands": [
+                      [
+                        "wait",
+                        "id",
+                        "submission_complete",
+                        30
+                      ]
+                    ]
+                  }
+                ]
+              }
+            ]
           },
           "variant": {
             "vci_authorization_code_flow_variant": "issuer_initiated",
