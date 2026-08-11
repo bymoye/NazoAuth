@@ -385,6 +385,7 @@ pub enum TaskResult {
     ConformanceLeaseCleaned {
         cleaned_leases: u64,
         deleted_clients: u64,
+        #[serde(default)]
         deleted_credential_datasets: u64,
     },
 }

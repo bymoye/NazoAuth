@@ -1008,6 +1008,24 @@ fn conformance_lease_protocol_keeps_legacy_create_tasks_compatible() {
 }
 
 #[test]
+fn conformance_cleanup_result_keeps_signed_legacy_receipts_verifiable() {
+    let result: TaskResult = serde_json::from_value(serde_json::json!({
+        "kind": "conformance-lease-cleaned",
+        "cleaned_leases": 1,
+        "deleted_clients": 90,
+    }))
+    .unwrap();
+    assert_eq!(
+        result,
+        TaskResult::ConformanceLeaseCleaned {
+            cleaned_leases: 1,
+            deleted_clients: 90,
+            deleted_credential_datasets: 0,
+        }
+    );
+}
+
+#[test]
 fn conformance_lease_receipts_do_not_echo_token_digests() {
     let digest = "b".repeat(64);
     let result = TaskResult::ConformanceLeaseCreated {
