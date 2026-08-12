@@ -3223,3 +3223,81 @@ fn ciba_automated_decision_request_token_rejects_wrong_methods_and_schemes() {
     query.decision_token = Some("disabled-secret".to_owned());
     assert!(ciba_automated_decision_request_token(&config, &get, &query).is_none());
 }
+
+#[test]
+fn ciba_policy_covers_algorithm_names_and_delivery_rejections() {
+    assert_eq!(
+        ciba_algorithm_name(jsonwebtoken::Algorithm::EdDSA),
+        Some("EdDSA")
+    );
+    assert_eq!(
+        ciba_algorithm_name(jsonwebtoken::Algorithm::ES256),
+        Some("ES256")
+    );
+    assert_eq!(ciba_algorithm_name(jsonwebtoken::Algorithm::RS256), None);
+
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut ping_client = ciba_private_key_jwt_client("policy-ping-kid", &key);
+    ping_client.backchannel_token_delivery_mode = "ping".to_owned();
+    ping_client.backchannel_client_notification_endpoint = None;
+    let valid_notification = BackchannelAuthenticationForm {
+        client_notification_token: Some("notification-token-0123456789".to_owned()),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let missing_endpoint = validate_ciba_delivery_request(&ping_client, &valid_notification)
+        .expect_err("ping mode must require a registered notification endpoint");
+    assert_eq!(missing_endpoint.status(), StatusCode::BAD_REQUEST);
+
+    let mut unsupported_client = ping_client;
+    unsupported_client.backchannel_token_delivery_mode = "push".to_owned();
+    let unsupported = validate_ciba_delivery_request(&unsupported_client, &valid_notification)
+        .expect_err("unsupported CIBA delivery modes must fail closed");
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+
+    let mut poll_client = ciba_private_key_jwt_client("policy-poll-kid", &key);
+    poll_client.backchannel_token_delivery_mode = "poll".to_owned();
+    let poll_with_notification = validate_ciba_delivery_request(&poll_client, &valid_notification)
+        .expect_err("poll mode must reject notification credentials");
+    assert_eq!(poll_with_notification.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn ciba_token_profile_covers_fapi2_client_and_sender_constraints() {
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("profile-kid", &key);
+
+    let baseline_settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    let baseline = CibaHttpConfig::from(&baseline_settings);
+    for (dpop, mtls) in [(false, false), (true, false), (false, true), (true, true)] {
+        client.require_dpop_bound_tokens = dpop;
+        client.require_mtls_bound_tokens = mtls;
+        validate_ciba_token_request_profile(&baseline, &client, "private_key_jwt")
+            .expect("baseline CIBA profile should preserve each sender-constraint mapping");
+    }
+
+    let mut fapi2_settings = baseline_settings;
+    fapi2_settings.protocol.authorization_server_profile =
+        crate::settings::AuthorizationServerProfile::Fapi2Security;
+    let fapi2 = CibaHttpConfig::from(&fapi2_settings);
+
+    client.client_type = "public".to_owned();
+    let public_client = validate_ciba_token_request_profile(&fapi2, &client, "private_key_jwt")
+        .expect_err("FAPI2 CIBA must reject public clients");
+    assert_eq!(oauth_error_code(&public_client), "unauthorized_client");
+
+    client.client_type = "confidential".to_owned();
+    client.require_dpop_bound_tokens = false;
+    client.require_mtls_bound_tokens = false;
+    let bearer = validate_ciba_token_request_profile(&fapi2, &client, "private_key_jwt")
+        .expect_err("FAPI2 CIBA must reject bearer tokens");
+    assert_eq!(oauth_error_code(&bearer), "invalid_request");
+
+    client.require_mtls_bound_tokens = true;
+    let bad_auth_method =
+        validate_ciba_token_request_profile(&fapi2, &client, "client_secret_basic")
+            .expect_err("FAPI2 CIBA must reject shared-secret authentication");
+    assert_eq!(oauth_error_code(&bad_auth_method), "invalid_client");
+    validate_ciba_token_request_profile(&fapi2, &client, "private_key_jwt")
+        .expect("FAPI2 CIBA should accept constrained private_key_jwt clients");
+}

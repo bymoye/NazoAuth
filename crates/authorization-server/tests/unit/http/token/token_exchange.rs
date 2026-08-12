@@ -825,3 +825,154 @@ async fn token_exchange_subject_boundaries_and_safe_default_scope_are_table_driv
         }
     }
 }
+
+#[test]
+fn token_exchange_request_policy_and_admission_wrappers_preserve_boundaries() {
+    let input = form();
+    let request = token_exchange_request(&input);
+    assert_eq!(request.subject_token.as_deref(), Some("subject-token"));
+    assert_eq!(
+        request.subject_token_type.as_deref(),
+        Some(ACCESS_TOKEN_TYPE)
+    );
+    assert_eq!(request.audiences, input.audiences);
+
+    let state = token_exchange_state();
+    let config = crate::http::token::issue::TokenIssuanceConfig::from(state.settings.as_ref());
+    let modules = state.active_module_snapshot();
+    let authorization = crate::http::token::issue::test_support::test_authorization_service(&state);
+    let issuance = TokenIssuanceContext {
+        config: &config,
+        modules: &modules,
+        authorization: &authorization,
+    };
+    let mut constrained = client();
+    constrained.require_dpop_bound_tokens = true;
+    constrained.require_mtls_bound_tokens = true;
+    let exchange_policy = token_exchange_policy(&issuance, &constrained, 1_700_000_000);
+    assert_eq!(exchange_policy.client_id, "resource-server");
+    assert!(exchange_policy.client_is_confidential);
+    assert!(exchange_policy.require_dpop_bound_tokens);
+    assert!(exchange_policy.require_mtls_bound_tokens);
+
+    let mut no_target = form();
+    no_target.audiences.clear();
+    let explicit_target =
+        token_exchange_admission_error_response(TokenExchangeError::InvalidTarget, &no_target);
+    assert_eq!(explicit_target.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        explicit_target
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_target")
+    );
+    assert_eq!(
+        token_exchange_admission_error_response(TokenExchangeError::InvalidTarget, &input).status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        token_exchange_admission_error_response(TokenExchangeError::Disabled, &input).status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
+fn token_exchange_subject_error_wrapper_handles_safe_scope_and_claim_boundaries() {
+    let client = client();
+    let mut oidc_only = claims(
+        "resource-server",
+        json!("https://backend.example/api"),
+        "openid",
+    );
+    let response = token_exchange_subject_error_response(
+        TokenExchangeError::InvalidScope,
+        &client,
+        &form(),
+        &oidc_only,
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_scope")
+    );
+
+    oidc_only.scope = "accounts".to_owned();
+    let response = token_exchange_subject_error_response(
+        TokenExchangeError::InvalidScope,
+        &client,
+        &form(),
+        &oidc_only,
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let mut wrong_client = claims(
+        "other-client",
+        json!("https://backend.example/api"),
+        "accounts",
+    );
+    wrong_client.client_id = "other-client".to_owned();
+    let response = token_exchange_subject_error_response(
+        TokenExchangeError::InvalidGrant,
+        &client,
+        &form(),
+        &wrong_client,
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    wrong_client.client_id = client.client_id.clone();
+    wrong_client.user_id = Some("not-a-uuid".to_owned());
+    let response = token_exchange_subject_error_response(
+        TokenExchangeError::InvalidGrant,
+        &client,
+        &form(),
+        &wrong_client,
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    assert_eq!(
+        token_exchange_subject_error_response(
+            TokenExchangeError::InvalidTarget,
+            &client,
+            &form(),
+            &wrong_client,
+        )
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn token_exchange_rejects_invalid_access_and_absent_actor_tokens() {
+    let state = token_exchange_state();
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let client = client();
+    let invalid = validate_exchange_access_token(
+        &service,
+        "https://issuer.example",
+        &client,
+        "not-a-jwt",
+        policy(&client),
+    )
+    .await
+    .expect_err("malformed access tokens must fail closed");
+    assert_eq!(invalid, TokenExchangeTokenError::Invalid);
+
+    let actor = validate_actor_token(
+        &service,
+        "https://issuer.example",
+        &client,
+        None,
+        policy(&client),
+    )
+    .await
+    .expect("an omitted actor token is valid");
+    assert!(actor.is_none());
+}

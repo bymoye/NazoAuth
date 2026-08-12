@@ -324,6 +324,43 @@ async fn worker_iteration_pushes_checkpoint_and_acknowledges_it() {
 }
 
 #[tokio::test]
+async fn worker_iteration_anchors_each_delivery_in_order() {
+    let (endpoint, server) = local_anchor_replay_endpoint(202).await;
+    let mut config = iteration_config(endpoint);
+    config.batch_size = 2;
+    let mut first = delivery();
+    first.event_id = Uuid::from_u128(1);
+    let mut second = delivery();
+    second.event_id = Uuid::from_u128(2);
+    second.sequence = 8;
+    second.event_hash = vec![3; 32];
+    let repository = ScriptedRepository::with_health(
+        Ok(health_snapshot()),
+        Ok(vec![first.clone(), second.clone()]),
+    )
+    .with_acknowledgement(Ok(()))
+    .with_acknowledgement(Ok(()));
+    let mut last_anchored = None;
+
+    assert_eq!(
+        run_iteration(&repository, &test_client(), &config, &mut last_anchored).await,
+        IterationOutcome::Continue
+    );
+    assert_eq!(
+        repository.marked(),
+        vec![
+            (first.event_id, first.attempts),
+            (second.event_id, second.attempts)
+        ]
+    );
+    assert_eq!(last_anchored.unwrap().sequence, second.sequence);
+    assert_eq!(
+        server.await.expect("checkpoint endpoints complete").len(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn worker_iteration_reschedules_http_failures() {
     let (endpoint, server) = local_anchor_endpoint(503).await;
     let config = iteration_config(endpoint);

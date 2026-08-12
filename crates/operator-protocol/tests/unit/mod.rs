@@ -2225,3 +2225,74 @@ fn identity_transition_and_audit_boundaries_are_checked() {
     assert!(validate_file_identifier_value("file-1").is_ok());
     assert!(validate_file_identifier_value("file/1").is_err());
 }
+
+#[test]
+fn public_matrix_validator_rejects_structural_and_placeholder_boundaries() {
+    let base = checked_in_matrix_descriptor();
+    let mut invalid = base.clone();
+    invalid.schema = 2;
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups.clear();
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans.clear();
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans[0].config_template = serde_json::json!("not-an-object");
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans[0].expected_results = (0..65)
+        .map(|index| (format!("test-{index}"), "SKIPPED".to_owned()))
+        .collect();
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans[0].variant = (0..65)
+        .map(|index| (format!("variant-{index}"), "value".to_owned()))
+        .collect();
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans[0].required_roles = (0..65)
+        .map(|index| ConformanceMatrixRoleRequirement {
+            role: format!("role-{index}"),
+            logical_client_id: Some(format!("client-{index}")),
+            secret_refs: Vec::new(),
+            registration_template: None,
+        })
+        .collect();
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    let role = invalid.groups[0].plans[0]
+        .required_roles
+        .first_mut()
+        .expect("checked-in matrix has a role");
+    role.secret_refs = vec![String::new()];
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    let role = invalid.groups[0].plans[0]
+        .required_roles
+        .first_mut()
+        .expect("checked-in matrix has a role");
+    role.registration_template = Some(serde_json::json!("not-an-object"));
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans[0].config_template["client_secret"] =
+        serde_json::json!("embedded-secret");
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+
+    let mut invalid = base.clone();
+    invalid.groups[0].plans[0]
+        .secret_bindings
+        .insert("cycle".to_owned(), "{{secret.cycle}}".to_owned());
+    invalid.groups[0].plans[0].config_template["cycle"] = serde_json::json!("{{cycle}}");
+    assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+}

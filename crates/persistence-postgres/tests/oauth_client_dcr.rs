@@ -1111,6 +1111,14 @@ async fn dynamic_registration_store_maps_repository_failures_to_unavailable() {
         DynamicRegistrationDependencyError::Unavailable
     );
     assert_eq!(
+        repository.upsert(&template, None).await.unwrap_err(),
+        RepositoryError::Unavailable
+    );
+    assert_eq!(
+        repository.update_metadata(&template).await.unwrap_err(),
+        RepositoryError::Unavailable
+    );
+    assert_eq!(
         DynamicRegistrationClientStore::by_registration_access_token(
             &repository,
             tenant.tenant_id.as_uuid(),

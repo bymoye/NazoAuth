@@ -1359,3 +1359,89 @@ async fn operator_create_rejects_invalid_digest_and_trust_before_storage() {
             .contains("invalid OpenID4VC conformance credential trust anchor")
     );
 }
+
+#[test]
+fn policy_secret_path_accepts_only_the_explicit_fixed_mapping() {
+    let configured = std::env::var_os("PATH").expect("test process PATH");
+    let configured = configured.to_string_lossy();
+    assert_eq!(
+        conformance_policy_secret_path("PATH", &configured, "unused-credential").unwrap(),
+        std::path::PathBuf::from(configured.as_ref())
+    );
+
+    let error = conformance_policy_secret_path(
+        "PATH",
+        "/run/credentials/client-secret-pepper",
+        "client-secret-pepper",
+    )
+    .expect_err("an ambient PATH value must not become a controller credential path");
+    assert!(error.to_string().contains("fixed mapping"));
+}
+
+#[test]
+fn dataset_validation_rejects_maps_that_drift_from_the_signed_matrix() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let mut datasets = descriptor.openid4vc_credential_datasets.clone();
+    datasets.remove("eu.europa.ec.eudi.pid.1");
+    let error = validate_onboarding_credential_datasets(&datasets, &descriptor)
+        .expect_err("the lease dataset map is signed by the matrix");
+    assert!(
+        error
+            .to_string()
+            .contains("do not match the deployment matrix")
+    );
+}
+
+#[test]
+fn matrix_anchor_policy_rejects_multiple_suite_pins_before_membership_check() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let mut ambiguous = descriptor.clone();
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .expect("second Suite trust key");
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let second = params
+        .self_signed(&key)
+        .expect("second Suite trust anchor")
+        .pem();
+    ambiguous.openid4vc_suite_mdoc_trust_anchor_pem = format!(
+        "{}\n{}\n",
+        descriptor.openid4vc_suite_mdoc_trust_anchor_pem.trim_end(),
+        second.replace("\r\n", "\n").trim_end()
+    );
+    let material = valid_conformance_trust(&descriptor);
+    let error = validate_matrix_suite_mdoc_anchor(&material, &ambiguous)
+        .expect_err("Matrix must pin exactly one Suite mdoc trust anchor");
+    assert!(error.to_string().contains("exactly one"));
+}
+
+#[tokio::test]
+async fn onboarding_apply_requires_the_fixed_bundle_channel_before_database_access() {
+    if std::env::var_os("NAZOAUTH_OPERATOR_CONFORMANCE_BUNDLE_FILE").is_some() {
+        return;
+    }
+    let error = operator_onboarding_apply(
+        "request-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nazoauth-full",
+        3,
+        &"b".repeat(64),
+        &digest_hex(CONFORMANCE_MATRIX_BYTES),
+        0,
+        300,
+    )
+    .await
+    .expect_err("onboarding must fail closed when the bundle channel is absent");
+    assert!(error.to_string().contains("onboarding bundle"));
+}
+
+#[test]
+fn onboarding_repository_requires_the_operator_data_key_channel() {
+    if std::env::var_os("NAZOAUTH_OPERATOR_OPENID4VC_DATA_ENCRYPTION_KEY_FILE").is_some() {
+        return;
+    }
+    let error = match repository_for_onboarding() {
+        Ok(_) => panic!("onboarding repository must not be built without its data key"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("OPENID4VC"));
+}

@@ -299,6 +299,16 @@ fn new_native_sso_token_binding_requires_session_id() {
     );
 }
 
+#[test]
+fn native_sso_subject_policy_uses_client_specific_subject_mapping() {
+    let state = native_sso_state_with_signing_key();
+    let config = crate::http::token::issue::TokenIssuanceConfig::from(state.settings.as_ref());
+    let client = native_sso_client(json!(["openid", "offline_access", "device_sso"]));
+    let subject = native_sso_subject_for_client(&config, Uuid::now_v7(), &client)
+        .expect("configured public subject policy should map the user");
+    assert!(!subject.is_empty());
+}
+
 #[tokio::test]
 async fn native_sso_id_token_decoder_accepts_configured_issuer() {
     let state = native_sso_state_with_signing_key();
