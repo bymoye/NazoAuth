@@ -106,6 +106,101 @@ async fn pre_authorized_token_rejects_invalid_dpop_before_consuming_offer_state(
     assert_error(error, 400, "invalid_dpop_proof", "DPoP proof is invalid.");
 }
 
+#[tokio::test]
+async fn pre_authorized_token_maps_dpop_nonce_store_failure() {
+    let issuer = operations(true).await;
+    let error = issuer
+        .pre_authorized_token(PreAuthorizedTokenRequest {
+            pre_authorized_code: "unit-code".to_owned(),
+            tx_code: None,
+            client_id: None,
+            dpop_proof: Some(valid_dpop_proof(Some("unit-nonce"))),
+            client_attestation: None,
+            client_attestation_pop: None,
+            request_url: "https://issuer.example/token".to_owned(),
+        })
+        .await
+        .expect_err("unavailable DPoP nonce state must fail before offer lookup");
+    assert_error(
+        error,
+        503,
+        "server_error",
+        "DPoP nonce validation is unavailable.",
+    );
+}
+
+#[tokio::test]
+async fn pre_authorized_token_maps_configured_attestation_validation_failure() {
+    let (validator, _, _) = configured_client_attestation_fixture();
+    let issuer = operations_with_client_attestation(validator).await;
+    let error = issuer
+        .pre_authorized_token(PreAuthorizedTokenRequest {
+            pre_authorized_code: "unit-code".to_owned(),
+            tx_code: None,
+            client_id: None,
+            dpop_proof: None,
+            client_attestation: Some("not-a-client-attestation".to_owned()),
+            client_attestation_pop: Some("not-a-client-attestation-pop".to_owned()),
+            request_url: "https://issuer.example/token".to_owned(),
+        })
+        .await
+        .expect_err("malformed configured attestation must be rejected");
+    assert_error(
+        error,
+        401,
+        "invalid_client_attestation",
+        "Client attestation is invalid.",
+    );
+}
+
+#[tokio::test]
+async fn pre_authorized_token_rejects_attestation_client_mismatch_before_replay_state() {
+    let (validator, attestation, proof) = configured_client_attestation_fixture();
+    let issuer = operations_with_client_attestation(validator).await;
+    let error = issuer
+        .pre_authorized_token(PreAuthorizedTokenRequest {
+            pre_authorized_code: "unit-code".to_owned(),
+            tx_code: None,
+            client_id: Some("different-wallet".to_owned()),
+            dpop_proof: None,
+            client_attestation: Some(attestation),
+            client_attestation_pop: Some(proof),
+            request_url: "https://issuer.example/token".to_owned(),
+        })
+        .await
+        .expect_err("attested and requested client identities must match");
+    assert_error(
+        error,
+        401,
+        "invalid_client_attestation",
+        "Client identity does not match the attestation.",
+    );
+}
+
+#[tokio::test]
+async fn pre_authorized_token_maps_attestation_replay_state_failure() {
+    let (validator, attestation, proof) = configured_client_attestation_fixture();
+    let issuer = operations_with_client_attestation(validator).await;
+    let error = issuer
+        .pre_authorized_token(PreAuthorizedTokenRequest {
+            pre_authorized_code: "unit-code".to_owned(),
+            tx_code: None,
+            client_id: Some("wallet-client".to_owned()),
+            dpop_proof: None,
+            client_attestation: Some(attestation),
+            client_attestation_pop: Some(proof),
+            request_url: "https://issuer.example/token".to_owned(),
+        })
+        .await
+        .expect_err("unavailable attestation replay state must fail closed");
+    assert_error(
+        error,
+        503,
+        "server_error",
+        "Client attestation replay state is unavailable.",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires NAZO_TEST_DATABASE_URL/DATABASE_URL and VALKEY_URL; run explicitly with --ignored"]
 async fn live_access_enforces_dpop_binding_and_validates_presented_proof() {

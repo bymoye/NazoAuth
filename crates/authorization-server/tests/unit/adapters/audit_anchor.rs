@@ -1349,6 +1349,43 @@ fn retry_delay_and_delivery_lag_are_monotonic_and_bounded() {
     assert_eq!(delivery_lag_seconds(&recent), 0);
 }
 
+#[tokio::test]
+async fn repository_adapter_forwards_invalid_pool_calls_without_panicking() {
+    let pool = nazo_postgres::create_pool("not a postgres url", 1).unwrap();
+    let repository = AuditLedgerRepository::new(pool);
+
+    assert!(
+        <AuditLedgerRepository as AuditAnchorRepository>::anchor_health(&repository)
+            .await
+            .is_err()
+    );
+    assert!(
+        <AuditLedgerRepository as AuditAnchorRepository>::claim_due(&repository, 0, 1)
+            .await
+            .is_err()
+    );
+    assert!(
+        <AuditLedgerRepository as AuditAnchorRepository>::mark_exported(
+            &repository,
+            Uuid::nil(),
+            1,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        <AuditLedgerRepository as AuditAnchorRepository>::reschedule(
+            &repository,
+            Uuid::nil(),
+            1,
+            Utc::now(),
+            "typed-test-error",
+        )
+        .await
+        .is_err()
+    );
+}
+
 fn required_config() -> AuditAnchorPreflightConfig {
     AuditAnchorPreflightConfig {
         mode: AuditAnchorMode::Required,

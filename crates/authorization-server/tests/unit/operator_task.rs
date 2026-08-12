@@ -937,3 +937,50 @@ async fn external_key_dispatch_rejects_unmounted_public_material() {
     .await;
     assert!(matches!(outcome, TaskOutcome::Failed { .. }));
 }
+
+#[tokio::test]
+async fn operator_dispatch_maps_deterministic_precondition_errors() {
+    let onboarding = execute(&TaskOperation::ConformanceOnboardingApply {
+        profile: "nazoauth-full".to_owned(),
+        bundle_schema: 3,
+        bundle_sha256: String::new(),
+        matrix_sha256: "a".repeat(64),
+        client_count: 1,
+        ttl_seconds: 60,
+    })
+    .await;
+    assert!(matches!(onboarding, TaskOutcome::Failed { .. }));
+
+    let generated = execute(&TaskOperation::KeysGenerateLocal {
+        alg: "unsupported-algorithm".to_owned(),
+        purposes: vec!["credential".to_owned()],
+    })
+    .await;
+    assert!(matches!(generated, TaskOutcome::Failed { .. }));
+
+    let external = execute(&TaskOperation::KeysRegisterExternal {
+        kid: "external-1".to_owned(),
+        alg: "ES256".to_owned(),
+        key_ref: "provider:key-1".to_owned(),
+        public_jwk_sha256: "a".repeat(64),
+    })
+    .await;
+    assert!(matches!(external, TaskOutcome::Failed { .. }));
+
+    let lease = execute(&TaskOperation::ConformanceLeaseCreate {
+        profile: "oidf-full".to_owned(),
+        material_sha256: "a".repeat(64),
+        dynamic_registration_initial_access_token_sha256: Some("b".repeat(64)),
+        ciba_automated_decision_token_sha256: None,
+        public_material: None,
+        ttl_seconds: 60,
+    })
+    .await;
+    assert!(matches!(lease, TaskOutcome::Failed { .. }));
+
+    // These list/validate paths are local key-management dispatches; they
+    // must always map their typed operation error into a receipt-safe outcome
+    // without requiring a database connection in this unit test.
+    let _ = execute(&TaskOperation::KeysList).await;
+    let _ = execute(&TaskOperation::KeysValidate).await;
+}

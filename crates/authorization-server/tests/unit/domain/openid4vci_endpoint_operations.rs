@@ -8,6 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diesel::sql_query;
 use diesel::sql_types::{Integer, Text, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
+use ed25519_dalek::{Signer as _, SigningKey};
 use fred::interfaces::ClientLike;
 use nazo_digital_credentials::{CertificateRevocationPolicy, VcIssuerTrustPolicy, encrypt_ecdh_es};
 use nazo_key_management::{KeyManager, KeySettings};
@@ -128,6 +129,33 @@ async fn operations(enabled: bool) -> ServerCredentialIssuerOperations {
     .await
 }
 
+async fn operations_with_client_attestation(
+    client_attestation: Arc<Openid4vcClientAttestationValidator>,
+) -> ServerCredentialIssuerOperations {
+    let pool = invalid_pool();
+    let mut valkey_builder = fred::prelude::Builder::default_centralized();
+    valkey_builder.with_performance_config(|performance: &mut fred::prelude::PerformanceConfig| {
+        performance.default_command_timeout = std::time::Duration::from_millis(100);
+    });
+    valkey_builder.with_connection_config(|connection: &mut fred::prelude::ConnectionConfig| {
+        connection.connection_timeout = std::time::Duration::from_millis(100);
+        connection.internal_command_timeout = std::time::Duration::from_millis(100);
+        connection.max_command_attempts = 1;
+    });
+    let valkey = valkey_builder
+        .build()
+        .expect("valkey fixture should build without connecting");
+    operations_with_inputs_and_attestation(
+        pool,
+        nazo_valkey::ValkeyConnection::from_existing_client(valkey),
+        true,
+        BTreeMap::from([("unit-config".to_owned(), unit_configuration())]),
+        BTreeSet::new(),
+        Some(client_attestation),
+    )
+    .await
+}
+
 fn unit_configuration() -> CredentialConfiguration {
     CredentialConfiguration {
         format: nazo_digital_credentials::CredentialFormat::SdJwtVc,
@@ -147,6 +175,25 @@ async fn operations_with_inputs(
     enabled: bool,
     configurations: BTreeMap<String, CredentialConfiguration>,
     deferred_configurations: BTreeSet<String>,
+) -> ServerCredentialIssuerOperations {
+    operations_with_inputs_and_attestation(
+        pool,
+        valkey_connection,
+        enabled,
+        configurations,
+        deferred_configurations,
+        None,
+    )
+    .await
+}
+
+async fn operations_with_inputs_and_attestation(
+    pool: nazo_postgres::DbPool,
+    valkey_connection: nazo_valkey::ValkeyConnection,
+    enabled: bool,
+    configurations: BTreeMap<String, CredentialConfiguration>,
+    deferred_configurations: BTreeSet<String>,
+    client_attestation: Option<Arc<Openid4vcClientAttestationValidator>>,
 ) -> ServerCredentialIssuerOperations {
     let mut settings =
         Settings::from_config(&ConfigSource::default()).expect("unit settings should load");
@@ -181,13 +228,76 @@ async fn operations_with_inputs(
         runtime,
         crypto,
         proof_validator,
-        None,
+        client_attestation,
         settings.endpoint.issuer,
         configurations,
         deferred_configurations,
         nazo_auth::DpopNoncePolicy::Optional,
     )
     .expect("credential issuer fixture should build")
+}
+
+fn configured_client_attestation_fixture()
+-> (Arc<Openid4vcClientAttestationValidator>, String, String) {
+    let attester = crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::ES256);
+    let instance = crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::ES256);
+    let validator = Openid4vcClientAttestationValidator::new(
+        "https://attester.example",
+        json!({"keys": [attester.public_jwk("attester-key")]}),
+    )
+    .expect("static client attestation validator should build");
+    let now = chrono::Utc::now().timestamp();
+    let mut attestation_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    attestation_header.typ = Some("oauth-client-attestation+jwt".to_owned());
+    attestation_header.kid = Some("attester-key".to_owned());
+    let attestation = attester.encode_jwt(
+        &attestation_header,
+        &json!({
+            "iss": "https://attester.example",
+            "sub": "wallet-client",
+            "exp": now + 600,
+            "cnf": {"jwk": instance.public_jwk("instance-key")},
+        }),
+    );
+    let mut proof_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    proof_header.typ = Some("oauth-client-attestation-pop+jwt".to_owned());
+    let proof = instance.encode_jwt(
+        &proof_header,
+        &json!({
+            "iss": "wallet-client",
+            "aud": "https://issuer.example",
+            "iat": now,
+            "jti": format!("unit-proof-{}", Uuid::now_v7()),
+        }),
+    );
+    (Arc::new(validator), attestation, proof)
+}
+
+fn valid_dpop_proof(nonce: Option<&str>) -> String {
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let public = URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes());
+    let mut claims = json!({
+        "htm": "POST",
+        "htu": "https://issuer.example/token",
+        "iat": chrono::Utc::now().timestamp(),
+        "jti": format!("unit-dpop-{}", Uuid::now_v7()),
+    });
+    if let Some(nonce) = nonce {
+        claims["nonce"] = json!(nonce);
+    }
+    let header = json!({
+        "typ": "dpop+jwt",
+        "alg": "EdDSA",
+        "jwk": {"kty": "OKP", "crv": "Ed25519", "x": public},
+    });
+    let encoded_header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let encoded_claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    let signing_input = format!("{encoded_header}.{encoded_claims}");
+    let signature = key.sign(signing_input.as_bytes());
+    format!(
+        "{signing_input}.{}",
+        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    )
 }
 
 fn live_configuration(configuration_id: &str) -> (String, CredentialConfiguration) {
@@ -459,6 +569,49 @@ async fn request_json_accepts_json_and_rejects_invalid_encrypted_request() {
         "invalid_credential_request",
         "Encrypted credential request is malformed.",
     );
+}
+
+#[tokio::test]
+async fn credential_decrypts_a_valid_encrypted_request_before_access_validation() {
+    let issuer = operations(true).await;
+    let request = credential_request();
+    let mut jwk = issuer.request_encryption.public_jwk();
+    jwk["alg"] = json!("ECDH-ES");
+    jwk["kid"] = json!("openid4vci-request-encryption");
+    let encrypted = encrypt_ecdh_es(
+        &serde_json::to_vec(&request).expect("credential request should serialize"),
+        &jwk,
+        Some("application/json"),
+    )
+    .expect("credential request should encrypt");
+    let error = issuer
+        .credential(request_context(), CredentialRequestBody::Jwt(encrypted))
+        .await
+        .expect_err("valid encrypted request should then reach access validation");
+    assert_error(error, 401, "invalid_token", "Access token is invalid.");
+}
+
+#[tokio::test]
+async fn deferred_decrypts_a_valid_encrypted_request_before_access_validation() {
+    let issuer = operations(true).await;
+    let request = DeferredCredentialRequest {
+        transaction_id: "unit-transaction".to_owned(),
+        credential_response_encryption: None,
+    };
+    let mut jwk = issuer.request_encryption.public_jwk();
+    jwk["alg"] = json!("ECDH-ES");
+    jwk["kid"] = json!("openid4vci-request-encryption");
+    let encrypted = encrypt_ecdh_es(
+        &serde_json::to_vec(&request).expect("deferred request should serialize"),
+        &jwk,
+        Some("application/json"),
+    )
+    .expect("deferred request should encrypt");
+    let error = issuer
+        .deferred(request_context(), CredentialRequestBody::Jwt(encrypted))
+        .await
+        .expect_err("valid encrypted request should then reach access validation");
+    assert_error(error, 401, "invalid_token", "Access token is invalid.");
 }
 
 #[tokio::test]

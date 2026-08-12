@@ -304,7 +304,46 @@ async fn call_ciba_token_with_request_for_test(
     auth_req_id: String,
     req: HttpRequest,
 ) -> HttpResponse {
-    let form = ciba_token_form(auth_req_id);
+    call_ciba_token_with_form_for_test(
+        state,
+        client,
+        ciba_token_form(auth_req_id),
+        req,
+        None,
+        "private_key_jwt",
+    )
+    .await
+}
+
+async fn call_ciba_token_with_form_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    form: TokenForm,
+    req: HttpRequest,
+    client_assertion: Option<&ValidatedClientAssertion>,
+    auth_method: &str,
+) -> HttpResponse {
+    call_ciba_token_with_modules_for_test(
+        state,
+        client,
+        form,
+        req,
+        client_assertion,
+        auth_method,
+        state.active_module_snapshot(),
+    )
+    .await
+}
+
+async fn call_ciba_token_with_modules_for_test(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    form: TokenForm,
+    req: HttpRequest,
+    client_assertion: Option<&ValidatedClientAssertion>,
+    auth_method: &str,
+    modules: nazo_runtime_modules::ActiveModuleSnapshot,
+) -> HttpResponse {
     let connection = state.valkey_connection();
     let ciba_service = ServerCibaService::new(CibaStore::new(&connection));
     let users = nazo_postgres::UserRepository::new(state.diesel_db.clone());
@@ -315,7 +354,6 @@ async fn call_ciba_token_with_request_for_test(
     );
     let issuance_config = TokenIssuanceConfig::from(state.settings.as_ref());
     let ciba_config = CibaHttpConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
     let authorization = super::super::issue::test_support::test_authorization_service(state);
     let issuance = TokenIssuanceContext {
         config: &issuance_config,
@@ -339,8 +377,8 @@ async fn call_ciba_token_with_request_for_test(
         },
         client,
         &form,
-        None,
-        "private_key_jwt",
+        client_assertion,
+        auth_method,
     )
     .await
 }
@@ -381,6 +419,76 @@ async fn token_ciba_rejects_client_policy_before_state_access() {
             .map(|fields| fields.error.as_str()),
         Some("unauthorized_client")
     );
+}
+
+#[actix_web::test]
+async fn token_ciba_rejects_a_disabled_module_before_state_access() {
+    let state = ciba_test_state();
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("disabled-module-kid", &key);
+    let modules = nazo_runtime_modules::ActiveModuleSnapshot {
+        revision: nazo_runtime_modules::ModuleRevision::new(0),
+        accepting: std::collections::BTreeSet::new(),
+        draining: std::collections::BTreeSet::new(),
+    };
+    let request = actix_web::test::TestRequest::post()
+        .uri("/token")
+        .to_http_request();
+
+    let response = call_ciba_token_with_modules_for_test(
+        &state,
+        &client,
+        ciba_token_form("not-stored".to_owned()),
+        request,
+        None,
+        "private_key_jwt",
+        modules,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "unsupported_grant_type");
+}
+
+#[actix_web::test]
+async fn token_ciba_rejects_a_missing_auth_req_id_before_state_access() {
+    let state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+    });
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("missing-auth-req-id-kid", &key);
+    let form = TokenForm {
+        grant_type: CIBA_GRANT_TYPE.to_owned(),
+        ..ciba_token_form("ignored".to_owned())
+    };
+    let form = TokenForm {
+        auth_req_id: None,
+        ..form
+    };
+    let request = actix_web::test::TestRequest::post()
+        .uri("/token")
+        .to_http_request();
+
+    let response =
+        call_ciba_token_with_form_for_test(&state, &client, form, request, None, "private_key_jwt")
+            .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+}
+
+#[actix_web::test]
+async fn token_ciba_rejects_an_invalid_fapi_client_before_state_access() {
+    let state = ciba_test_state_with(|settings| {
+        settings.modules.enable_ciba = true;
+    });
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("invalid-fapi-client-kid", &key);
+
+    let response = call_ciba_token_for_test(&state, &client, "not-stored".to_owned()).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
 }
 
 #[actix_web::test]
@@ -890,7 +998,7 @@ async fn ciba_request_parser_enforces_form_encoding_and_parameter_uniqueness() {
         "id_token_hint=id-token&login_hint_token=hint-token&binding_message=1234&",
         "acr_values=1&requested_expiry=30&client_id=client-1&client_secret=secret&",
         "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer&",
-        "client_assertion=assertion&client_notification_token=notification"
+        "client_assertion=assertion&client_notification_token=notification&unknown=ignored"
     );
     let (request, mut payload) = actix_web::test::TestRequest::post()
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
@@ -1115,6 +1223,212 @@ fn ciba_request_object_helpers_cover_protocol_boundaries() {
     assert_eq!(unverified_signed_ciba_request_object_client_id("bad"), None);
     assert_eq!(
         unverified_signed_ciba_request_object_client_id("a.b."),
+        None
+    );
+}
+
+#[test]
+fn ciba_request_object_without_request_is_a_noop() {
+    let state = ciba_test_state();
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("ciba-kid", &key);
+    let mut form = BackchannelAuthenticationForm::default();
+
+    assert!(
+        validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+            .expect("missing request object should be accepted")
+            .is_none()
+    );
+}
+
+#[test]
+fn ciba_request_object_rejects_unsupported_binding_and_parameter_conflicts() {
+    let state = ciba_test_state();
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("ciba-kid", &key);
+    let unsupported =
+        signed_ciba_request_object("ciba-kid", &key, json!({"binding_message": "\u{0001}"}));
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(unsupported),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+        .expect_err("unsupported binding_message must be rejected");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_binding_message");
+
+    for field in [
+        "scope",
+        "login_hint",
+        "id_token_hint",
+        "login_hint_token",
+        "binding_message",
+        "acr_values",
+        "client_notification_token",
+    ] {
+        let extra = match field {
+            "scope" => json!({"scope": "openid"}),
+            "login_hint" => json!({"login_hint": "request-user"}),
+            "id_token_hint" => json!({
+                "login_hint": null,
+                "id_token_hint": "request-id-token"
+            }),
+            "login_hint_token" => json!({
+                "login_hint": null,
+                "login_hint_token": "request-login-token"
+            }),
+            "binding_message" => json!({"binding_message": "request-binding"}),
+            "acr_values" => json!({"acr_values": "1"}),
+            "client_notification_token" => {
+                json!({"client_notification_token": "request-notification"})
+            }
+            _ => unreachable!("conflict field list is exhaustive"),
+        };
+        let request_object = signed_ciba_request_object("ciba-kid", &key, extra);
+        let mut form = BackchannelAuthenticationForm {
+            request: Some(request_object),
+            ..BackchannelAuthenticationForm::default()
+        };
+        match field {
+            "scope" => form.scope = Some("outer-scope".to_owned()),
+            "login_hint" => form.login_hint = Some("outer-user".to_owned()),
+            "id_token_hint" => form.id_token_hint = Some("outer-id-token".to_owned()),
+            "login_hint_token" => form.login_hint_token = Some("outer-login-token".to_owned()),
+            "binding_message" => form.binding_message = Some("outer-binding".to_owned()),
+            "acr_values" => form.acr_values = Some("2".to_owned()),
+            "client_notification_token" => {
+                form.client_notification_token = Some("outer-notification".to_owned())
+            }
+            _ => unreachable!("conflict field list is exhaustive"),
+        }
+        let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+            .expect_err("outer and request object parameters must not conflict");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+        assert_eq!(oauth_error_code(&response), "invalid_request", "{field}");
+    }
+}
+
+#[test]
+fn ciba_request_object_rejects_invalid_or_conflicting_requested_expiry() {
+    let state = ciba_test_state();
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("ciba-kid", &key);
+
+    let request_object = signed_ciba_request_object(
+        "ciba-kid",
+        &key,
+        json!({"requested_expiry": "not-a-duration"}),
+    );
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(request_object),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+        .expect_err("invalid request object expiry must be rejected");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+
+    let request_object =
+        signed_ciba_request_object("ciba-kid", &key, json!({"requested_expiry": "30"}));
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(request_object),
+        requested_expiry_seconds: Some(31),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+        .expect_err("outer and request object expiry must not conflict");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+}
+
+#[test]
+fn ciba_request_object_rejects_invalid_compact_jwt_metadata() {
+    let state = ciba_test_state();
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let client = ciba_private_key_jwt_client("ciba-kid", &key);
+
+    for request_object in ["not-a-jwt".to_owned(), "a.b.".to_owned()] {
+        let mut form = BackchannelAuthenticationForm {
+            request: Some(request_object),
+            ..BackchannelAuthenticationForm::default()
+        };
+        let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+            .expect_err("malformed request object must be rejected");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(oauth_error_code(&response), "invalid_request");
+    }
+
+    let none_header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(r#"{"iss":"client-1"}"#);
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(format!("{none_header}.{payload}.signature")),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+        .expect_err("alg=none request object must be rejected");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+
+    let mut mismatched = client.clone();
+    mismatched.backchannel_authentication_request_signing_alg = Some("ES256".to_owned());
+    let request_object = signed_ciba_request_object("ciba-kid", &key, json!({}));
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(request_object),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &mismatched, &mut form)
+        .expect_err("request object algorithm must match registration");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+
+    let claims = json!({
+        "iss": "client-1",
+        "aud": "https://issuer.example",
+        "iat": Utc::now().timestamp(),
+        "nbf": Utc::now().timestamp(),
+        "exp": Utc::now().timestamp() + 120,
+        "jti": format!("missing-kid-{}", Uuid::now_v7()),
+        "login_hint": "subject@example.test"
+    });
+    let request_object = key.encode_jwt(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::PS256),
+        &claims,
+    );
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(request_object),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+        .expect_err("request object without kid must be rejected");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+
+    let request_object = signed_ciba_request_object("unknown-kid", &key, json!({}));
+    let mut form = BackchannelAuthenticationForm {
+        request: Some(request_object),
+        ..BackchannelAuthenticationForm::default()
+    };
+    let response = validate_and_apply_ciba_request_object_claims(&state, &client, &mut form)
+        .expect_err("request object with an unknown key must be rejected");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_request");
+}
+
+#[test]
+fn ciba_unverified_request_object_hint_rejects_none_and_empty_issuers() {
+    let none_header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(r#"{"iss":"client-1","sub":"client-1"}"#);
+    assert_eq!(
+        unverified_signed_ciba_request_object_client_id(&format!(
+            "{none_header}.{payload}.signature"
+        )),
+        None
+    );
+
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"PS256"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(r#"{"iss":"  "}"#);
+    assert_eq!(
+        unverified_signed_ciba_request_object_client_id(&format!("{header}.{payload}.signature")),
         None
     );
 }
@@ -2875,4 +3189,37 @@ fn ciba_rejects_rs256_client_assertion_algorithm() {
     assert!(ciba_jwt_signing_algorithm_supported(
         jsonwebtoken::Algorithm::PS256
     ));
+}
+
+#[test]
+fn ciba_automated_decision_request_token_rejects_wrong_methods_and_schemes() {
+    let settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    let mut config = CibaHttpConfig::from(&settings);
+    let post = actix_web::test::TestRequest::post().to_http_request();
+    let get = actix_web::test::TestRequest::get().to_http_request();
+    let mut query = CibaAutomatedDecisionQuery {
+        token: None,
+        auth_req_id: Some("request-id".to_owned()),
+        r#type: Some("allow".to_owned()),
+        action: None,
+        decision_token: Some("query-secret".to_owned()),
+    };
+
+    config.automated_decision_mode = CibaAutomatedDecisionMode::Header;
+    assert!(ciba_automated_decision_request_token(&config, &get, &query).is_none());
+    let basic = actix_web::test::TestRequest::post()
+        .insert_header((header::AUTHORIZATION, "Basic dGVzdA=="))
+        .to_http_request();
+    assert!(ciba_automated_decision_request_token(&config, &basic, &query).is_none());
+    assert!(ciba_automated_decision_request_token(&config, &post, &query).is_none());
+
+    config.automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
+    assert!(ciba_automated_decision_request_token(&config, &post, &query).is_none());
+    query.decision_token = None;
+    assert!(ciba_automated_decision_request_token(&config, &get, &query).is_none());
+
+    config.automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
+    query.decision_token = Some("disabled-secret".to_owned());
+    assert!(ciba_automated_decision_request_token(&config, &get, &query).is_none());
 }

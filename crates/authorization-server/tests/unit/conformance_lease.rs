@@ -28,6 +28,49 @@ fn empty_optional_mtls_selectors_do_not_require_a_trust_anchor() {
     assert!(registration_requires_mtls_anchor(&san_bound));
 }
 
+#[test]
+fn secret_text_deserializes_and_wipes_owned_material() {
+    let secret: SecretText = serde_json::from_value(serde_json::json!("bundle-secret"))
+        .expect("secret text deserialization");
+    assert_eq!(secret.as_str(), "bundle-secret");
+
+    let mut value = "sensitive-value".to_owned();
+    wipe_secret_string(&mut value);
+    assert!(value.is_empty());
+}
+
+#[test]
+fn mtls_registration_selectors_all_require_a_trust_anchor() {
+    for request in [
+        serde_json::json!({
+            "token_endpoint_auth_method": "tls_client_auth"
+        }),
+        serde_json::json!({
+            "token_endpoint_auth_method": "self_signed_tls_client_auth"
+        }),
+        serde_json::json!({
+            "tls_client_auth_subject_dn": "CN=conformance-client"
+        }),
+        serde_json::json!({
+            "tls_client_auth_cert_sha256": "a".repeat(64)
+        }),
+        serde_json::json!({
+            "tls_client_auth_san_dns": ["client.example"]
+        }),
+        serde_json::json!({
+            "tls_client_auth_san_uri": ["spiffe://example.test/client"]
+        }),
+        serde_json::json!({
+            "tls_client_auth_san_ip": ["127.0.0.1"]
+        }),
+        serde_json::json!({
+            "tls_client_auth_san_email": ["client@example.test"]
+        }),
+    ] {
+        assert!(registration_requires_mtls_anchor(&request), "{request}");
+    }
+}
+
 #[cfg(unix)]
 fn secure_material_fixture(name: &str, mode: u32) -> std::path::PathBuf {
     let directory = std::env::temp_dir().join(format!("nazoauth-{name}-{}", Uuid::now_v7()));
@@ -343,6 +386,28 @@ fn matrix_suite_mdoc_anchor_policy_rejects_ambiguous_matrix_pins() {
     assert!(error.to_string().contains("Matrix Suite mdoc trust anchor"));
 }
 
+#[test]
+fn matrix_suite_mdoc_anchor_policy_requires_exact_membership() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix descriptor");
+    let mut material = valid_conformance_trust(&descriptor);
+    let unrelated = || {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+            .expect("unrelated trust key");
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let pem = params
+            .self_signed(&key)
+            .expect("unrelated trust anchor")
+            .pem();
+        let pem = pem.replace("\r\n", "\n");
+        format!("{}\n", pem.trim_end())
+    };
+    material.credential_trust_anchor_pem = format!("{}{}", unrelated(), unrelated());
+    let error = validate_matrix_suite_mdoc_anchor(&material, &descriptor)
+        .expect_err("the trust set must include the exact Matrix Suite anchor");
+    assert!(error.to_string().contains("does not contain the Matrix"));
+}
+
 #[derive(Clone, Copy)]
 struct UnusedClientRepository;
 
@@ -646,6 +711,18 @@ async fn onboarding_bundle_rejects_signed_binding_and_secret_material_drift() {
     assert_onboarding_bundle_error(claims, bundle, "does not contain the Matrix").await;
 }
 
+#[actix_web::test]
+async fn onboarding_bundle_rejects_unsupported_profile_and_invalid_applicant_password() {
+    let (mut claims, mut bundle) = onboarding_bundle_fixture();
+    claims.profile = "unsupported";
+    bundle.profile = "unsupported".to_owned();
+    assert_onboarding_bundle_error(claims, bundle, "profile is not supported").await;
+
+    let (claims, mut bundle) = onboarding_bundle_fixture();
+    bundle.applicant.password = SecretText(String::new());
+    assert_onboarding_bundle_error(claims, bundle, "applicant password is invalid").await;
+}
+
 #[test]
 fn onboarding_dataset_policy_rejects_shape_size_secret_and_unknown_configuration() {
     let descriptor = load_matrix_descriptor().expect("built-in matrix");
@@ -691,6 +768,47 @@ fn onboarding_dataset_policy_rejects_shape_size_secret_and_unknown_configuration
         validate_onboarding_credential_datasets(&unknown.openid4vc_credential_datasets, &unknown)
             .is_err()
     );
+}
+
+#[test]
+fn onboarding_dataset_policy_enforces_count_and_total_size_before_runtime_lookup() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let maximum = usize::try_from(MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS)
+        .expect("dataset count bound");
+    let mut too_many = descriptor.clone();
+    too_many.openid4vc_credential_datasets = (0..=maximum)
+        .map(|index| {
+            (
+                format!("credential-{index}"),
+                serde_json::json!({"claim": "value"}),
+            )
+        })
+        .collect();
+    let error =
+        validate_onboarding_credential_datasets(&too_many.openid4vc_credential_datasets, &too_many)
+            .expect_err("dataset count must be bounded");
+    assert!(error.to_string().contains("count is out of bounds"));
+
+    let mut too_large = descriptor.clone();
+    too_large.openid4vc_credential_datasets = (0..maximum)
+        .map(|index| {
+            (
+                format!("credential-{index}"),
+                serde_json::json!({"claim": "x".repeat(60_000)}),
+            )
+        })
+        .collect();
+    let error = validate_onboarding_credential_datasets(
+        &too_large.openid4vc_credential_datasets,
+        &too_large,
+    )
+    .expect_err("dataset total size must be bounded");
+    assert!(error.to_string().contains("total size is out of bounds"));
+
+    let mut empty = descriptor;
+    empty.openid4vc_credential_datasets = BTreeMap::new();
+    validate_onboarding_credential_datasets(&empty.openid4vc_credential_datasets, &empty)
+        .expect("empty dataset map has no runtime configuration to validate");
 }
 
 #[test]
@@ -771,6 +889,13 @@ fn onboarding_scalar_and_registration_validators_cover_closed_policy_boundaries(
         "token_endpoint_auth_method": "client_secret_basic"
     });
     assert!(validate_client_request(&oversized_request).is_err());
+    assert!(validate_client_request(&serde_json::json!([])).is_err());
+    assert!(
+        validate_client_request(&serde_json::json!({
+            "client_type": "confidential"
+        }))
+        .is_err()
+    );
 
     let mut sets = serde_json::json!({
         "redirect_uris": ["https://client.example/cb", "https://client.example/cb"],
@@ -815,6 +940,32 @@ fn onboarding_scalar_and_registration_validators_cover_closed_policy_boundaries(
         &descriptor,
         "target.ciba_automated_decision_url"
     ));
+}
+
+#[test]
+fn controller_path_helpers_keep_fixed_defaults_without_environment_overrides() {
+    if std::env::var_os("NAZOAUTH_OPERATOR_CLIENT_SECRET_PEPPER_FILE").is_none() {
+        assert!(
+            conformance_policy_secret_path(
+                "NAZOAUTH_OPERATOR_CLIENT_SECRET_PEPPER_FILE",
+                CONFORMANCE_CLIENT_SECRET_PEPPER_PATH,
+                "client-secret-pepper",
+            )
+            .is_err()
+        );
+    }
+    if std::env::var_os("NAZOAUTH_OPERATOR_CONFORMANCE_BUNDLE_FILE").is_none() {
+        assert_eq!(
+            conformance_bundle_path().expect("fixed bundle path"),
+            std::path::PathBuf::from(CONFORMANCE_BUNDLE_PATH)
+        );
+    }
+    if std::env::var_os("NAZOAUTH_OPERATOR_OUTPUT_DIRECTORY").is_none() {
+        assert_eq!(
+            conformance_output_directory().expect("fixed output directory"),
+            std::path::PathBuf::from(CONFORMANCE_OUTPUT_DIRECTORY)
+        );
+    }
 }
 
 #[tokio::test]
@@ -873,6 +1024,72 @@ async fn onboarding_adapter_request(
         clients: Vec::new(),
         mtls_trust_anchors: Vec::new(),
         openid4vc_credential_datasets: descriptor.openid4vc_credential_datasets,
+    }
+}
+
+#[tokio::test]
+async fn onboarding_adapter_rejects_conversion_boundaries_before_database_access() {
+    let pool = nazo_postgres::create_pool("postgresql://postgres:postgres@127.0.0.1:5432/oauth", 1)
+        .expect("lazy adapter pool");
+    let adapter = PostgresOnboardingRepository::new(ConformanceLeaseRepository::new(pool));
+
+    let request = onboarding_adapter_request(DEFAULT_TENANT_ID, 3, 0, 300).await;
+    let pending = adapter.apply_onboarding(request);
+    drop(pending);
+
+    let mut request = onboarding_adapter_request(Uuid::now_v7(), 3, 0, 300).await;
+    assert!(
+        adapter
+            .apply_onboarding(request)
+            .await
+            .expect_err("tenant binding must be checked before persistence")
+            .to_string()
+            .contains("tenant binding")
+    );
+
+    request = onboarding_adapter_request(DEFAULT_TENANT_ID, u32::MAX, 0, 300).await;
+    assert!(
+        adapter
+            .apply_onboarding(request)
+            .await
+            .expect_err("bundle schema conversion must be bounded")
+            .to_string()
+            .contains("bundle schema")
+    );
+
+    request = onboarding_adapter_request(DEFAULT_TENANT_ID, 3, 0, u64::MAX).await;
+    assert!(
+        adapter
+            .apply_onboarding(request)
+            .await
+            .expect_err("ttl conversion must be bounded")
+            .to_string()
+            .contains("ttl")
+    );
+
+    request = onboarding_adapter_request(DEFAULT_TENANT_ID, 3, u32::MAX, 300).await;
+    assert!(
+        adapter
+            .apply_onboarding(request)
+            .await
+            .expect_err("client count conversion must be bounded")
+            .to_string()
+            .contains("client count")
+    );
+}
+
+#[tokio::test]
+async fn prepare_client_registrations_requires_the_controller_secret_channel() {
+    if std::env::var_os("NAZOAUTH_OPERATOR_CLIENT_SECRET_PEPPER_FILE").is_none() {
+        let error = match prepare_client_registrations(Vec::new()).await {
+            Ok(_) => panic!("client preparation must not proceed without its secret channel"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("NAZOAUTH_OPERATOR_CLIENT_SECRET_PEPPER_FILE")
+        );
     }
 }
 
@@ -1110,4 +1327,35 @@ async fn operator_rejects_invalid_identifiers_and_ttl_overflow() {
             .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn operator_create_rejects_invalid_digest_and_trust_before_storage() {
+    let error = operator_create(
+        "oidc-fapi-ciba",
+        &"a".repeat(64),
+        Some(&"A".repeat(64)),
+        None,
+        None,
+        60,
+    )
+    .await
+    .expect_err("uppercase digest must fail closed before repository access");
+    assert!(error.to_string().contains("lowercase SHA-256"));
+
+    let error = operator_create(
+        "oidc-fapi-ciba",
+        &"a".repeat(64),
+        None,
+        None,
+        Some(trust_material_fixture()),
+        60,
+    )
+    .await
+    .expect_err("invalid trust material must fail closed before repository access");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid OpenID4VC conformance credential trust anchor")
+    );
 }

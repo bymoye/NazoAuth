@@ -375,6 +375,22 @@ async fn insert_issue_user(state: &TestInfrastructure, user_id: Uuid) {
     .expect("issue test user should insert");
 }
 
+async fn insert_issue_user_with_invalid_principal_metadata(
+    state: &TestInfrastructure,
+    user_id: Uuid,
+) {
+    insert_issue_user(state, user_id).await;
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("issue test database connection should be available");
+    sql_query("UPDATE users SET role = 'user', admin_level = 1 WHERE tenant_id = $1 AND id = $2")
+        .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+        .bind::<SqlUuid, _>(user_id)
+        .execute(&mut connection)
+        .await
+        .expect("issue test user metadata corruption should succeed");
+}
+
 async fn insert_issue_client(state: &TestInfrastructure, client: &ClientRow) {
     let mut connection = get_conn(&state.diesel_db)
         .await
@@ -429,6 +445,39 @@ fn issue_state_with_live_database_pool_size(max_size: usize) -> Option<TestInfra
             jsonwebtoken::Algorithm::RS256,
         ),
     })
+}
+
+fn issue_state_with_live_database_and_disconnected_valkey() -> Option<TestInfrastructure> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let _key_material = client_signing_fixture(jsonwebtoken::Algorithm::EdDSA);
+    Some(TestInfrastructure {
+        diesel_db: create_pool(database_url, 1).expect("database pool should build"),
+        valkey: disconnected_valkey_client(),
+        settings: Arc::new(
+            Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
+        ),
+        keyset: crate::test_support::test_key_manager_with_algorithm(
+            jsonwebtoken::Algorithm::RS256,
+        ),
+    })
+}
+
+async fn delete_token_issuance_for_grant(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    grant_key: &str,
+) {
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    if let Ok(Some(record)) = service
+        .token_issuance_by_grant(client.tenant_id, client.id, grant_key)
+        .await
+    {
+        delete_token_issuance(state, record.issuance_id).await;
+    }
 }
 
 #[test]
@@ -1739,4 +1788,214 @@ async fn busy_prepared_issuance_fails_closed_after_bounded_wait() {
     let value: Value = serde_json::from_slice(&response_body(response).await)
         .expect("OAuth error body should be JSON");
     assert_eq!(value["error"], "server_error");
+}
+
+#[actix_web::test]
+async fn busy_prepared_issuance_recovers_a_response_persisted_by_the_owner() {
+    let Some(state) = issue_state_with_live_database_pool_size(2) else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("busy-recovery-{}", Uuid::now_v7());
+    let issue = token_issue_without_openid();
+    let request_digest = issuance_request_digest(&client, &issue, &grant_key);
+    let issuance_id = Uuid::now_v7();
+    let owner_id = Uuid::now_v7();
+    let expires_at = Utc::now() + chrono::Duration::minutes(5);
+    let owner_response_body = br#"{"access_token":"owner-response","token_type":"Bearer"}"#;
+    let response_digest = blake3::hash(owner_response_body).to_hex().to_string();
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let prepared = service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id,
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: grant_key.clone(),
+            request_digest: request_digest.clone(),
+            expires_at,
+        })
+        .await
+        .expect("busy recovery fixture should prepare");
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+    assert_eq!(
+        service
+            .claim_token_issuance(issuance_id, &request_digest, owner_id)
+            .await
+            .expect("busy recovery fixture should claim"),
+        TokenIssuanceClaimResult::Applied
+    );
+
+    let writer_service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let writer = async {
+        tokio::task::yield_now().await;
+        writer_service
+            .record_token_issuance_signed(nazo_auth::RecordTokenIssuanceSigned {
+                issuance_id,
+                request_digest: &request_digest,
+                claim_owner_id: owner_id,
+                access_token_jti: "owner-jti",
+                access_token_expires_at: expires_at.timestamp(),
+                response_body: owner_response_body,
+                response_digest: &response_digest,
+            })
+            .await
+    };
+    let issuer = issue_token_response_with_grant_for_test(&state, &client, &grant_key, issue);
+    let (response, signed) = tokio::join!(issuer, writer);
+    delete_token_issuance(&state, issuance_id).await;
+
+    assert_eq!(
+        signed.expect("owner should persist the response"),
+        TokenIssuanceTransitionResult::Applied
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_body(response).await, owner_response_body.to_vec());
+}
+
+#[actix_web::test]
+async fn dpop_nonce_failure_is_reported_after_the_issuance_claim() {
+    let Some(state) = issue_state_with_live_database_and_disconnected_valkey() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("dpop-error-{}", Uuid::now_v7());
+    let mut issue = token_issue_without_openid();
+    issue.user_id = None;
+    issue.subject = client.client_id.clone();
+    issue.scopes = vec!["accounts".to_owned()];
+    issue.include_refresh = false;
+    issue.dpop_jkt = Some("dpop-thumbprint".to_owned());
+
+    let response =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, issue).await;
+    delete_token_issuance_for_grant(&state, &client, &grant_key).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("access_token").is_none());
+}
+
+#[actix_web::test]
+async fn access_token_subject_mapping_failure_fails_closed_before_response_assembly() {
+    let Some(state) = issue_state_with_live_database_and_disconnected_valkey() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("subject-map-error-{}", Uuid::now_v7());
+    let mut issue = token_issue_without_openid();
+    issue.user_id = Some(Uuid::now_v7());
+    issue.subject = "pairwise-subject".to_owned();
+    issue.scopes = vec!["accounts".to_owned()];
+    issue.include_refresh = false;
+
+    let response =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, issue).await;
+    delete_token_issuance_for_grant(&state, &client, &grant_key).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("access_token").is_none());
+}
+
+#[actix_web::test]
+async fn malformed_active_subject_claims_fail_closed_before_id_token_signing() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let mut client = client_with_grants(&["authorization_code"]);
+    client.client_id = format!("invalid-subject-claims-{}", Uuid::now_v7());
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user_with_invalid_principal_metadata(&state, user_id).await;
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+    issue.include_refresh = false;
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("id_token").is_none());
+}
+
+#[actix_web::test]
+async fn native_sso_device_secret_failure_does_not_return_partial_credentials() {
+    let Some(mut state) = issue_state_with_live_database_and_disconnected_valkey() else {
+        return;
+    };
+    Arc::get_mut(&mut state.settings)
+        .expect("test state owns its settings")
+        .modules
+        .enable_native_sso = true;
+    let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
+    client.client_id = format!("native-sso-store-error-{}", Uuid::now_v7());
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user(&state, user_id).await;
+
+    let mut issue = token_issue_with_sid(vec!["sid".to_owned()]);
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+    issue.scopes = vec!["openid".to_owned(), "offline_access".to_owned()];
+    issue.include_refresh = true;
+    issue.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: format!("device-secret-{}", Uuid::now_v7()),
+        ds_hash: "device-hash".to_owned(),
+        sid: "native-sso-sid".to_owned(),
+    });
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("device_secret").is_none());
+}
+
+#[actix_web::test]
+async fn refresh_issue_new_persistence_failure_uses_non_rotation_error_mapping() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
+    client.client_id = format!("refresh-persist-error-{}", Uuid::now_v7());
+    insert_issue_client(&state, &client).await;
+
+    let grant_key = format!("refresh-persist-error-{}", Uuid::now_v7());
+    let mut issue = token_issue_without_openid();
+    issue.user_id = None;
+    issue.subject = "s".repeat(129);
+    issue.scopes = vec!["accounts".to_owned(), "offline_access".to_owned()];
+    issue.include_refresh = true;
+
+    let response =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, issue).await;
+    delete_token_issuance_for_grant(&state, &client, &grant_key).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("refresh_token").is_none());
 }

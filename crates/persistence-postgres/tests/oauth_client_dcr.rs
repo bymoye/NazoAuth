@@ -5,7 +5,7 @@ use diesel::{
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use nazo_auth::{
     DynamicRegistrationClientStore, DynamicRegistrationDependencyError, OAuthClient,
-    ValidatedClientRegistration,
+    PreparedClientRegistration, ValidatedClientRegistration,
 };
 use nazo_identity::{TenantContext, ports::RepositoryError};
 use nazo_postgres::{ConformanceLeaseTokenDigests, OAuthClientRepository, create_pool, get_conn};
@@ -862,6 +862,323 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
         .execute(&mut connection)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_registration_store_round_trips_registration_and_secret_material() {
+    let Ok(database_url) =
+        std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
+    else {
+        return;
+    };
+    let pool = create_pool(database_url, 4).unwrap();
+    let repository = OAuthClientRepository::new(pool.clone());
+    let tenant = TenantContext::default_system();
+    let template = client(tenant);
+    let initial_token = registration_token(&template, "trait-initial");
+    let initial_secret_hash = "client-secret-v1:initial-salt:initial-digest";
+    let prepared = PreparedClientRegistration {
+        tenant,
+        conformance_lease_id: None,
+        registration: template.registration.clone(),
+        require_mtls_bound_tokens: template.require_mtls_bound_tokens,
+        issued_secret: None,
+        client_secret_hash: Some(initial_secret_hash.to_owned()),
+        registration_access_token_blake3: Some(initial_token.clone()),
+    };
+
+    let inserted = DynamicRegistrationClientStore::insert(&repository, &prepared)
+        .await
+        .unwrap();
+    assert_eq!(inserted.client_id, template.client_id);
+    assert_eq!(inserted.tenant_id, tenant.tenant_id.as_uuid());
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            &inserted.client_id,
+            &initial_token,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+        DynamicRegistrationClientStore::has_client_secret(&repository, inserted.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        Some("initial-salt".to_owned())
+    );
+    assert!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            initial_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            "client-secret-v1:wrong-salt:wrong-digest",
+        )
+        .await
+        .unwrap()
+    );
+
+    let rotated_token = registration_token(&inserted, "trait-rotated");
+    let rotated_secret_hash = "client-secret-v1:rotated-salt:rotated-digest";
+    DynamicRegistrationClientStore::rotate_credentials(
+        &repository,
+        inserted.tenant_id,
+        inserted.id,
+        Some(rotated_secret_hash),
+        &initial_token,
+        &rotated_token,
+    )
+    .await
+    .unwrap();
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &initial_token,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &rotated_token,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        Some("rotated-salt".to_owned())
+    );
+    assert!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            rotated_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+
+    let mut replacement = inserted.clone();
+    replacement.registration.client_name = "Trait replacement".to_owned();
+    let replacement_token = registration_token(&inserted, "trait-replacement");
+    let replacement_secret_hash = "client-secret-v1:replacement-salt:replacement-digest";
+    let replaced = DynamicRegistrationClientStore::replace_registration(
+        &repository,
+        &replacement,
+        Some(replacement_secret_hash),
+        &rotated_token,
+        Some(replacement_token.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replaced.client_name, "Trait replacement");
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &rotated_token,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &replacement_token,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        Some("replacement-salt".to_owned())
+    );
+    assert!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            replacement_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+
+    assert!(
+        DynamicRegistrationClientStore::deactivate(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+            &replacement_token,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &replacement_token,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        !DynamicRegistrationClientStore::has_client_secret(&repository, inserted.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        !DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            replacement_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("DELETE FROM oauth_clients WHERE id = $1")
+        .bind::<SqlUuid, _>(inserted.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_registration_store_maps_repository_failures_to_unavailable() {
+    let repository = OAuthClientRepository::new(
+        create_pool("postgres://invalid:invalid@127.0.0.1:1/never", 1)
+            .expect("invalid test pool should still be constructible"),
+    );
+    let tenant = TenantContext::default_system();
+    let template = client(tenant);
+    let initial_token = registration_token(&template, "unavailable-initial");
+    let prepared = PreparedClientRegistration {
+        tenant,
+        conformance_lease_id: None,
+        registration: template.registration.clone(),
+        require_mtls_bound_tokens: template.require_mtls_bound_tokens,
+        issued_secret: None,
+        client_secret_hash: Some("client-secret-v1:unavailable-salt:unavailable-digest".to_owned()),
+        registration_access_token_blake3: Some(initial_token.clone()),
+    };
+
+    assert_eq!(
+        DynamicRegistrationClientStore::insert(&repository, &prepared)
+            .await
+            .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            &template.client_id,
+            &initial_token,
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::has_client_secret(&repository, template.id)
+            .await
+            .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, template.id)
+            .await
+            .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            template.id,
+            "client-secret-v1:unavailable-salt:unavailable-digest",
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::rotate_credentials(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            template.id,
+            None,
+            &initial_token,
+            "unavailable-rotated",
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::replace_registration(
+            &repository,
+            &template,
+            None,
+            &initial_token,
+            Some("unavailable-replacement"),
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::deactivate(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            template.id,
+            &initial_token,
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
 }
 
 #[derive(diesel::QueryableByName)]
