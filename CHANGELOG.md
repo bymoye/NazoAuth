@@ -3,6 +3,12 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.33 - 2026-08-12
+
+- Keep the supplementary keyless binary bundle offline because the public
+  ReleaseManifest and build-provenance attestations already provide the
+  transparency-log record; this makes immutable release retries idempotent.
+
 ## 0.1.32 - 2026-08-12
 
 ### Fixed

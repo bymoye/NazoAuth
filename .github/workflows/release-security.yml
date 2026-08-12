@@ -566,7 +566,12 @@ jobs:
           set -euo pipefail
           mkdir -p target/release-evidence/signatures
           binary="target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}"
+          # ReleaseManifest and build-provenance attestations above are the
+          # public transparency-log records. This supplementary bundle is
+          # retained only as internal evidence, so do not create a third Rekor
+          # entry for the same immutable subject on a governed retry.
           cosign sign-blob --yes \
+            --tlog-upload=false \
             --bundle "target/release-evidence/signatures/$(basename "$binary").bundle" \
             "$binary"
       - name: Upload platform attestation evidence
