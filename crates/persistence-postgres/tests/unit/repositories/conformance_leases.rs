@@ -614,7 +614,7 @@ async fn onboarding_replay_exercises_mapping_dataset_and_cleanup_state() {
 
     let mut mapping_connection = crate::get_conn(&pool).await.unwrap();
     let mapping = sql_query(
-        "SELECT client_id AS storage_client_id, client.client_id AS public_client_id
+        "SELECT mapping.client_id AS storage_client_id, client.client_id AS public_client_id
          FROM conformance_lease_clients mapping
          JOIN oauth_clients client
            ON client.tenant_id = mapping.tenant_id AND client.id = mapping.client_id
@@ -1172,20 +1172,22 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
         .unwrap();
     let dynamic_material_b = test_digest("material-b", &Uuid::now_v7().simple().to_string());
     let dynamic_b_ciba_digest = test_digest("ciba-b", &Uuid::now_v7().simple().to_string());
-    let dynamic_b = repository
-        .create(
-            tenant_id,
-            "oidc-fapi-ciba",
-            &dynamic_material_b,
-            ConformanceLeaseTokenDigests {
-                dynamic_registration_initial_access_token_sha256: Some(&dynamic_digest),
-                ciba_automated_decision_token_sha256: Some(&dynamic_b_ciba_digest),
-            },
-            Some(json!({"source": "b"})),
-            300,
-        )
-        .await
-        .unwrap();
+    assert!(matches!(
+        repository
+            .create(
+                tenant_id,
+                "oidc-fapi-ciba",
+                &dynamic_material_b,
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: Some(&dynamic_digest),
+                    ciba_automated_decision_token_sha256: Some(&dynamic_b_ciba_digest),
+                },
+                Some(json!({"source": "b"})),
+                300,
+            )
+            .await,
+        Err(RepositoryError::Conflict)
+    ));
     assert!(
         repository
             .list(tenant_id)
@@ -1194,13 +1196,13 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
             .iter()
             .any(|lease| lease.id == dynamic_a.id)
     );
-    assert!(matches!(
+    assert_eq!(
         repository
             .active_dynamic_registration_lease_id(tenant_id, &dynamic_digest)
-            .await,
-        Err(RepositoryError::Consistency(message))
-            if message.contains("dynamic registration credential")
-    ));
+            .await
+            .unwrap(),
+        Some(dynamic_a.id)
+    );
     let no_match_digest = "f".repeat(64);
     assert_eq!(
         repository
@@ -1209,15 +1211,6 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
             .unwrap(),
         None
     );
-    delete_created_lease(&pool, tenant_id, dynamic_b.id).await;
-    assert_eq!(
-        repository
-            .active_dynamic_registration_lease_id(tenant_id, &dynamic_digest)
-            .await
-            .unwrap(),
-        Some(dynamic_a.id)
-    );
-
     let ciba_material_a = test_digest("material-c", &Uuid::now_v7().simple().to_string());
     let ciba_a = repository
         .create(
@@ -1234,28 +1227,22 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
         .await
         .unwrap();
     let ciba_material_b = test_digest("material-d", &Uuid::now_v7().simple().to_string());
-    let ciba_b = repository
-        .create(
-            tenant_id,
-            "oidc-fapi-ciba",
-            &ciba_material_b,
-            ConformanceLeaseTokenDigests {
-                dynamic_registration_initial_access_token_sha256: None,
-                ciba_automated_decision_token_sha256: Some(&ciba_digest),
-            },
-            Some(json!({"source": "d"})),
-            300,
-        )
-        .await
-        .unwrap();
     assert!(matches!(
         repository
-            .active_ciba_automated_decision_lease_id(tenant_id, &ciba_digest)
+            .create(
+                tenant_id,
+                "oidc-fapi-ciba",
+                &ciba_material_b,
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: None,
+                    ciba_automated_decision_token_sha256: Some(&ciba_digest),
+                },
+                Some(json!({"source": "d"})),
+                300,
+            )
             .await,
-        Err(RepositoryError::Consistency(message))
-            if message.contains("CIBA automated-decision credential")
+        Err(RepositoryError::Conflict)
     ));
-    delete_created_lease(&pool, tenant_id, ciba_b.id).await;
     assert_eq!(
         repository
             .active_ciba_automated_decision_lease_id(tenant_id, &ciba_digest)
