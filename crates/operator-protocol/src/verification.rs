@@ -605,6 +605,10 @@ pub fn validate_conformance_matrix_descriptor(
     }
     validate_identifier(&descriptor.source.release)?;
     validate_lower_hex(&descriptor.source.digest, 64)?;
+    validate_single_public_certificate(
+        &descriptor.openid4vc_suite_mdoc_trust_anchor_pem,
+        "invalid Suite mdoc trust anchor",
+    )?;
     validate_conformance_openid4vc_credential_datasets(&descriptor.openid4vc_credential_datasets)?;
     if descriptor.groups.is_empty() || descriptor.groups.len() > MAX_CONFORMANCE_MATRIX_GROUPS {
         return Err(ProtocolError::Policy(
@@ -1373,6 +1377,24 @@ pub fn validate_openid4vc_conformance_trust(
     }
     validate_openid4vc_trust_jwks(&material.client_attestation_jwks, true)?;
     validate_openid4vc_trust_jwks(&material.key_attestation_jwks, false)?;
+    Ok(())
+}
+
+fn validate_single_public_certificate(
+    value: &str,
+    message: &'static str,
+) -> Result<(), ProtocolError> {
+    if value.is_empty()
+        || value.len() > 16 * 1024
+        || !value.starts_with("-----BEGIN CERTIFICATE-----\n")
+        || !value.ends_with("-----END CERTIFICATE-----\n")
+        || value.matches("-----BEGIN CERTIFICATE-----").count() != 1
+        || value.matches("-----END CERTIFICATE-----").count() != 1
+        || value.contains("PRIVATE KEY")
+        || value.chars().any(|character| character == '\0')
+    {
+        return Err(ProtocolError::Policy(message));
+    }
     Ok(())
 }
 

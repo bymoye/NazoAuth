@@ -3,6 +3,16 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.32 - 2026-08-12
+
+### Fixed
+
+- Pinned the current OIDF Suite mdoc signer CA in the signed Matrix and require
+  every lease-scoped credential trust bundle to contain that exact public
+  anchor alongside the deployment root. This preserves full certificate,
+  validity, issuer-signature, and device-signature verification without
+  enabling an unrelated verifier backend or weakening trust policy.
+
 ## 0.1.31 - 2026-08-12
 
 ### Added

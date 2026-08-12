@@ -446,6 +446,10 @@ pub struct ConformanceMatrixSummary {
 pub struct ConformanceMatrixDescriptor {
     pub schema: u32,
     pub source: ConformanceMatrixSource,
+    /// Public self-signed Document Signer certificate pinned by the exact
+    /// OIDF Suite source release. It is a test-only trust anchor, never a
+    /// private key, and is bound by the raw Matrix digest.
+    pub openid4vc_suite_mdoc_trust_anchor_pem: String,
     /// Public lease-owned OpenID4VC claims keyed by credential
     /// configuration ID.  The server and CTL consume this map verbatim;
     /// secrets, private keys, and applicant credentials are never part of it.

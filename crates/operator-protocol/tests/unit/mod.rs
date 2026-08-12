@@ -511,6 +511,8 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
             release: "v0.1.0".to_owned(),
             digest: "a".repeat(64),
         },
+        openid4vc_suite_mdoc_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
         openid4vc_credential_datasets: BTreeMap::new(),
         groups: vec![ConformanceMatrixGroup {
             id: "oidc-core".to_owned(),
@@ -574,6 +576,17 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
         .insert("oidcc-test".to_owned(), "PASSED".to_owned());
     assert!(validate_conformance_matrix_descriptor(&invalid_result).is_err());
 
+    let mut private_suite_anchor = descriptor.clone();
+    private_suite_anchor.openid4vc_suite_mdoc_trust_anchor_pem =
+        "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----\n".to_owned();
+    assert!(validate_conformance_matrix_descriptor(&private_suite_anchor).is_err());
+
+    let mut duplicate_suite_anchor = descriptor.clone();
+    duplicate_suite_anchor
+        .openid4vc_suite_mdoc_trust_anchor_pem
+        .push_str("-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n");
+    assert!(validate_conformance_matrix_descriptor(&duplicate_suite_anchor).is_err());
+
     let mut review_is_not_preapproved = descriptor;
     review_is_not_preapproved.groups[0].plans[0]
         .expected_results
@@ -614,6 +627,8 @@ fn conformance_matrix_registration_vectors_are_arrays_of_strings() {
             release: "v0.1.0".to_owned(),
             digest: "a".repeat(64),
         },
+        openid4vc_suite_mdoc_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
         openid4vc_credential_datasets: BTreeMap::new(),
         groups: vec![ConformanceMatrixGroup {
             id: "oidc-core".to_owned(),

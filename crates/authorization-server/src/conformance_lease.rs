@@ -480,7 +480,9 @@ async fn validate_bundle(
         bail!("conformance onboarding target issuer does not match this deployment");
     }
     let suite_origin = validate_suite_origin(&bundle.suite_base_url, &target_issuer)?;
+    let descriptor = load_matrix_descriptor()?;
     validate_conformance_trust_material(&bundle.openid4vc_conformance_trust, &suite_origin)?;
+    validate_matrix_suite_mdoc_anchor(&bundle.openid4vc_conformance_trust, &descriptor)?;
     let applicant_email = validate_email(&bundle.applicant.email)?;
     let applicant_password = validate_secret_text(
         bundle.applicant.password.as_str(),
@@ -503,7 +505,6 @@ async fn validate_bundle(
     {
         bail!("conformance token bindings are only valid for the nazoauth-full profile");
     }
-    let descriptor = load_matrix_descriptor()?;
     validate_onboarding_credential_datasets(&bundle.openid4vc_credential_datasets, &descriptor)?;
     let mut expected_logical_ids = BTreeSet::new();
     for group in &descriptor.groups {
@@ -1437,6 +1438,27 @@ fn validate_conformance_trust_material(
         &material.credential_trust_anchor_pem,
     )
     .map_err(|_| anyhow::anyhow!("conformance credential trust anchor is invalid"))?;
+    Ok(())
+}
+
+fn validate_matrix_suite_mdoc_anchor(
+    material: &Openid4vcConformanceTrust,
+    descriptor: &ConformanceMatrixDescriptor,
+) -> anyhow::Result<()> {
+    let anchors = crate::domain::parse_conformance_credential_trust_anchors(
+        &material.credential_trust_anchor_pem,
+    )
+    .map_err(|_| anyhow::anyhow!("conformance credential trust anchor is invalid"))?;
+    let suite_anchors = crate::domain::parse_conformance_credential_trust_anchors(
+        &descriptor.openid4vc_suite_mdoc_trust_anchor_pem,
+    )
+    .map_err(|_| anyhow::anyhow!("Matrix Suite mdoc trust anchor is invalid"))?;
+    let [suite_anchor] = suite_anchors.as_slice() else {
+        bail!("Matrix must pin exactly one Suite mdoc trust anchor");
+    };
+    if anchors.len() < 2 || !anchors.contains(suite_anchor) {
+        bail!("conformance trust material does not contain the Matrix Suite mdoc trust anchor");
+    }
     Ok(())
 }
 

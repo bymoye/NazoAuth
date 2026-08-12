@@ -285,6 +285,16 @@ fn conformance_trust_material_rejects_private_or_unsupported_keys() {
     assert!(validate_conformance_trust_material(&unsupported, "https://suite.example").is_err());
 }
 
+#[test]
+fn checked_in_matrix_pins_one_current_suite_mdoc_ca() {
+    let descriptor = load_matrix_descriptor().expect("checked-in Matrix descriptor");
+    let anchors = crate::domain::parse_conformance_credential_trust_anchors(
+        &descriptor.openid4vc_suite_mdoc_trust_anchor_pem,
+    )
+    .expect("current Suite mdoc trust anchor");
+    assert_eq!(anchors.len(), 1);
+}
+
 #[derive(Clone, Copy)]
 struct UnusedClientRepository;
 
