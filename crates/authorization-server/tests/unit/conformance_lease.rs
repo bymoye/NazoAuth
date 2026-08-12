@@ -495,7 +495,7 @@ fn onboarding_bundle_fixture() -> (SignedOnboardingClaims<'static>, ConformanceO
         openid4vc_conformance_trust: valid_conformance_trust(&descriptor),
         applicant: ConformanceApplicantBundle {
             email: "credential-holder@example.test".to_owned(),
-            password: SecretText("correct horse battery staple".to_owned()),
+            password: SecretText(format!("bundle-password-{}", Uuid::now_v7())),
         },
         dynamic_registration_initial_access_token: Some(SecretText(
             "dynamic-registration-token".to_owned(),
@@ -760,7 +760,8 @@ fn onboarding_scalar_and_registration_validators_cover_closed_policy_boundaries(
 
 #[tokio::test]
 async fn onboarding_password_hash_uses_the_configured_bounded_worker() {
-    let hash = hash_applicant_password("correct horse battery staple")
+    let password = format!("coverage-password-{}", Uuid::now_v7());
+    let hash = hash_applicant_password(&password)
         .await
         .expect("bounded applicant password hash");
     assert!(hash.into_persistence_value().starts_with("$argon2"));
@@ -773,6 +774,7 @@ async fn onboarding_adapter_request(
     ttl_seconds: u64,
 ) -> ConformanceOnboardingRequest {
     let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let password = format!("adapter-password-{}", Uuid::now_v7());
     ConformanceOnboardingRequest {
         tenant_id,
         task_jti: format!("request-{}", Uuid::now_v7().simple()),
@@ -789,7 +791,7 @@ async fn onboarding_adapter_request(
         applicant: ConformanceOnboardingApplicant {
             username: format!("conformance-{}", Uuid::now_v7().simple()),
             email: "credential-holder@example.test".to_owned(),
-            password_hash: hash_applicant_password("correct horse battery staple")
+            password_hash: hash_applicant_password(&password)
                 .await
                 .expect("applicant password hash"),
             email_verified: true,
