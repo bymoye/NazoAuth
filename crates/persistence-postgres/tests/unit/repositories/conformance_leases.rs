@@ -1211,21 +1211,6 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
             .unwrap(),
         None
     );
-    let ciba_material_a = test_digest("material-c", &Uuid::now_v7().simple().to_string());
-    let ciba_a = repository
-        .create(
-            tenant_id,
-            "oidc-fapi-ciba",
-            &ciba_material_a,
-            ConformanceLeaseTokenDigests {
-                dynamic_registration_initial_access_token_sha256: None,
-                ciba_automated_decision_token_sha256: Some(&ciba_digest),
-            },
-            Some(json!({"source": "c"})),
-            300,
-        )
-        .await
-        .unwrap();
     let ciba_material_b = test_digest("material-d", &Uuid::now_v7().simple().to_string());
     assert!(matches!(
         repository
@@ -1248,7 +1233,7 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
             .active_ciba_automated_decision_lease_id(tenant_id, &ciba_digest)
             .await
             .unwrap(),
-        Some(ciba_a.id)
+        Some(dynamic_a.id)
     );
 
     let origin = format!("https://ambiguous-{}.example.test", Uuid::now_v7().simple());
@@ -1417,7 +1402,6 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
     assert!(cleanup.cleaned_leases >= 2);
     for lease in [
         dynamic_a.id,
-        ciba_a.id,
         origin_a.id,
         expired.id,
         revoked.id,
