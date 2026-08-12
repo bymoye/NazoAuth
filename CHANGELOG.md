@@ -3,6 +3,14 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.34 - 2026-08-12
+
+- Remove the redundant supplementary keyless blob signature. The governed
+  ReleaseManifest and standard build-provenance attestations already bind each
+  immutable binary to public transparency evidence, while a third signature
+  duplicated that proof and made retries dependent on cosign signing-config
+  behavior.
+
 ## 0.1.33 - 2026-08-12
 
 - Keep the supplementary keyless binary bundle offline because the public

@@ -338,6 +338,19 @@ class ReleaseGovernanceTests(unittest.TestCase):
                 job,
             )
 
+    def test_platform_binaries_use_canonical_attestations_without_duplicate_signing(self) -> None:
+        release = (
+            ROOT / ".github" / "workflows" / "release-security.yml"
+        ).read_text(encoding="utf-8")
+        attestation_job = release.split("  attest-platform-binaries:", 1)[1].split(
+            "  attest-operator-protocol:", 1
+        )[0]
+
+        self.assertIn("actions/attest@", attestation_job)
+        self.assertIn("actions/attest-build-provenance@", attestation_job)
+        self.assertNotIn("cosign sign-blob", attestation_job)
+        self.assertNotIn("release-evidence/signatures", attestation_job)
+
     def test_release_matrix_is_native_smoked_and_server_only(self) -> None:
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
