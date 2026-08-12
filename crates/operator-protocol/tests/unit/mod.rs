@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use ed25519_dalek::SigningKey;
 use proptest::prelude::*;
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::*;
 
@@ -109,6 +110,136 @@ fn adoption_receipt() -> AdoptionReceipt {
         plan_sha256: "c".repeat(64),
         adopted_at: 1_000,
     }
+}
+
+fn checked_in_matrix_descriptor() -> ConformanceMatrixDescriptor {
+    serde_json::from_slice(include_bytes!(
+        "../../../authorization-server/resources/nazoauth-conformance-matrix-v1.json"
+    ))
+    .expect("checked-in conformance matrix JSON")
+}
+
+fn assert_wire_rejects_unknown_field<T>(value: T)
+where
+    T: DeserializeOwned + Serialize,
+{
+    let mut encoded = serde_json::to_value(value).expect("wire value should serialize");
+    encoded
+        .as_object_mut()
+        .expect("wire value should serialize as an object")
+        .insert("unexpected_wire_field".to_owned(), serde_json::json!(true));
+    assert!(
+        serde_json::from_value::<T>(encoded).is_err(),
+        "wire model {} accepted an unknown field",
+        std::any::type_name::<T>()
+    );
+}
+
+#[test]
+fn conformance_matrix_crypto_policy_defaults_are_stable() {
+    let expected = ConformanceMatrixCryptoPolicy {
+        rsa_bits: 2048,
+        ec_curve: "P-256".to_owned(),
+        mtls_signature: "ECDSA-P256-SHA256".to_owned(),
+    };
+    assert_eq!(ConformanceMatrixCryptoPolicy::default(), expected);
+    assert_eq!(
+        serde_json::from_value::<ConformanceMatrixCryptoPolicy>(serde_json::json!({})).unwrap(),
+        expected
+    );
+    assert_eq!(
+        serde_json::from_value::<ConformanceMatrixCryptoPolicy>(serde_json::json!({
+            "rsa_bits": 4096
+        }))
+        .unwrap(),
+        ConformanceMatrixCryptoPolicy {
+            rsa_bits: 4096,
+            ..expected.clone()
+        }
+    );
+
+    let plan: ConformanceMatrixPlan = serde_json::from_value(serde_json::json!({
+        "id": "oidc-core-default",
+        "plan": "oidc-core",
+        "config_template": {}
+    }))
+    .unwrap();
+    assert_eq!(plan.crypto, expected);
+}
+
+#[test]
+fn security_sensitive_wire_models_reject_unknown_fields() {
+    assert_wire_rejects_unknown_field(ProtectedHeader {
+        alg: FixedAlgorithm::EdDSA,
+        kid: "controller-1".to_owned(),
+        typ: TASK_JWS_TYPE.to_owned(),
+    });
+    assert_wire_rejects_unknown_field(Actor {
+        kind: ActorKind::LocalRoot,
+        id: "uid:0".to_owned(),
+    });
+    assert_wire_rejects_unknown_field(task());
+    assert_wire_rejects_unknown_field(EmbeddedIdentity {
+        release: "v1.0.0".to_owned(),
+        revision: "a".repeat(40),
+        protocol: PROTOCOL_VERSION,
+        build_id: "build:test".to_owned(),
+    });
+    assert_wire_rejects_unknown_field(DiscoveryRequest {
+        schema: CONTROL_DISCOVERY_SCHEMA,
+        nonce: discovery_statement().nonce,
+    });
+    assert_wire_rejects_unknown_field(DiscoveryResponse {
+        statement: "signed-statement".to_owned(),
+        instance_public_key: "public-key".to_owned(),
+    });
+    assert_wire_rejects_unknown_field(discovery_statement());
+    assert_wire_rejects_unknown_field(deployment_statement());
+    assert_wire_rejects_unknown_field(adoption_receipt());
+    assert_wire_rejects_unknown_field(AdoptedRuntimeIdentity {
+        runtime_instance_id: "runtime-1".to_owned(),
+        backend: "podman".to_owned(),
+        object_reference: "container/nazoauth".to_owned(),
+        artifact_identity: "a".repeat(64),
+    });
+    assert_wire_rejects_unknown_field(ConfigBinding {
+        manifest_version: CONFIG_MANIFEST_VERSION,
+        config_sha256: "a".repeat(64),
+        secret_binding: SecretBinding::OpaqueRevision {
+            revision: "revision-1".to_owned(),
+        },
+    });
+    assert_wire_rejects_unknown_field(TargetExpectation::HostBinary {
+        path: "/usr/local/bin/nazoauth".to_owned(),
+        sha256: "b".repeat(64),
+    });
+    assert_wire_rejects_unknown_field(Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": []}),
+        key_attestation_jwks: serde_json::json!({"keys": []}),
+        credential_trust_anchor_pem: "public".to_owned(),
+    });
+    assert_wire_rejects_unknown_field(ConformanceMatrixCryptoPolicy::default());
+    assert_wire_rejects_unknown_field(ConformanceMatrixSource {
+        release: "v1.0.0".to_owned(),
+        digest: "a".repeat(64),
+    });
+    assert_wire_rejects_unknown_field(ConformanceMatrixVariant {
+        id: "default".to_owned(),
+        values: BTreeMap::new(),
+    });
+    assert_wire_rejects_unknown_field(ConformanceMatrixRoleRequirement {
+        role: "rp".to_owned(),
+        logical_client_id: None,
+        secret_refs: Vec::new(),
+        registration_template: None,
+    });
+    assert_wire_rejects_unknown_field(checked_in_matrix_descriptor());
+    assert_wire_rejects_unknown_field(CanonicalConfigManifest {
+        version: CONFIG_MANIFEST_VERSION,
+        entries: BTreeMap::new(),
+    });
 }
 
 #[test]
@@ -592,6 +723,65 @@ fn conformance_matrix_descriptor_rejects_duplicates_and_count_drift() {
         .expected_results
         .insert("oidcc-test".to_owned(), "REVIEW".to_owned());
     assert!(validate_conformance_matrix_descriptor(&review_is_not_preapproved).is_err());
+}
+
+#[test]
+fn conformance_matrix_mdoc_trust_anchor_rejects_malformed_certificates() {
+    let descriptor = checked_in_matrix_descriptor();
+    let invalid = [
+        "",
+        "public",
+        "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----",
+        "-----BEGIN CERTIFICATE-----\npublic\0\n-----END CERTIFICATE-----\n",
+        "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----\n",
+        "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n-----END CERTIFICATE-----\n",
+    ];
+    for value in invalid {
+        let mut candidate = descriptor.clone();
+        candidate.openid4vc_suite_mdoc_trust_anchor_pem = value.to_owned();
+        assert!(matches!(
+            validate_conformance_matrix_descriptor(&candidate),
+            Err(ProtocolError::Policy("invalid Suite mdoc trust anchor"))
+        ));
+    }
+
+    let mut oversized = descriptor;
+    oversized.openid4vc_suite_mdoc_trust_anchor_pem = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        "x".repeat(16 * 1024)
+    );
+    assert!(matches!(
+        validate_conformance_matrix_descriptor(&oversized),
+        Err(ProtocolError::Policy("invalid Suite mdoc trust anchor"))
+    ));
+}
+
+#[test]
+fn conformance_matrix_crypto_policy_rejects_weak_values() {
+    let descriptor = checked_in_matrix_descriptor();
+    for crypto in [
+        ConformanceMatrixCryptoPolicy {
+            rsa_bits: 1024,
+            ..ConformanceMatrixCryptoPolicy::default()
+        },
+        ConformanceMatrixCryptoPolicy {
+            ec_curve: "P-384".to_owned(),
+            ..ConformanceMatrixCryptoPolicy::default()
+        },
+        ConformanceMatrixCryptoPolicy {
+            mtls_signature: "RSA-PSS-SHA256".to_owned(),
+            ..ConformanceMatrixCryptoPolicy::default()
+        },
+    ] {
+        let mut candidate = descriptor.clone();
+        candidate.groups[0].plans[0].crypto = crypto;
+        assert!(matches!(
+            validate_conformance_matrix_descriptor(&candidate),
+            Err(ProtocolError::Policy(
+                "conformance matrix crypto policy is weak"
+            ))
+        ));
+    }
 }
 
 #[test]
@@ -1127,6 +1317,171 @@ fn openid4vc_lease_accepts_only_closed_public_trust_material() {
     let mut unsupported = material;
     unsupported.client_attestation_jwks["keys"][0]["kty"] = serde_json::json!("RSA");
     assert!(validate_openid4vc_conformance_trust(&unsupported).is_err());
+}
+
+#[test]
+fn openid4vc_trust_rejects_ambiguous_or_malformed_public_jwks() {
+    let coordinate = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let ec_key = |kid: Option<&str>| {
+        let mut key = serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": coordinate,
+            "y": coordinate,
+        });
+        if let Some(kid) = kid {
+            key["kid"] = serde_json::json!(kid);
+        }
+        key
+    };
+    let material = || Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example/".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [ec_key(Some("client"))]}),
+        key_attestation_jwks: serde_json::json!({"keys": [ec_key(Some("holder"))]}),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
+    };
+
+    for invalid in [
+        Openid4vcConformanceTrust {
+            schema: 2,
+            ..material()
+        },
+        Openid4vcConformanceTrust {
+            client_attestation_issuer: "http://suite.example/".to_owned(),
+            ..material()
+        },
+        Openid4vcConformanceTrust {
+            credential_trust_anchor_pem:
+                "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----".to_owned(),
+            ..material()
+        },
+        Openid4vcConformanceTrust {
+            credential_trust_anchor_pem: format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                "x".repeat(16 * 1024)
+            ),
+            ..material()
+        },
+        Openid4vcConformanceTrust {
+            credential_trust_anchor_pem:
+                "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----\n".to_owned(),
+            ..material()
+        },
+    ] {
+        assert!(matches!(
+            validate_openid4vc_conformance_trust(&invalid),
+            Err(ProtocolError::Policy(
+                "invalid OpenID4VC conformance trust material"
+            ))
+        ));
+    }
+
+    let mut oversized_json = material();
+    oversized_json.client_attestation_jwks["padding"] = serde_json::json!("x".repeat(33 * 1024));
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&oversized_json),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust material exceeds 32 KiB"
+        ))
+    ));
+
+    let mut empty = material();
+    empty.client_attestation_jwks = serde_json::json!({"keys": []});
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&empty),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust requires non-empty JWK Sets"
+        ))
+    ));
+
+    let mut non_object = material();
+    non_object.client_attestation_jwks = serde_json::json!({"keys": ["not-a-key"]});
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&non_object),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust must contain public keys only"
+        ))
+    ));
+
+    let mut duplicate_kid = material();
+    duplicate_kid.client_attestation_jwks =
+        serde_json::json!({"keys": [ec_key(Some("same")), ec_key(Some("same"))]});
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&duplicate_kid),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust keys require unique key ids"
+        ))
+    ));
+
+    let mut holder_without_kid = material();
+    holder_without_kid.key_attestation_jwks = serde_json::json!({"keys": [ec_key(None)]});
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&holder_without_kid),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust keys require unique key ids"
+        ))
+    ));
+
+    let mut client_without_kid = material();
+    client_without_kid.client_attestation_jwks = serde_json::json!({"keys": [ec_key(None)]});
+    validate_openid4vc_conformance_trust(&client_without_kid).unwrap();
+
+    let mut ambiguous_client_kids = material();
+    ambiguous_client_kids.client_attestation_jwks =
+        serde_json::json!({"keys": [ec_key(None), ec_key(None)]});
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&ambiguous_client_kids),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust keys require unique key ids"
+        ))
+    ));
+
+    let mut bad_coordinate = material();
+    bad_coordinate.client_attestation_jwks["keys"][0]["x"] = serde_json::json!("not-base64");
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&bad_coordinate),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust contains an unsupported public key"
+        ))
+    ));
+
+    let mut wrong_algorithm = material();
+    wrong_algorithm.client_attestation_jwks["keys"][0]["alg"] = serde_json::json!("ES384");
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&wrong_algorithm),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust contains an unsupported public key"
+        ))
+    ));
+
+    let mut holder_ed25519 = material();
+    holder_ed25519.key_attestation_jwks = serde_json::json!({
+        "keys": [{
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": coordinate,
+            "kid": "holder"
+        }]
+    });
+    validate_openid4vc_conformance_trust(&holder_ed25519).unwrap();
+
+    let mut client_ed25519 = material();
+    client_ed25519.client_attestation_jwks = serde_json::json!({
+        "keys": [{
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": coordinate,
+            "kid": "client"
+        }]
+    });
+    assert!(matches!(
+        validate_openid4vc_conformance_trust(&client_ed25519),
+        Err(ProtocolError::Policy(
+            "OpenID4VC conformance trust contains an unsupported public key"
+        ))
+    ));
 }
 
 #[test]

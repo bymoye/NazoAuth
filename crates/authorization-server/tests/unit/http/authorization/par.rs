@@ -455,6 +455,21 @@ impl LiveParFixture {
             .expect("PAR test client jwks update should succeed");
     }
 
+    async fn set_client_authentication_method(&self, client_id: &str, method: &str) {
+        let mut conn = get_conn(&self.par.database)
+            .await
+            .expect("database connection should open");
+        sql_query(
+            "UPDATE oauth_clients SET token_endpoint_auth_method = $1 WHERE tenant_id = $2 AND client_id = $3",
+        )
+        .bind::<Text, _>(method)
+        .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+        .bind::<Text, _>(client_id)
+        .execute(&mut conn)
+        .await
+        .expect("PAR client authentication method update should succeed");
+    }
+
     async fn insert_client_secret_post_client_with_options(
         &self,
         client_id: &str,
@@ -933,6 +948,41 @@ async fn par_client_lookup_failure_is_server_error_not_invalid_client() {
     let (status, value) = par_json_body(response).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(value.get("error"), Some(&json!("server_error")));
+    assert!(value.get("request_uri").is_none());
+}
+
+#[actix_web::test]
+async fn par_requires_configured_validator_for_attestation_authenticated_clients() {
+    let Some(fixture) = LiveParFixture::new().await else {
+        return;
+    };
+    let client_id = format!("par-attestation-unconfigured-{}", Uuid::now_v7().simple());
+    let secret = par_test_secret();
+    fixture
+        .insert_client_secret_post_client(&client_id, &secret)
+        .await;
+    fixture
+        .set_client_authentication_method(&client_id, "attest_jwt_client_auth")
+        .await;
+
+    let request = TestRequest::post()
+        .peer_addr("127.0.0.1:12000".parse().unwrap())
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .insert_header(("OAuth-Client-Attestation", "malformed-attestation"))
+        .insert_header(("OAuth-Client-Attestation-PoP", "malformed-proof"))
+        .to_http_request();
+    let body = Bytes::from(format!(
+        "client_id={}&response_type=code&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback",
+        urlencoding::encode(&client_id),
+    ));
+    let response = par_after_rate_limit(&fixture.par, request, body).await;
+    let (status, value) = par_json_body(response).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        value.get("error"),
+        Some(&json!("invalid_client_attestation"))
+    );
     assert!(value.get("request_uri").is_none());
 }
 

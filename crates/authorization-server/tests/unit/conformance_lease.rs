@@ -384,6 +384,464 @@ fn materialize_registration_fixture(
     }
 }
 
+fn valid_conformance_trust(descriptor: &ConformanceMatrixDescriptor) -> Openid4vcConformanceTrust {
+    let key =
+        rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("deployment trust key");
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let deployment_anchor = params
+        .self_signed(&key)
+        .expect("deployment trust anchor")
+        .pem();
+    let deployment_anchor = deployment_anchor.replace("\r\n", "\n");
+    let deployment_anchor = format!("{}\n", deployment_anchor.trim_end());
+    let client_attestation =
+        crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::ES256);
+    let key_attestation =
+        crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::ES256);
+    let material = Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example/".to_owned(),
+        client_attestation_jwks: serde_json::json!({
+            "keys": [client_attestation.public_jwk("client-attestation")]
+        }),
+        key_attestation_jwks: serde_json::json!({
+            "keys": [key_attestation.public_jwk("key-attestation")]
+        }),
+        credential_trust_anchor_pem: format!(
+            "{}{}\n",
+            deployment_anchor,
+            descriptor.openid4vc_suite_mdoc_trust_anchor_pem.trim_end()
+        ),
+    };
+    nazo_operator_protocol::validate_openid4vc_conformance_trust(&material)
+        .expect("generated conformance trust material");
+    material
+}
+
+fn onboarding_clients_fixture(
+    descriptor: &ConformanceMatrixDescriptor,
+) -> Vec<ConformanceClientBundle> {
+    let rsa = crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let ec = crate::test_support::client_signing_fixture(jsonwebtoken::Algorithm::ES256);
+    let rsa_jwks = serde_json::json!({"keys": [rsa.public_jwk("matrix-rsa")]});
+    let ec_jwks = serde_json::json!({"keys": [ec.public_jwk("matrix-ec")]});
+    let mut clients = BTreeMap::new();
+
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            for role in group.required_roles.iter().chain(&plan.required_roles) {
+                let Some(mut request) = role.registration_template.clone() else {
+                    continue;
+                };
+                let logical_client_id = role
+                    .logical_client_id
+                    .as_deref()
+                    .unwrap_or(&role.role)
+                    .to_owned();
+                if clients.contains_key(&logical_client_id) {
+                    continue;
+                }
+                materialize_registration_fixture(&mut request, &rsa_jwks, &ec_jwks);
+                let auth_method = request
+                    .get("token_endpoint_auth_method")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("matrix registration auth method");
+                let client_secret =
+                    matches!(auth_method, "client_secret_basic" | "client_secret_post")
+                        .then(|| SecretText(format!("secret-{logical_client_id}")));
+                let mtls_trust_anchor_pem = registration_requires_mtls_anchor(&request)
+                    .then(|| descriptor.openid4vc_suite_mdoc_trust_anchor_pem.clone());
+                clients.insert(
+                    logical_client_id.clone(),
+                    ConformanceClientBundle {
+                        logical_client_id,
+                        request,
+                        client_secret,
+                        mtls_trust_anchor_pem,
+                    },
+                );
+            }
+        }
+    }
+
+    clients.into_values().collect()
+}
+
+fn onboarding_bundle_fixture() -> (SignedOnboardingClaims<'static>, ConformanceOnboardingBundle) {
+    const TASK_JTI: &str = "request-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PROFILE: &str = "nazoauth-full";
+    const BUNDLE_SHA256: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let matrix_sha256 = digest_hex(CONFORMANCE_MATRIX_BYTES);
+    let clients = onboarding_clients_fixture(&descriptor);
+    let client_count = u32::try_from(clients.len()).expect("bounded client count");
+    let claims = SignedOnboardingClaims {
+        task_jti: TASK_JTI,
+        profile: PROFILE,
+        bundle_schema: 3,
+        bundle_sha256: BUNDLE_SHA256,
+        matrix_sha256: Box::leak(matrix_sha256.clone().into_boxed_str()),
+        client_count,
+        ttl_seconds: 300,
+    };
+    let bundle = ConformanceOnboardingBundle {
+        schema: 3,
+        request_jti: TASK_JTI.to_owned(),
+        matrix_sha256,
+        profile: PROFILE.to_owned(),
+        target_issuer: configured_issuer().expect("configured issuer"),
+        suite_base_url: "https://suite.example/test/a/plan".to_owned(),
+        openid4vc_conformance_trust: valid_conformance_trust(&descriptor),
+        applicant: ConformanceApplicantBundle {
+            email: "credential-holder@example.test".to_owned(),
+            password: SecretText("correct horse battery staple".to_owned()),
+        },
+        dynamic_registration_initial_access_token: Some(SecretText(
+            "dynamic-registration-token".to_owned(),
+        )),
+        ciba_automated_decision_token: Some(SecretText("ciba-decision-token".to_owned())),
+        clients,
+        openid4vc_credential_datasets: descriptor.openid4vc_credential_datasets,
+    };
+    (claims, bundle)
+}
+
+#[actix_web::test]
+async fn onboarding_bundle_rejects_unknown_runtime_credential_configuration() {
+    let (claims, bundle) = onboarding_bundle_fixture();
+    let error = validate_bundle(claims, bundle)
+        .await
+        .err()
+        .expect("unknown runtime credential configuration must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("conformance credential configuration is unknown"),
+        "unexpected credential-configuration error: {error:#}"
+    );
+}
+
+async fn assert_onboarding_bundle_error(
+    claims: SignedOnboardingClaims<'_>,
+    bundle: ConformanceOnboardingBundle,
+    expected: &str,
+) {
+    let error = validate_bundle(claims, bundle)
+        .await
+        .err()
+        .expect("invalid onboarding bundle must fail");
+    assert!(
+        error.to_string().contains(expected),
+        "expected {expected:?}, got {error:#}"
+    );
+}
+
+#[actix_web::test]
+async fn onboarding_bundle_rejects_signed_binding_and_secret_material_drift() {
+    let (mut claims, bundle) = onboarding_bundle_fixture();
+    claims.task_jti = "request-not-hex";
+    assert_onboarding_bundle_error(claims, bundle, "idempotency binding is invalid").await;
+
+    let (mut claims, bundle) = onboarding_bundle_fixture();
+    claims.bundle_schema = 2;
+    assert_onboarding_bundle_error(claims, bundle, "schema does not match").await;
+
+    let (claims, mut bundle) = onboarding_bundle_fixture();
+    bundle.request_jti = "request-cccccccccccccccccccccccccccccccc".to_owned();
+    assert_onboarding_bundle_error(claims, bundle, "task binding does not match").await;
+
+    let (claims, mut bundle) = onboarding_bundle_fixture();
+    bundle.matrix_sha256 = "c".repeat(64);
+    assert_onboarding_bundle_error(claims, bundle, "matrix digest does not match").await;
+
+    let (mut claims, bundle) = onboarding_bundle_fixture();
+    claims.profile = "unsupported";
+    assert_onboarding_bundle_error(claims, bundle, "profile does not match").await;
+
+    let (mut claims, bundle) = onboarding_bundle_fixture();
+    claims.bundle_sha256 = "INVALID";
+    assert_onboarding_bundle_error(claims, bundle, "bundle digest is invalid").await;
+
+    let (mut claims, mut bundle) = onboarding_bundle_fixture();
+    claims.matrix_sha256 = "INVALID";
+    bundle.matrix_sha256 = "INVALID".to_owned();
+    assert_onboarding_bundle_error(claims, bundle, "matrix digest is invalid").await;
+
+    let (mut claims, bundle) = onboarding_bundle_fixture();
+    claims.ttl_seconds = 59;
+    assert_onboarding_bundle_error(claims, bundle, "ttl is out of bounds").await;
+
+    let (mut claims, bundle) = onboarding_bundle_fixture();
+    claims.client_count = 0;
+    assert_onboarding_bundle_error(claims, bundle, "client count does not match").await;
+
+    let (claims, mut bundle) = onboarding_bundle_fixture();
+    bundle.target_issuer = "https://different-deployment.example".to_owned();
+    assert_onboarding_bundle_error(claims, bundle, "does not match this deployment").await;
+
+    let (claims, mut bundle) = onboarding_bundle_fixture();
+    bundle.openid4vc_conformance_trust.client_attestation_issuer =
+        "https://different-suite.example/".to_owned();
+    assert_onboarding_bundle_error(
+        claims,
+        bundle,
+        "client-attestation issuer does not match the Suite origin",
+    )
+    .await;
+
+    let (claims, mut bundle) = onboarding_bundle_fixture();
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    bundle
+        .openid4vc_conformance_trust
+        .credential_trust_anchor_pem = descriptor.openid4vc_suite_mdoc_trust_anchor_pem;
+    assert_onboarding_bundle_error(claims, bundle, "does not contain the Matrix").await;
+}
+
+#[test]
+fn onboarding_dataset_policy_rejects_shape_size_secret_and_unknown_configuration() {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let mut empty = descriptor.clone();
+    empty.openid4vc_credential_datasets =
+        BTreeMap::from([("eu.europa.ec.eudi.pid.1".to_owned(), serde_json::json!({}))]);
+    assert!(
+        validate_onboarding_credential_datasets(&empty.openid4vc_credential_datasets, &empty)
+            .is_err()
+    );
+
+    let mut oversized = descriptor.clone();
+    oversized.openid4vc_credential_datasets = BTreeMap::from([(
+        "eu.europa.ec.eudi.pid.1".to_owned(),
+        serde_json::json!({
+            "email": "x".repeat(MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES)
+        }),
+    )]);
+    assert!(
+        validate_onboarding_credential_datasets(
+            &oversized.openid4vc_credential_datasets,
+            &oversized
+        )
+        .is_err()
+    );
+
+    let mut secret = descriptor.clone();
+    secret.openid4vc_credential_datasets = BTreeMap::from([(
+        "eu.europa.ec.eudi.pid.1".to_owned(),
+        serde_json::json!({"client_secret": "forbidden"}),
+    )]);
+    assert!(
+        validate_onboarding_credential_datasets(&secret.openid4vc_credential_datasets, &secret)
+            .is_err()
+    );
+
+    let mut unknown = descriptor;
+    unknown.openid4vc_credential_datasets = BTreeMap::from([(
+        "unknown-credential".to_owned(),
+        serde_json::json!({"claim": "value"}),
+    )]);
+    assert!(
+        validate_onboarding_credential_datasets(&unknown.openid4vc_credential_datasets, &unknown)
+            .is_err()
+    );
+}
+
+#[test]
+fn onboarding_scalar_and_registration_validators_cover_closed_policy_boundaries() {
+    assert_eq!(
+        validate_target_issuer(" http://127.0.0.1:8000/ ").unwrap(),
+        "http://127.0.0.1:8000"
+    );
+    for invalid in [
+        "http://example.com",
+        "https://user@example.com",
+        "https://example.com?query=1",
+        "https://example.com#fragment",
+        "not-a-url",
+    ] {
+        assert!(validate_target_issuer(invalid).is_err(), "{invalid}");
+    }
+    for invalid in [
+        "http://suite.example",
+        "https://user@suite.example",
+        "https://suite.example?query=1",
+        "https://suite.example#fragment",
+        "not-a-url",
+    ] {
+        assert!(
+            validate_suite_origin(invalid, "https://issuer.example").is_err(),
+            "{invalid}"
+        );
+    }
+    for invalid in [
+        "",
+        "missing-at.example",
+        "two@@example.test",
+        "local@.example",
+        "local@example.",
+        "white space@example.test",
+    ] {
+        assert!(validate_email(invalid).is_err(), "{invalid}");
+    }
+    assert_eq!(
+        validate_email(" holder@example.test ").unwrap(),
+        "holder@example.test"
+    );
+    assert!(validate_secret_text("", "test", 8).is_err());
+    assert!(validate_secret_text("too-long", "test", 3).is_err());
+    assert!(validate_secret_text("bad\nvalue", "test", 32).is_err());
+    assert_eq!(validate_secret_text("valid", "test", 8).unwrap(), "valid");
+
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    let mut request = onboarding_clients_fixture(&descriptor)
+        .into_iter()
+        .next()
+        .expect("matrix client")
+        .request;
+    validate_client_request(&request).expect("matrix client request");
+    request["unsupported"] = serde_json::json!(true);
+    assert!(validate_client_request(&request).is_err());
+    request.as_object_mut().unwrap().remove("unsupported");
+    request["client_type"] = serde_json::json!("public");
+    assert!(validate_client_request(&request).is_err());
+    request["client_type"] = serde_json::json!("confidential");
+    request["tls_client_auth_cert_sha256"] = serde_json::json!("not-a-digest");
+    assert!(validate_client_request(&request).is_err());
+    request["tls_client_auth_cert_sha256"] = serde_json::Value::Null;
+    request["tls_client_auth_subject_dn"] = serde_json::json!("x".repeat(4097));
+    assert!(validate_client_request(&request).is_err());
+    request["tls_client_auth_subject_dn"] = serde_json::Value::Null;
+    request["jwks"] = serde_json::json!({"keys": [{"k": "secret"}]});
+    assert!(validate_client_request(&request).is_err());
+
+    let mut sets = serde_json::json!({
+        "redirect_uris": ["https://client.example/cb", "https://client.example/cb"],
+        "scopes": ["openid", "openid"]
+    });
+    canonicalize_conformance_registration_sets(&mut sets).unwrap();
+    assert_eq!(sets["redirect_uris"].as_array().unwrap().len(), 1);
+    assert_eq!(sets["scopes"].as_array().unwrap().len(), 1);
+    assert!(canonicalize_conformance_registration_sets(&mut serde_json::json!([])).is_err());
+    assert!(
+        canonicalize_conformance_registration_sets(&mut serde_json::json!({"scopes": "openid"}))
+            .is_err()
+    );
+    assert!(
+        canonicalize_conformance_registration_sets(
+            &mut serde_json::json!({"scopes": ["openid", 1]})
+        )
+        .is_err()
+    );
+
+    assert!(contains_secret_field(
+        &serde_json::json!([{"token": "secret"}])
+    ));
+    assert!(!contains_secret_field(
+        &serde_json::json!({"claim": "public"})
+    ));
+    assert!(is_identifier("nazoauth-full/v1"));
+    assert!(!is_identifier("contains space"));
+    assert!(is_file_identifier("client_id-1"));
+    assert!(!is_file_identifier("client/id"));
+    assert!(is_lower_hex(&"a".repeat(64), 64));
+    assert!(!is_lower_hex(&"A".repeat(64), 64));
+    assert!(value_contains_reference(
+        &serde_json::json!({"nested": ["{{target.issuer}}"]}),
+        "target.issuer"
+    ));
+    assert!(!value_contains_reference(
+        &serde_json::json!({"nested": ["target.issuer"]}),
+        "target.issuer"
+    ));
+    assert!(descriptor_requires_reference(
+        &descriptor,
+        "target.ciba_automated_decision_url"
+    ));
+}
+
+#[tokio::test]
+async fn onboarding_password_hash_uses_the_configured_bounded_worker() {
+    let hash = hash_applicant_password("correct horse battery staple")
+        .await
+        .expect("bounded applicant password hash");
+    assert!(hash.into_persistence_value().starts_with("$argon2"));
+}
+
+async fn onboarding_adapter_request(
+    tenant_id: Uuid,
+    bundle_schema: u32,
+    client_count: u32,
+    ttl_seconds: u64,
+) -> ConformanceOnboardingRequest {
+    let descriptor = load_matrix_descriptor().expect("built-in matrix");
+    ConformanceOnboardingRequest {
+        tenant_id,
+        task_jti: format!("request-{}", Uuid::now_v7().simple()),
+        profile: "nazoauth-full".to_owned(),
+        bundle_schema,
+        bundle_sha256: "b".repeat(64),
+        matrix_sha256: digest_hex(CONFORMANCE_MATRIX_BYTES),
+        suite_origin: "https://suite.example".to_owned(),
+        public_material: valid_conformance_trust(&descriptor),
+        dynamic_registration_initial_access_token_sha256: Some("c".repeat(64)),
+        ciba_automated_decision_token_sha256: Some("d".repeat(64)),
+        client_count,
+        ttl_seconds,
+        applicant: ConformanceOnboardingApplicant {
+            username: format!("conformance-{}", Uuid::now_v7().simple()),
+            email: "credential-holder@example.test".to_owned(),
+            password_hash: hash_applicant_password("correct horse battery staple")
+                .await
+                .expect("applicant password hash"),
+            email_verified: true,
+            display_name: CONFORMANCE_PROFILE_DISPLAY_NAME.to_owned(),
+            given_name: CONFORMANCE_PROFILE_GIVEN_NAME.to_owned(),
+            family_name: CONFORMANCE_PROFILE_FAMILY_NAME.to_owned(),
+            middle_name: CONFORMANCE_PROFILE_MIDDLE_NAME.to_owned(),
+            nickname: CONFORMANCE_PROFILE_NICKNAME.to_owned(),
+            profile_url: CONFORMANCE_PROFILE_URL.to_owned(),
+            avatar_url: CONFORMANCE_PROFILE_AVATAR_URL.to_owned(),
+            website_url: CONFORMANCE_PROFILE_WEBSITE_URL.to_owned(),
+            gender: CONFORMANCE_PROFILE_GENDER.to_owned(),
+            birthdate: CONFORMANCE_PROFILE_BIRTHDATE.to_owned(),
+            zoneinfo: CONFORMANCE_PROFILE_ZONEINFO.to_owned(),
+            locale: CONFORMANCE_PROFILE_LOCALE.to_owned(),
+            address: nazo_identity::PostalAddress::default(),
+            phone_number: CONFORMANCE_PROFILE_PHONE_NUMBER.to_owned(),
+            phone_number_verified: true,
+        },
+        clients: Vec::new(),
+        mtls_trust_anchors: Vec::new(),
+        openid4vc_credential_datasets: descriptor.openid4vc_credential_datasets,
+    }
+}
+
+#[tokio::test]
+async fn postgres_onboarding_adapter_rejects_invalid_conversion_and_count_boundaries() {
+    if !database_is_available() {
+        return;
+    }
+    let adapter = PostgresOnboardingRepository::new(repository().expect("lease repository"));
+
+    let request = onboarding_adapter_request(Uuid::now_v7(), 3, 0, 300).await;
+    assert!(adapter.apply_onboarding(request).await.is_err());
+
+    let request = onboarding_adapter_request(DEFAULT_TENANT_ID, u32::MAX, 0, 300).await;
+    assert!(adapter.apply_onboarding(request).await.is_err());
+
+    let request = onboarding_adapter_request(DEFAULT_TENANT_ID, 3, 0, u64::MAX).await;
+    assert!(adapter.apply_onboarding(request).await.is_err());
+
+    let request = onboarding_adapter_request(DEFAULT_TENANT_ID, 3, u32::MAX, 300).await;
+    assert!(adapter.apply_onboarding(request).await.is_err());
+
+    let request = onboarding_adapter_request(DEFAULT_TENANT_ID, 3, 1, 300).await;
+    let error = adapter
+        .apply_onboarding(request)
+        .await
+        .expect_err("client count mismatch must fail");
+    assert!(error.to_string().contains("consistency"));
+}
+
 #[actix_web::test]
 async fn built_in_registration_templates_pass_the_real_admin_policy() {
     let descriptor = load_matrix_descriptor().expect("built-in matrix must validate");

@@ -550,7 +550,7 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     assert_eq!(replay.applicant_user_id, first.applicant_user_id);
     assert_eq!(replay.client_mappings, first.client_mappings);
 
-    let mut drifted_request = request;
+    let mut drifted_request = request.clone();
     drifted_request.public_material = serde_json::json!({
         "schema": 1,
         "credential_trust_anchor_pem": "DIFFERENT-PUBLIC-MATERIAL",
@@ -584,6 +584,10 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
             .unwrap(),
         None
     );
+    assert!(matches!(
+        repository.onboard(request).await,
+        Err(RepositoryError::Conflict)
+    ));
 }
 
 #[tokio::test]
@@ -639,6 +643,12 @@ async fn onboarding_owns_encrypted_openid4vc_datasets_and_replay_compares_claims
 
     let replay = repository.onboard(request.clone()).await.unwrap();
     assert!(replay.idempotent_replay);
+    let repository_without_data_key = ConformanceLeaseRepository::new(pool.clone());
+    assert!(matches!(
+        repository_without_data_key.onboard(request.clone()).await,
+        Err(RepositoryError::Consistency(message))
+            if message.contains("application data key")
+    ));
 
     request
         .openid4vc_credential_datasets

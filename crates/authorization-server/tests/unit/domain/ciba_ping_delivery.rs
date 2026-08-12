@@ -26,6 +26,13 @@ fn test_identity() -> (
 fn single_version_tls_server(
     version: &'static rustls::SupportedProtocolVersion,
 ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+    single_version_tls_server_with_status(version, 204)
+}
+
+fn single_version_tls_server_with_status(
+    version: &'static rustls::SupportedProtocolVersion,
+    status: u16,
+) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
     let (key, certificate) = test_identity();
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
@@ -44,8 +51,18 @@ fn single_version_tls_server(
         if stream.conn.complete_io(&mut stream.sock).is_ok() {
             let mut request = [0_u8; 2048];
             let _ = stream.read(&mut request);
+            let reason = match status {
+                200 => "OK",
+                204 => "No Content",
+                400 => "Bad Request",
+                500 => "Internal Server Error",
+                _ => "Test Response",
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
             stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .write_all(response.as_bytes())
                 .expect("write TLS test response");
         }
     });
@@ -79,6 +96,14 @@ async fn post_to_single_version_server(
     post_to_server(address, server).await
 }
 
+async fn post_to_single_version_server_with_status(
+    version: &'static rustls::SupportedProtocolVersion,
+    status: u16,
+) -> reqwest::Result<reqwest::Response> {
+    let (address, server) = single_version_tls_server_with_status(version, status);
+    post_to_server(address, server).await
+}
+
 #[test]
 fn ciba_ping_transport_policy_is_bounded_to_tls12_and_tls13() {
     assert!(matches!(CIBA_PING_TLS_MIN, reqwest::tls::Version::TLS_1_2));
@@ -102,4 +127,17 @@ async fn ciba_ping_transport_supports_tls13() {
         .expect("CIBA Ping must offer TLS 1.3 when the endpoint supports it");
 
     assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn ciba_ping_transport_preserves_terminal_and_retry_http_statuses() {
+    let terminal = post_to_single_version_server_with_status(&rustls::version::TLS12, 400)
+        .await
+        .expect("TLS 1.2 endpoint should return its terminal status");
+    assert_eq!(terminal.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let retry = post_to_single_version_server_with_status(&rustls::version::TLS13, 500)
+        .await
+        .expect("TLS 1.3 endpoint should return its retry status");
+    assert_eq!(retry.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
 }

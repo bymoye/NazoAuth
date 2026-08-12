@@ -20,6 +20,28 @@ fn test_repository() -> Option<OAuthClientRepository> {
     ))
 }
 
+#[tokio::test]
+async fn revoke_missing_conformance_lease_returns_not_found() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+            }
+            Err(_) => return,
+        };
+    let leases =
+        nazo_postgres::ConformanceLeaseRepository::new(create_pool(database_url, 4).unwrap());
+    let tenant = TenantContext::default_system();
+
+    assert_eq!(
+        leases
+            .revoke(tenant.tenant_id.as_uuid(), Uuid::now_v7())
+            .await,
+        Err(RepositoryError::NotFound)
+    );
+}
+
 fn client(tenant: TenantContext) -> OAuthClient {
     OAuthClient {
         id: Uuid::now_v7(),

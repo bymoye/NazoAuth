@@ -798,6 +798,47 @@ async fn admin_patch_client_rejects_missing_csrf_before_admin_lookup() {
 }
 
 #[actix_web::test]
+async fn admin_patch_client_fails_closed_when_admin_session_lookup_is_unavailable() {
+    let state = Data::new(test_state());
+    let req = actix_web::test::TestRequest::patch()
+        .uri("/admin/clients/client-1")
+        .cookie(Cookie::new(
+            state.settings.session.session_cookie_name.clone(),
+            "session-id",
+        ))
+        .cookie(Cookie::new(
+            state.settings.session.csrf_cookie_name.clone(),
+            "csrf-token",
+        ))
+        .insert_header(("x-csrf-token", "csrf-token"))
+        .to_http_request();
+    let sessions = admin_session_handles(
+        state.diesel_db.clone(),
+        state.valkey_connection(),
+        &state.settings,
+    );
+    let service = admin_client_service(
+        state.diesel_db.clone(),
+        state.keyset.clone(),
+        &state.settings,
+    );
+    let config = admin_client_config(&state.settings);
+
+    let response = admin_patch_client(
+        sessions,
+        service,
+        config,
+        req,
+        actix_web::web::Path::from("client-1".to_owned()),
+        Json(empty_patch()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_name(&response).as_deref(), Some("server_error"));
+}
+
+#[actix_web::test]
 async fn admin_patch_client_reports_not_found_for_unknown_client_id() {
     let schema = format!("admin_client_update_missing_{}", Uuid::now_v7().simple());
     let Some(fixture) = LiveAdminClientUpdateFixture::new_isolated(&schema).await else {

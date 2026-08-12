@@ -313,6 +313,18 @@ fn token_exchange_actor_claim_preserves_current_and_prior_actor_context() {
 }
 
 #[test]
+fn token_exchange_actor_claim_rejects_cross_client_and_cross_tenant_claims() {
+    let client = client();
+    let mut wrong_client = claims("other-client", json!("resource-server"), "read");
+    wrong_client.sub = "service-16".to_owned();
+    assert!(token_exchange_actor_claim(&wrong_client, policy(&client)).is_err());
+
+    let mut cross_tenant_actor = claims("resource-server", json!("resource-server"), "read");
+    cross_tenant_actor.tenant_id = Uuid::from_u128(u128::MAX).to_string();
+    assert!(token_exchange_actor_claim(&cross_tenant_actor, policy(&client)).is_err());
+}
+
+#[test]
 fn token_exchange_binding_claims_preserve_sender_constraint_type() {
     assert_eq!(
         token_exchange_binding_claims(TokenExchangeSenderBinding::Bearer),
@@ -441,6 +453,46 @@ async fn token_exchange_subject_binding_requires_the_presented_sender_proof() {
     )
     .await
     .expect_err("an mTLS subject token cannot silently become DPoP-bound");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
+
+    let mut mtls_required_for_dpop = client();
+    mtls_required_for_dpop.require_mtls_bound_tokens = true;
+    let response = validate_subject_sender_binding(
+        &issuance,
+        &request,
+        &mtls_required_for_dpop,
+        "subject-token",
+        &TokenExchangeSenderBinding::Dpop("dpop-jkt".to_owned()),
+    )
+    .await
+    .expect_err("a DPoP subject token must not be converted to mTLS");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_dpop_proof")
+    );
+
+    let mut mtls_subject_required = client();
+    mtls_subject_required.require_mtls_bound_tokens = true;
+    let response = validate_subject_sender_binding(
+        &issuance,
+        &request,
+        &mtls_subject_required,
+        "subject-token",
+        &TokenExchangeSenderBinding::MutualTls("mtls-thumbprint".to_owned()),
+    )
+    .await
+    .expect_err("an mTLS subject token still needs a verified certificate");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         response
