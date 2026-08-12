@@ -1348,9 +1348,12 @@ async fn lease_lookups_reject_ambiguous_credentials_and_ignore_dead_rows() {
         .await
         .unwrap();
     repository.revoke(tenant_id, revoked.id).await.unwrap();
+    repository.revoke(tenant_id, cleaned.id).await.unwrap();
     let mut connection = crate::get_conn(&pool).await.unwrap();
     sql_query(
-        "UPDATE conformance_leases SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+        "UPDATE conformance_leases
+         SET created_at = CURRENT_TIMESTAMP - INTERVAL '10 minutes',
+             expires_at = CURRENT_TIMESTAMP - INTERVAL '5 minutes'
          WHERE tenant_id = $1 AND id = $2",
     )
     .bind::<diesel::sql_types::Uuid, _>(tenant_id)
