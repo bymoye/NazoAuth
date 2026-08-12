@@ -5,6 +5,7 @@ use diesel::{QueryableByName, sql_query};
 use diesel_async::RunQueryDsl;
 use nazo_auth::{ClientPresentationMetadata, ClientSecurityPolicy, ValidatedClientRegistration};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[derive(QueryableByName)]
@@ -46,9 +47,10 @@ async fn test_pool() -> Option<crate::DbPool> {
 }
 
 fn test_digest(label: &str, suffix: &str) -> String {
-    let mut digest = format!("{label}{suffix}");
-    digest.push_str(&"a".repeat(64 - digest.len()));
-    digest
+    Sha256::digest(format!("{label}:{suffix}"))
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn test_registration(suffix: &str) -> ValidatedClientRegistration {
