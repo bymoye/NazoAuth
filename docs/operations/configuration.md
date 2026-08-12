@@ -194,6 +194,12 @@ client assertions, DPoP proofs, access tokens, refresh tokens, authorization
 codes, provider tokens, and secret references must not be logged or returned in
 error responses.
 
+For concrete HAProxy 3.2 and nginx presets, dynamic conformance CA installation,
+atomic reload, and rollback requirements, see
+[`deploy/proxy/README.md`](../../deploy/proxy/README.md). A conformance client CA
+is generated for one run and must not be hard-coded or retained as a permanent
+production trust root.
+
 CORS is endpoint-scoped. `CORS_ALLOWED_ORIGINS` is an exact allowlist, not proof
 that a browser client is confidential. Authorization and browser-redirect
 endpoints are navigation-only and are not CORS APIs. `/token` and `/revoke`

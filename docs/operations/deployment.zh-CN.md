@@ -81,6 +81,59 @@ sudo nazoauthctl bootstrap-admin
 宿主机端口需要变化时设置 `NAZOAUTH_PORT`。该变量只改变本机监听端口，不改变
 issuer；`PUBLIC_BASE_URL` 仍必须等于客户端看到的公开 HTTPS 地址。
 
+### 反向代理与 mTLS
+
+启用 RFC 8705 或完整 OIDF profile 时，TLS 终止代理必须请求客户端证书，并通过
+RFC 9440 `Client-Cert` header 转交。NazoAuth 再根据客户端注册信息认证该证书；
+代理不得接受公网客户端自行提交的 `Client-Cert` 或 `Client-Cert-Chain`。服务配置
+使用 `MTLS_CERTIFICATE_SOURCE=rfc9440`，`TRUSTED_PROXY_CIDRS` 只填写 NazoAuth
+实际看到的精确代理地址。一个宿主地址足够时，不得信任整个容器网段。
+
+NazoAuthCtl 一致性测试每轮都会生成新的 CA 与叶证书，因此测试部署前的代理不能向
+客户端公布过期的固定 client-CA 列表。开始创建 Suite module 前，必须安装本轮生成的
+公开 CA bundle，并在同一次运行的 cleanup 中恢复旧 bundle。HAProxy 3.2 可按以下方式配置：
+
+叶证书的 subject DN 必须与 CA 的 subject DN 不同，其 issuer DN 则必须匹配该 CA。
+预检必须执行 `openssl verify -CAfile run-ca.pem client.pem`；否则，不同密钥却复用同一
+subject/issuer DN 的叶证书可能被 OpenSSL/HAProxy 判为自签证书并拒绝握手。
+
+```haproxy
+frontend nazoauth
+  bind :443 ssl crt /run/nazoauth/server.pem ca-file /run/nazoauth/active-conformance-client-cas.pem verify optional ssl-min-ver TLSv1.2 ssl-max-ver TLSv1.3 no-tls-tickets ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384 ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
+  http-request del-header Client-Cert
+  http-request del-header Client-Cert-Chain
+  http-request set-header Client-Cert ":%[ssl_c_der,base64]:" if { ssl_c_used }
+  default_backend nazoauth
+
+backend nazoauth
+  server app 127.0.0.1:8000 check
+```
+
+同一个 listener 还承载普通 HTTPS 路由时，必须使用 `verify optional` 请求证书；
+`verify none` 不会请求。客户端一旦提交证书，就必须能链接到本轮 active bundle。
+NazoAuth 仍会验证注册的 subject/SAN 和可选证书摘要。同时还必须满足：
+
+- HAProxy 先删除公网请求中的证书 header，再写入自己从 TLS 连接取得的证书；
+- 明文 upstream 只绑定 loopback，或以其他方式确保公网客户端无法直连；
+- NazoAuth 只信任精确代理地址，并按已注册证书身份验证收到的叶证书；
+- TLS 1.2 与 TLS 1.3 分别限制为批准的 AES-GCM cipher suite。
+
+本轮 bundle 只能来自 active lease 绑定的公开 `mtls_trust_anchor_pem`。必须原子写入、
+校验整个 bundle、重载代理，并在创建 Suite module 前核对 digest。即使运行被中断，
+cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执行 install/restore；除非
+每轮拥有独立 listener 和 CA bundle，否则不能并发改变代理信任。严禁用
+`ca-ignore-err all` 或 `crt-ignore-err all` 代替安装本轮 CA：这会把全部证书链信任
+委托给应用，并可能削弱只按标准 subject selector 注册的 RFC 8705 客户端。
+
+普通生产客户端若由固定 CA 签发，应把该 CA 安装进 HAProxy，并在独立 mTLS listener
+使用 `verify required`。除非控制面能原子安装并恢复每轮 CA，否则不得让该 listener
+同时承担动态一致性测试证书。
+
+重载前必须使用相同 HAProxy 镜像或二进制执行
+`haproxy -c -f /path/to/candidate.cfg`，并保存 root-only 的旧配置。重载后验证
+`/ready`、Discovery、Suite 未授权边界、AES-GCM 握手成功，以及 CBC 与 CHACHA20
+被拒绝。任一检查失败都应立即恢复旧配置并再次重载。
+
 ## 验证
 
 满足以下条件后才算启用：

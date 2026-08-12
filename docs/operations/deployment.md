@@ -97,6 +97,73 @@ Set `NAZOAUTH_PORT` when the host loopback port must differ. Changing the host
 port does not change the issuer: `PUBLIC_BASE_URL` must still match the public
 HTTPS address seen by clients.
 
+### Reverse proxy and mTLS
+
+When RFC 8705 or the full OIDF profile is enabled, the TLS terminator must
+request a client certificate and forward it with the RFC 9440 `Client-Cert`
+header. NazoAuth authenticates the certificate against the client registration;
+the proxy must not accept a `Client-Cert` or `Client-Cert-Chain` value supplied
+by the Internet client. Configure `MTLS_CERTIFICATE_SOURCE=rfc9440` and set
+`TRUSTED_PROXY_CIDRS` to the exact address NazoAuth observes for that proxy. Do
+not trust a whole container subnet when one host address is sufficient.
+
+NazoAuthCtl conformance clients use a fresh CA and leaf certificate for every
+run. A proxy in front of a conformance deployment therefore cannot advertise a
+stale, fixed client-CA list. Install the public CA bundle generated for that run
+before starting Suite modules and restore the previous bundle in the same run's
+cleanup path. With HAProxy 3.2, use this pattern:
+
+The leaf subject DN must differ from the CA subject DN, while its issuer DN must
+match that CA. Include `openssl verify -CAfile run-ca.pem client.pem` in the
+preflight; otherwise OpenSSL/HAProxy can classify a different-key leaf with the
+same subject/issuer DN as self-signed and reject the handshake.
+
+```haproxy
+frontend nazoauth
+  bind :443 ssl crt /run/nazoauth/server.pem ca-file /run/nazoauth/active-conformance-client-cas.pem verify optional ssl-min-ver TLSv1.2 ssl-max-ver TLSv1.3 no-tls-tickets ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384 ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
+  http-request del-header Client-Cert
+  http-request del-header Client-Cert-Chain
+  http-request set-header Client-Cert ":%[ssl_c_der,base64]:" if { ssl_c_used }
+  default_backend nazoauth
+
+backend nazoauth
+  server app 127.0.0.1:8000 check
+```
+
+`verify optional` is required to request a certificate while retaining ordinary
+HTTPS routes on the same listener; `verify none` does not request one. A client
+that supplies a certificate must chain to the active run bundle. NazoAuth still
+performs the registration subject/SAN and optional certificate-digest checks.
+All of the following must remain true:
+
+- HAProxy deletes inbound certificate headers before adding its own value;
+- the cleartext upstream is loopback-only or otherwise inaccessible to clients;
+- NazoAuth trusts only the exact proxy address and validates the presented leaf
+  against the registered certificate identity;
+- TLS 1.2 and TLS 1.3 are restricted separately to the approved AES-GCM suites.
+
+Build the run bundle only from the public `mtls_trust_anchor_pem` values bound to
+the active lease. Write it atomically, validate the entire bundle, reload the
+proxy, and confirm its digest before creating Suite modules. Cleanup restores
+the previous bundle and reloads the proxy even after interruption. A shared
+proxy must serialize this install/restore lifecycle unless each run has its own
+listener and CA bundle. Never use `ca-ignore-err all` or `crt-ignore-err all` as
+a production substitute for installing the run CA: that delegates all chain
+trust to the application and can weaken RFC 8705 clients registered only by a
+standard subject selector.
+
+For ordinary production clients issued by a stable CA, install that CA in
+HAProxy and use `verify required` on a dedicated mTLS listener. Do not combine
+that listener with run-scoped conformance certificates unless the control plane
+can atomically install and restore their CA.
+
+Before reloading HAProxy, validate the candidate with the same HAProxy image or
+binary (`haproxy -c -f /path/to/candidate.cfg`) and retain a root-only copy of
+the previous configuration. After reload, verify `/ready`, Discovery, the
+unauthenticated Suite boundary, an allowed AES-GCM handshake, and rejection of
+CBC and CHACHA20. Roll back the saved configuration and reload immediately if
+any check fails.
+
 ## Validation
 
 Activation requires all of these checks:
