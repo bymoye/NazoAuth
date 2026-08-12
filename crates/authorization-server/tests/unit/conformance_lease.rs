@@ -61,6 +61,26 @@ fn secure_material_rejects_broad_permissions_and_hard_links() {
     fs::hard_link(&linked, linked.with_extension("alias")).expect("create hard link");
     assert!(read_fixed_material(&linked, 16).is_err());
     fs::remove_dir_all(linked.parent().unwrap()).expect("remove linked fixture");
+
+    let symlinked = secure_material_fixture("symlink", 0o400);
+    let target = symlinked.with_extension("target");
+    fs::rename(&symlinked, &target).expect("move symlink target");
+    std::os::unix::fs::symlink(&target, &symlinked).expect("create secure-material symlink");
+    assert!(read_fixed_material(&symlinked, 16).is_err());
+    fs::remove_dir_all(symlinked.parent().unwrap()).expect("remove symlink fixture");
+
+    let empty = secure_material_fixture("empty-material", 0o600);
+    fs::write(&empty, b"").expect("truncate material");
+    fs::set_permissions(&empty, fs::Permissions::from_mode(0o400)).expect("lock empty material");
+    assert!(read_fixed_material(&empty, 16).is_err());
+    fs::remove_dir_all(empty.parent().unwrap()).expect("remove empty fixture");
+
+    let oversized = secure_material_fixture("oversized-material", 0o600);
+    fs::write(&oversized, b"0123456789abcdefg").expect("write oversized material");
+    fs::set_permissions(&oversized, fs::Permissions::from_mode(0o400))
+        .expect("lock oversized material");
+    assert!(read_fixed_material(&oversized, 16).is_err());
+    fs::remove_dir_all(oversized.parent().unwrap()).expect("remove oversized fixture");
 }
 
 #[cfg(unix)]
@@ -73,6 +93,19 @@ fn fixed_policy_secret_accepts_owner_only_source_without_weakening_bundle_mode()
         "{}"
     );
     fs::remove_dir_all(path.parent().unwrap()).expect("remove owner secret fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn fixed_secret_reader_rejects_empty_control_and_non_utf8_values() {
+    let path = secure_material_fixture("invalid-secret", 0o600);
+    fs::write(&path, b" \n").expect("write empty secret");
+    assert!(read_fixed_secret_string(&path, "policy secret").is_err());
+    fs::write(&path, b"valid\0secret\n").expect("write control secret");
+    assert!(read_fixed_secret_string(&path, "policy secret").is_err());
+    fs::write(&path, [0xff, 0xfe]).expect("write non-UTF8 secret");
+    assert!(read_fixed_secret_string(&path, "policy secret").is_err());
+    fs::remove_dir_all(path.parent().unwrap()).expect("remove invalid secret fixture");
 }
 
 #[test]
@@ -293,6 +326,21 @@ fn checked_in_matrix_pins_one_current_suite_mdoc_ca() {
     )
     .expect("current Suite mdoc trust anchor");
     assert_eq!(anchors.len(), 1);
+}
+
+#[test]
+fn matrix_suite_mdoc_anchor_policy_rejects_ambiguous_matrix_pins() {
+    let base = load_matrix_descriptor().expect("checked-in Matrix descriptor");
+    let mut descriptor = base.clone();
+    descriptor.openid4vc_suite_mdoc_trust_anchor_pem = format!(
+        "{}\n{}\n",
+        base.openid4vc_suite_mdoc_trust_anchor_pem.trim_end(),
+        base.openid4vc_suite_mdoc_trust_anchor_pem.trim_end()
+    );
+    let material = valid_conformance_trust(&base);
+    let error = validate_matrix_suite_mdoc_anchor(&material, &descriptor)
+        .expect_err("Matrix must pin exactly one Suite mdoc trust anchor");
+    assert!(error.to_string().contains("Matrix Suite mdoc trust anchor"));
 }
 
 #[derive(Clone, Copy)]
@@ -712,6 +760,17 @@ fn onboarding_scalar_and_registration_validators_cover_closed_policy_boundaries(
     request["tls_client_auth_subject_dn"] = serde_json::Value::Null;
     request["jwks"] = serde_json::json!({"keys": [{"k": "secret"}]});
     assert!(validate_client_request(&request).is_err());
+
+    let oversized_request = serde_json::json!({
+        "client_name": "x".repeat(MAX_CONFORMANCE_CLIENT_REQUEST_BYTES),
+        "client_type": "confidential",
+        "redirect_uris": ["https://client.example/cb"],
+        "scopes": ["openid"],
+        "allowed_audiences": ["https://issuer.example"],
+        "grant_types": ["authorization_code"],
+        "token_endpoint_auth_method": "client_secret_basic"
+    });
+    assert!(validate_client_request(&oversized_request).is_err());
 
     let mut sets = serde_json::json!({
         "redirect_uris": ["https://client.example/cb", "https://client.example/cb"],

@@ -5,6 +5,7 @@ use proptest::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::*;
+use crate::verification::*;
 
 // This module is included by lib.rs so private protocol invariants remain testable.
 
@@ -1632,4 +1633,595 @@ proptest! {
         let key = SigningKey::from_bytes(&[7; 32]);
         prop_assert!(matches!(sign_task(&envelope, "controller-1", &key), Err(ProtocolError::Policy(_))));
     }
+}
+
+#[test]
+fn task_operation_variants_and_key_boundaries_are_validated() {
+    for operation in [
+        TaskOperation::MigrateApply,
+        TaskOperation::ConformanceMatrixDescribe,
+        TaskOperation::ConformanceLeaseList,
+        TaskOperation::ConformanceLeaseCleanup,
+        TaskOperation::KeysList,
+        TaskOperation::KeysValidate,
+    ] {
+        validate_operation(&operation).unwrap();
+    }
+
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseRevoke {
+            lease_id: "lease-1".to_owned(),
+        })
+        .is_ok()
+    );
+    for lease_id in ["", "lease/with-slash"] {
+        assert!(
+            validate_operation(&TaskOperation::ConformanceLeaseRevoke {
+                lease_id: lease_id.to_owned(),
+            })
+            .is_err()
+        );
+    }
+
+    let trust_material = || Openid4vcConformanceTrust {
+        schema: 1,
+        client_attestation_issuer: "https://suite.example".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": []}),
+        key_attestation_jwks: serde_json::json!({"keys": []}),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n".to_owned(),
+    };
+    let lease = |profile: &str, public_material| TaskOperation::ConformanceLeaseCreate {
+        profile: profile.to_owned(),
+        material_sha256: "a".repeat(64),
+        dynamic_registration_initial_access_token_sha256: None,
+        ciba_automated_decision_token_sha256: None,
+        public_material,
+        ttl_seconds: 60,
+    };
+    validate_operation(&lease("oidf-full", None)).unwrap();
+    assert!(validate_operation(&lease("p", Some(trust_material()))).is_err());
+    assert!(validate_operation(&lease("openid4vc", None)).is_err());
+    assert!(validate_operation(&lease(&"p".repeat(65), None)).is_err());
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-full".to_owned(),
+            material_sha256: "A".repeat(64),
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: None,
+            public_material: None,
+            ttl_seconds: 60,
+        })
+        .is_err()
+    );
+    assert!(
+        validate_operation(&TaskOperation::ConformanceLeaseCreate {
+            profile: "oidf-full".to_owned(),
+            material_sha256: "a".repeat(64),
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: None,
+            public_material: None,
+            ttl_seconds: 86_401,
+        })
+        .is_err()
+    );
+
+    let onboarding = |profile: &str,
+                      bundle_schema,
+                      bundle_sha256: &str,
+                      matrix_sha256: &str,
+                      client_count,
+                      ttl_seconds| TaskOperation::ConformanceOnboardingApply {
+        profile: profile.to_owned(),
+        bundle_schema,
+        bundle_sha256: bundle_sha256.to_owned(),
+        matrix_sha256: matrix_sha256.to_owned(),
+        client_count,
+        ttl_seconds,
+    };
+    validate_operation(&onboarding(
+        "nazoauth-full",
+        3,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        1,
+        60,
+    ))
+    .unwrap();
+    for profile in ["oidf-full", ""] {
+        assert!(
+            validate_operation(&onboarding(
+                profile,
+                3,
+                &"b".repeat(64),
+                &"c".repeat(64),
+                1,
+                60,
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        validate_operation(&onboarding(
+            "nazoauth-full",
+            2,
+            &"b".repeat(64),
+            &"c".repeat(64),
+            1,
+            60,
+        ))
+        .is_err()
+    );
+    assert!(
+        validate_operation(&onboarding(
+            "nazoauth-full",
+            3,
+            &"B".repeat(64),
+            &"c".repeat(64),
+            1,
+            60,
+        ))
+        .is_err()
+    );
+    assert!(
+        validate_operation(&onboarding(
+            "nazoauth-full",
+            3,
+            &"b".repeat(64),
+            &"C".repeat(64),
+            1,
+            60,
+        ))
+        .is_err()
+    );
+    for client_count in [0, MAX_CONFORMANCE_ONBOARDING_CLIENTS + 1] {
+        assert!(
+            validate_operation(&onboarding(
+                "nazoauth-full",
+                3,
+                &"b".repeat(64),
+                &"c".repeat(64),
+                client_count,
+                60,
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        validate_operation(&onboarding(
+            "nazoauth-full",
+            3,
+            &"b".repeat(64),
+            &"c".repeat(64),
+            1,
+            59,
+        ))
+        .is_err()
+    );
+
+    validate_operation(&TaskOperation::KeysGenerateLocal {
+        alg: "EdDSA".to_owned(),
+        purposes: vec!["sign".to_owned(), "verify".to_owned()],
+    })
+    .unwrap();
+    for purposes in [
+        Vec::new(),
+        vec!["purpose".to_owned(); 9],
+        vec!["bad purpose".to_owned()],
+    ] {
+        assert!(
+            validate_operation(&TaskOperation::KeysGenerateLocal {
+                alg: "EdDSA".to_owned(),
+                purposes,
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        validate_operation(&TaskOperation::KeysGenerateLocal {
+            alg: "bad alg".to_owned(),
+            purposes: vec!["sign".to_owned()],
+        })
+        .is_err()
+    );
+
+    let external =
+        |kid: &str, alg: &str, key_ref: &str, digest: &str| TaskOperation::KeysRegisterExternal {
+            kid: kid.to_owned(),
+            alg: alg.to_owned(),
+            key_ref: key_ref.to_owned(),
+            public_jwk_sha256: digest.to_owned(),
+        };
+    validate_operation(&external(
+        "external-1",
+        "ES256",
+        "provider:keys/active+1",
+        &"d".repeat(64),
+    ))
+    .unwrap();
+    for key_ref in [
+        "",
+        "provider://secret",
+        "provider@secret",
+        "provider?secret",
+        "provider#secret",
+        "provider=secret",
+        "provider secret",
+    ] {
+        assert!(
+            validate_operation(&external("external-1", "ES256", key_ref, &"d".repeat(64),))
+                .is_err()
+        );
+    }
+    assert!(
+        validate_operation(&external(
+            "external-1",
+            "ES256",
+            &"x".repeat(513),
+            &"d".repeat(64),
+        ))
+        .is_err()
+    );
+    assert!(
+        validate_operation(&external(
+            "external/1",
+            "ES256",
+            "provider:key",
+            &"d".repeat(64),
+        ))
+        .is_err()
+    );
+    assert!(
+        validate_operation(&external(
+            "external-1",
+            "bad alg",
+            "provider:key",
+            &"d".repeat(64),
+        ))
+        .is_err()
+    );
+    assert!(
+        validate_operation(&external(
+            "external-1",
+            "ES256",
+            "provider:key",
+            &"D".repeat(64),
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn task_and_receipt_validation_covers_crypto_targets_and_versions() {
+    let valid = task();
+    validate_task(&valid).unwrap();
+
+    let mut invalid = valid.clone();
+    invalid.ver += 1;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.actor.id = "uid 0".to_owned();
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.jti = "jti/with-slash".to_owned();
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.deployment_id = "deployment/1".to_owned();
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.exp = invalid.iat - 1;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.exp = invalid.iat + MAX_TASK_LIFETIME_SECONDS + 1;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.nbf = invalid.iat - 1;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.config.manifest_version += 1;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.config.config_sha256 = "D".repeat(64);
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.embedded.build_id = "build id".to_owned();
+    assert!(validate_task(&invalid).is_err());
+
+    let mut host_binary = valid.clone();
+    host_binary.target = TargetExpectation::HostBinary {
+        path: "/usr/local/bin/nazoauth".to_owned(),
+        sha256: "e".repeat(64),
+    };
+    validate_task(&host_binary).unwrap();
+    host_binary.target = TargetExpectation::HostBinary {
+        path: "/usr/local/bin/nazoauth".to_owned(),
+        sha256: "E".repeat(64),
+    };
+    assert!(validate_task(&host_binary).is_err());
+    let mut bad_oci = valid.clone();
+    bad_oci.target = TargetExpectation::OciImage {
+        image_ref: "localhost/nazoauth:v1".to_owned(),
+        image_digest: "e".repeat(64),
+    };
+    assert!(validate_task(&bad_oci).is_err());
+
+    let mut hmac = valid.clone();
+    hmac.config.secret_binding = SecretBinding::HmacSha256 {
+        key_id: "config-key".to_owned(),
+        digest: "f".repeat(64),
+    };
+    validate_task(&hmac).unwrap();
+    hmac.config.secret_binding = SecretBinding::HmacSha256 {
+        key_id: "bad key".to_owned(),
+        digest: "f".repeat(64),
+    };
+    assert!(validate_task(&hmac).is_err());
+    hmac.config.secret_binding = SecretBinding::HmacSha256 {
+        key_id: "config-key".to_owned(),
+        digest: "F".repeat(64),
+    };
+    assert!(validate_task(&hmac).is_err());
+
+    let source = task();
+    let mut final_receipt = FinalReceipt {
+        ver: PROTOCOL_VERSION,
+        iss: source.iss.clone(),
+        aud: "operator-audit".to_owned(),
+        jti: source.jti.clone(),
+        request_sha256: "a".repeat(64),
+        deployment_id: source.deployment_id.clone(),
+        actor: source.actor.clone(),
+        operation: "migrate-apply".to_owned(),
+        completed_at: 1_002,
+        audit_sequence: 1,
+        audit_previous_sha256: "0".repeat(64),
+        controller_verified_target: RuntimeTargetClaim::HostBinary {
+            path: "/usr/local/bin/nazoauth".to_owned(),
+            sha256: "b".repeat(64),
+        },
+        embedded: source.embedded.clone(),
+        config: source.config.clone(),
+        runtime_receipt_sha256: "c".repeat(64),
+        outcome: TaskOutcome::Succeeded {
+            result: TaskResult::Migration { applied: true },
+        },
+    };
+    validate_final_receipt(&final_receipt).unwrap();
+    final_receipt.ver += 1;
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.ver = PROTOCOL_VERSION;
+    final_receipt.iss = "bad value".to_owned();
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.iss = source.iss.clone();
+    final_receipt.jti = "bad/jti".to_owned();
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.jti = source.jti.clone();
+    final_receipt.deployment_id = "bad/id".to_owned();
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.deployment_id = source.deployment_id.clone();
+    final_receipt.request_sha256 = "A".repeat(64);
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.request_sha256 = "a".repeat(64);
+    final_receipt.runtime_receipt_sha256 = "B".repeat(64);
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.runtime_receipt_sha256 = "c".repeat(64);
+    final_receipt.audit_previous_sha256 = "G".repeat(64);
+    assert!(validate_final_receipt(&final_receipt).is_err());
+
+    let runtime = RuntimeReceipt {
+        ver: PROTOCOL_VERSION + 1,
+        iss: "runtime:deployment-1".to_owned(),
+        aud: "controller:deployment-1".to_owned(),
+        jti: source.jti,
+        request_sha256: "a".repeat(64),
+        deployment_id: "deployment-1".to_owned(),
+        actor: source.actor,
+        operation: "migrate-apply".to_owned(),
+        started_at: 1_001,
+        completed_at: 1_002,
+        embedded: source.embedded,
+        config: source.config,
+        outcome: TaskOutcome::Failed {
+            code: "runtime-failure".to_owned(),
+        },
+    };
+    let key = SigningKey::from_bytes(&[14; 32]);
+    let compact = sign_compact(&runtime, "receipt-1", RUNTIME_RECEIPT_JWS_TYPE, &key).unwrap();
+    assert!(matches!(
+        verify_runtime_receipt(&compact, "receipt-1", &key.verifying_key()),
+        Err(ProtocolError::Policy("unsupported receipt version"))
+    ));
+}
+
+#[test]
+fn identity_transition_and_audit_boundaries_are_checked() {
+    let statement = discovery_statement();
+    validate_discovery_statement(&statement, 1_030, Some(&statement.nonce)).unwrap();
+    let mut invalid = statement.clone();
+    invalid.schema += 1;
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.product = "other".to_owned();
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    for field in ["deployment/1", "runtime/1", "instance/1"] {
+        let mut candidate = statement.clone();
+        candidate.deployment_id = field.to_owned();
+        assert!(validate_discovery_statement(&candidate, 1_030, None).is_err());
+    }
+    for field in [
+        "issuer value",
+        "release value",
+        "revision value",
+        "build value",
+    ] {
+        let mut candidate = statement.clone();
+        candidate.issuer = field.to_owned();
+        assert!(validate_discovery_statement(&candidate, 1_030, None).is_err());
+    }
+    let mut invalid = statement.clone();
+    invalid.control_protocol_versions = vec![CONTROL_DISCOVERY_SCHEMA, CONTROL_DISCOVERY_SCHEMA];
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.control_protocol_versions = vec![CONTROL_DISCOVERY_SCHEMA + 1];
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.control_protocol_versions = (1..=17).collect();
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.operator_protocol_versions = vec![PROTOCOL_VERSION + 1];
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.instance_key_id = "instance/1".to_owned();
+    assert!(validate_discovery_statement(&invalid, 1_030, None).is_err());
+    assert!(validate_discovery_statement(&statement, 1_030, Some("different-nonce")).is_err());
+    assert!(validate_discovery_statement(&statement, 999, None).is_err());
+    assert!(validate_discovery_statement(&statement, 1_061, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.expires_at = invalid.issued_at - 1;
+    assert!(validate_discovery_statement(&invalid, 1_000, None).is_err());
+    let mut invalid = statement.clone();
+    invalid.expires_at = invalid.issued_at + MAX_DISCOVERY_LIFETIME_SECONDS + 1;
+    assert!(validate_discovery_statement(&invalid, 1_000, None).is_err());
+    assert!(
+        validate_discovery_request(&DiscoveryRequest {
+            schema: CONTROL_DISCOVERY_SCHEMA,
+            nonce: URL_SAFE_NO_PAD.encode([1u8; 31]),
+        })
+        .is_err()
+    );
+
+    let mut deployment = deployment_statement();
+    validate_deployment_statement(&deployment).unwrap();
+    deployment.issued_at = 0;
+    assert!(validate_deployment_statement(&deployment).is_err());
+    let mut deployment = deployment_statement();
+    deployment.product = "other".to_owned();
+    assert!(validate_deployment_statement(&deployment).is_err());
+    let mut deployment = deployment_statement();
+    deployment.control_protocol_versions.clear();
+    assert!(validate_deployment_statement(&deployment).is_err());
+
+    let mut receipt = adoption_receipt();
+    validate_adoption_receipt(&receipt).unwrap();
+    receipt.schema += 1;
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.deployment_id = "deployment/1".to_owned();
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.issuer = "issuer value".to_owned();
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.verified_release = "release value".to_owned();
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.release_manifest_sha256 = "A".repeat(64);
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.plan_sha256 = "A".repeat(64);
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.adopted_at = 0;
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.runtime_instances[0].runtime_instance_id = "runtime/1".to_owned();
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.runtime_instances[0].backend = "backend\nvalue".to_owned();
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt.instance_key_ids[0] = "instance/1".to_owned();
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt
+        .resource_references
+        .insert("bad name".to_owned(), "value".to_owned());
+    assert!(validate_adoption_receipt(&receipt).is_err());
+    let mut receipt = adoption_receipt();
+    receipt
+        .resource_references
+        .insert("name".to_owned(), "bad\nvalue".to_owned());
+    assert!(validate_adoption_receipt(&receipt).is_err());
+
+    let transition = ControllerTrustTransition {
+        ver: PROTOCOL_VERSION,
+        deployment_id: "deployment-1".to_owned(),
+        issued_at: 1_003,
+        authorization: TransitionAuthorization::Controller,
+        previous_key_id: "controller-1".to_owned(),
+        next_key_id: "controller-2".to_owned(),
+        next_public_key_sha256: "a".repeat(64),
+        previous_audit_key_id: "audit-1".to_owned(),
+        next_audit_key_id: "audit-2".to_owned(),
+        next_audit_public_key_sha256: "b".repeat(64),
+        previous_break_glass_key_id: "break-glass-1".to_owned(),
+        next_break_glass_key_id: "break-glass-2".to_owned(),
+        next_break_glass_public_key_sha256: "c".repeat(64),
+        reason: "scheduled-rotation".to_owned(),
+    };
+    validate_transition(&transition).unwrap();
+    let mut invalid_transition = transition.clone();
+    invalid_transition.ver += 1;
+    assert!(validate_transition(&invalid_transition).is_err());
+    let mut invalid_transition = transition.clone();
+    invalid_transition.next_public_key_sha256 = "A".repeat(64);
+    assert!(validate_transition(&invalid_transition).is_err());
+    let mut invalid_transition = transition.clone();
+    invalid_transition.next_audit_public_key_sha256 = "B".repeat(64);
+    assert!(validate_transition(&invalid_transition).is_err());
+    let mut invalid_transition = transition;
+    invalid_transition.next_break_glass_public_key_sha256 = "C".repeat(64);
+    assert!(validate_transition(&invalid_transition).is_err());
+
+    let event = ManagementAuditEvent {
+        ver: PROTOCOL_VERSION,
+        deployment_id: "deployment-1".to_owned(),
+        sequence: 1,
+        previous_sha256: "0".repeat(64),
+        request_id: "request-1".to_owned(),
+        issued_at: 1_004,
+        actor: Actor {
+            kind: ActorKind::Automation,
+            id: "automation-1".to_owned(),
+        },
+        operation: "update".to_owned(),
+        release: "v1.0.0".to_owned(),
+        recovery_boundary: "artifact-and-schema-compatible".to_owned(),
+    };
+    validate_management_event(&event).unwrap();
+    let mut invalid_event = event.clone();
+    invalid_event.ver += 1;
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.deployment_id = "deployment/1".to_owned();
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.request_id = "request/1".to_owned();
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.previous_sha256 = "A".repeat(64);
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.actor.id = "automation id".to_owned();
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.operation = "operation value".to_owned();
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.release = "release value".to_owned();
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event;
+    invalid_event.recovery_boundary = "boundary value".to_owned();
+    assert!(validate_management_event(&invalid_event).is_err());
+
+    validate_identifier("issuer:https://auth.example").unwrap();
+    for value in [String::new(), "bad value".to_owned(), "x".repeat(257)] {
+        assert!(validate_identifier(&value).is_err());
+    }
+    validate_file_identifier("deployment-1_v2").unwrap();
+    for value in [String::new(), "deployment/1".to_owned(), "x".repeat(129)] {
+        assert!(validate_file_identifier(&value).is_err());
+    }
+    assert!(validate_file_identifier_value("file-1").is_ok());
+    assert!(validate_file_identifier_value("file/1").is_err());
 }

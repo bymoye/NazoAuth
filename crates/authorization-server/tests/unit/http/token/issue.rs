@@ -1454,3 +1454,289 @@ async fn prepared_issuance_rejects_a_different_request_digest_for_the_same_grant
     assert_eq!(oauth_error_code(&response), "invalid_grant");
     assert!(!response_body(response).await.is_empty());
 }
+
+#[actix_web::test]
+async fn refresh_issue_rejects_missing_essential_id_token_claims() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let mut client = client_with_grants(&["authorization_code"]);
+    client.client_id = format!("issue-essential-{}", Uuid::now_v7());
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user(&state, user_id).await;
+
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+    issue.refresh_token_scopes = Some(vec!["openid".to_owned()]);
+    issue.id_token_claim_requests = vec![OidcClaimRequest {
+        name: "department".to_owned(),
+        essential: true,
+        value: None,
+        values: Vec::new(),
+    }];
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_grant");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "invalid_grant");
+    assert!(value.get("id_token").is_none());
+}
+
+#[actix_web::test]
+async fn id_token_signing_failure_does_not_issue_oidc_credentials() {
+    let Some(mut state) = issue_state_with_live_database() else {
+        return;
+    };
+    let _key_material = client_signing_fixture(jsonwebtoken::Algorithm::EdDSA);
+    state.keyset = crate::test_support::test_key_manager();
+    let mut client = client_with_grants(&["authorization_code"]);
+    client.client_id = format!("issue-id-sign-{}", Uuid::now_v7());
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user(&state, user_id).await;
+
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("id_token").is_none());
+}
+
+#[actix_web::test]
+async fn id_token_encryption_failure_does_not_issue_an_unencrypted_token() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let mut client = client_with_grants(&["authorization_code"]);
+    client.client_id = format!("issue-id-encrypt-{}", Uuid::now_v7());
+    client.id_token_encrypted_response_alg = Some("RSA-OAEP-256".to_owned());
+    client.id_token_encrypted_response_enc = Some("A256GCM".to_owned());
+    client.jwks = Some(json!({
+        "keys": [{"kty": "RSA", "use": "enc", "alg": "RSA-OAEP-256"}]
+    }));
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user(&state, user_id).await;
+
+    let mut issue = token_issue_with_sid(Vec::new());
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("id_token").is_none());
+}
+
+#[actix_web::test]
+async fn native_sso_issue_requires_a_refresh_session_before_persisting_device_state() {
+    let Some(mut state) = issue_state_with_live_database() else {
+        return;
+    };
+    Arc::get_mut(&mut state.settings)
+        .expect("test state owns its settings")
+        .modules
+        .enable_native_sso = true;
+    let mut client = client_with_grants(&["authorization_code"]);
+    client.client_id = format!("issue-native-missing-refresh-{}", Uuid::now_v7());
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user(&state, user_id).await;
+
+    let mut issue = token_issue_with_sid(vec!["sid".to_owned()]);
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+    issue.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: format!("device-secret-{}", Uuid::now_v7()),
+        ds_hash: "device-hash".to_owned(),
+        sid: "native-sso-sid".to_owned(),
+    });
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_grant");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "invalid_grant");
+    assert!(value.get("device_secret").is_none());
+}
+
+#[actix_web::test]
+async fn native_sso_issue_persists_device_state_with_the_refresh_family() {
+    let Some(mut state) = issue_state_with_live_database() else {
+        return;
+    };
+    state
+        .valkey
+        .init()
+        .await
+        .expect("live Native SSO fixture should connect to Valkey");
+    Arc::get_mut(&mut state.settings)
+        .expect("test state owns its settings")
+        .modules
+        .enable_native_sso = true;
+    let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
+    client.client_id = format!("issue-native-success-{}", Uuid::now_v7());
+    let user_id = Uuid::now_v7();
+    insert_issue_client(&state, &client).await;
+    insert_issue_user(&state, user_id).await;
+
+    let device_secret = format!("device-secret-{}", Uuid::now_v7());
+    let mut issue = token_issue_with_sid(vec!["sid".to_owned()]);
+    issue.user_id = Some(user_id);
+    issue.subject = user_id.to_string();
+    issue.scopes = vec!["openid".to_owned(), "offline_access".to_owned()];
+    issue.include_refresh = true;
+    issue.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: device_secret.clone(),
+        ds_hash: "device-hash".to_owned(),
+        sid: "native-sso-sid".to_owned(),
+    });
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("token response should be JSON");
+    assert_eq!(value["device_secret"], device_secret);
+    assert!(
+        value["access_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        value["id_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        value["refresh_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+}
+
+#[actix_web::test]
+async fn authorization_code_marker_failure_revokes_the_issued_access_token() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    state
+        .valkey
+        .init()
+        .await
+        .expect("live authorization-code fixture should connect to Valkey");
+    let client = client_with_grants(&["client_credentials"]);
+    let mut issue = token_issue_without_openid();
+    issue.user_id = None;
+    issue.subject = client.client_id.clone();
+    issue.scopes = vec!["accounts".to_owned()];
+    issue.include_refresh = false;
+    issue.authorization_code_hash = Some(format!("missing-code-{}", Uuid::now_v7()));
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+    assert!(value.get("access_token").is_none());
+}
+
+#[actix_web::test]
+async fn refresh_rotation_conflict_fails_closed_without_returning_credentials() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
+    client.client_id = format!("issue-rotation-conflict-{}", Uuid::now_v7());
+    insert_issue_client(&state, &client).await;
+
+    let mut issue = token_issue_without_openid();
+    issue.user_id = None;
+    issue.subject = client.client_id.clone();
+    issue.scopes = vec!["accounts".to_owned(), "offline_access".to_owned()];
+    issue.include_refresh = true;
+    issue.refresh_token_policy = RefreshTokenPolicy::Rotate {
+        family_id: Uuid::now_v7(),
+        rotated_from_id: Uuid::now_v7(),
+    };
+
+    let response = issue_token_response(&state, &client, issue).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&response), "invalid_grant");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "invalid_grant");
+    assert!(value.get("access_token").is_none());
+    assert!(value.get("refresh_token").is_none());
+}
+
+#[actix_web::test]
+async fn busy_prepared_issuance_fails_closed_after_bounded_wait() {
+    let Some(state) = issue_state_with_live_database() else {
+        return;
+    };
+    let client = client_with_grants(&["client_credentials"]);
+    let grant_key = format!("busy-prepared-{}", Uuid::now_v7());
+    let issue = token_issue_without_openid();
+    let request_digest = issuance_request_digest(&client, &issue, &grant_key);
+    let issuance_id = Uuid::now_v7();
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+    let prepared = service
+        .prepare_token_issuance(PrepareTokenIssuance {
+            issuance_id,
+            tenant_id: client.tenant_id,
+            client_id: client.id,
+            grant_key: grant_key.clone(),
+            request_digest,
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+        })
+        .await
+        .expect("busy issuance fixture should prepare");
+    assert!(matches!(prepared, PrepareTokenIssuanceResult::Created(_)));
+    assert_eq!(
+        service
+            .claim_token_issuance(
+                issuance_id,
+                &issuance_request_digest(&client, &issue, &grant_key),
+                Uuid::now_v7()
+            )
+            .await
+            .expect("busy issuance fixture should claim"),
+        TokenIssuanceClaimResult::Applied
+    );
+
+    let response =
+        issue_token_response_with_grant_for_test(&state, &client, &grant_key, issue).await;
+    delete_token_issuance(&state, issuance_id).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(oauth_error_code(&response), "server_error");
+    let value: Value = serde_json::from_slice(&response_body(response).await)
+        .expect("OAuth error body should be JSON");
+    assert_eq!(value["error"], "server_error");
+}
