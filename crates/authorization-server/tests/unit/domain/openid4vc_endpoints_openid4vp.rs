@@ -237,7 +237,8 @@ async fn expire_lease(pool: &nazo_postgres::DbPool, lease_id: Uuid) {
         .expect("expiry fixture connection should be available");
     sql_query(
         "UPDATE conformance_leases
-         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+         SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes',
+             expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
          WHERE tenant_id = $1 AND id = $2",
     )
     .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
