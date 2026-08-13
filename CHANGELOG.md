@@ -3,6 +3,25 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.35 - 2026-08-13
+
+### Changed
+
+- Strengthen OAuth, OIDC, FAPI, CIBA, OpenID4VC, operator-task, onboarding,
+  storage, and key-management contract validation with behavior-focused
+  regression coverage.
+- Update reviewed Rust, Python, GitHub Actions, and container dependencies.
+
+### Fixed
+
+- Close fail-open and integrity gaps across management authentication,
+  conformance onboarding replay and rollback, registration reservations,
+  compact JWE parsing, runtime receipts, durable keyset writes, and protocol
+  admission boundaries.
+- Allow the one-shot host-local OIDF Suite token bootstrap listener to use an
+  explicitly validated loopback port when the backward-compatible default is
+  already owned by another deployment.
+
 ## 0.1.34 - 2026-08-12
 
 - Remove the redundant supplementary keyless blob signature. The governed
