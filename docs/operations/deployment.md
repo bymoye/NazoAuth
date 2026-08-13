@@ -28,6 +28,9 @@ both the host port and the public origin seen by browsers, run:
 NAZOAUTH_PORT=443 \
 NAZOAUTH_BIND_ADDRESS=0.0.0.0 \
 NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
+NAZOAUTH_TRANSPORT_MODE=trusted-proxy \
+NAZOAUTH_TRUSTED_PROXY_CIDRS=<exact-ingress-peer-cidr> \
+NAZOAUTH_MTLS_CERTIFICATE_SOURCE=disabled \
 NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
 NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
 docker compose up -d --build
@@ -41,6 +44,10 @@ platform port mapper reaches the published host port through a non-loopback
 interface. Keep the default `127.0.0.1` when a reverse proxy on the same host
 terminates TLS. Do not bind all interfaces unless the platform or firewall
 controls direct access to the plaintext port.
+
+Replace `<exact-ingress-peer-cidr>` with the address NazoAuth observes for the
+TLS terminator. The Compose path is a trusted-proxy deployment; it does not
+mount the server certificate and client-CA files required by direct TLS.
 
 Compose generates private PostgreSQL and Valkey credentials in a named volume,
 starts both services, and uses a short-lived development operator identity to

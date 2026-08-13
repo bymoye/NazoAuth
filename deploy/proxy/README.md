@@ -71,6 +71,7 @@ the supplied preset.
 When RFC 9440 mode is selected, set:
 
 ```yaml
+TRANSPORT_MODE: "trusted-proxy"
 MTLS_CERTIFICATE_SOURCE: "rfc9440"
 MTLS_ENDPOINT_BASE_URL: "https://auth.example.com:8443"
 TRUSTED_PROXY_CIDRS: "127.0.0.1/32"

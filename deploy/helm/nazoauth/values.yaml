@@ -6,6 +6,7 @@ image:
   pullPolicy: IfNotPresent
 
 publicBaseUrl: "https://auth.example.com"
+transportMode: trusted-proxy
 
 service:
   type: ClusterIP
