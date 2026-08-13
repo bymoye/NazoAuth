@@ -216,6 +216,29 @@ class CheckPatchCoverageTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_missing_lcov_record_for_declaration_only_rust_file_passes_gate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self._initialize_repository(repository)
+            source_directory = repository / "src"
+            source_directory.mkdir()
+            (source_directory / "base.rs").write_text(
+                "pub fn existing() {}\n", encoding="utf-8"
+            )
+            base = self._commit(repository, "base")
+
+            (source_directory / "ports.rs").write_text(
+                "pub trait Port {\n    fn execute(&self) -> Result<(), ()>;\n}\n",
+                encoding="utf-8",
+            )
+            self._commit(repository, "add interface")
+
+            result = self._run_gate(repository, base, "TN:\n")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

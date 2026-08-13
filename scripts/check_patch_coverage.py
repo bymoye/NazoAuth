@@ -15,6 +15,11 @@ from merge_lcov import parse_lcov
 
 
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+RUST_FUNCTION_BODY = re.compile(
+    r"\b(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:\s*<[^;{}]*>)?\s*\([^;{}]*\)[^{;]*\{",
+    re.DOTALL,
+)
 
 
 def codecov_ignores(config: Path) -> tuple[str, ...]:
@@ -85,6 +90,35 @@ def changed_lines(base: str, head: str | None, repository: Path) -> dict[str, se
     return changed
 
 
+def added_files(base: str, head: str | None, repository: Path) -> set[str]:
+    revision = base if head is None else f"{base}...{head}"
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=A",
+            "--find-renames",
+            revision,
+            "--",
+            "*.rs",
+        ],
+        cwd=repository,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    return set(result.stdout.splitlines())
+
+
+def added_rust_file_has_executable_code(repository: Path, path: str) -> bool:
+    source = repository / path
+    if not source.is_file():
+        return False
+    return RUST_FUNCTION_BODY.search(source.read_text(encoding="utf-8")) is not None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lcov", type=Path, required=True)
@@ -111,6 +145,11 @@ def main() -> int:
         None if args.include_worktree else args.head,
         repository,
     )
+    added = added_files(
+        args.base,
+        None if args.include_worktree else args.head,
+        repository,
+    )
 
     rows: list[tuple[str, int, int]] = []
     instrumentation_errors: list[str] = []
@@ -119,9 +158,13 @@ def main() -> int:
             continue
         record = records.get(path)
         if record is None:
-            if path.endswith(".rs") and lines:
+            if (
+                path in added
+                and lines
+                and added_rust_file_has_executable_code(repository, path)
+            ):
                 instrumentation_errors.append(
-                    f"changed Rust source is absent from LCOV: {path}"
+                    f"executable Rust source is absent from LCOV: {path}"
                 )
             continue
         executable = lines.intersection(record.lines)
@@ -144,11 +187,13 @@ def main() -> int:
     for error in instrumentation_errors:
         print(error, file=sys.stderr)
     print(f"patch coverage: {total_hit}/{total} ({percentage:.5f}%)")
-    if instrumentation_errors or percentage + sys.float_info.epsilon < args.threshold:
+    below_threshold = percentage + sys.float_info.epsilon < args.threshold
+    if below_threshold:
         print(
             f"patch coverage is below the required {args.threshold:.2f}%",
             file=sys.stderr,
         )
+    if instrumentation_errors or below_threshold:
         return 1
     return 0
 
