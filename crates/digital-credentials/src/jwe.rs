@@ -128,7 +128,7 @@ fn encrypt_ecdh_es_with_zip(
         "A256GCM" => 256,
         _ => return Err(JweError::Unsupported),
     };
-    let recipient = parse_public_jwk(recipient_jwk)?;
+    let recipient = parse_recipient_public_jwk(recipient_jwk)?;
     let ephemeral = SecretKey::generate();
     let shared = diffie_hellman(ephemeral.to_nonzero_scalar(), recipient.as_affine());
     let key = concat_kdf(
@@ -139,7 +139,7 @@ fn encrypt_ecdh_es_with_zip(
         key_bits,
     );
     let mut header = json!({
-        "alg": "ECDH-ES", "enc": enc, "epk": public_jwk(ephemeral.public_key()),
+        "alg": "ECDH-ES", "enc": enc, "epk": ephemeral_public_jwk(ephemeral.public_key()),
     });
     if let Some(kid) = recipient_jwk.get("kid").and_then(Value::as_str) {
         header["kid"] = Value::String(kid.to_owned());
@@ -224,7 +224,7 @@ fn decrypt_ecdh_es(
     {
         return Err(JweError::Unsupported);
     }
-    let ephemeral = parse_public_jwk(header.get("epk").ok_or(JweError::Malformed)?)?;
+    let ephemeral = parse_ephemeral_public_jwk(header.get("epk").ok_or(JweError::Malformed)?)?;
     let shared = diffie_hellman(recipient.to_nonzero_scalar(), ephemeral.as_affine());
     let apu = decode_party_info(&header, "apu")?;
     let apv = decode_party_info(&header, "apv")?;
@@ -287,19 +287,44 @@ fn decompress_deflate(compressed: &[u8]) -> Result<Vec<u8>, JweError> {
 }
 
 fn public_jwk(key: PublicKey) -> Value {
+    let mut jwk = ec_public_jwk(key);
+    jwk["use"] = Value::String("enc".to_owned());
+    jwk["alg"] = Value::String("ECDH-ES".to_owned());
+    jwk
+}
+
+fn ephemeral_public_jwk(key: PublicKey) -> Value {
+    ec_public_jwk(key)
+}
+
+fn ec_public_jwk(key: PublicKey) -> Value {
     let point = key.to_sec1_point(false);
     json!({
         "kty": "EC", "crv": "P-256",
         "x": URL_SAFE_NO_PAD.encode(point.x().expect("uncompressed P-256 point has x")),
         "y": URL_SAFE_NO_PAD.encode(point.y().expect("uncompressed P-256 point has y")),
-        "use": "enc", "alg": "ECDH-ES",
     })
 }
 
-fn parse_public_jwk(jwk: &Value) -> Result<PublicKey, JweError> {
+fn parse_recipient_public_jwk(jwk: &Value) -> Result<PublicKey, JweError> {
+    if jwk.get("alg").and_then(Value::as_str) != Some("ECDH-ES") {
+        return Err(JweError::InvalidKey);
+    }
+    parse_ec_public_jwk(jwk)
+}
+
+fn parse_ephemeral_public_jwk(jwk: &Value) -> Result<PublicKey, JweError> {
+    match jwk.get("alg") {
+        None => {}
+        Some(Value::String(algorithm)) if algorithm == "ECDH-ES" => {}
+        _ => return Err(JweError::InvalidKey),
+    }
+    parse_ec_public_jwk(jwk)
+}
+
+fn parse_ec_public_jwk(jwk: &Value) -> Result<PublicKey, JweError> {
     if jwk.get("kty").and_then(Value::as_str) != Some("EC")
         || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
-        || jwk.get("alg").and_then(Value::as_str) != Some("ECDH-ES")
     {
         return Err(JweError::InvalidKey);
     }
