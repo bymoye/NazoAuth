@@ -38,7 +38,7 @@ arc-swap = "1.8.2"
 argon2 = "0.5.3"
 atomicwrites = "0.4.4"
 aws-lc-rs = "1.17.1"
-base64 = "0.22.1"
+base64 = "0.23.1"
 blake3 = "1.8.5"
 chrono = "0.4.45"
 der = { version = "0.8.1", features = ["derive"] }
