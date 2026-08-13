@@ -55,7 +55,7 @@ pub use authorization_details::{
     parse_authorization_details,
 };
 pub use authorization_policy::{
-    AUTHORIZATION_NONCE_MAX_BYTES, AuthorizationCapabilityPolicy, AuthorizationClientPolicy,
+    AUTHORIZATION_NONCE_MAX_CHARS, AuthorizationCapabilityPolicy, AuthorizationClientPolicy,
     AuthorizationPolicyError, AuthorizationProfilePolicy, AuthorizationResponsePlan,
     AuthorizationResponsePolicyError, AuthorizationResponsePolicyInput, AuthorizationSession,
     AuthorizationSessionDecision, BASELINE_ACR_VALUE, JarmAuthorizationResponse,

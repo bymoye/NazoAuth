@@ -426,6 +426,11 @@ async fn par_after_rate_limit_inner(
             client_type: &client.client_type,
             redirect_uris: &client.redirect_uris,
             allowed_audiences: &client.allowed_audiences,
+            pkce_required: !client_policy.allow_confidential_oidc_without_pkce
+                || client_policy.requires_fapi2_security()
+                || client.require_dpop_bound_tokens
+                || client.require_mtls_bound_tokens
+                || params.contains_key("dpop_jkt"),
             fapi2_requires_explicit_redirect_uri: client_policy.requires_fapi2_security(),
         },
     ) {

@@ -76,7 +76,7 @@ pub(super) use policy::{
 pub(super) use request::{
     apply_ciba_request_object_client_id_hint, ciba_hint_count, ciba_selected_acr,
     parse_backchannel_authentication_form,
-    validate_and_apply_ciba_request_object_claims_with_config,
+    validate_and_apply_ciba_request_object_claims_with_config, validate_ciba_binding_message,
 };
 pub(super) use state::{
     BackchannelAuthenticationForm, CIBA_AUTOMATED_DECISION_PROFILE, CIBA_BINDING_MESSAGE_MAX_CHARS,

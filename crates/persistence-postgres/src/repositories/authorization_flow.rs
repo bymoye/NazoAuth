@@ -77,9 +77,12 @@ impl AuthorizationRepositoryPort for AuthorizationFlowRepository {
 
     fn upsert_grant<'a>(&'a self, write: GrantWrite<'a>) -> AuthorizationFuture<'a, ()> {
         Box::pin(async move {
+            if write.tenant_id != self.tenant_id {
+                return Err(AuthorizationPortError::CorruptData);
+            }
             self.grants
                 .upsert(
-                    write.tenant_id,
+                    self.tenant_id,
                     write.user_id,
                     write.client_id,
                     write.scopes,
@@ -97,7 +100,7 @@ impl AuthorizationRepositoryPort for AuthorizationFlowRepository {
     ) -> AuthorizationFuture<'a, Option<String>> {
         Box::pin(async move {
             self.clients
-                .client_secret_salt(client_id)
+                .client_secret_salt_for_tenant(self.tenant_id, client_id)
                 .await
                 .map_err(map_repository_error)
         })
@@ -110,7 +113,11 @@ impl AuthorizationRepositoryPort for AuthorizationFlowRepository {
     ) -> AuthorizationFuture<'a, bool> {
         Box::pin(async move {
             self.clients
-                .client_secret_digest_matches(client_id, candidate_digest)
+                .client_secret_digest_matches_for_tenant(
+                    self.tenant_id,
+                    client_id,
+                    candidate_digest,
+                )
                 .await
                 .map_err(map_repository_error)
         })
@@ -132,9 +139,12 @@ impl DeviceGrantRepositoryPort for AuthorizationFlowRepository {
 
     fn upsert_grant<'a>(&'a self, write: DeviceGrantWrite<'a>) -> DeviceGrantFuture<'a, ()> {
         Box::pin(async move {
+            if write.tenant_id != self.tenant_id {
+                return Err(DeviceGrantPortError::CorruptData);
+            }
             self.grants
                 .ensure(
-                    write.tenant_id,
+                    self.tenant_id,
                     write.user_id,
                     write.client_id,
                     write.scopes,

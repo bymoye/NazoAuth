@@ -1344,6 +1344,14 @@ struct MtlsAnchorReplayRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     certificate_sha256: String,
     #[diesel(sql_type = diesel::sql_types::Text)]
+    certificate_pem: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    subject_dn: String,
+    #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+    not_before: DateTime<Utc>,
+    #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+    not_after: DateTime<Utc>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
     source: String,
     #[diesel(sql_type = diesel::sql_types::SmallInt)]
     status: i16,
@@ -1492,11 +1500,12 @@ async fn replay_or_conflict(
                 "conformance trust anchor references an unknown logical client".to_owned(),
             )));
         };
-        expected_anchors.insert(client_id, anchor.certificate_sha256.as_str());
+        expected_anchors.insert(client_id, anchor);
     }
     let persisted_anchors = sql_query(
-        "SELECT request.client_id, request.certificate_sha256, request.source,
-                request.status,
+        "SELECT request.client_id, request.certificate_sha256, request.certificate_pem,
+                request.subject_dn, request.not_before, request.not_after,
+                request.source, request.status,
                 (request.status = 1
                  AND request.source = 'operator-conformance'
                  AND request.not_before <= CURRENT_TIMESTAMP
@@ -1518,7 +1527,7 @@ async fn replay_or_conflict(
         )));
     }
     for anchor in persisted_anchors {
-        let Some(expected_digest) = expected_anchors.remove(&anchor.client_id) else {
+        let Some(expected) = expected_anchors.remove(&anchor.client_id) else {
             return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
                 "conformance lease contains an unexpected trust-anchor row".to_owned(),
             )));
@@ -1526,7 +1535,11 @@ async fn replay_or_conflict(
         if !anchor.active
             || anchor.status != 1
             || anchor.source != "operator-conformance"
-            || anchor.certificate_sha256.as_str() != expected_digest
+            || anchor.certificate_sha256.as_str() != expected.certificate_sha256.as_str()
+            || anchor.certificate_pem.as_str() != expected.certificate_pem.as_str()
+            || anchor.subject_dn.as_str() != expected.subject_dn.as_str()
+            || anchor.not_before.timestamp_micros() != expected.not_before.timestamp_micros()
+            || anchor.not_after.timestamp_micros() != expected.not_after.timestamp_micros()
         {
             return Err(OnboardingTxError::Repository(RepositoryError::Consistency(
                 "conformance lease trust-anchor row is inconsistent".to_owned(),
@@ -1901,8 +1914,42 @@ fn validate_onboarding_credential_datasets(
                 "conformance OpenID4VC dataset claims exceed structural limits".to_owned(),
             ));
         }
+        if contains_forbidden_credential_claim(claims) {
+            return Err(RepositoryError::Consistency(
+                "conformance OpenID4VC dataset claims contain forbidden material".to_owned(),
+            ));
+        }
     }
     Ok(())
+}
+
+fn contains_forbidden_credential_claim(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let private_jwk = object.contains_key("kty")
+                && ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+                    .iter()
+                    .any(|key| object.contains_key(*key));
+            private_jwk
+                || object.iter().any(|(key, value)| {
+                    matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "password"
+                            | "password_hash"
+                            | "token"
+                            | "access_token"
+                            | "refresh_token"
+                            | "client_secret"
+                            | "private_key"
+                            | "private_jwk"
+                            | "private_jwks"
+                    ) || contains_forbidden_credential_claim(value)
+                })
+        }
+        Value::Array(array) => array.iter().any(contains_forbidden_credential_claim),
+        Value::String(value) => value.contains("{{") || value.contains("}}"),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 fn validate_onboarding_public_material(value: &Value) -> Result<(), RepositoryError> {

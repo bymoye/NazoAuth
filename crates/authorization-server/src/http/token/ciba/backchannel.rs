@@ -140,6 +140,9 @@ pub(crate) async fn backchannel_authentication(
         Ok(replay) => replay,
         Err(response) => return response,
     };
+    if let Err(response) = validate_ciba_binding_message(&form) {
+        return response;
+    }
     if let Err(response) = validate_ciba_delivery_request(&client, &form) {
         return response;
     }

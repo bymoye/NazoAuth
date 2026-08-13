@@ -113,14 +113,24 @@ def main() -> int:
     )
 
     rows: list[tuple[str, int, int]] = []
+    instrumentation_errors: list[str] = []
     for path, lines in diff.items():
         if is_ignored(path, ignores):
             continue
         record = records.get(path)
         if record is None:
+            if path.endswith(".rs") and lines:
+                instrumentation_errors.append(
+                    f"changed Rust source is absent from LCOV: {path}"
+                )
             continue
         executable = lines.intersection(record.lines)
         if not executable:
+            # LLVM coverage intentionally emits no DA entry for comments,
+            # declarations, derives, and many type-only changes.  The file is
+            # instrumented, so those lines remain outside the executable-line
+            # denominator; only an entirely absent Rust SF record is a gate
+            # integrity error.
             continue
         hit = sum(record.lines[line][0] > 0 for line in executable)
         rows.append((path, hit, len(executable)))
@@ -131,8 +141,10 @@ def main() -> int:
     for path, hit, count in sorted(rows, key=lambda row: (row[1] - row[2], row[0])):
         if hit != count:
             print(f"{hit:5d}/{count:<5d} {hit * 100.0 / count:6.2f}%  {path}")
+    for error in instrumentation_errors:
+        print(error, file=sys.stderr)
     print(f"patch coverage: {total_hit}/{total} ({percentage:.5f}%)")
-    if percentage + sys.float_info.epsilon < args.threshold:
+    if instrumentation_errors or percentage + sys.float_info.epsilon < args.threshold:
         print(
             f"patch coverage is below the required {args.threshold:.2f}%",
             file=sys.stderr,

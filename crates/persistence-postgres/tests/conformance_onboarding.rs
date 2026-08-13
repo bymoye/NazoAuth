@@ -399,7 +399,7 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     assert_eq!(first.client_count, 2);
 
     let applicant_id = first.applicant_user_id.expect("onboarding applicant");
-    let claims = UserRepository::new(pool)
+    let claims = UserRepository::new(pool.clone())
         .active_subject_claims_by_tenant_id(
             tenant.tenant_id,
             nazo_identity::UserId::new(applicant_id).unwrap(),
@@ -550,6 +550,26 @@ async fn onboarding_replay_returns_stable_logical_client_mappings() {
     assert_eq!(replay.applicant_user_id, first.applicant_user_id);
     assert_eq!(replay.client_mappings, first.client_mappings);
 
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE oauth_client_mtls_trust_anchor_requests request
+         SET subject_dn = 'CN=Tampered replay metadata'
+         FROM conformance_lease_clients mapping
+         WHERE mapping.tenant_id = request.tenant_id
+           AND mapping.client_id = request.client_id
+           AND mapping.lease_id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(first.lease_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(matches!(
+        repository.onboard(request.clone()).await,
+        Err(RepositoryError::Consistency(message))
+            if message.contains("trust-anchor row is inconsistent")
+    ));
+
     let mut drifted_request = request.clone();
     drifted_request.public_material = serde_json::json!({
         "schema": 1,
@@ -610,6 +630,35 @@ async fn onboarding_owns_encrypted_openid4vc_datasets_and_replay_compares_claims
         "org.example.pid".to_owned(),
         json!({"given_name": "Conformance", "family_name": "User"}),
     );
+    let repository_without_data_key = ConformanceLeaseRepository::new(pool.clone());
+    assert!(matches!(
+        repository_without_data_key.onboard(request.clone()).await,
+        Err(RepositoryError::Consistency(message))
+            if message.contains("application data key")
+    ));
+    let mut connection = get_conn(&pool).await.unwrap();
+    let rolled_back_lease = sql_query(
+        "SELECT COUNT(*)::BIGINT AS count FROM conformance_leases
+         WHERE tenant_id = $1 AND task_jti = $2",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<Text, _>(&request.task_jti)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .unwrap();
+    let rolled_back_applicant = sql_query(
+        "SELECT COUNT(*)::BIGINT AS count FROM users
+         WHERE tenant_id = $1 AND username = $2",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<Text, _>(&request.applicant.username)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(rolled_back_lease.count, 0);
+    assert_eq!(rolled_back_applicant.count, 0);
+    drop(connection);
+
     let repository =
         ConformanceLeaseRepository::new_with_openid4vc_data_key(pool.clone(), [0x51; 32]);
     let first = repository.onboard(request.clone()).await.unwrap();
@@ -643,7 +692,6 @@ async fn onboarding_owns_encrypted_openid4vc_datasets_and_replay_compares_claims
 
     let replay = repository.onboard(request.clone()).await.unwrap();
     assert!(replay.idempotent_replay);
-    let repository_without_data_key = ConformanceLeaseRepository::new(pool.clone());
     assert!(matches!(
         repository_without_data_key.onboard(request.clone()).await,
         Err(RepositoryError::Consistency(message))

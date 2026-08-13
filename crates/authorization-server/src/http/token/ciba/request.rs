@@ -139,6 +139,7 @@ pub(crate) fn validate_and_apply_ciba_request_object_claims_with_config(
         claims.client_notification_token,
         "CIBA request object client_notification_token conflicts with outer parameter.",
     )?;
+    validate_ciba_binding_message(form)?;
     if let Some(requested_expiry) = claims.requested_expiry {
         let Some(seconds) = ciba_requested_expiry_seconds(&requested_expiry) else {
             return Err(ciba_invalid_request(
@@ -368,6 +369,23 @@ pub(crate) fn ciba_binding_message_is_supported(value: &str) -> bool {
         && trimmed
             .chars()
             .all(|ch| ch.is_ascii() && !ch.is_ascii_control())
+}
+
+pub(crate) fn validate_ciba_binding_message(
+    form: &BackchannelAuthenticationForm,
+) -> Result<(), HttpResponse> {
+    if form
+        .binding_message
+        .as_deref()
+        .is_some_and(|value| !ciba_binding_message_is_supported(value))
+    {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_binding_message",
+            "CIBA binding_message is unsupported.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn merge_request_object_string(

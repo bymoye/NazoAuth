@@ -99,12 +99,15 @@ impl PresentationEndpoint {
     }
 
     fn management_authorized(&self, request: &HttpRequest) -> bool {
+        if self.management_token.is_empty() {
+            return false;
+        }
         request
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::trim)
+            .filter(|provided| !provided.is_empty())
             .is_some_and(|provided| constant_time_eq(provided.as_bytes(), &self.management_token))
     }
 }

@@ -292,17 +292,14 @@ fn public_jwk(key: PublicKey) -> Value {
         "kty": "EC", "crv": "P-256",
         "x": URL_SAFE_NO_PAD.encode(point.x().expect("uncompressed P-256 point has x")),
         "y": URL_SAFE_NO_PAD.encode(point.y().expect("uncompressed P-256 point has y")),
-        "use": "enc",
+        "use": "enc", "alg": "ECDH-ES",
     })
 }
 
 fn parse_public_jwk(jwk: &Value) -> Result<PublicKey, JweError> {
     if jwk.get("kty").and_then(Value::as_str) != Some("EC")
         || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
-        || jwk
-            .get("alg")
-            .and_then(Value::as_str)
-            .is_some_and(|alg| alg != "ECDH-ES")
+        || jwk.get("alg").and_then(Value::as_str) != Some("ECDH-ES")
     {
         return Err(JweError::InvalidKey);
     }

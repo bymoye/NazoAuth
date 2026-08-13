@@ -83,7 +83,7 @@ use std::sync::Arc;
 
 use crate::config::ConfigSource;
 use nazo_auth::{
-    AUTHORIZATION_NONCE_MAX_BYTES, AuthorizationPolicyError, NormalizedAuthorizationRequest,
+    AUTHORIZATION_NONCE_MAX_CHARS, AuthorizationPolicyError, NormalizedAuthorizationRequest,
     OidcClaimRequest, PlainAuthorizationResponse, PromptDirectives, RequestedClaims,
     authorization_session_decision, plain_authorization_response_uri,
 };
@@ -784,9 +784,17 @@ fn authorization_nonce_length_check_allows_long_state_but_rejects_long_nonce() {
         "state",
         &"s".repeat(1000),
     )])));
+    assert!(!authorization_nonce_too_long(&query(&[(
+        "nonce",
+        &"n".repeat(AUTHORIZATION_NONCE_MAX_CHARS),
+    )])));
+    assert!(!authorization_nonce_too_long(&query(&[(
+        "nonce",
+        &"界".repeat(AUTHORIZATION_NONCE_MAX_CHARS),
+    )])));
     assert!(authorization_nonce_too_long(&query(&[(
         "nonce",
-        &"n".repeat(AUTHORIZATION_NONCE_MAX_BYTES + 1),
+        &"n".repeat(AUTHORIZATION_NONCE_MAX_CHARS + 1),
     )])));
 }
 

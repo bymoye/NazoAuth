@@ -130,12 +130,19 @@ where
         {
             return Ok(SendVerificationCodeOutcome::Suppressed);
         }
-        if !self
+        let email_reserved = match self
             .verification
             .reserve_email_send(normalized_email, self.config.send_cooldown_seconds)
             .await
-            .map_err(SendVerificationCodeError::Reservation)?
         {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                let _ = self.verification.release_peer_send(peer_subject).await;
+                return Err(SendVerificationCodeError::Reservation(error));
+            }
+        };
+        if !email_reserved {
+            let _ = self.verification.release_peer_send(peer_subject).await;
             return Ok(SendVerificationCodeOutcome::Suppressed);
         }
 

@@ -501,6 +501,7 @@ pub struct ExpandedParAdmissionPolicy<'a> {
     pub client_type: &'a str,
     pub redirect_uris: &'a [String],
     pub allowed_audiences: &'a [String],
+    pub pkce_required: bool,
     pub fapi2_requires_explicit_redirect_uri: bool,
 }
 
@@ -560,10 +561,7 @@ pub fn validate_raw_par_admission(
         }
         if !matches!(
             policy.client_authentication_method,
-            "private_key_jwt"
-                | "tls_client_auth"
-                | "self_signed_tls_client_auth"
-                | "attest_jwt_client_auth"
+            "private_key_jwt" | "tls_client_auth" | "self_signed_tls_client_auth"
         ) {
             return Err(ParAdmissionError::StrongClientAuthenticationRequired);
         }
@@ -596,6 +594,7 @@ pub fn validate_expanded_par_admission(
         parameters.get("code_challenge").map(String::as_str),
         parameters.get("code_challenge_method").map(String::as_str),
     ) {
+        (None, None) if !policy.pkce_required => {}
         (None, None) => return Err(ParAdmissionError::PkceRequired),
         (Some(challenge), Some("S256")) if is_valid_pkce_value(challenge) => {}
         _ => return Err(ParAdmissionError::InvalidPkce),

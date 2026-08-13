@@ -431,7 +431,7 @@ fn signed_receipts_are_recovered_and_bound_to_the_request() {
     )
     .unwrap();
     let request = task(TaskOperation::KeysValidate);
-    let digest = "r".repeat(64);
+    let digest = "a".repeat(64);
     let compact = sign_task_outcome(
         &request,
         &digest,

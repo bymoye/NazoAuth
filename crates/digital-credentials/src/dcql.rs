@@ -87,6 +87,29 @@ impl DcqlQuery {
             {
                 return Err(DcqlError::EmptySelection);
             }
+            let mut claim_ids = std::collections::BTreeSet::new();
+            if let Some(claims) = &credential.claims {
+                for claim in claims {
+                    if claim.path.is_empty() {
+                        return Err(DcqlError::EmptyClaimPath);
+                    }
+                    if let Some(id) = claim.id.as_deref()
+                        && (id.is_empty() || !claim_ids.insert(id))
+                    {
+                        return Err(DcqlError::InvalidClaimId);
+                    }
+                }
+            }
+            if let Some(claim_sets) = &credential.claim_sets
+                && claim_sets.iter().any(|set| {
+                    set.is_empty()
+                        || set
+                            .iter()
+                            .any(|id| id.is_empty() || !claim_ids.contains(id.as_str()))
+                })
+            {
+                return Err(DcqlError::InvalidClaimSet);
+            }
         }
         if let Some(sets) = &self.credential_sets {
             for set in sets {
@@ -114,6 +137,12 @@ pub enum DcqlError {
     InvalidCredentialId,
     #[error("DCQL claim selections must not be empty")]
     EmptySelection,
+    #[error("DCQL claim paths must not be empty")]
+    EmptyClaimPath,
+    #[error("DCQL claim identifiers must be unique and non-empty")]
+    InvalidClaimId,
+    #[error("DCQL claim set references are invalid")]
+    InvalidClaimSet,
     #[error("DCQL credential set references are invalid")]
     InvalidCredentialSet,
 }

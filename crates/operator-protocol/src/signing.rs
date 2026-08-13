@@ -8,7 +8,8 @@ use sha2::{Digest as _, Sha256};
 use crate::verification::{
     validate_adoption_receipt, validate_deployment_statement, validate_discovery_statement,
     validate_file_identifier, validate_final_receipt, validate_identifier,
-    validate_management_event, validate_task, validate_transition, verify_task_window,
+    validate_management_event, validate_runtime_receipt, validate_task, validate_transition,
+    verify_task_window,
 };
 use crate::wire::{
     AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
@@ -18,8 +19,8 @@ use crate::wire::{
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
     DEPLOYMENT_STATEMENT_JWS_TYPE, FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE,
-    MAX_COMPACT_JWS_BYTES, PROTOCOL_VERSION, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE,
-    TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
+    MAX_COMPACT_JWS_BYTES, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE,
+    TRUST_TRANSITION_JWS_TYPE,
 };
 
 pub fn sign_discovery_statement(
@@ -93,9 +94,7 @@ pub fn sign_runtime_receipt(
     key_id: &str,
     key: &SigningKey,
 ) -> Result<String, ProtocolError> {
-    if receipt.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy("unsupported receipt version"));
-    }
+    validate_runtime_receipt(receipt)?;
     sign_compact(receipt, key_id, RUNTIME_RECEIPT_JWS_TYPE, key)
 }
 

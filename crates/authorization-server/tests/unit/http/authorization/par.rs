@@ -141,6 +141,7 @@ fn expanded_par_policy(client: &ClientRow, fapi2: bool) -> ExpandedParAdmissionP
         client_type: &client.client_type,
         redirect_uris: &client.redirect_uris,
         allowed_audiences: &client.allowed_audiences,
+        pkce_required: true,
         fapi2_requires_explicit_redirect_uri: fapi2,
     }
 }

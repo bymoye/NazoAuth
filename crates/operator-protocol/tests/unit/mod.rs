@@ -316,6 +316,27 @@ fn adoption_receipt_roundtrips_and_enforces_bounded_recovery_evidence() {
     assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
 
     let mut invalid = adoption_receipt();
+    invalid.instance_key_ids.clear();
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid
+        .runtime_instances
+        .push(invalid.runtime_instances[0].clone());
+    invalid.instance_key_ids.push("instance-2".to_owned());
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid
+        .instance_key_ids
+        .push(invalid.instance_key_ids[0].clone());
+    invalid.runtime_instances.push(AdoptedRuntimeIdentity {
+        runtime_instance_id: "runtime-2".to_owned(),
+        ..invalid.runtime_instances[0].clone()
+    });
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
     invalid.resource_references = (0..65)
         .map(|index| (format!("resource-{index}"), "external/shared".to_owned()))
         .collect();
@@ -323,6 +344,10 @@ fn adoption_receipt_roundtrips_and_enforces_bounded_recovery_evidence() {
 
     let mut invalid = adoption_receipt();
     invalid.recovery_evidence = vec!["snapshot/evidence".to_owned(); 65];
+    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
+
+    let mut invalid = adoption_receipt();
+    invalid.recovery_evidence.clear();
     assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
 
     let mut invalid = adoption_receipt();
@@ -1926,6 +1951,16 @@ fn task_and_receipt_validation_covers_crypto_targets_and_versions() {
     let mut invalid = valid.clone();
     invalid.embedded.build_id = "build id".to_owned();
     assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.iat = 0;
+    invalid.nbf = 0;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.embedded.protocol = PROTOCOL_VERSION + 1;
+    assert!(validate_task(&invalid).is_err());
+    let mut invalid = valid.clone();
+    invalid.embedded.release = "bad release".to_owned();
+    assert!(validate_task(&invalid).is_err());
 
     let mut host_binary = valid.clone();
     host_binary.target = TargetExpectation::HostBinary {
@@ -1933,6 +1968,11 @@ fn task_and_receipt_validation_covers_crypto_targets_and_versions() {
         sha256: "e".repeat(64),
     };
     validate_task(&host_binary).unwrap();
+    host_binary.target = TargetExpectation::HostBinary {
+        path: "relative path with spaces".to_owned(),
+        sha256: "e".repeat(64),
+    };
+    assert!(validate_task(&host_binary).is_err());
     host_binary.target = TargetExpectation::HostBinary {
         path: "/usr/local/bin/nazoauth".to_owned(),
         sha256: "E".repeat(64),
@@ -2007,9 +2047,21 @@ fn task_and_receipt_validation_covers_crypto_targets_and_versions() {
     final_receipt.runtime_receipt_sha256 = "c".repeat(64);
     final_receipt.audit_previous_sha256 = "G".repeat(64);
     assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.audit_previous_sha256 = "0".repeat(64);
+    final_receipt.completed_at = 0;
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.completed_at = 1_002;
+    final_receipt.audit_sequence = 0;
+    assert!(validate_final_receipt(&final_receipt).is_err());
+    final_receipt.audit_sequence = 1;
+    final_receipt.controller_verified_target = RuntimeTargetClaim::HostBinary {
+        path: "bad path".to_owned(),
+        sha256: "b".repeat(64),
+    };
+    assert!(validate_final_receipt(&final_receipt).is_err());
 
-    let runtime = RuntimeReceipt {
-        ver: PROTOCOL_VERSION + 1,
+    let mut runtime = RuntimeReceipt {
+        ver: PROTOCOL_VERSION,
         iss: "runtime:deployment-1".to_owned(),
         aud: "controller:deployment-1".to_owned(),
         jti: source.jti,
@@ -2026,6 +2078,14 @@ fn task_and_receipt_validation_covers_crypto_targets_and_versions() {
         },
     };
     let key = SigningKey::from_bytes(&[14; 32]);
+    sign_runtime_receipt(&runtime, "receipt-1", &key).unwrap();
+    runtime.completed_at = runtime.started_at - 1;
+    assert!(sign_runtime_receipt(&runtime, "receipt-1", &key).is_err());
+    runtime.completed_at = 1_002;
+    runtime.embedded.protocol = PROTOCOL_VERSION + 1;
+    assert!(sign_runtime_receipt(&runtime, "receipt-1", &key).is_err());
+    runtime.embedded.protocol = PROTOCOL_VERSION;
+    runtime.ver = PROTOCOL_VERSION + 1;
     let compact = sign_compact(&runtime, "receipt-1", RUNTIME_RECEIPT_JWS_TYPE, &key).unwrap();
     assert!(matches!(
         verify_runtime_receipt(&compact, "receipt-1", &key.verifying_key()),
@@ -2164,6 +2224,9 @@ fn identity_transition_and_audit_boundaries_are_checked() {
     invalid_transition.ver += 1;
     assert!(validate_transition(&invalid_transition).is_err());
     let mut invalid_transition = transition.clone();
+    invalid_transition.issued_at = 0;
+    assert!(validate_transition(&invalid_transition).is_err());
+    let mut invalid_transition = transition.clone();
     invalid_transition.next_public_key_sha256 = "A".repeat(64);
     assert!(validate_transition(&invalid_transition).is_err());
     let mut invalid_transition = transition.clone();
@@ -2191,6 +2254,12 @@ fn identity_transition_and_audit_boundaries_are_checked() {
     validate_management_event(&event).unwrap();
     let mut invalid_event = event.clone();
     invalid_event.ver += 1;
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.issued_at = 0;
+    assert!(validate_management_event(&invalid_event).is_err());
+    let mut invalid_event = event.clone();
+    invalid_event.sequence = 0;
     assert!(validate_management_event(&invalid_event).is_err());
     let mut invalid_event = event.clone();
     invalid_event.deployment_id = "deployment/1".to_owned();

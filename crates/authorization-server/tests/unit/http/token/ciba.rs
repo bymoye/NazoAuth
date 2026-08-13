@@ -11,7 +11,7 @@ use super::request::{
     ciba_requested_expiry_seconds, ciba_selected_acr, decode_jwt_header_value,
     merge_request_object_string, parse_backchannel_authentication_form,
     parse_requested_expiry_string, split_compact_jwt,
-    unverified_signed_ciba_request_object_client_id,
+    unverified_signed_ciba_request_object_client_id, validate_ciba_binding_message,
 };
 
 fn validate_and_apply_ciba_request_object_claims(
@@ -1189,6 +1189,24 @@ fn ciba_request_object_helpers_cover_protocol_boundaries() {
     assert!(!ciba_binding_message_is_supported(
         &"x".repeat(CIBA_BINDING_MESSAGE_MAX_CHARS + 1)
     ));
+    let valid_binding = BackchannelAuthenticationForm {
+        binding_message: Some("1234".to_owned()),
+        ..BackchannelAuthenticationForm::default()
+    };
+    validate_ciba_binding_message(&valid_binding).expect("valid binding message must pass");
+    for invalid in [
+        " ".to_owned(),
+        "line\nbreak".to_owned(),
+        "x".repeat(CIBA_BINDING_MESSAGE_MAX_CHARS + 1),
+    ] {
+        let invalid_binding = BackchannelAuthenticationForm {
+            binding_message: Some(invalid),
+            ..BackchannelAuthenticationForm::default()
+        };
+        let response = validate_ciba_binding_message(&invalid_binding)
+            .expect_err("invalid outer binding message must fail closed");
+        assert_eq!(oauth_error_code(&response), "invalid_binding_message");
+    }
 
     let mut target = None;
     merge_request_object_string(&mut target, Some(" value ".to_owned()), "conflict")

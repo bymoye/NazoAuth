@@ -1,6 +1,6 @@
 use nazo_digital_credentials::{
     EphemeralEncryptionKey, JweError, encrypt_ecdh_es, encrypt_ecdh_es_a128,
-    encrypt_ecdh_es_deflate,
+    encrypt_ecdh_es_deflate, parse_compact_jwe,
 };
 
 #[test]
@@ -22,6 +22,59 @@ fn ecdh_es_a256gcm_round_trip_is_authenticated() {
     assert_eq!(
         recipient.decrypt(&parts.join(".")),
         Err(JweError::AuthenticationFailed)
+    );
+}
+
+#[test]
+fn ecdh_es_output_matches_compact_jwe_serialization_contract() {
+    let recipient = EphemeralEncryptionKey::generate();
+    let compact = encrypt_ecdh_es(
+        br#"{"vp_token":"credential"}"#,
+        &recipient.public_jwk(),
+        Some("application/json"),
+    )
+    .expect("encrypt");
+
+    let parsed = parse_compact_jwe(&compact).expect("parse compact JWE");
+    assert!(parsed.encrypted_key.is_empty());
+    assert!(!parsed.protected.is_empty());
+    assert!(!parsed.initialization_vector.is_empty());
+    assert!(!parsed.ciphertext.is_empty());
+    assert!(!parsed.authentication_tag.is_empty());
+
+    for malformed in [
+        "a.b.c.d",
+        "a.b.c.d.e.f",
+        ".b.c.d.e",
+        "a.b..d.e",
+        "a.b.c..e",
+        "a.b.c.d.",
+    ] {
+        assert!(
+            parse_compact_jwe(malformed).is_err(),
+            "malformed compact JWE should be rejected: {malformed}"
+        );
+    }
+}
+
+#[test]
+fn ecdh_es_recipient_jwk_requires_an_exact_algorithm_binding() {
+    let recipient = EphemeralEncryptionKey::generate();
+    let mut missing_algorithm = recipient.public_jwk();
+    missing_algorithm
+        .as_object_mut()
+        .expect("public JWK object")
+        .remove("alg");
+    assert_eq!(
+        encrypt_ecdh_es(b"credential", &missing_algorithm, Some("application/json")),
+        Err(JweError::InvalidKey)
+    );
+
+    let mut wrong_algorithm = recipient.public_jwk();
+    wrong_algorithm["alg"] = serde_json::json!("ECDH-ES+A256KW");
+    assert_eq!(
+        encrypt_ecdh_es(b"credential", &wrong_algorithm, Some("application/json")),
+        Err(JweError::InvalidKey)
     );
 }
 

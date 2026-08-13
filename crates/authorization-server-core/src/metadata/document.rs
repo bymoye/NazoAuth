@@ -45,11 +45,10 @@ const CLIENT_AUTH_METHODS: [&str; 7] = [
     "none",
     "attest_jwt_client_auth",
 ];
-const FAPI2_CLIENT_AUTH_METHODS: [&str; 4] = [
+const FAPI2_CLIENT_AUTH_METHODS: [&str; 3] = [
     "private_key_jwt",
     "tls_client_auth",
     "self_signed_tls_client_auth",
-    "attest_jwt_client_auth",
 ];
 const SCOPES_SUPPORTED: [&str; 6] = [
     "openid",
@@ -312,7 +311,10 @@ pub fn protected_resource_metadata(
         "resource": input.protected_resource_identifier,
         "authorization_servers": [input.issuer],
         "resource_name": "Nazo OAuth Protected Resource",
-        "bearer_methods_supported": ["header", "body"],
+        // This document describes the configured protected resource (the
+        // FAPI resource by default), whose transport rejects form-body bearer
+        // tokens. Baseline UserInfo compatibility is a different resource.
+        "bearer_methods_supported": ["header"],
         "scopes_supported": SCOPES_SUPPORTED,
         "dpop_signing_alg_values_supported": DPOP_SIGNING_ALGS
     });

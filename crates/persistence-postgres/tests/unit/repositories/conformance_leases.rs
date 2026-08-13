@@ -332,6 +332,30 @@ fn onboarding_rejects_unbounded_or_non_object_credential_dataset_claims() {
     let error = validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)
         .unwrap_err();
     assert!(error.to_string().contains("per-dataset bound"));
+
+    for forbidden in [
+        serde_json::json!({"client_secret": "not-public"}),
+        serde_json::json!({"nested": {"PRIVATE_KEY": "not-public"}}),
+        serde_json::json!({"holder_key": {"kty": "EC", "d": "private"}}),
+        serde_json::json!({"claim": "{{generated.secret}}"}),
+    ] {
+        request.openid4vc_credential_datasets.clear();
+        request
+            .openid4vc_credential_datasets
+            .insert("org.example.pid".to_owned(), forbidden);
+        let error = validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets)
+            .unwrap_err();
+        assert!(error.to_string().contains("forbidden material"));
+    }
+
+    request.openid4vc_credential_datasets.clear();
+    request.openid4vc_credential_datasets.insert(
+        "org.example.pid".to_owned(),
+        serde_json::json!({"d": "district", "p": "province", "k": "classification"}),
+    );
+    assert!(
+        validate_onboarding_credential_datasets(&request.openid4vc_credential_datasets).is_ok()
+    );
 }
 
 #[test]

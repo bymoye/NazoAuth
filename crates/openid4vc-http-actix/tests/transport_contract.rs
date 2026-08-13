@@ -101,7 +101,13 @@ impl PresentationOperations for Verifier {
         &'a self,
         _: CreatePresentationRequest,
     ) -> PresentationFuture<'a, Result<CreatePresentationResponse, PresentationHttpError>> {
-        Box::pin(async { unreachable!() })
+        Box::pin(async {
+            Ok(CreatePresentationResponse {
+                transaction_id: Uuid::now_v7(),
+                authorization_url: "https://wallet.example/authorize".to_owned(),
+                expires_in: 60,
+            })
+        })
     }
     fn request<'a>(
         &'a self,
@@ -548,6 +554,78 @@ async fn management_endpoints_fail_closed_without_exact_bearer_token() {
             response.headers().get("www-authenticate").unwrap(),
             "Bearer"
         );
+    }
+}
+
+#[actix_web::test]
+async fn presentation_management_requires_nonempty_exact_bearer_token() {
+    let cases = [
+        (Vec::<u8>::new(), Some("Bearer "), StatusCode::UNAUTHORIZED),
+        (
+            b"management-token".to_vec(),
+            Some("Bearer "),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            b"management-token".to_vec(),
+            Some("Bearer  management-token"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            b"management-token".to_vec(),
+            Some(" Bearer management-token"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            b"management-token".to_vec(),
+            Some("Bearer management-token "),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            b"management-token".to_vec(),
+            Some("Basic management-token"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            b"management-token".to_vec(),
+            Some("bearer management-token"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (b"management-token".to_vec(), None, StatusCode::UNAUTHORIZED),
+        (
+            b"management-token".to_vec(),
+            Some("Bearer management-token"),
+            StatusCode::OK,
+        ),
+    ];
+
+    for (configured_token, authorization, expected_status) in cases {
+        let endpoint = web::Data::new(PresentationEndpoint::new(
+            Arc::new(Verifier),
+            configured_token,
+        ));
+        let app = test::init_service(
+            App::new()
+                .app_data(endpoint)
+                .route("/presentations", web::post().to(create_presentation)),
+        )
+        .await;
+
+        let request = test::TestRequest::post()
+            .uri("/presentations")
+            .set_json(json!({
+                "wallet_authorization_endpoint": "https://wallet.example/authorize",
+                "dcql_query": {"credentials": []}
+            }));
+        let request = if let Some(authorization) = authorization {
+            request.insert_header(("authorization", authorization))
+        } else {
+            request
+        };
+        let response = test::call_service(&app, request.to_request()).await;
+
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     }
 }
 

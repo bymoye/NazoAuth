@@ -154,9 +154,7 @@ pub fn verify_runtime_receipt(
 ) -> Result<RuntimeReceipt, ProtocolError> {
     let receipt: RuntimeReceipt =
         verify_compact(compact, expected_key_id, RUNTIME_RECEIPT_JWS_TYPE, key)?;
-    if receipt.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy("unsupported receipt version"));
-    }
+    validate_runtime_receipt(&receipt)?;
     Ok(receipt)
 }
 
@@ -285,13 +283,22 @@ pub(crate) fn validate_adoption_receipt(receipt: &AdoptionReceipt) -> Result<(),
     if receipt.adopted_at <= 0 || receipt.runtime_instances.is_empty() {
         return Err(ProtocolError::Policy("invalid adoption receipt"));
     }
-    if receipt.runtime_instances.len() > 128 || receipt.instance_key_ids.len() > 128 {
+    if receipt.runtime_instances.len() > 128
+        || receipt.instance_key_ids.len() > 128
+        || receipt.runtime_instances.len() != receipt.instance_key_ids.len()
+    {
         return Err(ProtocolError::Policy(
-            "adoption receipt exceeds instance limit",
+            "adoption receipt instance identities are inconsistent",
         ));
     }
+    let mut runtime_ids = std::collections::BTreeSet::new();
     for runtime in &receipt.runtime_instances {
         validate_file_identifier(&runtime.runtime_instance_id)?;
+        if !runtime_ids.insert(runtime.runtime_instance_id.as_str()) {
+            return Err(ProtocolError::Policy(
+                "adoption receipt runtime identities must be unique",
+            ));
+        }
         for value in [
             &runtime.backend,
             &runtime.object_reference,
@@ -300,8 +307,14 @@ pub(crate) fn validate_adoption_receipt(receipt: &AdoptionReceipt) -> Result<(),
             validate_audit_boundary(value)?;
         }
     }
+    let mut key_ids = std::collections::BTreeSet::new();
     for key_id in &receipt.instance_key_ids {
         validate_file_identifier(key_id)?;
+        if !key_ids.insert(key_id.as_str()) {
+            return Err(ProtocolError::Policy(
+                "adoption receipt key identities must be unique",
+            ));
+        }
     }
     if receipt.resource_references.len() > 64 || receipt.capabilities.len() > 16 {
         return Err(ProtocolError::Policy(
@@ -319,6 +332,11 @@ pub(crate) fn validate_adoption_receipt(receipt: &AdoptionReceipt) -> Result<(),
     if receipt.recovery_evidence.len() > 64 {
         return Err(ProtocolError::Policy(
             "adoption receipt exceeds recovery evidence limit",
+        ));
+    }
+    if receipt.recovery_proven && receipt.recovery_evidence.is_empty() {
+        return Err(ProtocolError::Policy(
+            "adoption recovery proof requires evidence",
         ));
     }
     for evidence in &receipt.recovery_evidence {
@@ -410,7 +428,12 @@ pub(crate) fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {
     }
     validate_file_identifier(&task.jti)?;
     validate_file_identifier(&task.deployment_id)?;
-    if task.exp < task.iat || task.exp - task.iat > MAX_TASK_LIFETIME_SECONDS {
+    if task.iat <= 0
+        || task.nbf <= 0
+        || task.exp <= 0
+        || task.exp < task.iat
+        || task.exp - task.iat > MAX_TASK_LIFETIME_SECONDS
+    {
         return Err(ProtocolError::Policy("task lifetime exceeds 60 seconds"));
     }
     if task.nbf < task.iat {
@@ -422,15 +445,22 @@ pub(crate) fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {
         return Err(ProtocolError::Policy("unsupported config manifest version"));
     }
     validate_lower_hex(&task.config.config_sha256, 64)?;
-    validate_identifier(&task.embedded.build_id)?;
+    validate_embedded_identity(&task.embedded)?;
     match &task.target {
-        TargetExpectation::OciImage { image_digest, .. } => {
+        TargetExpectation::OciImage {
+            image_ref,
+            image_digest,
+        } => {
+            validate_oci_image_reference(image_ref)?;
             let digest = image_digest
                 .strip_prefix("sha256:")
                 .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
             validate_lower_hex(digest, 64)?;
         }
-        TargetExpectation::HostBinary { sha256, .. } => validate_lower_hex(sha256, 64)?,
+        TargetExpectation::HostBinary { path, sha256 } => {
+            validate_host_binary_path(path)?;
+            validate_lower_hex(sha256, 64)?;
+        }
     }
     match &task.config.secret_binding {
         SecretBinding::OpaqueRevision { revision } => validate_identifier(revision)?,
@@ -443,6 +473,34 @@ pub(crate) fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+pub(crate) fn validate_runtime_receipt(receipt: &RuntimeReceipt) -> Result<(), ProtocolError> {
+    if receipt.ver != PROTOCOL_VERSION {
+        return Err(ProtocolError::Policy("unsupported receipt version"));
+    }
+    for value in [
+        &receipt.iss,
+        &receipt.aud,
+        &receipt.operation,
+        &receipt.actor.id,
+    ] {
+        validate_identifier(value)?;
+    }
+    validate_file_identifier(&receipt.jti)?;
+    validate_file_identifier(&receipt.deployment_id)?;
+    validate_lower_hex(&receipt.request_sha256, 64)?;
+    validate_embedded_identity(&receipt.embedded)?;
+    validate_config_binding(&receipt.config)?;
+    if receipt.started_at <= 0
+        || receipt.completed_at <= 0
+        || receipt.completed_at < receipt.started_at
+    {
+        return Err(ProtocolError::Policy(
+            "runtime receipt time range is invalid",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_final_receipt(receipt: &FinalReceipt) -> Result<(), ProtocolError> {
     if receipt.ver != PROTOCOL_VERSION {
         return Err(ProtocolError::Policy("unsupported receipt version"));
@@ -450,7 +508,6 @@ pub(crate) fn validate_final_receipt(receipt: &FinalReceipt) -> Result<(), Proto
     for value in [
         &receipt.iss,
         &receipt.aud,
-        &receipt.embedded.build_id,
         &receipt.operation,
         &receipt.actor.id,
     ] {
@@ -461,7 +518,54 @@ pub(crate) fn validate_final_receipt(receipt: &FinalReceipt) -> Result<(), Proto
     validate_lower_hex(&receipt.request_sha256, 64)?;
     validate_lower_hex(&receipt.runtime_receipt_sha256, 64)?;
     validate_lower_hex(&receipt.audit_previous_sha256, 64)?;
+    validate_embedded_identity(&receipt.embedded)?;
+    validate_config_binding(&receipt.config)?;
+    if receipt.completed_at <= 0 || receipt.audit_sequence == 0 {
+        return Err(ProtocolError::Policy(
+            "final receipt time or audit sequence is invalid",
+        ));
+    }
+    match &receipt.controller_verified_target {
+        RuntimeTargetClaim::OciImage {
+            image_ref,
+            image_digest,
+        } => {
+            validate_oci_image_reference(image_ref)?;
+            let digest = image_digest
+                .strip_prefix("sha256:")
+                .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
+            validate_lower_hex(digest, 64)?;
+        }
+        RuntimeTargetClaim::HostBinary { path, sha256 } => {
+            validate_host_binary_path(path)?;
+            validate_lower_hex(sha256, 64)?;
+        }
+    }
     Ok(())
+}
+
+fn validate_embedded_identity(identity: &EmbeddedIdentity) -> Result<(), ProtocolError> {
+    if identity.protocol != PROTOCOL_VERSION {
+        return Err(ProtocolError::Policy("embedded protocol version mismatch"));
+    }
+    for value in [&identity.release, &identity.revision, &identity.build_id] {
+        validate_identifier(value)?;
+    }
+    Ok(())
+}
+
+fn validate_config_binding(config: &ConfigBinding) -> Result<(), ProtocolError> {
+    if config.manifest_version != CONFIG_MANIFEST_VERSION {
+        return Err(ProtocolError::Policy("unsupported config manifest version"));
+    }
+    validate_lower_hex(&config.config_sha256, 64)?;
+    match &config.secret_binding {
+        SecretBinding::OpaqueRevision { revision } => validate_identifier(revision),
+        SecretBinding::HmacSha256 { key_id, digest } => {
+            validate_identifier(key_id)?;
+            validate_lower_hex(digest, 64)
+        }
+    }
 }
 
 pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
@@ -846,6 +950,15 @@ fn validate_public_credential_claims(
     }
     match value {
         serde_json::Value::Object(object) => {
+            if object.contains_key("kty")
+                && ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+                    .iter()
+                    .any(|key| object.contains_key(*key))
+            {
+                return Err(ProtocolError::Policy(
+                    "conformance OpenID4VC credential dataset contains a private JWK",
+                ));
+            }
             for (key, child) in object {
                 if key.is_empty()
                     || key.len() > 255
@@ -888,14 +1001,6 @@ fn is_forbidden_public_credential_claim_key(key: &str) -> bool {
             | "private_key"
             | "private_jwk"
             | "private_jwks"
-            | "d"
-            | "p"
-            | "q"
-            | "dp"
-            | "dq"
-            | "qi"
-            | "oth"
-            | "k"
     )
 }
 
@@ -1489,6 +1594,11 @@ pub(crate) fn validate_transition(
             "unsupported trust transition version",
         ));
     }
+    if transition.issued_at <= 0 {
+        return Err(ProtocolError::Policy(
+            "trust transition has an invalid issuance time",
+        ));
+    }
     for value in [
         &transition.deployment_id,
         &transition.previous_key_id,
@@ -1512,6 +1622,11 @@ pub(crate) fn validate_management_event(event: &ManagementAuditEvent) -> Result<
             "unsupported management event version",
         ));
     }
+    if event.issued_at <= 0 || event.sequence == 0 {
+        return Err(ProtocolError::Policy(
+            "management event time or sequence is invalid",
+        ));
+    }
     validate_file_identifier(&event.deployment_id)?;
     validate_file_identifier(&event.request_id)?;
     validate_lower_hex(&event.previous_sha256, 64)?;
@@ -1530,6 +1645,35 @@ fn validate_audit_boundary(value: &str) -> Result<(), ProtocolError> {
             .all(|character| character.is_ascii_alphanumeric() || ".:_/@+_-".contains(character))
     {
         return Err(ProtocolError::Policy("invalid audit recovery boundary"));
+    }
+    Ok(())
+}
+
+fn validate_oci_image_reference(value: &str) -> Result<(), ProtocolError> {
+    if value.is_empty()
+        || value.len() > 2048
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(ProtocolError::Policy("invalid OCI image reference"));
+    }
+    Ok(())
+}
+
+fn validate_host_binary_path(value: &str) -> Result<(), ProtocolError> {
+    let windows_absolute = value.as_bytes().get(1) == Some(&b':')
+        && value
+            .as_bytes()
+            .get(2)
+            .is_some_and(|byte| matches!(byte, b'/' | b'\\'));
+    if value.is_empty()
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+        || value.contains(['{', '}'])
+        || !(value.starts_with('/') || value.starts_with("\\\\") || windows_absolute)
+    {
+        return Err(ProtocolError::Policy("invalid host binary path"));
     }
     Ok(())
 }

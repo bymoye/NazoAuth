@@ -233,6 +233,29 @@ impl OAuthClientRepository {
             .map_err(map_error)
     }
 
+    /// Tenant-scoped variant used by authorization flows whose adapter owns a
+    /// fixed tenant boundary.
+    pub async fn client_secret_salt_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<String>, RepositoryError> {
+        let mut connection = self.connection().await?;
+        oauth_clients::table
+            .find(id)
+            .filter(oauth_clients::tenant_id.eq(tenant_id))
+            .filter(oauth_clients::is_active.eq(true))
+            .filter(conformance_lease_is_effective())
+            .filter(oauth_clients::client_secret_hash.like("client-secret-v1:%:%"))
+            .select(diesel::dsl::sql::<diesel::sql_types::Text>(
+                "split_part(client_secret_hash, ':', 2)",
+            ))
+            .first::<String>(&mut connection)
+            .await
+            .optional()
+            .map_err(map_error)
+    }
+
     /// Compares an already-derived candidate digest without loading the stored digest.
     pub async fn client_secret_digest_matches(
         &self,
@@ -243,6 +266,27 @@ impl OAuthClientRepository {
         diesel::select(diesel::dsl::exists(
             oauth_clients::table
                 .find(id)
+                .filter(oauth_clients::is_active.eq(true))
+                .filter(conformance_lease_is_effective())
+                .filter(oauth_clients::client_secret_hash.eq(candidate_digest)),
+        ))
+        .get_result(&mut connection)
+        .await
+        .map_err(map_error)
+    }
+
+    /// Tenant-scoped digest comparison for fixed-tenant authorization flows.
+    pub async fn client_secret_digest_matches_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        candidate_digest: &str,
+    ) -> Result<bool, RepositoryError> {
+        let mut connection = self.connection().await?;
+        diesel::select(diesel::dsl::exists(
+            oauth_clients::table
+                .find(id)
+                .filter(oauth_clients::tenant_id.eq(tenant_id))
                 .filter(oauth_clients::is_active.eq(true))
                 .filter(conformance_lease_is_effective())
                 .filter(oauth_clients::client_secret_hash.eq(candidate_digest)),

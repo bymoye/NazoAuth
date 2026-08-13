@@ -242,7 +242,7 @@ pub(crate) async fn write_private_key_pem_atomic(path: &Path, pem: &str) -> anyh
             )
         });
     }
-    sync_private_key_directory(parent).await?;
+    sync_parent_directory(parent).await?;
     Ok(())
 }
 
@@ -273,7 +273,7 @@ pub(crate) async fn write_private_key_pem_if_absent(path: &Path, pem: &str) -> a
                     tmp_path.display()
                 )
             })?;
-            sync_private_key_directory(parent).await?;
+            sync_parent_directory(parent).await?;
             Ok(())
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
@@ -305,13 +305,13 @@ async fn write_private_key_temp(path: &Path, bytes: &[u8]) -> anyhow::Result<()>
 }
 
 #[cfg(unix)]
-async fn sync_private_key_directory(path: &Path) -> anyhow::Result<()> {
+async fn sync_parent_directory(path: &Path) -> anyhow::Result<()> {
     tokio::fs::File::open(path).await?.sync_all().await?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-async fn sync_private_key_directory(_path: &Path) -> anyhow::Result<()> {
+async fn sync_parent_directory(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -327,14 +327,32 @@ async fn write_file_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
             .unwrap_or("keyset"),
         Uuid::now_v7()
     ));
-    tokio::fs::write(&tmp_path, bytes).await?;
-    tokio::fs::rename(&tmp_path, path).await.with_context(|| {
-        format!(
-            "failed to atomically rename {} to {}",
-            tmp_path.display(),
-            path.display()
-        )
-    })?;
+    let prepare_result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await
+    }
+    .await;
+    if let Err(error) = prepare_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error)
+            .with_context(|| format!("failed to durably prepare {}", tmp_path.display()));
+    }
+    if let Err(error) = tokio::fs::rename(&tmp_path, path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error).with_context(|| {
+            format!(
+                "failed to atomically rename {} to {}",
+                tmp_path.display(),
+                path.display()
+            )
+        });
+    }
+    sync_parent_directory(parent).await?;
     Ok(())
 }
 

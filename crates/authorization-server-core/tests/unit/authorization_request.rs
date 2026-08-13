@@ -474,6 +474,7 @@ fn par_fapi_policy_requires_confidential_strong_auth_and_sender_constraint() {
         client_type: "confidential",
         redirect_uris: &redirect_uris,
         allowed_audiences: &audiences,
+        pkce_required: true,
         fapi2_requires_explicit_redirect_uri: true,
     };
     assert!(validate_raw_par_admission(&parameters, raw).is_ok());
@@ -504,6 +505,28 @@ fn par_fapi_policy_requires_confidential_strong_auth_and_sender_constraint() {
     assert_eq!(
         validate_expanded_par_admission(&without_pkce, expanded),
         Err(ParAdmissionError::PkceRequired)
+    );
+    assert!(
+        validate_expanded_par_admission(
+            &without_pkce,
+            ExpandedParAdmissionPolicy {
+                pkce_required: false,
+                fapi2_requires_explicit_redirect_uri: false,
+                ..expanded
+            }
+        )
+        .is_ok(),
+        "baseline confidential OIDC compatibility must be identical at PAR and authorize"
+    );
+    assert_eq!(
+        validate_raw_par_admission(
+            &parameters,
+            RawParAdmissionPolicy {
+                client_authentication_method: "attest_jwt_client_auth",
+                ..raw
+            }
+        ),
+        Err(ParAdmissionError::StrongClientAuthenticationRequired)
     );
     let mut plain_pkce = parameters.clone();
     plain_pkce.insert("code_challenge_method".to_owned(), "plain".to_owned());
