@@ -31,6 +31,18 @@ case "$container_runtime" in
     ;;
 esac
 
+bootstrap_bind_port=${OIDF_SUITE_BOOTSTRAP_BIND_PORT:-18443}
+case "$bootstrap_bind_port" in
+  ''|*[!0-9]*)
+    echo "OIDF_SUITE_BOOTSTRAP_BIND_PORT must be an integer from 1 to 65535" >&2
+    exit 1
+    ;;
+esac
+if test "$bootstrap_bind_port" -lt 1 || test "$bootstrap_bind_port" -gt 65535; then
+  echo "OIDF_SUITE_BOOTSTRAP_BIND_PORT must be an integer from 1 to 65535" >&2
+  exit 1
+fi
+
 actual_revision=$(git -C "$OIDF_SUITE_SOURCE_DIR" rev-parse HEAD)
 test "$actual_revision" = "$expected_revision" || {
   echo "OIDF suite checkout is $actual_revision, expected $expected_revision" >&2
@@ -146,7 +158,7 @@ cleanup_bootstrap
 "$container_runtime" run -d \
   --name "$bootstrap_container" \
   --network nazoauth-oidf-suite-default \
-  --publish 127.0.0.1:18443:8080 \
+  --publish "127.0.0.1:${bootstrap_bind_port}:8080" \
   --env "BASE_URL=$OIDF_SUITE_BASE_URL" \
   --env "BASE_MTLS_URL=$OIDF_SUITE_BASE_URL" \
   --env MONGODB_HOST=mongodb \
@@ -157,7 +169,7 @@ cleanup_bootstrap
   --env "JAVA_EXTRA_ARGS=-Dfintechlabs.devmode=true -Dfintechlabs.makeDummyUserAdminInDevMode=false -Doidc.google.iss=$OIDF_OPERATOR_ISSUER -Doidc.gitlab.iss=$OIDF_OPERATOR_ISSUER -Doidc.admin.issuer=$OIDF_OPERATOR_ISSUER" \
   "$suite_image" >/dev/null
 
-python3 - "$OIDF_SUITE_TOKEN_FILE" "$OIDF_SUITE_TOKEN_METADATA_FILE" <<'PY'
+python3 - "$OIDF_SUITE_TOKEN_FILE" "$OIDF_SUITE_TOKEN_METADATA_FILE" "$bootstrap_bind_port" <<'PY'
 import json
 import os
 import pathlib
@@ -167,7 +179,7 @@ import time
 import urllib.error
 import urllib.request
 
-endpoint = "http://127.0.0.1:18443/api/token"
+endpoint = f"http://127.0.0.1:{int(sys.argv[3])}/api/token"
 request = urllib.request.Request(
     endpoint,
     data=b'{"permanent":false}',

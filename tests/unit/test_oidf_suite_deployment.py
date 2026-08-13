@@ -112,7 +112,19 @@ class OidfSuiteDeploymentTests(unittest.TestCase):
         self.assertIn("external: true", compose)
         self.assertIn('"$container_runtime" run --rm', bootstrap)
         self.assertIn("--network nazoauth-oidf-suite-default", bootstrap)
-        self.assertIn("--publish 127.0.0.1:18443:8080", bootstrap)
+        self.assertIn(
+            'bootstrap_bind_port=${OIDF_SUITE_BOOTSTRAP_BIND_PORT:-18443}',
+            bootstrap,
+        )
+        self.assertIn('test "$bootstrap_bind_port" -lt 1', bootstrap)
+        self.assertIn('test "$bootstrap_bind_port" -gt 65535', bootstrap)
+        self.assertIn(
+            '--publish "127.0.0.1:${bootstrap_bind_port}:8080"', bootstrap
+        )
+        self.assertIn(
+            'endpoint = f"http://127.0.0.1:{int(sys.argv[3])}/api/token"',
+            bootstrap,
+        )
         self.assertIn('"$container_runtime" rm -f "$bootstrap_container"', bootstrap)
         self.assertIn('"$OIDF_SUITE_SOURCE_DIR/nginx/Dockerfile"', bootstrap)
         self.assertIn("Reusing exact OIDF Suite TLS ingress image", bootstrap)
