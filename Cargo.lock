@@ -1956,25 +1956,25 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "httpsig"
-version = "0.0.24"
+version = "0.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5c2b530de2c85aa07eafdf40489cc714eae4668948ebe92cdcb81e38e176315"
+checksum = "958dd8d277959a426e8a6af3ab368e53d5195a922e57d014dcbbd9e9ccd17fe3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "ecdsa 0.16.9",
+ "ecdsa 0.17.0",
  "ed25519-compact",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "indexmap",
- "p256 0.13.2",
- "p384",
- "pkcs8 0.10.2",
+ "p256 0.14.0",
+ "p384 0.14.0",
+ "pkcs8 0.11.0",
  "rand 0.10.2",
  "rustc-hash",
- "sec1 0.7.3",
- "sfv 0.14.0",
- "sha2 0.10.9",
- "spki 0.7.3",
+ "sec1 0.8.1",
+ "sfv",
+ "sha2 0.11.0",
+ "spki 0.8.0",
  "thiserror",
  "tracing",
 ]
@@ -2475,7 +2475,7 @@ dependencies = [
  "hmac 0.12.1",
  "log",
  "p256 0.13.2",
- "p384",
+ "p384 0.13.1",
  "p521",
  "rand 0.8.7",
  "serde",
@@ -2640,7 +2640,7 @@ dependencies = [
  "p256 0.14.0",
  "proptest",
  "serde_json",
- "sfv 0.15.0",
+ "sfv",
  "sha2 0.11.0",
  "subtle",
  "thiserror",
@@ -3181,6 +3181,20 @@ dependencies = [
  "elliptic-curve 0.13.8",
  "primeorder 0.13.6",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "p384"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
+dependencies = [
+ "ecdsa 0.17.0",
+ "elliptic-curve 0.14.1",
+ "fiat-crypto 0.3.0",
+ "primefield",
+ "primeorder 0.14.0",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -4159,17 +4173,6 @@ checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
 dependencies = [
  "base16ct 1.0.0",
  "serde",
-]
-
-[[package]]
-name = "sfv"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d471eaefb14f4b30032525bdb124b36e55ba9cb1292080e06f1a236cd10fe87"
-dependencies = [
- "base64 0.22.1",
- "indexmap",
- "ref-cast",
 ]
 
 [[package]]
