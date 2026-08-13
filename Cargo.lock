@@ -68,7 +68,7 @@ dependencies = [
  "actix-service",
  "actix-tls",
  "actix-utils",
- "base64",
+ "base64 0.22.1",
  "bitflags",
  "brotli",
  "bytes",
@@ -509,6 +509,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -1437,7 +1443,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9298e6504d9b9e780ed3f7dfd43a61be8cd0e09eb07f7706a945b0072b6670b6"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "memchr",
 ]
 
@@ -1954,7 +1960,7 @@ version = "0.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5c2b530de2c85aa07eafdf40489cc714eae4668948ebe92cdcb81e38e176315"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "ecdsa 0.16.9",
  "ed25519-compact",
@@ -2025,7 +2031,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -2304,7 +2310,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "881733cbc631fc9e472e24447ce32a64bedf2da498d6d8570b08edc87de71f65"
 dependencies = [
  "aws-lc-rs",
- "base64",
+ "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
  "pem",
@@ -2334,7 +2340,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "email-encoding",
  "email_address",
  "fastrand",
@@ -2456,7 +2462,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e571fd42535e0893a53662ac9f631474b6258b169ef4b93f214f0469ca9e647e"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "ciborium",
  "const-oid 0.9.6",
@@ -2556,7 +2562,7 @@ name = "nazo-auth"
 version = "0.1.34"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "blake3",
  "chrono",
  "ed25519-dalek 3.0.0",
@@ -2582,7 +2588,7 @@ name = "nazo-digital-credentials"
 version = "0.1.34"
 dependencies = [
  "aes-gcm",
- "base64",
+ "base64 0.23.1",
  "chrono",
  "flate2",
  "p256 0.14.0",
@@ -2603,7 +2609,7 @@ version = "0.1.34"
 dependencies = [
  "actix-cors",
  "actix-web",
- "base64",
+ "base64 0.23.1",
  "blake3",
  "chrono",
  "futures-util",
@@ -2627,7 +2633,7 @@ name = "nazo-http-signatures"
 version = "0.1.34"
 dependencies = [
  "aws-lc-rs",
- "base64",
+ "base64 0.23.1",
  "ed25519-dalek 3.0.0",
  "httpsig",
  "jsonwebtoken",
@@ -2646,7 +2652,7 @@ name = "nazo-identity"
 version = "0.1.34"
 dependencies = [
  "argon2",
- "base64",
+ "base64 0.23.1",
  "blake3",
  "chrono",
  "hmac 0.13.0",
@@ -2672,7 +2678,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "aws-lc-rs",
- "base64",
+ "base64 0.23.1",
  "chrono",
  "der 0.8.1",
  "ed25519-dalek 3.0.0",
@@ -2710,7 +2716,7 @@ dependencies = [
  "argon2",
  "atomicwrites",
  "aws-lc-rs",
- "base64",
+ "base64 0.23.1",
  "blake3",
  "chrono",
  "ciborium",
@@ -2827,7 +2833,7 @@ name = "nazo-operator-protocol"
 version = "0.1.34"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "chrono",
  "ed25519-dalek 3.0.0",
  "proptest",
@@ -2878,7 +2884,7 @@ name = "nazo-resource-server"
 version = "0.1.34"
 dependencies = [
  "aws-lc-rs",
- "base64",
+ "base64 0.23.1",
  "chrono",
  "ed25519-dalek 3.0.0",
  "http 1.4.2",
@@ -3220,7 +3226,7 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68b76d109aa51f99c94d2f361c10dc0c93980dd87aa1ad5212df83e7e1b80a29"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "ciborium",
  "const-oid 0.9.6",
  "ed25519-dalek 2.2.0",
@@ -3251,7 +3257,7 @@ version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde_core",
 ]
 
@@ -3353,7 +3359,7 @@ version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08808e3c483c46e999108051c78334f473d5adb59d78bb80a1268c7e6aa6c514"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "fallible-iterator",
@@ -3772,7 +3778,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -4161,7 +4167,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d471eaefb14f4b30032525bdb124b36e55ba9cb1292080e06f1a236cd10fe87"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "indexmap",
  "ref-cast",
 ]
@@ -4172,7 +4178,7 @@ version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "890ef0e5532daf21fdaa3dbaf991417187f3a87ab69231fe69be942495746480"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "indexmap",
  "ref-cast",
 ]
