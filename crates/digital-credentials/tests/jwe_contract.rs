@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_digital_credentials::{
     EphemeralEncryptionKey, JweError, encrypt_ecdh_es, encrypt_ecdh_es_a128,
     encrypt_ecdh_es_deflate, parse_compact_jwe,
@@ -42,6 +43,30 @@ fn ecdh_es_output_matches_compact_jwe_serialization_contract() {
     assert!(!parsed.ciphertext.is_empty());
     assert!(!parsed.authentication_tag.is_empty());
 
+    let protected: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(&parsed.protected)
+            .expect("decode protected header"),
+    )
+    .expect("protected header JSON");
+    let ephemeral = protected["epk"].as_object().expect("ephemeral JWK");
+    assert_eq!(
+        ephemeral.get("kty").and_then(serde_json::Value::as_str),
+        Some("EC")
+    );
+    assert_eq!(
+        ephemeral.get("crv").and_then(serde_json::Value::as_str),
+        Some("P-256")
+    );
+    assert!(ephemeral.get("alg").is_none());
+    assert!(ephemeral.get("use").is_none());
+    assert_eq!(
+        recipient
+            .decrypt(&compact)
+            .expect("decrypt JWE with JOSE epk"),
+        br#"{"vp_token":"credential"}"#
+    );
+
     for malformed in [
         "a.b.c.d",
         "a.b.c.d.e.f",
@@ -55,6 +80,31 @@ fn ecdh_es_output_matches_compact_jwe_serialization_contract() {
             "malformed compact JWE should be rejected: {malformed}"
         );
     }
+}
+
+#[test]
+fn ecdh_es_ephemeral_jwk_rejects_an_explicit_wrong_algorithm() {
+    let recipient = EphemeralEncryptionKey::generate();
+    let compact = encrypt_ecdh_es(
+        b"credential",
+        &recipient.public_jwk(),
+        Some("application/json"),
+    )
+    .expect("encrypt");
+    let mut parts = compact.split('.').map(str::to_owned).collect::<Vec<_>>();
+    let mut protected: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(&parts[0])
+            .expect("decode protected header"),
+    )
+    .expect("protected header JSON");
+    protected["epk"]["alg"] = serde_json::json!("ECDH-ES+A256KW");
+    parts[0] = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&protected).expect("encode header"));
+
+    assert_eq!(
+        recipient.decrypt(&parts.join(".")),
+        Err(JweError::InvalidKey)
+    );
 }
 
 #[test]
