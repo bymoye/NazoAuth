@@ -64,6 +64,7 @@ async fn ciba_cas_preserves_exact_key_payload_deadline_and_single_winner() {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: None,
         issued_at: now,
         status: CibaStatus::Pending,
@@ -100,7 +101,58 @@ async fn ciba_cas_preserves_exact_key_payload_deadline_and_single_winner() {
 }
 
 #[tokio::test]
-async fn concurrent_approved_ciba_polls_have_exactly_one_token_issuance_winner() {
+async fn ciba_cas_rejects_an_expired_lease_without_mutating_state() {
+    let Some((connection, inspector)) = setup().await else {
+        return;
+    };
+    let store = CibaStore::new(&connection);
+    let auth_req_id = format!("ciba-lease-expired-{}", uuid::Uuid::now_v7());
+    let now = server_time(&inspector).await;
+    let state = CibaRequestState {
+        client_id: "leased-client".to_owned(),
+        user_id: uuid::Uuid::from_u128(2),
+        scopes: vec!["openid".to_owned()],
+        audiences: vec!["resource".to_owned()],
+        acr: None,
+        authentication_context: None,
+        binding_message: None,
+        issued_at: now,
+        status: CibaStatus::Pending,
+        interval_seconds: 5,
+        expires_at: now + 60,
+        retention_expires_at: now + 180,
+        last_poll_at: None,
+        ping_notification: None,
+    };
+    assert_eq!(
+        store.create(&auth_req_id, &state).await.unwrap(),
+        AtomicResult::Applied
+    );
+    let stored = store.load(&auth_req_id).await.unwrap().unwrap();
+    let mut replacement = state.clone();
+    replacement.status = CibaStatus::Approved;
+    assert_eq!(
+        store
+            .replace_with_lease_deadline(&auth_req_id, &stored, &replacement, Some(now))
+            .await
+            .unwrap(),
+        AtomicResult::DeadlineElapsed
+    );
+    assert_eq!(
+        store
+            .delete_with_lease_deadline(&auth_req_id, &stored, Some(now))
+            .await
+            .unwrap(),
+        AtomicResult::DeadlineElapsed
+    );
+    assert_eq!(
+        store.load(&auth_req_id).await.unwrap().unwrap().value(),
+        &state
+    );
+}
+
+#[tokio::test]
+async fn concurrent_approved_ciba_polls_consume_auth_req_id_once() {
     let Some((connection, inspector)) = setup().await else {
         return;
     };
@@ -112,6 +164,7 @@ async fn concurrent_approved_ciba_polls_have_exactly_one_token_issuance_winner()
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: None,
         issued_at: now,
         status: CibaStatus::Approved,
@@ -140,8 +193,9 @@ async fn concurrent_approved_ciba_polls_have_exactly_one_token_issuance_winner()
             .filter(|result| matches!(result, Ok(CibaPollCommit::Approved(_))))
             .count(),
         1,
-        "approved auth_req_id must be consumed once even under concurrent polling"
+        "approved auth_req_id must have exactly one successful redemption"
     );
+    assert!(first.load(&auth_req_id).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -159,6 +213,7 @@ async fn ciba_decision_atomically_schedules_and_terminally_acks_ping_delivery() 
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: None,
         issued_at: now,
         status: CibaStatus::Pending,
@@ -230,6 +285,7 @@ async fn expired_ciba_ping_is_failed_without_exposing_its_notification_token() {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
         acr: None,
+        authentication_context: None,
         binding_message: None,
         issued_at: now,
         status: CibaStatus::Pending,
@@ -400,7 +456,7 @@ async fn concurrent_device_polls_atomically_accumulate_slow_down() {
 }
 
 #[tokio::test]
-async fn approved_device_code_has_exactly_one_consumer() {
+async fn approved_device_code_remains_retryable_for_owner_claim() {
     let Some((connection, inspector)) = setup().await else {
         return;
     };
@@ -438,12 +494,14 @@ async fn approved_device_code_has_exactly_one_consumer() {
         .into_iter()
         .filter(|result| matches!(result, Ok(DevicePollCommit::Approved(_))))
         .count();
-    let missing = [&first, &second]
-        .into_iter()
-        .filter(|result| matches!(result, Err(DevicePollFailure::Missing)))
-        .count();
-    assert_eq!(approved, 1);
-    assert_eq!(missing, 1);
+    assert_eq!(approved, 2);
+    assert!(
+        DeviceStore::new(&connection)
+            .load_by_device_code(&device_code)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

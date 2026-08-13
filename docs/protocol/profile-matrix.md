@@ -29,7 +29,7 @@ deployment can satisfy.
 | Response types | `code` |
 | Client auth | `none`, `client_secret_basic`, `client_secret_post`, `private_key_jwt`, `tls_client_auth`, `self_signed_tls_client_auth` |
 | Token binding | Bearer, DPoP-bound, mTLS-bound |
-| PKCE | S256 required for every authorization code request; no client type or registration field can bypass it |
+| PKCE | S256 required for public, FAPI, sender-constrained, and non-OIDC authorization-code requests. Baseline confidential OIDC may omit PKCE only through the explicit per-client compatibility policy; any supplied challenge must be S256 |
 | PAR | Supported, not globally required by default |
 | JAR | Supported only as an asymmetric signed Request Object; `alg=none` is rejected |
 | JARM | Supported as `response_mode=jwt` when negotiated; per-client metadata may select signing and nested JWE protection |
@@ -45,7 +45,8 @@ Required negative tests:
 - duplicate OAuth parameters
 - unsafe redirect URI
 - non-S256 PKCE
-- omitted PKCE for every authorization-code client type
+- omitted PKCE for public, FAPI, sender-constrained, and non-OIDC authorization-code clients
+- `plain` PKCE for every client type
 - mixed client authentication methods
 - invalid client assertion audience
 - access token transport ambiguity

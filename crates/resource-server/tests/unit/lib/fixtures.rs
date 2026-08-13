@@ -1,10 +1,18 @@
 use super::*;
+use aws_lc_rs::{
+    encoding::{AsDer, Pkcs8V1Der},
+    rsa::{KeyPair, KeySize},
+};
 use jsonwebtoken::{
     EncodingKey, Header,
     jwk::{Jwk, PublicKeyUse},
 };
-use openssl::rsa::Rsa;
 use serde_json::json;
+
+pub(crate) const TEST_JKT_1: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+pub(crate) const TEST_JKT_2: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
+pub(crate) const TEST_X5T_1: &str = "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8";
+pub(crate) const TEST_X5T_2: &str = "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8";
 
 pub(crate) struct Fixture {
     pub(crate) verifier: ResourceServerVerifier,
@@ -19,7 +27,7 @@ pub(crate) struct DpopFixture {
 }
 
 pub(crate) fn fixture() -> Fixture {
-    let der = Rsa::generate(2048).unwrap().private_key_to_der().unwrap();
+    let der = rsa_private_der();
     let encoding_key = EncodingKey::from_rsa_der(&der);
     let mut jwk = Jwk::from_encoding_key(&encoding_key, Algorithm::RS256).unwrap();
     jwk.common.key_id = Some("test-rs256".to_owned());
@@ -39,7 +47,7 @@ pub(crate) fn fixture() -> Fixture {
 }
 
 pub(crate) fn dpop_fixture() -> DpopFixture {
-    let der = Rsa::generate(2048).unwrap().private_key_to_der().unwrap();
+    let der = rsa_private_der();
     let encoding_key = EncodingKey::from_rsa_der(&der);
     let mut public_jwk = Jwk::from_encoding_key(&encoding_key, Algorithm::RS256).unwrap();
     public_jwk.common.key_id = Some("dpop-rs256".to_owned());
@@ -51,6 +59,13 @@ pub(crate) fn dpop_fixture() -> DpopFixture {
         public_jwk,
         jkt,
     }
+}
+
+fn rsa_private_der() -> Vec<u8> {
+    let key = KeyPair::generate(KeySize::Rsa2048).unwrap();
+    let pkcs8 = AsDer::<Pkcs8V1Der<'static>>::as_der(&key).unwrap();
+    let private_key = pkcs8::PrivateKeyInfoRef::try_from(pkcs8.as_ref()).unwrap();
+    private_key.private_key.as_bytes().to_vec()
 }
 
 pub(crate) fn token(

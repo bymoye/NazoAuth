@@ -70,7 +70,7 @@ HTTP_SIGNATURE_CASE_REGISTRY = (
     ("fapi_http_signature_tampered_dpop", "signed_request", {"query": "tampered-dpop", "signed_dpop": "signed-dpop-value", "sent_dpop": "altered-dpop-value", "expected_status": 401}),
     ("fapi_http_signature_tampered_body", "tampered_body", {"query": "tampered-body", "expected_status": 401}),
     ("fapi_http_signature_stale_created", "relative_created", {"query": "stale-created", "created_offset": -61, "expected_status": 401}),
-    ("fapi_http_signature_future_created", "relative_created", {"query": "future-created", "created_offset": 6, "expected_status": 401}),
+    ("fapi_http_signature_future_created", "relative_created", {"query": "future-created", "created_offset": 30, "expected_status": 401}),
     ("fapi_http_signature_replay", "replay", {"query": "replay", "expected_status": 200}),
     ("fapi_http_signature_wrong_key", "wrong_key", {"query": "wrong-key", "expected_status": 401}),
     ("fapi_http_signature_wrong_client", "wrong_client", {"query": "wrong-client", "expected_status": 401}),
@@ -1706,7 +1706,7 @@ def approve_authorization(
         allow_redirects=False,
         timeout=10,
     )
-    expect_status(f"authorize_decision_approve_{state}", response, 302)
+    expect_status(f"authorize_decision_approve_{state}", response, 303)
     query = location_query(response)
     code = query.get("code", [None])[0]
     check(
@@ -2121,6 +2121,7 @@ def run() -> None:
             health_body.get("checks")
             == {
                 "postgresql": {"status": "up"},
+                "signing_keys": {"status": "up"},
                 "valkey": {"status": "up"},
             },
         )
@@ -2506,6 +2507,35 @@ def run() -> None:
         exercise_saml_federation()
 
         login(admin, ADMIN_EMAIL, ADMIN_PASSWORD, "POST /auth/login admin")
+        admin_totp_begin = expect_json(
+            expect_status(
+                "POST /auth/me/mfa/totp/begin admin",
+                admin.post(
+                    f"{BASE_URL}/auth/me/mfa/totp/begin",
+                    headers=csrf_header(admin),
+                    timeout=10,
+                ),
+                200,
+            )
+        )
+        admin_totp_confirm = expect_json(
+            expect_status(
+                "POST /auth/me/mfa/totp/confirm admin",
+                admin.post(
+                    f"{BASE_URL}/auth/me/mfa/totp/confirm",
+                    json={"code": totp_code(admin_totp_begin["secret_base32"])},
+                    headers=csrf_header(admin),
+                    timeout=10,
+                ),
+                200,
+            )
+        )
+        check(
+            "admin_mfa_step_up_is_interactive",
+            admin_totp_confirm.get("mfa_enabled") is True
+            and len(admin_totp_confirm.get("backup_codes", [])) == 10,
+            admin_totp_confirm,
+        )
         admin_users = expect_json(
             expect_status(
                 "GET /admin/users",
@@ -2879,34 +2909,11 @@ def run() -> None:
             allow_redirects=False,
             timeout=10,
         )
-        expect_status(
+        expect_authorization_error_redirect(
             "GET /authorize confidential client missing PKCE",
             confidential_without_pkce,
-            302,
-        )
-        confidential_without_pkce_request_id = consent_request_from_redirect(
-            confidential_without_pkce,
-            "GET /authorize confidential client missing PKCE",
-        )
-        confidential_without_pkce_code, _ = approve_authorization(
-            user,
-            confidential_without_pkce_request_id,
-            "",
+            "invalid_request",
             state="confidential-no-pkce",
-        )
-        confidential_without_pkce_tokens = token_basic(
-            secret_auth_client_id,
-            secret_auth_client_secret,
-            {
-                "grant_type": "authorization_code",
-                "code": confidential_without_pkce_code,
-                "redirect_uri": CLIENT_REDIRECT_URI,
-            },
-            "POST /token confidential client missing PKCE",
-        )
-        check(
-            "confidential_without_pkce_token_issued",
-            bool(confidential_without_pkce_tokens.get("access_token")),
         )
 
         post_authorize_request_id, post_authorize_verifier = authorize_request(
@@ -3961,7 +3968,7 @@ def run() -> None:
             allow_redirects=False,
             timeout=10,
         )
-        expect_status("POST /authorize/decision deny", deny_response, 302)
+        expect_status("POST /authorize/decision deny", deny_response, 303)
         check("authorize_deny_error", location_query(deny_response).get("error") == ["access_denied"])
 
         dpop_key = ed25519.Ed25519PrivateKey.generate()

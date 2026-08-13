@@ -1,6 +1,5 @@
 //! refresh_token grant 处理。
-use crate::adapters::audit::audit_event;
-use crate::adapters::audit::audit_fields;
+use crate::adapters::audit::{audit_event_required, audit_fields};
 use crate::adapters::security::ValidatedClientAssertion;
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::constant_time_eq;
@@ -11,11 +10,9 @@ use crate::domain::client_policy::json_array_to_strings;
 use crate::domain::client_policy::parse_scope;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue, TokenRow};
+use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::dpop_proof_present;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 
 use actix_web::http::StatusCode;
 
@@ -30,9 +27,11 @@ use uuid::Uuid;
 // 只处理 refresh token 校验、复用检测和轮换前置约束。
 
 use super::{
-    ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
+    SenderConstraintValidationError, ServerTokenService, TokenForm,
+    consume_token_client_assertion_with_authorization_service,
     issue::{TokenIssuanceContext, issue_token_response_with_service},
-    should_issue_refresh_token,
+    sender_constraint_multiple_error, should_issue_refresh_token,
+    validate_token_sender_constraints,
 };
 use crate::settings::AuthorizationServerProfile;
 
@@ -211,7 +210,7 @@ pub(crate) async fn token_refresh_with_service(
                 token = successor;
             }
             Ok(None) => {
-                audit_event(
+                if let Err(error) = audit_event_required(
                     "refresh_reuse_detected",
                     audit_fields(&[
                         ("client_id", json!(client.client_id)),
@@ -225,7 +224,17 @@ pub(crate) async fn token_refresh_with_service(
                             ))),
                         ),
                     ]),
-                );
+                )
+                .await
+                {
+                    tracing::error!(%error, "required refresh reuse audit failed");
+                    return oauth_token_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_error",
+                        "刷新令牌重用审计写入失败.",
+                        false,
+                    );
+                }
                 return oauth_token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
@@ -270,33 +279,9 @@ pub(crate) async fn token_refresh_with_service(
             }
         }
     }
-    let dpop_jkt = if dpop_proof_present(req) {
-        match validate_dpop_proof_with_authorization_service(
-            issuance.authorization,
-            issuance.config.issuer(),
-            issuance.config.mtls_endpoint_base_url(),
-            issuance.config.dpop_nonce_policy(),
-            req,
-            None,
-            token.dpop_jkt.as_deref(),
-        )
-        .await
-        {
-            Ok(value) => value.or(token.dpop_jkt.clone()),
-            Err(error) => return dpop_error_response(error, DpopErrorContext::TokenEndpoint),
-        }
-    } else if token.dpop_jkt.is_some() {
-        return oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token requires proof of possession.",
-            false,
-        );
-    } else {
-        None
-    };
     if client.client_type == "public"
         && client.require_dpop_bound_tokens
+        && !client.require_mtls_bound_tokens
         && token.dpop_jkt.is_none()
     {
         return oauth_token_error(
@@ -306,45 +291,42 @@ pub(crate) async fn token_refresh_with_service(
             false,
         );
     }
-    if client.require_dpop_bound_tokens && dpop_jkt.is_none() {
-        return oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token requires proof of possession.",
-            false,
-        );
-    }
-    let mtls_x5t_s256 = if let Some(expected) = token.mtls_x5t_s256.clone() {
-        match request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        {
-            Some(actual) if constant_time_eq(expected.as_bytes(), actual.as_bytes()) => {
-                Some(expected)
-            }
-            _ => {
-                return oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "refresh_token requires mTLS proof of possession.",
-                    false,
-                );
-            }
+    let sender = match validate_token_sender_constraints(
+        issuance,
+        req,
+        client,
+        None,
+        token.dpop_jkt.as_deref(),
+        token.mtls_x5t_s256.as_deref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(SenderConstraintValidationError::Dpop(DpopError::MissingProof)) => {
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token requires proof of possession.",
+                false,
+            );
         }
-    } else if client.require_mtls_bound_tokens {
-        match request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        {
-            Some(actual) => Some(actual),
-            None => {
-                return oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "refresh_token requires mTLS proof of possession.",
-                    false,
-                );
-            }
+        Err(SenderConstraintValidationError::Dpop(error)) => {
+            return dpop_error_response(error, DpopErrorContext::TokenEndpoint);
         }
-    } else {
-        None
+        Err(SenderConstraintValidationError::MissingMtls) => {
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token requires mTLS proof of possession.",
+                false,
+            );
+        }
+        Err(SenderConstraintValidationError::Multiple) => {
+            return sender_constraint_multiple_error();
+        }
     };
+    let dpop_jkt = sender.dpop_jkt;
+    let mtls_x5t_s256 = sender.mtls_x5t_s256;
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -404,6 +386,23 @@ pub(crate) async fn token_refresh_with_service(
             false,
         );
     }
+    if token
+        .authentication_context
+        .as_ref()
+        .is_some_and(|context| {
+            context.issuer != issuance.config.issuer() || context.audience != client.client_id
+        })
+    {
+        // Do not rotate a family while dropping the original OIDC issuer or
+        // audience contract. The caller must re-authorize after a metadata
+        // mismatch rather than receive a permanently degraded successor.
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh_token 的 OpenID 上下文与当前客户端不匹配.",
+            false,
+        );
+    }
     let refresh_token_policy = match lost_response_original_id {
         Some(original_id) => RefreshTokenPolicy::RotateLostResponse {
             family_id: token.token_family_id,
@@ -417,6 +416,44 @@ pub(crate) async fn token_refresh_with_service(
             &token,
         ),
     };
+    let authentication_context = token.authentication_context.as_ref().filter(|context| {
+        context.issuer == issuance.config.issuer() && context.audience == client.client_id
+    });
+    let refresh_id_token_sid = authentication_context.map(|context| context.id_token_sid.clone());
+    let (
+        nonce,
+        auth_time,
+        amr,
+        oidc_sid,
+        acr,
+        userinfo_claims,
+        userinfo_claim_requests,
+        id_token_claims,
+        id_token_claim_requests,
+    ) = match authentication_context {
+        Some(context) => (
+            context.nonce.clone(),
+            Some(context.auth_time),
+            context.amr.clone(),
+            context.oidc_sid.clone(),
+            context.acr.clone(),
+            context.userinfo_claims.clone(),
+            context.userinfo_claim_requests.clone(),
+            context.id_token_claims.clone(),
+            context.id_token_claim_requests.clone(),
+        ),
+        None => (
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
     issue_token_response_with_service(
         issuance,
         token_service,
@@ -427,15 +464,23 @@ pub(crate) async fn token_refresh_with_service(
             scopes,
             authorization_details: token.authorization_details,
             audiences,
-            nonce: None,
-            auth_time: None,
-            amr: Vec::new(),
-            oidc_sid: None,
-            acr: None,
-            userinfo_claims: Vec::new(),
-            userinfo_claim_requests: Vec::new(),
-            id_token_claims: Vec::new(),
-            id_token_claim_requests: Vec::new(),
+            // Keep the original nonce in the persisted refresh contract, but
+            // issue.rs suppresses it from the refreshed ID Token as required
+            // by OIDC Core 12.2.
+            nonce,
+            // OIDC Core 12.2 requires the original issuer/audience and
+            // auth_time/amr/acr/sid. A legacy row, or a row whose issuer or
+            // audience no longer matches this client, therefore receives no
+            // ID Token rather than a token with a rewritten context.
+            auth_time,
+            amr,
+            oidc_sid,
+            acr,
+            userinfo_claims,
+            userinfo_claim_requests,
+            id_token_claims,
+            id_token_claim_requests,
+            refresh_id_token_sid,
             include_refresh: true,
             refresh_token_policy,
             dpop_jkt: dpop_jkt.clone(),

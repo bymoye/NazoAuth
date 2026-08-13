@@ -15,8 +15,10 @@ end
 return cjson.encode({found = true, value = value, expire_at = redis.call('EXPIRETIME', KEYS[1])})
 "#;
 const SET_NX_DEADLINE_SCRIPT: &str = r#"
-local deadline = tonumber(ARGV[2])
+local lease_deadline = tonumber(ARGV[3]) or 0
 local now = tonumber(redis.call('TIME')[1])
+if lease_deadline > 0 and now >= lease_deadline then return 'deadline_elapsed' end
+local deadline = tonumber(ARGV[2])
 if now >= deadline then return 'deadline_elapsed' end
 if redis.call('SETNX', KEYS[1], ARGV[1]) == 0 then return 'conflict' end
 redis.call('EXPIREAT', KEYS[1], deadline)
@@ -26,6 +28,10 @@ return 'applied'
 const COMPARE_SET_DEADLINE_SCRIPT: &str = r#"
 local deadline = tonumber(ARGV[3])
 local now = tonumber(redis.call('TIME')[1])
+local lease_deadline = tonumber(ARGV[6]) or 0
+if lease_deadline > 0 and now >= lease_deadline then
+  return 'deadline_elapsed'
+end
 if now >= deadline then
   local expired = redis.call('GET', KEYS[1])
   if expired and expired == ARGV[1] then
@@ -49,6 +55,10 @@ return 'applied'
 const COMPARE_DELETE_DEADLINE_SCRIPT: &str = r#"
 local deadline = tonumber(ARGV[2])
 local now = tonumber(redis.call('TIME')[1])
+local lease_deadline = tonumber(ARGV[4]) or 0
+if lease_deadline > 0 and now >= lease_deadline then
+  return 'deadline_elapsed'
+end
 if now >= deadline then
   local expired = redis.call('GET', KEYS[1])
   if expired and expired == ARGV[1] then
@@ -201,6 +211,16 @@ impl CibaStore {
         auth_req_id: &str,
         state: &CibaRequestState,
     ) -> Result<AtomicResult, Error> {
+        self.create_with_lease_deadline(auth_req_id, state, None)
+            .await
+    }
+
+    pub async fn create_with_lease_deadline(
+        &self,
+        auth_req_id: &str,
+        state: &CibaRequestState,
+        lease_expires_at: Option<i64>,
+    ) -> Result<AtomicResult, Error> {
         let mut state = state.clone();
         if let Some(notification) = state.ping_notification.as_mut() {
             notification.auth_req_id = Some(auth_req_id.to_owned());
@@ -210,7 +230,11 @@ impl CibaStore {
             &self.connection,
             SET_NX_DEADLINE_SCRIPT,
             vec![keys::ciba(auth_req_id)],
-            vec![raw, state.retention_expires_at.to_string()],
+            vec![
+                raw,
+                state.retention_expires_at.to_string(),
+                lease_expires_at.map_or_else(String::new, |value| value.to_string()),
+            ],
         )
         .await?;
         parse_atomic(&reply)
@@ -261,6 +285,17 @@ impl CibaStore {
         expected: &StoredCibaRequest,
         replacement: &CibaRequestState,
     ) -> Result<AtomicResult, Error> {
+        self.replace_with_lease_deadline(auth_req_id, expected, replacement, None)
+            .await
+    }
+
+    pub async fn replace_with_lease_deadline(
+        &self,
+        auth_req_id: &str,
+        expected: &StoredCibaRequest,
+        replacement: &CibaRequestState,
+        lease_expires_at: Option<i64>,
+    ) -> Result<AtomicResult, Error> {
         if replacement.retention_expires_at != expected.deadline {
             return Err(Error::protocol(
                 "CIBA replacement changed retention deadline",
@@ -284,6 +319,7 @@ impl CibaStore {
                 expected.deadline.to_string(),
                 auth_req_id_hash,
                 due_at,
+                lease_expires_at.map_or_else(String::new, |value| value.to_string()),
             ],
         )
         .await?;
@@ -295,6 +331,16 @@ impl CibaStore {
         auth_req_id: &str,
         expected: &StoredCibaRequest,
     ) -> Result<AtomicResult, Error> {
+        self.delete_with_lease_deadline(auth_req_id, expected, None)
+            .await
+    }
+
+    pub async fn delete_with_lease_deadline(
+        &self,
+        auth_req_id: &str,
+        expected: &StoredCibaRequest,
+        lease_expires_at: Option<i64>,
+    ) -> Result<AtomicResult, Error> {
         let reply = command::eval_string(
             &self.connection,
             COMPARE_DELETE_DEADLINE_SCRIPT,
@@ -303,6 +349,7 @@ impl CibaStore {
                 expected.raw.clone(),
                 expected.deadline.to_string(),
                 keys::ciba_hash(auth_req_id),
+                lease_expires_at.map_or_else(String::new, |value| value.to_string()),
             ],
         )
         .await?;
@@ -406,6 +453,20 @@ impl CibaStateStorePort for CibaStore {
         })
     }
 
+    fn create_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        state: &'a CibaRequestState,
+        lease_expires_at: Option<i64>,
+    ) -> nazo_auth::CibaStateFuture<'a, CibaAtomicResult> {
+        Box::pin(async move {
+            CibaStore::create_with_lease_deadline(self, auth_req_id, state, lease_expires_at)
+                .await
+                .map(Into::into)
+                .map_err(port_error)
+        })
+    }
+
     fn replace<'a>(
         &'a self,
         auth_req_id: &'a str,
@@ -420,6 +481,27 @@ impl CibaStateStorePort for CibaStore {
         })
     }
 
+    fn replace_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        state: &'a CibaRequestState,
+        lease_expires_at: Option<i64>,
+    ) -> nazo_auth::CibaStateFuture<'a, CibaAtomicResult> {
+        Box::pin(async move {
+            CibaStore::replace_with_lease_deadline(
+                self,
+                auth_req_id,
+                version,
+                state,
+                lease_expires_at,
+            )
+            .await
+            .map(Into::into)
+            .map_err(port_error)
+        })
+    }
+
     fn delete<'a>(
         &'a self,
         auth_req_id: &'a str,
@@ -427,6 +509,20 @@ impl CibaStateStorePort for CibaStore {
     ) -> nazo_auth::CibaStateFuture<'a, CibaAtomicResult> {
         Box::pin(async move {
             CibaStore::delete(self, auth_req_id, version)
+                .await
+                .map(Into::into)
+                .map_err(port_error)
+        })
+    }
+
+    fn delete_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        lease_expires_at: Option<i64>,
+    ) -> nazo_auth::CibaStateFuture<'a, CibaAtomicResult> {
+        Box::pin(async move {
+            CibaStore::delete_with_lease_deadline(self, auth_req_id, version, lease_expires_at)
                 .await
                 .map(Into::into)
                 .map_err(port_error)

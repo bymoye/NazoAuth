@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::{
     ClientIpConfig, SessionCookieConfig, client_ip_with_config, csrf_error,
-    form_post_authorization_response, login_required_response, oauth_error, redirect_found,
+    form_post_authorization_response, login_required_response, oauth_error, redirect_see_other,
 };
 
 pub type AuthorizationDecisionFuture<'a> = Pin<
@@ -50,6 +50,7 @@ pub enum AuthorizationDecisionError {
     ConsentInvalid,
     ConsentReadUnavailable,
     UserMismatch,
+    AuditUnavailable,
     ApprovalUnavailable,
     UnsupportedResponseMode,
     ResponseProtectionUnavailable,
@@ -113,7 +114,7 @@ pub async fn authorize_decision(
         source_ip: client_ip_with_config(&request, &endpoint.client_ip),
     };
     match endpoint.operations.decide(command).await {
-        Ok(AuthorizationDecisionResponse::Redirect { location }) => redirect_found(location),
+        Ok(AuthorizationDecisionResponse::Redirect { location }) => redirect_see_other(location),
         Ok(AuthorizationDecisionResponse::FormPost {
             action,
             parameters,
@@ -154,6 +155,11 @@ fn authorization_decision_error_response(
             StatusCode::FORBIDDEN,
             "access_denied",
             "当前会话与授权请求不匹配.",
+        ),
+        AuthorizationDecisionError::AuditUnavailable => oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "授权审计存储不可用.",
         ),
         AuthorizationDecisionError::ApprovalUnavailable => oauth_error(
             StatusCode::SERVICE_UNAVAILABLE,

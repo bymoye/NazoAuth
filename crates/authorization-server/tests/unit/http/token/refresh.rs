@@ -57,7 +57,7 @@ pub(crate) async fn token_refresh(
     client_assertion: Option<&ValidatedClientAssertion>,
 ) -> HttpResponse {
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     );
@@ -537,6 +537,7 @@ fn token_row() -> TokenRow {
         dpop_jkt: Some("dpop-jkt".to_owned()),
         mtls_x5t_s256: None,
         client_attestation_jkt: None,
+        authentication_context: None,
     }
 }
 

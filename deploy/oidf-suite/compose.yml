@@ -1,0 +1,75 @@
+name: nazoauth-oidf-suite
+
+x-suite-environment: &suite-environment
+  BASE_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
+  BASE_MTLS_URL: ${OIDF_SUITE_BASE_URL:?set OIDF_SUITE_BASE_URL to the public HTTPS origin}
+  MONGODB_HOST: mongodb
+  OIDC_GOOGLE_CLIENTID: google-client
+  OIDC_GOOGLE_SECRET: google-secret
+  OIDC_GITLAB_CLIENTID: gitlab-client
+  OIDC_GITLAB_SECRET: gitlab-secret
+
+services:
+  mongodb:
+    image: docker.io/library/mongo:6.0.13
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+  server:
+    image: nazoauth-oidf-suite:${OIDF_SUITE_IMAGE_TAG:-321bc5bc}
+    restart: unless-stopped
+    environment:
+      <<: *suite-environment
+      JAVA_EXTRA_ARGS: >-
+        -Dfintechlabs.devmode=false
+        -Doidc.google.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+        -Doidc.gitlab.iss=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+        -Doidc.admin.issuer=${OIDF_OPERATOR_ISSUER:?set OIDF_OPERATOR_ISSUER to a container-reachable HTTPS OIDC issuer}
+    volumes:
+      - oidf_proxy_pki:/oidf-proxy-pki:ro
+    depends_on:
+      mongodb:
+        condition: service_started
+    networks:
+      - default
+      - oidf_bridge
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+  nginx:
+    image: nazoauth-oidf-suite-nginx:${OIDF_SUITE_IMAGE_TAG:-321bc5bc}
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8443:8443"
+    depends_on:
+      server:
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: 500k
+        max-file: "5"
+
+volumes:
+  mongodb_data:
+  oidf_proxy_pki:
+    name: nazoauth-oidf-proxy-pki
+    external: true
+
+networks:
+  default:
+    name: nazoauth-oidf-suite-default
+  oidf_bridge:
+    name: nazoauth-oidf-bridge
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24

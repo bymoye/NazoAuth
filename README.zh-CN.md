@@ -22,7 +22,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 | 项目 | 值 |
 | --- | --- |
 | 包名 | `nazo-oauth-server` |
-| 版本 | `0.1.0` |
+| Workspace 版本 | `0.1.9` 发布候选 |
 | 许可证 | AGPL-3.0-or-later |
 | 语言 | Rust 2024 |
 | 运行依赖 | PostgreSQL、Valkey |
@@ -39,7 +39,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 | 静态安全分析 | CodeQL Rust analysis，启用 `security-extended` 和 `security-and-quality` queries。 |
 | 依赖策略 | GitHub dependency review、`cargo audit`、`cargo deny`，覆盖 advisories、bans、licenses 和 sources。 |
 | 运行时安全行为 | `conformance-security` 中的真实 HTTP E2E、load/race gate、Valkey outage injection。 |
-| 协议一致性 | 当前 25-plan OIDF/FAPI 矩阵与 17-plan OpenID4VC 矩阵的公网黑盒官方套件证据。 |
+| 协议一致性 | Release 门禁会针对同一公网部署运行固定的 27-plan OIDC/FAPI/CIBA/logout 矩阵和固定的 17-plan OpenID4VCI/VP 矩阵；历史证据与精确 Release 证据按版本保存在 `docs/conformance`。 |
 | 覆盖率趋势 | 专用 coverage workflow 上传 Codecov LCOV。 |
 | 发布来源证明 | CycloneDX SBOM、Trivy image scan、Sigstore signing、GitHub artifact attestations。 |
 
@@ -68,6 +68,8 @@ GitHub Release 安装签名的 `nazoauthctl`，然后执行：
 
 ```sh
 sudo nazoauthctl install --runtime auto
+sudo nazoauthctl bootstrap-admin
+sudo nazoauthctl status
 sudo nazoauthctl doctor
 ```
 
@@ -76,6 +78,11 @@ sudo nazoauthctl doctor
 `http://127.0.0.1:8000/health` 或
 `http://127.0.0.1:8000/.well-known/openid-configuration`。数据、签名密钥和头像
 会持久保存。
+
+数据库还没有管理员时，`nazoauthctl bootstrap-admin` 会读取 runtime 所有、且不会被
+打印的一次性 claim。交互模式只通过 TTY 提示；自动化必须通过 stdin 或专用文件描述符
+提交封闭的凭据文档。token、凭据或携带 token 的 URL 都不得进入 argv、普通环境变量、
+日志或审计记录。
 
 公开部署时传入 `--public-url https://auth.example.com`；TLS 入口要求见
 [部署指南](docs/operations/deployment.zh-CN.md)。`compose.yml` 仅保留为源码树开发沙箱，
@@ -87,9 +94,10 @@ sudo nazoauthctl doctor
 nazoauth server
 ```
 
-如果当前目录没有 `.env.yaml`，该命令只创建模板并退出。修改配置后，通过正式的
-`nazoauthctl migrate --yes` 签发一次性任务，再执行 `nazoauth server`，避免以示例
-秘密、错误 issuer 或无审计的数据库权限意外启动。
+如果当前目录没有 `.env.yaml`，该命令会创建最小配置，生成持久化应用秘密与签名密钥，
+然后使用安全默认值继续启动。显式 YAML 和环境配置仍然优先。受管部署的 schema 变更只由
+正式的 `nazoauthctl migrate --yes` 签名一次性任务执行，长期运行的应用身份不持有 DDL
+权限。
 
 ## 配置
 

@@ -152,6 +152,11 @@ impl AuthorizationRequest {
         if self.response_type != VP_TOKEN_RESPONSE_TYPE
             || self.nonce.is_empty()
             || self.state.is_empty()
+            // The verifier does not yet parse the holder-binding proof's
+            // transaction_data_hashes. Accepting transaction_data here would
+            // let a wallet present a proof that is not bound to the requested
+            // transaction, so fail closed until that verifier path exists.
+            || self.transaction_data.is_some()
             || !matches!(
                 self.response_mode.as_str(),
                 "direct_post" | "direct_post.jwt"
@@ -193,6 +198,8 @@ pub struct PresentationTransaction {
     pub request: AuthorizationRequest,
     pub request_object: Option<String>,
     pub request_uri: Option<String>,
+    #[serde(skip)]
+    pub conformance_lease_id: Option<Uuid>,
     #[serde(skip)]
     pub response_encryption_private_key: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,

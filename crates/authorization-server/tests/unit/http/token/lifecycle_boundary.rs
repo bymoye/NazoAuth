@@ -28,14 +28,14 @@ fn function_body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 
 #[test]
 fn production_token_dispatch_and_grants_do_not_receive_app_state() {
-    let dispatch = include_str!("../../../../src/http/token/dispatch.rs");
+    let dispatch = include_str!("../../../../src/http/token/dispatch/mod.rs");
     let dispatch = function_body(
         dispatch,
         "pub(crate) async fn token_with_service(",
         "pub(crate) use token_with_service as token;",
     );
     assert_eq!(
-        include_str!("../../../../src/http/token/dispatch.rs")
+        include_str!("../../../../src/http/token/dispatch/mod.rs")
             .matches("pub(crate) use token_with_service as token;")
             .count(),
         1,
@@ -77,9 +77,9 @@ fn production_token_dispatch_and_grants_do_not_receive_app_state() {
         ),
         (
             "ciba",
-            include_str!("../../../../src/http/token/ciba.rs"),
+            include_str!("../../../../src/http/token/ciba/poll.rs"),
             "pub(crate) async fn token_ciba(",
-            "fn ciba_auth_req_id_client_error(",
+            "pub(super) fn ciba_auth_req_id_client_error(",
         ),
     ] {
         let body = function_body(source, start, end);
@@ -128,7 +128,7 @@ fn client_authentication_handlers_use_the_focused_authorization_boundary() {
     for (name, source) in [
         (
             "token",
-            include_str!("../../../../src/http/token/dispatch.rs"),
+            include_str!("../../../../src/http/token/dispatch/mod.rs"),
         ),
         ("ciba", include_str!("../../../../src/http/token/ciba.rs")),
         (
@@ -239,7 +239,12 @@ fn device_transport_uses_focused_composition_root_dependencies() {
 
 #[test]
 fn ciba_decision_transport_uses_focused_composition_root_dependencies() {
-    let source = include_str!("../../../../src/http/token/ciba.rs");
+    let source = [
+        include_str!("../../../../src/http/token/ciba.rs"),
+        include_str!("../../../../src/http/token/ciba/decision.rs"),
+        include_str!("../../../../src/http/token/ciba/poll.rs"),
+    ]
+    .concat();
     for forbidden in [
         "Data<TestInfrastructure>",
         "state.permits_existing_module_transaction",
@@ -272,7 +277,7 @@ fn device_token_issuance_handoff_uses_focused_context_and_services() {
     assert!(source.contains("token_service: &ServerTokenService"));
     assert!(source.contains("issuance: &TokenIssuanceContext<'_>"));
     assert!(source.contains("issue_token_response_with_service"));
-    assert!(source.contains("validate_dpop_proof_with_authorization_service"));
+    assert!(source.contains("validate_token_sender_constraints"));
     assert!(source.contains("consume_token_client_assertion_with_authorization_service"));
     for forbidden in [
         "TestInfrastructure",

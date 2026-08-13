@@ -8,10 +8,16 @@ pub(crate) use database_user_fixture::{
 
 use std::sync::Arc;
 
+use aws_lc_rs::{
+    encoding::{AsDer, Pkcs8V1Der},
+    rsa::{
+        KeyPair, KeySize, OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, PrivateDecryptingKey,
+    },
+    signature::KeyPair as _,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::jwk::Jwk;
-use openssl::rsa::Rsa;
 use p256::elliptic_curve::{Generate, pkcs8::EncodePrivateKey as _};
 use serde_json::{Value, json};
 
@@ -25,6 +31,47 @@ pub(crate) fn hash_client_secret_fixture(secret: &str, pepper: &str) -> String {
     )
 }
 
+pub(crate) struct TestRsaKey {
+    private_pkcs8_der: Vec<u8>,
+    pub(crate) modulus: Vec<u8>,
+    pub(crate) exponent: Vec<u8>,
+}
+
+impl TestRsaKey {
+    pub(crate) fn generate() -> Self {
+        let key = KeyPair::generate(KeySize::Rsa2048).expect("AWS-LC RSA fixture key");
+        let private_pkcs8_der = AsDer::<Pkcs8V1Der<'static>>::as_der(&key)
+            .expect("RSA fixture PKCS#8")
+            .as_ref()
+            .to_vec();
+        Self {
+            private_pkcs8_der,
+            modulus: key
+                .public_key()
+                .modulus()
+                .big_endian_without_leading_zero()
+                .to_vec(),
+            exponent: key
+                .public_key()
+                .exponent()
+                .big_endian_without_leading_zero()
+                .to_vec(),
+        }
+    }
+
+    pub(crate) fn decrypt_oaep_sha256(&self, ciphertext: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let private = PrivateDecryptingKey::from_pkcs8(&self.private_pkcs8_der)
+            .map_err(|_| anyhow::anyhow!("invalid RSA fixture private key"))?;
+        let private = OaepPrivateDecryptingKey::new(private)
+            .map_err(|_| anyhow::anyhow!("invalid RSA-OAEP fixture key"))?;
+        let mut plaintext = vec![0; private.min_output_size()];
+        Ok(private
+            .decrypt(&OAEP_SHA256_MGF1SHA256, ciphertext, &mut plaintext, None)
+            .map_err(|_| anyhow::anyhow!("RSA-OAEP fixture decryption failed"))?
+            .to_vec())
+    }
+}
+
 /// Shared infrastructure used to compose focused endpoint handles in tests.
 #[derive(Clone)]
 pub(crate) struct TestInfrastructure {
@@ -32,6 +79,36 @@ pub(crate) struct TestInfrastructure {
     pub(crate) valkey: nazo_valkey::test_support::Client,
     pub(crate) settings: Arc<crate::settings::Settings>,
     pub(crate) keyset: nazo_key_management::KeyManager,
+}
+
+pub(crate) fn token_issuance_repository(
+    pool: nazo_postgres::DbPool,
+) -> nazo_postgres::TokenIssuanceRepository {
+    initialize_audit_dependencies(&pool);
+    nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
+        pool,
+        nazo_postgres::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
+            .expect("test response key ring is valid"),
+    )
+}
+
+pub(crate) fn initialize_audit_dependencies(pool: &nazo_postgres::DbPool) {
+    let preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
+        crate::adapters::audit_anchor::AuditAnchorPreflightConfig {
+            mode: crate::adapters::audit_anchor::config::AuditAnchorMode::Disabled,
+            deployment_id: "unit-test".to_owned(),
+            status_file: std::path::PathBuf::from("runtime/test/audit-anchor-health.json"),
+            freshness: std::time::Duration::from_secs(1),
+            max_lag: std::time::Duration::from_secs(1),
+        },
+    )
+    .expect("test audit anchor preflight config is valid");
+    crate::adapters::audit::install_persistent_audit_sink(
+        nazo_postgres::AuditLedgerRepository::new(pool.clone()),
+        false,
+        preflight,
+    )
+    .expect("test durable audit repository should install");
 }
 
 impl TestInfrastructure {
@@ -208,7 +285,16 @@ impl ClientSigningFixture {
                 der
             }
             jsonwebtoken::Algorithm::RS256 | jsonwebtoken::Algorithm::PS256 => {
-                Rsa::generate(2048)?.private_key_to_der()?
+                let key = KeyPair::generate(KeySize::Rsa2048)
+                    .map_err(|_| anyhow::anyhow!("AWS-LC RSA fixture generation failed"))?;
+                let pkcs8 = AsDer::<Pkcs8V1Der<'static>>::as_der(&key)
+                    .map_err(|_| anyhow::anyhow!("AWS-LC RSA fixture encoding failed"))?
+                    .as_ref()
+                    .to_vec();
+                pkcs8::PrivateKeyInfoRef::try_from(pkcs8.as_slice())?
+                    .private_key
+                    .as_bytes()
+                    .to_vec()
             }
             jsonwebtoken::Algorithm::ES256 => p256::SecretKey::try_generate()?
                 .to_pkcs8_der()?

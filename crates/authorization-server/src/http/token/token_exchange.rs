@@ -5,20 +5,23 @@
 //! token exchange, and ID-token issuance require separate policy models.
 use nazo_http_actix::oauth_token_error;
 
-use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use super::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant, request_idempotency_key,
+};
+use super::{
+    SenderConstraintValidationError, ValidatedSenderConstraints, sender_constraint_multiple_error,
+    validate_token_sender_constraints,
+};
 use super::{
     ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
 };
 use super::{native_sso_profile_requested, token_native_sso_exchange};
 use crate::adapters::security::ValidatedClientAssertion;
-use crate::adapters::security::constant_time_eq;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
@@ -227,102 +230,87 @@ fn exchange_token_error_response(error: TokenExchangeTokenError) -> HttpResponse
 }
 
 async fn validate_subject_sender_binding(
-    authorization_service: &crate::http::authorization::ServerAuthorizationService,
-    issuance: &TokenIssuanceContext<'_>,
-    req: &HttpRequest,
-    subject_token: &str,
-    subject_binding: &TokenExchangeSenderBinding,
-) -> Result<(), HttpResponse> {
-    match subject_binding {
-        TokenExchangeSenderBinding::Dpop(jkt) => {
-            validate_dpop_proof_with_authorization_service(
-                authorization_service,
-                issuance.config.issuer(),
-                issuance.config.mtls_endpoint_base_url(),
-                issuance.config.dpop_nonce_policy(),
-                req,
-                Some(subject_token),
-                Some(jkt),
-            )
-            .await
-            .map_err(|error| dpop_error_response(error, DpopErrorContext::TokenEndpoint))?;
-        }
-        TokenExchangeSenderBinding::MutualTls(expected) => {
-            let Some(actual) = request_mtls_thumbprint_from_trusted_proxy(
-                req,
-                issuance.config.trusted_proxy_cidrs(),
-            ) else {
-                return Err(oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "mTLS-bound subject token requires a verified client certificate.",
-                    false,
-                ));
-            };
-            if !constant_time_eq(expected.as_bytes(), actual.as_bytes()) {
-                return Err(oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "mTLS-bound subject token certificate mismatch.",
-                    false,
-                ));
-            }
-        }
-        TokenExchangeSenderBinding::Bearer => {}
-    }
-    Ok(())
-}
-
-async fn token_exchange_issue_binding(
-    authorization_service: &crate::http::authorization::ServerAuthorizationService,
     issuance: &TokenIssuanceContext<'_>,
     req: &HttpRequest,
     client: &ClientRow,
+    subject_token: &str,
     subject_binding: &TokenExchangeSenderBinding,
+) -> Result<ValidatedSenderConstraints, HttpResponse> {
+    let (expected_dpop, expected_mtls, token_for_ath) = match subject_binding {
+        TokenExchangeSenderBinding::Dpop(jkt) => (Some(jkt.as_str()), None, Some(subject_token)),
+        TokenExchangeSenderBinding::MutualTls(thumbprint) => {
+            (None, Some(thumbprint.as_str()), None)
+        }
+        TokenExchangeSenderBinding::Bearer => (None, None, None),
+    };
+    validate_token_sender_constraints(
+        issuance,
+        req,
+        client,
+        token_for_ath,
+        expected_dpop,
+        expected_mtls,
+    )
+    .await
+    .map_err(|error| match error {
+        SenderConstraintValidationError::Dpop(DpopError::MissingProof)
+            if matches!(subject_binding, TokenExchangeSenderBinding::MutualTls(_))
+                && client.require_dpop_bound_tokens
+                && !client.require_mtls_bound_tokens =>
+        {
+            oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "token exchange cannot convert mTLS subject binding to DPoP.",
+                false,
+            )
+        }
+        SenderConstraintValidationError::Dpop(error) => {
+            dpop_error_response(error, DpopErrorContext::TokenEndpoint)
+        }
+        SenderConstraintValidationError::MissingMtls
+            if matches!(subject_binding, TokenExchangeSenderBinding::Dpop(_))
+                && client.require_mtls_bound_tokens
+                && !client.require_dpop_bound_tokens =>
+        {
+            oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "token exchange cannot convert DPoP subject binding to mTLS.",
+                false,
+            )
+        }
+        SenderConstraintValidationError::MissingMtls
+            if matches!(subject_binding, TokenExchangeSenderBinding::MutualTls(_)) =>
+        {
+            oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "mTLS-bound subject token requires a verified client certificate.",
+                false,
+            )
+        }
+        SenderConstraintValidationError::MissingMtls => oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "token exchange requires mTLS sender constraint.",
+            false,
+        ),
+        SenderConstraintValidationError::Multiple => sender_constraint_multiple_error(),
+    })
+}
+
+fn token_exchange_issue_binding(
+    client: &ClientRow,
+    subject_binding: &TokenExchangeSenderBinding,
+    presented: &ValidatedSenderConstraints,
     policy: TokenExchangePolicy<'_>,
 ) -> Result<TokenExchangeSenderBinding, HttpResponse> {
-    let (presented_dpop, presented_mtls) = match subject_binding {
-        TokenExchangeSenderBinding::Bearer if client.require_dpop_bound_tokens => {
-            let dpop_jkt = validate_dpop_proof_with_authorization_service(
-                authorization_service,
-                issuance.config.issuer(),
-                issuance.config.mtls_endpoint_base_url(),
-                issuance.config.dpop_nonce_policy(),
-                req,
-                None,
-                None,
-            )
-            .await
-            .map_err(|error| dpop_error_response(error, DpopErrorContext::TokenEndpoint))?;
-            if dpop_jkt.is_none() {
-                return Err(dpop_error_response(
-                    DpopError::MissingProof,
-                    DpopErrorContext::TokenEndpoint,
-                ));
-            }
-            (dpop_jkt, None)
-        }
-        TokenExchangeSenderBinding::Bearer if client.require_mtls_bound_tokens => {
-            let Some(x5t_s256) = request_mtls_thumbprint_from_trusted_proxy(
-                req,
-                issuance.config.trusted_proxy_cidrs(),
-            ) else {
-                return Err(oauth_token_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_grant",
-                    "token exchange requires mTLS sender constraint.",
-                    false,
-                ));
-            };
-            (None, Some(x5t_s256))
-        }
-        _ => (None, None),
-    };
     token_exchange_issuance_binding(
         subject_binding,
         PresentedSenderConstraint {
-            dpop_jkt: presented_dpop.as_deref(),
-            mtls_x5t_s256: presented_mtls.as_deref(),
+            dpop_jkt: presented.dpop_jkt.as_deref(),
+            mtls_x5t_s256: presented.mtls_x5t_s256.as_deref(),
         },
         policy,
     )
@@ -444,27 +432,24 @@ pub(crate) async fn token_exchange(
                 return token_exchange_subject_error_response(error, client, form, &subject);
             }
         };
-    if let Err(response) = validate_subject_sender_binding(
-        authorization_service,
+    let presented_sender = match validate_subject_sender_binding(
         issuance,
         req,
+        client,
         subject_token,
         &validated_subject.sender_binding,
     )
     .await
     {
-        return response;
-    }
+        Ok(presented) => presented,
+        Err(response) => return response,
+    };
     let issuance_binding = match token_exchange_issue_binding(
-        authorization_service,
-        issuance,
-        req,
         client,
         &validated_subject.sender_binding,
+        &presented_sender,
         policy,
-    )
-    .await
-    {
+    ) {
         Ok(binding) => binding,
         Err(response) => return response,
     };
@@ -485,10 +470,12 @@ pub(crate) async fn token_exchange(
         Ok(admission) => admission,
         Err(error) => return token_exchange_admission_error_response(error, form),
     };
-    issue_token_response_with_service(
+    let idempotency_key = request_idempotency_key(req);
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        idempotency_key.as_deref(),
         TokenIssue {
             user_id: validated_subject.user_id,
             subject: validated_subject.subject,
@@ -504,6 +491,7 @@ pub(crate) async fn token_exchange(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: false,
             refresh_token_policy: RefreshTokenPolicy::PreserveExisting,
             dpop_jkt,

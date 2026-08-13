@@ -7,13 +7,16 @@ use crate::adapters::security::random_urlsafe_token;
 use crate::domain::client_policy::is_subset;
 use crate::domain::client_policy::parse_scope;
 use crate::domain::{ClientRow, NativeSsoTokenBinding, RefreshTokenPolicy, TokenIssue};
-use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 use crate::http::token::client_auth::consume_token_client_assertion_with_authorization_service;
-use crate::http::token::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use crate::http::token::issue::{
+    TokenIssuanceContext, issue_token_response_with_service_and_grant, request_idempotency_key,
+};
+use crate::http::token::{
+    SenderConstraintValidationError, sender_constraint_multiple_error,
+    validate_token_sender_constraints,
+};
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -191,40 +194,21 @@ async fn native_sso_issue_binding(
     req: &HttpRequest,
     client: &ClientRow,
 ) -> Result<(Option<String>, Option<String>), HttpResponse> {
-    if client.require_dpop_bound_tokens {
-        let dpop_jkt = validate_dpop_proof_with_authorization_service(
-            issuance.authorization,
-            issuance.config.issuer(),
-            issuance.config.mtls_endpoint_base_url(),
-            issuance.config.dpop_nonce_policy(),
-            req,
-            None,
-            None,
-        )
+    let sender = validate_token_sender_constraints(issuance, req, client, None, None, None)
         .await
-        .map_err(|error| dpop_error_response(error, DpopErrorContext::TokenEndpoint))?;
-        if dpop_jkt.is_none() {
-            return Err(dpop_error_response(
-                DpopError::MissingProof,
-                DpopErrorContext::TokenEndpoint,
-            ));
-        }
-        return Ok((dpop_jkt, None));
-    }
-    if client.require_mtls_bound_tokens {
-        let Some(x5t_s256) =
-            request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        else {
-            return Err(oauth_token_error(
+        .map_err(|error| match error {
+            SenderConstraintValidationError::Dpop(error) => {
+                dpop_error_response(error, DpopErrorContext::TokenEndpoint)
+            }
+            SenderConstraintValidationError::MissingMtls => oauth_token_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
                 "Native SSO requires mTLS sender constraint.",
                 false,
-            ));
-        };
-        return Ok((None, Some(x5t_s256)));
-    }
-    Ok((None, None))
+            ),
+            SenderConstraintValidationError::Multiple => sender_constraint_multiple_error(),
+        })?;
+    Ok((sender.dpop_jkt, sender.mtls_x5t_s256))
 }
 
 pub(crate) async fn persist_native_sso_device_secret(
@@ -397,10 +381,12 @@ pub(crate) async fn token_native_sso_exchange(
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    issue_token_response_with_service(
+    let idempotency_key = request_idempotency_key(req);
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        idempotency_key.as_deref(),
         TokenIssue {
             user_id: Some(secret.user_id),
             subject,
@@ -416,6 +402,7 @@ pub(crate) async fn token_native_sso_exchange(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: true,
             refresh_token_policy: RefreshTokenPolicy::IssueNew,
             dpop_jkt: dpop_jkt.clone(),

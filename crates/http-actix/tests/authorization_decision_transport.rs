@@ -140,7 +140,7 @@ async fn approved_transport_forwards_typed_command_and_preserves_redirect() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(response.headers().get(header::LOCATION).unwrap(), location);
     let commands = operations.commands.lock().unwrap();
     assert_eq!(commands.len(), 1);
@@ -211,6 +211,12 @@ async fn domain_failures_keep_existing_status_and_oauth_error_contracts() {
             AuthorizationDecisionError::UserMismatch,
             StatusCode::FORBIDDEN,
             "access_denied",
+            "Request failed.",
+        ),
+        (
+            AuthorizationDecisionError::AuditUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
             "Request failed.",
         ),
         (

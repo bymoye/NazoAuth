@@ -9,6 +9,7 @@ impl ConfigSource {
                 .collect(),
             env_values: HashMap::new(),
             generated_values: HashMap::new(),
+            config_dir: PathBuf::from("."),
         }
     }
 
@@ -20,11 +21,23 @@ impl ConfigSource {
             file_values: values.into_iter().collect(),
             env_values: HashMap::new(),
             generated_values: HashMap::new(),
+            config_dir: PathBuf::from("."),
         }
     }
 
     fn load_from_dir(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::load_from_dir_with_env(path, std::iter::empty::<(String, String)>())
+    }
+
+    fn load_from_dir_with_env(
+        path: impl AsRef<Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> anyhow::Result<Self> {
+        Self::load_from_dir_with_env_mode(path, env, true, true)
+    }
+
+    fn merge_env(&mut self, env: impl IntoIterator<Item = (String, String)>) -> anyhow::Result<()> {
+        self.merge_env_with_worker_policy(env, true)
     }
 }
 
@@ -197,6 +210,34 @@ fn unknown_yaml_key_is_rejected_with_the_key_name() {
 }
 
 #[test]
+fn removed_stable_module_flags_are_rejected_instead_of_becoming_hidden_policy() {
+    for key in [
+        "ENABLE_REQUEST_OBJECT",
+        "ENABLE_PAR_REQUEST_OBJECT",
+        "ENABLE_DEVICE_AUTHORIZATION_GRANT",
+        "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
+        "ENABLE_CIBA",
+        "ENABLE_FRONTCHANNEL_LOGOUT",
+        "ENABLE_SESSION_MANAGEMENT",
+    ] {
+        let path = temp_config_dir("removed_module_flag");
+        std::fs::write(path.join(CONFIG_FILE), format!("{key}: true\n")).unwrap();
+        let error = ConfigSource::load_from_dir(&path)
+            .expect_err("removed stable module flags must not be accepted");
+        assert!(error.to_string().contains(key), "{key}");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+    let path = temp_config_dir("removed_module_env");
+    let error = ConfigSource::load_from_dir_with_env(
+        &path,
+        [("ENABLE_CIBA".to_owned(), "false".to_owned())],
+    )
+    .expect_err("removed stable module environment flags must not be ignored");
+    assert!(error.to_string().contains("ENABLE_CIBA was removed"));
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn yaml_document_must_be_a_mapping_with_non_empty_string_keys() {
     let sequence = temp_config_dir("yaml_top_level_sequence");
     std::fs::write(sequence.join(CONFIG_FILE), "- ISSUER\n").unwrap();
@@ -268,10 +309,28 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
         "CLIENT_SECRET_PEPPER",
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
         "PAIRWISE_SUBJECT_SECRET",
+        "MFA_TOTP_ENCRYPTION_KEY",
+        "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
     ] {
         assert!(first.required_string(key).unwrap().len() >= 32);
         assert_eq!(first.get(key), second.get(key));
     }
+    let response_key = first
+        .required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")
+        .unwrap();
+    let digest = blake3::hash(response_key.as_bytes()).to_hex().to_string();
+    assert_eq!(
+        first
+            .required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID")
+            .unwrap(),
+        format!("generated-{}", &digest[..16])
+    );
+    let mfa_key = first.required_string("MFA_TOTP_ENCRYPTION_KEY").unwrap();
+    let mfa_digest = blake3::hash(mfa_key.as_bytes()).to_hex().to_string();
+    assert_eq!(
+        first.required_string("MFA_TOTP_ENCRYPTION_KEY_ID").unwrap(),
+        format!("generated-{}", &mfa_digest[..16])
+    );
     let explicit = ConfigSource::load_from_dir_with_env(
         &path,
         [(
@@ -284,6 +343,91 @@ fn generated_secrets_are_stable_and_are_lower_precedence_than_explicit_values() 
         explicit.required_string("CLIENT_SECRET_PEPPER").unwrap(),
         "explicit-client-secret-pepper-value-123456"
     );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn configured_capabilities_receive_durable_service_owned_secrets() {
+    let path = temp_config_dir("generated_capability_secrets");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        concat!(
+            "DATA_DIR: state\n",
+            "CIBA_AUTOMATED_DECISION_MODE: header\n",
+            "ENABLE_OPENID4VCI_ISSUER: true\n",
+            "ENABLE_OPENID4VP_VERIFIER: true\n",
+        ),
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+    for key in [
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "OPENID4VC_DATA_ENCRYPTION_KEY",
+        "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+        "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+    ] {
+        assert!(source.required_string(key).unwrap().len() >= 32, "{key}");
+    }
+    let second = ConfigSource::load_from_dir(&path).unwrap();
+    for key in [
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "OPENID4VC_DATA_ENCRYPTION_KEY",
+        "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+        "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+    ] {
+        assert_eq!(source.get(key), second.get(key), "{key} must be stable");
+    }
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn server_config_excludes_worker_only_yaml_and_environment_values() {
+    let path = temp_config_dir("worker_config_isolation");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        concat!(
+            "PUBLIC_BASE_URL: https://auth.example\n",
+            "AUDIT_ANCHOR_URL: https://anchor-from-yaml.example\n",
+            "AUDIT_ANCHOR_TOKEN: yaml-worker-secret\n",
+        ),
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir_with_env_filtered(
+        &path,
+        [
+            (
+                "AUDIT_ANCHOR_URL".to_owned(),
+                "https://anchor-from-env.example".to_owned(),
+            ),
+            (
+                "AUDIT_ANCHOR_DATABASE_URL".to_owned(),
+                "postgresql://worker-only.example/oauth".to_owned(),
+            ),
+            ("ISSUER".to_owned(), "https://issuer.example".to_owned()),
+        ],
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        source.get("PUBLIC_BASE_URL").as_deref(),
+        Some("https://auth.example")
+    );
+    assert_eq!(
+        source.get("ISSUER").as_deref(),
+        Some("https://issuer.example")
+    );
+    for key in [
+        "AUDIT_ANCHOR_URL",
+        "AUDIT_ANCHOR_TOKEN",
+        "AUDIT_ANCHOR_DATABASE_URL",
+    ] {
+        assert!(source.get(key).is_none(), "{key} must remain worker-only");
+    }
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -444,6 +588,25 @@ fn runtime_secret_helper_returns_the_stable_persisted_path_and_value() {
 }
 
 #[test]
+fn instance_identity_helper_persists_an_ed25519_seed_without_reusing_token_size() {
+    let path = temp_config_dir("instance_identity_helper");
+    let (created_path, first) =
+        read_or_create_instance_identity_key(&path, "instance/identity.key").unwrap();
+    let (_, second) = read_or_create_instance_identity_key(&path, "instance/identity.key").unwrap();
+
+    assert_eq!(created_path, path.join("instance/identity.key"));
+    assert_eq!(first, second);
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(first)
+            .unwrap()
+            .len(),
+        32
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
 fn generated_secret_creation_reports_an_invalid_parent_without_partial_state() {
     let path = temp_config_dir("invalid_secret_parent");
     let blocking_file = path.join("not-a-directory");
@@ -467,23 +630,61 @@ fn generated_secret_creation_reports_an_invalid_parent_without_partial_state() {
 fn migration_config_does_not_materialize_unrelated_application_secrets() {
     let path = temp_config_dir("migration_config_no_application_secrets");
     let database_url_file = path.join("database-url");
-    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nCLIENT_SECRET_PEPPER_FILE: deliberately-absent\n",
+    )
+    .unwrap();
     std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
 
-    let source = ConfigSource::load_from_dir_with_env_mode(
+    let source = ConfigSource::load_for_migrations_from_dir_with_env(
         &path,
         [(
             "DATABASE_URL_FILE".to_owned(),
             database_url_file.display().to_string(),
         )],
-        false,
-        true,
     )
     .unwrap();
 
     assert_eq!(database_url(&source), "postgresql://file.example/oauth");
     assert!(!path.join("state").exists());
     assert!(source.get("CLIENT_SECRET_PEPPER").is_none());
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn migration_config_accepts_deployment_identity_without_materializing_state() {
+    let path = temp_config_dir("migration_config_deployment_identity");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        concat!(
+            "DEPLOYMENT_ID: deployment-ci\n",
+            "RUNTIME_INSTANCE_ID: runtime-ci\n",
+            "INSTANCE_IDENTITY_DIR: runtime-instance\n",
+        ),
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_for_migrations_from_dir_with_env(&path, []).unwrap();
+
+    assert_eq!(
+        source.get("DEPLOYMENT_ID").as_deref(),
+        Some("deployment-ci")
+    );
+    assert_eq!(
+        source.get("RUNTIME_INSTANCE_ID").as_deref(),
+        Some("runtime-ci")
+    );
+    let expected_identity_dir = std::fs::canonicalize(&path)
+        .unwrap()
+        .join("runtime-instance")
+        .display()
+        .to_string();
+    assert_eq!(
+        source.get("INSTANCE_IDENTITY_DIR").as_deref(),
+        Some(expected_identity_dir.as_str())
+    );
+    assert!(!path.join("runtime-instance").exists());
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -532,6 +733,7 @@ fn environment_overrides_yaml_by_allowlist() {
             ("DATABASE_MAX_CONNECTIONS".to_owned(), "24".to_owned()),
             ("PERF_METRICS_ENABLED".to_owned(), "true".to_owned()),
             ("UNKNOWN_ENV".to_owned(), "ignored".to_owned()),
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
         ])
         .unwrap();
 
@@ -551,6 +753,61 @@ fn environment_overrides_yaml_by_allowlist() {
     assert_eq!(source.string("DATABASE_MAX_CONNECTIONS", ""), "24");
     assert_eq!(source.string("PERF_METRICS_ENABLED", ""), "true");
     assert!(source.get("UNKNOWN_ENV").is_none());
+    assert!(source.get("PATH").is_none());
+}
+
+#[test]
+fn unknown_nazoauth_environment_key_is_rejected_without_rejecting_system_environment() {
+    let mut source = ConfigSource::default();
+    source
+        .merge_env([("PATH".to_owned(), "/usr/bin".to_owned())])
+        .unwrap();
+
+    let error = source
+        .merge_env([("NAZOAUTH_UNKNOWN_CONFIG".to_owned(), "value".to_owned())])
+        .expect_err("unknown NazoAuth environment keys must fail startup");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown NazoAuth environment config key NAZOAUTH_UNKNOWN_CONFIG")
+    );
+}
+
+#[test]
+fn relative_persistent_paths_are_anchored_to_the_configuration_directory() {
+    let path = temp_config_dir("relative_persistent_paths");
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nUI_CACHE_DIR: cache/ui\n",
+    )
+    .unwrap();
+
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+    let canonical_path = std::fs::canonicalize(&path).unwrap();
+    assert_eq!(
+        source.string("DATA_DIR", ""),
+        canonical_path.join("state").display().to_string()
+    );
+    assert_eq!(
+        source.string("UI_CACHE_DIR", ""),
+        canonical_path.join("cache/ui").display().to_string()
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn relative_persistent_paths_cannot_escape_the_configuration_directory() {
+    let path = temp_config_dir("relative_persistent_path_escape");
+    std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: ../outside\n").unwrap();
+
+    let error = ConfigSource::load_from_dir(&path)
+        .expect_err("relative persistent roots must stay below the config directory");
+    assert!(
+        error
+            .to_string()
+            .contains("DATA_DIR relative path escapes configuration directory")
+    );
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]
@@ -562,6 +819,20 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "AUTH_CODE_TTL_SECONDS",
             "AUTH_RATE_LIMIT_MAX_REQUESTS",
             "AUTHORIZATION_SERVER_PROFILE",
+            "AUDIT_ANCHOR_BATCH_SIZE",
+            "AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS",
+            "AUDIT_ANCHOR_DATABASE_URL",
+            "AUDIT_ANCHOR_DATABASE_URL_FILE",
+            "AUDIT_ANCHOR_FRESHNESS_SECONDS",
+            "AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS",
+            "AUDIT_ANCHOR_MAX_LAG_SECONDS",
+            "AUDIT_ANCHOR_MODE",
+            "AUDIT_ANCHOR_POLL_INTERVAL_SECONDS",
+            "AUDIT_ANCHOR_REQUEST_TIMEOUT_SECONDS",
+            "AUDIT_ANCHOR_STATUS_FILE",
+            "AUDIT_ANCHOR_TOKEN",
+            "AUDIT_ANCHOR_TOKEN_FILE",
+            "AUDIT_ANCHOR_URL",
             "AVATAR_MAX_BYTES",
             "AVATAR_STORAGE_DIR",
             "BACKCHANNEL_LOGOUT_PRIVATE_ORIGINS",
@@ -572,6 +843,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CLIENT_SECRET_PEPPER_FILE",
             "CIBA_AUTOMATED_DECISION_TOKEN",
             "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
+            "CIBA_AUTOMATED_DECISION_MODE",
             "CIBA_AUTH_REQ_ID_TTL_SECONDS",
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
             "CIBA_PING_TLS_TRUST_BUNDLE",
@@ -585,23 +857,17 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "DATABASE_MAX_CONNECTIONS",
             "DATA_DIR",
             "DEFAULT_AUDIENCE",
+            "DEPLOYMENT_ID",
             "DEVICE_AUTHORIZATION_POLL_INTERVAL_SECONDS",
             "DEVICE_AUTHORIZATION_TTL_SECONDS",
             "DPOP_NONCE_POLICY",
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
             "ENABLE_AUTHORIZATION_DETAILS",
-            "ENABLE_CIBA",
-            "ENABLE_DEVICE_AUTHORIZATION_GRANT",
-            "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
-            "ENABLE_FRONTCHANNEL_LOGOUT",
             "ENABLE_FAPI_HTTP_SIGNATURES",
             "ENABLE_NATIVE_SSO",
             "ENABLE_OPENID4VCI_ISSUER",
             "ENABLE_OPENID4VP_VERIFIER",
-            "ENABLE_PAR_REQUEST_OBJECT",
-            "ENABLE_REQUEST_OBJECT",
-            "ENABLE_SESSION_MANAGEMENT",
             "ENABLE_SCIM_SECURITY_EVENTS",
             "EMAIL_CODE_DEV_RESPONSE_ENABLED",
             "EMAIL_CODE_PEER_COOLDOWN_SECONDS",
@@ -623,12 +889,25 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS",
             "FAPI_RESOURCE_DPOP_NONCE_POLICY",
             "ID_TOKEN_TTL_SECONDS",
+            "INSTANCE_IDENTITY_DIR",
             "ISSUER",
             "JWK_KEYS_DIR",
             "LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS",
             "LOGIN_FAILURE_WINDOW_SECONDS",
             "MTLS_ENDPOINT_BASE_URL",
             "MTLS_CERTIFICATE_SOURCE",
+            "MFA_TOTP_ENCRYPTION_KEY",
+            "MFA_TOTP_ENCRYPTION_KEY_FILE",
+            "MFA_TOTP_ENCRYPTION_KEY_ID",
+            "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY",
+            "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_FILE",
+            "MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID",
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_FILE",
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID",
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE",
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID",
             "OPENID4VC_DATA_ENCRYPTION_KEY",
             "OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
             "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON",
@@ -636,6 +915,9 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "OPENID4VC_KEY_ATTESTATION_JWKS_JSON",
             "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
             "OPENID4VC_TRUST_ANCHORS_FILE",
+            "OPENID4VC_REVOCATION_POLICY",
+            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
+            "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
             "OPENID4VC_TRANSACTION_TTL_SECONDS",
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
             "OPENID4VCI_DEFERRED_CREDENTIAL_CONFIGURATIONS",
@@ -670,7 +952,9 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "REMOTE_CLIENT_DOCUMENT_PRIVATE_ORIGINS",
             "REQUIRE_PUSHED_AUTHORIZATION_REQUESTS",
             "RUST_LOG",
+            "RUNTIME_INSTANCE_ID",
             "SCIM_EVENT_RETENTION_SECONDS",
+            "SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE",
             "SESSION_COOKIE_NAME",
             "SESSION_TTL_SECONDS",
             "SIGNING_KEY_PREPUBLISH_SECONDS",
@@ -683,6 +967,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TLS_CLIENT_CA_FILE",
             "TLS_PRIVATE_KEY_FILE",
             "TRUSTED_PROXY_CIDRS",
+            "UI_CACHE_DIR",
             "UI_STATIC_DIR",
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_URL",

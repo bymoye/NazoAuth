@@ -8,6 +8,7 @@ use crate::{
 use diesel::{
     ExpressionMethods, OptionalExtension, PgExpressionMethods, QueryDsl, SelectableHelper,
 };
+use diesel_async::AsyncPgConnection;
 use diesel_async::RunQueryDsl;
 use nazo_identity::{
     AdminPolicyError, AdminUserUpdateOutcome, AuthenticationIdentity, IdentitySecurityEvent,
@@ -17,6 +18,7 @@ use nazo_identity::{
         AdminUserUpdate, NewUser, ProfileUpdate, RepositoryError, UserPage, UserRepositoryPort,
     },
 };
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct UserRepository {
@@ -485,6 +487,55 @@ impl UserRepository {
             .transpose()
             .map_err(|error| RepositoryError::Consistency(error.0))
     }
+}
+
+/// Inserts the ordinary applicant used by an atomic conformance onboarding
+/// transaction without acquiring another database connection.  This helper
+/// deliberately writes the role boundary explicitly instead of relying on
+/// database defaults: a conformance applicant can never become an admin as a
+/// side effect of a malformed or replayed bundle.
+pub(crate) async fn insert_conformance_applicant_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant: nazo_identity::TenantContext,
+    applicant: &crate::repositories::conformance_leases::ConformanceApplicant,
+) -> Result<Uuid, diesel::result::Error> {
+    diesel::insert_into(users::table)
+        .values((
+            users::tenant_id.eq(tenant.tenant_id.as_uuid()),
+            users::realm_id.eq(tenant.realm_id.as_uuid()),
+            users::organization_id.eq(tenant.organization_id.as_uuid()),
+            users::username.eq(&applicant.username),
+            users::email.eq(&applicant.email),
+            users::password_hash.eq(applicant.password_hash.clone().into_persistence_value()),
+            users::is_active.eq(true),
+            users::mfa_enabled.eq(false),
+            users::email_verified.eq(applicant.email_verified),
+            users::display_name.eq(Some(applicant.display_name.as_str())),
+            users::given_name.eq(Some(applicant.given_name.as_str())),
+            users::family_name.eq(Some(applicant.family_name.as_str())),
+            users::middle_name.eq(Some(applicant.middle_name.as_str())),
+            users::nickname.eq(Some(applicant.nickname.as_str())),
+            users::profile_url.eq(Some(applicant.profile_url.as_str())),
+            users::avatar_url.eq(Some(applicant.avatar_url.as_str())),
+            users::website_url.eq(Some(applicant.website_url.as_str())),
+            users::gender.eq(Some(applicant.gender.as_str())),
+            users::birthdate.eq(Some(applicant.birthdate.as_str())),
+            users::zoneinfo.eq(Some(applicant.zoneinfo.as_str())),
+            users::locale.eq(Some(applicant.locale.as_str())),
+            users::address_formatted.eq(applicant.address.formatted.as_deref()),
+            users::address_street_address.eq(applicant.address.street_address.as_deref()),
+            users::address_locality.eq(applicant.address.locality.as_deref()),
+            users::address_region.eq(applicant.address.region.as_deref()),
+            users::address_postal_code.eq(applicant.address.postal_code.as_deref()),
+            users::address_country.eq(applicant.address.country.as_deref()),
+            users::phone_number.eq(Some(applicant.phone_number.as_str())),
+            users::phone_number_verified.eq(applicant.phone_number_verified),
+            users::role.eq("user"),
+            users::admin_level.eq(0),
+        ))
+        .returning(users::id)
+        .get_result(connection)
+        .await
 }
 
 fn admin_event(

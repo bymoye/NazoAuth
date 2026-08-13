@@ -2,20 +2,33 @@
 
 本文规定唯一受支持的 OIDF 一致性测试流程。被测对象是正常的公网生产部署；测试工具不得获得数据库访问权、私有服务网络地址、特权运行时挂载或另一套协议行为。
 
-## 四步复现
+## 本地四步复现
 
-生产接入的安全边界不能省略，但操作者入口固定为四步：
+生产接入的安全边界不能省略，但 GitHub 不是执行依赖。操作者入口固定为四步：
 
-1. 部署一个精确仓库 commit，并记录完整 SHA。
-2. 运行 `oidf-conformance-full.yml`，输入 `deployed_sha`、`target_issuer`，并将
-   `onboarding_material_only` 设为 `true`；下载并校验生成的 bundle。
-3. 由普通申请人与不同的审批人，通过 `apply_public_conformance_onboarding.py`
-   和正式公开控制面完成接入。禁止数据库 seed 和私有网络访问。
-4. 使用相同输入、将 `onboarding_material_only` 设为 `false` 运行 27-plan
-   OIDC/FAPI/FAPI-CIBA/Logout 矩阵，再运行 17-plan OpenID4VC Final/HAIP 矩阵。
-   workflow 会检出已部署 SHA、克隆精确官方套件提交，并在发现受版本控制的修改时拒绝运行。
+1. 部署一个精确且不可变的 Release tag，并同时记录 tag 与其完整源码 commit SHA。
+2. 在操作者自己的 Linux 主机检出该源码 commit 和精确的官方 Suite commit；运行
+   `prepare_host_local_oidf_install.py` 生成本轮一次性的 OpenID4VC 安装材料。
+3. 准备两个不同的公网产品身份、官方 Suite 的短期 API token、VCI/VP 管理 token，
+   只通过 stdin、继承 FD 或 POSIX `0600` 文件把封闭 JSON 交给本地 runner。
+4. 运行 `run_official_oidf_full_matrix.py`。该入口固定连接
+   `https://www.certification.openid.net`，依次运行 27-plan
+   OIDC/FAPI/FAPI-CIBA/Logout/Session 与 17-plan OpenID4VC Final/HAIP，完成公开控制面
+   清理，并把原始 ZIP 归约成一份无凭据的 44-plan evidence manifest 和 receipt。
 
-所需 Secret 名称和轮换规则见
+`.github/workflows/oidf-conformance-full.yml` 和 OpenID4VC workflow 只是可选的远程包装层，
+不得成为 Suite token、源码材料、执行逻辑或证据归约的唯一来源。本地入口不调用 `gh`、
+GitHub API 或 Actions artifact。
+
+`--ref` 只选择要运行的 workflow 定义，不是源码信任 allowlist。两个 workflow 都会先
+要求所给 tag 解引用后精确等于所给 commit。若该 commit 不是默认分支的祖先，还必须确认
+GitHub Release 存在且不是 draft，下载当前 runner 对应的 Linux `nazoauthctl` bootstrap
+制品，并用 GitHub attestation 精确验证
+`release-security.yml@refs/tags/<release-tag>` 证书身份、source ref、source digest、
+自定义 Release predicate 和 hosted-runner 策略。全部证明通过后才允许检出或执行目标
+commit 的源码；不存在按分支名称放行的例外。
+
+可选 GitHub 包装层所需 Secret 名称和轮换规则见
 [`GitHub Actions Secrets`](../operations/github-actions-secrets.zh-CN.md)。每个 fork 必须提供自己的
 issuer、账号、客户端材料和 suite token；仓库不提供共享被测部署。
 
@@ -42,6 +55,12 @@ issuer、账号、客户端材料和 suite token；仓库不提供共享被测�
 - 发行方和套件地址由运行者输入，必须是公网 HTTPS origin；仓库不提供任何部署域名默认值。
 - Discovery 中的 `issuer` 必须等于被测公网 origin。
 - 套件只能访问公网 HTTPS。禁止私有 DNS、裸 IP、loopback、容器服务名和关闭 TLS 校验。
+- 如果 FAPI 1.0 Advanced 各端点共用同一个 TLS origin，证书必须使用至少 2048-bit
+  RSA；TLS 1.2 只启用 `ECDHE-RSA-AES128-GCM-SHA256` 和
+  `ECDHE-RSA-AES256-GCM-SHA384`。这是 [FAPI 1.0 Advanced 第 8.5 节](https://openid.net/specs/openid-financial-api-part-2-1_0.html#tls-considerations)
+  与 [RFC 9325 第 4.2 节](https://www.rfc-editor.org/rfc/rfc9325.html#section-4.2)
+  的前向保密交集；TLS 1.3 仍需启用。授权端点的互操作例外不能放宽同一 TLS listener
+  上的其他端点。
 - 产品逻辑不得根据 plan 名称、suite alias、callback path、测试 header 或 conformance 编译开关分支。
 - 准备工具不得执行 SQL，也不得加载生产 server crate。
 - 申请人与审批人必须是两个不同的有效账号；审批人的 `admin_level` 必须大于 0。自动化账号仍遵守正常账号生命周期和 MFA 策略。
@@ -55,20 +74,66 @@ issuer、账号、客户端材料和 suite token；仓库不提供共享被测�
 
 公网开放前必须关闭套件的 development profile。普通非管理员用户随后通过 OIDC 登录，并从套件正式 `/api/token` 端点创建短期 API token。该 token 只保存在 root 可读的运行时 secret 文件中。创建 plan 前同时验证两个边界：携带 Bearer token 的请求返回 `200`，不携带 token 的相同 API 请求返回 `401`。禁止直接向 MongoDB 写入套件 token、禁止把产品管理员 session 当成套件 Bearer token，也不得依赖源码托管平台账号。
 
-## 推荐入口：单次可逆运行
+## 推荐入口：本地单次可逆 44-plan 运行
 
-操作者公网 OIDC/FAPI/FAPI-CIBA 矩阵应使用统一入口，不应手工拼接后续各节的内部命令。运行前只准备两个彼此独立的生产身份、动态注册/CIBA 令牌和公网套件短期 API token：
+先在同一次连续验收中生成全新的 source-bound OpenID4VC 材料：
 
 ```sh
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-export OIDF_CONFORMANCE_TOKEN=...
+python scripts/prepare_host_local_oidf_install.py \
+  --source-dir /opt/nazoauth/source \
+  --source-commit <已部署-sha> \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <精确-suite-sha> \
+  --suite-origin https://www.certification.openid.net \
+  --output-dir /run/nazoauth-official-oidf-install
+```
 
-python scripts/run_public_oidf_conformance.py \
+再以一个封闭八字段 JSON 启动完整矩阵。示例中的 `secret-provider` 是操作者自己的本地
+秘密来源，不是 GitHub Secret：
+
+```sh
+umask 077
+run_id="oidf-$(date -u +%m%d%H%M)-$(openssl rand -hex 2)"
+secret-provider read nazoauth/official-oidf-run | \
+python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
+  --deployed-sha <已部署-sha> \
+  --runner-sha <runner-sha> \
+  --target-issuer https://issuer.example \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <精确-suite-sha> \
+  --work-dir "/var/lib/nazo-oidf/runs/$run_id" \
+  --export-dir "/var/lib/nazo-oidf/results/$run_id" \
+  --run-namespace "$run_id" \
+  --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
+  --proxy-executable /usr/sbin/nginx \
+  --prepared-install-dir /run/nazoauth-official-oidf-install \
+  --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
+```
+
+基础 `run_id` 最长 22 个字符。协调器还会追加 `-protocol` 和 `-openid4vc`，两个派生
+namespace 都必须满足下游最长 32 个字符的契约。
+
+该命令默认以前台方式运行。如果运行者通过可能中断的 SSH 会话登录主机，应由该主机的
+服务管理器托管同一条本地命令，并把 stdout/stderr 写入 root/运行者所有、权限为 `0600`
+的文件。执行生命周期不得依赖 SSH 传输；服务管理器只是操作系统包装层，不会引入 GitHub
+依赖。
+
+严格 JSON 字段恰好为 `applicant_email`、`applicant_password`、`admin_email`、
+`admin_password`、`admin_mfa_totp_secret`、`oidf_conformance_token`、
+`issuer_management_token` 和 `verifier_management_token`。入口内部只通过子进程 stdin
+把必要字段分别交给现有 27-plan 和 17-plan runner，不把秘密放进 argv 或环境变量。
+成功 receipt 必须绑定恰好 `27 + 17 = 44` 个不同 plan ID；否则整个运行失败。
+
+## 独立 27-plan 入口
+
+操作者公网 OIDC/FAPI/FAPI-CIBA 矩阵应使用统一入口，不应手工拼接后续各节的内部命令。运行前只准备两个彼此独立的生产身份、CIBA 决策令牌和公网套件短期 API token；动态注册初始 token 由 runner 为每条租约单独生成：
+
+```sh
+secret-provider read nazoauth/oidf-run-secrets | \
+python scripts/run_public_oidf_conformance.py --secrets-stdin \
   --deployed-sha <已部署-sha> \
   --target-issuer https://issuer.example \
   --conformance-server https://suite.example \
@@ -78,19 +143,42 @@ python scripts/run_public_oidf_conformance.py \
   --export-dir /var/lib/nazo-oidf/results/<run-id> \
   --run-namespace <run-id> \
   --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
-  --proxy-executable /usr/sbin/nginx
+  --proxy-executable /usr/sbin/nginx \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
 ```
 
-该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并按并发、CIBA、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout 和 Session Management 隔离组执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
+输入必须是严格 JSON，且字段恰好为 `oidf_applicant_email`、
+`oidf_applicant_password`、`oidf_admin_email`、`oidf_admin_password`、
+`oidf_admin_totp_secret` 和 `oidf_conformance_token`。也可通过
+`--secret-fd N` 或当前用户/root 所有、单硬链接、权限为 `0600` 的
+`--secret-file` 提供（仅 POSIX）。Windows 的 mode bits 不能证明 DACL，因此必须使用
+stdin 或继承 FD。所有秘密都没有 argv 或环境变量回退。
+
+该入口硬性校验产品提交、显式指定的官方套件提交和干净源码树；随后自动生成 source-bound 材料，并先通过 `nazoauthctl` 创建有时效的 conformance lease，把本轮分别随机生成的动态注册 token、CIBA 自动决策 token 的 SHA-256 与全部临时 client 绑定到同一租约。两个 token 只能操作该租约拥有的 DCR/CIBA 事务，并在租约过期或吊销后立即失效。官方套件会在并发模块间共享浏览器 cookie/session，因此所有驱动浏览器的模块和 plan 组均串行执行。它通过不同身份完成申请、审批、一次性交付和信任审批，原子安装已批准的信任 bundle，验证套件 API 的 `401/200` 边界，并执行 27 个 plan。无论成功或失败，均通过公网控制面停用本次客户端、撤销并物理清理租约数据、撤销信任并恢复代理原配置。私密运行材料保留在独立工作目录；套件原始 ZIP 会自动归约为 `evidence-manifest.json` 后删除，不会把凭据或日志正文作为结果留存。
+
+如果当前部署通过通用的 `nazoauthctl development activate` 路径安装，运行 runner
+时必须省略全部 candidate 参数：控制器会读取并校验当前本地镜像内嵌的 build identity
+和 digest。这个本地路径适用于任何运行者，不依赖 GitHub，也不绑定某一台主机。
+
+下面四项属于另一条“签名候选版本”路径。私有预发布门禁可以在同一 runner 中同时传入
+`--candidate-release`、`--candidate-revision`、`--candidate-build-id` 和
+`--candidate-oci-digest`。四项缺一即失败；运行中的容器必须使用同一
+digest 固定的镜像引用，二进制内嵌身份也必须逐项匹配。该例外只作用于
+`conformance lease` 和显式 `nazoauthctl migrate --yes` 候选迁移。候选迁移同样
+必须同时传入四项绑定，并且只能通过签名 operator task 执行；不得使用原始 SQL
+或旧服务端命令。它不会改写已签名 active Release，也不能作为发布、
+provenance 或官方认证证据。未传这些参数时，所有控制器命令仍严格绑定
+已签名 Release manifest。
 
 最后一组完成后，驱动会立即复查本轮全部 alias 的全部模块，等待 45 秒让异步回调与投递 worker 稳定，再复查一次完整矩阵。早期分组的任何晚到状态变化都会令整轮失败；单个分组的导出结果本身不能作为全矩阵成功证据。
 
 审批仍是正式、可审计的授权事件；自动化只消除文件复制、路径推断、命令拼接和恢复操作，不绕过申请人与审批人分离。
 
-浏览器自动化登录凭据的事实源是运行时环境变量
-`OIDF_USER_EMAIL` / `OIDF_USER_PASSWORD`。plan 配置中的同名 `nazo` 字段只允许作为
-本地操作者运行的显式后备值；GitHub Actions Secret 必须覆盖它们，避免轮换 Secret 后
-仍使用陈旧 plan 配置。
+统一 runner 会通过管理员登录、CSRF 和公网 `POST /admin/users` 幂等创建 applicant，
+随后再以普通公网登录验证 applicant 凭据。浏览器凭据只会写入权限为 `0600` 的私有
+plan 文件；子进程只会收到封闭环境白名单，不会复制任何未知父进程环境项。
 
 ## 1. 生成不可变的 runner 材料
 
@@ -100,31 +188,42 @@ python scripts/run_public_oidf_conformance.py \
 export OIDF_TARGET_ISSUER=https://issuer.example
 export OIDF_MTLS_TARGET_ISSUER=https://mtls.issuer.example
 export OIDF_SUITE_BASE_URL=https://suite.example
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-python scripts/prepare_oidf_black_box.py
+secret-provider mount nazoauth/oidf-preparation /run/secrets/nazoauth-oidf-preparation.json
+chmod 0600 /run/secrets/nazoauth-oidf-preparation.json
+python scripts/prepare_oidf_black_box.py \
+  --secret-file /run/secrets/nazoauth-oidf-preparation.json
 ```
+
+该 preparation 文档是封闭的四字段 JSON，只包含 `oidf_applicant_email`、
+`oidf_applicant_password`、`oidf_dynamic_registration_initial_access_token` 和
+`oidf_ciba_automated_decision_token`。准备完成后立即移除 provider mount；若 provider
+能够安全流式提供该封闭文档，也可使用 `--secrets-stdin` 或 `--secret-fd N`。
 
 命令只在 `runtime/oidf` 生成 runner 配置、密钥、证书、onboarding manifest 以及精确的 plan/skip/review 清单。这些是测试输入，不是生产记录，也不具备修改生产数据库的权限。
 
 若官方 runner 配置保存在仓库的加密材料中，可使用仅导出模式，在不创建套件 plan 的情况下生成接入材料：
 
 ```sh
-gh workflow run oidf-conformance-full.yml \
-  --ref <精确分支> \
+run_url="$(gh workflow run oidf-conformance-full.yml \
+  --ref <workflow-定义-ref> \
+  -f release_tag=<精确-release-tag> \
   -f deployed_sha=<已部署-sha> \
   -f target_issuer=https://issuer.example \
   -f credential_holder_email_sha256=<全新申请人邮箱的-sha256> \
-  -f onboarding_material_only=true
+  -f onboarding_material_only=true)"
+run_id="${run_url##*/}"
+test -n "$run_id"
+gh run watch "$run_id" --exit-status
+gh run download "$run_id" \
+  --name oidf-public-onboarding-material \
+  --dir runtime/official-onboarding
 ```
 
-该模式调用可复用的接入材料 workflow，在不暴露邮箱或密码哈希的前提下绑定全新申请人
-邮箱承诺，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。进入第 3 步前，
-必须下载该 artifact，并按相同 source commit 完成校验。artifact 本身仍不具有生产权限：
+该模式调用可复用的接入材料 workflow，先把精确 Release tag 与已部署源码 commit 绑定，
+再在不暴露邮箱或密码哈希的前提下绑定全新申请人
+邮箱承诺，校验 bundle 并上传私有 artifact；两个一致性测试 job 都不会执行。捕获 dispatch
+返回的 URL 可以把下载绑定到本次精确 run；不得按分支或 workflow 名称选择“最新”运行。
+进入第 3 步前，必须按相同 source commit 校验已下载 artifact。artifact 本身仍不具有生产权限：
 客户端创建和 CA 审批必须由不同身份通过公网控制面完成。
 
 使用以下命令把已校验的官方 artifact 转换为生产申请，不得重新生成客户端、密钥或证书：
@@ -165,12 +264,24 @@ CA 边界：缺失 `keyCertSign`、扩展非 critical，或 Basic Constraints �
 
 ## 3. 通过生产控制面完成客户端接入
 
-执行：
+先在部署宿主机创建有时效的租约。manifest 是公开接入材料；只把原样文件复制到宿主机，
+不得混入 runner 私钥或已交付的 client secret：
+
+```sh
+sudo nazoauthctl conformance lease create \
+  --profile oidf-full \
+  --material /run/nazoauth/oidf-onboarding-manifest.json \
+  --ttl-seconds 28800 \
+  --yes
+```
+
+记录返回的 `lease_id`，再执行：
 
 ```sh
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
   --delivered-client-material runtime/official-onboarding-apply/oidf-delivered-client-material.json \
@@ -179,7 +290,9 @@ python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin 
   --no-runner-env
 ```
 
-凭据输入是严格 JSON，并且只能包含 `applicant_email`、`applicant_password`、
+签名 Operator Task 只保存 manifest SHA-256 和租约元数据；该命令不会把 runner 私钥或
+明文 client secret 交给服务端。每个通过正式控制面审批创建的客户端都会在同一数据库
+写入语句中绑定有效租约。凭据输入是严格 JSON，并且只能包含 `applicant_email`、`applicant_password`、
 `admin_email` 和 `admin_password`。自动化也可使用 `--credentials-fd N`；工具不提供
 密码环境变量或 argv 回退路径。
 
@@ -240,7 +353,8 @@ OpenID4VC runner 只能使用明确标记的专用 conformance 用户。driver �
 
 ```sh
 gh workflow run oidf-conformance-full.yml \
-  --ref main \
+  --ref <workflow-定义-ref> \
+  -f release_tag=<精确-release-tag> \
   -f deployed_sha=<已部署-sha> \
   -f target_issuer=https://issuer.example \
   -f runner_mode=parallel-isolated \
@@ -252,8 +366,10 @@ gh workflow run openid4vc-conformance.yml \
   -f target_origin=https://issuer.example
 ```
 
-两个 workflow 都从 `oidf-conformance` environment 读取经过轮换的套件 token、
-运行账号和已交付客户端材料。OIDC/FAPI 的并发组、四个 CIBA 组以及两个浏览器敏感
+GitHub Actions 平台没有原生继承 FD 输入，因此仓库 Secret 只暴露给一个短生命周期的
+materializer step。只有该进程拥有秘密环境项；它把内容写入 `RUNNER_TEMP` 下权限为
+`0600` 的文件，后续 step 只接收路径或继承 FD，并通过 `if: always()` 删除目录。该方案
+缩小了暴露窗口，但不会伪称消除了 GitHub runner 信任边界。OIDC/FAPI 的并发组、四个 CIBA 组以及两个浏览器敏感
 plan 由 workflow 自动隔离；OpenID4VC 按有界 group 执行 17 个 plan。操作者不应手工
 拆 plan、复制配置或修改 runner 并发策略。
 
@@ -265,9 +381,18 @@ plan 由 workflow 自动隔离；OpenID4VC 按有界 group 执行 17 个 plan。
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
   --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
+
+sudo nazoauthctl conformance lease revoke \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" --yes
+sudo nazoauthctl conformance lease cleanup --yes
 ```
 
-清理过程通过公网管理员 API 撤销信任申请并停用本次创建的客户端。只有代理回滚流程确认旧信任配置恢复后，才能删除安装的 CA。留存脱敏后的结果、精确 commit、plan manifest、bundle digest、审批/撤销审计 ID 和官方 run ID；文档中严禁保存密码、私钥、session cookie、CSRF token、client secret 或一次性交付 token。
+公网清理先撤销信任申请并停用本次客户端；租约撤销会原子停用全部绑定客户端，随后删除其
+token、grant、revocation、access request、mTLS 信任事件和客户端记录。若显式清理未能执行，
+服务会在租约期限到达时立即拒绝这些客户端，并由周期性幂等清理器完成相同的数据库删除；
+只保留不含秘密的租约墓碑用于审计。已有 Valkey 协议瞬态状态在客户端过期后不可用，并按
+各自 TTL 到期；当前实现不会扫描共享 Valkey 命名空间。只有代理回滚流程确认旧信任配置恢复后，
+才能删除安装的 CA。留存脱敏后的结果、精确 commit、plan manifest、bundle digest、审批/撤销审计 ID 和官方 run ID；文档中严禁保存密码、私钥、session cookie、CSRF token、client secret 或一次性交付 token。
 
 套件导出的原始 ZIP 不是脱敏证据：其中的 `testInfo.config` 和日志正文可能包含
 浏览器密码、client secret、token 或私钥。仓库 runner 会在正常或可处理的异常退出路径中生成

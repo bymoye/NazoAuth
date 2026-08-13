@@ -30,11 +30,9 @@ fn merge_sorted_unique(target: &mut Vec<String>, incoming: Vec<String>) {
 use super::*;
 use actix_web::test::TestRequest;
 use nazo_http_actix::IpCidr;
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::Rsa;
-use openssl::x509::extension::SubjectAlternativeName;
-use openssl::x509::{X509Builder, X509Name};
+use rcgen::{
+    CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256, SanType,
+};
 
 struct TestCertificate {
     x5c: String,
@@ -86,10 +84,6 @@ fn client() -> ClientRow {
         sector_identifier_uri: None,
         sector_identifier_host: None,
     }
-}
-
-fn test_private_key() -> PKey<Private> {
-    PKey::from_rsa(Rsa::generate(2048).expect("test rsa key")).expect("test pkey")
 }
 
 #[test]
@@ -172,33 +166,15 @@ fn test_certificate(
     not_before_offset: i64,
     not_after_offset: i64,
 ) -> TestCertificate {
-    let key = test_private_key();
-    let mut name = X509Name::builder().expect("x509 name builder");
-    name.append_entry_by_nid(Nid::COMMONNAME, common_name)
-        .expect("test common name");
-    let name = name.build();
-    let mut builder = X509Builder::new().expect("x509 builder");
-    builder.set_version(2).expect("x509 version");
-    builder.set_subject_name(&name).expect("x509 subject");
-    builder.set_issuer_name(&name).expect("x509 issuer");
-    builder.set_pubkey(&key).expect("x509 pubkey");
-    let now = Utc::now().timestamp();
-    let not_before = Asn1Time::from_unix(now + not_before_offset).expect("x509 not_before");
-    let not_after = Asn1Time::from_unix(now + not_after_offset).expect("x509 not_after");
-    builder
-        .set_not_before(&not_before)
-        .expect("set x509 not_before");
-    builder
-        .set_not_after(&not_after)
-        .expect("set x509 not_after");
-    builder
-        .sign(&key, MessageDigest::sha256())
-        .expect("sign test cert");
-    let der = builder.build().to_der().expect("cert der");
-    TestCertificate {
-        x5c: STANDARD.encode(&der),
-        thumbprint: URL_SAFE_NO_PAD.encode(Sha256::digest(&der)),
-    }
+    let mut params = CertificateParams::default();
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now + time::Duration::seconds(not_before_offset);
+    params.not_after = now + time::Duration::seconds(not_after_offset);
+    finish_test_certificate(params)
 }
 
 fn certificate_pem(certificate: &TestCertificate) -> String {
@@ -209,79 +185,59 @@ fn certificate_pem(certificate: &TestCertificate) -> String {
 }
 
 fn test_certificate_with_sans() -> TestCertificate {
-    let key = test_private_key();
-    let mut name = X509Name::builder().expect("x509 name builder");
-    name.append_entry_by_nid(Nid::COMMONNAME, "client, one")
-        .expect("test common name");
-    name.append_entry_by_nid(Nid::ORGANIZATIONNAME, "Example + Org")
-        .expect("test organization");
-    let name = name.build();
-    let mut builder = X509Builder::new().expect("x509 builder");
-    builder.set_version(2).expect("x509 version");
-    builder.set_subject_name(&name).expect("x509 subject");
-    builder.set_issuer_name(&name).expect("x509 issuer");
-    builder.set_pubkey(&key).expect("x509 pubkey");
-    let now = Utc::now().timestamp();
-    let not_before = Asn1Time::from_unix(now - 60).expect("x509 not_before");
-    let not_after = Asn1Time::from_unix(now + 3600).expect("x509 not_after");
-    builder
-        .set_not_before(&not_before)
-        .expect("set x509 not_before");
-    builder
-        .set_not_after(&not_after)
-        .expect("set x509 not_after");
-    let san = SubjectAlternativeName::new()
-        .dns("client.example")
-        .dns("api.client.example")
-        .uri("urn:client:one")
-        .email("client@example.com")
-        .ip("192.0.2.44")
-        .ip("2001:db8::44")
-        .build(&builder.x509v3_context(None, None))
-        .expect("subject alternative name");
-    builder.append_extension(san).expect("append san");
-    builder
-        .sign(&key, MessageDigest::sha256())
-        .expect("sign test cert");
-    let der = builder.build().to_der().expect("cert der");
-    TestCertificate {
-        x5c: STANDARD.encode(&der),
-        thumbprint: URL_SAFE_NO_PAD.encode(Sha256::digest(&der)),
-    }
+    let mut params = current_test_certificate_params();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "client, one");
+    params
+        .distinguished_name
+        .push(DnType::OrganizationName, "Example + Org");
+    params.subject_alt_names = vec![
+        SanType::DnsName("client.example".try_into().unwrap()),
+        SanType::DnsName("api.client.example".try_into().unwrap()),
+        SanType::URI("urn:client:one".try_into().unwrap()),
+        SanType::Rfc822Name("client@example.com".try_into().unwrap()),
+        SanType::IpAddress("192.0.2.44".parse().unwrap()),
+        SanType::IpAddress("2001:db8::44".parse().unwrap()),
+    ];
+    finish_test_certificate(params)
 }
 
 fn test_certificate_with_full_subject() -> TestCertificate {
-    let key = test_private_key();
-    let mut name = X509Name::builder().expect("x509 name builder");
-    name.append_entry_by_nid(Nid::COUNTRYNAME, "US")
-        .expect("test country");
-    name.append_entry_by_nid(Nid::STATEORPROVINCENAME, "CA")
-        .expect("test state");
-    name.append_entry_by_nid(Nid::LOCALITYNAME, "San Francisco")
-        .expect("test locality");
-    name.append_entry_by_nid(Nid::ORGANIZATIONALUNITNAME, "Security")
-        .expect("test organizational unit");
-    name.append_entry_by_nid(Nid::PKCS9_EMAILADDRESS, "client@example.com")
-        .expect("test email address");
-    let name = name.build();
-    let mut builder = X509Builder::new().expect("x509 builder");
-    builder.set_version(2).expect("x509 version");
-    builder.set_subject_name(&name).expect("x509 subject");
-    builder.set_issuer_name(&name).expect("x509 issuer");
-    builder.set_pubkey(&key).expect("x509 pubkey");
-    let now = Utc::now().timestamp();
-    let not_before = Asn1Time::from_unix(now - 60).expect("x509 not_before");
-    let not_after = Asn1Time::from_unix(now + 3600).expect("x509 not_after");
-    builder
-        .set_not_before(&not_before)
-        .expect("set x509 not_before");
-    builder
-        .set_not_after(&not_after)
-        .expect("set x509 not_after");
-    builder
-        .sign(&key, MessageDigest::sha256())
-        .expect("sign test cert");
-    let der = builder.build().to_der().expect("cert der");
+    let mut params = current_test_certificate_params();
+    params.distinguished_name.push(DnType::CountryName, "US");
+    params
+        .distinguished_name
+        .push(DnType::StateOrProvinceName, "CA");
+    params
+        .distinguished_name
+        .push(DnType::LocalityName, "San Francisco");
+    params
+        .distinguished_name
+        .push(DnType::OrganizationalUnitName, "Security");
+    params.distinguished_name.push(
+        DnType::CustomDnType(vec![1, 2, 840, 113549, 1, 9, 1]),
+        "client@example.com",
+    );
+    finish_test_certificate(params)
+}
+
+fn current_test_certificate_params() -> CertificateParams {
+    let mut params = CertificateParams::default();
+    params.distinguished_name = DistinguishedName::new();
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::minutes(1);
+    params.not_after = now + time::Duration::hours(1);
+    params
+}
+
+fn finish_test_certificate(params: CertificateParams) -> TestCertificate {
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("test P-256 key");
+    let der = params
+        .self_signed(&key)
+        .expect("test certificate")
+        .der()
+        .to_vec();
     TestCertificate {
         x5c: STANDARD.encode(&der),
         thumbprint: URL_SAFE_NO_PAD.encode(Sha256::digest(&der)),
@@ -423,6 +379,15 @@ fn certificate_pem_identity_rejects_future_and_expired_certificates() {
 
     assert!(certificate_pem_identity(&certificate_pem(&future)).is_none());
     assert!(certificate_pem_identity(&certificate_pem(&expired)).is_none());
+}
+
+#[test]
+fn certificate_der_identity_rejects_trailing_data() {
+    let certificate = test_certificate("client-trailing-data", -60, 3600);
+    let mut der = STANDARD.decode(certificate.x5c).unwrap();
+    der.extend_from_slice(b"trailing-data");
+
+    assert!(certificate_der_identity(&der).is_none());
 }
 
 #[test]

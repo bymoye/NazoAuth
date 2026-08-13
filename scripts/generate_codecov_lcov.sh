@@ -5,7 +5,22 @@ IGNORE_REGEX='(^|/)(tests?|benches|examples|migrations)(/|\.rs$)|(^|/)cargo/regi
 
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/codecov-coverage}"
+SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+DEFAULT_CARGO_TARGET_DIR="$SCRIPT_ROOT/target/codecov-coverage"
+REQUESTED_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$DEFAULT_CARGO_TARGET_DIR}"
+if ! command -v realpath >/dev/null 2>&1; then
+  echo "realpath is required to validate CARGO_TARGET_DIR" >&2
+  exit 2
+fi
+if ! CARGO_TARGET_DIR="$(realpath -m -- "$REQUESTED_CARGO_TARGET_DIR")"; then
+  echo "unable to resolve CARGO_TARGET_DIR" >&2
+  exit 2
+fi
+if [[ "$CARGO_TARGET_DIR" != "$DEFAULT_CARGO_TARGET_DIR" ]]; then
+  echo "refusing CARGO_TARGET_DIR outside the repository-owned codecov target: $CARGO_TARGET_DIR" >&2
+  exit 2
+fi
+export CARGO_TARGET_DIR
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 
 COVERAGE_DIR="${CARGO_TARGET_DIR%/}/llvm-cov-target"
@@ -20,19 +35,58 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 SERVER_PID=""
 SIGNED_SERVER_PID=""
-POSTGRES_CONTAINER="${CODECOV_POSTGRES_CONTAINER:-nazo-oauth-codecov-postgres}"
-VALKEY_CONTAINER="${CODECOV_VALKEY_CONTAINER:-nazo-oauth-codecov-valkey}"
+CODECOV_OWNER_LABEL="nazoauth-codecov-lcov"
+DEFAULT_POSTGRES_CONTAINER="nazo-oauth-codecov-postgres"
+DEFAULT_VALKEY_CONTAINER="nazo-oauth-codecov-valkey"
+POSTGRES_CONTAINER="${CODECOV_POSTGRES_CONTAINER:-$DEFAULT_POSTGRES_CONTAINER}"
+VALKEY_CONTAINER="${CODECOV_VALKEY_CONTAINER:-$DEFAULT_VALKEY_CONTAINER}"
+if [[ "$POSTGRES_CONTAINER" != "$DEFAULT_POSTGRES_CONTAINER" ]]; then
+  echo "refusing CODECOV_POSTGRES_CONTAINER override; only $DEFAULT_POSTGRES_CONTAINER is script-owned" >&2
+  exit 2
+fi
+if [[ "$VALKEY_CONTAINER" != "$DEFAULT_VALKEY_CONTAINER" ]]; then
+  echo "refusing CODECOV_VALKEY_CONTAINER override; only $DEFAULT_VALKEY_CONTAINER is script-owned" >&2
+  exit 2
+fi
+
+remove_owned_container() {
+  local container_name="$1"
+  if ! docker inspect "$container_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  local owner
+  owner="$(docker inspect --format '{{ index .Config.Labels "io.nazoauth.owner" }}' "$container_name" 2>/dev/null || true)"
+  if [[ "$owner" != "$CODECOV_OWNER_LABEL" ]]; then
+    echo "refusing to remove unowned Docker container $container_name" >&2
+    return 1
+  fi
+  docker rm -f "$container_name"
+}
+
 POSTGRES_HOST="${CODECOV_POSTGRES_HOST:-127.0.0.1}"
 POSTGRES_PORT="${CODECOV_POSTGRES_PORT:-15432}"
 VALKEY_HOST="${CODECOV_VALKEY_HOST:-127.0.0.1}"
 VALKEY_PORT="${CODECOV_VALKEY_PORT:-16383}"
-DOCKER_NETWORK="${CODECOV_DOCKER_NETWORK:-}"
-if [[ -n "$DOCKER_NETWORK" ]]; then
-  POSTGRES_HOST="${CODECOV_POSTGRES_HOST:-$POSTGRES_CONTAINER}"
-  POSTGRES_PORT="${CODECOV_POSTGRES_PORT:-5432}"
-  VALKEY_HOST="${CODECOV_VALKEY_HOST:-$VALKEY_CONTAINER}"
-  VALKEY_PORT="${CODECOV_VALKEY_PORT:-6379}"
+if [[ -n "${CODECOV_DOCKER_NETWORK:-}" ]]; then
+  echo "refusing CODECOV_DOCKER_NETWORK override; coverage owns its loopback ports" >&2
+  exit 2
 fi
+case "$POSTGRES_HOST" in
+  127.0.0.1) ;;
+  *) echo "refusing CODECOV_POSTGRES_HOST outside the script-owned fixture" >&2; exit 2 ;;
+esac
+case "$POSTGRES_PORT" in
+  15432) ;;
+  *) echo "refusing CODECOV_POSTGRES_PORT outside the script-owned fixture" >&2; exit 2 ;;
+esac
+case "$VALKEY_HOST" in
+  127.0.0.1) ;;
+  *) echo "refusing CODECOV_VALKEY_HOST outside the script-owned fixture" >&2; exit 2 ;;
+esac
+case "$VALKEY_PORT" in
+  16383) ;;
+  *) echo "refusing CODECOV_VALKEY_PORT outside the script-owned fixture" >&2; exit 2 ;;
+esac
 
 cleanup() {
   if [[ -n "$SIGNED_SERVER_PID" ]]; then
@@ -43,7 +97,8 @@ cleanup() {
     kill -INT "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  docker rm -f "$POSTGRES_CONTAINER" "$VALKEY_CONTAINER" 2>/dev/null || true
+  remove_owned_container "$POSTGRES_CONTAINER" || true
+  remove_owned_container "$VALKEY_CONTAINER" || true
 }
 trap cleanup EXIT
 
@@ -56,29 +111,26 @@ profile_path() {
 
 cargo llvm-cov clean --workspace
 eval "$(cargo llvm-cov show-env --sh)"
+if [[ "${CARGO_TARGET_DIR:-}" != "$DEFAULT_CARGO_TARGET_DIR" ]]; then
+  echo "cargo llvm-cov changed CARGO_TARGET_DIR outside the repository-owned codecov target" >&2
+  exit 2
+fi
 if [[ "${CODECOV_FORCE_CARGO_CLEAN:-0}" == "1" ]]; then
   cargo clean
 fi
 
-docker rm -f "$POSTGRES_CONTAINER" "$VALKEY_CONTAINER" 2>/dev/null || true
-docker_args=()
-if [[ -n "$DOCKER_NETWORK" ]]; then
-  docker_args+=(--network "$DOCKER_NETWORK")
-fi
+remove_owned_container "$POSTGRES_CONTAINER"
+remove_owned_container "$VALKEY_CONTAINER"
 postgres_port_args=(-p "${POSTGRES_PORT}:5432")
 valkey_port_args=(-p "${VALKEY_PORT}:6379")
-if [[ -n "$DOCKER_NETWORK" ]]; then
-  postgres_port_args=()
-  valkey_port_args=()
-fi
 docker run -d --name "$POSTGRES_CONTAINER" \
-  "${docker_args[@]}" \
+  --label "io.nazoauth.owner=$CODECOV_OWNER_LABEL" \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=oauth \
   "${postgres_port_args[@]}" \
   postgres:18-alpine
 docker run -d --name "$VALKEY_CONTAINER" \
-  "${docker_args[@]}" \
+  --label "io.nazoauth.owner=$CODECOV_OWNER_LABEL" \
   "${valkey_port_args[@]}" \
   valkey/valkey:8-alpine
 
@@ -101,9 +153,18 @@ if [[ "$services_ready" != "true" ]]; then
 fi
 docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d oauth
 docker exec "$VALKEY_CONTAINER" valkey-cli ping
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nazo_audit_test'
+docker exec "$POSTGRES_CONTAINER" \
+  psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE nazo_workspace_test'
 
 export DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/oauth"
+export NAZO_AUDIT_TEST_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_audit_test"
 export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"
+WORKSPACE_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_workspace_test"
+WORKSPACE_VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/1"
 export VALKEY_COMMAND_TIMEOUT_MS='1000'
 export BIND='127.0.0.1:18000'
 export ISSUER='http://127.0.0.1:18000'
@@ -125,14 +186,23 @@ export EMAIL_CODE_PEER_COOLDOWN_SECONDS='1'
 export EMAIL_CODE_DEV_RESPONSE_ENABLED='false'
 export AVATAR_STORAGE_DIR='runtime/codecov/avatars'
 export JWK_KEYS_DIR='runtime/codecov/keys'
-export AUTH_RATE_LIMIT_MAX_REQUESTS='100000'
-export TOKEN_RATE_LIMIT_MAX_REQUESTS='100000'
-export TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS='100000'
 export REQUIRE_PUSHED_AUTHORIZATION_REQUESTS='false'
-export ENABLE_REQUEST_OBJECT='true'
-export ENABLE_PAR_REQUEST_OBJECT='true'
+# Coverage owns and migrates an ephemeral database with its bootstrap
+# superuser.  Keep production's strict least-privilege default intact while
+# explicitly selecting the documented non-strict repository preflight for
+# this disposable functional-test fixture.
+export SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE='false'
+# Exercise the real encrypted TOTP persistence boundary with a fresh key that
+# exists only for this coverage run.  Both server processes inherit the same
+# value so they can read each other's envelopes without weakening the
+# production fail-closed requirement.
+export MFA_TOTP_ENCRYPTION_KEY_ID='codecov-ephemeral-v1'
+export MFA_TOTP_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 export ENABLE_AUTHORIZATION_DETAILS='true'
-export NAZO_RUNTIME_INSTANCE_ID='codecov-primary'
+export RUNTIME_INSTANCE_ID='codecov-primary'
+PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"
+SIGNED_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-signed"
+export INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR"
 # 覆盖率 E2E 使用与服务端相同的 provider registry，不再维护单 provider 配置入口。
 export FEDERATION_PROVIDER_CONFIGS='[{"provider_id":"codecov-oidc","enabled":true,"display_name":"Codecov OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"codecov-oidc-client","client_secret":"codecov-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/codecov-oidc/callback","scopes":"openid email profile"}]'
 export E2E_OIDC_PROVIDER_ID='codecov-oidc'
@@ -143,7 +213,8 @@ export FEDERATION_SAML_GATEWAY_AUDIENCE='nazo-oauth-codecov'
 export FEDERATION_SAML_GATEWAY_SECRET='codecov-saml-gateway-secret-000000'
 export RUST_LOG="${RUST_LOG:-warn}"
 
-mkdir -p runtime/codecov/avatars runtime/codecov/keys "$COVERAGE_DIR"
+mkdir -p runtime/codecov/avatars runtime/codecov/keys \
+  "$PRIMARY_INSTANCE_IDENTITY_DIR" "$SIGNED_INSTANCE_IDENTITY_DIR" "$COVERAGE_DIR"
 "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -258,10 +329,12 @@ cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
 cargo build --locked --workspace --all-features --bin nazoauth
 
-LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
+INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
+  LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
 SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
-  NAZO_RUNTIME_INSTANCE_ID='codecov-signed' \
+  RUNTIME_INSTANCE_ID='codecov-signed' \
+  INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR" \
   BIND='127.0.0.1:18001' \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
   "$BIN_DIR/nazoauth" server &
@@ -298,10 +371,35 @@ kill -INT "$SERVER_PID"
 wait "$SERVER_PID" || true
 SERVER_PID=""
 
+# The E2E seed intentionally leaves durable identity and protocol state behind.
+# Workspace integration tests include process-wide migration and key-rotation
+# invariants, so they must start from their own migrated database and Valkey DB
+# rather than inheriting another test phase's credentials or key versions.
+export DATABASE_URL="$WORKSPACE_DATABASE_URL"
+export NAZO_TEST_DATABASE_URL="$WORKSPACE_DATABASE_URL"
+export VALKEY_URL="$WORKSPACE_VALKEY_URL"
+cargo test --locked -p nazo-postgres --test migrations \
+  pending_migrations_create_all_runtime_module_state_tables
+
 TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"
 cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
 cargo test --locked --workspace --all-features --lib --bins --tests
+
+# These integration-heavy protocol tests are intentionally excluded from the
+# default workspace run because they require live PostgreSQL and Valkey. This
+# coverage phase owns both services, so execute the explicit allowlist here.
+# Keep the allowlist narrow: future ignored tests may depend on external state.
+COVERAGE_LIVE_TESTS=(
+  live_immediate_offer_pre_authorized_credential_replay_and_notification
+  live_deferred_credential_claim_response_replay_and_notification
+  live_access_enforces_dpop_binding_and_validates_presented_proof
+  live_offer_enforces_subject_dataset_lifetime_and_transaction_code_policy
+  par_fapi2_rejects_shared_secret_client_auth_after_authentication
+)
+for test_name in "${COVERAGE_LIVE_TESTS[@]}"; do
+  cargo test --locked -p nazo-oauth-server --lib "$test_name" -- --ignored
+done
 
 # Let cargo-llvm-cov resolve the complete workspace object graph as an
 # independent report. `show-env` deliberately points cargo-llvm-cov at the
@@ -325,7 +423,10 @@ mapfile -t SERVER_PROFRAWS < <(
   find "$COVERAGE_DIR" -type f \
     \( -name 'server-*.profraw' -o -name 'signed-server-*.profraw' \)
 )
-mapfile -t TEST_PROFRAWS < <(find "$COVERAGE_DIR" -name 'cargo-*.profraw' -type f)
+mapfile -t TEST_PROFRAWS < <(
+  find "$COVERAGE_DIR" -type f \
+    -name 'cargo-*.profraw'
+)
 if [[ "${#SERVER_PROFRAWS[@]}" -eq 0 || "${#TEST_PROFRAWS[@]}" -eq 0 ]]; then
   echo "Both server and test llvm-cov profile files are required." >&2
   exit 1

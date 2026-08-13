@@ -191,10 +191,12 @@ impl DecisionLiveFixture {
         });
         let valkey = valkey_builder.build().expect("valkey client should build");
         valkey.init().await.expect("valkey should connect");
+        let diesel_db = create_pool(database_url, 4).expect("database pool should build");
+        crate::test_support::initialize_audit_dependencies(&diesel_db);
 
         Some(Self {
             state: Data::new(TestInfrastructure {
-                diesel_db: create_pool(database_url, 4).expect("database pool should build"),
+                diesel_db,
                 valkey,
                 settings: Arc::new(settings),
                 keyset: crate::test_support::test_key_manager(),
@@ -809,7 +811,7 @@ async fn authorization_decision_rejects_malformed_consumed_par_without_issuing_c
     };
     let response = authorize_decision(fixture.state.clone(), req, Form(form)).await;
 
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let pairs = redirect_location(&response)
         .query_pairs()
         .into_owned()
@@ -840,7 +842,7 @@ async fn authorization_decision_accepts_deny_with_user_match() {
     };
 
     let response = authorize_decision(fixture.state.clone(), req, Form(form)).await;
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let pairs = redirect_location(&response)
         .query_pairs()
         .into_owned()
@@ -876,7 +878,7 @@ async fn authorization_decision_issues_code_for_matching_user_and_client() {
     };
 
     let response = authorize_decision(fixture.state.clone(), req, Form(form)).await;
-    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let pairs = redirect_location(&response)
         .query_pairs()
         .into_owned()

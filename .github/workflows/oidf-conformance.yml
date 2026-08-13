@@ -27,7 +27,7 @@ jobs:
     env:
       DEPLOYED_SHA: ${{ inputs.deployed_sha }}
       TRUSTED_TARGET_ISSUER: ${{ vars.OIDF_TARGET_ISSUER }}
-      CONFORMANCE_SERVER: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
+      CONFORMANCE_SERVER: https://www.certification.openid.net
       OIDF_REF: ${{ vars.OIDF_CONFORMANCE_SUITE_REF || 'dee9a25160e789f0f80517674693ef7989ab9fa1' }}
       PLAN_EXPRESSION: ${{ inputs.plan_expression }}
       OIDF_TARGET_ISSUER: ${{ inputs.target_issuer }}
@@ -39,7 +39,7 @@ jobs:
       RERUN: ${{ vars.OIDF_RERUN || '' }}
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -49,14 +49,17 @@ jobs:
           set -euo pipefail
           git cat-file -e "$DEPLOYED_SHA^{commit}"
           git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"
+          git checkout --detach "$DEPLOYED_SHA"
+          test "$(git rev-parse HEAD)" = "$DEPLOYED_SHA"
 
       - name: Verify target issuer is trusted
         run: |
           set -euo pipefail
           test -n "$TRUSTED_TARGET_ISSUER"
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
+          test "$CONFORMANCE_SERVER" = "https://www.certification.openid.net"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -76,17 +79,23 @@ jobs:
       - name: Install age decryptor
         run: cargo install rage --version 0.11.2 --locked
 
+      - name: Materialize OIDF job secrets
+        run: python scripts/materialize_github_oidf_secrets.py --minimal --output-dir "$RUNNER_TEMP/oidf-secrets"
+        env:
+          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
+          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
+          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
+
       - name: Write OIDF plan config
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' "$OIDF_PLAN_CONFIG_AGE_IDENTITY" > oidf-plan-config.agekey
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-secret-patch.json \
             docs/conformance/oidf-plan-config-secret-patch.json.age
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-ciba-secret-patch.json \
             docs/conformance/oidf-plan-config-ciba-secret-patch.json.age
           python - <<'PY'
@@ -106,18 +115,11 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
-          test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
-          printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          chmod 600 ciba-automated-decision-token
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
-            --ciba-automated-decision-token-file ciba-automated-decision-token \
+            --ciba-automated-decision-token-file "$RUNNER_TEMP/oidf-secrets/ciba-decision-token" \
             --output oidf-plan-configs.json
-          rm -f ciba-automated-decision-token
-        env:
-          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
-          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
 
       - name: Run OIDF conformance plan
         run: |
@@ -130,6 +132,7 @@ jobs:
             --target-issuer "$OIDF_TARGET_ISSUER"
             --timeout-seconds "$RUN_TIMEOUT_SECONDS"
             --monitor-interval-seconds "$MONITOR_INTERVAL_SECONDS"
+            --token-file "$RUNNER_TEMP/oidf-secrets/suite-token"
           )
           if [ "$VERBOSE" = "true" ]; then
             args+=(--verbose)
@@ -145,7 +148,6 @@ jobs:
           fi
           python -u scripts/run_oidf_conformance.py "${args[@]}"
         env:
-          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
           OIDF_PLAN_SET_JSON: ${{ vars.OIDF_PLAN_SET_JSON }}
 
       - name: Verify official suite remained pristine
@@ -155,3 +157,9 @@ jobs:
             test "$(git -C oidf-conformance-suite rev-parse HEAD)" = "$OIDF_REF"
             test -z "$(git -C oidf-conformance-suite status --porcelain --untracked-files=no)"
           }
+
+      - name: Remove OIDF job secrets
+        if: always()
+        run: |
+          rm -f -- oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json oidf-plan-configs.json
+          rm -rf -- "$RUNNER_TEMP/oidf-secrets"

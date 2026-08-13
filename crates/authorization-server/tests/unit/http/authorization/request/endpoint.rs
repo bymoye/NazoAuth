@@ -9,11 +9,6 @@ use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
 use nazo_valkey::test_support::par_storage_key;
-use openssl::encrypt::Decrypter;
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::{Padding, Rsa};
-use openssl::symm::{Cipher, decrypt_aead};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -482,24 +477,21 @@ fn decode_jarm_claims(state: &TestInfrastructure, response_jwt: &str, audience: 
         .claims
 }
 
-fn rsa_jarm_jwe_keypair(kid: &str) -> (PKey<Private>, Value) {
-    let rsa = Rsa::generate(2048).expect("test RSA key should generate");
+fn rsa_jarm_jwe_keypair(kid: &str) -> (crate::test_support::TestRsaKey, Value) {
+    let rsa = crate::test_support::TestRsaKey::generate();
     let jwk = json!({
         "kty": "RSA",
         "kid": kid,
         "use": "enc",
         "alg": "RSA-OAEP-256",
-        "n": URL_SAFE_NO_PAD.encode(rsa.n().to_vec()),
-        "e": URL_SAFE_NO_PAD.encode(rsa.e().to_vec())
+        "n": URL_SAFE_NO_PAD.encode(&rsa.modulus),
+        "e": URL_SAFE_NO_PAD.encode(&rsa.exponent)
     });
-    (
-        PKey::from_rsa(rsa).expect("test RSA key should convert to PKey"),
-        jwk,
-    )
+    (rsa, jwk)
 }
 
 fn decrypt_jarm_jwe(
-    private_key: &PKey<Private>,
+    private_key: &crate::test_support::TestRsaKey,
     compact_jwe: &str,
 ) -> anyhow::Result<(Value, String)> {
     let parts = compact_jwe.split('.').collect::<Vec<_>>();
@@ -509,21 +501,9 @@ fn decrypt_jarm_jwe(
     let iv = URL_SAFE_NO_PAD.decode(parts[2])?;
     let ciphertext = URL_SAFE_NO_PAD.decode(parts[3])?;
     let tag = URL_SAFE_NO_PAD.decode(parts[4])?;
-    let mut decrypter = Decrypter::new(private_key)?;
-    decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-    decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-    decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
-    let mut cek = vec![0; decrypter.decrypt_len(&encrypted_key)?];
-    let len = decrypter.decrypt(&encrypted_key, &mut cek)?;
-    cek.truncate(len);
-    let plaintext = decrypt_aead(
-        Cipher::aes_256_gcm(),
-        &cek,
-        Some(&iv),
-        parts[0].as_bytes(),
-        &ciphertext,
-        &tag,
-    )?;
+    let cek = private_key.decrypt_oaep_sha256(&encrypted_key)?;
+    let plaintext =
+        crate::crypto::aes_256_gcm_decrypt(&cek, &iv, parts[0].as_bytes(), &ciphertext, &tag)?;
     Ok((protected_header, String::from_utf8(plaintext)?))
 }
 
@@ -982,7 +962,7 @@ async fn authorization_request_redirects_when_outer_request_uri_parameters_do_no
 }
 
 #[actix_web::test]
-async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_and_request_uri() {
+async fn fapi_authorization_accepts_matching_outer_parameters_and_ignores_the_duplicates() {
     let Some(fixture) = LiveAuthorizationFixture::new().await else {
         return;
     };
@@ -1004,13 +984,15 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
                 ("client_id", client_id.as_str()),
                 ("redirect_uri", "https://client.example/callback"),
                 ("response_type", "code"),
+                ("code_challenge", VALID_CODE_CHALLENGE),
+                ("code_challenge_method", "S256"),
                 ("scope", "openid"),
                 ("state", "fapi-par-state"),
             ]),
         )
         .await;
     let uri = format!(
-        "/authorize?client_id={}&request_uri={}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code",
+        "/authorize?client_id={}&request_uri={}&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&response_type=code&scope=openid",
         urlencoding::encode(&client_id),
         urlencoding::encode(&request_uri)
     );
@@ -1022,6 +1004,7 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
         ("request_uri", request_uri.as_str()),
         ("redirect_uri", "https://client.example/callback"),
         ("response_type", "code"),
+        ("scope", "openid"),
     ]);
 
     let response = authorize_request(
@@ -1031,7 +1014,25 @@ async fn fapi_authorization_request_rejects_outer_parameters_beyond_client_id_an
     )
     .await;
 
-    assert_authorization_error_redirect(response, "invalid_request", Some("fapi-par-state"));
+    let location = authorization_location(&response);
+    assert_eq!(
+        location.origin().ascii_serialization(),
+        "https://app.example"
+    );
+    assert_eq!(location.path(), "/auth");
+    let next = location
+        .query_pairs()
+        .find_map(|(key, value)| (key == "next").then_some(value.into_owned()))
+        .expect("login redirect should include next parameter");
+    let next = urlencoding::decode(&next).expect("next parameter should decode");
+    for parameter in [
+        "request_uri=",
+        "redirect_uri=",
+        "response_type=code",
+        "scope=openid",
+    ] {
+        assert!(next.contains(parameter));
+    }
 }
 
 #[actix_web::test]

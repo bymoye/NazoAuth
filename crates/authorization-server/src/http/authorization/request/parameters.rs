@@ -70,21 +70,13 @@ pub(super) fn outer_request_uri_parameters_match_pushed(
     })
 }
 
-pub(super) fn outer_request_uri_parameters_are_fapi_compliant(
-    outer: &HashMap<String, String>,
-) -> bool {
-    outer
-        .keys()
-        .all(|key| matches!(key.as_str(), "client_id" | "request_uri"))
-}
-
 pub(super) fn authorization_login_query(
     expanded: &HashMap<String, String>,
-    original: &HashMap<String, String>,
+    original: Option<&HashMap<String, String>>,
     request_uri: Option<&String>,
 ) -> HashMap<String, String> {
     if request_uri.is_some() {
-        original.clone()
+        original.cloned().unwrap_or_else(|| expanded.clone())
     } else {
         expanded.clone()
     }
@@ -95,25 +87,27 @@ pub(super) fn authorization_login_url_for_frontend(
     q: &HashMap<String, String>,
     reauth_nonce: Option<&str>,
 ) -> String {
-    let mut next_query = q.clone();
-    if let Some(reauth_nonce) = reauth_nonce {
-        next_query.insert(REAUTH_NONCE_PARAMETER.to_owned(), reauth_nonce.to_owned());
+    let mut next = String::from("/authorize");
+    let mut has_query = false;
+    for (key, value) in q {
+        next.push(if has_query { '&' } else { '?' });
+        has_query = true;
+        next.push_str(&urlencoding::encode(key));
+        next.push('=');
+        next.push_str(&urlencoding::encode(value));
     }
-    let query = next_query
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-    let next = if query.is_empty() {
-        "/authorize".to_string()
-    } else {
-        format!("/authorize?{query}")
-    };
-    format!(
-        "{}/auth?next={}",
-        frontend_base_url.trim_end_matches('/'),
-        urlencoding::encode(&next)
-    )
+    if let Some(reauth_nonce) = reauth_nonce {
+        next.push(if has_query { '&' } else { '?' });
+        next.push_str(REAUTH_NONCE_PARAMETER);
+        next.push('=');
+        next.push_str(&urlencoding::encode(reauth_nonce));
+    }
+
+    let mut location = String::with_capacity(frontend_base_url.len() + next.len() + 16);
+    location.push_str(frontend_base_url.trim_end_matches('/'));
+    location.push_str("/auth?next=");
+    location.push_str(&urlencoding::encode(&next));
+    location
 }
 
 #[cfg(test)]

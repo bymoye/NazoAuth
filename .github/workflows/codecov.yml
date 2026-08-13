@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/codecov.yml"
+      - "codecov.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain"
@@ -13,6 +14,8 @@ on:
       - "crates/**"
       - "src/**"
       - "scripts/generate_codecov_lcov.sh"
+      - "scripts/merge_lcov.py"
+      - "scripts/check_patch_coverage.py"
       - "scripts/full_real_request_e2e.py"
       - "tests/**"
       - "benches/**"
@@ -23,6 +26,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/codecov.yml"
+      - "codecov.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain"
@@ -31,6 +35,8 @@ on:
       - "crates/**"
       - "src/**"
       - "scripts/generate_codecov_lcov.sh"
+      - "scripts/merge_lcov.py"
+      - "scripts/check_patch_coverage.py"
       - "scripts/full_real_request_e2e.py"
       - "tests/**"
       - "benches/**"
@@ -49,13 +55,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The complete base-to-head diff is required for the repository-owned
+          # patch gate. GitHub's pull-files API can omit large file patches.
+          fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           components: llvm-tools-preview, rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           shared-key: coverage
           workspaces: ". -> target/codecov-coverage"
@@ -67,10 +78,12 @@ jobs:
         run: python -m pip install --require-hashes -r requirements/codecov.txt
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@f7446eecb41674ffe9e1e12a2bc5e69a9dec09d3 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
 
       - name: Verify deterministic LCOV union
-        run: python -m unittest tests.unit.test_merge_lcov
+        run: python -m unittest tests.unit.test_merge_lcov tests.unit.test_check_patch_coverage
 
       - name: Generate coverage report
         shell: bash
@@ -89,9 +102,19 @@ jobs:
           retention-days: 7
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+        if: github.event_name != 'pull_request'
+        uses: codecov/codecov-action@a99c28d3f0da835de33ff2feb2e15691c7b9641f # v7
         with:
           files: lcov.info
           disable_search: true
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Verify complete Git patch coverage
+        if: github.event_name == 'pull_request'
+        run: >-
+          python scripts/check_patch_coverage.py
+          --lcov lcov.info
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+          --threshold 90

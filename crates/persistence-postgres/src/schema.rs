@@ -21,6 +21,12 @@ diesel::table! {
         token_hash -> Varchar,
         expires_at -> Timestamptz,
         consumed_at -> Nullable<Timestamptz>,
+        request_id -> Nullable<Varchar>,
+        request_email_hash -> Nullable<Varchar>,
+        claimed_user_id -> Nullable<Uuid>,
+        claim_result -> Nullable<Varchar>,
+        receipt_version -> Nullable<Int2>,
+        claimed_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
@@ -28,7 +34,8 @@ diesel::table! {
 
 diesel::table! {
     user_totp_credentials (id) {
-        id -> Uuid, tenant_id -> Uuid, user_id -> Uuid, secret_base32 -> Varchar,
+        id -> Uuid, tenant_id -> Uuid, user_id -> Uuid, secret_base32 -> Nullable<Varchar>,
+        secret_ciphertext -> Nullable<Binary>, secret_key_id -> Nullable<Varchar>,
         label -> Varchar, confirmed_at -> Nullable<Timestamptz>, last_used_step -> Nullable<Int8>,
         created_at -> Timestamptz, updated_at -> Timestamptz,
     }
@@ -54,6 +61,7 @@ diesel::table! {
         id -> Uuid, tenant_id -> Uuid, category -> Varchar, event_type -> Varchar,
         outcome -> Varchar, actor_id -> Nullable<Uuid>, target_user_id -> Nullable<Uuid>,
         reason_code -> Varchar, occurred_at -> Timestamptz,
+        request_id -> Nullable<Varchar>,
     }
 }
 
@@ -93,6 +101,29 @@ diesel::table! {
         dpop_jkt -> Nullable<Varchar>,
         mtls_x5t_s256 -> Nullable<Varchar>,
         client_attestation_jkt -> Nullable<Varchar>,
+        oidc_auth_context -> Nullable<Jsonb>,
+    }
+}
+
+diesel::table! {
+    oauth_token_issuances (issuance_id) {
+        issuance_id -> Uuid,
+        tenant_id -> Uuid,
+        client_id -> Uuid,
+        grant_key_blake3 -> Varchar,
+        request_digest -> Varchar,
+        phase -> Varchar,
+        claim_owner_id -> Nullable<Uuid>,
+        claim_started_at -> Nullable<Timestamptz>,
+        access_token_jti -> Nullable<Varchar>,
+        access_token_expires_at -> Nullable<Timestamptz>,
+        response_ciphertext -> Nullable<Binary>,
+        response_digest -> Nullable<Varchar>,
+        response_envelope_version -> Nullable<Varchar>,
+        response_key_id -> Nullable<Varchar>,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -191,6 +222,54 @@ diesel::table! {
 }
 
 diesel::table! {
+    conformance_leases (id) {
+        id -> Uuid,
+        tenant_id -> Uuid,
+        profile -> Varchar,
+        material_sha256 -> Varchar,
+        dynamic_registration_initial_access_token_sha256 -> Nullable<Varchar>,
+        ciba_automated_decision_token_sha256 -> Nullable<Varchar>,
+        public_material -> Nullable<Jsonb>,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+        revoked_at -> Nullable<Timestamptz>,
+        cleaned_at -> Nullable<Timestamptz>,
+        task_jti -> Varchar,
+        bundle_schema -> Int4,
+        bundle_sha256 -> Varchar,
+        client_count -> Int4,
+        suite_origin -> Nullable<Varchar>,
+    }
+}
+
+diesel::table! {
+    conformance_lease_applicants (tenant_id, lease_id) {
+        tenant_id -> Uuid,
+        lease_id -> Uuid,
+        applicant_user_id -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+        cleaned_at -> Nullable<Timestamptz>,
+        deleted_at -> Nullable<Timestamptz>,
+        deleted_token_count -> Int4,
+        deleted_grant_count -> Int4,
+        deleted_access_request_count -> Int4,
+        deleted_mtls_request_count -> Int4,
+        deleted_user_state_count -> Int4,
+        deleted_credential_dataset_count -> Int4,
+    }
+}
+
+diesel::table! {
+    conformance_lease_clients (tenant_id, lease_id, logical_client_id) {
+        tenant_id -> Uuid,
+        lease_id -> Uuid,
+        logical_client_id -> Varchar,
+        client_id -> Uuid,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     oauth_clients (id) {
         id -> Uuid,
         tenant_id -> Uuid,
@@ -259,6 +338,17 @@ diesel::table! {
     }
 }
 
+// Keep lease metadata as a narrow Diesel mapping. `oauth_clients` already has
+// 64 mapped columns; widening its primary mapping would require Diesel's much
+// heavier `128-column-tables` feature in every build.
+diesel::table! {
+    #[sql_name = "oauth_clients"]
+    oauth_client_conformance_bindings (id) {
+        id -> Uuid,
+        conformance_lease_id -> Nullable<Uuid>,
+    }
+}
+
 diesel::table! {
     runtime_module_desired_states (module_id) {
         module_id -> Varchar,
@@ -299,6 +389,40 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    security_audit_chain_state (singleton) {
+        singleton -> Bool,
+        last_sequence -> Int8,
+        last_hash -> Binary,
+    }
+}
+
+diesel::table! {
+    security_audit_events (event_id) {
+        event_id -> Uuid,
+        sequence -> Int8,
+        event_type -> Varchar,
+        event_category -> Varchar,
+        payload -> Jsonb,
+        occurred_at -> Timestamptz,
+        previous_hash -> Binary,
+        event_hash -> Binary,
+    }
+}
+
+diesel::table! {
+    security_audit_event_outbox (event_id) {
+        event_id -> Uuid,
+        attempts -> Int4,
+        available_at -> Timestamptz,
+        locked_at -> Nullable<Timestamptz>,
+        exported_at -> Nullable<Timestamptz>,
+        last_error -> Nullable<Text>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(client_access_requests -> users (user_id));
 diesel::joinable!(scim_audit_events -> scim_tokens (scim_token_id));
 diesel::joinable!(scim_security_event_receipts -> scim_security_events (event_id));
@@ -308,6 +432,7 @@ diesel::joinable!(user_client_grants -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     users,
+    initial_admin_bootstrap,
     user_totp_credentials,
     user_mfa_backup_codes,
     user_mfa_remembered_devices,
@@ -315,8 +440,12 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_passkey_credentials,
     external_identity_links,
     oauth_tokens,
+    oauth_token_issuances,
     user_client_grants,
     client_access_requests,
+    conformance_leases,
+    conformance_lease_applicants,
+    conformance_lease_clients,
     oauth_clients,
     access_token_revocations,
     scim_tokens,
@@ -326,5 +455,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     backchannel_logout_deliveries,
     runtime_module_desired_states,
     runtime_module_instance_states,
-    runtime_module_state_events
+    runtime_module_state_events,
+    security_audit_chain_state,
+    security_audit_events,
+    security_audit_event_outbox
 );

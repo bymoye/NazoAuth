@@ -21,6 +21,7 @@ set can be scanned from one place.
 | Fresh production activation | [operations/fresh-production-activation.md](operations/fresh-production-activation.md) |
 | Chinese fresh production activation | [operations/fresh-production-activation.zh-CN.md](operations/fresh-production-activation.zh-CN.md) |
 | Configuration | [operations/configuration.md](operations/configuration.md) |
+| Release platform support | [operations/platform-support.md](operations/platform-support.md) |
 | Operator-task security and UX plan | [security/operator-task-protocol-plan.zh-CN.md](security/operator-task-protocol-plan.zh-CN.md) |
 | Operator-task implementation task book | [project/operator-task-protocol-implementation-task.zh-CN.md](project/operator-task-protocol-implementation-task.zh-CN.md) |
 | OpenID Connect integration | [integration/openid-connect.md](integration/openid-connect.md) |
@@ -73,6 +74,7 @@ set can be scanned from one place.
 | [operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md](operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md) | Evidence and scheduling decision for bounded parallel OIDC/FAPI and OpenID4VC matrices. |
 | [operations/ha-operations.md](operations/ha-operations.md) | PostgreSQL and Valkey operational guidance. |
 | [operations/release-security.md](operations/release-security.md) | Release security checks, provenance, and supply-chain controls. |
+| [operations/platform-support.md](operations/platform-support.md) | Native binary targets, OCI architectures, dependency boundaries, and binary-only Release assets. |
 | [operations/release-boundary.md](operations/release-boundary.md) | Production artifact and conformance-tool separation boundary. |
 | [operations/release-boundary.zh-CN.md](operations/release-boundary.zh-CN.md) | Chinese production artifact and conformance-tool separation boundary. |
 | [operations/github-actions-secrets.md](operations/github-actions-secrets.md) | GitHub Actions Secret inventory and rotation rules. |

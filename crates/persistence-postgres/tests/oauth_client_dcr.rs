@@ -1,11 +1,14 @@
-use diesel::{sql_query, sql_types::Uuid as SqlUuid};
+use diesel::{
+    sql_query,
+    sql_types::{Bool, Uuid as SqlUuid},
+};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use nazo_auth::{
     DynamicRegistrationClientStore, DynamicRegistrationDependencyError, OAuthClient,
-    ValidatedClientRegistration,
+    PreparedClientRegistration, ValidatedClientRegistration,
 };
 use nazo_identity::{TenantContext, ports::RepositoryError};
-use nazo_postgres::{OAuthClientRepository, create_pool, get_conn};
+use nazo_postgres::{ConformanceLeaseTokenDigests, OAuthClientRepository, create_pool, get_conn};
 use uuid::Uuid;
 
 fn test_repository() -> Option<OAuthClientRepository> {
@@ -15,6 +18,28 @@ fn test_repository() -> Option<OAuthClientRepository> {
     Some(OAuthClientRepository::new(
         create_pool(database_url, 4).unwrap(),
     ))
+}
+
+#[tokio::test]
+async fn revoke_missing_conformance_lease_returns_not_found() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+            }
+            Err(_) => return,
+        };
+    let leases =
+        nazo_postgres::ConformanceLeaseRepository::new(create_pool(database_url, 4).unwrap());
+    let tenant = TenantContext::default_system();
+
+    assert_eq!(
+        leases
+            .revoke(tenant.tenant_id.as_uuid(), Uuid::now_v7())
+            .await,
+        Err(RepositoryError::NotFound)
+    );
 }
 
 fn client(tenant: TenantContext) -> OAuthClient {
@@ -82,6 +107,477 @@ fn client(tenant: TenantContext) -> OAuthClient {
     }
 }
 
+#[tokio::test]
+async fn conformance_lease_rejects_invalid_capability_material_before_database_access() {
+    let repository = nazo_postgres::ConformanceLeaseRepository::new(
+        create_pool("postgres://invalid:invalid@127.0.0.1:1/never", 1)
+            .expect("invalid test pool should still be constructible"),
+    );
+    let tenant_id = Uuid::now_v7();
+    let valid_material = "a".repeat(64);
+    let valid_token = "b".repeat(64);
+
+    for ttl in [
+        nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS - 1,
+        nazo_postgres::MAX_CONFORMANCE_LEASE_SECONDS + 1,
+    ] {
+        assert!(matches!(
+            repository
+                .create(
+                    tenant_id,
+                    "oidf-test",
+                    &valid_material,
+                    ConformanceLeaseTokenDigests::default(),
+                    None,
+                    ttl,
+                )
+                .await,
+            Err(RepositoryError::Consistency(_))
+        ));
+    }
+    for profile in [String::new(), "x".repeat(65)] {
+        assert!(matches!(
+            repository
+                .create(
+                    tenant_id,
+                    &profile,
+                    &valid_material,
+                    ConformanceLeaseTokenDigests::default(),
+                    None,
+                    nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+                )
+                .await,
+            Err(RepositoryError::Consistency(_))
+        ));
+    }
+    for material in ["A".repeat(64), "z".repeat(64), "short".to_owned()] {
+        assert!(matches!(
+            repository
+                .create(
+                    tenant_id,
+                    "oidf-test",
+                    &material,
+                    ConformanceLeaseTokenDigests::default(),
+                    None,
+                    nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+                )
+                .await,
+            Err(RepositoryError::Consistency(_))
+        ));
+    }
+    assert!(matches!(
+        repository
+            .create(
+                tenant_id,
+                "oidf-test",
+                &valid_material,
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: Some("invalid"),
+                    ciba_automated_decision_token_sha256: None,
+                },
+                None,
+                nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+    assert!(matches!(
+        repository
+            .create(
+                tenant_id,
+                "oidf-test",
+                &valid_material,
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: None,
+                    ciba_automated_decision_token_sha256: Some(&valid_token),
+                },
+                None,
+                nazo_postgres::MIN_CONFORMANCE_LEASE_SECONDS,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+}
+
+#[tokio::test]
+async fn expired_conformance_lease_fails_closed_before_idempotent_physical_cleanup() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+            }
+            Err(_) => return,
+        };
+    let pool = create_pool(database_url, 4).unwrap();
+    let clients = OAuthClientRepository::new(pool.clone());
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let tenant = TenantContext::default_system();
+    let public_material = serde_json::json!({"schema": 1, "keys": ["public-only"]});
+    let lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidf-test",
+            &"a".repeat(64),
+            ConformanceLeaseTokenDigests::default(),
+            Some(public_material.clone()),
+            60,
+        )
+        .await
+        .unwrap();
+    let leased_client = client(tenant);
+    clients
+        .insert(&leased_client, None, None, Some(lease.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_public_material_for_client(leased_client.tenant_id, &leased_client.client_id,)
+            .await
+            .unwrap(),
+        Some(public_material),
+    );
+    assert!(
+        leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidf-test",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    let active_profile_material = leases
+        .active_public_materials_for_profile(leased_client.tenant_id, "oidf-test")
+        .await
+        .unwrap();
+    assert_eq!(active_profile_material.len(), 1);
+    assert_eq!(active_profile_material[0].lease_id, lease.id);
+    assert_eq!(
+        leases
+            .active_public_material_for_lease(leased_client.tenant_id, lease.id)
+            .await
+            .unwrap(),
+        Some(active_profile_material[0].public_material.clone()),
+    );
+    assert!(
+        clients
+            .by_client_id(leased_client.tenant_id, &leased_client.client_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE conformance_leases SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes', expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE id = $1",
+    )
+    .bind::<SqlUuid, _>(lease.id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    assert!(
+        clients
+            .by_client_id(leased_client.tenant_id, &leased_client.client_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        leases
+            .active_public_materials_for_profile(leased_client.tenant_id, "oidf-test")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        leases
+            .active_public_material_for_lease(leased_client.tenant_id, lease.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidf-test",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(clients.update_metadata(&leased_client).await.is_err());
+    let late_client = client(tenant);
+    assert!(
+        clients
+            .insert(&late_client, None, None, Some(lease.id))
+            .await
+            .is_err()
+    );
+    let cleaned = leases.cleanup().await.unwrap();
+    assert!(cleaned.cleaned_leases >= 1);
+    assert!(cleaned.deleted_clients >= 1);
+    assert!(
+        clients
+            .by_client_id(leased_client.tenant_id, &leased_client.client_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let listed = leases.list(leased_client.tenant_id).await.unwrap();
+    let tombstone = listed
+        .iter()
+        .find(|candidate| candidate.id == lease.id)
+        .unwrap();
+    assert!(tombstone.revoked_at.is_some());
+    assert!(tombstone.cleaned_at.is_some());
+    assert!(tombstone.public_material.is_none());
+    leases.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn revoked_conformance_lease_fails_closed_without_restart_or_cleanup() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+            }
+            Err(_) => return,
+        };
+    let pool = create_pool(database_url, 4).unwrap();
+    let clients = OAuthClientRepository::new(pool.clone());
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool);
+    let tenant = TenantContext::default_system();
+    let initial_access_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    let unknown_initial_access_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    let ciba_decision_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    let other_ciba_decision_token_sha256 = format!("{:064x}", Uuid::now_v7().as_u128());
+    assert!(matches!(
+        leases
+            .create(
+                tenant.tenant_id.as_uuid(),
+                "openid4vc",
+                &"d".repeat(64),
+                ConformanceLeaseTokenDigests {
+                    dynamic_registration_initial_access_token_sha256: Some(
+                        &initial_access_token_sha256,
+                    ),
+                    ciba_automated_decision_token_sha256: None,
+                },
+                None,
+                60,
+            )
+            .await,
+        Err(RepositoryError::Consistency(_))
+    ));
+    let lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidc-fapi-ciba",
+            &"b".repeat(64),
+            ConformanceLeaseTokenDigests {
+                dynamic_registration_initial_access_token_sha256: Some(
+                    &initial_access_token_sha256,
+                ),
+                ciba_automated_decision_token_sha256: Some(&ciba_decision_token_sha256),
+            },
+            None,
+            60,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                &initial_access_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(lease.id)
+    );
+    assert_eq!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                &unknown_initial_access_token_sha256,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    let leased_client = client(tenant);
+    clients
+        .insert(&leased_client, None, None, Some(lease.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                leased_client.tenant_id,
+                &ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(lease.id)
+    );
+    let other_lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidc-fapi-ciba",
+            &format!("{:064x}", Uuid::now_v7().as_u128()),
+            ConformanceLeaseTokenDigests {
+                dynamic_registration_initial_access_token_sha256: None,
+                ciba_automated_decision_token_sha256: Some(&other_ciba_decision_token_sha256),
+            },
+            None,
+            60,
+        )
+        .await
+        .unwrap();
+    let other_leased_client = client(tenant);
+    clients
+        .insert(&other_leased_client, None, None, Some(other_lease.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                other_leased_client.tenant_id,
+                &other_ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(other_lease.id)
+    );
+    assert_ne!(ciba_decision_token_sha256, other_ciba_decision_token_sha256);
+    assert!(
+        leases
+            .active_for_client_lease_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !leases
+            .active_for_client_lease_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                other_lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !leases
+            .active_for_client_lease_profile(
+                other_leased_client.tenant_id,
+                &other_leased_client.client_id,
+                lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        leases
+            .active_for_client_lease_profile(
+                other_leased_client.tenant_id,
+                &other_leased_client.client_id,
+                other_lease.id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+
+    leases
+        .revoke(leased_client.tenant_id, lease.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_dynamic_registration_lease_id(
+                tenant.tenant_id.as_uuid(),
+                &initial_access_token_sha256,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        leases
+            .list(leased_client.tenant_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == lease.id)
+            .is_some_and(|candidate| {
+                candidate
+                    .dynamic_registration_initial_access_token_sha256
+                    .is_none()
+                    && candidate.ciba_automated_decision_token_sha256.is_none()
+            })
+    );
+    assert!(
+        !leases
+            .active_for_client_profile(
+                leased_client.tenant_id,
+                &leased_client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                leased_client.tenant_id,
+                &ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        leases
+            .active_ciba_automated_decision_lease_id(
+                other_leased_client.tenant_id,
+                &other_ciba_decision_token_sha256,
+            )
+            .await
+            .unwrap(),
+        Some(other_lease.id)
+    );
+    leases
+        .revoke(other_leased_client.tenant_id, other_lease.id)
+        .await
+        .unwrap();
+
+    leases.cleanup().await.unwrap();
+}
+
 fn registration_token(client: &OAuthClient, label: &str) -> String {
     format!("{label}-{}", client.id)
 }
@@ -99,7 +595,7 @@ async fn dcr_replace_cannot_resurrect_a_concurrently_deleted_client() {
     let initial_token = registration_token(&client, "registration-token");
     let rotated_token = registration_token(&client, "rotated-token");
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
 
@@ -182,7 +678,7 @@ async fn dynamic_profile_metadata_round_trips_through_postgres() {
     let rotated_token = registration_token(&client, "rotated-registration-token");
 
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
     let persisted = repository.by_id(client.id).await.unwrap().unwrap();
@@ -235,7 +731,7 @@ async fn registration_token_rotation_rejects_a_stale_authenticated_token() {
     let rotated_token = registration_token(&client, "rotated-token");
     let attacker_token = registration_token(&client, "attacker-token");
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
 
@@ -284,9 +780,23 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
     let stale_token = registration_token(&client, "stale-write");
     let replacement_token = registration_token(&client, "replacement-token");
     repository
-        .insert(&client, None, Some(initial_token.as_str()))
+        .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
+    let registered = repository
+        .by_registration_access_token(client.tenant_id, &client.client_id, initial_token.as_str())
+        .await
+        .unwrap()
+        .expect("active registration access token should resolve its client");
+    assert_eq!(registered.id, client.id);
+    assert!(!repository.has_client_secret(client.id).await.unwrap());
+    assert!(
+        repository
+            .active_for_user(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     DynamicRegistrationClientStore::rotate_credentials(
         &repository,
@@ -349,6 +859,475 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
     let mut connection = get_conn(&pool).await.unwrap();
     sql_query("DELETE FROM oauth_clients WHERE id = $1")
         .bind::<SqlUuid, _>(client.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_registration_store_round_trips_registration_and_secret_material() {
+    let Ok(database_url) =
+        std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
+    else {
+        return;
+    };
+    let pool = create_pool(database_url, 4).unwrap();
+    let repository = OAuthClientRepository::new(pool.clone());
+    let tenant = TenantContext::default_system();
+    let template = client(tenant);
+    let initial_token = registration_token(&template, "trait-initial");
+    let initial_secret_hash = "client-secret-v1:initial-salt:initial-digest";
+    let prepared = PreparedClientRegistration {
+        tenant,
+        conformance_lease_id: None,
+        registration: template.registration.clone(),
+        require_mtls_bound_tokens: template.require_mtls_bound_tokens,
+        issued_secret: None,
+        client_secret_hash: Some(initial_secret_hash.to_owned()),
+        registration_access_token_blake3: Some(initial_token.clone()),
+    };
+
+    let inserted = DynamicRegistrationClientStore::insert(&repository, &prepared)
+        .await
+        .unwrap();
+    assert_eq!(inserted.client_id, template.client_id);
+    assert_eq!(inserted.tenant_id, tenant.tenant_id.as_uuid());
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            &inserted.client_id,
+            &initial_token,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+        DynamicRegistrationClientStore::has_client_secret(&repository, inserted.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        Some("initial-salt".to_owned())
+    );
+    assert!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            initial_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            "client-secret-v1:wrong-salt:wrong-digest",
+        )
+        .await
+        .unwrap()
+    );
+
+    let rotated_token = registration_token(&inserted, "trait-rotated");
+    let rotated_secret_hash = "client-secret-v1:rotated-salt:rotated-digest";
+    DynamicRegistrationClientStore::rotate_credentials(
+        &repository,
+        inserted.tenant_id,
+        inserted.id,
+        Some(rotated_secret_hash),
+        &initial_token,
+        &rotated_token,
+    )
+    .await
+    .unwrap();
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &initial_token,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &rotated_token,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        Some("rotated-salt".to_owned())
+    );
+    assert!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            rotated_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+
+    let mut replacement = inserted.clone();
+    replacement.registration.client_name = "Trait replacement".to_owned();
+    let replacement_token = registration_token(&inserted, "trait-replacement");
+    let replacement_secret_hash = "client-secret-v1:replacement-salt:replacement-digest";
+    let replaced = DynamicRegistrationClientStore::replace_registration(
+        &repository,
+        &replacement,
+        Some(replacement_secret_hash),
+        &rotated_token,
+        Some(replacement_token.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replaced.client_name, "Trait replacement");
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &rotated_token,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &replacement_token,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        Some("replacement-salt".to_owned())
+    );
+    assert!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            replacement_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+
+    assert!(
+        DynamicRegistrationClientStore::deactivate(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+            &replacement_token,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            inserted.tenant_id,
+            &inserted.client_id,
+            &replacement_token,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        !DynamicRegistrationClientStore::has_client_secret(&repository, inserted.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        !DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            inserted.id,
+            replacement_secret_hash,
+        )
+        .await
+        .unwrap()
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("DELETE FROM oauth_clients WHERE id = $1")
+        .bind::<SqlUuid, _>(inserted.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_registration_store_maps_repository_failures_to_unavailable() {
+    let repository = OAuthClientRepository::new(
+        create_pool("postgres://invalid:invalid@127.0.0.1:1/never", 1)
+            .expect("invalid test pool should still be constructible"),
+    );
+    let tenant = TenantContext::default_system();
+    let template = client(tenant);
+    let initial_token = registration_token(&template, "unavailable-initial");
+    let prepared = PreparedClientRegistration {
+        tenant,
+        conformance_lease_id: None,
+        registration: template.registration.clone(),
+        require_mtls_bound_tokens: template.require_mtls_bound_tokens,
+        issued_secret: None,
+        client_secret_hash: Some("client-secret-v1:unavailable-salt:unavailable-digest".to_owned()),
+        registration_access_token_blake3: Some(initial_token.clone()),
+    };
+
+    assert_eq!(
+        DynamicRegistrationClientStore::insert(&repository, &prepared)
+            .await
+            .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        repository.upsert(&template, None).await.unwrap_err(),
+        RepositoryError::Unavailable
+    );
+    assert_eq!(
+        repository.update_metadata(&template).await.unwrap_err(),
+        RepositoryError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::by_registration_access_token(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            &template.client_id,
+            &initial_token,
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::has_client_secret(&repository, template.id)
+            .await
+            .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_salt(&repository, template.id)
+            .await
+            .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::client_secret_digest_matches(
+            &repository,
+            template.id,
+            "client-secret-v1:unavailable-salt:unavailable-digest",
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::rotate_credentials(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            template.id,
+            None,
+            &initial_token,
+            "unavailable-rotated",
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::replace_registration(
+            &repository,
+            &template,
+            None,
+            &initial_token,
+            Some("unavailable-replacement"),
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+    assert_eq!(
+        DynamicRegistrationClientStore::deactivate(
+            &repository,
+            tenant.tenant_id.as_uuid(),
+            template.id,
+            &initial_token,
+        )
+        .await
+        .unwrap_err(),
+        DynamicRegistrationDependencyError::Unavailable
+    );
+}
+
+#[derive(diesel::QueryableByName)]
+struct LeaseStillActive {
+    #[diesel(sql_type = Bool)]
+    active: bool,
+}
+
+#[tokio::test]
+async fn ciba_decision_claim_releases_pool_connection_before_callback() {
+    let Ok(database_url) =
+        std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
+    else {
+        return;
+    };
+    let pool = create_pool(database_url, 1).unwrap();
+    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
+    let clients = OAuthClientRepository::new(pool.clone());
+    let tenant = TenantContext::default_system();
+    let lease = leases
+        .create(
+            tenant.tenant_id.as_uuid(),
+            "oidc-fapi-ciba",
+            &"b".repeat(64),
+            ConformanceLeaseTokenDigests::default(),
+            None,
+            60,
+        )
+        .await
+        .unwrap();
+    let client = client(tenant);
+    clients
+        .insert(&client, None, None, Some(lease.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        leases
+            .active_lease_id_for_client(
+                tenant.tenant_id.as_uuid(),
+                &client.client_id,
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap(),
+        Some(lease.id)
+    );
+    assert_eq!(
+        leases
+            .active_lease_id_for_client(
+                tenant.tenant_id.as_uuid(),
+                &client.client_id,
+                "different-profile",
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        leases
+            .active_lease_id_for_client(
+                tenant.tenant_id.as_uuid(),
+                "missing-client",
+                "oidc-fapi-ciba",
+            )
+            .await
+            .unwrap(),
+        None
+    );
+
+    let (decision_started_tx, decision_started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let decision_leases = leases.clone();
+    let decision_client_id = client.client_id.clone();
+    let callback_pool = pool.clone();
+    let decision = tokio::spawn(async move {
+        decision_leases
+            .with_active_ciba_decision(
+                tenant.tenant_id.into(),
+                &decision_client_id,
+                Some(lease.id),
+                |lease_expires_at| async move {
+                    // A pool of one proves that the callback did not inherit
+                    // the claim transaction's connection. Token issuance
+                    // performs the same nested-database acquisition.
+                    let mut nested = get_conn(&callback_pool).await.unwrap();
+                    let probe = sql_query(
+                        "SELECT EXISTS(SELECT 1 FROM conformance_leases WHERE id = $1) AS active",
+                    )
+                    .bind::<SqlUuid, _>(lease.id)
+                    .get_result::<LeaseStillActive>(&mut nested)
+                    .await
+                    .unwrap();
+                    assert!(probe.active);
+                    drop(nested);
+                    decision_started_tx.send(lease_expires_at).unwrap();
+                    release_rx.await.unwrap();
+                    lease_expires_at
+                },
+            )
+            .await
+    });
+    let lease_expires_at = decision_started_rx.await.unwrap();
+    assert!(lease_expires_at.is_some());
+
+    let (revoke_started_tx, revoke_started_rx) = tokio::sync::oneshot::channel();
+    let revoke_leases = leases.clone();
+    let revoke = tokio::spawn(async move {
+        revoke_started_tx.send(()).unwrap();
+        revoke_leases
+            .revoke(tenant.tenant_id.as_uuid().to_owned(), lease.id)
+            .await
+    });
+    revoke_started_rx.await.unwrap();
+    tokio::task::yield_now().await;
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    let active = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM conformance_leases WHERE id = $1 AND revoked_at IS NULL) AS active",
+    )
+    .bind::<SqlUuid, _>(lease.id)
+    .get_result::<LeaseStillActive>(&mut connection)
+    .await
+    .unwrap();
+    assert!(
+        active.active,
+        "revoke must wait for the decision CAS callback"
+    );
+
+    drop(connection);
+    release_tx.send(()).unwrap();
+    assert!(decision.await.unwrap().unwrap().unwrap().is_some());
+    assert_eq!(revoke.await.unwrap().unwrap(), 1);
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("DELETE FROM oauth_clients WHERE id = $1")
+        .bind::<SqlUuid, _>(client.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM conformance_leases WHERE id = $1")
+        .bind::<SqlUuid, _>(lease.id)
         .execute(&mut connection)
         .await
         .unwrap();

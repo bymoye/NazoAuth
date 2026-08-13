@@ -1,6 +1,6 @@
 [package]
 name = "nazo-http-signatures"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,8 +17,8 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+aws-lc-rs.workspace = true
 ed25519-dalek.workspace = true
-openssl.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
 proptest.workspace = true
 

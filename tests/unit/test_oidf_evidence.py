@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 def load_module():
@@ -40,6 +41,17 @@ class OidfEvidenceTests(unittest.TestCase):
             "results": [
                 {"result": "SUCCESS", "msg": f"access_token={secret}"},
                 {"result": "INFO", "config": {"private_key": secret}},
+                {
+                    "result": "FAILURE",
+                    "src": "ValidateCredentialTrust",
+                    "msg": f"credential={secret}",
+                    "args": {"credential": secret},
+                },
+                {
+                    "result": "WARNING",
+                    "src": f"unsafe source {secret}",
+                    "msg": secret,
+                },
             ],
         }
         with zipfile.ZipFile(path, "w") as archive:
@@ -65,10 +77,14 @@ class OidfEvidenceTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["module_results"], {"PASSED": 1})
             self.assertEqual(
                 payload["summary"]["condition_results"],
-                {"INFO": 1, "SUCCESS": 1},
+                {"FAILURE": 1, "INFO": 1, "SUCCESS": 1, "WARNING": 1},
             )
             module = payload["archives"][0]["modules"][0]
             self.assertTrue(module["signature_present"])
+            self.assertEqual(
+                module["problem_conditions"],
+                [{"result": "FAILURE", "src": "ValidateCredentialTrust"}],
+            )
             self.assertNotIn("config", module["test_info"])
             self.assertNotIn("owner", module["test_info"])
 
@@ -95,6 +111,36 @@ class OidfEvidenceTests(unittest.TestCase):
                 [archive["file"] for archive in payload["archives"]],
                 ["group-1/plan-1.zip", "group-2/plan-2.zip"],
             )
+
+    def test_summarizer_rejects_too_many_zip_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "plan.zip"
+            self.write_archive(archive, plan_id="plan-id", secret="secret")
+
+            with mock.patch.object(self.module, "MAX_ARCHIVE_MEMBERS", 1):
+                with self.assertRaisesRegex(self.module.EvidenceError, "too many members"):
+                    self.module.summarize_archive(archive, root)
+
+    def test_summarizer_rejects_expanded_archive_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "plan.zip"
+            self.write_archive(archive, plan_id="plan-id", secret="secret")
+
+            with mock.patch.object(self.module, "MAX_ARCHIVE_BYTES", 4):
+                with self.assertRaisesRegex(self.module.EvidenceError, "bounded size"):
+                    self.module.summarize_archive(archive, root)
+
+    def test_summarizer_rejects_oversized_json_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "plan.zip"
+            self.write_archive(archive, plan_id="plan-id", secret="secret")
+
+            with mock.patch.object(self.module, "MAX_JSON_BYTES", 4):
+                with self.assertRaisesRegex(self.module.EvidenceError, "bounded JSON size"):
+                    self.module.summarize_archive(archive, root)
 
 
 if __name__ == "__main__":

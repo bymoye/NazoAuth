@@ -120,6 +120,7 @@ fn prepared_client(
 ) -> PreparedClientRegistration {
     PreparedClientRegistration {
         tenant,
+        conformance_lease_id: None,
         registration,
         require_mtls_bound_tokens,
         issued_secret: None,
@@ -357,29 +358,58 @@ async fn duplicate_client_conflict_does_not_report_request_as_processed() {
         .create(new_request(tenant, user_id, &format!("first-{suffix}")))
         .await
         .unwrap();
-    let prepared = prepared_client(tenant, client(&suffix), true);
+    let mut registration = client(&suffix);
+    registration.jwks_uri = Some("https://client.example.test/jwks.json".to_owned());
+    registration.jwks = Some(serde_json::json!({"keys": []}));
+    registration.request_uris = vec!["https://client.example.test/request.jwt".to_owned()];
+    registration.initiate_login_uri = Some("https://client.example.test/initiate".to_owned());
+    registration.presentation = nazo_auth::ClientPresentationMetadata {
+        logo_uri: Some("https://client.example.test/logo.png".to_owned()),
+        policy_uri: Some("https://client.example.test/policy".to_owned()),
+        tos_uri: Some("https://client.example.test/terms".to_owned()),
+    };
+    registration.security_policy = Some(nazo_auth::ClientSecurityPolicy {
+        session_management: true,
+        ..nazo_auth::ClientSecurityPolicy::default()
+    });
+    let expected_registration = registration.clone();
+    let prepared = prepared_client(tenant, registration, true);
     let approved = repository
         .approve(tenant, first.id, user_id, &prepared)
         .await
         .unwrap();
     let client_repository = OAuthClientRepository::new(pool.clone());
-    assert_eq!(
-        client_repository
-            .by_id(approved.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .client_id,
-        approved.client_id
-    );
+    let persisted = client_repository.by_id(approved.id).await.unwrap().unwrap();
+    assert_eq!(persisted.client_id, approved.client_id);
     assert!(
-        client_repository
-            .by_id(approved.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .require_mtls_bound_tokens,
+        persisted.require_mtls_bound_tokens,
         "access-request approval must preserve the mTLS sender constraint"
+    );
+    assert_eq!(persisted.jwks_uri, expected_registration.jwks_uri);
+    assert_eq!(persisted.request_uris, expected_registration.request_uris);
+    assert_eq!(
+        persisted.initiate_login_uri,
+        expected_registration.initiate_login_uri
+    );
+    assert_eq!(
+        persisted.presentation.logo_uri,
+        expected_registration.presentation.logo_uri
+    );
+    assert_eq!(
+        persisted.presentation.policy_uri,
+        expected_registration.presentation.policy_uri
+    );
+    assert_eq!(
+        persisted.presentation.tos_uri,
+        expected_registration.presentation.tos_uri
+    );
+    assert_eq!(
+        persisted
+            .security_policy
+            .as_ref()
+            .map(|policy| policy.session_management),
+        Some(true),
+        "access-request approval must preserve composable client security policy"
     );
     assert_eq!(
         client_repository

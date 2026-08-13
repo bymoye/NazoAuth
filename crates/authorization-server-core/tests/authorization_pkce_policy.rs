@@ -51,9 +51,9 @@ fn normalize(
 }
 
 #[test]
-fn baseline_confidential_oidc_client_may_omit_pkce() {
-    let normalized = normalize(&request(true, false), "confidential", false)
-        .expect("baseline confidential OIDC code flow permits PKCE to be omitted");
+fn explicit_confidential_oidc_compatibility_policy_may_omit_pkce_and_nonce() {
+    let normalized = normalize(&request(false, false), "confidential", false)
+        .expect("an explicit compatibility policy permits PKCE to be omitted");
 
     assert_eq!(normalized.code_challenge, None);
 }
@@ -67,8 +67,9 @@ fn public_client_cannot_replace_pkce_with_oidc_nonce() {
 }
 
 #[test]
-fn baseline_confidential_oidc_code_flow_remains_core_compatible_without_nonce() {
+fn nonce_does_not_control_explicit_confidential_oidc_compatibility_policy() {
     assert!(normalize(&request(false, false), "confidential", false).is_ok());
+    assert!(normalize(&request(true, false), "confidential", false).is_ok());
 }
 
 #[test]
@@ -86,6 +87,10 @@ fn confidential_non_oidc_code_flow_requires_pkce() {
 fn hardened_profile_requires_pkce_even_for_confidential_oidc_client() {
     assert_eq!(
         normalize(&request(true, false), "confidential", true),
+        Err(AuthorizationPolicyError::InvalidRequest)
+    );
+    assert_eq!(
+        normalize(&request(false, false), "confidential", true),
         Err(AuthorizationPolicyError::InvalidRequest)
     );
     assert!(normalize(&request(true, true), "confidential", true).is_ok());

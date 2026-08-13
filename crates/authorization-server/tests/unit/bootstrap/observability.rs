@@ -49,3 +49,15 @@ fn otel_config_rejects_unsupported_protocol_and_bad_endpoint() {
     ]);
     assert!(OtelConfig::from_config(&endpoint).is_err());
 }
+
+#[test]
+fn otel_http_exporters_build_with_the_selected_reqwest_client() {
+    let config = OtelConfig {
+        endpoint: "http://collector:4318".to_owned(),
+        timeout: Some(Duration::from_secs(1)),
+    };
+
+    otel_http_span_exporter(&config).expect("span exporter should build");
+    otel_http_metric_exporter(&config).expect("metric exporter should build");
+    otel_http_log_exporter(&config).expect("log exporter should build");
+}

@@ -41,6 +41,10 @@ pub(crate) struct TokenIssue {
     pub(crate) userinfo_claim_requests: Vec<OidcClaimRequest>,
     pub(crate) id_token_claims: Vec<String>,
     pub(crate) id_token_claim_requests: Vec<OidcClaimRequest>,
+    /// `None` means this is not a refresh issuance. `Some(None)` records that
+    /// the original ID Token omitted `sid`; `Some(Some(value))` preserves the
+    /// exact SID emitted by the original ID Token (including Native SSO).
+    pub(crate) refresh_id_token_sid: Option<Option<String>>,
     pub(crate) include_refresh: bool,
     pub(crate) refresh_token_policy: RefreshTokenPolicy,
     pub(crate) dpop_jkt: Option<String>,

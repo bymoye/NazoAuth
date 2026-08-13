@@ -2,7 +2,15 @@
 .git/
 
 # Build and runtime output should never enter the Docker context.
-target/
+target/*
+!target/release-container/
+target/release-container/*
+!target/release-container/amd64/
+!target/release-container/arm64/
+target/release-container/amd64/*
+target/release-container/arm64/*
+!target/release-container/amd64/nazoauth
+!target/release-container/arm64/nazoauth
 runtime/
 perf/results/
 

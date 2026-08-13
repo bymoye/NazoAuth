@@ -266,7 +266,11 @@ fn admin_required() -> HttpResponse {
 
 fn recent_mfa(session: &CurrentSession, now: i64) -> bool {
     let max_age = i64::try_from(MFA_STEP_UP_MAX_AGE.as_secs()).expect("MFA max age fits i64");
-    session.amr().iter().any(|method| method == "mfa")
+    let methods = session.amr();
+    methods.iter().any(|method| method == "mfa")
+        && methods
+            .iter()
+            .any(|method| matches!(method.as_str(), "otp" | "recovery_code"))
         && session.auth_time() <= now.saturating_add(MFA_CLOCK_SKEW_SECONDS)
         && now.saturating_sub(session.auth_time()) <= max_age
 }

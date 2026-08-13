@@ -72,7 +72,15 @@ pub struct CompactJwe {
 
 pub fn parse_compact_jwe(input: &str) -> Result<CompactJwe, JoseError> {
     let parts = input.split('.').collect::<Vec<_>>();
-    if parts.len() != 5 || parts.iter().any(|part| part.is_empty()) {
+    // RFC 7516 compact serialization always has five parts, but direct key
+    // agreement algorithms such as ECDH-ES carry no encrypted CEK.  In that
+    // case the second part is intentionally empty (`protected..iv.ct.tag`).
+    if parts.len() != 5
+        || parts[0].is_empty()
+        || parts[2].is_empty()
+        || parts[3].is_empty()
+        || parts[4].is_empty()
+    {
         return Err(JoseError::MalformedJwe);
     }
     Ok(CompactJwe {

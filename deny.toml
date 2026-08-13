@@ -16,6 +16,7 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    "PostgreSQL",
     "Unicode-3.0",
     "Zlib",
 ]

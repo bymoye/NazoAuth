@@ -48,7 +48,7 @@ fn authorization_code_audiences(
 
 fn test_token_service(state: &TestInfrastructure) -> ServerTokenService {
     ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     )
@@ -114,6 +114,39 @@ use crate::config::ConfigSource;
 use crate::test_support::DatabaseUserFixture;
 use nazo_auth::pairwise_subject as oidc_subject;
 use nazo_postgres::{create_pool, get_conn};
+
+#[test]
+fn authorization_code_replay_requires_same_client_and_exact_redemption_binding() {
+    let client_id = Uuid::now_v7();
+    let binding = "authorization_code:binding";
+    let mut marker = ConsumedAuthorizationCode {
+        client_id,
+        redemption_binding: Some(binding.to_owned()),
+        access_token_jti: "access-jti".to_owned(),
+        access_token_expires_at: Utc::now().timestamp() + 300,
+        refresh_token_family_id: None,
+        consumed_at: Utc::now(),
+    };
+
+    assert!(replay_matches_original_redemption(
+        &marker, client_id, binding
+    ));
+    assert!(!replay_matches_original_redemption(
+        &marker,
+        Uuid::now_v7(),
+        binding
+    ));
+    assert!(!replay_matches_original_redemption(
+        &marker,
+        client_id,
+        "authorization_code:different"
+    ));
+
+    marker.redemption_binding = None;
+    assert!(!replay_matches_original_redemption(
+        &marker, client_id, binding
+    ));
+}
 
 fn unavailable_valkey_client() -> fred::prelude::Client {
     let mut builder = ValkeyBuilder::from_config(
@@ -1494,6 +1527,13 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
     let code = format!("code-{}", Uuid::now_v7());
     let marker = ConsumedAuthorizationCode {
         client_id: client.id,
+        redemption_binding: Some(authorization_code_grant_key(
+            &blake3_hex(&code),
+            &form_for_code(&code),
+            None,
+            None,
+            None,
+        )),
         access_token_jti: format!("access-jti-{}", Uuid::now_v7()),
         access_token_expires_at: Utc::now().timestamp() + 300,
         refresh_token_family_id: Some(family_id),
@@ -1537,6 +1577,7 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
             &AuthorizationCodeState::Consumed {
                 marker: ConsumedAuthorizationCode {
                     client_id: Uuid::now_v7(),
+                    redemption_binding: None,
                     access_token_jti: "access-jti-2".to_owned(),
                     access_token_expires_at: Utc::now().timestamp() + 300,
                     refresh_token_family_id: None,
@@ -1580,7 +1621,14 @@ async fn token_authorization_code_replay_fails_closed_when_replayed_client_looku
             &code,
             &AuthorizationCodeState::Consumed {
                 marker: ConsumedAuthorizationCode {
-                    client_id: Uuid::now_v7(),
+                    client_id: client.id,
+                    redemption_binding: Some(authorization_code_grant_key(
+                        &blake3_hex(&code),
+                        &form_for_code(&code),
+                        None,
+                        None,
+                        None,
+                    )),
                     access_token_jti: format!("access-jti-{}", Uuid::now_v7()),
                     access_token_expires_at: Utc::now().timestamp() + 300,
                     refresh_token_family_id: Some(Uuid::now_v7()),
@@ -1630,6 +1678,34 @@ async fn token_authorization_code_reports_busy_failed_and_missing_states() {
     .await;
     assert_eq!(consuming_response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&consuming_response), "invalid_grant");
+
+    let expired_code = format!("code-{}", Uuid::now_v7());
+    let mut expired_payload = payload_for_client(&client);
+    expired_payload.expires_at = Utc::now() - Duration::seconds(1);
+    fixture
+        .store_code_state(
+            &expired_code,
+            &AuthorizationCodeState::Pending {
+                payload: expired_payload,
+            },
+        )
+        .await;
+    let expired_response = token_authorization_code(
+        &fixture.state,
+        &req,
+        &client,
+        &form_for_code(&expired_code),
+        None,
+    )
+    .await;
+    assert_eq!(expired_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(oauth_error_code(&expired_response), "invalid_grant");
+    match fixture.code_state(&expired_code).await {
+        AuthorizationCodeState::Failed { error, .. } => {
+            assert_eq!(error, "authorization_code_expired");
+        }
+        _ => panic!("expired authorization code should be failed closed"),
+    }
 
     let failed_code = format!("code-{}", Uuid::now_v7());
     fixture

@@ -1,15 +1,63 @@
+use std::io::ErrorKind;
+
 use anyhow::{Context, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use openssl::{
-    encrypt::Decrypter,
-    hash::MessageDigest,
-    pkey::PKey,
-    rsa::Padding,
-    symm::{Cipher, decrypt_aead},
-};
 use serde::Deserialize;
+use serde_json::Value;
+use sha2::Digest as _;
 
-use crate::KeyManager;
+use crate::{
+    KeyManager,
+    crypto::{aes_256_gcm_decrypt, rsa_oaep_sha256_decrypt},
+    model::KeySettings,
+    serialization::write_private_key_pem_if_absent,
+};
+
+pub(crate) const REQUEST_OBJECT_ENCRYPTION_KEY_FILE: &str = "request-object-encryption.pem";
+
+pub(crate) async fn ensure_request_object_encryption_key(
+    settings: &KeySettings,
+) -> anyhow::Result<()> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    let pem = String::from_utf8(crate::crypto::generate_rsa_pkcs8_pem(3072)?)
+        .context("generated request object key was not PEM text")?;
+    write_private_key_pem_if_absent(&path, &pem).await
+}
+
+pub(crate) async fn load_request_object_decryption_key(
+    settings: &KeySettings,
+) -> anyhow::Result<Vec<u8>> {
+    let path = settings.keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    let pem = tokio::fs::read(&path)
+        .await
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    crate::crypto::validate_rsa_pkcs8_pem(&pem)
+        .context("request object decryption key is not valid PKCS#8 PEM")?;
+    Ok(pem)
+}
+
+pub(crate) fn request_object_encryption_jwk(private_key_pem: &[u8]) -> anyhow::Result<Value> {
+    let (n, e, public_der) = crate::crypto::rsa_public_components_from_pem(private_key_pem)?;
+    let kid = format!(
+        "request-object-{}",
+        URL_SAFE_NO_PAD.encode(&sha2::Sha256::digest(&public_der)[..12])
+    );
+    Ok(serde_json::json!({
+        "kty": "RSA",
+        "use": "enc",
+        "alg": "RSA-OAEP-256",
+        "kid": kid,
+        "n": URL_SAFE_NO_PAD.encode(n),
+        "e": URL_SAFE_NO_PAD.encode(e)
+    }))
+}
 
 #[derive(Deserialize)]
 struct ProtectedHeader {
@@ -60,19 +108,13 @@ impl KeyManager {
             return Err(anyhow!("unsupported request object JWE header"));
         }
 
-        let private_key =
-            PKey::private_key_from_pem(&generation.loaded.request_object_decryption_key)
-                .context("invalid request object decryption key")?;
-        let mut decrypter = Decrypter::new(&private_key)?;
-        decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-        decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-        decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
         let encrypted_key = URL_SAFE_NO_PAD
             .decode(encrypted_key)
             .context("invalid encrypted key encoding")?;
-        let mut cek = vec![0_u8; decrypter.decrypt_len(&encrypted_key)?];
-        let cek_len = decrypter.decrypt(&encrypted_key, &mut cek)?;
-        cek.truncate(cek_len);
+        let cek = rsa_oaep_sha256_decrypt(
+            &generation.loaded.request_object_decryption_key,
+            &encrypted_key,
+        )?;
         if cek.len() != 32 {
             return Err(anyhow!(
                 "request object content encryption key must be 256 bits"
@@ -89,15 +131,8 @@ impl KeyManager {
         if iv.len() != 12 || tag.len() != 16 {
             return Err(anyhow!("invalid A256GCM iv or tag length"));
         }
-        let plaintext = decrypt_aead(
-            Cipher::aes_256_gcm(),
-            &cek,
-            Some(&iv),
-            protected.as_bytes(),
-            &ciphertext,
-            &tag,
-        )
-        .context("request object authentication failed")?;
+        let plaintext = aes_256_gcm_decrypt(&cek, &iv, protected.as_bytes(), &ciphertext, &tag)
+            .context("request object authentication failed")?;
         String::from_utf8(plaintext).context("request object plaintext is not UTF-8")
     }
 }

@@ -136,6 +136,7 @@ pub fn device_authorization_request_payload(
 
 const DEVICE_TRANSITION_MAX_ATTEMPTS: usize = 5;
 const DEVICE_SLOW_DOWN_INCREMENT_SECONDS: u64 = 5;
+const DEVICE_APPROVAL_CLAIM_TIMEOUT_SECONDS: i64 = 30;
 
 pub type DeviceStateFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, DeviceStatePortError>> + Send + 'a>>;
@@ -468,22 +469,14 @@ where
                     }
                 }
                 DevicePollTransition::Approved { payload, approval } => {
-                    match self
-                        .store
-                        .consume_by_device_code(device_code, &stored.version)
-                        .await
-                        .map_err(DevicePollFailure::Storage)?
-                    {
-                        DeviceAtomicResult::Applied => {
-                            return Ok(DevicePollCommit::Approved(Box::new(
-                                ApprovedDeviceAuthorization { payload, approval },
-                            )));
-                        }
-                        DeviceAtomicResult::Conflict => continue,
-                        DeviceAtomicResult::DeadlineElapsed => {
-                            return Ok(DevicePollCommit::Expired);
-                        }
-                    }
+                    // Polling must not consume the approved state before the
+                    // token side effect succeeds. The token issuance owner
+                    // claim makes concurrent retries idempotent while the
+                    // state-store TTL bounds how long an approved request is
+                    // retained.
+                    return Ok(DevicePollCommit::Approved(Box::new(
+                        ApprovedDeviceAuthorization { payload, approval },
+                    )));
                 }
                 DevicePollTransition::AccessDenied => return Ok(DevicePollCommit::AccessDenied),
                 DevicePollTransition::Expired => return Ok(DevicePollCommit::Expired),
@@ -668,7 +661,34 @@ where
                     }
                     if !*grant_recorded {
                         if *active_claim_id != claim_id {
-                            return Err(DeviceDecisionFailure::AlreadyHandled);
+                            if !device_approval_claim_is_stale(*started_at, now) {
+                                return Err(DeviceDecisionFailure::Contended);
+                            }
+                            // A crashed approver may leave the state in
+                            // Approving forever. Reclaim only after the
+                            // bounded claim timeout, preserving the original
+                            // subject/authentication decision and using CAS so
+                            // only one retry becomes the new owner.
+                            let reclaimed = DeviceAuthorizationState::Approving {
+                                payload: payload.clone(),
+                                approval: claimed_approval.clone(),
+                                claim_id,
+                                grant_recorded: false,
+                                started_at: now,
+                            };
+                            match self
+                                .store
+                                .replace_by_device_hash(&device_hash, &stored.version, &reclaimed)
+                                .await
+                                .map_err(DeviceDecisionFailure::Storage)?
+                            {
+                                DeviceAtomicResult::Applied | DeviceAtomicResult::Conflict => {
+                                    continue;
+                                }
+                                DeviceAtomicResult::DeadlineElapsed => {
+                                    return Err(DeviceDecisionFailure::Expired);
+                                }
+                            }
                         }
                         repository
                             .upsert_grant(DeviceGrantWrite {
@@ -727,6 +747,13 @@ where
         }
         Err(DeviceDecisionFailure::Contended)
     }
+}
+
+/// Returns whether an in-flight device approval claim has exceeded its
+/// bounded crash-recovery window.
+#[must_use]
+fn device_approval_claim_is_stale(started_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(started_at).num_seconds() >= DEVICE_APPROVAL_CLAIM_TIMEOUT_SECONDS
 }
 
 #[must_use]
@@ -791,3 +818,7 @@ pub fn device_authorization_payload(
         DeviceAuthorizationState::Consumed { .. } => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/device.rs"]
+mod tests;

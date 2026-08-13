@@ -100,10 +100,7 @@ pub(crate) fn dummy_password_hash() -> anyhow::Result<String> {
 }
 
 pub(crate) fn default_password_hash_max_concurrency() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .map(|cpus| (cpus / 2).max(1))
-        .unwrap_or(DEFAULT_PASSWORD_HASH_MAX_CONCURRENCY)
+    DEFAULT_PASSWORD_HASH_MAX_CONCURRENCY
 }
 
 pub(crate) fn default_password_hash_queue_timeout_ms() -> u64 {

@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub const BASELINE_ACR_VALUE: &str = "1";
-pub const AUTHORIZATION_NONCE_MAX_BYTES: usize = 256;
+pub const AUTHORIZATION_NONCE_MAX_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PromptDirectives {
@@ -101,7 +101,7 @@ pub fn normalize_authorization_request(
     }
     if parameters
         .get("nonce")
-        .is_some_and(|nonce| nonce.len() > AUTHORIZATION_NONCE_MAX_BYTES)
+        .is_some_and(|nonce| nonce.chars().count() > AUTHORIZATION_NONCE_MAX_CHARS)
     {
         return Err(AuthorizationPolicyError::InvalidRequest);
     }
@@ -137,9 +137,10 @@ pub fn normalize_authorization_request(
         }
         _ => return Err(AuthorizationPolicyError::InvalidRequest),
     };
-    let confidential_oidc =
-        client.client_type == "confidential" && scopes.iter().any(|scope| scope == "openid");
-    if code_challenge.is_none() && (profile.pkce_required || !confidential_oidc) {
+    let confidential_oidc_compatibility = !profile.pkce_required
+        && client.client_type == "confidential"
+        && scopes.iter().any(|scope| scope == "openid");
+    if code_challenge.is_none() && !confidential_oidc_compatibility {
         return Err(AuthorizationPolicyError::InvalidRequest);
     }
 

@@ -47,8 +47,12 @@ sudo nazoauthctl keys generate-local --alg ES256 \
 
 持久化的 `purposes` 字段采用 fail-closed 校验。该专用密钥不会参与 OIDC 轮换，
 也不能签 Access Token、ID Token、JARM、Logout Token、HTTP Message 或 Security
-Event。配置的 OpenID4VC 叶证书必须与这把专用密钥精确匹配，并能链接到配置的
-信任锚；否则服务拒绝启动。运维不得手工编辑 `keyset.json`。
+Event。`standards-full` 首次安装时，经过认证的 key task 会只在内存中创建本地 CA，
+为与此专用密钥精确匹配、且 DNS SAN 为当前 issuer hostname 的叶证书签名；然后原子
+替换一个“叶证书+CA”PEM bundle。两个 certificate 设置都指向该 bundle，运行时只将
+其中 `CA:TRUE` 的证书作为 trust anchor。CA 私钥绝不持久化，onboarding material
+也不能替换这一条本地信任边界。链、锚、DNS SAN 或密钥绑定无效时服务拒绝
+启动。运维不得手工编辑 `keyset.json`。
 
 OIDF Conformance Suite 固定到 v5.2.0 commit
 `dee9a25160e789f0f80517674693ef7989ab9fa1`，运行四个上游计划：
@@ -77,14 +81,11 @@ OIDC 专用的 `offline_access` scope。使用 Wallet Attestation 时，refresh 
 attestation `cnf.jwk` 中的 Client Instance 公钥；刷新请求必须使用同一密钥完成客户端
 认证。矩阵不接受任何 HAIP refresh-token warning 或 skip。
 
-标准 VCI 的两个预授权码组合还登记了一项精确 expected failure：
-`oid4vci-1_0-issuer-happy-flow-multiple-clients`。该上游模块只接收一份 Credential
-Offer，却让第二个客户端再次兑换同一 `pre-authorized_code`；OpenID4VCI 1.0 Final
-第 4.1.1 节明确要求该代码短期有效且只能使用一次。服务端不得为满足测试而允许按
-客户端分别重放同一代码。该预期失败精确绑定两个预授权码 configuration、完整
-variant、`Second client: Verify token endpoint response` block 和
-`CheckTokenEndpointHttpStatus200` condition；授权码组合中的同名多客户端模块仍必须
-执行并通过。任何其他 failure、warning 或 skip 仍视为失败。
+标准 VCI 的两个预授权码组合均包含
+`oid4vci-1_0-issuer-happy-flow-multiple-clients`。driver 为两个模拟客户端分别创建并
+投递独立的 Credential Offer，因此每份 offer 都拥有自己的短期、单次使用
+`pre-authorized_code`，符合 OpenID4VCI 1.0 Final 第 4.1.1 节。该模块不得从 plan
+中筛除并且必须通过；服务端也不得允许第二个客户端重放第一份 code。
 
 上游计划标题明确标为 **alpha**，并注明可能不完整/不正确或尚未纳入认证计划。
 因此全绿只能称为“官方套件回归通过”，不能称为 OpenID Foundation 正式认证，

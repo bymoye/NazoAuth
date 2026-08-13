@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+
+FROM docker.io/library/maven:3-eclipse-temurin-21 AS builder
+
+ARG OIDF_SUITE_UPSTREAM_REVISION=321bc5bc53601b9690b54c023c0cbfac0f0230f2
+
+WORKDIR /src
+COPY --from=oidf_suite . .
+RUN --mount=type=cache,id=oidf-suite-maven,target=/root/.m2,sharing=locked \
+    test "$(git rev-parse HEAD)" = "${OIDF_SUITE_UPSTREAM_REVISION}" && \
+    test -z "$(git status --porcelain)" && \
+    mvn -B clean package -DskipTests=true
+
+FROM docker.io/library/eclipse-temurin:21
+
+ARG OIDF_SUITE_UPSTREAM_REVISION=321bc5bc53601b9690b54c023c0cbfac0f0230f2
+
+COPY --from=builder /src/target/fapi-test-suite.jar /server/fapi-test-suite.jar
+COPY --chmod=0555 deploy/oidf-suite/start-suite.sh /usr/local/bin/start-oidf-suite
+
+LABEL org.opencontainers.image.revision="${OIDF_SUITE_UPSTREAM_REVISION}"
+
+ENV BASE_URL=https://localhost:8443 \
+    BASE_MTLS_URL=https://localhost:8444 \
+    MONGODB_HOST=mongodb \
+    JAVA_EXTRA_ARGS=
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/start-oidf-suite"]

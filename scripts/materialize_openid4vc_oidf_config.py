@@ -22,23 +22,6 @@ OIDF_VP_SD_JWT_VCT = "urn:eudi:pid:1"
 OFFICIAL_VCI_PRIVATE_KEY_CLIENT_ID = "nazo-openid4vc-oidf-private-key-jwt"
 OFFICIAL_VCI_ATTESTED_CLIENT_ID = "nazo-openid4vc-oidf-client-attestation"
 VCI_UNSUPPORTED_ENCRYPTION_MODULE = "oid4vci-1_0-issuer-fail-unsupported-encryption-algorithm"
-VCI_MULTIPLE_CLIENTS_MODULE = "oid4vci-1_0-issuer-happy-flow-multiple-clients"
-VCI_PREAUTHORIZED_APPLICABLE_MODULES = (
-    "oid4vci-1_0-issuer-metadata-test",
-    "oid4vci-1_0-issuer-metadata-test-signed",
-    "oid4vci-1_0-issuer-happy-flow",
-    "oid4vci-1_0-issuer-happy-flow-additional-requests",
-    "oid4vci-1_0-issuer-happy-flow-skip-notification",
-    "oid4vci-1_0-issuer-batch-issuance",
-    "oid4vci-1_0-issuer-fail-invalid-nonce",
-    "oid4vci-1_0-issuer-fail-invalid-jwt-proof-signature",
-    "oid4vci-1_0-issuer-fail-invalid-key-attestation-signature",
-    "oid4vci-1_0-issuer-fail-missing-proof",
-    VCI_UNSUPPORTED_ENCRYPTION_MODULE,
-    "oid4vci-1_0-issuer-fail-unknown-credential-configuration",
-    "oid4vci-1_0-issuer-fail-unknown-credential-identifier",
-    "oid4vci-1_0-issuer-fail-on-access-token-in-query",
-)
 P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
 P256_A = -3
 P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
@@ -108,6 +91,46 @@ def vci_client_ids(onboarding_profile: str, run_namespace: str | None) -> dict[s
     }
 
 
+def plan_alias(prefix: str, slug: str, run_namespace: str | None) -> str:
+    """Keep official aliases stable and isolate every operator run."""
+    return "-".join(
+        part for part in (prefix, run_namespace, slug) if isinstance(part, str) and part
+    )
+
+
+def vp_verification_evidence_browser_automation(
+    conformance_server: str,
+) -> list[dict[str, object]]:
+    evidence_url = (
+        conformance_server.rstrip("/") + "/test/a/*/verification-evidence"
+    )
+    return [
+        {
+            "comment": (
+                "capture the suite-served evidence page to fill the verification-result "
+                "screenshot placeholder without human interaction"
+            ),
+            "match": evidence_url,
+            "tasks": [
+                {
+                    "task": "Capture verification evidence",
+                    "match": evidence_url,
+                    "commands": [
+                        [
+                            "wait",
+                            "xpath",
+                            "//*",
+                            10,
+                            ".*Deferred verification evidence.*",
+                            "update-image-placeholder",
+                        ]
+                    ],
+                }
+            ],
+        }
+    ]
+
+
 def bind_subject_id(
     issuer_settings: dict[str, object],
     onboarding_profile: str,
@@ -151,12 +174,21 @@ def plan_expression(plan: str, variants: dict[str, str], filename: str) -> str:
     expression = plan + "".join(
         f"[{name}={value}]" for name, value in variants.items()
     )
-    if plan == VCI_STANDARD and variants.get("vci_grant_type") == "pre_authorization_code":
-        # The pinned official multiple-client module starts its second client
-        # without requesting another Credential Offer. Select every applicable
-        # module explicitly so it cannot reuse a single-use pre-authorized code.
-        expression += ":" + ",".join(VCI_PREAUTHORIZED_APPLICABLE_MODULES)
     return f"{expression} {filename}"
+
+
+def p028_plan_expression() -> str:
+    """Return the canonical expression for the diagnostic VCI p028 case.
+
+    The materializer remains the authority for both the full 17-plan registry
+    and the variant ordering used by the upstream runner.  Keeping this helper
+    here prevents a targeted invocation from retyping (and potentially
+    drifting from) the p028 selector.
+    """
+    for plan, slug, variants in matrix_cases():
+        if slug == "vci-sd-wallet-plain":
+            return plan_expression(plan, variants, f"openid4vc-{slug}.json")
+    raise RuntimeError("OpenID4VC matrix no longer contains the p028 VCI case")
 
 
 def expected_skips_for_cases(cases: list[tuple[str, str, dict[str, str]]]) -> list[dict[str, object]]:
@@ -496,8 +528,11 @@ def main() -> int:
             client["client_id"] = target_hostname
             if plan == VP_HAIP or variants.get("request_method") == "request_uri_signed":
                 client["request_object_trust_anchor_pem"] = request_object_trust_anchor_pem
+            config["browser"] = vp_verification_evidence_browser_automation(
+                str(driver["conformance_server"])
+            )
         prefix = str(config.get("alias", "nazo-openid4vc"))
-        alias = f"{prefix}-{slug}"
+        alias = plan_alias(prefix, slug, namespace)
         config["alias"] = alias
         config["description"] = f"NazoAuth {slug} OpenID4VC Final regression"
         filename = f"openid4vc-{slug}.json"

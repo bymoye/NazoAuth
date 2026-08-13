@@ -568,7 +568,7 @@ fn protected_resource_metadata_uses_the_same_rar_snapshot() {
             "resource": "https://issuer.example/fapi/resource",
             "authorization_servers": ["https://issuer.example"],
             "resource_name": "Nazo OAuth Protected Resource",
-            "bearer_methods_supported": ["header", "body"],
+            "bearer_methods_supported": ["header"],
             "scopes_supported": [
                 "openid", "profile", "email", "address", "phone", "offline_access"
             ],

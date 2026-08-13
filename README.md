@@ -55,7 +55,7 @@ path. The live demo is available at <https://auth.nazo.run/ui/auth>.
 | Item | Value |
 | --- | --- |
 | Package | `nazo-oauth-server` |
-| Version | `0.1.0` |
+| Workspace version | `0.1.9` release candidate |
 | License | AGPL-3.0-or-later |
 | Language | Rust 2024 |
 | Runtime services | PostgreSQL, Valkey |
@@ -73,7 +73,7 @@ composite score:
 | Static security analysis | CodeQL Rust analysis with the `security-extended` query suite. |
 | Dependency policy | GitHub dependency review, `cargo audit`, and `cargo deny` over advisories, bans, licenses, and sources. |
 | Runtime security behavior | Real HTTP E2E, load/race gate, and Valkey outage injection in `conformance-security`. |
-| Protocol conformance | Public black-box official-suite evidence for the current 25-plan OIDF/FAPI matrix and 17-plan OpenID4VC matrix. |
+| Protocol conformance | The release gate runs the fixed 27-plan OIDC/FAPI/CIBA/logout matrix and the fixed 17-plan OpenID4VCI/VP matrix against the same public deployment. Historical and exact-release evidence remains versioned under `docs/conformance`. |
 | Coverage trend | Codecov LCOV upload from the dedicated coverage workflow. |
 | Release provenance | CycloneDX SBOM, Trivy image scan, Sigstore signing, and GitHub artifact attestations. |
 
@@ -107,11 +107,17 @@ composite score:
 
 ## Quick start
 
-Install the signed `nazoauthctl` from an immutable GitHub Release using the
-[verified bootstrap procedure](docs/operations/one-click-update.md), then run:
+Install the independently signed `nazoauthctl` from
+[`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl). Controller
+source, CI, installation, and Releases now live only in that repository; the
+NazoAuth `v0.1.20` tag retains the pre-removal source as a review and rollback
+point. See the [repository split boundary](docs/operations/controller-repository-split.md),
+then run:
 
 ```sh
 sudo nazoauthctl install --runtime auto
+sudo nazoauthctl bootstrap-admin
+sudo nazoauthctl status
 sudo nazoauthctl doctor
 ```
 
@@ -122,9 +128,11 @@ Open `http://127.0.0.1:8000/health` or
 `http://127.0.0.1:8000/.well-known/openid-configuration`. Data, signing keys,
 generated application secrets, and avatars are persistent.
 
-On a database without an administrator, the server log reports a time-bounded
-one-time setup URL. Treat the URL as a password and use it to create the first
-administrator without configuring SMTP.
+On a database without an administrator, `nazoauthctl bootstrap-admin` reads the
+runtime-owned one-time claim without printing it. Interactive use prompts on a
+TTY; automation supplies the closed credential document through stdin or a
+dedicated file descriptor. The token, credentials, and any token-bearing URL
+never enter argv, ordinary environment variables, logs, or audit records.
 
 For a public issuer, pass `--public-url https://auth.example.com`; see the
 [deployment guide](docs/operations/deployment.md) for TLS ingress requirements.

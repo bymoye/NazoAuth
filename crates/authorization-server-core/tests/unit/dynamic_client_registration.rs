@@ -147,6 +147,66 @@ fn configuration_update_rejects_server_fields_and_requires_matching_credentials(
 }
 
 #[test]
+fn configuration_update_rejects_invalid_shapes_and_public_secrets() {
+    let client = client();
+
+    for payload in [json!(null), json!([])] {
+        let error = parse_client_configuration_update(payload, &client, false, false)
+            .expect_err("configuration updates must be JSON objects");
+        assert_eq!(error.error, "invalid_request");
+    }
+
+    let missing_client_id = parse_client_configuration_update(
+        json!({"client_name": "missing-id"}),
+        &client,
+        false,
+        false,
+    )
+    .expect_err("client_id is required");
+    assert_eq!(missing_client_id.error, "invalid_client_metadata");
+
+    let wrong_client_id = parse_client_configuration_update(
+        json!({"client_id": "another-client"}),
+        &client,
+        false,
+        false,
+    )
+    .expect_err("client_id must match the endpoint");
+    assert_eq!(wrong_client_id.error, "invalid_client_metadata");
+
+    let public_secret = parse_client_configuration_update(
+        json!({"client_id": "client", "client_secret": "unexpected"}),
+        &client,
+        false,
+        false,
+    )
+    .expect_err("public clients must not submit a client secret");
+    assert_eq!(public_secret.error, "invalid_client_metadata");
+
+    let malformed_metadata = parse_client_configuration_update(
+        json!({"client_id": "client", "redirect_uris": 42}),
+        &client,
+        false,
+        false,
+    )
+    .expect_err("invalid metadata types must be rejected");
+    assert_eq!(malformed_metadata.error, "invalid_client_metadata");
+
+    let public_update = parse_client_configuration_update(
+        json!({"client_id": "client", "client_name": "Public update"}),
+        &client,
+        false,
+        false,
+    )
+    .expect("public clients may update ordinary metadata");
+    assert_eq!(public_update.client_name.as_deref(), Some("Public update"));
+
+    let mut non_code_client = client;
+    non_code_client.grant_types = vec!["client_credentials".to_owned()];
+    assert!(response_types_from_client(&non_code_client).is_empty());
+}
+
+#[test]
 fn public_and_confidential_code_clients_share_one_registration_path() {
     for (token_endpoint_auth_method, expected_type) in
         [("none", "public"), ("client_secret_basic", "confidential")]

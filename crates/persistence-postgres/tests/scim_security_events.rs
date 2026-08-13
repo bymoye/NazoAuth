@@ -58,7 +58,7 @@ async fn insert_receiver(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scim_outbox_is_atomic_receiver_scoped_and_terminally_acknowledged() {
     let Some(database_url) = database_url() else {
         return;

@@ -30,9 +30,8 @@ jobs:
       CONFORMANCE_SERVER: https://www.certification.openid.net
       TARGET_ORIGIN: ${{ inputs.target_origin }}
       TRUSTED_TARGET_ORIGIN: ${{ vars.OPENID4VC_TARGET_ORIGIN }}
-      OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -43,10 +42,12 @@ jobs:
           set -euo pipefail
           git cat-file -e "$DEPLOYED_SHA^{commit}"
           git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"
+          git checkout --detach "$DEPLOYED_SHA"
+          test "$(git rev-parse HEAD)" = "$DEPLOYED_SHA"
           test -n "$TRUSTED_TARGET_ORIGIN"
           test "$TARGET_ORIGIN" = "$TRUSTED_TARGET_ORIGIN"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -64,57 +65,54 @@ jobs:
       - name: Install pinned runner dependencies
         run: python -m pip install --require-hashes -r requirements/oidf-conformance.txt
 
-      - name: Materialize isolated OpenID4VC configurations
-        shell: bash
+      - name: Materialize OpenID4VC job secrets
+        run: python scripts/materialize_github_oidf_secrets.py --openid4vc --output-dir "$RUNNER_TEMP/oidf-secrets"
         env:
+          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
           OPENID4VC_OIDF_BASE_CONFIG_JSON: ${{ secrets.OPENID4VC_OIDF_BASE_CONFIG_JSON }}
           OPENID4VC_OIDF_MTLS_CONFIG_JSON: ${{ secrets.OPENID4VC_OIDF_MTLS_CONFIG_JSON }}
           OPENID4VC_OIDF_DRIVER_CONFIG_JSON: ${{ secrets.OPENID4VC_OIDF_DRIVER_CONFIG_JSON }}
           OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
+          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
+          OIDF_ADMIN_EMAIL: ${{ secrets.OIDF_ADMIN_EMAIL }}
+          OIDF_ADMIN_PASSWORD: ${{ secrets.OIDF_ADMIN_PASSWORD }}
+
+      - name: Materialize isolated OpenID4VC configurations
+        shell: bash
         run: |
-          test -n "$OIDF_CONFORMANCE_TOKEN"
+          set -euo pipefail
+          umask 077
           test -n "$TARGET_ORIGIN" || {
             echo "Supply the public production HTTPS issuer through workflow_dispatch input target_origin." >&2
             exit 1
           }
-          test -n "$OPENID4VC_OIDF_BASE_CONFIG_JSON"
-          test -n "$OPENID4VC_OIDF_MTLS_CONFIG_JSON"
-          test -n "$OPENID4VC_OIDF_DRIVER_CONFIG_JSON"
           install -d -m 700 runtime/openid4vc
-          printf '%s' "$OPENID4VC_OIDF_BASE_CONFIG_JSON" > runtime/openid4vc/base.json
-          printf '%s' "$OPENID4VC_OIDF_MTLS_CONFIG_JSON" > runtime/openid4vc/mtls.json
-          printf '%s' "$OPENID4VC_OIDF_DRIVER_CONFIG_JSON" > runtime/openid4vc/driver-input.json
-          chmod 600 runtime/openid4vc/*.json
           python scripts/materialize_openid4vc_oidf_config.py \
-            --base-config-json-file runtime/openid4vc/base.json \
-            --mtls-config-json-file runtime/openid4vc/mtls.json \
-            --driver-config-json-file runtime/openid4vc/driver-input.json \
+            --base-config-json-file "$RUNNER_TEMP/oidf-secrets/base.json" \
+            --mtls-config-json-file "$RUNNER_TEMP/oidf-secrets/mtls.json" \
+            --driver-config-json-file "$RUNNER_TEMP/oidf-secrets/driver-input.json" \
             --credential-datasets-json-file tests/contracts/openid4vc-conformance-datasets.json \
             --conformance-server "$CONFORMANCE_SERVER" \
             --target-origin "$TARGET_ORIGIN" \
             --onboarding-profile official \
             --output-dir runtime/openid4vc
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > runtime/openid4vc/delivered-client-material.json
-          chmod 600 runtime/openid4vc/delivered-client-material.json
           python scripts/apply_oidf_delivered_client_material.py \
-            --material-json-file runtime/openid4vc/delivered-client-material.json \
+            --material-json-file "$RUNNER_TEMP/oidf-secrets/delivered-client-material.json" \
             --config-json-file runtime/openid4vc/openid4vc-plan-configs.json \
             --expected-target-issuer "$TARGET_ORIGIN" \
             --expected-suite-base-url "$CONFORMANCE_SERVER"
+          python scripts/apply_oidf_browser_credentials.py \
+            --config-json-file runtime/openid4vc/openid4vc-plan-configs.json \
+            --credentials-file "$RUNNER_TEMP/oidf-secrets/browser-credentials.json"
 
       - name: Run official OpenID4VC Final and HAIP alpha matrix
         shell: bash
-        env:
-          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
-          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
-          OIDF_ADMIN_EMAIL: ${{ secrets.OIDF_ADMIN_EMAIL }}
-          OIDF_ADMIN_PASSWORD: ${{ secrets.OIDF_ADMIN_PASSWORD }}
         run: |
-          test -n "$OIDF_ADMIN_EMAIL"
-          test -n "$OIDF_ADMIN_PASSWORD"
           python -u scripts/run_openid4vc_conformance.py \
             --driver-config-json-file runtime/openid4vc/openid4vc-driver.json \
+            --operator-credentials-file "$RUNNER_TEMP/oidf-secrets/operator-credentials.json" \
+            --suite-token-file "$RUNNER_TEMP/oidf-secrets/suite-token" \
             --plan-group-size 4 \
             -- \
             --suite-dir oidf-conformance-suite \
@@ -126,7 +124,8 @@ jobs:
             --expected-skips-file runtime/openid4vc/openid4vc-expected-skips.json \
             --export-dir runtime/openid4vc/results \
             --timeout-seconds 4800 \
-            --monitor-interval-seconds 10
+            --monitor-interval-seconds 10 \
+            --token-file "$RUNNER_TEMP/oidf-secrets/suite-token"
 
       - name: Verify official suite remained pristine
         if: always()
@@ -140,7 +139,9 @@ jobs:
       - name: Remove plaintext secrets
         if: always()
         shell: bash
-        run: rm -f runtime/openid4vc/base.json runtime/openid4vc/mtls.json runtime/openid4vc/driver-input.json runtime/openid4vc/delivered-client-material.json runtime/openid4vc/openid4vc-driver.json runtime/openid4vc/openid4vc-plan-configs.json
+        run: |
+          rm -f runtime/openid4vc/openid4vc-driver.json runtime/openid4vc/openid4vc-plan-configs.json
+          rm -rf -- "$RUNNER_TEMP/oidf-secrets"
 
       - name: Upload redacted conformance evidence
         if: always()

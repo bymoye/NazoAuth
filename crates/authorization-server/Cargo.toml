@@ -1,6 +1,6 @@
 [package]
 name = "nazo-oauth-server"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,23 +14,27 @@ test = false
 actix-cors.workspace = true
 actix-files.workspace = true
 actix-multipart = "0.8.0"
-actix-web = { workspace = true, features = ["cookies", "openssl"] }
-actix-tls = { workspace = true, features = ["accept", "openssl"] }
+actix-web = { workspace = true, features = ["cookies", "rustls-0_23"] }
+actix-tls = { workspace = true, features = ["accept", "rustls-0_23"] }
 anyhow.workspace = true
 argon2.workspace = true
+atomicwrites.workspace = true
 aws-lc-rs.workspace = true
 base64.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-diesel = { workspace = true, features = ["postgres", "uuid", "chrono", "serde_json", "64-column-tables"] }
+diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "serde_json", "64-column-tables"] }
+der.workspace = true
 ed25519-dalek.workspace = true
+flate2.workspace = true
+fs2.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 mdoc-rs.workspace = true
 coset.workspace = true
 ciborium.workspace = true
-lettre = { workspace = true, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
+lettre = { workspace = true, features = ["aws-lc-rs", "builder", "rustls-platform-verifier", "smtp-transport", "tokio1-rustls"] }
 nazo-auth.workspace = true
 nazo-http-signatures.workspace = true
 nazo-http-actix.workspace = true
@@ -46,7 +50,6 @@ nazo-valkey.workspace = true
 nazo-resource-server.workspace = true
 nazo-runtime-modules.workspace = true
 nazo-scim-events.workspace = true
-openssl.workspace = true
 opentelemetry = "0.32.0"
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }
@@ -54,15 +57,23 @@ opentelemetry_sdk = { version = "0.32.1", features = ["logs", "metrics", "rt-tok
 passkey-auth.workspace = true
 p256 = { workspace = true, features = ["ecdh", "ecdsa", "pkcs8"] }
 rand.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "rustls", "json", "stream"] }
+rcgen.workspace = true
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
+rustix.workspace = true
+rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+semver.workspace = true
 sha2.workspace = true
+tar.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url.workspace = true
+x509-parser.workspace = true
+x509-cert.workspace = true
 urlencoding.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 yaml_serde = "0.10.4"
@@ -71,9 +82,9 @@ yaml_serde = "0.10.4"
 diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 diesel_migrations.workspace = true
 fred = { workspace = true, features = ["i-scripts"] }
+pkcs8.workspace = true
 proptest.workspace = true
 nazo-key-management = { workspace = true, features = ["test-support"] }
-rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "std"] }
 
 [lints]
 workspace = true

@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/code-quality.yml"
+      - ".github/workflows/release-policy.yml"
+      - ".github/workflows/release-security.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain"
@@ -20,9 +22,12 @@ on:
       - "migrations/**"
       - "scripts/**/*.py"
       - "scripts/**/*.sh"
+      - "release/**"
   pull_request:
     paths:
       - ".github/workflows/code-quality.yml"
+      - ".github/workflows/release-policy.yml"
+      - ".github/workflows/release-security.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain"
@@ -38,6 +43,7 @@ on:
       - "migrations/**"
       - "scripts/**/*.py"
       - "scripts/**/*.sh"
+      - "release/**"
   workflow_dispatch:
 
 permissions:
@@ -73,6 +79,7 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/oauth
+      NAZO_AUDIT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/nazo_audit_test
       VALKEY_URL: redis://127.0.0.1:6379/0
       VALKEY_COMMAND_TIMEOUT_MS: "1000"
       BIND: 127.0.0.1:18000
@@ -87,9 +94,6 @@ jobs:
       EMAIL_CODE_DEV_RESPONSE_ENABLED: "false"
       AVATAR_STORAGE_DIR: runtime/ci/avatars
       JWK_KEYS_DIR: runtime/ci/keys
-      AUTH_RATE_LIMIT_MAX_REQUESTS: "100000"
-      TOKEN_RATE_LIMIT_MAX_REQUESTS: "100000"
-      TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS: "100000"
       REQUIRE_PUSHED_AUTHORIZATION_REQUESTS: "false"
       FEDERATION_PROVIDER_CONFIGS: >-
         [{"provider_id":"ci-oidc","enabled":true,"display_name":"CI OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"ci-oidc-client","client_secret":"ci-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/ci-oidc/callback","scopes":"openid email profile"}]
@@ -102,21 +106,30 @@ jobs:
       CARGO_BUILD_JOBS: "1"
       RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           shared-key: workspace-quality
 
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev postgresql-client
 
       - name: Prepare runtime directories
         run: mkdir -p runtime/ci/avatars runtime/ci/keys
+
+      - name: Create isolated audit ledger test database
+        run: >-
+          PGPASSWORD=postgres psql
+          -h 127.0.0.1 -U postgres -d postgres
+          -v ON_ERROR_STOP=1
+          -c 'CREATE DATABASE nazo_audit_test'
 
       - name: Verify compatibility contracts
         run: python scripts/verify_static_contracts.py --check
@@ -140,9 +153,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - name: Install pinned nightly and cargo-fuzz
         run: |
@@ -157,9 +172,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 

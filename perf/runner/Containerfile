@@ -3,7 +3,7 @@ FROM docker.io/grafana/k6:2.1.0 AS k6
 FROM docker.io/library/python:3.14-alpine
 
 RUN apk add --no-cache ca-certificates docker-cli \
-    && pip install --no-cache-dir "psycopg[binary]==3.3.2" "redis==7.1.0" "argon2-cffi==25.1.0" "cryptography==46.0.3" "blake3==1.0.9"
+    && pip install --no-cache-dir "psycopg[binary]==3.3.2" "redis==7.1.0" "argon2-cffi==25.1.0" "cryptography==50.0.0" "blake3==1.0.9"
 
 COPY --from=k6 /usr/bin/k6 /usr/bin/k6
 COPY perf /perf

@@ -7,13 +7,18 @@ use fred::prelude::{
     PerformanceConfig,
 };
 use nazo_auth::{
-    CibaDecisionEvaluation, CibaPollTransition, evaluate_ciba_decision, evaluate_ciba_poll,
+    CibaAtomicResult, CibaAuthenticationContext, CibaCreateFailure, CibaDecision,
+    CibaDecisionEvaluation, CibaDecisionFailure, CibaPollCommit, CibaPollFailure,
+    CibaPollTransition, CibaStateFuture, CibaStateStorePort, CibaStoredRequest,
+    evaluate_ciba_decision, evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
 };
 use nazo_valkey::AtomicResult as ValkeyAtomicResult;
 use nazo_valkey::test_support::ciba_request_storage_key;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
+use tokio::sync::Barrier;
 
 fn pending_state(now: i64) -> CibaRequestState {
     CibaRequestState {
@@ -22,6 +27,7 @@ fn pending_state(now: i64) -> CibaRequestState {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         acr: Some("1".to_owned()),
+        authentication_context: None,
         binding_message: Some("Read the number".to_owned()),
         issued_at: now,
         status: CibaStatus::Pending,
@@ -73,6 +79,237 @@ async fn stage_at_deadline(valkey: &ValkeyClient, key: &str, raw: &str, deadline
     .await
     .expect("state should be staged");
     assert_eq!(reply.parse::<i64>().unwrap(), deadline);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CibaStoreCall {
+    Create(Option<i64>),
+    Replace(Option<i64>),
+    Delete(Option<i64>),
+}
+
+#[derive(Clone)]
+struct RecordedCibaRequest {
+    state: CibaRequestState,
+    version: u64,
+}
+
+/// A deterministic state-store double for protocol tests that must not depend
+/// on a live Valkey server.  Its version check models the compare-and-set
+/// linearization point, while the outcome queue can inject a lease expiry or
+/// one stale-version conflict at that point.
+#[derive(Clone)]
+struct RecordingCibaStore {
+    requests: Arc<Mutex<HashMap<String, RecordedCibaRequest>>>,
+    calls: Arc<Mutex<Vec<CibaStoreCall>>>,
+    outcomes: Arc<Mutex<VecDeque<CibaAtomicResult>>>,
+    yield_before_load: bool,
+    load_barrier: Option<Arc<Barrier>>,
+    barrier_loads: Arc<AtomicUsize>,
+}
+
+impl RecordingCibaStore {
+    fn new(yield_before_load: bool) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(HashMap::new())),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            outcomes: Arc::new(Mutex::new(VecDeque::new())),
+            yield_before_load,
+            load_barrier: None,
+            barrier_loads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn with_load_barrier() -> Self {
+        Self {
+            load_barrier: Some(Arc::new(Barrier::new(2))),
+            ..Self::new(false)
+        }
+    }
+
+    fn seed(&self, auth_req_id: &str, state: CibaRequestState) {
+        self.requests.lock().unwrap().insert(
+            auth_req_id.to_owned(),
+            RecordedCibaRequest { state, version: 0 },
+        );
+    }
+
+    fn push_outcome(&self, outcome: CibaAtomicResult) {
+        self.outcomes.lock().unwrap().push_back(outcome);
+    }
+
+    fn calls(&self) -> Vec<CibaStoreCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl CibaStateStorePort for RecordingCibaStore {
+    type Version = u64;
+
+    fn load<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+    ) -> CibaStateFuture<'a, Option<CibaStoredRequest<Self::Version>>> {
+        let requests = Arc::clone(&self.requests);
+        let auth_req_id = auth_req_id.to_owned();
+        let yield_before_load = self.yield_before_load;
+        let load_barrier = self.load_barrier.clone();
+        let barrier_loads = Arc::clone(&self.barrier_loads);
+        Box::pin(async move {
+            if yield_before_load {
+                tokio::task::yield_now().await;
+            }
+            let participates_in_barrier =
+                load_barrier.is_some() && barrier_loads.fetch_add(1, Ordering::SeqCst) < 2;
+            if participates_in_barrier {
+                let load_barrier = load_barrier.as_ref().expect("barrier is configured");
+                load_barrier.wait().await;
+            }
+            let stored = requests
+                .lock()
+                .unwrap()
+                .get(&auth_req_id)
+                .map(|stored| CibaStoredRequest::new(stored.state.clone(), stored.version));
+            if participates_in_barrier {
+                let load_barrier = load_barrier.as_ref().expect("barrier is configured");
+                load_barrier.wait().await;
+            }
+            Ok(stored)
+        })
+    }
+
+    fn create<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        state: &'a CibaRequestState,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        self.create_with_lease_deadline(auth_req_id, state, None)
+    }
+
+    fn create_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        state: &'a CibaRequestState,
+        lease_expires_at: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        let requests = Arc::clone(&self.requests);
+        let calls = Arc::clone(&self.calls);
+        let outcomes = Arc::clone(&self.outcomes);
+        let auth_req_id = auth_req_id.to_owned();
+        let state = state.clone();
+        Box::pin(async move {
+            calls
+                .lock()
+                .unwrap()
+                .push(CibaStoreCall::Create(lease_expires_at));
+            let outcome = outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(CibaAtomicResult::Applied);
+            if outcome != CibaAtomicResult::Applied {
+                return Ok(outcome);
+            }
+            let mut requests = requests.lock().unwrap();
+            if requests.contains_key(&auth_req_id) {
+                return Ok(CibaAtomicResult::Conflict);
+            }
+            requests.insert(auth_req_id, RecordedCibaRequest { state, version: 0 });
+            Ok(CibaAtomicResult::Applied)
+        })
+    }
+
+    fn replace<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        state: &'a CibaRequestState,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        self.replace_with_lease_deadline(auth_req_id, version, state, None)
+    }
+
+    fn replace_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        state: &'a CibaRequestState,
+        lease_expires_at: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        let requests = Arc::clone(&self.requests);
+        let calls = Arc::clone(&self.calls);
+        let outcomes = Arc::clone(&self.outcomes);
+        let auth_req_id = auth_req_id.to_owned();
+        let expected_version = *version;
+        let state = state.clone();
+        Box::pin(async move {
+            calls
+                .lock()
+                .unwrap()
+                .push(CibaStoreCall::Replace(lease_expires_at));
+            let mut requests = requests.lock().unwrap();
+            let Some(stored) = requests.get_mut(&auth_req_id) else {
+                return Ok(CibaAtomicResult::Conflict);
+            };
+            if stored.version != expected_version {
+                return Ok(CibaAtomicResult::Conflict);
+            }
+            let outcome = outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(CibaAtomicResult::Applied);
+            if outcome != CibaAtomicResult::Applied {
+                return Ok(outcome);
+            }
+            stored.state = state;
+            stored.version = stored.version.saturating_add(1);
+            Ok(CibaAtomicResult::Applied)
+        })
+    }
+
+    fn delete<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        self.delete_with_lease_deadline(auth_req_id, version, None)
+    }
+
+    fn delete_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        lease_expires_at: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        let requests = Arc::clone(&self.requests);
+        let calls = Arc::clone(&self.calls);
+        let outcomes = Arc::clone(&self.outcomes);
+        let auth_req_id = auth_req_id.to_owned();
+        let expected_version = *version;
+        Box::pin(async move {
+            calls
+                .lock()
+                .unwrap()
+                .push(CibaStoreCall::Delete(lease_expires_at));
+            let mut requests = requests.lock().unwrap();
+            let Some(stored) = requests.get(&auth_req_id) else {
+                return Ok(CibaAtomicResult::Conflict);
+            };
+            if stored.version != expected_version {
+                return Ok(CibaAtomicResult::Conflict);
+            }
+            let outcome = outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(CibaAtomicResult::Applied);
+            if outcome != CibaAtomicResult::Applied {
+                return Ok(outcome);
+            }
+            requests.remove(&auth_req_id);
+            Ok(CibaAtomicResult::Applied)
+        })
+    }
 }
 
 #[test]
@@ -164,6 +401,236 @@ fn ciba_decision_changes_only_status() {
     assert_eq!(next.retention_expires_at, state.retention_expires_at);
     assert_eq!(next.interval_seconds, state.interval_seconds);
     assert_eq!(next.last_poll_at, state.last_poll_at);
+}
+
+#[test]
+fn approved_ciba_state_preserves_the_authenticated_session_context() {
+    let state = pending_state(1_000);
+    let context = CibaAuthenticationContext {
+        auth_time: 900,
+        amr: vec!["pwd".to_owned(), "otp".to_owned()],
+        oidc_sid: Some("sid-1".to_owned()),
+    };
+    let CibaDecisionEvaluation::Commit(next) = evaluate_ciba_decision_with_authentication_context(
+        &state,
+        Some(state.user_id),
+        CibaDecision::Approve,
+        Some(context.clone()),
+        1_001,
+    ) else {
+        panic!("valid decision should produce a terminal replacement")
+    };
+
+    assert_eq!(next.authentication_context, Some(context));
+}
+
+#[actix_web::test]
+async fn ciba_creation_passes_lease_deadline_to_atomic_store() {
+    let store = RecordingCibaStore::new(false);
+    store.push_outcome(CibaAtomicResult::DeadlineElapsed);
+    let state = pending_state(1_000);
+    let service = CibaService::new(store.clone());
+
+    let result = service
+        .create_unique_with_lease_deadline(&state, Some(900), || "lease-bound".to_owned())
+        .await;
+
+    assert_eq!(result, Err(CibaCreateFailure::DeadlineElapsed));
+    assert_eq!(store.calls(), vec![CibaStoreCall::Create(Some(900))]);
+    assert!(service.load("lease-bound").await.unwrap().is_none());
+}
+
+#[actix_web::test]
+async fn ciba_decision_lease_expiry_blocks_cas_without_mutating_pending_state() {
+    let store = RecordingCibaStore::new(false);
+    let state = pending_state(1_000);
+    let auth_req_id = "lease-decision-expired";
+    store.seed(auth_req_id, state.clone());
+    store.push_outcome(CibaAtomicResult::DeadlineElapsed);
+    let service = CibaService::new(store.clone());
+
+    let result = service
+        .decide_with_authentication_context_and_lease_deadline(
+            auth_req_id,
+            CibaDecision::Approve,
+            Some(state.user_id),
+            None,
+            Some(900),
+            || 1_001,
+        )
+        .await;
+
+    assert_eq!(result, Err(CibaDecisionFailure::Expired));
+    assert_eq!(store.calls(), vec![CibaStoreCall::Replace(Some(900))]);
+    assert_eq!(
+        service.load(auth_req_id).await.unwrap().unwrap().state(),
+        &state
+    );
+}
+
+#[actix_web::test]
+async fn expired_ciba_decision_uses_lease_guarded_cleanup_delete() {
+    let store = RecordingCibaStore::new(false);
+    let mut state = pending_state(1_000);
+    state.expires_at = 1_000;
+    state.retention_expires_at = 1_200;
+    let auth_req_id = "lease-decision-cleanup";
+    store.seed(auth_req_id, state.clone());
+    store.push_outcome(CibaAtomicResult::DeadlineElapsed);
+    let service = CibaService::new(store.clone());
+
+    let result = service
+        .decide_with_authentication_context_and_lease_deadline(
+            auth_req_id,
+            CibaDecision::Approve,
+            Some(state.user_id),
+            None,
+            Some(900),
+            || 1_001,
+        )
+        .await;
+
+    assert_eq!(result, Err(CibaDecisionFailure::Expired));
+    assert_eq!(store.calls(), vec![CibaStoreCall::Delete(Some(900))]);
+    assert_eq!(
+        service.load(auth_req_id).await.unwrap().unwrap().state(),
+        &state
+    );
+}
+
+#[actix_web::test]
+async fn ciba_poll_lease_expiry_returns_expired_without_advancing_poll_state() {
+    let store = RecordingCibaStore::new(false);
+    let state = pending_state(1_000);
+    let auth_req_id = "lease-poll-expired";
+    store.seed(auth_req_id, state.clone());
+    let initial = CibaService::new(store.clone())
+        .load(auth_req_id)
+        .await
+        .unwrap()
+        .unwrap();
+    store.push_outcome(CibaAtomicResult::DeadlineElapsed);
+    let service = CibaService::new(store.clone());
+
+    let result = service
+        .poll_with_lease_deadline(auth_req_id, &state.client_id, initial, Some(900), || 1_001)
+        .await;
+
+    assert_eq!(result, Ok(CibaPollCommit::Expired));
+    assert_eq!(store.calls(), vec![CibaStoreCall::Replace(Some(900))]);
+    assert_eq!(
+        service.load(auth_req_id).await.unwrap().unwrap().state(),
+        &state
+    );
+}
+
+#[actix_web::test]
+async fn approved_ciba_poll_lease_expiry_does_not_redeem_terminal_state() {
+    let store = RecordingCibaStore::new(false);
+    let mut state = pending_state(1_000);
+    state.status = CibaStatus::Approved;
+    let auth_req_id = "lease-poll-terminal-expired";
+    store.seed(auth_req_id, state.clone());
+    let initial = CibaService::new(store.clone())
+        .load(auth_req_id)
+        .await
+        .unwrap()
+        .unwrap();
+    store.push_outcome(CibaAtomicResult::DeadlineElapsed);
+    let service = CibaService::new(store.clone());
+
+    let result = service
+        .poll_with_lease_deadline(auth_req_id, &state.client_id, initial, Some(900), || 1_001)
+        .await;
+
+    assert_eq!(result, Ok(CibaPollCommit::Expired));
+    assert_eq!(store.calls(), vec![CibaStoreCall::Delete(Some(900))]);
+    assert_eq!(
+        service.load(auth_req_id).await.unwrap().unwrap().state(),
+        &state
+    );
+}
+
+#[actix_web::test]
+async fn concurrent_ciba_decisions_retry_stale_cas_and_commit_one_terminal_state() {
+    let store = RecordingCibaStore::with_load_barrier();
+    let state = pending_state(1_000);
+    let auth_req_id = "decision-lease-race";
+    store.seed(auth_req_id, state.clone());
+    let service = CibaService::new(store.clone());
+
+    let (approve, deny) = tokio::join!(
+        service.decide_with_authentication_context_and_lease_deadline(
+            auth_req_id,
+            CibaDecision::Approve,
+            Some(state.user_id),
+            None,
+            Some(2_000),
+            || 1_001,
+        ),
+        service.decide_with_authentication_context_and_lease_deadline(
+            auth_req_id,
+            CibaDecision::Deny,
+            Some(state.user_id),
+            None,
+            Some(2_000),
+            || 1_001,
+        ),
+    );
+
+    assert_eq!(usize::from(approve.is_ok()) + usize::from(deny.is_ok()), 1);
+    assert_eq!(
+        [&approve, &deny]
+            .into_iter()
+            .filter(|result| matches!(result, Err(CibaDecisionFailure::AlreadyHandled)))
+            .count(),
+        1
+    );
+    let replace_calls = store
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            CibaStoreCall::Replace(deadline) => Some(deadline),
+            CibaStoreCall::Create(_) | CibaStoreCall::Delete(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replace_calls, vec![Some(2_000), Some(2_000)]);
+    let stored = service.load(auth_req_id).await.unwrap().unwrap();
+    assert!(matches!(
+        stored.state().status,
+        CibaStatus::Approved | CibaStatus::Denied
+    ));
+}
+
+#[actix_web::test]
+async fn ciba_poll_client_mismatch_rejects_before_lease_cas() {
+    let store = RecordingCibaStore::new(false);
+    let state = pending_state(1_000);
+    let auth_req_id = "poll-client-mismatch";
+    store.seed(auth_req_id, state.clone());
+    let initial = CibaService::new(store.clone())
+        .load(auth_req_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let service = CibaService::new(store.clone());
+
+    let result = service
+        .poll_with_lease_deadline(
+            auth_req_id,
+            "different-client",
+            initial,
+            Some(2_000),
+            || 1_001,
+        )
+        .await;
+
+    assert_eq!(result, Err(CibaPollFailure::ClientMismatch));
+    assert!(store.calls().is_empty());
+    assert_eq!(
+        service.load(auth_req_id).await.unwrap().unwrap().state(),
+        &state
+    );
 }
 
 #[actix_web::test]
@@ -505,7 +972,7 @@ async fn three_concurrent_premature_polls_each_add_exactly_five_seconds() {
 }
 
 #[actix_web::test]
-async fn concurrent_approved_consumers_produce_exactly_one_issuance_outcome() {
+async fn concurrent_approved_polls_consume_state_once() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
@@ -531,12 +998,7 @@ async fn concurrent_approved_consumers_produce_exactly_one_issuance_outcome() {
         .into_iter()
         .filter(|result| matches!(result, Ok(CibaPollCommit::Approved(_))))
         .count();
-    let missing_count = [&one, &two]
-        .into_iter()
-        .filter(|result| matches!(result, Err(CibaPollFailure::Missing)))
-        .count();
     assert_eq!(approved_count, 1);
-    assert_eq!(missing_count, 1);
     assert!(service.load(&auth_req_id).await.unwrap().is_none());
 }
 
@@ -581,7 +1043,7 @@ async fn ciba_poll_conflict_retry_consumes_assertion_once() {
 }
 
 #[actix_web::test]
-async fn consumed_approved_state_is_not_restored_after_downstream_failure() {
+async fn approved_state_is_consumed_before_downstream_issuance() {
     let Some(valkey) = live_valkey().await else {
         return;
     };

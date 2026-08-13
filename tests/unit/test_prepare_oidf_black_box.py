@@ -1,8 +1,35 @@
 import importlib.util
+import json
+import os
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
+
+
+def configure_test_secrets(module) -> None:
+    reader, writer = os.pipe()
+    try:
+        os.write(
+            writer,
+            json.dumps(
+                {
+                    "oidf_applicant_email": "applicant@example.com",
+                    "oidf_applicant_password": "test-applicant-password",
+                    "oidf_dynamic_registration_initial_access_token": "test-initial-access-token",
+                    "oidf_ciba_automated_decision_token": "test-ciba-decision-token",
+                }
+            ).encode("utf-8"),
+        )
+    finally:
+        os.close(writer)
+    try:
+        module.configure_operator_secrets(
+            Namespace(secrets_stdin=False, secret_fd=reader, secret_file=None)
+        )
+    finally:
+        os.close(reader)
 
 
 def load_setup_module(runtime_dir: str | None = None):
@@ -14,15 +41,12 @@ def load_setup_module(runtime_dir: str | None = None):
         "OIDF_TARGET_ISSUER": "https://issuer.example",
         "OIDF_MTLS_TARGET_ISSUER": "https://mtls.issuer.example",
         "OIDF_SUITE_BASE_URL": "https://suite.example",
-        "OIDF_APPLICANT_EMAIL": "applicant@example.com",
-        "OIDF_APPLICANT_PASSWORD": "test-applicant-password",
-        "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN": "test-initial-access-token",
-        "OIDF_CIBA_AUTOMATED_DECISION_TOKEN": "test-ciba-decision-token",
     }
     if runtime_dir is not None:
         environment["OIDF_RUNTIME_DIR"] = runtime_dir
     with mock.patch.dict("os.environ", environment, clear=True):
         spec.loader.exec_module(module)
+        configure_test_secrets(module)
     return module
 
 
@@ -37,14 +61,11 @@ def load_setup_module_with_suite_base(suite_base_url: str):
             "OIDF_TARGET_ISSUER": "https://issuer.example",
             "OIDF_MTLS_TARGET_ISSUER": "https://mtls.issuer.example",
             "OIDF_SUITE_BASE_URL": suite_base_url,
-            "OIDF_APPLICANT_EMAIL": "applicant@example.com",
-            "OIDF_APPLICANT_PASSWORD": "test-applicant-password",
-            "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN": "test-initial-access-token",
-            "OIDF_CIBA_AUTOMATED_DECISION_TOKEN": "test-ciba-decision-token",
         },
         clear=True,
     ):
         spec.loader.exec_module(module)
+        configure_test_secrets(module)
     return module
 
 
@@ -232,8 +253,16 @@ class PrepareOidfBlackBoxTests(unittest.TestCase):
             "write_ui",
             "ensure_server_oidf_keyset",
             "listen 9443",
+            "OIDF_PLAN_CONFIG_JSON=",
         ):
             self.assertNotIn(forbidden, source)
+
+        onboarding_source = (
+            Path(__file__).resolve().parents[2]
+            / "scripts"
+            / "apply_public_conformance_onboarding.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("OIDF_PLAN_CONFIG_JSON=", onboarding_source)
 
     def test_fapi_ciba_plans_are_the_orthogonal_supported_combinations(self):
         module = load_setup_module()
@@ -486,6 +515,46 @@ class PrepareOidfBlackBoxTests(unittest.TestCase):
         self.assertEqual(len(groups["09-backchannel.json"]), 1)
         self.assertEqual(len(groups["10-frontchannel.json"]), 1)
         self.assertEqual(len(groups["11-session.json"]), 1)
+
+    def test_logout_plan_contract_uses_authoritative_oidf_names_and_configs(self):
+        module = load_setup_module()
+        configs = {
+            "oidf-oidcc-basic-plan-config.json": module.write_basic_plan_config(),
+            "oidf-oidcc-dynamic-plan-config.json": module.write_dynamic_plan_config(),
+            "oidf-oidcc-formpost-plan-config.json": module.write_formpost_plan_config(),
+            "oidf-oidcc-third-party-init-plan-config.json": module.write_third_party_init_plan_config(),
+            "oidf-oidcc-config-plan-config.json": module.write_oidcc_config_plan_config(),
+            "oidf-oidcc-rp-initiated-logout-plan-config.json": module.write_rp_initiated_logout_plan_config(),
+            "oidf-oidcc-backchannel-logout-plan-config.json": module.write_backchannel_logout_plan_config(),
+            "oidf-oidcc-frontchannel-logout-plan-config.json": module.write_frontchannel_logout_plan_config(),
+            "oidf-oidcc-session-management-plan-config.json": module.write_session_management_plan_config(),
+        }
+        configs.update(module.write_fapi_ciba_plan_config())
+        configs.update(module.write_fapi_matrix_plan_configs())
+
+        expressions = module.plan_expressions_for_configs(configs)
+        manifest = module.plan_manifest_for_expressions(expressions, configs)
+        by_config = {plan["config"]: plan for plan in manifest["plans"]}
+
+        self.assertEqual(len(expressions), 27)
+        self.assertEqual(
+            expressions[5],
+            "oidcc-rp-initiated-logout-certification-test-plan[client_registration=static_client][response_type=code] "
+            "oidf-oidcc-rp-initiated-logout-plan-config.json",
+        )
+        self.assertEqual(
+            expressions[6],
+            "oidcc-backchannel-rp-initiated-logout-certification-test-plan[client_registration=static_client][response_type=code] "
+            "oidf-oidcc-backchannel-logout-plan-config.json",
+        )
+        self.assertEqual(
+            by_config["oidf-oidcc-rp-initiated-logout-plan-config.json"]["title"],
+            "OIDC RP-Initiated Logout OP",
+        )
+        self.assertEqual(
+            by_config["oidf-oidcc-backchannel-logout-plan-config.json"]["title"],
+            "OIDC Back-Channel Logout OP",
+        )
 
     def test_help_exits_before_generating_runtime_files(self):
         module = load_setup_module()

@@ -14,11 +14,48 @@ import ipaddress
 import re
 import secrets
 import ssl
+import sys
 import urllib.parse
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from oidf_secret_input import (  # noqa: E402
+    SecretInputError,
+    add_secret_source_arguments,
+    read_secret_document,
+)
+
+
+PREPARATION_SECRET_FIELDS = (
+    "oidf_applicant_email",
+    "oidf_applicant_password",
+    "oidf_dynamic_registration_initial_access_token",
+    "oidf_ciba_automated_decision_token",
+)
+
+
+def configure_operator_secrets(args: argparse.Namespace) -> None:
+    global USER_EMAIL
+    global USER_PASSWORD
+    global CLIENT_SECRET
+    global DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN
+    global OIDF_CIBA_AUTOMATED_DECISION_TOKEN
+
+    operator_secrets = read_secret_document(
+        args,
+        required_fields=PREPARATION_SECRET_FIELDS,
+    )
+    USER_EMAIL = operator_secrets["oidf_applicant_email"]
+    USER_PASSWORD = operator_secrets["oidf_applicant_password"]
+    CLIENT_SECRET = secrets.token_urlsafe(32)
+    DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN = operator_secrets[
+        "oidf_dynamic_registration_initial_access_token"
+    ]
+    OIDF_CIBA_AUTOMATED_DECISION_TOKEN = operator_secrets[
+        "oidf_ciba_automated_decision_token"
+    ]
 
 
 def runtime_directory() -> Path:
@@ -91,30 +128,18 @@ SESSION_CLIENT_ID = f"{OIDF_CLIENT_PREFIX}-session-client"
 BASIC_ALIAS = os.environ.get(
     "OIDF_BASIC_ALIAS", f"nazo-oauth-oidf-{RUN_NAMESPACE}"
 )
-USER_EMAIL = os.environ.get(
-    "OIDF_APPLICANT_EMAIL", ""
-)
-USER_PASSWORD = os.environ.get("OIDF_APPLICANT_PASSWORD", "")
-if not USER_EMAIL or not USER_PASSWORD:
-    raise RuntimeError(
-        "OIDF_APPLICANT_EMAIL and OIDF_APPLICANT_PASSWORD are required; "
-        "the applicant must be created through the normal verified-account flow"
-    )
-CLIENT_SECRET = os.environ.get("OIDF_CLIENT_SECRET") or secrets.token_urlsafe(32)
-DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN = os.environ.get(
-    "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN", ""
-)
-if not DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN:
-    raise RuntimeError(
-        "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN is required and must match the target deployment"
-    )
-OIDF_CIBA_AUTOMATED_DECISION_TOKEN = os.environ.get(
-    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN", ""
-)
-if not OIDF_CIBA_AUTOMATED_DECISION_TOKEN:
-    raise RuntimeError(
-        "OIDF_CIBA_AUTOMATED_DECISION_TOKEN is required and must match the target deployment"
-    )
+
+
+def run_scoped_alias(slug: str) -> str:
+    """Return a plan alias owned by this isolated conformance run."""
+    return f"nazo-oauth-oidf-{RUN_NAMESPACE}-{slug}"
+
+
+USER_EMAIL = ""
+USER_PASSWORD = ""
+CLIENT_SECRET = ""
+DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN = ""
+OIDF_CIBA_AUTOMATED_DECISION_TOKEN = ""
 FAPI_CLIENT_PREFIX = os.environ.get(
     "OIDF_FAPI_CLIENT_PREFIX", f"{OIDF_CLIENT_PREFIX}-fapi"
 )
@@ -491,6 +516,14 @@ def base_client_request(
         # default when the related session-required metadata is omitted.
         "backchannel_logout_session_required": False,
         "frontchannel_logout_session_required": False,
+        # OIDC Core does not require PKCE for a confidential client. These
+        # clients are short-lived and lease-owned; production clients retain
+        # the secure PKCE-required default unless an operator explicitly opts
+        # them into the same compatibility policy.
+        "security_policy": {
+            "version": 1,
+            "allow_confidential_oidc_without_pkce": True,
+        },
         "jwks": None,
     }
 
@@ -578,15 +611,14 @@ def onboarding_clients(configs: dict[str, dict[str, object]]) -> list[dict[str, 
     add(FRONTCHANNEL_CLIENT_ID, frontchannel_request)
 
     session_alias = f"{BASIC_ALIAS}-session-management"
-    add(
-        SESSION_CLIENT_ID,
-        base_client_request(
-            name="OIDF Session Management Client",
-            auth_method="client_secret_basic",
-            redirect_uris=[callback_for(session_alias)],
-            post_logout_redirect_uris=[test_endpoint_for(session_alias, "post_logout_redirect")],
-        ),
+    session_request = base_client_request(
+        name="OIDF Session Management Client",
+        auth_method="client_secret_basic",
+        redirect_uris=[callback_for(session_alias)],
+        post_logout_redirect_uris=[test_endpoint_for(session_alias, "post_logout_redirect")],
     )
+    session_request["security_policy"]["session_management"] = True
+    add(SESSION_CLIENT_ID, session_request)
 
     for file_name, config in sorted(configs.items()):
         if not file_name.startswith("oidf-fapi-"):
@@ -645,6 +677,13 @@ def onboarding_clients(configs: dict[str, dict[str, object]]) -> list[dict[str, 
             request["backchannel_authentication_request_signing_alg"] = client.get(
                 "backchannel_authentication_request_signing_alg"
             )
+            request["security_policy"] = {
+                "version": 1,
+                "assurance": "fapi2",
+                "require_signed_authorization_request": "-message-" in file_name,
+                "require_signed_authorization_response": response_mode == "jarm",
+                "allow_cross_device_flows": ciba,
+            }
             certificate_pem = str(mtls["cert"])
             ca_pem = str(mtls["ca"])
             if auth_method == "tls_client_auth":
@@ -1194,7 +1233,7 @@ def fapi_plan_focus(plan_kind: str, fapi_profile: str, fapi_response_mode: str) 
 
 def write_oidcc_config_plan_config() -> dict[str, object]:
     config = {
-        "alias": "nazo-oauth-oidf-config",
+        "alias": run_scoped_alias("config"),
         "description": "OIDC Config OP: provider metadata accuracy for the public issuer.",
         "server": oidf_server_config(),
     }
@@ -1367,7 +1406,7 @@ def fapi_matrix_plan_config(
         fapi_response_mode,
     )
     config = fapi_plan_config(
-        f"nazo-oauth-oidf-{slug}",
+        run_scoped_alias(slug),
         description,
         slug,
         False,
@@ -1389,25 +1428,25 @@ def fapi_matrix_plan_config(
 def write_fapi_plan_configs() -> dict[str, dict[str, object]]:
     configs = {
         "oidf-fapi-security-final-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-security-final",
+            run_scoped_alias("fapi-security-final"),
             "NazoAuth FAPI2 Security Final conformance configuration",
             "security-final",
             False,
         ),
         "oidf-fapi-message-final-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-message-final",
+            run_scoped_alias("fapi-message-final"),
             "NazoAuth FAPI2 Message Signing Final conformance configuration",
             "message-final",
             False,
         ),
         "oidf-fapi-security-id2-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-security-id2",
+            run_scoped_alias("fapi-security-id2"),
             "NazoAuth FAPI2 Security ID2 conformance configuration",
             "security-id2",
             True,
         ),
         "oidf-fapi-message-id1-plan-config.json": fapi_plan_config(
-            "nazo-oauth-oidf-fapi-message-id1",
+            run_scoped_alias("fapi-message-id1"),
             "NazoAuth FAPI2 Message Signing ID1 conformance configuration",
             "message-id1",
             True,
@@ -1431,7 +1470,7 @@ def write_fapi_ciba_plan_config() -> dict[str, dict[str, object]]:
         client1_id, client2_id = fapi_client_ids(slug)
         client1_jwks = client_private_jwks(client1_id)
         client2_jwks = client_private_jwks(client2_id)
-        alias = f"nazo-oauth-oidf-{slug}"
+        alias = run_scoped_alias(slug)
         notification_endpoint = test_endpoint_for(alias, "ciba-notification-endpoint")
 
         def ciba_client(client_id: str, jwks: dict[str, object]) -> dict[str, object]:
@@ -1617,9 +1656,10 @@ def write_all_plan_configs() -> None:
         RUNTIME / "oidf-runner.env",
         "\n".join(
             [
-                f"OIDF_PLAN_CONFIG_JSON={json.dumps({'configs': configs})}",
-                f"OIDF_PLAN_SET_JSON={json.dumps(plan_set)}",
-                f"OIDF_PLAN_MANIFEST_JSON={json.dumps(plan_manifest)}",
+                "# Secret-free path hints; pass these files explicitly to the runner.",
+                "OIDF_PLAN_CONFIG_FILE=oidf-plan-configs.json",
+                "OIDF_PLAN_SET_FILE=oidf-plan-set.json",
+                "OIDF_PLAN_MANIFEST_FILE=oidf-plan-set-manifest.json",
                 "",
             ]
         ),
@@ -1975,11 +2015,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Materialize runner inputs for a caller-supplied public issuer and suite origin."
     )
+    add_secret_source_arguments(parser)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parse_args(argv)
+    args = parse_args(argv)
+    try:
+        configure_operator_secrets(args)
+    except SecretInputError as error:
+        raise SystemExit(str(error)) from error
     ensure_mtls_certs()
     write_all_plan_configs()
     print(f"Prepared public black-box runner inputs under {RUNTIME}")

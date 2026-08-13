@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     DbPool,
+    repositories::clients::{bind_conformance_lease, conformance_lease_is_effective},
     schema::{client_access_requests, oauth_clients, users},
 };
 
@@ -274,6 +275,7 @@ impl AccessRequestRepository {
             .filter(oauth_clients::id.eq(approved_client_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
+            .filter(conformance_lease_is_effective())
             .select(diesel::dsl::count_star())
             .first::<i64>(&mut connection)
             .await
@@ -458,13 +460,13 @@ impl nazo_identity::ports::AccessRequestRepositoryPort for AccessRequestReposito
     }
 }
 
-async fn insert_client(
+pub(crate) async fn insert_client(
     connection: &mut diesel_async::AsyncPgConnection,
     tenant: nazo_identity::TenantContext,
     client: &PreparedClientRegistration,
 ) -> Result<ApprovedClient, RepositoryError> {
     let prepared = &client.registration;
-    diesel::insert_into(oauth_clients::table)
+    let approved = diesel::insert_into(oauth_clients::table)
         .values((
             oauth_clients::tenant_id.eq(tenant.tenant_id.as_uuid()),
             oauth_clients::realm_id.eq(tenant.realm_id.as_uuid()),
@@ -511,7 +513,13 @@ async fn insert_client(
             oauth_clients::tls_client_auth_san_uri.eq(json!(&prepared.tls_client_auth_san_uri)),
             oauth_clients::tls_client_auth_san_ip.eq(json!(&prepared.tls_client_auth_san_ip)),
             oauth_clients::tls_client_auth_san_email.eq(json!(&prepared.tls_client_auth_san_email)),
+            oauth_clients::jwks_uri.eq(&prepared.jwks_uri),
             oauth_clients::jwks.eq(&prepared.jwks),
+            oauth_clients::request_uris.eq(json!(&prepared.request_uris)),
+            oauth_clients::initiate_login_uri.eq(&prepared.initiate_login_uri),
+            oauth_clients::logo_uri.eq(&prepared.presentation.logo_uri),
+            oauth_clients::policy_uri.eq(&prepared.presentation.policy_uri),
+            oauth_clients::tos_uri.eq(&prepared.presentation.tos_uri),
             oauth_clients::id_token_signed_response_alg.eq(&prepared.id_token_signed_response_alg),
             oauth_clients::id_token_encrypted_response_alg
                 .eq(&prepared.id_token_encrypted_response_alg),
@@ -541,13 +549,23 @@ async fn insert_client(
                 .eq(&prepared.authorization_encrypted_response_alg),
             oauth_clients::authorization_encrypted_response_enc
                 .eq(&prepared.authorization_encrypted_response_enc),
+            oauth_clients::security_policy.eq(prepared
+                .security_policy
+                .as_ref()
+                .map(|policy| json!(policy))),
             oauth_clients::is_active.eq(true),
         ))
         .returning((oauth_clients::id, oauth_clients::client_id))
         .get_result::<(Uuid, String)>(connection)
         .await
-        .map(|(id, client_id)| ApprovedClient { id, client_id })
-        .map_err(map_error)
+        .map_err(map_error)?;
+    bind_conformance_lease(connection, approved.0, client.conformance_lease_id)
+        .await
+        .map_err(map_error)?;
+    Ok(ApprovedClient {
+        id: approved.0,
+        client_id: approved.1,
+    })
 }
 
 fn search_pattern(search: Option<&str>) -> Option<String> {

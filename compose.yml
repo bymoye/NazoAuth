@@ -2,11 +2,12 @@ name: nazo-oauth
 
 services:
   secrets-init:
-    image: docker.io/library/alpine:3.22
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: compose-secrets-init
     volumes:
       - runtime_secrets:/run/nazoauth-secrets
-      - ./deploy/compose/initialize-secrets.sh:/usr/local/libexec/nazoauth-initialize-secrets.sh:ro
-    command: ["/bin/sh", "/usr/local/libexec/nazoauth-initialize-secrets.sh"]
     networks:
       nazo_oauth_net:
 
@@ -18,6 +19,8 @@ services:
       - avatars_data:/state/avatars
       - generated_secrets:/state/secrets
       - bootstrap_data:/state/bootstrap
+      - instance_data:/state/instance
+      - ui_releases:/state/ui-releases
       - operator_state:/state/operator
     command: ["sh", "-euc", "chown -R 10001:10001 /state/*; chmod 0700 /state/*"]
     networks:
@@ -28,20 +31,26 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
+      args:
+        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
+        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
+        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     restart: unless-stopped
     environment:
       DATA_DIR: /var/lib/nazo_oauth
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
       VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
+      PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
     volumes:
-      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
       - keys_data:/var/lib/nazo_oauth/keys
       - avatars_data:/var/lib/nazo_oauth/avatars
       - generated_secrets:/var/lib/nazo_oauth/secrets
       - bootstrap_data:/var/lib/nazo_oauth/bootstrap
+      - instance_data:/var/lib/nazo_oauth/instance
+      - ui_releases:/var/lib/nazo_oauth/ui-releases
       - runtime_secrets:/run/nazoauth-secrets:ro
     ports:
-      - "127.0.0.1:${NAZOAUTH_PORT:-8000}:8000"
+      - "${NAZOAUTH_BIND_ADDRESS:-127.0.0.1}:${NAZOAUTH_PORT:-8000}:8000"
     depends_on:
       secrets-init:
         condition: service_completed_successfully
@@ -62,10 +71,17 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
+      args:
+        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
+        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
+        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     environment:
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
+      PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      NAZOAUTH_EXPECTED_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
+      NAZOAUTH_EXPECTED_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
+      NAZOAUTH_EXPECTED_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     volumes:
-      - ${NAZOAUTH_CONFIG:-./.env.yaml.example}:/app/.env.yaml:ro
       - runtime_secrets:/run/nazoauth-secrets:ro
       - operator_state:/var/lib/nazoauth/operator-state
     depends_on:
@@ -83,18 +99,25 @@ services:
       - sh
       - -euc
       - |
-        ci_operator_task prepare \
+        automation_operator_task prepare \
           --config /app/.env.yaml \
           --output /tmp/operator \
+          --deployment-id development-compose \
+          --actor-id docker-compose \
+          --secret-revision "$$(cat /run/nazoauth-secrets/revision)" \
           --image-ref localhost/nazoauth-development:local \
-          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
+          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+          --embedded-release "$$NAZOAUTH_EXPECTED_BUILD_RELEASE" \
+          --embedded-revision "$$NAZOAUTH_EXPECTED_BUILD_REVISION" \
+          --embedded-build-id "$$NAZOAUTH_EXPECTED_BUILD_ID"
         NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
         NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
         NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
+        NAZOAUTH_OPERATOR_SECRET_REVISION_FILE=/run/nazoauth-secrets/revision \
         NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
         NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
           nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws
-        ci_operator_task verify \
+        automation_operator_task verify \
           --receipt /tmp/operator/receipt.jws \
           --public-key /tmp/operator/receipt.pub \
           --request-sha256 /tmp/operator/request.sha256
@@ -158,7 +181,9 @@ volumes:
   keys_data:
   avatars_data:
   bootstrap_data:
+  instance_data:
   generated_secrets:
+  ui_releases:
   runtime_secrets:
   operator_state:
 

@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -20,7 +21,44 @@ def load_runner_module():
 
 
 class RunOidfConformanceTests(unittest.TestCase):
-    def test_runtime_credentials_override_stale_plan_config_credentials(self):
+    def test_private_plan_config_has_no_environment_fallback(self):
+        module = load_runner_module()
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('parser.add_argument("--config-env"', source)
+        self.assertNotIn("OIDF_PLAN_CONFIG_JSON", source)
+
+    def test_ciba_automation_gate_reads_the_required_private_config_file(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "configs": {
+                            "ciba": {
+                                "alias": "nazo-oauth-oidf-fapi-ciba-private-poll",
+                                "automated_ciba_approval_url": "https://issuer.example/test/ciba",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(module.ciba_config_has_automated_approval_url(str(config)))
+
+    def test_ciba_automation_gate_rejects_a_config_without_approval_url(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text(
+                json.dumps({"configs": {"ciba": {"alias": "nazo-oauth-oidf-fapi-ciba"}}}),
+                encoding="utf-8",
+            )
+
+            self.assertFalse(module.ciba_config_has_automated_approval_url(str(config)))
+
+    def test_runtime_secret_environment_cannot_override_private_plan_credentials(self):
         module = load_runner_module()
         config = {
             "nazo": {
@@ -38,7 +76,7 @@ class RunOidfConformanceTests(unittest.TestCase):
         ):
             credentials = module.nazo_automation_credentials(config)
 
-        self.assertEqual(credentials, ("current@example.test", "current-password"))
+        self.assertEqual(credentials, ("stale@example.test", "stale-password"))
 
     def test_plan_config_credentials_remain_available_for_local_runs(self):
         module = load_runner_module()
@@ -54,6 +92,49 @@ class RunOidfConformanceTests(unittest.TestCase):
 
         self.assertEqual(credentials, ("local@example.test", "local-password"))
 
+    def test_private_plan_configs_are_restored_or_removed_after_materialization(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite_scripts = root / "suite" / "scripts"
+            suite_scripts.mkdir(parents=True)
+            private_input = root / "private.json"
+            private_input.write_text(
+                json.dumps({"configs": {"existing.json": {"alias": "private-alias"}}}),
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                private_input.chmod(0o600)
+            existing = suite_scripts / "existing.json"
+            existing.write_bytes(b"suite-owned-before-run\n")
+            original_mode = existing.stat().st_mode & 0o777
+            backups = {}
+
+            with mock.patch.object(
+                module,
+                "read_private_text",
+                return_value=private_input.read_text(encoding="utf-8"),
+            ):
+                module.write_plan_configs(
+                    suite_scripts,
+                    "ignored.json",
+                    str(private_input),
+                    "",
+                    backups=backups,
+                )
+            module.restore_plan_configs(backups)
+
+            self.assertEqual(existing.read_bytes(), b"suite-owned-before-run\n")
+            self.assertEqual(existing.stat().st_mode & 0o777, original_mode)
+            self.assertFalse((suite_scripts / "ignored.json").exists())
+
+    def test_main_source_has_finally_cleanup_for_injected_configs(self):
+        module = load_runner_module()
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertIn("plan_config_backups", source)
+        self.assertIn("restore_plan_configs(plan_config_backups)", source)
+        self.assertIn("OIDF conformance cleanup incomplete", source)
+
     def test_main_accepts_omitted_expected_skips_file(self):
         module = load_runner_module()
         with tempfile.TemporaryDirectory() as temporary:
@@ -68,14 +149,14 @@ class RunOidfConformanceTests(unittest.TestCase):
                 suite_dir=str(suite_dir),
                 suite_revision="revision",
                 config_file_name="config.json",
-                config_env="CONFIG",
                 config_json_file=None,
                 plan_expression=[],
                 plan_set_env="PLAN_SET",
                 plan_set_json_file=None,
                 conformance_server="https://suite.example",
                 no_api_token=True,
-                token_env="TOKEN",
+                token_fd=None,
+                token_file=None,
                 list=False,
                 no_parallel=False,
                 expected_failures_file=None,
@@ -100,7 +181,8 @@ class RunOidfConformanceTests(unittest.TestCase):
             ):
                 self.assertEqual(module.main(), 0)
 
-        self.assertEqual(run.call_args.args[-1], {})
+        self.assertEqual(run.call_args.args[-2], {})
+        self.assertIsNone(run.call_args.args[-1])
 
     def test_official_runner_terminates_nested_process_group_when_interrupted(self):
         module = load_runner_module()
@@ -113,7 +195,7 @@ class RunOidfConformanceTests(unittest.TestCase):
 
         process = Process()
         with (
-            mock.patch.object(module.subprocess, "Popen", return_value=process),
+            mock.patch.object(module.subprocess, "Popen", return_value=process) as popen,
             mock.patch.object(module, "terminate_runner") as terminate,
             self.assertRaises(KeyboardInterrupt),
         ):
@@ -130,9 +212,12 @@ class RunOidfConformanceTests(unittest.TestCase):
                 {},
                 {},
                 {},
+                None,
             )
 
         terminate.assert_called_once_with(process)
+        self.assertIs(popen.call_args.kwargs["stdout"], module.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
 
     def test_callback_completion_waits_have_a_thirty_second_floor(self):
         module = load_runner_module()
@@ -277,19 +362,24 @@ class RunOidfConformanceTests(unittest.TestCase):
             clear=True,
         ):
             env = module.sanitized_runner_environment()
-        command = module.official_runner_command(suite_scripts, runner)
+        command = module.official_runner_command(suite_scripts, runner, None)
 
         self.assertEqual(
             command[0:6],
             [module.sys.executable, "-I", "-S", "-B", "-u", "-c"],
         )
         self.assertIn("runpy.run_path", command[6])
-        self.assertIn("sysconfig.get_paths", command[6])
-        self.assertEqual(command[7:9], [str(suite_scripts), str(runner)])
+        self.assertTrue(command[7].endswith("oidf_fd_bootstrap.py"))
+        self.assertEqual(command[8:11], [str(suite_scripts), str(runner), "-"])
         self.assertNotIn("PYTHONPATH", env)
+
+        bootstrap = Path(command[7]).read_text(encoding="utf-8")
+        self.assertIn("sysconfig.get_paths", bootstrap)
+        self.assertIn("class OneShotSecretEnvironment", bootstrap)
+        self.assertNotIn("os.environ.__setitem__", bootstrap)
         self.assertNotIn("PYTHONSTARTUP", env)
         self.assertNotIn("PYTHONUNBUFFERED", env)
-        self.assertEqual(env["SAFE_SETTING"], "preserved")
+        self.assertNotIn("SAFE_SETTING", env)
 
     def test_isolated_bootstrap_does_not_run_attacker_sitecustomize_or_write_bytecode(self):
         module = load_runner_module()
@@ -315,7 +405,7 @@ class RunOidfConformanceTests(unittest.TestCase):
             env["PYTHONPATH"] = str(attacker)
 
             result = subprocess.run(
-                module.official_runner_command(suite_scripts, runner),
+                module.official_runner_command(suite_scripts, runner, None),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -325,6 +415,72 @@ class RunOidfConformanceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(marker.exists())
             self.assertFalse((suite_scripts / "__pycache__").exists())
+
+    def test_fd_bootstrap_token_is_one_shot_and_absent_from_copies(self):
+        bootstrap_path = (
+            Path(__file__).resolve().parents[2] / "scripts" / "oidf_fd_bootstrap.py"
+        )
+        spec = importlib.util.spec_from_file_location("oidf_fd_bootstrap_test", bootstrap_path)
+        bootstrap = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(bootstrap)
+
+        environment = bootstrap.OneShotSecretEnvironment(
+            {"PATH": os.environ.get("PATH", "")}, bytearray(b"one-shot-token")
+        )
+        self.assertNotIn("CONFORMANCE_TOKEN", environment)
+        self.assertNotIn("CONFORMANCE_TOKEN", environment.copy())
+        self.assertEqual(environment["CONFORMANCE_TOKEN"], "one-shot-token")
+        with self.assertRaises(KeyError):
+            _ = environment["CONFORMANCE_TOKEN"]
+
+        child = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                "import os;print(os.environ.get('CONFORMANCE_TOKEN','absent'))",
+            ],
+            env=environment.copy(),
+            text=True,
+        )
+        self.assertEqual(child.strip(), "absent")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux /proc and pass_fds")
+    def test_token_fd_is_absent_from_proc_environment_and_descendants(self):
+        module = load_runner_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite_scripts = root / "suite" / "scripts"
+            suite_scripts.mkdir(parents=True)
+            runner = suite_scripts / "run-test-plan.py"
+            runner.write_text(
+                "import os,subprocess,sys\n"
+                "token=os.environ['CONFORMANCE_TOKEN']\n"
+                "assert token == 'fd-only-test-token'\n"
+                "assert 'CONFORMANCE_TOKEN' not in os.environ\n"
+                "assert b'fd-only-test-token' not in open('/proc/self/environ','rb').read()\n"
+                "child=subprocess.check_output([sys.executable,'-c',"
+                "\"import os;print(os.environ.get('CONFORMANCE_TOKEN','absent'))\"])\n"
+                "assert child.strip() == b'absent'\n",
+                encoding="utf-8",
+            )
+            reader, writer = os.pipe()
+            try:
+                os.write(writer, b"fd-only-test-token")
+            finally:
+                os.close(writer)
+            try:
+                result = subprocess.run(
+                    module.official_runner_command(suite_scripts, runner, reader),
+                    pass_fds=(reader,),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=module.sanitized_runner_environment(),
+                )
+            finally:
+                os.close(reader)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_oidf_api_request_retries_remote_disconnect(self):
         module = load_runner_module()
@@ -339,7 +495,7 @@ class RunOidfConformanceTests(unittest.TestCase):
                 return False
 
             @staticmethod
-            def read():
+            def read(_size=-1):
                 return b'{"ok": true}'
 
         with (
@@ -376,7 +532,7 @@ class RunOidfConformanceTests(unittest.TestCase):
                 return False
 
             @staticmethod
-            def read():
+            def read(_size=-1):
                 return b'{"ok": true}'
 
         error = module.urllib.error.HTTPError(
@@ -407,6 +563,220 @@ class RunOidfConformanceTests(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(2)
+
+    def test_oidf_api_request_rejects_empty_success_payload(self):
+        module = load_runner_module()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(_size=-1):
+                return b""
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(SystemExit, "empty HTTP 200"):
+                module.oidf_api_request(
+                    "GET",
+                    "https://localhost:8443/",
+                    "api/server",
+                    None,
+                    expected_statuses={200},
+                )
+
+    def test_oidf_api_request_rejects_invalid_success_json(self):
+        module = load_runner_module()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(_size=-1):
+                return b"not-json"
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(SystemExit, "invalid JSON for HTTP 200"):
+                module.oidf_api_request(
+                    "GET",
+                    "https://localhost:8443/",
+                    "api/server",
+                    None,
+                    expected_statuses={200},
+                )
+
+    def test_oidf_api_request_rejects_oversized_response(self):
+        module = load_runner_module()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=-1):
+                self.requested_size = size
+                return b"x" * (module.MAX_OIDF_API_RESPONSE_BYTES + 1)
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            with self.assertRaisesRegex(
+                SystemExit,
+                f"response exceeds {module.MAX_OIDF_API_RESPONSE_BYTES} bytes",
+            ):
+                module.oidf_api_request(
+                    "GET",
+                    "https://localhost:8443/",
+                    "api/server",
+                    None,
+                    expected_statuses={200},
+                )
+
+    def test_oidf_api_request_accepts_explicit_larger_response_limit(self):
+        module = load_runner_module()
+        body = b'["' + (b"x" * module.MAX_OIDF_API_RESPONSE_BYTES) + b'"]'
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(_size=-1):
+                return body
+
+        with mock.patch.object(module.urllib.request, "urlopen", return_value=FakeResponse()):
+            status, payload = module.oidf_api_request(
+                "GET",
+                "https://localhost:8443/",
+                "api/log/module",
+                None,
+                expected_statuses={200},
+                max_response_bytes=module.MAX_OIDF_LOG_RESPONSE_BYTES,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload[0]), module.MAX_OIDF_API_RESPONSE_BYTES)
+
+    def test_inspect_state_uses_dedicated_log_response_limit(self):
+        module = load_runner_module()
+        info = {
+            "_id": "module-id",
+            "status": "FINISHED",
+            "result": "PASSED",
+        }
+        with (
+            mock.patch.object(
+                module,
+                "fetch_alias_plans",
+                return_value=[{"modules": [{"instances": ["module-id"]}]}],
+            ),
+            mock.patch.object(
+                module,
+                "oidf_api_request",
+                side_effect=[(200, info), (200, [])],
+            ) as request,
+        ):
+            failure = module.inspect_oidf_state(
+                "https://suite.example",
+                "token",
+                {"alias"},
+                final=True,
+            )
+
+        self.assertIsNone(failure)
+        self.assertNotIn("max_response_bytes", request.call_args_list[0].kwargs)
+        self.assertEqual(
+            request.call_args_list[1].kwargs["max_response_bytes"],
+            module.MAX_OIDF_LOG_RESPONSE_BYTES,
+        )
+
+    def test_fetch_alias_plans_rejects_malformed_success_schema(self):
+        module = load_runner_module()
+        with mock.patch.object(module, "oidf_api_request", return_value=(200, [])):
+            with self.assertRaisesRegex(SystemExit, "non-object JSON payload"):
+                module.fetch_alias_plans("https://suite.example", "token", {"alias"})
+
+    def test_fetch_alias_plans_uses_bounded_pages(self):
+        module = load_runner_module()
+        responses = [
+            (200, {"data": [{"config": {"alias": "alias"}}], "recordsTotal": 2}),
+            (200, {"data": [{"config": {"alias": "other"}}], "recordsTotal": 2}),
+        ]
+        with mock.patch.object(module, "oidf_api_request", side_effect=responses) as request:
+            plans = module.fetch_alias_plans(
+                "https://suite.example", "token", {"alias"}
+            )
+
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            request.call_args_list[0].kwargs["query"],
+            {"start": 0, "length": module.OIDF_PLAN_PAGE_LENGTH},
+        )
+        self.assertEqual(
+            request.call_args_list[1].kwargs["query"],
+            {"start": 1, "length": module.OIDF_PLAN_PAGE_LENGTH},
+        )
+
+    def test_cleanup_alias_plans_uses_bounded_pages(self):
+        module = load_runner_module()
+        response = (200, {"data": [{"config": {"alias": "other"}}], "recordsTotal": 1})
+        with (
+            mock.patch.object(module, "oidf_api_request", return_value=response) as request,
+            mock.patch.object(module, "cleanup_alias_plan", return_value=False),
+        ):
+            deleted = module.cleanup_existing_alias_plans_pass(
+                "https://suite.example", "token", {"alias"}
+            )
+
+        self.assertEqual(deleted, 0)
+        self.assertEqual(
+            request.call_args.kwargs["query"],
+            {"start": 0, "length": module.OIDF_PLAN_PAGE_LENGTH},
+        )
+
+    def test_inspect_state_rejects_empty_success_module_info(self):
+        module = load_runner_module()
+        with (
+            mock.patch.object(
+                module,
+                "fetch_alias_plans",
+                return_value=[
+                    {
+                        "_id": "plan-id",
+                        "planName": "oid4vci-1_0-issuer-test-plan",
+                        "modules": [{"instances": ["module-id"]}],
+                    }
+                ],
+            ),
+            mock.patch.object(module, "oidf_api_request", return_value=(200, None)),
+        ):
+            failure = module.inspect_oidf_state(
+                "https://suite.example",
+                "token",
+                {"alias"},
+                final=True,
+            )
+
+        self.assertIn("invalid HTTP 200 module info payload", failure)
 
     def test_monitor_interval_has_floor_when_aliases_are_present(self):
         module = load_runner_module()
@@ -900,6 +1270,45 @@ class RunOidfConformanceTests(unittest.TestCase):
                 "oidcc-rp-initiated-logout-query-added-to-post-logout-redirect-uri",
             },
         )
+
+    def test_openid4vc_review_allowlist_is_exactly_the_seven_vp_positive_sets(self):
+        module = load_runner_module()
+        entries = {
+            filename: context
+            for filename, context in module.OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG.items()
+            if filename.startswith("openid4vc-vp-")
+        }
+
+        self.assertEqual(
+            set(entries),
+            {
+                "openid4vc-vp-sd-redirect-query.json",
+                "openid4vc-vp-sd-x509dns-signed.json",
+                "openid4vc-vp-mdoc-x509dns-signed-jwt.json",
+                "openid4vc-vp-sd-x509hash-signed-jwt.json",
+                "openid4vc-vp-mdoc-x509hash-signed.json",
+                "openid4vc-vp-haip-sd.json",
+                "openid4vc-vp-haip-mdoc.json",
+            },
+        )
+        for filename, (plan, review_modules) in entries.items():
+            self.assertEqual(
+                plan,
+                (
+                    "oid4vp-1final-verifier-haip-test-plan"
+                    if "-haip-" in filename
+                    else "oid4vp-1final-verifier-test-plan"
+                ),
+            )
+            self.assertEqual(
+                review_modules,
+                {
+                    "oid4vp-1final-verifier-happy-flow",
+                    "oid4vp-1final-verifier-minimal-cnf-jwk",
+                    "oid4vp-1final-verifier-request-uri-method-post",
+                    "oid4vp-1final-verifier-request-uri-fetched-twice",
+                },
+            )
 
     def test_unexpected_review_is_not_hidden_by_successful_completion_log(self):
         module = load_runner_module()

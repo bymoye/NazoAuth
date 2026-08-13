@@ -10,10 +10,9 @@ coverage:
         paths:
           - "crates/authorization-server/src/http/token/"
           - "crates/authorization-server/src/http/authorization/"
-          - "crates/authorization-server/src/resource_server/"
-          - "crates/authorization-server/src/support/oauth*"
-          - "crates/authorization-server/src/support/security*"
-          - "crates/authorization-server/src/support/uri_policy*"
+          - "crates/authorization-server/src/domain/resource_server.rs"
+          - "crates/authorization-server/src/domain/oauth.rs"
+          - "crates/authorization-server/src/adapters/security.rs"
     patch:
       default:
         target: 90%

@@ -124,6 +124,71 @@ impl LoginSessionPort for Sessions {
 }
 
 #[derive(Clone, Default)]
+struct RecordingSessions(Arc<Mutex<Vec<u64>>>);
+
+impl LoginSessionPort for RecordingSessions {
+    fn create<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _record: &'a SessionRecord,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, LoginSessionCreate> {
+        self.0.lock().unwrap().push(ttl_seconds);
+        Box::pin(async { Ok(LoginSessionCreate::Created) })
+    }
+
+    fn create_replacing<'a>(
+        &'a self,
+        _previous_session_id: Option<&'a str>,
+        _session_id: &'a str,
+        _record: &'a SessionRecord,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, LoginSessionCreate> {
+        self.0.lock().unwrap().push(ttl_seconds);
+        Box::pin(async { Ok(LoginSessionCreate::Created) })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AlwaysValidVerifier;
+
+impl SecretVerifyPort for AlwaysValidVerifier {
+    fn verify_secret(
+        &self,
+        _secret: String,
+        _password_hash: PasswordHash,
+    ) -> SecretVerifyFuture<'_> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[derive(Clone)]
+struct ActiveAccounts {
+    authentication: AuthenticationIdentity,
+    public: PublicAccount,
+}
+
+impl LoginAccountRepositoryPort for ActiveAccounts {
+    fn authentication_by_email<'a>(
+        &'a self,
+        _tenant_id: TenantId,
+        _email: &'a str,
+    ) -> RepositoryFuture<'a, Option<AuthenticationIdentity>> {
+        let authentication = self.authentication.clone();
+        Box::pin(async move { Ok(Some(authentication)) })
+    }
+
+    fn public_account_by_id(
+        &self,
+        _tenant_id: TenantId,
+        _user_id: UserId,
+    ) -> RepositoryFuture<'_, Option<PublicAccount>> {
+        let public = self.public.clone();
+        Box::pin(async move { Ok(Some(public)) })
+    }
+}
+
+#[derive(Clone, Default)]
 struct Audit(Arc<Mutex<Vec<AuthenticationAuditEvent>>>);
 
 impl AuthenticationAuditPort for Audit {
@@ -152,6 +217,26 @@ fn inactive_identity() -> AuthenticationIdentity {
     }
 }
 
+fn active_mfa_identity() -> AuthenticationIdentity {
+    AuthenticationIdentity {
+        principal: Principal {
+            user_id: UserId::new(Uuid::now_v7()).unwrap(),
+            tenant: TenantContext::default_system(),
+            role: UserRole::User,
+            active: true,
+        },
+        login: LoginIdentity {
+            account: AccountIdentity {
+                username: "active".to_owned(),
+                email: "active@example.com".to_owned(),
+                email_verified: true,
+                mfa_enabled: true,
+            },
+            password_hash: PasswordHash::new("persisted-password-hash").unwrap(),
+        },
+    }
+}
+
 #[tokio::test]
 async fn missing_and_inactive_accounts_share_dummy_verification_and_failure_behavior() {
     for authentication in [None, Some(inactive_identity())] {
@@ -172,6 +257,7 @@ async fn missing_and_inactive_accounts_share_dummy_verification_and_failure_beha
                 failure_window_seconds: 60,
                 failure_ip_email_max_attempts: 5,
                 session_ttl_seconds: 300,
+                pending_mfa_session_ttl_seconds: 120,
             },
         );
 
@@ -197,4 +283,51 @@ async fn missing_and_inactive_accounts_share_dummy_verification_and_failure_beha
                 if *user_id == authentication.as_ref().map(|identity| identity.principal.user_id)
         ));
     }
+}
+
+#[tokio::test]
+async fn pending_mfa_login_uses_a_short_session_ttl() {
+    let authentication = active_mfa_identity();
+    let public = PublicAccount {
+        principal: authentication.principal.clone(),
+        account: authentication.login.account.clone(),
+        profile: Default::default(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let sessions = RecordingSessions::default();
+    let service = AuthenticationService::new(
+        ActiveAccounts {
+            authentication,
+            public,
+        },
+        Throttles::default(),
+        AlwaysValidVerifier,
+        RememberedMfa,
+        sessions.clone(),
+        Audit::default(),
+        AuthenticationServiceConfig {
+            tenant_id: TenantContext::default_system().tenant_id,
+            dummy_password_hash: PasswordHash::new("dummy-password-hash").unwrap(),
+            failure_window_seconds: 60,
+            failure_ip_email_max_attempts: 5,
+            session_ttl_seconds: 300,
+            pending_mfa_session_ttl_seconds: 120,
+        },
+    );
+
+    let result = service
+        .authenticate_password(AuthenticatePasswordInput {
+            email: "active@example.com".to_owned(),
+            password: "candidate".to_owned(),
+            source_ip: "192.0.2.1".to_owned(),
+            remembered_mfa: None,
+            previous_session_id: None,
+            now: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    assert!(result.session.pending_mfa());
+    assert_eq!(*sessions.0.lock().unwrap(), vec![120]);
 }

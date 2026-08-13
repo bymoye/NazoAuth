@@ -88,7 +88,9 @@ diesel::table! {
         id -> Uuid,
         tenant_id -> Uuid,
         user_id -> Uuid,
-        secret_base32 -> Varchar,
+        secret_base32 -> Nullable<Varchar>,
+        secret_ciphertext -> Nullable<Binary>,
+        secret_key_id -> Nullable<Varchar>,
         label -> Varchar,
         confirmed_at -> Nullable<Timestamptz>,
         last_used_step -> Nullable<Int8>,
@@ -190,5 +192,25 @@ diesel::table! {
         tenant_id -> Uuid,
         revoked_at -> Timestamptz,
         expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    oauth_token_issuances (issuance_id) {
+        issuance_id -> Uuid,
+        tenant_id -> Uuid,
+        client_id -> Uuid,
+        grant_key_blake3 -> Varchar,
+        request_digest -> Varchar,
+        phase -> Varchar,
+        access_token_jti -> Nullable<Varchar>,
+        access_token_expires_at -> Nullable<Timestamptz>,
+        response_ciphertext -> Nullable<Binary>,
+        response_digest -> Nullable<Varchar>,
+        response_envelope_version -> Nullable<Varchar>,
+        response_key_id -> Nullable<Varchar>,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }

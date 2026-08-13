@@ -34,6 +34,10 @@ class DeployLiveWrapperContractTests(unittest.TestCase):
         self.assertIn("@('recover', '--yes')", self.source)
         self.assertIn("@('update', '--plan')", self.source)
 
+    def test_default_action_is_read_only(self) -> None:
+        self.assertIn("[string]$Action = 'status'", self.source)
+        self.assertNotIn("[string]$Action = 'update'", self.source)
+
     def test_ssh_is_non_interactive_and_arguments_are_shell_quoted(self) -> None:
         self.assertIn("BatchMode=yes", self.source)
         self.assertIn("ConnectTimeout=15", self.source)

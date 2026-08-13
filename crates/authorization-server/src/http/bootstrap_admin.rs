@@ -5,8 +5,8 @@ use std::{
 
 use actix_web::{
     HttpResponse,
-    http::{StatusCode, header},
-    web::{Data, Form, Query},
+    http::StatusCode,
+    web::{Data, Json},
 };
 use chrono::{Duration, Utc};
 use nazo_identity::{email::normalize_email_address, ports::SecretHashPort as _};
@@ -33,11 +33,17 @@ impl InitialAdminBootstrapEndpoint {
         pool: nazo_postgres::DbPool,
         data_dir: &std::path::Path,
         issuer: &str,
+        tenant: nazo_identity::TenantContext,
     ) -> anyhow::Result<Self> {
         let (token_path, token) =
             read_or_create_runtime_secret(data_dir, "bootstrap/initial-admin-token")?;
+        if !valid_initial_admin_token(&token) {
+            anyhow::bail!(
+                "initial administrator token is malformed; restore or remove the private bootstrap state"
+            );
+        }
         let token_hash = hash_token(&token);
-        let repository = nazo_postgres::InitialAdminBootstrapRepository::new(pool);
+        let repository = nazo_postgres::InitialAdminBootstrapRepository::new(pool, tenant);
         let state = repository
             .ensure_claim(
                 &token_hash,
@@ -91,54 +97,68 @@ fn bootstrap_token_state(
                 issuer = %issuer.trim_end_matches('/'),
                 %expires_at,
                 token_file = %token_path.display(),
-                "initial administrator setup is required; read the root-owned token file through the operator workflow"
+                "initial administrator setup is required; use the operator workflow to read the private runtime-owned token file"
             );
             Some(token_hash)
+        }
+        nazo_postgres::InitialAdminBootstrapState::Claimed {
+            expires_at,
+            expected_token_hash,
+        } => {
+            if expected_token_hash != token_hash {
+                remove_consumed_token(token_path);
+            }
+            tracing::warn!(
+                issuer = %issuer.trim_end_matches('/'),
+                %expires_at,
+                token_file = %token_path.display(),
+                "initial administrator claim is committed; retain the private token until the controller verifies its idempotent receipt"
+            );
+            Some(expected_token_hash)
         }
     }
 }
 
-#[derive(Deserialize)]
-pub(crate) struct SetupQuery {
-    token: String,
+fn valid_initial_admin_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_bootstrap_request_id(request_id: &str) -> bool {
+    request_id.len() == 48
+        && request_id
+            .strip_prefix("bootstrap-admin-")
+            .is_some_and(|suffix| {
+                suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct InitialAdminClaimRequest {
+    request_id: String,
     token: String,
     email: String,
     password: String,
 }
 
-pub(crate) async fn initial_admin_setup_page(
-    endpoint: Data<InitialAdminBootstrapEndpoint>,
-    Query(query): Query<SetupQuery>,
-) -> HttpResponse {
-    if !endpoint
-        .expected_token_hash()
-        .as_deref()
-        .is_some_and(|expected| {
-            constant_time_eq(expected.as_bytes(), hash_token(&query.token).as_bytes())
-        })
-    {
-        return HttpResponse::NotFound().finish();
-    }
-    let token = html_escape(&query.token);
-    HttpResponse::Ok()
-        .insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8"))
-        .insert_header((header::REFERRER_POLICY, "no-referrer"))
-        .body(format!(
-            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>NazoAuth 初始管理员</title></head><body><main><h1>创建初始管理员</h1><form method=\"post\" action=\"/auth/bootstrap-admin\"><input type=\"hidden\" name=\"token\" value=\"{token}\"><label>邮箱 <input required type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>密码 <input required minlength=\"12\" type=\"password\" name=\"password\" autocomplete=\"new-password\"></label><button type=\"submit\">创建管理员</button></form></main></body></html>"
-        ))
-}
-
 pub(crate) async fn claim_initial_admin(
     endpoint: Data<InitialAdminBootstrapEndpoint>,
-    Form(payload): Form<InitialAdminClaimRequest>,
+    Json(payload): Json<InitialAdminClaimRequest>,
 ) -> HttpResponse {
     let Some(expected_hash) = endpoint.expected_token_hash() else {
         return bootstrap_error(StatusCode::GONE, "bootstrap_closed");
     };
+    if !valid_bootstrap_request_id(&payload.request_id) {
+        return bootstrap_error(StatusCode::BAD_REQUEST, "invalid_request_id");
+    }
+    if !valid_initial_admin_token(&payload.token) {
+        return bootstrap_error(StatusCode::NOT_FOUND, "invalid_bootstrap_token");
+    }
     let token_hash = hash_token(&payload.token);
     if !constant_time_eq(expected_hash.as_bytes(), token_hash.as_bytes()) {
         return bootstrap_error(StatusCode::NOT_FOUND, "invalid_bootstrap_token");
@@ -158,7 +178,7 @@ pub(crate) async fn claim_initial_admin(
     };
     match endpoint
         .repository
-        .claim(&token_hash, &email, password_hash)
+        .claim(&payload.request_id, &token_hash, &email, password_hash)
         .await
     {
         Ok(outcome) => claim_outcome_response(&endpoint, outcome),
@@ -174,16 +194,17 @@ fn claim_outcome_response(
     outcome: nazo_postgres::InitialAdminClaimOutcome,
 ) -> HttpResponse {
     match outcome {
-        nazo_postgres::InitialAdminClaimOutcome::Created { id, email } => {
-            endpoint.close();
-            remove_consumed_token(&endpoint.token_path);
-            HttpResponse::Created().json(json!({
-                "id": id,
-                "email": email,
-                "role": "admin",
-                "next": "/ui/login"
-            }))
-        }
+        nazo_postgres::InitialAdminClaimOutcome::Created {
+            request_id,
+            id,
+            email,
+        } => HttpResponse::Created().json(json!({
+            "request_id": request_id,
+            "id": id,
+            "email": email,
+            "role": "admin",
+            "next": "/ui/auth"
+        })),
         nazo_postgres::InitialAdminClaimOutcome::Closed => {
             endpoint.close();
             remove_consumed_token(&endpoint.token_path);
@@ -194,6 +215,9 @@ fn claim_outcome_response(
         }
         nazo_postgres::InitialAdminClaimOutcome::EmailConflict => {
             bootstrap_error(StatusCode::CONFLICT, "email_conflict")
+        }
+        nazo_postgres::InitialAdminClaimOutcome::IdempotencyConflict => {
+            bootstrap_error(StatusCode::CONFLICT, "bootstrap_request_conflict")
         }
     }
 }
@@ -218,15 +242,6 @@ fn remove_consumed_token(path: &std::path::Path) {
 
 fn bootstrap_error(status: StatusCode, code: &str) -> HttpResponse {
     HttpResponse::build(status).json(json!({"error": code}))
-}
-
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

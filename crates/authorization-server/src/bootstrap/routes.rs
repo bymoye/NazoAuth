@@ -20,6 +20,7 @@ use nazo_openid4vc_http_actix::{
     presentation_request, presentation_response, presentation_result,
 };
 
+use crate::control_discovery::control_discovery;
 use crate::http::admin::{
     access_requests::{
         admin_access_requests, admin_approve_access_request, admin_reject_access_request,
@@ -52,7 +53,7 @@ use crate::http::authorization::{
     presentation::authorize_client_presentation,
     request::{authorize_get, authorize_post},
 };
-use crate::http::bootstrap_admin::{claim_initial_admin, initial_admin_setup_page};
+use crate::http::bootstrap_admin::claim_initial_admin;
 use crate::http::perf_metrics::perf_metrics;
 use crate::http::profile::{
     access_requests::{create_access_request, my_access_requests},
@@ -72,7 +73,7 @@ use crate::http::token::{
     dispatch::token,
 };
 use crate::http::well_known::{captcha_config, live, ready, startup};
-use crate::settings::Settings;
+use crate::settings::{CibaAutomatedDecisionMode, Settings};
 use nazo_http_actix::{
     scim_create_user, scim_delete_user, scim_get_user, scim_list_users, scim_patch_user,
     scim_poll_security_events, scim_replace_user, scim_resource_types, scim_schemas,
@@ -86,12 +87,18 @@ pub(crate) fn configure(
     settings: &Settings,
     perf_metrics_enabled: bool,
 ) {
+    let ciba_automated_decision_mode = settings.ciba.ciba_automated_decision_mode;
     let enable_openid4vci_issuer = settings.modules.enable_openid4vci_issuer;
     // Actix scopes consume every request under their prefix, including paths
     // that are not registered inside the scope. Keep all /.well-known routes
     // in this single scope so later top-level resources cannot be shadowed.
     let well_known = web::scope("/.well-known")
         .wrap(cors::cors_well_known(settings))
+        .service(
+            web::resource("/nazoauth-control")
+                .app_data(web::JsonConfig::default().limit(2 * 1024))
+                .route(web::post().to(control_discovery)),
+        )
         .route("/openid-configuration", web::get().to(discovery))
         .route(
             "/oauth-authorization-server",
@@ -133,7 +140,6 @@ pub(crate) fn configure(
             .wrap(cors::cors_well_known(settings))
             .route(web::get().to(ready)),
     );
-    cfg.route("/setup", web::get().to(initial_admin_setup_page));
     // NO CORS: /authorize
     cfg.route("/authorize", web::get().to(authorize_get))
         .route("/authorize", web::post().to(authorize_post))
@@ -275,16 +281,9 @@ pub(crate) fn configure(
                         )
                         .route("/access-delivery", web::post().to(access_delivery)),
                 )
-                .route(
-                    "/ciba-automated-decision",
-                    web::get().to(ciba_automated_decision),
-                )
-                .route(
-                    "/ciba-automated-decision",
-                    web::post().to(ciba_automated_decision),
-                )
-                .route("/ciba/automated", web::get().to(ciba_automated_decision))
-                .route("/ciba/automated", web::post().to(ciba_automated_decision))
+                .configure(move |cfg| {
+                    configure_ciba_automated_decision_routes(cfg, ciba_automated_decision_mode);
+                })
                 .route("/ciba/{auth_req_id}", web::get().to(ciba_verification))
                 .route("/ciba/{auth_req_id}", web::post().to(ciba_decision))
                 .route("/logout", web::post().to(profile_logout)),
@@ -409,5 +408,37 @@ pub(crate) fn configure(
     }
     if perf_metrics_enabled {
         cfg.route("/__perf/metrics", web::get().to(perf_metrics));
+    }
+}
+
+fn configure_ciba_automated_decision_routes(
+    cfg: &mut web::ServiceConfig,
+    mode: CibaAutomatedDecisionMode,
+) {
+    match mode {
+        // The default transport is still fail-closed in the handler: this
+        // POST is only useful when a request-scoped oidc-fapi-ciba lease, its
+        // per-run token digest, and the lease-owned client all validate.
+        CibaAutomatedDecisionMode::Disabled => {
+            cfg.route(
+                "/ciba-automated-decision",
+                web::post().to(ciba_automated_decision),
+            )
+            .route("/ciba/automated", web::post().to(ciba_automated_decision));
+        }
+        CibaAutomatedDecisionMode::Header => {
+            cfg.route(
+                "/ciba-automated-decision",
+                web::post().to(ciba_automated_decision),
+            )
+            .route("/ciba/automated", web::post().to(ciba_automated_decision));
+        }
+        CibaAutomatedDecisionMode::QueryParameter => {
+            cfg.route(
+                "/ciba-automated-decision",
+                web::get().to(ciba_automated_decision),
+            )
+            .route("/ciba/automated", web::get().to(ciba_automated_decision));
+        }
     }
 }

@@ -88,6 +88,14 @@ impl RateLimitStore {
         )
         .await
     }
+
+    pub async fn increment_mfa_failure(&self, subject: &str, window: u64) -> Result<u64, Error> {
+        self.increment_key(keys::mfa_failure(subject), window).await
+    }
+
+    pub async fn clear_mfa_failure(&self, subject: &str) -> Result<i64, Error> {
+        command::delete(&self.connection, keys::mfa_failure(subject)).await
+    }
     async fn increment_key(&self, key: String, window: u64) -> Result<u64, Error> {
         command::eval_string(
             &self.connection,
@@ -146,6 +154,48 @@ impl nazo_identity::ports::LoginThrottlePort for RateLimitStore {
             .await
             .map(|_| ())
             .map_err(crate::identity_repository_error)
+        })
+    }
+}
+
+impl nazo_identity::ports::MfaAttemptThrottlePort for RateLimitStore {
+    fn reserve_attempt<'a>(
+        &'a self,
+        tenant_id: nazo_identity::TenantId,
+        user_id: nazo_identity::UserId,
+        session_id: &'a str,
+        window_seconds: u64,
+        max_attempts: u64,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, nazo_identity::ports::MfaAttemptThrottleDecision>
+    {
+        Box::pin(async move {
+            let subject = format!("{}:{}:{session_id}", tenant_id.as_uuid(), user_id.as_uuid());
+            let count = self
+                .increment_mfa_failure(&subject, window_seconds)
+                .await
+                .map_err(crate::identity_repository_error)?;
+            if count > max_attempts {
+                Ok(nazo_identity::ports::MfaAttemptThrottleDecision::Limited {
+                    retry_after_seconds: window_seconds,
+                })
+            } else {
+                Ok(nazo_identity::ports::MfaAttemptThrottleDecision::Allowed)
+            }
+        })
+    }
+
+    fn clear_attempts<'a>(
+        &'a self,
+        tenant_id: nazo_identity::TenantId,
+        user_id: nazo_identity::UserId,
+        session_id: &'a str,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
+        Box::pin(async move {
+            let subject = format!("{}:{}:{session_id}", tenant_id.as_uuid(), user_id.as_uuid());
+            self.clear_mfa_failure(&subject)
+                .await
+                .map(|_| ())
+                .map_err(crate::identity_repository_error)
         })
     }
 }

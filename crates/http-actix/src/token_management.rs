@@ -36,6 +36,10 @@ pub enum TokenManagementError {
     ResponseProtectionFailed,
 }
 
+// Keep the public representation enum source-compatible for protocol adapters.  The inspection
+// payload is intentionally value-owned so callers can build an RFC 7662 response without an
+// additional allocation; the size trade-off is bounded and is preferable to a breaking Box change.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenIntrospectionRepresentation {
     Inspection(TokenInspection),

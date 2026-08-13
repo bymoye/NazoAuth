@@ -1,12 +1,4 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use openssl::{
-    bn::BigNum,
-    encrypt::Encrypter,
-    hash::MessageDigest,
-    pkey::PKey,
-    rsa::{Padding, Rsa},
-    symm::{Cipher, encrypt_aead},
-};
 use serde_json::json;
 
 use crate::KeyManager;
@@ -38,6 +30,34 @@ fn request_object_decryption_rejects_tampered_ciphertext() {
     assert!(manager.decrypt_request_object(&compact).is_err());
 }
 
+#[test]
+fn request_object_decryption_rejects_invalid_encrypted_key_before_aead() {
+    let manager = KeyManager::for_test(jsonwebtoken::Algorithm::RS256);
+    let jwk = manager.snapshot().request_object_encryption_jwk.clone();
+    let protected = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "alg": "RSA-OAEP-256",
+            "enc": "A256GCM",
+            "kid": jwk["kid"],
+            "cty": "JWT"
+        }))
+        .expect("header"),
+    );
+    let compact = format!(
+        "{}.{}.{}.{}.{}",
+        protected,
+        URL_SAFE_NO_PAD.encode([1_u8, 2, 3]),
+        URL_SAFE_NO_PAD.encode([0_u8; 12]),
+        URL_SAFE_NO_PAD.encode([0_u8; 1]),
+        URL_SAFE_NO_PAD.encode([0_u8; 16])
+    );
+
+    let error = manager
+        .decrypt_request_object(&compact)
+        .expect_err("invalid RSA ciphertext must fail before AEAD");
+    assert!(format!("{error:#}").contains("RSA") || format!("{error:#}").contains("decrypt"));
+}
+
 fn encrypt(jwk: &serde_json::Value, plaintext: &[u8]) -> String {
     let kid = jwk["kid"].as_str().expect("kid");
     let protected = URL_SAFE_NO_PAD.encode(
@@ -49,48 +69,24 @@ fn encrypt(jwk: &serde_json::Value, plaintext: &[u8]) -> String {
         }))
         .expect("header"),
     );
-    let rsa = Rsa::from_public_components(
-        BigNum::from_slice(
-            &URL_SAFE_NO_PAD
-                .decode(jwk["n"].as_str().expect("n"))
-                .expect("n encoding"),
-        )
-        .expect("n"),
-        BigNum::from_slice(
-            &URL_SAFE_NO_PAD
-                .decode(jwk["e"].as_str().expect("e"))
-                .expect("e encoding"),
-        )
-        .expect("e"),
-    )
-    .expect("public RSA");
-    let key = PKey::from_rsa(rsa).expect("public key");
-    let mut encrypter = Encrypter::new(&key).expect("encrypter");
-    encrypter
-        .set_rsa_padding(Padding::PKCS1_OAEP)
-        .expect("padding");
-    encrypter
-        .set_rsa_oaep_md(MessageDigest::sha256())
-        .expect("oaep digest");
-    encrypter
-        .set_rsa_mgf1_md(MessageDigest::sha256())
-        .expect("mgf1 digest");
-    let cek = [7_u8; 32];
-    let mut encrypted_key = vec![0_u8; encrypter.encrypt_len(&cek).expect("encrypted key length")];
-    let encrypted_key_len = encrypter
-        .encrypt(&cek, &mut encrypted_key)
-        .expect("encrypt key");
-    encrypted_key.truncate(encrypted_key_len);
-
-    let iv = [9_u8; 12];
-    let mut tag = [0_u8; 16];
-    let ciphertext = encrypt_aead(
-        Cipher::aes_256_gcm(),
+    let cek = rand::random::<[u8; 32]>();
+    let encrypted_key = crate::crypto::test_support::rsa_oaep_sha256_encrypt(
+        &URL_SAFE_NO_PAD
+            .decode(jwk["n"].as_str().expect("n"))
+            .expect("n encoding"),
+        &URL_SAFE_NO_PAD
+            .decode(jwk["e"].as_str().expect("e"))
+            .expect("e encoding"),
         &cek,
-        Some(&iv),
+    )
+    .expect("encrypt key");
+
+    let iv = rand::random::<[u8; 12]>();
+    let (ciphertext, tag) = crate::crypto::test_support::aes_256_gcm_encrypt(
+        &cek,
+        &iv,
         protected.as_bytes(),
         plaintext,
-        &mut tag,
     )
     .expect("encrypt payload");
     format!(

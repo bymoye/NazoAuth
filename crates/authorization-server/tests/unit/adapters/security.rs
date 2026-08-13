@@ -7,6 +7,12 @@ use crate::test_support::ClientSigningFixture;
 use crate::test_support::client_signing_fixture;
 use actix_web::test::TestRequest;
 
+#[test]
+fn password_hash_capacity_defaults_match_the_documented_bounded_policy() {
+    assert_eq!(default_password_hash_max_concurrency(), 8);
+    assert_eq!(default_password_hash_queue_timeout_ms(), 100);
+}
+
 fn extract_client_credentials(
     req: &HttpRequest,
     settings: &Settings,

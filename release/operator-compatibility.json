@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "version": 1,
+  "minimum_ctl_version": "0.1.19",
+  "maximum_ctl_version_exclusive": "0.2.0"
+}

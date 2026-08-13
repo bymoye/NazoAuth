@@ -41,8 +41,8 @@ pub use admin_clients::{
     AdminClientCryptoPort, AdminClientError, AdminClientFuture, AdminClientPolicy,
     AdminClientPortError, AdminClientRepositoryPort, AdminClientService, CreateClientRequest,
     CreatedClient, PatchClientRequest, PreparedClientRegistration, SectorIdentifierFuture,
-    SectorIdentifierResolverPort, insert_prepared_client, prepare_client_patch,
-    prepare_client_registration,
+    SectorIdentifierResolverPort, SuppliedClientSecret, insert_prepared_client,
+    prepare_client_patch, prepare_client_registration,
 };
 pub use admin_grants::{
     AdminGrantFuture, AdminGrantPage, AdminGrantRepositoryPort, AdminGrantRevocation,
@@ -55,7 +55,7 @@ pub use authorization_details::{
     parse_authorization_details,
 };
 pub use authorization_policy::{
-    AUTHORIZATION_NONCE_MAX_BYTES, AuthorizationCapabilityPolicy, AuthorizationClientPolicy,
+    AUTHORIZATION_NONCE_MAX_CHARS, AuthorizationCapabilityPolicy, AuthorizationClientPolicy,
     AuthorizationPolicyError, AuthorizationProfilePolicy, AuthorizationResponsePlan,
     AuthorizationResponsePolicyError, AuthorizationResponsePolicyInput, AuthorizationSession,
     AuthorizationSessionDecision, BASELINE_ACR_VALUE, JarmAuthorizationResponse,
@@ -71,8 +71,9 @@ pub use authorization_request::{
     REQUEST_OBJECT_MAX_TTL_SECONDS, RawParAdmissionPolicy, RequestObjectClaims,
     RequestObjectJtiPolicy, RequestObjectPolicy, RequestObjectReplay,
     RequestObjectVerificationError, RequestObjectVerificationInput, VerifiedRequestObject,
-    normalize_request_object, unverified_signed_request_object_client_id,
-    validate_expanded_par_admission, validate_raw_par_admission, verify_request_object,
+    normalize_request_object, normalize_request_object_owned,
+    unverified_signed_request_object_client_id, validate_expanded_par_admission,
+    validate_raw_par_admission, verify_request_object,
 };
 pub use authorization_service::{
     AuthorizationApprovalCommitError, AuthorizationApprovalError, AuthorizationApprovalInput,
@@ -83,15 +84,16 @@ pub use authorization_service::{
     stored_grant_covers_requested_authorization,
 };
 pub use ciba::{
-    CibaAtomicResult, CibaCommittedDecision, CibaCreateFailure, CibaDecision,
-    CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification, CibaPingNotificationStatus,
-    CibaPollCommit, CibaPollFailure, CibaPollTransition, CibaRequestState, CibaService,
-    CibaStateFuture, CibaStatePortError, CibaStateStorePort, CibaStatus, CibaStoredRequest,
-    ciba_retention_deadline, evaluate_ciba_decision, evaluate_ciba_poll,
+    CibaAtomicResult, CibaAuthenticationContext, CibaCommittedDecision, CibaCreateFailure,
+    CibaDecision, CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification,
+    CibaPingNotificationStatus, CibaPollCommit, CibaPollFailure, CibaPollTransition,
+    CibaRequestState, CibaService, CibaStateFuture, CibaStatePortError, CibaStateStorePort,
+    CibaStatus, CibaStoredRequest, ciba_retention_deadline, evaluate_ciba_decision,
+    evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
 };
 pub use ciba_ping::{
-    CibaPingResponseAction, classify_ciba_ping_status, next_ciba_ping_retry_at,
-    validate_ciba_notification_endpoint,
+    CibaPingResponseAction, MAX_CIBA_LOGOUT_URI_BYTES, classify_ciba_ping_status,
+    next_ciba_ping_retry_at, validate_ciba_notification_endpoint,
 };
 pub use claims::{
     AccessTokenClaimsInput, AuthorizationResponseClaimsInput, BackchannelLogoutClaimsInput, Claims,
@@ -194,7 +196,8 @@ pub use session_management::{
 pub use signing::{SignError, SignRequest, Signature, Signer, SigningPurpose};
 pub use token::{
     BackchannelLogoutDelivery, LostResponseRetry, NewRefreshToken,
-    PendingBackchannelLogoutDelivery, RefreshToken, RefreshTokenPersistResult,
+    PendingBackchannelLogoutDelivery, RefreshToken, RefreshTokenAuthenticationContext,
+    RefreshTokenPersistResult,
 };
 pub use token_endpoint::{
     AdmittedTokenClient, AppliedSenderConstraint, AuthorizationCodeTokenRequest,
@@ -207,7 +210,9 @@ pub use token_endpoint::{
 pub use token_service::{
     AccessTokenRevocation, AccessTokenSignInput, AuthorizationCodeBeginResult,
     AuthorizationCodeTransitionResult, IdTokenSignInput, IntrospectionSignInput, IssuedAccessToken,
-    IssuedAuthorizationCodeTokens, TokenFuture, TokenInspection, TokenPortError,
+    IssuedAuthorizationCodeTokens, PrepareTokenIssuance, PrepareTokenIssuanceResult,
+    RecordTokenIssuanceSigned, TokenFuture, TokenInspection, TokenIssuanceClaimResult,
+    TokenIssuancePhase, TokenIssuanceRecord, TokenIssuanceTransitionResult, TokenPortError,
     TokenRepositoryPort, TokenRevocation, TokenService, TokenSignerPort, TokenStateStorePort,
     validate_sender_constraint,
 };

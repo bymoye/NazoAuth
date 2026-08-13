@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import http.cookiejar
 import json
 import os
 from pathlib import Path
+import re
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -29,6 +32,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_oidf_conformance as oidf  # noqa: E402
 import materialize_openid4vc_oidf_config as materializer  # noqa: E402
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
+from oidf_secret_input import (  # noqa: E402
+    read_private_text,
+    read_secret_document,
+    read_secret_value,
+    sanitized_environment,
+)
+from run_public_oidf_conformance import secret_pipe  # noqa: E402
 from apply_public_conformance_onboarding import (  # noqa: E402
     ControlPlaneSession,
     OnboardingError,
@@ -36,15 +46,172 @@ from apply_public_conformance_onboarding import (  # noqa: E402
 
 
 PRE_AUTHORIZED_CODE_GRANT = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+VCI_MULTIPLE_CLIENTS_MODULE = "oid4vci-1_0-issuer-happy-flow-multiple-clients"
 OIDF_TERMINAL_MODULE_STATUSES = {"FINISHED", "FAILED", "INTERRUPTED"}
+INITIAL_ANONYMOUS_AUTHORIZATION_VISIT_MODULES = frozenset(
+    {
+        "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds",
+    }
+)
+REPEATED_HOSTED_AUTHORIZATION_MODULES = frozenset(
+    {"fapi2-security-profile-final-par-attempt-reuse-request_uri"}
+)
+DATASET_SOURCE_ADMIN = "admin"
+DATASET_SOURCE_LEASE = "lease"
+DATASET_SOURCES = (DATASET_SOURCE_ADMIN, DATASET_SOURCE_LEASE)
+LEASE_BINDING_REQUIRED_FIELDS = frozenset(
+    {
+        "lease_id",
+        "applicant_id",
+        "request_jti",
+        "matrix_sha256",
+        "bundle_sha256",
+        "expires_at",
+    }
+)
+LEASE_BINDING_OPTIONAL_FIELDS = frozenset(
+    {"client_mappings", "client_count", "idempotent_replay"}
+)
 
 
 def fail(message: str) -> None:
     raise SystemExit(message)
 
 
+def _canonical_uuid(value: object, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError(f"lease binding {field} must be a UUID")
+    try:
+        return str(uuid.UUID(value))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise RuntimeError(f"lease binding {field} must be a UUID") from error
+
+
+def _require_digest(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise RuntimeError(f"lease binding {field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def validate_lease_dataset_binding(config: dict[str, object]) -> dict[str, object]:
+    """Validate the non-secret evidence for a lease-provisioned dataset set."""
+    if config.get("dataset_source") != DATASET_SOURCE_LEASE:
+        raise RuntimeError(
+            "lease dataset mode requires driver config dataset_source=lease"
+        )
+    binding = config.get("lease_binding")
+    if not isinstance(binding, dict):
+        raise RuntimeError("lease dataset mode requires driver config lease_binding")
+    fields = set(binding)
+    allowed = LEASE_BINDING_REQUIRED_FIELDS | LEASE_BINDING_OPTIONAL_FIELDS
+    missing = LEASE_BINDING_REQUIRED_FIELDS - fields
+    unknown = fields - allowed
+    if missing:
+        raise RuntimeError(
+            "lease binding is missing required fields: " + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise RuntimeError(
+            "lease binding contains unknown fields: " + ", ".join(sorted(unknown))
+        )
+
+    _canonical_uuid(binding["lease_id"], field="lease_id")
+    applicant_id = _canonical_uuid(binding["applicant_id"], field="applicant_id")
+    issuer = config.get("issuer")
+    if not isinstance(issuer, dict) or issuer.get("dedicated_conformance_subject") is not True:
+        raise RuntimeError(
+            "lease dataset mode requires an explicitly dedicated conformance subject"
+        )
+    subject_id = _canonical_uuid(issuer.get("subject_id"), field="issuer.subject_id")
+    if subject_id != applicant_id:
+        raise RuntimeError(
+            "lease binding applicant_id does not match issuer subject_id"
+        )
+
+    request_jti = binding["request_jti"]
+    if (
+        not isinstance(request_jti, str)
+        or not request_jti
+        or len(request_jti) > 256
+        or any(character.isspace() for character in request_jti)
+    ):
+        raise RuntimeError("lease binding request_jti is invalid")
+    _require_digest(binding["matrix_sha256"], field="matrix_sha256")
+    _require_digest(binding["bundle_sha256"], field="bundle_sha256")
+    expires_at = binding["expires_at"]
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int) or expires_at <= 0:
+        raise RuntimeError("lease binding expires_at must be a positive integer")
+    if expires_at <= int(time.time()):
+        raise RuntimeError("lease binding expires_at is not in the future")
+
+    client_mappings = binding.get("client_mappings")
+    if client_mappings is not None:
+        if not isinstance(client_mappings, dict) or any(
+            not isinstance(logical, str)
+            or not logical
+            or not isinstance(actual, str)
+            or not actual
+            for logical, actual in client_mappings.items()
+        ):
+            raise RuntimeError("lease binding client_mappings is invalid")
+    client_count = binding.get("client_count")
+    if client_count is not None:
+        if isinstance(client_count, bool) or not isinstance(client_count, int) or client_count < 1:
+            raise RuntimeError("lease binding client_count is invalid")
+        if client_mappings is not None and client_count != len(client_mappings):
+            raise RuntimeError(
+                "lease binding client_count does not match client_mappings"
+            )
+    idempotent_replay = binding.get("idempotent_replay")
+    if idempotent_replay is not None and not isinstance(idempotent_replay, bool):
+        raise RuntimeError("lease binding idempotent_replay must be a boolean")
+    return binding
+
+
+def validate_dataset_source(config: dict[str, object], source: str) -> None:
+    if source not in DATASET_SOURCES:
+        raise RuntimeError(f"unsupported OpenID4VC dataset source: {source}")
+    binding = config.get("lease_binding")
+    declared = config.get("dataset_source")
+    if source == DATASET_SOURCE_LEASE:
+        validate_lease_dataset_binding(config)
+        return
+    if declared not in (None, DATASET_SOURCE_ADMIN):
+        raise RuntimeError("admin dataset mode cannot use lease dataset evidence")
+    if binding is not None:
+        raise RuntimeError("admin dataset mode cannot include lease_binding")
+
+
+def install_credential_datasets_if_needed(
+    config: dict[str, object],
+    credentials: dict[str, str],
+    source: str,
+) -> list[tuple[str, str]]:
+    validate_dataset_source(config, source)
+    if source == DATASET_SOURCE_LEASE:
+        return []
+    _, installed = install_credential_datasets(config, credentials)
+    return installed
+
+
+def cleanup_credential_datasets_if_needed(
+    config: dict[str, object],
+    credentials: dict[str, str],
+    source: str,
+    installed: list[tuple[str, str]],
+) -> None:
+    if source != DATASET_SOURCE_ADMIN or not installed:
+        return
+    cleanup_credential_datasets(
+        canonical_https_origin(str(config.get("target_origin", "")), label="target_origin"),
+        credentials,
+        installed,
+    )
+
+
 def install_credential_datasets(
     config: dict[str, object],
+    credentials: dict[str, str],
 ) -> tuple[ControlPlaneSession, list[tuple[str, str]]]:
     issuer = config.get("issuer")
     if not isinstance(issuer, dict) or issuer.get("dedicated_conformance_subject") is not True:
@@ -68,12 +235,13 @@ def install_credential_datasets(
     ):
         raise RuntimeError("issuer credential_datasets contains an invalid entry")
     origin = canonical_https_origin(str(config.get("target_origin", "")), label="target_origin")
-    admin_email = os.environ.get("OIDF_ADMIN_EMAIL", "")
-    admin_password = os.environ.get("OIDF_ADMIN_PASSWORD", "")
-    if not admin_email or not admin_password:
-        raise RuntimeError("OIDF_ADMIN_EMAIL and OIDF_ADMIN_PASSWORD are required")
     try:
-        admin = ControlPlaneSession.login(origin, admin_email, admin_password)
+        admin = ControlPlaneSession.login(
+            origin,
+            credentials["admin_email"],
+            credentials["admin_password"],
+            mfa_totp_secret=credentials["admin_mfa_totp_secret"],
+        )
         profile = admin.request_json("GET", "/auth/me", expected_status=200)
     except OnboardingError as error:
         raise RuntimeError(f"OpenID4VC admin control-plane login failed: {error}") from error
@@ -97,15 +265,25 @@ def install_credential_datasets(
             )
             installed.append((subject_id, encoded_configuration))
     except OnboardingError as error:
-        cleanup_credential_datasets(admin, installed)
+        cleanup_credential_datasets(origin, credentials, installed)
         raise RuntimeError(f"OpenID4VC dataset installation failed: {error}") from error
     return admin, installed
 
 
 def cleanup_credential_datasets(
-    admin: ControlPlaneSession,
+    origin: str,
+    credentials: dict[str, str],
     installed: list[tuple[str, str]],
 ) -> None:
+    # Dataset deletion requires recent MFA.  A full OpenID4VC matrix can outlive
+    # the login freshness window, so establish a fresh session for cleanup
+    # instead of reusing the setup session.
+    admin = ControlPlaneSession.login(
+        origin,
+        credentials["admin_email"],
+        credentials["admin_password"],
+        mfa_totp_secret=credentials["admin_mfa_totp_secret"],
+    )
     failures: list[str] = []
     for subject_id, encoded_configuration in reversed(installed):
         path = (
@@ -150,8 +328,9 @@ def request_json(method: str, url: str, token: str, payload: object | None = Non
     try:
         response = opener.open(request, timeout=30)
     except urllib.error.HTTPError as error:
-        detail = error.read(64 * 1024).decode("utf-8", errors="replace")
-        raise RuntimeError(f"management request failed with HTTP {error.code}: {detail}") from error
+        with error:
+            error.read(64 * 1024)
+            raise RuntimeError(f"management request failed with HTTP {error.code}") from error
     with response:
         encoded = response.read(1024 * 1024 + 1)
         if len(encoded) > 1024 * 1024:
@@ -163,7 +342,9 @@ def request_json(method: str, url: str, token: str, payload: object | None = Non
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        raise RuntimeError(f"unexpected redirect while delivering conformance input: {code} {newurl}")
+        raise RuntimeError(
+            f"unexpected redirect while delivering conformance input: HTTP {code}"
+        )
 
 
 class ExactRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -177,9 +358,32 @@ class ExactRedirectHandler(urllib.request.HTTPRedirectHandler):
             resolved, label="wallet redirect URL"
         ) != self.expected_url:
             raise RuntimeError(
-                f"unexpected redirect while delivering conformance input: {code} {resolved}"
+                f"unexpected redirect while delivering conformance input: HTTP {code}"
             )
         return super().redirect_request(req, fp, code, msg, headers, resolved)
+
+
+class CaptureRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def capture_control_plane_redirects(session: ControlPlaneSession) -> None:
+    cookie_processors = [
+        handler
+        for handler in session.opener.handlers
+        if isinstance(handler, urllib.request.HTTPCookieProcessor)
+    ]
+    if len(cookie_processors) != 1:
+        raise RuntimeError("hosted authorization session lacks a unique cookie jar")
+    cookie_jar = cookie_processors[0].cookiejar
+    if not isinstance(cookie_jar, http.cookiejar.CookieJar):
+        raise RuntimeError("hosted authorization session has an invalid cookie jar")
+    session.opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        urllib.request.HTTPCookieProcessor(cookie_jar),
+        CaptureRedirectHandler(),
+    )
 
 
 def strict_https_url(value: str, *, label: str) -> str:
@@ -206,7 +410,9 @@ def get_url(url: str, *, expected_redirect_url: str | None = None) -> None:
         redirect_handler,
     )
     with opener.open(url, timeout=30) as response:
-        response.read()
+        body = response.read(oidf.MAX_OIDF_API_RESPONSE_BYTES + 1)
+        if len(body) > oidf.MAX_OIDF_API_RESPONSE_BYTES:
+            raise RuntimeError("browser callback response exceeds 1 MiB")
 
 
 def canonical_https_origin(value: str, *, label: str) -> str:
@@ -244,6 +450,266 @@ def suite_callback_url(conformance_server: str, value: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def hosted_authorization_url(
+    target_origin: str,
+    browser: object,
+    completed_urls: set[str] | None = None,
+) -> str | None:
+    if not isinstance(browser, dict):
+        return None
+    urls = browser.get("urls")
+    if not isinstance(urls, list):
+        return None
+    candidates: list[str] = []
+    for value in urls:
+        if not isinstance(value, str):
+            continue
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.fragment or parsed.username is not None or parsed.password is not None:
+            continue
+        try:
+            origin = canonical_https_origin(
+                f"{parsed.scheme}://{parsed.netloc}", label="hosted authorization origin"
+            )
+        except (RuntimeError, ValueError):
+            continue
+        if origin == target_origin and parsed.path == "/authorize" and parsed.query:
+            candidates.append(urllib.parse.urlunsplit(parsed))
+    pending = [
+        candidate
+        for candidate in dict.fromkeys(candidates)
+        if candidate not in (completed_urls or set())
+    ]
+    if not pending:
+        return None
+    if len(pending) != 1:
+        raise RuntimeError("hosted authorization browser input is ambiguous")
+    return pending[0]
+
+
+def browser_visit_count(browser: object, authorization_url: str) -> int:
+    if not isinstance(browser, dict):
+        return 0
+    visited = browser.get("visited")
+    if not isinstance(visited, list):
+        return 0
+    return sum(value == authorization_url for value in visited)
+
+
+def mark_suite_browser_url_visited(
+    conformance_server: str,
+    token: str,
+    module_id: str,
+    authorization_url: str,
+) -> None:
+    oidf.oidf_api_request(
+        "POST",
+        conformance_server,
+        f"api/runner/browser/{module_id}/visit",
+        token,
+        query={"url": authorization_url},
+        expected_statuses={204},
+    )
+
+
+def visit_initial_hosted_login_page(target_origin: str, authorization_url: str) -> None:
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=oidf.OIDF_API_SSL_CONTEXT),
+        CaptureRedirectHandler(),
+    )
+    location = redirect_location(
+        opener,
+        urllib.request.Request(
+            authorization_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": "nazo-openid4vc-host-local-driver/1",
+            },
+            method="GET",
+        ),
+        label="initial anonymous hosted authorization request",
+    )
+    parsed = urllib.parse.urlsplit(
+        strict_https_url(location, label="hosted login redirect URL")
+    )
+    redirect_origin = canonical_https_origin(
+        f"{parsed.scheme}://{parsed.netloc}", label="hosted login redirect origin"
+    )
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if (
+        redirect_origin != target_origin
+        or parsed.path != "/ui/auth"
+        or set(query) != {"next"}
+        or len(query["next"]) != 1
+    ):
+        raise RuntimeError("initial hosted authorization did not reach the login page")
+
+
+def redirect_location(
+    opener: urllib.request.OpenerDirector,
+    request: urllib.request.Request,
+    *,
+    label: str,
+) -> str:
+    try:
+        response = opener.open(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        location = error.headers.get("Location")
+        code = error.code
+        with error:
+            error.read(64 * 1024)
+        if code in {302, 303} and isinstance(location, str) and location:
+            return urllib.parse.urljoin(request.full_url, location)
+        raise RuntimeError(f"{label} failed with HTTP {code}") from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise RuntimeError(f"{label} failed: {type(error).__name__}") from error
+    with response:
+        response.read(64 * 1024)
+        status = getattr(response, "status", 200)
+    raise RuntimeError(f"{label} expected a redirect but received HTTP {status}")
+
+
+def hosted_consent_request_id(target_origin: str, value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        origin = canonical_https_origin(
+            f"{parsed.scheme}://{parsed.netloc}", label="hosted consent origin"
+        )
+    except (RuntimeError, ValueError) as error:
+        raise RuntimeError("hosted authorization did not redirect to consent") from error
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    request_ids = query.get("request_id")
+    if (
+        origin != target_origin
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/ui/consent"
+        or parsed.fragment
+        or not isinstance(request_ids, list)
+        or len(request_ids) != 1
+        or not request_ids[0]
+    ):
+        raise RuntimeError("hosted authorization did not redirect to consent")
+    return request_ids[0]
+
+
+def hosted_suite_callback_url(conformance_server: str, value: str) -> str:
+    suite_origin = canonical_https_origin(conformance_server, label="conformance_server")
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        origin = canonical_https_origin(
+            f"{parsed.scheme}://{parsed.netloc}", label="suite callback origin"
+        )
+    except (RuntimeError, ValueError) as error:
+        raise RuntimeError("hosted authorization callback escaped the configured suite") from error
+    if (
+        origin != suite_origin
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.path.startswith("/test/")
+        or parsed.fragment
+    ):
+        raise RuntimeError("hosted authorization callback escaped the configured suite")
+    return urllib.parse.urlunsplit(parsed)
+
+
+def hosted_authorization_decision(info: dict[str, object]) -> str:
+    return (
+        "deny"
+        if str(info.get("testName", ""))
+        in oidf.FAPI_SECURITY_USER_REJECTS_AUTHENTICATION_MODULES
+        else "approve"
+    )
+
+
+def suite_implicit_submit_url(conformance_server: str, html: bytes) -> str:
+    try:
+        document = html.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("suite callback page is not UTF-8") from error
+    matches = re.findall(
+        r"xhr\.open\('POST',\s*(\"(?:\\.|[^\"\\])*\")\s*,\s*true\);",
+        document,
+    )
+    if len(matches) != 1:
+        raise RuntimeError("suite callback page lacks a unique implicit submission URL")
+    try:
+        value = json.loads(matches[0])
+    except json.JSONDecodeError as error:
+        raise RuntimeError("suite callback page has an invalid implicit submission URL") from error
+    if not isinstance(value, str):
+        raise RuntimeError("suite callback page has an invalid implicit submission URL")
+    suite_origin = canonical_https_origin(conformance_server, label="conformance_server")
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        origin = canonical_https_origin(
+            f"{parsed.scheme}://{parsed.netloc}", label="suite implicit submission origin"
+        )
+    except (RuntimeError, ValueError) as error:
+        raise RuntimeError("suite implicit submission escaped the configured suite") from error
+    if (
+        origin != suite_origin
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.path.startswith("/test/")
+        or "/implicit/" not in parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("suite implicit submission escaped the configured suite")
+    return urllib.parse.urlunsplit(parsed)
+
+
+def complete_suite_browser_callback(conformance_server: str, callback_url: str) -> None:
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=oidf.OIDF_API_SSL_CONTEXT),
+        NoRedirectHandler(),
+    )
+    request = urllib.request.Request(
+        callback_url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": "nazo-openid4vc-host-local-driver/1",
+        },
+        method="GET",
+    )
+    try:
+        response = opener.open(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        with error:
+            error.read(64 * 1024)
+        raise RuntimeError(f"suite browser callback failed with HTTP {error.code}") from error
+    with response:
+        content_type = response.headers.get("Content-Type", "").lower()
+        html = response.read(1024 * 1024 + 1)
+        status = getattr(response, "status", 200)
+    if status != 200 or "text/html" not in content_type or len(html) > 1024 * 1024:
+        raise RuntimeError("suite browser callback returned an invalid page")
+    submit_url = suite_implicit_submit_url(conformance_server, html)
+    submission = urllib.request.Request(
+        submit_url,
+        data=b"",
+        headers={
+            "Accept": "*/*",
+            "Content-Type": "text/plain",
+            "Origin": canonical_https_origin(conformance_server, label="conformance_server"),
+            "User-Agent": "nazo-openid4vc-host-local-driver/1",
+        },
+        method="POST",
+    )
+    try:
+        response = opener.open(submission, timeout=30)
+    except urllib.error.HTTPError as error:
+        with error:
+            error.read(64 * 1024)
+        raise RuntimeError(f"suite implicit submission failed with HTTP {error.code}") from error
+    with response:
+        response.read(64 * 1024)
+        status = getattr(response, "status", 200)
+    if status != 204:
+        raise RuntimeError(f"suite implicit submission returned HTTP {status}")
+
+
 def module_entries(
     base_url: str,
     token: str | None,
@@ -265,7 +731,9 @@ def module_entries(
         status, info = oidf.oidf_api_request(
             "GET", base_url, f"api/info/{module_id}", token, expected_statuses={200, 404}
         )
-        if status != 200 or not isinstance(info, dict):
+        if status == 200 and not isinstance(info, dict):
+            raise RuntimeError(f"OIDF module info for {module_id} is not a JSON object")
+        if status != 200:
             return None
         entry = {
             **info,
@@ -281,12 +749,23 @@ def module_entries(
             token,
             expected_statuses={200, 404},
         )
+        if runner_status == 200 and not isinstance(runner_info, dict):
+            raise RuntimeError(f"OIDF runner info for {module_id} is not a JSON object")
         exposed = (
             runner_info.get("exposed")
             if runner_status == 200 and isinstance(runner_info, dict)
             else None
         )
-        return {**entry, **({"exposed": exposed} if isinstance(exposed, dict) else {})}
+        browser = (
+            runner_info.get("browser")
+            if runner_status == 200 and isinstance(runner_info, dict)
+            else None
+        )
+        return {
+            **entry,
+            **({"exposed": exposed} if isinstance(exposed, dict) else {}),
+            **({"browser": browser} if isinstance(browser, dict) else {}),
+        }
 
     if not candidates:
         return []
@@ -305,6 +784,11 @@ class Openid4vcDriver:
         self.stop = stop
         self.triggered: set[str] = set()
         self.terminal_modules: set[str] = set()
+        self.completed_hosted_authorizations: dict[str, set[str]] = {}
+        self.completed_trigger_total = 0
+
+    def completed_trigger_count(self) -> int:
+        return self.completed_trigger_total
 
     def run(self) -> None:
         interval = max(1, int(self.config.get("poll_interval_seconds", 2)))
@@ -312,15 +796,16 @@ class Openid4vcDriver:
             try:
                 self.drive_once()
             except Exception as exc:  # runner monitor remains authoritative
-                print(f"OpenID4VC driver retryable error: {type(exc).__name__}: {exc}", flush=True)
+                print(
+                    f"OpenID4VC driver retryable error: {type(exc).__name__}",
+                    flush=True,
+                )
             if self.stop.wait(interval):
                 break
 
     def drive_once(self) -> None:
         server = str(self.config["conformance_server"])
-        configured_token = str(
-            self.config.get("conformance_token") or os.environ.get("OIDF_CONFORMANCE_TOKEN", "")
-        )
+        configured_token = str(self.config.get("conformance_token") or "")
         if configured_token == "":
             raise RuntimeError("OIDF conformance API token is required")
         token = configured_token
@@ -331,31 +816,45 @@ class Openid4vcDriver:
             server,
             token,
             aliases,
-            ignored_module_ids=self.triggered | self.terminal_modules,
+            ignored_module_ids=self.terminal_modules,
             max_workers=max_workers,
         )
-        triggered_before = len(self.triggered)
+        triggered_before = self.completed_trigger_count()
         for info in entries:
             module_id = str(info["_driver_module_id"])
-            status = str(info.get("status", "")).upper()
-            if status in OIDF_TERMINAL_MODULE_STATUSES:
-                self.terminal_modules.add(module_id)
-                continue
-            if module_id in self.triggered or status != "WAITING":
-                continue
-            plan_name = str(info.get("_driver_plan", ""))
-            variant = info.get("variant") if isinstance(info.get("variant"), dict) else {}
-            if plan_name.startswith("oid4vci-"):
-                if variant.get("vci_authorization_code_flow_variant") == "issuer_initiated":
-                    self.drive_issuer(module_id, info, variant)
-            elif plan_name.startswith("oid4vp-"):
-                self.drive_verifier(module_id, info, variant, "haip" in plan_name)
+            try:
+                status = str(info.get("status", "")).upper()
+                if status in OIDF_TERMINAL_MODULE_STATUSES:
+                    self.terminal_modules.add(module_id)
+                    self.completed_hosted_authorizations.pop(module_id, None)
+                    continue
+                if status != "WAITING":
+                    continue
+                plan_name = str(info.get("_driver_plan", ""))
+                variant = info.get("variant") if isinstance(info.get("variant"), dict) else {}
+                if plan_name.startswith("oid4vci-"):
+                    if variant.get("vci_authorization_code_flow_variant") == "issuer_initiated":
+                        if module_id not in self.triggered:
+                            self.drive_issuer(module_id, info, variant)
+                        if str(variant.get("vci_grant_type", "authorization_code")) == "authorization_code":
+                            self.drive_wallet_initiated_issuer(module_id, info)
+                    elif variant.get("vci_authorization_code_flow_variant") == "wallet_initiated":
+                        self.drive_wallet_initiated_issuer(module_id, info)
+                elif plan_name.startswith("oid4vp-"):
+                    if module_id not in self.triggered:
+                        self.drive_verifier(module_id, info, variant, "haip" in plan_name)
+            except Exception as exc:  # retry this module without starving its peers
+                print(
+                    "OpenID4VC driver retryable module error: "
+                    f"{module_id} {type(exc).__name__}",
+                    flush=True,
+                )
         if entries:
             print(
                 "OpenID4VC driver scan completed: "
                 f"{len(entries)} live modules, "
                 f"{len(self.terminal_modules)} cached terminal, "
-                f"{len(self.triggered) - triggered_before} newly triggered, "
+                f"{self.completed_trigger_count() - triggered_before} newly triggered, "
                 f"{time.monotonic() - start:.2f}s",
                 flush=True,
             )
@@ -373,37 +872,174 @@ class Openid4vcDriver:
         grant = str(variant.get("vci_grant_type", "authorization_code"))
         grant_type = PRE_AUTHORIZED_CODE_GRANT if grant == "pre_authorization_code" else "authorization_code"
         tx_code = issuer.get("tx_code") if grant == "pre_authorization_code" else None
-        offer = request_json(
-            "POST",
-            urllib.parse.urljoin(
-                str(self.config["target_origin"]), "/openid4vci/offers"
-            ),
-            str(issuer["management_token"]),
-            {
-                "subject_id": issuer["subject_id"],
-                "credential_configuration_ids": [configuration_id],
-                "grant_types": [grant_type],
-                **({"tx_code": tx_code} if tx_code else {}),
-                "expires_in": 300,
-            },
+        offer_count = (
+            2
+            if grant == "pre_authorization_code"
+            and info.get("testName") == VCI_MULTIPLE_CLIENTS_MODULE
+            else 1
         )
-        if issuer.get("offer_delivery", "uri") == "value":
-            value = json.dumps(offer["credential_offer"], separators=(",", ":"))
-            callback = (
-                f"{endpoint}?"
-                f"{urllib.parse.urlencode({'credential_offer': value})}"
+        for offer_index in range(offer_count):
+            offer = request_json(
+                "POST",
+                urllib.parse.urljoin(
+                    str(self.config["target_origin"]), "/openid4vci/offers"
+                ),
+                str(issuer["management_token"]),
+                {
+                    "subject_id": issuer["subject_id"],
+                    "credential_configuration_ids": [configuration_id],
+                    "grant_types": [grant_type],
+                    **({"tx_code": tx_code} if tx_code else {}),
+                    "expires_in": 300,
+                },
             )
-        else:
-            callback = (
-                f"{endpoint}?"
-                f"{urllib.parse.urlencode({'credential_offer_uri': offer['credential_offer_uri']})}"
+            if issuer.get("offer_delivery", "uri") == "value":
+                value = json.dumps(offer["credential_offer"], separators=(",", ":"))
+                callback = (
+                    f"{endpoint}?"
+                    f"{urllib.parse.urlencode({'credential_offer': value})}"
+                )
+            else:
+                callback = (
+                    f"{endpoint}?"
+                    f"{urllib.parse.urlencode({'credential_offer_uri': offer['credential_offer_uri']})}"
+                )
+            # The callback is synchronous: for the multiple-client module the
+            # first request returns only after client 1 completes and the suite
+            # has entered its second credential-offer wait state.  A fresh offer
+            # therefore preserves pre-authorized-code single use for client 2.
+            get_url(callback)
+            print(
+                "OpenID4VC driver delivered credential offer "
+                f"{offer_index + 1}/{offer_count} to {module_id}",
+                flush=True,
             )
-        get_url(callback)
+        self.triggered.add(module_id)
+        self.completed_trigger_total += offer_count
+
+    def drive_wallet_initiated_issuer(
+        self,
+        module_id: str,
+        info: dict[str, object],
+    ) -> None:
+        target_origin = canonical_https_origin(
+            str(self.config["target_origin"]), label="target_origin"
+        )
+        test_name = str(info.get("testName", ""))
+        completed_urls = self.completed_hosted_authorizations.setdefault(module_id, set())
+        authorization_url = hosted_authorization_url(
+            target_origin,
+            info.get("browser"),
+            None
+            if test_name in REPEATED_HOSTED_AUTHORIZATION_MODULES
+            else completed_urls,
+        )
+        if authorization_url is None:
+            return
+        conformance_server = str(self.config["conformance_server"])
+        conformance_token = str(self.config.get("conformance_token") or "")
+        if not conformance_token:
+            raise RuntimeError("OIDF conformance API token is required")
+        browser = info.get("browser")
+        if (
+            test_name in INITIAL_ANONYMOUS_AUTHORIZATION_VISIT_MODULES
+            and browser_visit_count(browser, authorization_url) == 0
+        ):
+            visit_initial_hosted_login_page(target_origin, authorization_url)
+            mark_suite_browser_url_visited(
+                conformance_server,
+                conformance_token,
+                module_id,
+                authorization_url,
+            )
+            print(
+                f"OpenID4VC driver completed initial anonymous authorization visit for {module_id}",
+                flush=True,
+            )
+            return
+        mark_suite_browser_url_visited(
+            conformance_server,
+            conformance_token,
+            module_id,
+            authorization_url,
+        )
+        credentials = self.config.get("hosted_authorization")
+        if not isinstance(credentials, dict):
+            raise RuntimeError("hosted authorization credentials are required")
+        email = credentials.get("email")
+        password = credentials.get("password")
+        if not isinstance(email, str) or not email or not isinstance(password, str) or not password:
+            raise RuntimeError("hosted authorization credentials are incomplete")
+
+        try:
+            session = ControlPlaneSession.login(target_origin, email, password)
+        except OnboardingError as error:
+            raise RuntimeError("hosted authorization login failed") from error
+        capture_control_plane_redirects(session)
+        consent_location = redirect_location(
+            session.opener,
+            urllib.request.Request(
+                authorization_url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "User-Agent": "nazo-openid4vc-host-local-driver/1",
+                },
+                method="GET",
+            ),
+            label="hosted authorization request",
+        )
+        try:
+            callback_url = hosted_suite_callback_url(
+                str(self.config["conformance_server"]), consent_location
+            )
+        except RuntimeError:
+            request_id = hosted_consent_request_id(target_origin, consent_location)
+            consent_path = "/authorize/consent?" + urllib.parse.urlencode(
+                {"request_id": request_id}
+            )
+            try:
+                consent = session.request_json(
+                    "GET", consent_path, expected_status=200, csrf=False
+                )
+            except OnboardingError as error:
+                raise RuntimeError("hosted authorization consent lookup failed") from error
+            csrf_token = consent.get("csrf_token") if isinstance(consent, dict) else None
+            if not isinstance(csrf_token, str) or not csrf_token:
+                raise RuntimeError("hosted authorization consent lacks a CSRF token")
+            decision_body = urllib.parse.urlencode(
+                {
+                    "request_id": request_id,
+                    "decision": hosted_authorization_decision(info),
+                    "csrf_token": csrf_token,
+                }
+            ).encode("utf-8")
+            callback_location = redirect_location(
+                session.opener,
+                urllib.request.Request(
+                    f"{target_origin}/authorize/decision",
+                    data=decision_body,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Origin": target_origin,
+                        "User-Agent": "nazo-openid4vc-host-local-driver/1",
+                    },
+                    method="POST",
+                ),
+                label="hosted authorization decision",
+            )
+            callback_url = hosted_suite_callback_url(
+                str(self.config["conformance_server"]), callback_location
+            )
+        complete_suite_browser_callback(
+            conformance_server, callback_url
+        )
+        completed_urls.add(authorization_url)
+        self.completed_trigger_total += 1
         print(
-            f"OpenID4VC driver delivered credential offer to {module_id}",
+            f"OpenID4VC driver completed hosted authorization for {module_id}",
             flush=True,
         )
-        self.triggered.add(module_id)
 
     def drive_verifier(self, module_id: str, info: dict[str, object], variant: dict[str, object], haip: bool) -> None:
         verifier = self.config["verifier"]
@@ -473,12 +1109,30 @@ class Openid4vcDriver:
         )
         get_url(authorization_url, expected_redirect_url=completion_url)
         self.triggered.add(module_id)
+        self.completed_trigger_total += 1
         print(f"OpenID4VC driver initiated presentation for {module_id}", flush=True)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver-config-json-file", required=True)
+    parser.add_argument(
+        "--dataset-source",
+        choices=DATASET_SOURCES,
+        default=DATASET_SOURCE_ADMIN,
+        help=(
+            "dataset provisioning authority: admin performs the legacy PUT/DELETE "
+            "flow; lease requires atomic lease evidence in the driver config"
+        ),
+    )
+    parser.add_argument(
+        "--p028-only",
+        action="store_true",
+        help=(
+            "run only the canonical VCI p028 expression while still validating "
+            "the complete 17-plan materialized artifact"
+        ),
+    )
     parser.add_argument(
         "--plan-group-size",
         type=int,
@@ -496,8 +1150,44 @@ def parse_args() -> argparse.Namespace:
             "strict diagnostic runs against a patched conformance suite"
         ),
     )
+    operator_credentials = parser.add_mutually_exclusive_group(required=False)
+    operator_credentials.add_argument(
+        "--operator-credentials-file",
+        type=Path,
+        help="POSIX non-symlink mode-0600 admin credential document",
+    )
+    operator_credentials.add_argument(
+        "--operator-credentials-fd",
+        type=int,
+        help="read admin credentials from an inherited descriptor >= 3",
+    )
+    suite_token = parser.add_mutually_exclusive_group(required=True)
+    suite_token.add_argument(
+        "--suite-token-file",
+        type=Path,
+        help="POSIX non-symlink mode-0600 suite bearer token file",
+    )
+    suite_token.add_argument(
+        "--suite-token-fd",
+        type=int,
+        help="read the suite token from an inherited descriptor >= 3",
+    )
     parser.add_argument("runner_args", nargs=argparse.REMAINDER)
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    has_operator_credentials = (
+        args.operator_credentials_file is not None
+        or args.operator_credentials_fd is not None
+    )
+    if args.dataset_source == DATASET_SOURCE_LEASE and has_operator_credentials:
+        parser.error(
+            "--dataset-source lease cannot be combined with operator credentials"
+        )
+    if args.dataset_source == DATASET_SOURCE_ADMIN and not has_operator_credentials:
+        parser.error(
+            "admin dataset source requires --operator-credentials-file or "
+            "--operator-credentials-fd"
+        )
+    return args
 
 
 def option_value(arguments: list[str], option: str) -> str | None:
@@ -712,6 +1402,26 @@ def grouped_runner_args(runner_args: list[str], group_size: int, temp_dir: Path)
     return invocations
 
 
+def apply_targeted_plan_selection(
+    runner_args: list[str],
+    *,
+    p028_only: bool,
+    plan_group_size: int,
+) -> list[str]:
+    """Select p028 without weakening the full materialized-matrix checks."""
+    if not p028_only:
+        return runner_args
+    if plan_group_size != 0:
+        fail("--p028-only requires --plan-group-size 0")
+    if option_value(runner_args, "--plan-expression") is not None:
+        fail("--p028-only cannot be combined with --plan-expression")
+    return [
+        *runner_args,
+        "--plan-expression",
+        materializer.p028_plan_expression(),
+    ]
+
+
 def terminate_runner_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
@@ -733,38 +1443,99 @@ def terminate_runner_process(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def run_runner_invocations(invocations: list[list[str]]) -> int:
+def run_runner_invocations(
+    invocations: list[list[str]],
+    *,
+    suite_token: str | None = None,
+) -> int:
     for index, runner_args in enumerate(invocations, start=1):
         print(f"OpenID4VC official runner group {index}/{len(invocations)}", flush=True)
         command = [sys.executable, str(Path(__file__).with_name("run_oidf_conformance.py")), *runner_args]
-        process = subprocess.Popen(command, start_new_session=True)
-        previous_sigterm = signal.getsignal(signal.SIGTERM)
-
-        def interrupt_runner(_signum, _frame) -> None:  # noqa: ANN001
-            raise InterruptedError("OpenID4VC wrapper received SIGTERM")
-
-        signal.signal(signal.SIGTERM, interrupt_runner)
-        try:
-            try:
-                returncode = process.wait()
-            except BaseException:
-                terminate_runner_process(process)
-                raise
-        finally:
-            signal.signal(signal.SIGTERM, previous_sigterm)
+        if suite_token is not None:
+            if "--token-file" in runner_args or "--token-fd" in runner_args:
+                fail("suite token delivery is controlled by the OpenID4VC wrapper")
+            with secret_pipe(suite_token) as descriptor:
+                command.extend(["--token-fd", str(descriptor)])
+                process = subprocess.Popen(
+                    command,
+                    env=sanitized_environment(),
+                    pass_fds=(descriptor,),
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                returncode = wait_for_runner(process)
+        else:
+            process = subprocess.Popen(
+                command,
+                env=sanitized_environment(),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            returncode = wait_for_runner(process)
         if returncode != 0:
             return returncode
     return 0
 
 
-def main() -> int:
-    args = parse_args()
+def wait_for_runner(process: subprocess.Popen[bytes]) -> int:
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def interrupt_runner(_signum, _frame) -> None:  # noqa: ANN001
+        raise InterruptedError("OpenID4VC wrapper received SIGTERM")
+
+    signal.signal(signal.SIGTERM, interrupt_runner)
+    try:
+        try:
+            return process.wait()
+        except BaseException:
+            terminate_runner_process(process)
+            raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     runner_args = args.runner_args[1:] if args.runner_args[:1] == ["--"] else args.runner_args
     if not runner_args:
         fail("arguments for run_oidf_conformance.py are required after --")
     if args.plan_group_size < 0:
         fail("--plan-group-size must be zero or greater")
-    config = json.loads(Path(args.driver_config_json_file).read_text(encoding="utf-8"))
+    runner_args = apply_targeted_plan_selection(
+        runner_args,
+        p028_only=args.p028_only,
+        plan_group_size=args.plan_group_size,
+    )
+    config = json.loads(read_private_text(Path(args.driver_config_json_file)))
+    if not isinstance(config, dict):
+        fail("OpenID4VC driver config must be a JSON object")
+    try:
+        validate_dataset_source(config, args.dataset_source)
+    except RuntimeError as error:
+        fail(str(error))
+    credentials: dict[str, str] = {}
+    if args.dataset_source == DATASET_SOURCE_ADMIN:
+        credentials = read_secret_document(
+            argparse.Namespace(
+                secrets_stdin=False,
+                secret_fd=args.operator_credentials_fd,
+                secret_file=args.operator_credentials_file,
+            ),
+            required_fields=(
+                "admin_email",
+                "admin_password",
+                "admin_mfa_totp_secret",
+            ),
+        )
+    suite_token = read_secret_value(
+        descriptor=args.suite_token_fd
+        if args.suite_token_fd is not None
+        else None,
+        path=args.suite_token_file,
+    )
+    config["conformance_token"] = suite_token
     if "--no-api-token" in runner_args or "--disable-ssl-verify" in runner_args:
         fail("public black-box OpenID4VC runs require API authentication and TLS verification")
     validate_materialized_matrix(
@@ -779,7 +1550,11 @@ def main() -> int:
             "OpenID4VC suite contains stale generated plan configs: "
             + ", ".join(path.name for path in existing_plan_configs)
         )
-    admin, installed_datasets = install_credential_datasets(config)
+    installed_datasets = install_credential_datasets_if_needed(
+        config,
+        credentials,
+        args.dataset_source,
+    )
     stop = threading.Event()
     driver = Openid4vcDriver(config, stop)
     thread = threading.Thread(target=driver.run, name="openid4vc-oidf-driver", daemon=True)
@@ -789,13 +1564,18 @@ def main() -> int:
         if args.plan_group_size:
             with tempfile.TemporaryDirectory(prefix="openid4vc-oidf-groups-") as directory:
                 invocations = grouped_runner_args(runner_args, args.plan_group_size, Path(directory))
-                return run_runner_invocations(invocations)
-        return run_runner_invocations([runner_args])
+                return run_runner_invocations(invocations, suite_token=suite_token)
+        return run_runner_invocations([runner_args], suite_token=suite_token)
     finally:
         stop.set()
         thread.join(timeout=5)
         try:
-            cleanup_credential_datasets(admin, installed_datasets)
+            cleanup_credential_datasets_if_needed(
+                config,
+                credentials,
+                args.dataset_source,
+                installed_datasets,
+            )
         finally:
             try:
                 cleanup_suite_plan_configs(plan_config_paths)

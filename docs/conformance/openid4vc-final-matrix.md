@@ -59,9 +59,14 @@ sudo nazoauthctl keys generate-local --alg ES256 \
 
 The persisted `purposes` field is fail-closed. A purpose-scoped key is excluded
 from OIDC rotation and cannot sign access tokens, ID Tokens, JARM, logout
-tokens, HTTP messages or security events. The configured OpenID4VC leaf
-certificate must match this exact scoped key and chain to the configured trust
-anchors; startup fails otherwise. Operators must not edit `keyset.json`
+tokens, HTTP messages or security events. On a `standards-full` first install,
+the authenticated key task creates an in-memory local CA and signs a leaf that
+matches this exact scoped key and carries the current issuer hostname as a DNS
+SAN. It atomically replaces one leaf-plus-CA PEM bundle; both certificate
+settings reference it and the runtime accepts only its CA certificates as
+trust anchors. The CA private key is never persisted and onboarding material
+cannot replace that local trust boundary. Startup fails if the chain, anchor,
+DNS SAN, or key binding is invalid. Operators must not edit `keyset.json`
 manually.
 
 ## OIDF suite coverage
@@ -101,17 +106,12 @@ Attestation is used, each refresh token is bound to the Client Instance public
 key from the attestation `cnf.jwk`; refresh requests must authenticate with the
 same key. No HAIP refresh-token warning or skip is accepted by the matrix.
 
-The two standard VCI pre-authorized-code configurations also register one exact
-expected failure for
-`oid4vci-1_0-issuer-happy-flow-multiple-clients`. That upstream module accepts
-one Credential Offer but redeems the same `pre-authorized_code` again with its
-second client, whereas OpenID4VCI 1.0 Final section 4.1.1 requires the code to be
-short-lived and single-use. The server must not permit per-client replay to make
-the test pass. This expected failure is bound to the two exact pre-authorized-code
-configurations, full variants, the `Second client: Verify token endpoint response`
-block, and the `CheckTokenEndpointHttpStatus200` condition. The authorization-code
-variants of the same module still run and must pass. Any other failure, warning,
-or skip remains a failure.
+The standard VCI pre-authorized-code configurations include
+`oid4vci-1_0-issuer-happy-flow-multiple-clients`. The driver creates and delivers
+a distinct Credential Offer for each emulated client. Each offer therefore has
+its own short-lived, single-use `pre-authorized_code`, as required by OpenID4VCI
+1.0 Final section 4.1.1. The module is not filtered from the plan and must pass;
+the server must never permit one code to be replayed by the second client.
 
 The upstream plan display names explicitly call these tests **alpha** and say
 they are incomplete/incorrect or not currently part of the certification

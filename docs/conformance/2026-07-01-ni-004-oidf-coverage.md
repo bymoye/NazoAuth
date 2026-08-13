@@ -5,7 +5,8 @@
 NI-004 implements RFC 7591 / OIDC Dynamic Client Registration as a
 default-closed registration endpoint:
 
-- `/register` is routed only when `ENABLE_DYNAMIC_CLIENT_REGISTRATION=true`.
+- `/register` is routed only when the Dynamic Client Registration runtime
+  module is enabled and an initial-access token is present.
 - Discovery advertises `registration_endpoint` only when the endpoint is
   enabled.
 - Public deployments can require `DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN`.

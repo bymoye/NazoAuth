@@ -1,10 +1,15 @@
 //! 管理端客户端接入申请接口。
 use super::clients::ServerAdminClientService;
-use crate::adapters::audit::audit_event;
 use crate::adapters::audit::audit_fields;
 use crate::adapters::security::access_delivery_token;
 use crate::adapters::security::blake3_hex;
-use crate::http::sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles};
+use crate::http::admin::{
+    persist_required_audit_or_unavailable, require_durable_audit_or_unavailable,
+};
+use crate::http::sessions::{
+    AdminSessionHandles, require_admin_or_forbidden_with_handles,
+    require_admin_with_recent_mfa_or_forbidden_with_handles,
+};
 use crate::http::views::pagination;
 use actix_web::http::StatusCode;
 use actix_web::http::header;
@@ -162,7 +167,9 @@ pub(crate) async fn admin_approve_access_request(
     ) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req)
+        .await
+    {
         Ok(admin) => admin,
         Err(response) => return response,
     };
@@ -202,6 +209,9 @@ pub(crate) async fn admin_approve_access_request(
         Ok(prepared) => prepared,
         Err(error) => return client_preparation_error_response(error),
     };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     let token = access_delivery_token(&config.client_secret_pepper, request_user_id, request_id);
     let expires_at = Utc::now() + Duration::seconds(config.delivery_ttl_seconds as i64);
     let delivery_payload = json!({
@@ -281,7 +291,7 @@ pub(crate) async fn admin_approve_access_request(
             "客户端凭据交付激活失败.",
         );
     }
-    audit_event(
+    if let Err(response) = persist_required_audit_or_unavailable(
         "client_created",
         audit_fields(&[
             ("client_id", json!(client.client_id)),
@@ -292,7 +302,11 @@ pub(crate) async fn admin_approve_access_request(
                 json!(blake3_hex(&client_ip_with_config(&req, &client_ip_config))),
             ),
         ]),
-    );
+    )
+    .await
+    {
+        return response;
+    }
     match repository
         .by_id(admin.principal.tenant.tenant_id, request_id)
         .await
@@ -361,10 +375,15 @@ pub(crate) async fn admin_reject_access_request(
     ) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req)
+        .await
+    {
         Ok(admin) => admin,
         Err(response) => return response,
     };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     let updated = match repository
         .reject(
             admin.principal.tenant.tenant_id,
@@ -387,6 +406,17 @@ pub(crate) async fn admin_reject_access_request(
     };
     if !updated {
         return access_request_already_rejected_response();
+    }
+    if let Err(response) = persist_required_audit_or_unavailable(
+        "admin_access_request_rejected",
+        audit_fields(&[
+            ("request_id", json!(request_id)),
+            ("admin_user_id", json!(admin.id())),
+        ]),
+    )
+    .await
+    {
+        return response;
     }
     match repository
         .by_id(admin.principal.tenant.tenant_id, request_id)

@@ -24,6 +24,8 @@ PASSKEY_ORIGIN=https://auth.example.com
 PASSKEY_RP_ID=auth.example.com
 PROTECTED_RESOURCE_IDENTIFIER=https://auth.example.com/fapi/resource
 CLIENT_SECRET_PEPPER=<random 32+ byte secret>
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY=<base64url-encoded 32-byte key>
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID=response-2026-08
 ```
 
 ## Minimal deployment
@@ -35,6 +37,8 @@ DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 CLIENT_SECRET_PEPPER: "<random 32+ byte secret>"
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY: "<base64url-encoded 32-byte key>"
+TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID: "response-2026-08"
 RUST_LOG: "info"
 ```
 
@@ -55,19 +59,49 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
 | `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string |
 | `DATA_DIR` | `runtime` | Base directory for persistent local files |
+| `UI_CACHE_DIR` | `${DATA_DIR}/ui-releases` | Writable cache for the verified frontend release selected from the embedded descriptor |
 | `UI_STATIC_DIR` | unset | Optional signed frontend directory containing `index.html`; serves files and SPA routes under `/ui/` |
 | `CLIENT_SECRET_PEPPER` | generated under `DATA_DIR/secrets` | Explicit values override the persisted generated value; keep it stable and back it up with the database |
 | `PASSWORD_HASH_MAX_CONCURRENCY` | `8` | Maximum concurrent Argon2 password verifications per process; tune from CPU and memory capacity, not by lowering Argon2 cost |
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `100` | Maximum bounded wait for a password-verification slot before returning `temporarily_unavailable` |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window for the broad source-IP admission buckets |
+| `AUTH_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling for authentication endpoints; this is not the failed-login throttle |
+| `TOKEN_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling for token issuance, sized to tolerate shared client egress |
+| `TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling shared by token-management, PAR, and dynamic-registration paths |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
+| `CIBA_AUTOMATED_DECISION_MODE` | `disabled` | Automated decisions are closed by default. `nazoauthctl conformance lease create` can temporarily admit the OIDF GET/query endpoint for clients owned by that exact `oidc-fapi-ciba` lease and its independently generated token digest; lease expiry or revocation closes it immediately. Explicit `header` (POST + `Authorization: Bearer`) and `query` (legacy GET/query) modes retain their static transport behavior and are intended only for isolated conformance deployments. |
+| `CIBA_AUTOMATED_DECISION_TOKEN` | generated only for explicit static mode | 32+ byte static secret required only by explicit `header`/`query` modes. The default lease-gated OIDF path does not read it. Prefer `CIBA_AUTOMATED_DECISION_TOKEN_FILE` when an isolated deployment explicitly selects a static mode. |
+| `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | generated under `DATA_DIR/secrets` | Current 32-byte base64url key and derived version id for TOTP seed envelope encryption. Prefer `MFA_TOTP_ENCRYPTION_KEY_FILE` when importing a controlled existing key. |
+| `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional previous key pair accepted only while rotating TOTP envelopes; startup re-wraps legacy/previous rows before serving traffic, so retain it until that startup succeeds. |
+| `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` | Independent current 32-byte base64url key and derived id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`; file injection remains available for controlled rotation. Missing or malformed pairs fail startup. |
+| `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY` / `_ID` | unset | Optional previous key retained only during a rotation overlap; use `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE` for file injection. Existing live envelopes decrypt with current or previous; new envelopes always use current. Startup authenticates every live envelope, and expired rows are lazily removed before a grant key is reused. Remove the previous pair only after all rows encrypted with that id have expired and all old instances have stopped writing it. |
+| `OPENID4VC_REVOCATION_POLICY` | `disabled` | `disabled`, `optional`, or `required`. The VP verifier requires `required`; enabling a policy also requires a bounded local snapshot file. Request handling never performs network or file I/O. |
+| `OPENID4VC_REVOCATION_SNAPSHOT_FILE` | unset | Operator-controlled JSON snapshot containing SHA-256 certificate identities and `good`/`revoked` status with hard `this_update`/`next_update` bounds. Invalid reloads retain the previous snapshot only until its own expiry. |
+| `OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS` | `30` | Positive local snapshot reload interval. |
+| `SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE` | `true` | Reject startup and high-impact administration when the server role is a superuser, can assume a ledger owner/privileged role, has direct ledger table capabilities, or lacks the writer function grants. |
 | `ENABLE_FAPI_HTTP_SIGNATURES` | `false` | Experimental resource-only profile for the 2026-06-26 FAPI 2.0 HTTP Signatures working draft; when enabled, `/fapi/resource` requires a registered client JWK and RFC 9421 signature and signs every response |
 | `FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS` | `60` | Request signature age and replay-marker lifetime; accepted range is 1–300 seconds, with at most five seconds of future clock skew |
 | `ENABLE_SCIM_SECURITY_EVENTS` | `false` | Enables default-closed RFC 9967 SET outbox creation, discovery, and RFC 8936 polling; depends on the SCIM runtime module |
 | `SCIM_EVENT_RETENTION_SECONDS` | `604800` | Per-receiver delivery window and outbox retention; accepted range is 3600–2592000 seconds |
 | `RUST_LOG` | `info` | Tracing filter |
+
+The response key id is not the envelope format. The current format is `v1` and
+is stored separately from `response_key_id`; a format change requires an
+explicit migration. Keep the current and previous key material available for
+the full durable-response recovery window. A `nazoauth migrate` rollback is
+refused while issuance rows remain, so take an explicit database backup and
+drain/expire the saga before any destructive schema rollback.
+
+PostgreSQL connections use Rustls with the AWS-LC provider. `DATABASE_URL`
+accepts `sslmode=disable`, `prefer` (the PostgreSQL client default), or
+`require`. TLS connections validate the server hostname and certificate against
+the operating system trust store; bundled WebPKI roots are used only when the
+platform store is empty. This path does not load `libpq` or the system OpenSSL
+ABI. Use `sslmode=require` for remote or untrusted networks and
+`sslmode=disable` only for a separately protected local/private transport.
 
 ## Derived settings
 
@@ -104,15 +138,16 @@ grant/metadata are assigned. Session Management similarly requires
 `session_management=true`.
 
 Dynamic Client Registration is active only when
-`DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. Experimental,
-draft, remote-trust, and role-specific modules remain conditional on their
-complete prerequisites.
+`DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN` is non-empty. The token is
+generated and persisted by the server/managed installer when it is not
+provided. Experimental, draft, remote-trust, and role-specific modules remain
+conditional on their complete prerequisites.
 
 During the first upgrade to composable defaults, existing inherited module
-states are materialized as explicit rows using the old `ENABLE_*` settings.
-This avoids silently changing an existing deployment. After migration, runtime
-module administration is authoritative; the old stable-module flags are only
-migration inputs.
+states are materialized as explicit rows using the current composable defaults.
+After migration, runtime module administration is authoritative. The removed
+stable-module flags are not accepted as configuration and must be deleted from
+older `.env.yaml` files before restarting.
 
 See
 [Composable Capability Policy](../protocol/composable-capability-policy.md)
@@ -159,6 +194,12 @@ client assertions, DPoP proofs, access tokens, refresh tokens, authorization
 codes, provider tokens, and secret references must not be logged or returned in
 error responses.
 
+For concrete HAProxy 3.2 and nginx presets, dynamic conformance CA installation,
+atomic reload, and rollback requirements, see
+[`deploy/proxy/README.md`](../../deploy/proxy/README.md). A conformance client CA
+is generated for one run and must not be hard-coded or retained as a permanent
+production trust root.
+
 CORS is endpoint-scoped. `CORS_ALLOWED_ORIGINS` is an exact allowlist, not proof
 that a browser client is confidential. Authorization and browser-redirect
 endpoints are navigation-only and are not CORS APIs. `/token` and `/revoke`
@@ -177,11 +218,10 @@ is only appropriate for local loopback development.
 The following settings are still supported but should not be part of a quick
 deployment path. They are candidates for the administrator UI:
 
-- OAuth/OIDC compatibility/migration gates: `ENABLE_REQUEST_OBJECT`,
-  `ENABLE_PAR_REQUEST_OBJECT`, `ENABLE_DEVICE_AUTHORIZATION_GRANT`,
-  `ENABLE_DYNAMIC_CLIENT_REGISTRATION`; new deployments use runtime-module
-  state and per-client policy
-- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`
+- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`,
+  `ENABLE_NATIVE_SSO`, `ENABLE_FAPI_HTTP_SIGNATURES`,
+  `ENABLE_SCIM_SECURITY_EVENTS`, `ENABLE_OPENID4VCI_ISSUER`,
+  `ENABLE_OPENID4VP_VERIFIER`
 - protocol tuning: `DPOP_NONCE_POLICY`, `FAPI_RESOURCE_DPOP_NONCE_POLICY`, `REQUEST_OBJECT_JTI_POLICY`,
   `CIBA_SECURITY_PROFILE`, `REQUIRE_PUSHED_AUTHORIZATION_REQUESTS`,
   `PAR_TTL_SECONDS`,

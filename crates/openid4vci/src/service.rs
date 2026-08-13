@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     CredentialAccess, CredentialConfiguration, CredentialError, CredentialRequest,
     CredentialResponse, CredentialStorePort, IssuedCredential, ProofError, ProofValidatorPort,
+    StoredCredentialResponse,
 };
 
 pub trait CredentialDatasetPort: Send + Sync {
@@ -32,6 +33,38 @@ pub struct CredentialIssuance {
     pub disposition: IssuanceDisposition,
     pub status: Option<Value>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuanceClaim {
+    nonce_hash: String,
+    claim_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum IssuanceCommit {
+    Immediate {
+        notification_handle: crate::NotificationHandle,
+        nonce_claim: Option<IssuanceClaim>,
+    },
+    Deferred {
+        credential: Box<crate::DeferredCredential>,
+        nonce_claim: Option<IssuanceClaim>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuanceIdentity {
+    pub issuance_id: Uuid,
+    pub request_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingCredentialIssuance {
+    pub response: CredentialResponse,
+    pub commit: IssuanceCommit,
+    pub issuance_id: Uuid,
+    pub request_digest: String,
 }
 
 pub struct CredentialIssuerService<S, P, D, K> {
@@ -76,6 +109,52 @@ where
         expected_nonce: &str,
         now: DateTime<Utc>,
     ) -> Result<CredentialResponse, CredentialIssuanceError> {
+        let pending = self
+            .issue_pending(access, request, issuance, expected_nonce, now)
+            .await?;
+        if let Err(error) = self.commit_pending(&pending, now).await {
+            let _ = self.rollback_pending(&pending, now).await;
+            return Err(error);
+        }
+        Ok(pending.response)
+    }
+
+    /// Prepare a credential response without committing single-use state.
+    ///
+    /// The HTTP adapter must call [`Self::commit_pending`] only after it has
+    /// completely encoded/encrypted the response. This keeps malformed client
+    /// response-encryption parameters from permanently consuming a proof nonce.
+    pub async fn issue_pending(
+        &self,
+        access: &CredentialAccess,
+        request: &CredentialRequest,
+        issuance: &CredentialIssuance,
+        expected_nonce: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PendingCredentialIssuance, CredentialIssuanceError> {
+        self.issue_pending_with_identity(
+            access,
+            request,
+            issuance,
+            expected_nonce,
+            IssuanceIdentity {
+                issuance_id: Uuid::now_v7(),
+                request_digest: "legacy".to_owned(),
+            },
+            now,
+        )
+        .await
+    }
+
+    pub async fn issue_pending_with_identity(
+        &self,
+        access: &CredentialAccess,
+        request: &CredentialRequest,
+        issuance: &CredentialIssuance,
+        expected_nonce: &str,
+        identity: IssuanceIdentity,
+        now: DateTime<Utc>,
+    ) -> Result<PendingCredentialIssuance, CredentialIssuanceError> {
         request.validate_identifier()?;
         if now >= access.expires_at
             || !access
@@ -84,6 +163,7 @@ where
         {
             return Err(CredentialIssuanceError::Unauthorized);
         }
+        let mut nonce_claim = None;
         let holder_bindings = if issuance.configuration.proof_types_supported.is_empty() {
             if request
                 .proofs
@@ -127,23 +207,217 @@ where
                 ))?;
             let validated = self
                 .proofs
-                .validate(proofs, &self.issuer, expected_nonce, proof_metadata)
+                .validate(
+                    proofs,
+                    &access.client_id,
+                    &self.issuer,
+                    expected_nonce,
+                    proof_metadata,
+                )
                 .await?;
-            if validated.is_empty()
-                || !self
-                    .store
-                    .consume_nonce(&blake3::hash(expected_nonce.as_bytes()).to_hex(), now)
-                    .await?
+            if validated.is_empty() {
+                return Err(CredentialIssuanceError::Credential(
+                    CredentialError::InvalidNonce,
+                ));
+            }
+            let nonce_hash = blake3::hash(expected_nonce.as_bytes()).to_hex().to_string();
+            let claim_id = Uuid::now_v7().to_string();
+            // Proof validation is asynchronous; use a fresh clock value for
+            // the expiry check rather than the request-start timestamp.
+            let claim_now = std::cmp::max(now, Utc::now());
+            if claim_now >= access.expires_at {
+                return Err(CredentialIssuanceError::Unauthorized);
+            }
+            if !self
+                .store
+                .claim_nonce(&nonce_hash, &claim_id, claim_now)
+                .await?
             {
                 return Err(CredentialIssuanceError::Credential(
                     CredentialError::InvalidNonce,
                 ));
             }
+            nonce_claim = Some(IssuanceClaim {
+                nonce_hash,
+                claim_id,
+            });
             validated
                 .into_iter()
                 .map(|proof| proof.holder_binding)
                 .collect()
         };
+        let claim_for_rollback = nonce_claim.clone();
+        let result = self
+            .prepare_after_nonce_claim(
+                access,
+                issuance,
+                holder_bindings,
+                nonce_claim,
+                identity,
+                now,
+            )
+            .await;
+        match result {
+            Ok(pending) => Ok(pending),
+            Err(error) => {
+                if let Some(claim) = claim_for_rollback {
+                    let _ = self
+                        .store
+                        .release_nonce(&claim.nonce_hash, &claim.claim_id, now)
+                        .await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn commit_pending(
+        &self,
+        pending: &PendingCredentialIssuance,
+        now: DateTime<Utc>,
+    ) -> Result<(), CredentialIssuanceError> {
+        self.commit_pending_internal(pending, None, now).await
+    }
+
+    pub async fn commit_pending_with_response(
+        &self,
+        pending: &PendingCredentialIssuance,
+        response: &StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> Result<(), CredentialIssuanceError> {
+        let expected_token_id = match &pending.commit {
+            IssuanceCommit::Immediate {
+                notification_handle,
+                ..
+            } => notification_handle.token_id,
+            IssuanceCommit::Deferred { credential, .. } => credential.access.token_id,
+        };
+        if response.issuance_id != pending.issuance_id
+            || response.request_digest != pending.request_digest
+            || response.token_id != expected_token_id
+        {
+            return Err(CredentialIssuanceError::Store(
+                crate::CredentialStoreError::InvalidTransition,
+            ));
+        }
+        self.commit_pending_internal(pending, Some(response), now)
+            .await
+    }
+
+    async fn commit_pending_internal(
+        &self,
+        pending: &PendingCredentialIssuance,
+        response: Option<&StoredCredentialResponse>,
+        now: DateTime<Utc>,
+    ) -> Result<(), CredentialIssuanceError> {
+        match &pending.commit {
+            IssuanceCommit::Immediate {
+                notification_handle,
+                nonce_claim,
+            } => {
+                if let Some(claim) = nonce_claim {
+                    let committed = if let Some(response) = response {
+                        self.store
+                            .finalize_nonce_with_notification_and_response(
+                                &claim.nonce_hash,
+                                &claim.claim_id,
+                                notification_handle,
+                                response,
+                                now,
+                            )
+                            .await?
+                    } else {
+                        self.store
+                            .finalize_nonce_with_notification(
+                                &claim.nonce_hash,
+                                &claim.claim_id,
+                                notification_handle,
+                                now,
+                            )
+                            .await?
+                    };
+                    if !committed {
+                        return Err(CredentialIssuanceError::Store(
+                            crate::CredentialStoreError::InvalidTransition,
+                        ));
+                    }
+                } else {
+                    if let Some(response) = response {
+                        self.store
+                            .store_response_with_notification(notification_handle, response, now)
+                            .await?;
+                    } else {
+                        self.store
+                            .issue_notification_handle(notification_handle)
+                            .await?;
+                    }
+                }
+            }
+            IssuanceCommit::Deferred {
+                credential,
+                nonce_claim,
+            } => {
+                if let Some(claim) = nonce_claim {
+                    if let Some(response) = response {
+                        self.store
+                            .store_deferred_and_finalize_nonce_with_response(
+                                credential,
+                                &claim.nonce_hash,
+                                &claim.claim_id,
+                                response,
+                                now,
+                            )
+                            .await?;
+                    } else {
+                        self.store
+                            .store_deferred_and_finalize_nonce(
+                                credential,
+                                &claim.nonce_hash,
+                                &claim.claim_id,
+                                now,
+                            )
+                            .await?;
+                    }
+                } else {
+                    if let Some(response) = response {
+                        self.store
+                            .store_deferred_with_response(credential, response, now)
+                            .await?;
+                    } else {
+                        self.store.store_deferred(credential).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn rollback_pending(
+        &self,
+        pending: &PendingCredentialIssuance,
+        now: DateTime<Utc>,
+    ) -> Result<(), CredentialIssuanceError> {
+        let claim = match &pending.commit {
+            IssuanceCommit::Immediate { nonce_claim, .. }
+            | IssuanceCommit::Deferred { nonce_claim, .. } => nonce_claim.as_ref(),
+        };
+        if let Some(claim) = claim {
+            self.store
+                .release_nonce(&claim.nonce_hash, &claim.claim_id, now)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn prepare_after_nonce_claim(
+        &self,
+        access: &CredentialAccess,
+        issuance: &CredentialIssuance,
+        holder_bindings: Vec<Value>,
+        nonce_claim: Option<IssuanceClaim>,
+        identity: IssuanceIdentity,
+        now: DateTime<Utc>,
+    ) -> Result<PendingCredentialIssuance, CredentialIssuanceError> {
         let dataset = self
             .datasets
             .dataset(access, &issuance.configuration_id)
@@ -181,18 +455,24 @@ where
                     });
                 }
                 let notification_id = Uuid::now_v7().to_string();
-                self.store
-                    .issue_notification_handle(&crate::NotificationHandle {
-                        notification_id: notification_id.clone(),
-                        token_id: access.token_id,
-                        expires_at: access.expires_at.min(issuance.expires_at),
-                    })
-                    .await?;
-                Ok(CredentialResponse {
-                    credentials: Some(credentials),
-                    transaction_id: None,
-                    notification_id: Some(notification_id),
-                    interval: None,
+                let notification_handle = crate::NotificationHandle {
+                    notification_id: notification_id.clone(),
+                    token_id: access.token_id,
+                    expires_at: access.expires_at.min(issuance.expires_at),
+                };
+                Ok(PendingCredentialIssuance {
+                    response: CredentialResponse {
+                        credentials: Some(credentials),
+                        transaction_id: None,
+                        notification_id: Some(notification_id),
+                        interval: None,
+                    },
+                    commit: IssuanceCommit::Immediate {
+                        notification_handle,
+                        nonce_claim,
+                    },
+                    issuance_id: identity.issuance_id,
+                    request_digest: identity.request_digest,
                 })
             }
             IssuanceDisposition::Deferred { ready_at } => {
@@ -203,27 +483,31 @@ where
                     issued_at: now,
                     expires_at: issuance.expires_at,
                 };
-                self.store
-                    .store_deferred(&crate::DeferredCredential {
-                        id: Uuid::now_v7(),
-                        transaction_hash: blake3::hash(transaction_id.as_bytes())
-                            .to_hex()
-                            .to_string(),
-                        access: access.clone(),
-                        configuration_id: issuance.configuration_id.clone(),
-                        format: issuance.configuration.format,
-                        holder_bindings,
-                        payload_ciphertext: serde_json::to_vec(&protected)
-                            .map_err(|_| CredentialIssuanceError::InvalidConfiguration)?,
-                        ready_at,
-                        expires_at: access.expires_at.min(issuance.expires_at),
-                    })
-                    .await?;
-                Ok(CredentialResponse {
-                    credentials: None,
-                    transaction_id: Some(transaction_id),
-                    notification_id: None,
-                    interval: Some(5),
+                let deferred = crate::DeferredCredential {
+                    id: Uuid::now_v7(),
+                    transaction_hash: blake3::hash(transaction_id.as_bytes()).to_hex().to_string(),
+                    access: access.clone(),
+                    configuration_id: issuance.configuration_id.clone(),
+                    format: issuance.configuration.format,
+                    holder_bindings,
+                    payload_ciphertext: serde_json::to_vec(&protected)
+                        .map_err(|_| CredentialIssuanceError::InvalidConfiguration)?,
+                    ready_at,
+                    expires_at: access.expires_at.min(issuance.expires_at),
+                };
+                Ok(PendingCredentialIssuance {
+                    response: CredentialResponse {
+                        credentials: None,
+                        transaction_id: Some(transaction_id),
+                        notification_id: None,
+                        interval: Some(5),
+                    },
+                    commit: IssuanceCommit::Deferred {
+                        credential: Box::new(deferred),
+                        nonce_claim,
+                    },
+                    issuance_id: identity.issuance_id,
+                    request_digest: identity.request_digest,
                 })
             }
         }

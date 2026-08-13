@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 
 use nazo_http_actix::{
-    clear_cookie, cookie_value, has_valid_csrf_token_for_cookies, with_cookie_headers,
+    authorization_error_response, clear_cookie, cookie_value, has_valid_csrf_token_for_cookies,
+    with_cookie_headers,
 };
 
 use nazo_postgres::UserRepository;
@@ -37,6 +38,13 @@ pub(crate) struct CurrentSession {
     pub(crate) oidc_sid: String,
     pub(crate) logged_in_client_ids: Vec<String>,
 }
+
+/// Maximum age of an interactive MFA step-up accepted for high-impact admin
+/// mutations.  This is intentionally a fixed security default: making the
+/// check configurable would make an accidental deployment setting capable of
+/// silently turning the admin write boundary back into password-only access.
+pub(crate) const ADMIN_MFA_MAX_AGE_SECONDS: i64 = 5 * 60;
+const AUTH_TIME_CLOCK_SKEW_SECONDS: i64 = 30;
 
 /// Runtime-admin authentication dependencies, assembled once at the composition root.
 ///
@@ -123,19 +131,19 @@ impl AdminSessionHandles {
         .await
     }
 
-    pub(crate) async fn current_user_or_login_required(
+    pub(crate) async fn current_session_or_login_required(
         &self,
         req: &HttpRequest,
-    ) -> Result<nazo_identity::PublicAccount, HttpResponse> {
-        current_user_or_login_required_from_handles(
-            &self.sessions,
-            &self.users,
-            self.http.session_cookie_name(),
-            self.http.csrf_cookie_name(),
-            self.http.cookie_secure(),
-            req,
-        )
-        .await
+    ) -> Result<CurrentSession, HttpResponse> {
+        match self.current_session(req).await {
+            Ok(Some(session)) => Ok(session),
+            Ok(None) => Err(login_required_response_for_cookies(
+                self.http.session_cookie_name(),
+                self.http.csrf_cookie_name(),
+                self.http.cookie_secure(),
+            )),
+            Err(error) => Err(session_lookup_error_response(error)),
+        }
     }
 }
 
@@ -189,6 +197,17 @@ impl SessionProfileHandles {
     ) -> Result<PublicAccount, HttpResponse> {
         match self.current_session(req).await {
             Ok(Some(session)) => Ok(session.user),
+            Ok(None) => Err(self.login_required_response()),
+            Err(error) => Err(session_lookup_error_response(error)),
+        }
+    }
+
+    pub(crate) async fn current_session_or_login_required(
+        &self,
+        req: &HttpRequest,
+    ) -> Result<CurrentSession, HttpResponse> {
+        match self.current_session(req).await {
+            Ok(Some(session)) => Ok(session),
             Ok(None) => Err(self.login_required_response()),
             Err(error) => Err(session_lookup_error_response(error)),
         }
@@ -308,25 +327,6 @@ fn valid_session_payload(payload: &SessionPayload, now: i64) -> bool {
     )
 }
 
-pub(crate) async fn current_user_or_login_required_from_handles(
-    sessions: &SessionStore,
-    users: &UserRepository,
-    session_cookie_name: &str,
-    csrf_cookie_name: &str,
-    cookie_secure: bool,
-    req: &HttpRequest,
-) -> Result<PublicAccount, HttpResponse> {
-    match current_session_from_handles(sessions, users, session_cookie_name, req).await {
-        Ok(Some(session)) => Ok(session.user),
-        Ok(None) => Err(login_required_response_for_cookies(
-            session_cookie_name,
-            csrf_cookie_name,
-            cookie_secure,
-        )),
-        Err(error) => Err(session_lookup_error_response(error)),
-    }
-}
-
 fn login_required_response_for_cookies(
     session_cookie_name: &str,
     csrf_cookie_name: &str,
@@ -349,8 +349,43 @@ pub(crate) async fn require_admin_or_forbidden_with_handles(
     handles: &AdminSessionHandles,
     req: &HttpRequest,
 ) -> Result<PublicAccount, HttpResponse> {
+    current_admin_session_or_forbidden(handles, req)
+        .await
+        .map(|session| session.user)
+}
+
+/// Authorizes an administrator for a high-impact state mutation.
+///
+/// A normal administrator session is sufficient for read-only admin views, but
+/// writes additionally require a recent *interactive* MFA step-up.  A
+/// `remembered_mfa` marker by itself is not accepted: it proves a previously
+/// trusted device, not a factor entered for this privileged operation.  The
+/// marker may remain alongside `otp`/`recovery_code` after a later explicit
+/// step-up because AMR is cumulative for the browser session.
+/// The existing `/mfa/step-up` endpoint performs that rotation; no separate
+/// admin-only challenge or bypass token is introduced here.
+pub(crate) async fn require_admin_with_recent_mfa_or_forbidden_with_handles(
+    handles: &AdminSessionHandles,
+    req: &HttpRequest,
+) -> Result<PublicAccount, HttpResponse> {
+    let session = current_admin_session_or_forbidden(handles, req).await?;
+    if recent_admin_mfa(&session, Utc::now().timestamp()) {
+        Ok(session.user)
+    } else {
+        Err(authorization_error_response(
+            StatusCode::PRECONDITION_REQUIRED,
+            "mfa_step_up_required",
+            "高影响管理员操作需要最近一次多因素认证.",
+        ))
+    }
+}
+
+async fn current_admin_session_or_forbidden(
+    handles: &AdminSessionHandles,
+    req: &HttpRequest,
+) -> Result<CurrentSession, HttpResponse> {
     match handles.current_session(req).await {
-        Ok(Some(session)) if session.user.admin_level() > 0 => Ok(session.user),
+        Ok(Some(session)) if session.user.admin_level() > 0 => Ok(session),
         Ok(Some(_)) | Ok(None) => Err(oauth_error(
             StatusCode::FORBIDDEN,
             "access_denied",
@@ -358,6 +393,22 @@ pub(crate) async fn require_admin_or_forbidden_with_handles(
         )),
         Err(error) => Err(session_lookup_error_response(error)),
     }
+}
+
+fn recent_admin_mfa(session: &CurrentSession, now: i64) -> bool {
+    recent_mfa_authentication(session.auth_time, &session.amr, now)
+}
+
+/// Pure policy predicate kept separate from session lookup so both the HTTP
+/// boundary and its old/no-factor regression tests use exactly one rule.
+fn recent_mfa_authentication(auth_time: i64, amr: &[String], now: i64) -> bool {
+    let age = now.saturating_sub(auth_time);
+    auth_time <= now.saturating_add(AUTH_TIME_CLOCK_SKEW_SECONDS)
+        && (0..=ADMIN_MFA_MAX_AGE_SECONDS).contains(&age)
+        && amr.iter().any(|method| method == "mfa")
+        && amr
+            .iter()
+            .any(|method| matches!(method.as_str(), "otp" | "recovery_code"))
 }
 
 fn session_lookup_error_response(error: anyhow::Error) -> HttpResponse {

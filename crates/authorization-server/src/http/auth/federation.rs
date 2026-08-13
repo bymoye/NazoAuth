@@ -64,12 +64,15 @@ impl FederationHttpConfig {
 }
 
 fn federation_http_client() -> anyhow::Result<reqwest::Client> {
-    let builder = reqwest::Client::builder()
+    reqwest::Client::builder()
+        // Federation endpoints are security-sensitive configured destinations. Do not let
+        // process-wide HTTP(S)_PROXY/NO_PROXY variables silently redirect token and identity
+        // traffic or bypass the configured upstream boundary.
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none());
-    #[cfg(test)]
-    let builder = builder.no_proxy();
-    Ok(builder.build()?)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(Into::into)
 }
 
 async fn federation_response_bytes(response: reqwest::Response) -> anyhow::Result<Vec<u8>> {

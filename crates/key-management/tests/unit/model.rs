@@ -147,6 +147,42 @@ async fn jwt_encoding_rejects_grace_and_retired_keys() {
     }
 }
 
+#[tokio::test]
+async fn jwt_encoding_preserves_compact_wire_bytes() {
+    let manager = KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA);
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    let mut expected_header = header.clone();
+    expected_header.kid = Some(manager.snapshot().active_kid.clone());
+    let claims = serde_json::json!({
+        "sub": "wire-format-test",
+        "scope": "openid profile",
+    });
+
+    let token = manager
+        .encode_jwt(SigningPurpose::IdToken, &header, &claims)
+        .await
+        .expect("active test key should encode JWT");
+    let expected_signing_input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expected_header).unwrap()),
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()),
+    );
+    let signature = manager
+        .sign(SignRequest {
+            purpose: SigningPurpose::IdToken,
+            algorithm: "EdDSA",
+            signing_input: expected_signing_input.as_bytes(),
+        })
+        .await
+        .expect("active test key should sign the expected input");
+    let expected = format!(
+        "{expected_signing_input}.{}",
+        URL_SAFE_NO_PAD.encode(signature.as_bytes())
+    );
+
+    assert_eq!(token, expected);
+}
+
 #[test]
 fn http_signing_rejects_wrong_purpose_grace_and_retired_keys() {
     for (state, purposes) in [

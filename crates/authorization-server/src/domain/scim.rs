@@ -17,7 +17,6 @@ use nazo_identity::{
 use nazo_scim_events::{
     EventFuture, EventReceiver, EventSignerPort, EventSigningError, SecurityEventClaims,
 };
-use openssl::symm::{Cipher, decrypt_aead, encrypt_aead};
 use sha2::Sha256;
 
 use crate::{
@@ -300,16 +299,9 @@ impl ServerScimCursorProtector {
 impl ScimCursorProtector for ServerScimCursorProtector {
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, ScimDependencyError> {
         let nonce = rand::random::<[u8; SCIM_CURSOR_NONCE_LEN]>();
-        let mut tag = [0_u8; SCIM_CURSOR_TAG_LEN];
-        let ciphertext = encrypt_aead(
-            Cipher::aes_256_gcm(),
-            &self.key,
-            Some(&nonce),
-            SCIM_CURSOR_AAD,
-            plaintext,
-            &mut tag,
-        )
-        .map_err(|_| ScimDependencyError::Unavailable)?;
+        let (ciphertext, tag) =
+            crate::crypto::aes_256_gcm_encrypt(&self.key, &nonce, SCIM_CURSOR_AAD, plaintext)
+                .map_err(|_| ScimDependencyError::Unavailable)?;
         let mut protected = Vec::with_capacity(nonce.len() + ciphertext.len() + tag.len());
         protected.extend_from_slice(&nonce);
         protected.extend_from_slice(&ciphertext);
@@ -323,15 +315,8 @@ impl ScimCursorProtector for ServerScimCursorProtector {
         }
         let (nonce, remainder) = protected.split_at(SCIM_CURSOR_NONCE_LEN);
         let (ciphertext, tag) = remainder.split_at(remainder.len() - SCIM_CURSOR_TAG_LEN);
-        decrypt_aead(
-            Cipher::aes_256_gcm(),
-            &self.key,
-            Some(nonce),
-            SCIM_CURSOR_AAD,
-            ciphertext,
-            tag,
-        )
-        .map_err(|_| ScimDependencyError::Unavailable)
+        crate::crypto::aes_256_gcm_decrypt(&self.key, nonce, SCIM_CURSOR_AAD, ciphertext, tag)
+            .map_err(|_| ScimDependencyError::Unavailable)
     }
 }
 
@@ -348,3 +333,7 @@ impl ScimBootstrapPasswordProvider for ServerScimBootstrapPasswordProvider {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/domain/scim.rs"]
+mod tests;

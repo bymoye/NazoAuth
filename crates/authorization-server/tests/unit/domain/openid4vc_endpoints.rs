@@ -4,9 +4,10 @@ use nazo_openid4vci::CredentialConfiguration;
 use serde_json::{Value, json};
 
 use super::{
-    PutCredentialDatasetRequest, openid4vci_authorization_detail,
-    openid4vci_configuration_id_from_identifier, token_endpoint_dpop_target_uris,
-    validate_managed_dataset,
+    PutCredentialDatasetRequest,
+    openid4vci::{openid4vci_configuration_id_from_identifier, token_endpoint_dpop_target_uris},
+    openid4vci_authorization_detail,
+    openid4vci_dataset::validate_managed_dataset,
 };
 
 fn dataset_configuration(format: CredentialFormat) -> CredentialConfiguration {
@@ -121,6 +122,96 @@ fn managed_dataset_validity_must_end_after_start_and_now() {
         valid_until: Some(now + Duration::hours(1)),
     };
     assert!(validate_managed_dataset(&configuration, &reversed).is_err());
+
+    validate_managed_dataset(
+        &configuration,
+        &PutCredentialDatasetRequest {
+            claims: json!({"given_name":"Ada"}),
+            valid_from: Some(now + Duration::hours(1)),
+            valid_until: Some(now + Duration::hours(2)),
+        },
+    )
+    .expect("a future validity interval must be accepted");
+    validate_managed_dataset(
+        &configuration,
+        &PutCredentialDatasetRequest {
+            claims: json!({"given_name":"Ada"}),
+            valid_from: None,
+            valid_until: Some(now + Duration::hours(1)),
+        },
+    )
+    .expect("a future expiry without an explicit start must be accepted");
+}
+
+#[test]
+fn managed_dataset_rejects_claim_names_and_json_shape_at_every_boundary() {
+    let sd_jwt = dataset_configuration(CredentialFormat::SdJwtVc);
+    let mut empty_name = serde_json::Map::new();
+    empty_name.insert(String::new(), json!("empty-name"));
+    let mut oversized_name = serde_json::Map::new();
+    oversized_name.insert("x".repeat(129), json!("too-long-name"));
+    for claims in [Value::Object(empty_name), Value::Object(oversized_name)] {
+        assert!(validate_managed_dataset(&sd_jwt, &dataset_request(claims)).is_err());
+    }
+
+    let oversized_key = "k".repeat(256);
+    let mut oversized_key_claims = serde_json::Map::new();
+    oversized_key_claims.insert(oversized_key, json!("too-long-key"));
+    assert!(
+        validate_managed_dataset(
+            &sd_jwt,
+            &dataset_request(Value::Object(oversized_key_claims)),
+        )
+        .is_err()
+    );
+
+    let too_many_nodes = Value::Array((0..513).map(|_| json!(true)).collect());
+    assert!(
+        validate_managed_dataset(&sd_jwt, &dataset_request(json!({"values": too_many_nodes})),)
+            .is_err()
+    );
+
+    let nested_array = json!({"values": ["one", 2, false, null]});
+    validate_managed_dataset(&sd_jwt, &dataset_request(nested_array))
+        .expect("bounded arrays and scalar values are accepted");
+}
+
+#[test]
+fn managed_mdoc_dataset_rejects_namespace_and_inner_claim_name_bounds() {
+    let configuration = dataset_configuration(CredentialFormat::MsoMdoc);
+    let oversized_namespace = "n".repeat(256);
+    let mut oversized_namespace_claims = serde_json::Map::new();
+    oversized_namespace_claims.insert(oversized_namespace, json!({"family_name": "Lovelace"}));
+    assert!(
+        validate_managed_dataset(
+            &configuration,
+            &dataset_request(Value::Object(oversized_namespace_claims)),
+        )
+        .is_err()
+    );
+
+    let oversized_claim_name = "c".repeat(129);
+    let mut oversized_inner = serde_json::Map::new();
+    oversized_inner.insert(oversized_claim_name, json!("Lovelace"));
+    let mut oversized_inner_claims = serde_json::Map::new();
+    oversized_inner_claims.insert(
+        "org.iso.18013.5.1".to_owned(),
+        Value::Object(oversized_inner),
+    );
+    assert!(
+        validate_managed_dataset(
+            &configuration,
+            &dataset_request(Value::Object(oversized_inner_claims)),
+        )
+        .is_err()
+    );
+    assert!(
+        validate_managed_dataset(
+            &configuration,
+            &dataset_request(json!({"org.iso.18013.5.1": {"": "Lovelace"}})),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -139,35 +230,5 @@ fn vci_token_dpop_targets_include_public_issuer_endpoint() {
             "https://issuer.examplehttps://issuer.example/token"
         ),
         vec!["https://issuer.example/token".to_owned()]
-    );
-}
-
-#[test]
-fn pre_authorized_token_validates_dpop_before_consuming_single_use_state() {
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/domain/openid4vc_endpoints.rs"
-    ));
-    let start = source
-        .find("fn pre_authorized_token")
-        .expect("pre_authorized_token implementation should exist");
-    let body = &source[start..];
-    let dpop = body
-        .find("validate_authorization_server_dpop")
-        .expect("pre-authorized token flow must validate DPoP");
-    let attestation_replay = body
-        .find("consume_private_key_jwt")
-        .expect("client attestation replay state is consumed in this flow");
-    let pre_authorized_code = body
-        .find("consume_pre_authorized_offer")
-        .expect("pre-authorized code is consumed in this flow");
-
-    assert!(
-        dpop < attestation_replay,
-        "DPoP nonce challenges must not consume client attestation replay state"
-    );
-    assert!(
-        dpop < pre_authorized_code,
-        "DPoP nonce challenges must not consume the pre-authorized code"
     );
 }

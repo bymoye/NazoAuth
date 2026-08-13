@@ -1,5 +1,12 @@
 //! 管理端用户授权关系接口。
-use crate::http::sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles};
+use crate::adapters::audit::audit_fields;
+use crate::http::admin::{
+    persist_required_audit_or_unavailable, require_durable_audit_or_unavailable,
+};
+use crate::http::sessions::{
+    AdminSessionHandles, require_admin_or_forbidden_with_handles,
+    require_admin_with_recent_mfa_or_forbidden_with_handles,
+};
 use crate::http::views::pagination;
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Query};
@@ -89,7 +96,9 @@ pub(crate) async fn admin_revoke_grant(
     ) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req)
+        .await
+    {
         Ok(admin) => admin,
         Err(response) => return response,
     };
@@ -100,6 +109,9 @@ pub(crate) async fn admin_revoke_grant(
             "user_id 格式无效.",
         );
     };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     let revoked = match grants
         .revoke_by_client_id(
             admin.tenant().tenant_id.as_uuid(),
@@ -129,6 +141,23 @@ pub(crate) async fn admin_revoke_grant(
             );
         }
     };
+    if let Err(response) = persist_required_audit_or_unavailable(
+        "admin_grant_revoked",
+        audit_fields(&[
+            ("admin_user_id", json!(admin.id())),
+            ("user_id", json!(user_id)),
+            ("client_id", json!(payload.client_id)),
+            (
+                "revoked_refresh_tokens",
+                json!(revoked.revoked_refresh_tokens),
+            ),
+            ("removed_grants", json!(revoked.removed_grants)),
+        ]),
+    )
+    .await
+    {
+        return response;
+    }
     grant_revocation_response(revoked.revoked_refresh_tokens, revoked.removed_grants)
 }
 

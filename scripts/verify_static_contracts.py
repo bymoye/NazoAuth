@@ -70,6 +70,23 @@ RFC9967_CASES = {
 }
 
 
+def read_rust_module_tree(root_file: Path) -> str:
+    """Read a Rust module facade and every source file in its child directory."""
+    sources = [root_file]
+    child_directory = root_file.with_suffix("")
+    if child_directory.is_dir():
+        sources.extend(sorted(child_directory.rglob("*.rs")))
+    return "\n".join(source.read_text(encoding="utf-8") for source in sources)
+
+
+def read_rust_source_family(directory: Path, prefix: str) -> str:
+    """Read a facade plus private sibling modules sharing a capability prefix."""
+    return "\n".join(
+        source.read_text(encoding="utf-8")
+        for source in sorted(directory.glob(f"{prefix}*.rs"))
+    )
+
+
 def migration_line(path: Path) -> str:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return f"{digest}  {path.relative_to(ROOT).as_posix()}"
@@ -267,7 +284,7 @@ def check_workspace_package_metadata() -> None:
     for member in workspace_manifest["workspace"]["members"]:
         manifest_path = ROOT / member / "Cargo.toml"
         package = tomllib.loads(manifest_path.read_text(encoding="utf-8"))["package"]
-        for field in ("edition", "license", "repository"):
+        for field in ("version", "edition", "license", "repository"):
             if package.get(field) != {"workspace": True}:
                 raise SystemExit(
                     f"{manifest_path.relative_to(ROOT)} must inherit package.{field} "
@@ -288,21 +305,21 @@ def check_rust_test_structure() -> None:
         r"(?:(?:#\[[^\r\n]+\]\r?\n)*)"
         r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;"
     )
+    top_level_test_import = re.compile(
+        r"(?:\r?\n#\[[^\r\n]+\])*\r?\n"
+        r"\s*(?:pub(?:\([^)]*\))?\s+)?use\b"
+    )
     nested_cfg = re.compile(
         r"(?m)^(?P<indent>[ \t]+)#\[cfg\(test\)\]\r?\n"
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
     allowed_nested_seams = {
-        "crates/authorization-server/src/bootstrap/mod.rs": (
+        "crates/authorization-server/src/bootstrap/startup/configuration.rs": (
             "let valkey = nazo_valkey::test_support::connect(",
             "let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);",
+        ),
+        "crates/authorization-server/src/bootstrap/startup/services/identity.rs": (
             "let session_profiles = web::Data::new(SessionProfileHandles::new(",
-        ),
-        "crates/authorization-server/src/http/auth/federation.rs": (
-            "let builder = builder.no_proxy();",
-        ),
-        "crates/key-management/src/lifecycle.rs": (
-            'panic!("signing key lifecycle refresh failed: {error:#}");',
         ),
     }
 
@@ -333,7 +350,7 @@ def check_rust_test_structure() -> None:
             for cfg_match in top_level_cfg.finditer(source):
                 if not any(
                     hook.start() == cfg_match.start() for hook in hook_matches
-                ):
+                ) and top_level_test_import.match(source[cfg_match.end() :]) is None:
                     violations.append(f"{relative} has a non-mount top-level cfg(test) item")
 
             actual_nested = tuple(
@@ -530,9 +547,17 @@ def check_fapi_ciba_boundaries() -> None:
     ).read_text(encoding="utf-8")
     if any(marker in tls_policy for marker in forbidden_test_markers):
         raise SystemExit("CIBA ping TLS policy tests must remain outside production source")
-    if "tls_version_min(reqwest::tls::Version::TLS_1_2)" not in tls_policy:
+    if (
+        "CIBA_PING_TLS_MIN: reqwest::tls::Version = reqwest::tls::Version::TLS_1_2"
+        not in tls_policy
+        or ".tls_version_min(CIBA_PING_TLS_MIN)" not in tls_policy
+    ):
         raise SystemExit("CIBA ping delivery must reject TLS versions below 1.2")
-    if "tls_version_max(reqwest::tls::Version::TLS_1_3)" not in tls_policy:
+    if (
+        "CIBA_PING_TLS_MAX: reqwest::tls::Version = reqwest::tls::Version::TLS_1_3"
+        not in tls_policy
+        or ".tls_version_max(CIBA_PING_TLS_MAX)" not in tls_policy
+    ):
         raise SystemExit("CIBA ping delivery must offer TLS 1.3")
     if ".use_rustls_tls()" not in tls_policy:
         raise SystemExit("CIBA ping delivery must use the Rustls TLS backend")
@@ -555,7 +580,7 @@ def check_fapi_ciba_boundaries() -> None:
         ROOT / "crates" / "authorization-server-core" / "src" / "ciba_ping.rs"
     ).read_text(encoding="utf-8")
     for required_test in (
-        "ciba_ping_transport_rejects_tls11",
+        "ciba_ping_transport_policy_is_bounded_to_tls12_and_tls13",
         "ciba_ping_transport_supports_the_tls12_fapi_baseline",
         "ciba_ping_transport_supports_tls13",
     ):
@@ -683,9 +708,9 @@ def check_openid4vc_boundaries() -> None:
     driver = (ROOT / "scripts" / "run_openid4vc_conformance.py").read_text(
         encoding="utf-8"
     )
-    server_settings = (
+    server_settings = read_rust_module_tree(
         ROOT / "crates" / "authorization-server" / "src" / "settings.rs"
-    ).read_text(encoding="utf-8")
+    )
     server_config = (
         ROOT / "crates" / "authorization-server" / "src" / "config.rs"
     ).read_text(encoding="utf-8")
@@ -698,9 +723,9 @@ def check_openid4vc_boundaries() -> None:
     openid4vc_protocol_adapter = (
         ROOT / "crates" / "openid4vc-http-actix" / "src" / "vci.rs"
     ).read_text(encoding="utf-8")
-    openid4vc_server_domain = (
+    openid4vc_server_domain = read_rust_module_tree(
         ROOT / "crates" / "authorization-server" / "src" / "domain" / "openid4vc_endpoints.rs"
-    ).read_text(encoding="utf-8")
+    )
     for plan in expected_plans:
         if plan not in materializer:
             raise SystemExit(f"OpenID4VC materializer lacks upstream plan: {plan}")
@@ -787,8 +812,8 @@ def check_openid4vc_boundaries() -> None:
         if marker not in openid4vc_server_domain:
             raise SystemExit(f"OpenID4VC internal control-plane boundary is missing: {marker}")
     for marker in (
-        "OIDF_ADMIN_EMAIL",
-        "OIDF_ADMIN_PASSWORD",
+        "--operator-credentials-file",
+        "read_secret_document",
         "/admin/openid4vci/credential-datasets/",
         "dedicated_conformance_subject",
         "ControlPlaneSession",
@@ -796,6 +821,22 @@ def check_openid4vc_boundaries() -> None:
     ):
         if marker not in driver:
             raise SystemExit(f"OpenID4VC driver lacks production admin boundary: {marker}")
+    required_fields = re.search(
+        r"required_fields\s*=\s*\((?P<body>.*?)\)", driver, flags=re.DOTALL
+    )
+    if required_fields is None or any(
+        f'"{field}"' not in required_fields.group("body")
+        for field in ("admin_email", "admin_password", "admin_mfa_totp_secret")
+    ):
+        raise SystemExit(
+            "OpenID4VC driver lacks production admin boundary: "
+            "required_fields must include admin_email, admin_password, and admin_mfa_totp_secret"
+        )
+    for forbidden in ("OIDF_ADMIN_EMAIL", "OIDF_ADMIN_PASSWORD"):
+        if forbidden in driver:
+            raise SystemExit(
+                f"OpenID4VC driver restored a forbidden administrator environment secret: {forbidden}"
+            )
     containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
     runtime_start = containerfile.index("FROM runtime-base AS runtime")
     runtime_body = containerfile[runtime_start:]
@@ -804,8 +845,11 @@ def check_openid4vc_boundaries() -> None:
     keyctl = (ROOT / "crates" / "authorization-server" / "src" / "keyctl.rs").read_text(
         encoding="utf-8"
     )
-    key_store = (ROOT / "crates" / "key-management" / "src" / "store.rs").read_text(
-        encoding="utf-8"
+    key_store = "\n".join(
+        (
+            ROOT / "crates" / "key-management" / "src" / name
+        ).read_text(encoding="utf-8")
+        for name in ("store.rs", "serialization.rs", "lifecycle.rs")
     )
     for marker in (
         "generate-local",
@@ -1106,7 +1150,11 @@ def check_conformance_provisioning_boundaries() -> None:
     ):
         if marker not in mtls_runtime:
             raise SystemExit(f"RFC 8705 certificate selector boundary is missing: {marker}")
-    for marker in ("x509_cert::name::Name::from_str", "X509Name::from_der", "try_cmp"):
+    for marker in (
+        "x509_cert::name::Name::from_str",
+        "name.to_string().to_lowercase()",
+        "registered == certificate_subject",
+    ):
         if marker not in mtls_key_management:
             raise SystemExit(f"RFC 4514 distinguished-name boundary is missing: {marker}")
 
@@ -1142,24 +1190,24 @@ def check_conformance_provisioning_boundaries() -> None:
                 f"public conformance onboarding artifact omits OpenID4VC material: {marker}"
             )
 
-    openid4vc_runtime = (
+    openid4vc_runtime = read_rust_module_tree(
         ROOT
         / "crates"
         / "authorization-server"
         / "src"
         / "domain"
         / "openid4vc_endpoints.rs"
-    ).read_text(encoding="utf-8")
+    )
     if "Openid4vciDatasetRepository" not in openid4vc_runtime:
         raise SystemExit("OpenID4VC runtime lacks an issuer-authoritative dataset repository")
-    openid4vc_repository = (
+    openid4vc_repository = read_rust_source_family(
         ROOT
         / "crates"
         / "persistence-postgres"
         / "src"
-        / "repositories"
-        / "openid4vc.rs"
-    ).read_text(encoding="utf-8")
+        / "repositories",
+        "openid4vc",
+    )
     openid4vc_admin = (
         ROOT
         / "crates"
@@ -1204,7 +1252,7 @@ def check_conformance_provisioning_boundaries() -> None:
 
 
 def check_bootstrap_secret_log_boundary() -> None:
-    source = (
+    server = (
         ROOT
         / "crates"
         / "authorization-server"
@@ -1212,16 +1260,67 @@ def check_bootstrap_secret_log_boundary() -> None:
         / "http"
         / "bootstrap_admin.rs"
     ).read_text(encoding="utf-8")
+    routes = (
+        ROOT
+        / "crates"
+        / "authorization-server"
+        / "src"
+        / "bootstrap"
+        / "routes.rs"
+    ).read_text(encoding="utf-8")
+    repository = (
+        ROOT
+        / "crates"
+        / "persistence-postgres"
+        / "src"
+        / "repositories"
+        / "initial_admin_bootstrap.rs"
+    ).read_text(encoding="utf-8")
+    operations = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "docs" / "operations").glob("*.md")
+    )
+
     for forbidden in (
-        'let setup_url = format!("{}/setup?token={token}"',
-        "tracing::warn!(%setup_url",
+        "initial_admin_setup_page",
+        "text/html",
+        "<!doctype html>",
+        "web::{Data, Form",
+        "web::{Data, Query",
     ):
-        if forbidden in source:
-            raise SystemExit("initial administrator bootstrap token enters tracing output")
-    if "read the root-owned token file through the operator workflow" not in source:
+        if forbidden in server or forbidden in routes:
+            raise SystemExit(
+                f"authorization server still embeds administrator setup UI: {forbidden}"
+            )
+    if 'route("/setup"' in routes:
+        raise SystemExit("authorization server still exposes the legacy setup route")
+    for source in (server, routes, operations):
+        if "/setup?token=" in source or "setup URL" in source:
+            raise SystemExit(
+                "initial administrator bootstrap exposes a query-token URL"
+            )
+    if "use the operator workflow to read the private runtime-owned token file" not in server:
         raise SystemExit("initial administrator bootstrap lacks a non-secret recovery hint")
-
-
+    for marker in (
+        "request_id: String",
+        ".claim(&payload.request_id, &token_hash, &email, password_hash)",
+        '"request_id": request_id',
+        "InitialAdminClaimOutcome::IdempotencyConflict",
+    ):
+        if marker not in server:
+            raise SystemExit(f"idempotent bootstrap API boundary is missing: {marker}")
+    created_start = server.index("nazo_postgres::InitialAdminClaimOutcome::Created")
+    created_end = server.index("nazo_postgres::InitialAdminClaimOutcome::Closed", created_start)
+    created_branch = server[created_start:created_end]
+    if "endpoint.close()" in created_branch or "remove_consumed_token" in created_branch:
+        raise SystemExit("server destroys bootstrap retry proof before ctl verifies the receipt")
+    for marker in (
+        "insert_initial_admin_created_event(",
+        "InitialAdminClaimOutcome::IdempotencyConflict",
+        "InitialAdminBootstrapState::Claimed",
+    ):
+        if marker not in repository:
+            raise SystemExit(f"database-owned bootstrap receipt boundary is missing: {marker}")
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-migrations", action="store_true")

@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.7
+
+# Release OCI images are assembled from the exact native Linux binaries that
+# already passed the platform matrix. The image job must not compile the same
+# commit again under QEMU: that creates a second artifact identity and turns a
+# deterministic packaging step into an hour-long cross-build.
+FROM docker.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+
+ARG TARGETARCH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && groupadd --gid 10001 nazoauth \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin nazoauth \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY target/release-container/${TARGETARCH}/nazoauth /usr/local/bin/nazoauth
+
+WORKDIR /app
+USER 10001:10001
+EXPOSE 8000
+CMD ["nazoauth", "server"]

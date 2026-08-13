@@ -16,22 +16,22 @@ $function = $ast.Find(
     {
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq "ConvertTo-ShellLiteral"
+            $node.Name -eq "ConvertTo-ShellWord"
     },
     $true
 )
 if ($null -eq $function) {
-    throw "ConvertTo-ShellLiteral was not found"
+    throw "ConvertTo-ShellWord was not found"
 }
 
 Invoke-Expression $function.Extent.Text
 
-$emptyLiteral = ConvertTo-ShellLiteral ""
+$emptyLiteral = ConvertTo-ShellWord ""
 if ($emptyLiteral -ne "''") {
     throw "empty shell literal must be two single quotes, got: $emptyLiteral"
 }
 
-$quotedLiteral = ConvertTo-ShellLiteral "a'b"
+$quotedLiteral = ConvertTo-ShellWord "a'b"
 if ($quotedLiteral -ne "'a'\''b'") {
     throw "single quote escaping changed unexpectedly: $quotedLiteral"
 }

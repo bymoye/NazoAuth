@@ -1167,18 +1167,16 @@ async fn external_command_signer_produces_verifiable_jwt() {
     let active_der = generate_key_material(jsonwebtoken::Algorithm::RS256)
         .unwrap()
         .private_pkcs8_der;
-    let private_pem = der_to_pem(&active_der, "RSA PRIVATE KEY");
     let public_jwk = public_jwk_from_private_der(
         "external-active",
         jsonwebtoken::Algorithm::RS256,
         &active_der,
     )
     .unwrap();
-    let private_key_path = keys_dir.join("external-active.pem");
-    tokio::fs::write(&private_key_path, &private_pem)
-        .await
-        .unwrap();
-    let signer_command = external_rsa_signer_command(&keys_dir, &private_key_path).await;
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some("external-active".to_owned());
+    let claims = json!({"sub": "subject-1", "exp": 4_102_444_800_i64});
+    let signer_command = external_signature_command(rsa_signature(&active_der, &header, &claims));
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
@@ -1203,10 +1201,6 @@ async fn external_command_signer_produces_verifiable_jwt() {
         .await
         .unwrap()
         .unwrap();
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    header.kid = Some("external-active".to_owned());
-    let claims = json!({"sub": "subject-1", "exp": 4_102_444_800_i64});
-
     let manager = KeyManager::from_loaded(settings.clone(), keyset);
     let token = manager
         .encode_jwt(SigningPurpose::IdToken, &header, &claims)
@@ -1237,18 +1231,16 @@ async fn external_command_signer_signature_must_match_active_public_jwk() {
     let wrong_der = generate_key_material(jsonwebtoken::Algorithm::RS256)
         .unwrap()
         .private_pkcs8_der;
-    let wrong_private_pem = der_to_pem(&wrong_der, "RSA PRIVATE KEY");
     let public_jwk = public_jwk_from_private_der(
         "external-active",
         jsonwebtoken::Algorithm::RS256,
         &active_der,
     )
     .unwrap();
-    let wrong_private_key_path = keys_dir.join("wrong-external-active.pem");
-    tokio::fs::write(&wrong_private_key_path, &wrong_private_pem)
-        .await
-        .unwrap();
-    let signer_command = external_rsa_signer_command(&keys_dir, &wrong_private_key_path).await;
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some("external-active".to_owned());
+    let claims = json!({"sub": "subject-1", "exp": 4_102_444_800_i64});
+    let signer_command = external_signature_command(rsa_signature(&wrong_der, &header, &claims));
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
@@ -1273,10 +1265,6 @@ async fn external_command_signer_signature_must_match_active_public_jwk() {
         .await
         .unwrap()
         .unwrap();
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    header.kid = Some("external-active".to_owned());
-    let claims = json!({"sub": "subject-1", "exp": 4_102_444_800_i64});
-
     let manager = KeyManager::from_loaded(settings.clone(), keyset);
     let result = manager
         .encode_jwt(SigningPurpose::IdToken, &header, &claims)
@@ -1314,10 +1302,7 @@ fn in_memory_manager(algorithm: jsonwebtoken::Algorithm) -> KeyManager {
     let material = generate_key_material(algorithm).unwrap();
     let public_jwk =
         public_jwk_from_private_der(&kid, algorithm, &material.private_pkcs8_der).unwrap();
-    let request_object_decryption_key = PKey::from_rsa(Rsa::generate(2048).unwrap())
-        .unwrap()
-        .private_key_to_pem_pkcs8()
-        .unwrap();
+    let request_object_decryption_key = crate::crypto::generate_rsa_pkcs8_pem(2048).unwrap();
     let request_object_encryption_jwk =
         request_object_encryption_jwk(&request_object_decryption_key).unwrap();
     let loaded = LoadedKeyset {
@@ -1439,6 +1424,27 @@ async fn local_signing_rejects_algorithms_outside_server_allowlist() {
     ));
 }
 
+#[tokio::test]
+async fn request_object_key_probe_fails_when_keys_path_is_not_a_directory() {
+    let keys_path = temp_keys_dir("request_object_probe_not_directory");
+    tokio::fs::write(&keys_path, b"not a directory")
+        .await
+        .expect("fixture path should be a file");
+
+    let error = ensure_request_object_encryption_key(&test_settings(keys_path.clone()))
+        .await
+        .expect_err("non-directory key path must fail closed");
+    assert!(
+        error
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .is_some()
+    );
+    tokio::fs::remove_file(keys_path)
+        .await
+        .expect("fixture file should be removable");
+}
+
 fn temp_keys_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "nazo_keyset_{label}_{}",
@@ -1449,58 +1455,38 @@ fn temp_keys_dir(label: &str) -> PathBuf {
     ))
 }
 
-#[cfg(unix)]
-async fn external_rsa_signer_command(keys_dir: &Path, private_key_path: &Path) -> Vec<String> {
-    let signer = keys_dir.join("signer.sh");
-    tokio::fs::write(
-        &signer,
-        r#"#!/bin/sh
-set -eu
-key_file="$1"
-request=$(cat)
-signing_input=$(printf '%s' "$request" | sed -n 's/.*"signing_input":"\([^"]*\)".*/\1/p')
-signature=$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$key_file" -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
-printf '{"signature":"%s"}' "$signature"
-"#,
+fn rsa_signature(private_key: &[u8], header: &jsonwebtoken::Header, claims: &Value) -> String {
+    jsonwebtoken::encode(
+        header,
+        claims,
+        &jsonwebtoken::EncodingKey::from_rsa_der(private_key),
     )
-    .await
-    .unwrap();
+    .expect("RSA fixture JWT should sign")
+    .rsplit_once('.')
+    .expect("compact JWT should contain a signature")
+    .1
+    .to_owned()
+}
+
+#[cfg(unix)]
+fn external_signature_command(signature: String) -> Vec<String> {
     vec![
         "sh".to_owned(),
-        signer.display().to_string(),
-        private_key_path.display().to_string(),
+        "-c".to_owned(),
+        format!(r#"cat >/dev/null; printf '%s' '{{"signature":"{signature}"}}'"#),
     ]
 }
 
 #[cfg(windows)]
-async fn external_rsa_signer_command(keys_dir: &Path, private_key_path: &Path) -> Vec<String> {
-    let signer = keys_dir.join("signer.ps1");
-    tokio::fs::write(
-        &signer,
-        r#"$ErrorActionPreference = 'Stop'
-$keyFile = $args[0]
-$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
-$inputPath = [System.IO.Path]::GetTempFileName()
-$signaturePath = [System.IO.Path]::GetTempFileName()
-try {
-  [System.IO.File]::WriteAllText($inputPath, [string]$request.signing_input, [System.Text.Encoding]::ASCII)
-  & openssl dgst -sha256 -sign $keyFile -binary -out $signaturePath $inputPath | Out-Null
-  $signature = (& openssl base64 -A -in $signaturePath).Trim().Replace('+', '-').Replace('/', '_').TrimEnd('=')
-  [Console]::Out.Write("{""signature"":""$signature""}")
-} finally {
-  Remove-Item -LiteralPath $inputPath, $signaturePath -ErrorAction SilentlyContinue
-}
-"#,
-    )
-    .await
-    .unwrap();
+fn external_signature_command(signature: String) -> Vec<String> {
     vec![
         "pwsh".to_owned(),
         "-NoLogo".to_owned(),
         "-NoProfile".to_owned(),
-        "-File".to_owned(),
-        signer.display().to_string(),
-        private_key_path.display().to_string(),
+        "-Command".to_owned(),
+        format!(
+            "$null = [Console]::In.ReadToEnd(); [Console]::Out.Write('{{\"signature\":\"{signature}\"}}')"
+        ),
     ]
 }
 

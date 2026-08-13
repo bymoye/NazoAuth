@@ -7,6 +7,10 @@ on:
         description: "Exact deployed repository commit to test."
         required: true
         type: string
+      release_tag:
+        description: "Exact immutable Release tag that resolves to deployed_sha."
+        required: true
+        type: string
       target_issuer:
         description: "Production HTTPS issuer under test. No repository default is provided."
         required: true
@@ -30,20 +34,73 @@ on:
         type: string
 
 permissions:
+  attestations: read
   contents: read
 
 jobs:
+  verify-release-source:
+    if: ${{ !inputs.onboarding_material_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOYED_SHA: ${{ inputs.deployed_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Verify exact deployed revision trust before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git cat-file -e "$DEPLOYED_SHA^{commit}"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$DEPLOYED_SHA"
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft)"
+          test "$(jq -r '.tagName' <<<"$release_json")" = "$RELEASE_TAG"
+          test "$(jq -r '.isDraft' <<<"$release_json")" = false
+          case "$(uname -m)" in
+            x86_64) bootstrap_subject="nazoauth-x86_64-unknown-linux-gnu" ;;
+            aarch64) bootstrap_subject="nazoauth-aarch64-unknown-linux-gnu" ;;
+            *) echo "unsupported Linux runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          proof_dir="$RUNNER_TEMP/nazoauth-source-release-proof"
+          install -d -m 700 "$proof_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$bootstrap_subject" \
+            --dir "$proof_dir"
+          subject="$proof_dir/$bootstrap_subject"
+          test -f "$subject"
+          gh attestation verify "$subject" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_TAG" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --source-digest "$DEPLOYED_SHA" \
+            --predicate-type "https://nazo.run/attestations/release-manifest/v1" \
+            --deny-self-hosted-runners \
+            --format json > "$proof_dir/attestation-verification.json"
+          test -s "$proof_dir/attestation-verification.json"
+          git checkout --detach "$DEPLOYED_SHA"
+          test "$(git rev-parse HEAD)" = "$DEPLOYED_SHA"
+
   export-onboarding-material:
     if: ${{ inputs.onboarding_material_only }}
     uses: ./.github/workflows/oidf-public-onboarding-material.yml
     with:
       source_commit: ${{ inputs.deployed_sha }}
+      release_tag: ${{ inputs.release_tag }}
       target_issuer: ${{ inputs.target_issuer }}
-      suite_base_url: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
       credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}
     secrets: inherit
 
   oidf-conformance-full:
+    needs: verify-release-source
     if: ${{ !inputs.onboarding_material_only }}
     runs-on: ubuntu-latest
     environment: oidf-conformance
@@ -51,7 +108,7 @@ jobs:
     env:
       DEPLOYED_SHA: ${{ inputs.deployed_sha }}
       TRUSTED_TARGET_ISSUER: ${{ vars.OIDF_TARGET_ISSUER }}
-      CONFORMANCE_SERVER: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
+      CONFORMANCE_SERVER: https://www.certification.openid.net
       OIDF_REF: ${{ vars.OIDF_CONFORMANCE_SUITE_REF || 'dee9a25160e789f0f80517674693ef7989ab9fa1' }}
       VERBOSE: ${{ vars.OIDF_VERBOSE || 'true' }}
       DISABLE_SSL_VERIFY: ${{ vars.OIDF_DISABLE_SSL_VERIFY || 'false' }}
@@ -62,24 +119,18 @@ jobs:
       MONITOR_INTERVAL_SECONDS: ${{ vars.OIDF_MONITOR_INTERVAL_SECONDS || '60' }}
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - name: Verify deployed revision is trusted
-        run: |
-          set -euo pipefail
-          git cat-file -e "$DEPLOYED_SHA^{commit}"
-          git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"
+          ref: ${{ inputs.deployed_sha }}
 
       - name: Verify target issuer is trusted
         run: |
           set -euo pipefail
           test -n "$TRUSTED_TARGET_ISSUER"
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
+          test "$CONFORMANCE_SERVER" = "https://www.certification.openid.net"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -303,22 +354,32 @@ jobs:
           ]
           JSON
 
+      - name: Materialize OIDF job secrets
+        run: python scripts/materialize_github_oidf_secrets.py --output-dir "$RUNNER_TEMP/oidf-secrets"
+        env:
+          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
+          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
+          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
+          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
+          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
+          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
+          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
+
       - name: Write full OIDF matrix config
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' "$OIDF_PLAN_CONFIG_AGE_IDENTITY" > oidf-plan-config.agekey
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-secret-patch.json \
             docs/conformance/oidf-plan-config-secret-patch.json.age
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-ciba-secret-patch.json \
             docs/conformance/oidf-plan-config-ciba-secret-patch.json.age
-          printf '%s\n' "$OIDF_MTLS_MATERIAL_AGE_IDENTITY" > oidf-mtls-material.agekey
           rage --decrypt \
-            --identity oidf-mtls-material.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/mtls-material.agekey" \
             --output oidf-mtls-material.json \
             docs/conformance/oidf-mtls-material.json.age
           python - <<'PY'
@@ -338,37 +399,25 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
-          test -n "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN"
-          printf '%s' "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN" > dynamic-registration-initial-access-token
-          test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
-          printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
-          chmod 600 dynamic-registration-initial-access-token ciba-automated-decision-token oidf-delivered-client-material.json
-          unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN OIDF_CIBA_AUTOMATED_DECISION_TOKEN OIDF_DELIVERED_CLIENT_MATERIAL_JSON
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
-            --dynamic-registration-token-file dynamic-registration-initial-access-token \
+            --dynamic-registration-token-file "$RUNNER_TEMP/oidf-secrets/dynamic-registration-token" \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$CONFORMANCE_SERVER" \
-            --ciba-automated-decision-token-file ciba-automated-decision-token \
+            --ciba-automated-decision-token-file "$RUNNER_TEMP/oidf-secrets/ciba-decision-token" \
             --target-issuer "$OIDF_TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           python scripts/apply_oidf_delivered_client_material.py \
-            --material-json-file oidf-delivered-client-material.json \
+            --material-json-file "$RUNNER_TEMP/oidf-secrets/delivered-client-material.json" \
             --config-json-file oidf-plan-configs.json \
             --expected-target-issuer "$OIDF_TARGET_ISSUER" \
             --expected-suite-base-url "$CONFORMANCE_SERVER"
-        env:
-          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
-          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
-          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
-          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
-          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          python scripts/apply_oidf_browser_credentials.py \
+            --config-json-file oidf-plan-configs.json \
+            --credentials-file "$RUNNER_TEMP/oidf-secrets/browser-credentials.json"
 
       - name: Run full OIDF matrix
         run: |
@@ -407,6 +456,7 @@ jobs:
               --target-issuer "$OIDF_TARGET_ISSUER"
               --timeout-seconds "$RUN_TIMEOUT_SECONDS"
               --monitor-interval-seconds "$MONITOR_INTERVAL_SECONDS"
+              --token-file "$RUNNER_TEMP/oidf-secrets/suite-token"
             )
             if [ "$VERBOSE" = "true" ]; then
               args+=(--verbose)
@@ -443,11 +493,6 @@ jobs:
               exit 2
               ;;
           esac
-        env:
-          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
-          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
-          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
-
       - name: Verify official suite remained pristine
         if: always()
         run: |
@@ -460,6 +505,12 @@ jobs:
         if: always()
         run: python scripts/oidf_evidence.py "$RUNNER_TEMP/oidf-evidence"
 
+      - name: Remove OIDF job secrets
+        if: always()
+        run: |
+          rm -f -- oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json oidf-mtls-material.json oidf-plan-configs.json
+          rm -rf -- "$RUNNER_TEMP/oidf-secrets"
+
       - name: Upload credential-free OIDF evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -471,6 +522,7 @@ jobs:
 
 
   oidf-conformance-browser-isolated:
+    needs: verify-release-source
     if: ${{ !inputs.onboarding_material_only && inputs.runner_mode == 'parallel-isolated' }}
     runs-on: ubuntu-latest
     environment: oidf-conformance
@@ -494,7 +546,7 @@ jobs:
     env:
       DEPLOYED_SHA: ${{ inputs.deployed_sha }}
       TRUSTED_TARGET_ISSUER: ${{ vars.OIDF_TARGET_ISSUER }}
-      CONFORMANCE_SERVER: ${{ vars.OIDF_CONFORMANCE_SERVER || 'https://www.certification.openid.net/' }}
+      CONFORMANCE_SERVER: https://www.certification.openid.net
       OIDF_REF: ${{ vars.OIDF_CONFORMANCE_SUITE_REF || 'dee9a25160e789f0f80517674693ef7989ab9fa1' }}
       VERBOSE: ${{ vars.OIDF_VERBOSE || 'true' }}
       DISABLE_SSL_VERIFY: ${{ vars.OIDF_DISABLE_SSL_VERIFY || 'false' }}
@@ -503,24 +555,18 @@ jobs:
       MONITOR_INTERVAL_SECONDS: ${{ vars.OIDF_MONITOR_INTERVAL_SECONDS || '60' }}
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - name: Verify deployed revision is trusted
-        run: |
-          set -euo pipefail
-          git cat-file -e "$DEPLOYED_SHA^{commit}"
-          git merge-base --is-ancestor "$DEPLOYED_SHA" "origin/${{ github.event.repository.default_branch }}"
+          ref: ${{ inputs.deployed_sha }}
 
       - name: Verify target issuer is trusted
         run: |
           set -euo pipefail
           test -n "$TRUSTED_TARGET_ISSUER"
           test "$OIDF_TARGET_ISSUER" = "$TRUSTED_TARGET_ISSUER"
+          test "$CONFORMANCE_SERVER" = "https://www.certification.openid.net"
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
@@ -553,22 +599,32 @@ jobs:
           ]
           JSON
 
+      - name: Materialize isolated OIDF job secrets
+        run: python scripts/materialize_github_oidf_secrets.py --output-dir "$RUNNER_TEMP/oidf-secrets"
+        env:
+          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
+          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
+          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
+          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
+          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
+          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
+          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
+
       - name: Write isolated OIDF matrix config
         run: |
           set -euo pipefail
           umask 077
-          printf '%s\n' "$OIDF_PLAN_CONFIG_AGE_IDENTITY" > oidf-plan-config.agekey
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-secret-patch.json \
             docs/conformance/oidf-plan-config-secret-patch.json.age
           rage --decrypt \
-            --identity oidf-plan-config.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/plan-config.agekey" \
             --output oidf-plan-config-ciba-secret-patch.json \
             docs/conformance/oidf-plan-config-ciba-secret-patch.json.age
-          printf '%s\n' "$OIDF_MTLS_MATERIAL_AGE_IDENTITY" > oidf-mtls-material.agekey
           rage --decrypt \
-            --identity oidf-mtls-material.agekey \
+            --identity "$RUNNER_TEMP/oidf-secrets/mtls-material.agekey" \
             --output oidf-mtls-material.json \
             docs/conformance/oidf-mtls-material.json.age
           python - <<'PY'
@@ -588,37 +644,25 @@ jobs:
               json.dump(base, handle, sort_keys=True)
               handle.write("\n")
           PY
-          test -n "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN"
-          printf '%s' "$OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN" > dynamic-registration-initial-access-token
-          test -n "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN"
-          printf '%s' "$OIDF_CIBA_AUTOMATED_DECISION_TOKEN" > ciba-automated-decision-token
-          test -n "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-          printf '%s' "$OIDF_DELIVERED_CLIENT_MATERIAL_JSON" > oidf-delivered-client-material.json
-          chmod 600 dynamic-registration-initial-access-token ciba-automated-decision-token oidf-delivered-client-material.json
-          unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN OIDF_CIBA_AUTOMATED_DECISION_TOKEN OIDF_DELIVERED_CLIENT_MATERIAL_JSON
           python scripts/materialize_oidf_plan_config.py \
             --template docs/conformance/oidf-plan-config-template.json \
             --secret-patch-file oidf-plan-config-secret-patch.merged.json \
             --mtls-material-file oidf-mtls-material.json \
             --derive-dynamic-oidcc-config \
-            --dynamic-registration-token-file dynamic-registration-initial-access-token \
+            --dynamic-registration-token-file "$RUNNER_TEMP/oidf-secrets/dynamic-registration-token" \
             --derive-fapi-ciba-matrix-configs \
             --ciba-notification-base-url "$CONFORMANCE_SERVER" \
-            --ciba-automated-decision-token-file ciba-automated-decision-token \
+            --ciba-automated-decision-token-file "$RUNNER_TEMP/oidf-secrets/ciba-decision-token" \
             --target-issuer "$OIDF_TARGET_ISSUER" \
             --output oidf-plan-configs.json
-          rm -f dynamic-registration-initial-access-token ciba-automated-decision-token
           python scripts/apply_oidf_delivered_client_material.py \
-            --material-json-file oidf-delivered-client-material.json \
+            --material-json-file "$RUNNER_TEMP/oidf-secrets/delivered-client-material.json" \
             --config-json-file oidf-plan-configs.json \
             --expected-target-issuer "$OIDF_TARGET_ISSUER" \
             --expected-suite-base-url "$CONFORMANCE_SERVER"
-        env:
-          OIDF_PLAN_CONFIG_AGE_IDENTITY: ${{ secrets.OIDF_PLAN_CONFIG_AGE_IDENTITY }}
-          OIDF_MTLS_MATERIAL_AGE_IDENTITY: ${{ secrets.OIDF_MTLS_MATERIAL_AGE_IDENTITY }}
-          OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN: ${{ secrets.OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN }}
-          OIDF_CIBA_AUTOMATED_DECISION_TOKEN: ${{ secrets.OIDF_CIBA_AUTOMATED_DECISION_TOKEN }}
-          OIDF_DELIVERED_CLIENT_MATERIAL_JSON: ${{ secrets.OIDF_DELIVERED_CLIENT_MATERIAL_JSON }}
+          python scripts/apply_oidf_browser_credentials.py \
+            --config-json-file oidf-plan-configs.json \
+            --credentials-file "$RUNNER_TEMP/oidf-secrets/browser-credentials.json"
 
       - name: Run isolated OIDF browser-sensitive plan
         run: |
@@ -632,6 +676,7 @@ jobs:
             --target-issuer "$OIDF_TARGET_ISSUER"
             --timeout-seconds "$RUN_TIMEOUT_SECONDS"
             --monitor-interval-seconds "$MONITOR_INTERVAL_SECONDS"
+            --token-file "$RUNNER_TEMP/oidf-secrets/suite-token"
             --no-parallel
           )
           if [ "$VERBOSE" = "true" ]; then
@@ -641,11 +686,6 @@ jobs:
             args+=(--disable-ssl-verify)
           fi
           python -u scripts/run_oidf_conformance.py "${args[@]}"
-        env:
-          OIDF_CONFORMANCE_TOKEN: ${{ secrets.OIDF_CONFORMANCE_TOKEN }}
-          OIDF_USER_EMAIL: ${{ secrets.OIDF_USER_EMAIL }}
-          OIDF_USER_PASSWORD: ${{ secrets.OIDF_USER_PASSWORD }}
-
       - name: Verify official suite remained pristine
         if: always()
         run: |
@@ -653,6 +693,12 @@ jobs:
             test "$(git -C oidf-conformance-suite rev-parse HEAD)" = "$OIDF_REF"
             test -z "$(git -C oidf-conformance-suite status --porcelain --untracked-files=no)"
           }
+
+      - name: Remove isolated OIDF job secrets
+        if: always()
+        run: |
+          rm -f -- oidf-plan-config-secret-patch.json oidf-plan-config-ciba-secret-patch.json oidf-plan-config-secret-patch.merged.json oidf-mtls-material.json oidf-plan-configs.json
+          rm -rf -- "$RUNNER_TEMP/oidf-secrets"
 
 
       - name: Upload credential-free browser evidence

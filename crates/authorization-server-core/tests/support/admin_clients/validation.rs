@@ -43,6 +43,7 @@ pub(super) struct ClientMtlsMetadataFixture {
 pub(super) fn validate_metadata_fixture(metadata: ClientMetadataFixture<'_>) -> anyhow::Result<()> {
     let mtls = metadata.mtls_binding;
     let request = CreateClientRequest {
+        conformance_lease_id: None,
         client_name: "metadata-validation-test".to_owned(),
         client_type: metadata.client_type.to_owned(),
         redirect_uris: metadata.redirect_uris.to_vec(),

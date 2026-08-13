@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AuthorizationResponse, PresentationError, PresentationResult, PresentationStoreError,
-    PresentationStorePort, PresentationTransaction,
+    PresentationStorePort, PresentationTransaction, ResponseMode,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,11 +33,13 @@ where
         &self,
         transaction: &PresentationTransaction,
         response: &AuthorizationResponse,
+        additional_trust_anchors: &[Vec<u8>],
         now: DateTime<Utc>,
     ) -> Result<PresentationResult, PresentationServiceError> {
         if now >= transaction.expires_at
             || response.state.as_deref() != Some(transaction.request.state.as_str())
             || response.error.is_some()
+            || transaction.request.transaction_data.is_some()
         {
             return Err(PresentationError::InvalidState.into());
         }
@@ -71,6 +73,7 @@ where
                         mdoc_session_transcript: (query.format == CredentialFormat::MsoMdoc)
                             .then(|| mdoc_session_transcript.clone())
                             .flatten(),
+                        additional_trust_anchors: additional_trust_anchors.to_vec(),
                     })
                     .await
                     .map_err(|_| PresentationError::UntrustedPresentation)?;
@@ -128,13 +131,17 @@ fn mdoc_session_transcript(
     {
         return Ok(None);
     }
-    let verifier_key_thumbprint = transaction
-        .request
-        .client_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.jwks.as_ref())
-        .map(jwk_set_thumbprint)
-        .transpose()?;
+    let verifier_key_thumbprint = if transaction.response_mode == ResponseMode::DirectPostJwt {
+        transaction
+            .request
+            .client_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.jwks.as_ref())
+            .map(jwk_set_thumbprint)
+            .transpose()?
+    } else {
+        None
+    };
     let handover_info = ciborium::Value::Array(vec![
         ciborium::Value::Text(transaction.request.client_id.clone()),
         ciborium::Value::Text(transaction.request.nonce.clone()),

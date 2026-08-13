@@ -326,12 +326,15 @@ async fn par_after_rate_limit_inner(
                 "Client attestation is not configured.",
             );
         };
-        let validated = match validator.validate(
-            attestation,
-            proof,
-            &context.config.issuer,
-            Utc::now().timestamp(),
-        ) {
+        let validated = match validator
+            .validate_for_client(
+                attestation,
+                proof,
+                &context.config.issuer,
+                Utc::now().timestamp(),
+            )
+            .await
+        {
             Ok(validated) if validated.client_id == client.client_id => validated,
             _ => {
                 return oauth_error(
@@ -423,6 +426,11 @@ async fn par_after_rate_limit_inner(
             client_type: &client.client_type,
             redirect_uris: &client.redirect_uris,
             allowed_audiences: &client.allowed_audiences,
+            pkce_required: !client_policy.allow_confidential_oidc_without_pkce
+                || client_policy.requires_fapi2_security()
+                || client.require_dpop_bound_tokens
+                || client.require_mtls_bound_tokens
+                || params.contains_key("dpop_jkt"),
             fapi2_requires_explicit_redirect_uri: client_policy.requires_fapi2_security(),
         },
     ) {

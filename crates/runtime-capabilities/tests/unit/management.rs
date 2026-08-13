@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     future::Future,
     sync::{
         Arc, Mutex,
@@ -88,9 +88,64 @@ impl ModuleLifecycle for InitializePause {
 }
 
 #[derive(Default)]
+struct ScriptedLifecycle {
+    initializes: Mutex<VecDeque<Result<(), LifecycleFailure>>>,
+    stops: Mutex<VecDeque<Result<(), LifecycleFailure>>>,
+    drains: Mutex<VecDeque<Result<bool, LifecycleFailure>>>,
+}
+
+impl ScriptedLifecycle {
+    fn with_initialize(self, result: Result<(), LifecycleFailure>) -> Self {
+        self.initializes.lock().unwrap().push_back(result);
+        self
+    }
+
+    fn with_stop(self, result: Result<(), LifecycleFailure>) -> Self {
+        self.stops.lock().unwrap().push_back(result);
+        self
+    }
+
+    fn with_drain(self, result: Result<bool, LifecycleFailure>) -> Self {
+        self.drains.lock().unwrap().push_back(result);
+        self
+    }
+}
+
+impl ModuleLifecycle for ScriptedLifecycle {
+    fn initialize(
+        &self,
+        _module_id: ModuleId,
+    ) -> LifecycleFuture<'_, Result<(), LifecycleFailure>> {
+        let result = self
+            .initializes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Ok(()));
+        Box::pin(async move { result })
+    }
+
+    fn stop(&self, _module_id: ModuleId) -> LifecycleFuture<'_, Result<(), LifecycleFailure>> {
+        let result = self.stops.lock().unwrap().pop_front().unwrap_or(Ok(()));
+        Box::pin(async move { result })
+    }
+
+    fn drain_stored_transactions(
+        &self,
+        _module_id: ModuleId,
+        _revision: ModuleRevision,
+        _remaining_duration: Duration,
+    ) -> LifecycleFuture<'_, Result<bool, LifecycleFailure>> {
+        let result = self.drains.lock().unwrap().pop_front().unwrap_or(Ok(true));
+        Box::pin(async move { result })
+    }
+}
+
+#[derive(Default)]
 struct TestRepository {
     state: Mutex<RepositoryState>,
     fail_bulk_desired: AtomicBool,
+    fail_single_desired: AtomicBool,
     single_desired_reads: AtomicUsize,
     single_instance_reads: AtomicUsize,
     bulk_desired_reads: AtomicUsize,
@@ -98,6 +153,7 @@ struct TestRepository {
     cas_pause: Mutex<Option<CasPause>>,
     read_pauses: Mutex<Vec<ReadPause>>,
     desired_transaction: Mutex<()>,
+    instance_outcomes: Mutex<VecDeque<CasOutcome<InstanceStateRecord>>>,
 }
 
 impl ModuleStateRepository for TestRepository {
@@ -108,6 +164,9 @@ impl ModuleStateRepository for TestRepository {
         module_id: ModuleId,
     ) -> Result<Option<DesiredStateRecord>, Self::Error> {
         self.single_desired_reads.fetch_add(1, Ordering::Relaxed);
+        if self.fail_single_desired.load(Ordering::Relaxed) {
+            return Err(TestError::Unavailable);
+        }
         let current = self
             .state
             .lock()
@@ -252,6 +311,9 @@ impl ModuleStateRepository for TestRepository {
         mutation: InstanceStateMutation,
     ) -> Result<CasOutcome<InstanceStateRecord>, Self::Error> {
         let InstanceStateChange { next, .. } = mutation.change;
+        if let Some(outcome) = self.instance_outcomes.lock().unwrap().pop_front() {
+            return Ok(outcome);
+        }
         Ok(CasOutcome::Applied(next))
     }
 
@@ -323,6 +385,221 @@ fn instance() -> InstanceStateRecord {
         error_code: None,
         updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
     }
+}
+
+fn fixed_catalog(inherited: BTreeSet<ModuleId>) -> ModuleCatalog {
+    ModuleCatalog::fixed(
+        CatalogDurations {
+            device_authorization: Duration::from_secs(60),
+            ciba: Duration::from_secs(120),
+            authorization_code: Duration::from_secs(30),
+            refresh_token: Duration::from_secs(300),
+            session: Duration::from_secs(600),
+            scim_security_events: Duration::from_secs(600),
+        },
+        inherited,
+    )
+    .unwrap()
+}
+
+fn registry(
+    repository: Arc<TestRepository>,
+    catalog: ModuleCatalog,
+    accepting: BTreeSet<ModuleId>,
+) -> RuntimeModuleRegistry<TestRepository, NoopModuleLifecycle> {
+    RuntimeModuleRegistry::new(
+        repository,
+        Arc::new(NoopModuleLifecycle),
+        catalog,
+        "instance-a".to_owned(),
+        ActiveModuleSnapshot {
+            revision: ModuleRevision::new(1),
+            accepting,
+            draining: BTreeSet::new(),
+        },
+    )
+}
+
+fn registry_with_lifecycle<L: ModuleLifecycle>(
+    repository: Arc<TestRepository>,
+    lifecycle: Arc<L>,
+    catalog: ModuleCatalog,
+    accepting: BTreeSet<ModuleId>,
+) -> RuntimeModuleRegistry<TestRepository, L> {
+    RuntimeModuleRegistry::new(
+        repository,
+        lifecycle,
+        catalog,
+        "instance-a".to_owned(),
+        ActiveModuleSnapshot {
+            revision: ModuleRevision::new(1),
+            accepting,
+            draining: BTreeSet::new(),
+        },
+    )
+}
+
+#[test]
+fn reconcile_covers_no_change_and_initial_enable_disable_transitions() {
+    let no_change_repository = Arc::new(TestRepository::default());
+    {
+        let mut state = no_change_repository.state.lock().unwrap();
+        state.desired.push(desired(1, DesiredMode::Enabled));
+        state.instances.push(InstanceStateRecord {
+            instance_id: "instance-a".to_owned(),
+            module_id: ModuleId::Ciba,
+            state: ModuleState::Enabled,
+            transition_revision: ModuleRevision::new(1),
+            applied_revision: Some(ModuleRevision::new(1)),
+            drain_deadline: None,
+            error_code: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        });
+    }
+    let no_change = registry(
+        no_change_repository,
+        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        BTreeSet::from([ModuleId::Ciba]),
+    );
+    assert_eq!(
+        block_on(no_change.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::NoChange
+    );
+
+    let enable_repository = Arc::new(TestRepository::default());
+    enable_repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Enabled));
+    let enabling = registry(
+        enable_repository,
+        fixed_catalog(BTreeSet::new()),
+        BTreeSet::new(),
+    );
+    assert_eq!(
+        block_on(enabling.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Enabled
+    );
+    assert!(enabling.snapshot().admits(ModuleId::Ciba));
+
+    let disable_repository = Arc::new(TestRepository::default());
+    disable_repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Disabled));
+    let disabling = registry(
+        disable_repository,
+        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        BTreeSet::from([ModuleId::Ciba]),
+    );
+    assert_eq!(
+        block_on(disabling.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Disabled
+    );
+    assert!(!disabling.snapshot().admits(ModuleId::Ciba));
+}
+
+#[test]
+fn reconcile_reports_missing_disabled_and_active_dependency_boundaries() {
+    let missing_repository = Arc::new(TestRepository::default());
+    missing_repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(DesiredStateRecord {
+            module_id: ModuleId::Jarm,
+            mode: DesiredMode::Enabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        });
+    let dependent_catalog = fixed_catalog(BTreeSet::new())
+        .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
+        .unwrap();
+    let missing = registry(
+        missing_repository,
+        dependent_catalog.clone(),
+        BTreeSet::new(),
+    );
+    assert!(matches!(
+        block_on(missing.reconcile_once(ModuleId::Jarm)),
+        Err(RegistryError::MissingDesiredState(ModuleId::RequestObjects))
+    ));
+
+    let unavailable_repository = Arc::new(TestRepository::default());
+    unavailable_repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .extend([
+            DesiredStateRecord {
+                module_id: ModuleId::RequestObjects,
+                mode: DesiredMode::Disabled,
+                revision: ModuleRevision::new(1),
+                actor_id: None,
+                reason: None,
+                updated_at: SystemTime::UNIX_EPOCH,
+            },
+            DesiredStateRecord {
+                module_id: ModuleId::Jarm,
+                mode: DesiredMode::Enabled,
+                revision: ModuleRevision::new(1),
+                actor_id: None,
+                reason: None,
+                updated_at: SystemTime::UNIX_EPOCH,
+            },
+        ]);
+    let unavailable = registry(
+        unavailable_repository,
+        dependent_catalog.clone(),
+        BTreeSet::new(),
+    );
+    assert!(matches!(
+        block_on(unavailable.reconcile_once(ModuleId::Jarm)),
+        Err(RegistryError::DependencyUnavailable {
+            module_id: ModuleId::Jarm,
+            dependency: ModuleId::RequestObjects,
+        })
+    ));
+
+    let active_repository = Arc::new(TestRepository::default());
+    active_repository.state.lock().unwrap().desired.extend([
+        DesiredStateRecord {
+            module_id: ModuleId::RequestObjects,
+            mode: DesiredMode::Disabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        },
+        DesiredStateRecord {
+            module_id: ModuleId::Jarm,
+            mode: DesiredMode::Enabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        },
+    ]);
+    let active = registry(
+        active_repository,
+        dependent_catalog,
+        BTreeSet::from([ModuleId::Jarm, ModuleId::RequestObjects]),
+    );
+    assert!(matches!(
+        block_on(active.reconcile_once(ModuleId::RequestObjects)),
+        Err(RegistryError::ActiveDependent {
+            module_id: ModuleId::RequestObjects,
+            dependent: ModuleId::Jarm,
+        })
+    ));
 }
 
 #[test]
@@ -727,4 +1004,302 @@ fn dependency_loss_during_initialize_is_rechecked_and_fails_closed() {
     ));
     assert!(!registry.snapshot().admits(ModuleId::Jarm));
     assert!(lifecycle.stopped.load(Ordering::Acquire));
+}
+
+#[test]
+fn dependency_enabled_but_not_admitted_is_unavailable() {
+    let repository = Arc::new(TestRepository::default());
+    repository.state.lock().unwrap().desired.extend([
+        DesiredStateRecord {
+            module_id: ModuleId::RequestObjects,
+            mode: DesiredMode::Enabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        },
+        DesiredStateRecord {
+            module_id: ModuleId::Jarm,
+            mode: DesiredMode::Enabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        },
+    ]);
+    let catalog = fixed_catalog(BTreeSet::new())
+        .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
+        .unwrap();
+    let registry = registry(repository, catalog, BTreeSet::from([ModuleId::Jarm]));
+
+    assert!(matches!(
+        block_on(registry.reconcile_once(ModuleId::Jarm)),
+        Err(RegistryError::DependencyUnavailable {
+            module_id: ModuleId::Jarm,
+            dependency: ModuleId::RequestObjects,
+        })
+    ));
+    assert!(!registry.snapshot().admits(ModuleId::Jarm));
+}
+
+#[test]
+fn snapshot_admission_marks_a_disabled_dependent_as_active_for_policy_checks() {
+    let repository = Arc::new(TestRepository::default());
+    repository.state.lock().unwrap().desired.extend([
+        DesiredStateRecord {
+            module_id: ModuleId::RequestObjects,
+            mode: DesiredMode::Disabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        },
+        DesiredStateRecord {
+            module_id: ModuleId::Jarm,
+            mode: DesiredMode::Disabled,
+            revision: ModuleRevision::new(1),
+            actor_id: None,
+            reason: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        },
+    ]);
+    let catalog = fixed_catalog(BTreeSet::new())
+        .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
+        .unwrap();
+    let registry = registry(
+        repository,
+        catalog,
+        BTreeSet::from([ModuleId::Jarm, ModuleId::RequestObjects]),
+    );
+
+    assert!(matches!(
+        block_on(registry.reconcile_once(ModuleId::RequestObjects)),
+        Err(RegistryError::ActiveDependent {
+            module_id: ModuleId::RequestObjects,
+            dependent: ModuleId::Jarm,
+        })
+    ));
+}
+
+#[test]
+fn reconcile_propagates_desired_state_repository_failures() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Enabled));
+    repository
+        .fail_single_desired
+        .store(true, Ordering::Relaxed);
+    let registry = registry(repository, fixed_catalog(BTreeSet::new()), BTreeSet::new());
+
+    assert!(matches!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)),
+        Err(RegistryError::Repository(TestError::Unavailable))
+    ));
+}
+
+#[test]
+fn enable_lifecycle_failure_is_persisted_as_failed() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Enabled));
+    let lifecycle = Arc::new(
+        ScriptedLifecycle::default().with_initialize(Err(LifecycleFailure {
+            code: "initialize_failed",
+        })),
+    );
+    let registry = registry_with_lifecycle(
+        repository,
+        lifecycle,
+        fixed_catalog(BTreeSet::new()),
+        BTreeSet::new(),
+    );
+
+    assert_eq!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Failed
+    );
+}
+
+#[test]
+fn enable_stale_final_cas_withdraws_admission() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Enabled));
+    let starting = InstanceStateRecord {
+        instance_id: "instance-a".to_owned(),
+        module_id: ModuleId::Ciba,
+        state: ModuleState::Starting,
+        transition_revision: ModuleRevision::new(1),
+        applied_revision: None,
+        drain_deadline: None,
+        error_code: None,
+        updated_at: SystemTime::UNIX_EPOCH,
+    };
+    *repository.instance_outcomes.lock().unwrap() = VecDeque::from([
+        CasOutcome::Applied(starting.clone()),
+        CasOutcome::Stale {
+            current: Some(starting),
+        },
+    ]);
+    let registry = registry_with_lifecycle(
+        repository,
+        Arc::new(ScriptedLifecycle::default()),
+        fixed_catalog(BTreeSet::new()),
+        BTreeSet::new(),
+    );
+
+    assert_eq!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::StaleDiscarded
+    );
+    assert!(!registry.snapshot().admits(ModuleId::Ciba));
+}
+
+fn active_enabled_instance() -> InstanceStateRecord {
+    InstanceStateRecord {
+        instance_id: "instance-a".to_owned(),
+        module_id: ModuleId::Ciba,
+        state: ModuleState::Enabled,
+        transition_revision: ModuleRevision::new(1),
+        applied_revision: Some(ModuleRevision::new(0)),
+        drain_deadline: None,
+        error_code: None,
+        updated_at: SystemTime::UNIX_EPOCH,
+    }
+}
+
+#[test]
+fn disable_drains_stored_transactions_before_stopping() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Disabled));
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .instances
+        .push(active_enabled_instance());
+    let registry = registry_with_lifecycle(
+        repository,
+        Arc::new(ScriptedLifecycle::default().with_drain(Ok(true))),
+        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        BTreeSet::from([ModuleId::Ciba]),
+    );
+
+    assert_eq!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Disabled
+    );
+    assert!(!registry.snapshot().admits(ModuleId::Ciba));
+    assert!(!registry.snapshot().draining.contains(&ModuleId::Ciba));
+}
+
+#[test]
+fn disable_drain_deadline_failure_is_persisted() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Disabled));
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .instances
+        .push(active_enabled_instance());
+    let registry = registry_with_lifecycle(
+        repository,
+        Arc::new(ScriptedLifecycle::default().with_drain(Ok(false))),
+        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        BTreeSet::from([ModuleId::Ciba]),
+    );
+
+    assert_eq!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Failed
+    );
+}
+
+#[test]
+fn disable_drain_lifecycle_error_is_persisted() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Disabled));
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .instances
+        .push(active_enabled_instance());
+    let registry = registry_with_lifecycle(
+        repository,
+        Arc::new(
+            ScriptedLifecycle::default().with_drain(Err(LifecycleFailure {
+                code: "drain_failed",
+            })),
+        ),
+        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        BTreeSet::from([ModuleId::Ciba]),
+    );
+
+    assert_eq!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Failed
+    );
+}
+
+#[test]
+fn disable_stop_failure_is_persisted_after_drain() {
+    let repository = Arc::new(TestRepository::default());
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .desired
+        .push(desired(1, DesiredMode::Disabled));
+    repository
+        .state
+        .lock()
+        .unwrap()
+        .instances
+        .push(active_enabled_instance());
+    let registry = registry_with_lifecycle(
+        repository,
+        Arc::new(
+            ScriptedLifecycle::default()
+                .with_drain(Ok(true))
+                .with_stop(Err(LifecycleFailure {
+                    code: "stop_failed",
+                })),
+        ),
+        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        BTreeSet::from([ModuleId::Ciba]),
+    );
+
+    assert_eq!(
+        block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
+        ReconcileOutcome::Failed
+    );
 }

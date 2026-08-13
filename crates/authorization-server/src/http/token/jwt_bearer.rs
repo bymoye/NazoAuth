@@ -1,19 +1,19 @@
 //! RFC 7523 JWT bearer authorization grant.
 use nazo_http_actix::oauth_token_error;
 
-use super::issue::{TokenIssuanceContext, issue_token_response_with_service};
+use super::issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant};
 use super::{
-    ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
+    SenderConstraintValidationError, ServerTokenService, TokenForm,
+    consume_token_client_assertion_with_authorization_service, sender_constraint_multiple_error,
+    validate_token_sender_constraints,
 };
 use crate::adapters::security::ValidatedClientAssertion;
+use crate::adapters::security::blake3_hex;
 use crate::adapters::security::client_jwt_decoding_key;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
-use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
@@ -28,6 +28,19 @@ use serde_json::json;
 
 pub(crate) const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 pub(crate) const JWT_BEARER_ASSERTION_TYP: &str = "oauth-jwt-bearer+jwt";
+
+fn jwt_bearer_grant_key(
+    assertion_jti: &str,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+) -> String {
+    format!(
+        "jwt_bearer:{}:{}:{}",
+        blake3_hex(assertion_jti),
+        dpop_jkt.map(blake3_hex).unwrap_or_default(),
+        mtls_x5t_s256.map(blake3_hex).unwrap_or_default(),
+    )
+}
 
 #[derive(Debug)]
 pub(crate) enum JwtBearerAssertionError {
@@ -186,28 +199,13 @@ pub(crate) async fn token_jwt_bearer_with_service(
         .assertion
         .as_deref()
         .expect("validated JWT bearer grant must contain assertion");
-    let dpop_jkt = match validate_dpop_proof_with_authorization_service(
-        issuance.authorization,
-        issuance.config.issuer(),
-        issuance.config.mtls_endpoint_base_url(),
-        issuance.config.dpop_nonce_policy(),
-        req,
-        None,
-        None,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => return dpop_error_response(error, DpopErrorContext::TokenEndpoint),
-    };
-    if client.require_dpop_bound_tokens && dpop_jkt.is_none() {
-        return dpop_error_response(DpopError::MissingProof, DpopErrorContext::TokenEndpoint);
-    }
-    let mtls_x5t_s256 = if client.require_mtls_bound_tokens {
-        match request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        {
-            Some(value) => Some(value),
-            None => {
+    let sender =
+        match validate_token_sender_constraints(issuance, req, client, None, None, None).await {
+            Ok(value) => value,
+            Err(SenderConstraintValidationError::Dpop(error)) => {
+                return dpop_error_response(error, DpopErrorContext::TokenEndpoint);
+            }
+            Err(SenderConstraintValidationError::MissingMtls) => {
                 return oauth_token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
@@ -215,19 +213,10 @@ pub(crate) async fn token_jwt_bearer_with_service(
                     false,
                 );
             }
-        }
-    } else {
-        None
-    };
-    if let Err(error) = consume_token_client_assertion_with_authorization_service(
-        issuance.authorization,
-        client,
-        client_assertion,
-    )
-    .await
-    {
-        return super::token_client_assertion_error(error);
-    }
+            Err(SenderConstraintValidationError::Multiple) => {
+                return sender_constraint_multiple_error();
+            }
+        };
     let assertion = match validate_jwt_bearer_assertion_with_issuer(
         issuance.config.issuer(),
         client,
@@ -243,6 +232,20 @@ pub(crate) async fn token_jwt_bearer_with_service(
             );
         }
     };
+    let jwt_bearer_grant_key = jwt_bearer_grant_key(
+        &assertion.jti,
+        sender.dpop_jkt.as_deref(),
+        sender.mtls_x5t_s256.as_deref(),
+    );
+    if let Err(error) = consume_token_client_assertion_with_authorization_service(
+        issuance.authorization,
+        client,
+        client_assertion,
+    )
+    .await
+    {
+        return super::token_client_assertion_error(error);
+    }
     if let Err(error) = consume_jwt_bearer_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -276,10 +279,11 @@ pub(crate) async fn token_jwt_bearer_with_service(
         Ok(admission) => admission,
         Err(error) => return jwt_bearer_grant_error_response(error, client, form),
     };
-    issue_token_response_with_service(
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        Some(&jwt_bearer_grant_key),
         TokenIssue {
             user_id: None,
             subject: assertion.subject,
@@ -295,11 +299,12 @@ pub(crate) async fn token_jwt_bearer_with_service(
             userinfo_claim_requests: Vec::new(),
             id_token_claims: Vec::new(),
             id_token_claim_requests: Vec::new(),
+            refresh_id_token_sid: None,
             include_refresh: false,
             refresh_token_policy: RefreshTokenPolicy::PreserveExisting,
-            dpop_jkt,
+            dpop_jkt: sender.dpop_jkt,
             refresh_token_dpop_jkt: None,
-            mtls_x5t_s256,
+            mtls_x5t_s256: sender.mtls_x5t_s256,
             refresh_token_mtls_x5t_s256: None,
             refresh_token_client_attestation_jkt: None,
             refresh_token_scopes: None,

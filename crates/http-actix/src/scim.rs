@@ -160,7 +160,7 @@ pub async fn scim_poll_security_events(
         return backend_unavailable();
     };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut current = validated.clone();
+    let mut current = validated;
     loop {
         let response = match events.poll(&receiver, &current).await {
             Ok(response) => response,

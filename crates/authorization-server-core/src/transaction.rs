@@ -139,6 +139,12 @@ pub enum AuthorizationCodeState {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConsumedAuthorizationCode {
     pub client_id: Uuid,
+    /// Hash-derived binding of the code redemption request that produced the
+    /// issued tokens. Older markers do not carry it and therefore fail closed
+    /// without allowing an unauthenticated replay to revoke another client's
+    /// tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redemption_binding: Option<String>,
     pub access_token_jti: String,
     pub access_token_expires_at: i64,
     pub refresh_token_family_id: Option<Uuid>,

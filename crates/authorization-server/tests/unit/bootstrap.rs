@@ -1,47 +1,22 @@
 use super::*;
 use actix_web::http::header;
 use actix_web::{HttpResponse, test as actix_test};
+use chrono::{Duration as ChronoDuration, Utc};
+use nazo_digital_credentials::CertificateRevocationSnapshot;
 
 fn write_test_tls_identity(root: &std::path::Path) -> (String, String, String) {
-    use openssl::{
-        asn1::Asn1Time,
-        bn::{BigNum, MsbOption},
-        hash::MessageDigest,
-        pkey::PKey,
-        rsa::Rsa,
-        x509::{X509, X509NameBuilder, extension::BasicConstraints},
-    };
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256};
 
-    let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-    let mut name = X509NameBuilder::new().unwrap();
-    name.append_entry_by_text("CN", "localhost").unwrap();
-    let name = name.build();
-    let mut serial = BigNum::new().unwrap();
-    serial.rand(128, MsbOption::MAYBE_ZERO, false).unwrap();
-    let serial = serial.to_asn1_integer().unwrap();
-    let mut certificate = X509::builder().unwrap();
-    certificate.set_version(2).unwrap();
-    certificate.set_serial_number(&serial).unwrap();
-    certificate.set_subject_name(&name).unwrap();
-    certificate.set_issuer_name(&name).unwrap();
-    certificate.set_pubkey(&key).unwrap();
-    certificate
-        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
-        .unwrap();
-    certificate
-        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
-        .unwrap();
-    certificate
-        .append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-        .unwrap();
-    certificate.sign(&key, MessageDigest::sha256()).unwrap();
-    let certificate = certificate.build();
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let mut params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let certificate = params.self_signed(&key).unwrap();
     let certificate_path = root.join("server.pem");
     let private_key_path = root.join("server.key");
     let ca_path = root.join("ca.pem");
-    std::fs::write(&certificate_path, certificate.to_pem().unwrap()).unwrap();
-    std::fs::write(&ca_path, certificate.to_pem().unwrap()).unwrap();
-    std::fs::write(&private_key_path, key.private_key_to_pem_pkcs8().unwrap()).unwrap();
+    std::fs::write(&certificate_path, certificate.pem()).unwrap();
+    std::fs::write(&ca_path, certificate.pem()).unwrap();
+    std::fs::write(&private_key_path, key.serialize_pem()).unwrap();
     (
         certificate_path.display().to_string(),
         private_key_path.display().to_string(),
@@ -61,6 +36,22 @@ fn production_bootstrap_only_publishes_focused_application_data() {
         !source.contains(".app_data(state"),
         "production Actix app must not publish the giant TestInfrastructure"
     );
+}
+
+#[test]
+fn transport_tls_features_are_consolidated_on_rustls() {
+    let manifest = include_str!("../../Cargo.toml");
+
+    assert!(
+        manifest
+            .contains(r#"actix-web = { workspace = true, features = ["cookies", "rustls-0_23"] }"#)
+    );
+    assert!(manifest.contains(
+        r#"lettre = { workspace = true, features = ["aws-lc-rs", "builder", "rustls-platform-verifier", "smtp-transport", "tokio1-rustls"] }"#
+    ));
+    assert!(!manifest.contains("tokio1-native-tls"));
+    assert!(!manifest.contains(r#"features = ["native-tls", "rustls"#));
+    assert!(!manifest.contains(r#"features = ["cookies", "openssl"]"#));
 }
 
 #[actix_web::test]
@@ -181,6 +172,118 @@ fn direct_tls_listener_loads_a_complete_mutual_tls_identity() {
     let settings = Settings::from_config(&config).unwrap();
     let (address, _acceptor) = direct_tls_listener(&config, &settings).unwrap().unwrap();
     assert_eq!(address, "127.0.0.1:0".parse().unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn write_fresh_revocation_snapshot(root: &std::path::Path) -> std::path::PathBuf {
+    let path = root.join("revocations.json");
+    let now = Utc::now();
+    let snapshot = CertificateRevocationSnapshot {
+        version: CertificateRevocationSnapshot::VERSION,
+        this_update: now - ChronoDuration::minutes(1),
+        next_update: now + ChronoDuration::minutes(10),
+        entries: Vec::new(),
+    };
+    std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    path
+}
+
+fn revocation_settings(
+    policy: Openid4vcRevocationPolicy,
+    snapshot_file: Option<std::path::PathBuf>,
+) -> crate::settings::Openid4vcSettings {
+    let mut settings = Settings::from_config(&ConfigSource::default()).unwrap();
+    settings.openid4vc.revocation_policy = policy;
+    settings.openid4vc.revocation_snapshot_file = snapshot_file;
+    settings.openid4vc.revocation_reload_interval_seconds = 3_600;
+    settings.openid4vc
+}
+
+#[actix_web::test]
+async fn revocation_bootstrap_loads_disabled_optional_and_required_policies() {
+    let disabled = load_revocation_policy(&revocation_settings(
+        Openid4vcRevocationPolicy::Disabled,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(!disabled.is_enabled());
+    assert!(disabled.snapshot().is_none());
+
+    let root = std::env::temp_dir().join(format!("nazoauth-revocation-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let path = write_fresh_revocation_snapshot(&root);
+
+    let optional = load_revocation_policy(&revocation_settings(
+        Openid4vcRevocationPolicy::Optional,
+        Some(path.clone()),
+    ))
+    .await
+    .unwrap();
+    assert!(optional.is_enabled());
+    assert!(!optional.is_required());
+    assert!(optional.snapshot().is_some());
+
+    let required = load_revocation_policy(&revocation_settings(
+        Openid4vcRevocationPolicy::Required,
+        Some(path),
+    ))
+    .await
+    .unwrap();
+    assert!(required.is_enabled());
+    assert!(required.is_required());
+    assert!(required.snapshot().is_some());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn revocation_bootstrap_reports_snapshot_io_and_freshness_failures() {
+    let missing = std::env::temp_dir().join(format!(
+        "nazoauth-missing-revocation-{}.json",
+        uuid::Uuid::now_v7()
+    ));
+    let error = match load_revocation_policy(&revocation_settings(
+        Openid4vcRevocationPolicy::Required,
+        Some(missing),
+    ))
+    .await
+    {
+        Ok(_) => panic!("missing revocation snapshot must fail bootstrap"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("failed to load OpenID4VC revocation snapshot")
+    );
+
+    let root = std::env::temp_dir().join(format!(
+        "nazoauth-invalid-revocation-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let malformed = root.join("malformed.json");
+    std::fs::write(&malformed, b"not-json").unwrap();
+    let malformed_error = read_revocation_snapshot(&malformed)
+        .await
+        .expect_err("malformed revocation snapshot must be rejected");
+    assert!(malformed_error.to_string().contains("invalid entry"));
+
+    let expired = root.join("expired.json");
+    let now = Utc::now();
+    let snapshot = CertificateRevocationSnapshot {
+        version: CertificateRevocationSnapshot::VERSION,
+        this_update: now - ChronoDuration::minutes(10),
+        next_update: now - ChronoDuration::minutes(1),
+        entries: Vec::new(),
+    };
+    std::fs::write(&expired, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let expired_error = read_revocation_snapshot(&expired)
+        .await
+        .expect_err("expired revocation snapshot must be rejected");
+    assert!(expired_error.to_string().contains("expired"));
+
     std::fs::remove_dir_all(root).unwrap();
 }
 

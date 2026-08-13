@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
 use nazo_openid4vp::{AuthorizationResponse, PresentationResult, PresentationTransaction};
@@ -42,6 +42,15 @@ pub struct CreatePresentationRequest {
     pub response_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_data: Option<Vec<Value>>,
+    /// The exact conformance lease that owns this verifier transaction.
+    ///
+    /// Dynamic Suite origins are per-run trust boundaries.  The transport
+    /// keeps the binding opaque and leaves its tenant/profile/origin/JTI
+    /// validation to the authorization-server domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_lease_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_task_jti: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -90,12 +99,15 @@ impl PresentationEndpoint {
     }
 
     fn management_authorized(&self, request: &HttpRequest) -> bool {
+        if self.management_token.is_empty() {
+            return false;
+        }
         request
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::trim)
+            .filter(|provided| !provided.is_empty())
             .is_some_and(|provided| constant_time_eq(provided.as_bytes(), &self.management_token))
     }
 }
@@ -187,12 +199,9 @@ fn parse_presentation_response(
             "Presentation responses must use application/x-www-form-urlencoded.",
         ));
     }
-    let mut values = std::collections::BTreeMap::new();
+    let mut values: BTreeMap<Cow<'_, str>, Cow<'_, str>> = BTreeMap::new();
     for (name, value) in url::form_urlencoded::parse(body) {
-        if values
-            .insert(name.into_owned(), value.into_owned())
-            .is_some()
-        {
+        if values.insert(name, value).is_some() {
             return Err(invalid_response(
                 "Presentation response parameters must not repeat.",
             ));
@@ -204,16 +213,18 @@ fn parse_presentation_response(
                 "direct_post.jwt cannot be mixed with plaintext parameters.",
             ));
         }
-        return Ok(PresentationResponseInput::DirectPostJwt(response));
+        return Ok(PresentationResponseInput::DirectPostJwt(
+            response.into_owned(),
+        ));
     }
-    let vp_token = values
-        .remove("vp_token")
-        .map(|value| serde_json::from_str(&value).unwrap_or(Value::String(value)));
+    let vp_token = values.remove("vp_token").map(|value| {
+        serde_json::from_str(value.as_ref()).unwrap_or_else(|_| Value::String(value.into_owned()))
+    });
     let response = AuthorizationResponse {
         vp_token,
-        state: values.remove("state"),
-        error: values.remove("error"),
-        error_description: values.remove("error_description"),
+        state: values.remove("state").map(Cow::into_owned),
+        error: values.remove("error").map(Cow::into_owned),
+        error_description: values.remove("error_description").map(Cow::into_owned),
     };
     if !values.is_empty() {
         return Err(invalid_response(

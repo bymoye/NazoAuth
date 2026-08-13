@@ -1,7 +1,10 @@
 use super::*;
+use aws_lc_rs::{
+    encoding::{AsDer, Pkcs8V1Der},
+    rsa::{KeyPair, KeySize},
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, EncodingKey, jwk::Jwk};
-use openssl::rsa::Rsa;
 use p256::elliptic_curve::{Generate, pkcs8::EncodePrivateKey};
 use serde_json::{Value, json};
 
@@ -88,8 +91,10 @@ fn decoding_key_rejects_unsupported_or_missing_algorithm_metadata() {
 }
 
 fn rsa_jwk(alg: &str) -> Value {
-    let der = Rsa::generate(2048).unwrap().private_key_to_der().unwrap();
-    let key = EncodingKey::from_rsa_der(&der);
+    let key_pair = KeyPair::generate(KeySize::Rsa2048).unwrap();
+    let pkcs8 = AsDer::<Pkcs8V1Der<'static>>::as_der(&key_pair).unwrap();
+    let private_key = pkcs8::PrivateKeyInfoRef::try_from(pkcs8.as_ref()).unwrap();
+    let key = EncodingKey::from_rsa_der(private_key.private_key.as_bytes());
     let mut value =
         serde_json::to_value(Jwk::from_encoding_key(&key, Algorithm::RS256).unwrap()).unwrap();
     value["alg"] = json!(alg);

@@ -1,9 +1,9 @@
 # NazoAuth Operator Task Protocol 实施任务书
 
-状态：实施中；本机可执行门禁已通过，Linux fuzz/精确提交 CI、正式 Release 与第 18 节唯一远端验收尚未完成
-日期：2026-07-31  
+状态：实施中；远端代码门禁已通过当前候选改动；正式双 Release 与第 18 节唯一远端验收尚未完成
+日期：2026-08-01
 设计计划：[operator-task-protocol-plan.zh-CN.md](../security/operator-task-protocol-plan.zh-CN.md)  
-源代码基线：`497a0adb441f4e3391e4521f821d9a81922e3961` 上的当前工作树
+源代码基线：`codex/cosign-private-staging` 当前工作树；`v0.1.8`、`v0.1.9` 测试发布均被 `release-security` 封闭拒绝，`v0.1.10` 的私有服务器零状态安装在受管 Valkey 备份检查中封闭失败，修复后的安装验收版本为 `v0.1.11`，最终 SHA 只由正式 Release 固定
 
 ## 1. 任务目标
 
@@ -227,6 +227,15 @@ OTP-000 基线与契约
 - [ ] `OTP-407` 为 unmanaged/dev 模式定义显式、可审计、无隐式降级的兼容行为。
 - [ ] `OTP-408` 解析和错误路径全面应用 zeroization/secret wrapper；禁止派生 Debug 泄漏。
 
+应用侧的部署绑定实现约束：签名验证后必须读取本机只读部署身份，并逐字段
+比较 `deployment_id`、`iss=controller:<deployment_id>` 和
+`aud=runtime:<deployment_id>`。运行时已有
+`DATA_DIR/instance/deployment-id` 或 operator-state 锚点时必须逐一比对；首次
+`migrate-apply` 尚未建立任一锚点时，才能使用已纳入 config manifest 的
+`DEPLOYMENT_ID` 作为显式 bootstrap 来源，并原子持久化 operator-state 锚点；
+其他操作必须已有该锚点。
+缺少两者或两者冲突均 fail closed；该校验不依赖 NazoAuthCtl 在线可用。
+
 ### 验收
 
 - [ ] forged、expired、wrong deployment/target/config、unknown operation 和 replay request 在任何
@@ -249,7 +258,18 @@ OTP-000 基线与契约
 - [ ] `OTP-504` 测试 private-key-created/keyset-not-committed 等中间崩溃状态，清理孤儿或安全
   完成，不把半状态作为成功。
 - [ ] `OTP-505` migration 使用 PostgreSQL advisory lock、Diesel ledger 和 ctl intent；并发执行
-  有界等待或明确冲突，已完成迁移返回结构化 no-op。
+  有界等待或明确冲突，数据库 session 的 `lock_timeout`/`statement_timeout` 必须小于 ctl
+  transport timeout，并在成功、失败和取消路径释放 advisory lock；已完成迁移返回结构化
+  `applied=false` no-op。
+- [ ] `OTP-505a` task lock 也必须有界（不超过 30 秒）；claim 前的锁竞争必须在 ctl 300 秒
+  kill 前以 transport 失败返回并保留 intent，不能写一个未持久化的 final receipt（锁持有者
+  可能随后发布同一 JTI 的成功 receipt）。锁已取得后的数据库锁/语句超时属于已 claim 请求的
+  执行失败，必须输出可验证 `RuntimeReceipt` 的 `TaskOutcome::Failed`，而不是让 transport
+  进程因业务失败退出非零。
+- [ ] `OTP-505b` 同一 JTI 的 `migrate-apply` 在 `Executing` 且无 receipt 时只允许依据 Diesel
+  migration ledger 幂等重入；其他 operation 仍 fail closed。完整可验签且绑定 request/deployment
+  的 receipt 临时文件可以原子收敛；不完整或不匹配的临时文件必须保留并拒绝恢复。Prepared
+  生命周期与等价临时副本可清理后继续。
 - [ ] `OTP-506` migration 完成后写应用收据；首次创建收据 schema 的 bootstrap 例外按计划书
   明确处理，不伪造跨数据库/宿主机事务。
 - [ ] `OTP-507` update/rollback lifecycle journal 可以从最后提交阶段恢复，收据永不因 rollback
@@ -262,6 +282,11 @@ OTP-000 基线与契约
 - [ ] 重放返回原结果或稳定 replay/in-progress 状态，并产生审计事件。
 - [ ] key store、migration ledger、ctl journal 三者没有相互冒充状态所有者。
 - [ ] 对应 `INV-06`、`INV-09`、`INV-11`、`INV-12`、`INV-13` 有证据。
+
+任务 transport 退出码与签名结果状态必须分别记录：有效请求的业务失败应由 stdout
+`TaskOutcome::Failed` 表达并保持 transport 成功退出；验签/绑定/签名密钥等前置失败才是
+没有可验证 receipt 的 transport 失败。ctl 超时或 kill 只说明未收到 transport 结果，不能据此
+断言迁移未执行。
 
 ## 10. OTP-600：Docker、Podman 与 systemd 操作级沙箱
 
@@ -458,7 +483,7 @@ OTP-000 基线与契约
   前后版本、request ID 和 rollback 准备证据。
 - [ ] `OTP-1110` 编写最终验收报告，逐项映射计划书第 18 节和 `INV-01` 至 `INV-18`，列出实际
   数量、环境、版本、失败、跳过与未验证边界。
-- [ ] `OTP-1113` 通过 `ssh hostinger` 只读盘点 NazoAuth 服务、容器、镜像、network、volume、
+- [ ] `OTP-1113` 通过私有部署服务器的 SSH 别名只读盘点 NazoAuth 服务、容器、镜像、network、volume、
   systemd、端口、反向代理引用、配置/数据/identity/keys/audit 路径和本地 OIDF suite；保存
   非秘密现状与归属证据。
 - [ ] `OTP-1114` 逐个验证绝对路径和资源标签后，彻底删除且只删除 `auth.nazo.run` 的现有
@@ -470,7 +495,7 @@ OTP-000 基线与契约
 - [ ] `OTP-1116` 从远端清理开始的任一错误、卡住、超时、人工内部修复、扩大权限或安全绕过
   都将该轮标记 FAILED；修复代码并完成本地门后，重新删除全部 NazoAuth 专属状态，从 install
   重新执行，不从失败步骤续跑。
-- [ ] `OTP-1117` 管理与安全旅程全部通过后，使用 hostinger 本地 OIDF suite 串行运行项目当前
+- [ ] `OTP-1117` 管理与安全旅程全部通过后，使用同机私有 OIDF suite 串行运行项目当前
   正式声明的完整 plan/variant 矩阵；不得抽样、关闭能力、改判定或添加无规范依据 skip。
 - [ ] `OTP-1118` 最终报告包含 commit、Release/build identity、artifact/OCI/binary digest、完整
   命令、退出码、request IDs、远端证据、OIDF suite 版本、全部 plan/variant/module 结果和路径，
@@ -506,7 +531,7 @@ sudo nazoauthctl audit verify
 
 ```bash
 sudo nazoauthctl update --plan
-sudo nazoauthctl update
+sudo nazoauthctl update --yes
 sudo nazoauthctl status
 sudo nazoauthctl audit show --request-id REQUEST_ID
 ```
@@ -530,7 +555,8 @@ sudo nazoauthctl keys validate
 在候选健康检查前注入可控失败，再执行：
 
 ```bash
-sudo nazoauthctl update
+sudo nazoauthctl update --yes
+sudo nazoauthctl recover-update --yes
 sudo nazoauthctl status
 sudo nazoauthctl audit show --request-id REQUEST_ID
 ```
@@ -539,6 +565,10 @@ sudo nazoauthctl audit show --request-id REQUEST_ID
 schema 是否变化、是否触及 barrier”；审计保留失败候选、双层 target identity 和恢复结果，
 不删除失败证据。另行演练 backup/PITR restore 和不可逆 migration barrier，二者不得显示为
 普通数据库自动回滚。
+
+所有观察命令在持久 update journal 或 identity transition 未收敛时必须保持只读并 fail
+closed，分别指向 `recover-update --yes` 或 `recover-identity --yes`；不得通过读取配置隐式
+继续任务、启动/停止 runtime、归档密钥、写审计或删除 journal。
 
 ### Journey E：离线恢复与身份轮换
 

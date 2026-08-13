@@ -127,6 +127,19 @@ fn fapi2_profile_preserves_exact_rejection_codes_and_descriptions() {
         ))
     );
 
+    let attested_client = ClientProfile {
+        client_type: "confidential",
+        authentication_method: "attest_jwt_client_auth",
+        sender_constraint: SenderConstraintPolicy::DpopRequired,
+    };
+    assert_eq!(
+        validate_token_request_profile(SecurityProfile::Fapi2Security, attested_client),
+        Err(ProtocolError::new(
+            ProtocolErrorCode::InvalidClient,
+            "FAPI2 profiles require private_key_jwt or mTLS client authentication.",
+        ))
+    );
+
     let unconstrained_client = ClientProfile {
         client_type: "confidential",
         authentication_method: "private_key_jwt",

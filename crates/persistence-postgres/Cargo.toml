@@ -1,6 +1,6 @@
 [package]
 name = "nazo-postgres"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,11 +10,13 @@ anyhow.workspace = true
 argon2.workspace = true
 aes-gcm.workspace = true
 rand.workspace = true
+rustls.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-diesel = { workspace = true, features = ["postgres", "uuid", "chrono", "serde_json", "64-column-tables"] }
-diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
+diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "serde_json", "64-column-tables"] }
+diesel-async = { workspace = true, features = ["postgres", "deadpool", "migrations"] }
 diesel_migrations.workspace = true
+futures-util.workspace = true
 nazo-identity.workspace = true
 nazo-auth.workspace = true
 nazo-runtime-modules.workspace = true
@@ -25,11 +27,16 @@ nazo-openid4vp.workspace = true
 nazo-digital-credentials.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["rt"] }
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+tracing.workspace = true
+url.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 
 [dev-dependencies]
-syn = { version = "2.0.118", features = ["full", "visit"] }
+syn = { version = "3.0.0", features = ["full", "visit"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 
 [lints]

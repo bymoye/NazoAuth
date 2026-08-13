@@ -17,9 +17,30 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Compose 将初始化脚本和安全默认配置随构建上下文放入镜像，不要求 Docker daemon
+能够直接读取 CLI 所在主机的源码绝对路径。使用远端 Docker context 或容器化 WebIDE
+时仍不得添加手工秘密初始化步骤。需要改变宿主机端口和浏览器看到的公开 origin 时执行：
+
+```sh
+NAZOAUTH_PORT=443 \
+NAZOAUTH_BIND_ADDRESS=0.0.0.0 \
+NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
+NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
+NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
+docker compose up -d --build
+```
+
+这仍是源码开发沙箱，不是经过签名 attestation 验证的正式 Release 安装。
+
+当容器化 WebIDE 或平台端口映射通过非 loopback 接口访问宿主机发布端口时，必须设置
+`NAZOAUTH_BIND_ADDRESS=0.0.0.0`。如果由同一宿主机上的反向代理终止 TLS，则保留默认的
+`127.0.0.1`。只有平台或防火墙能够限制明文端口的直接访问时，才能绑定所有接口。
+
 Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务，并用
 短生命周期的开发 operator identity 通过同一个签名 `nazoauth operator-task` 入口执行
-迁移。该 identity 明确不是生产信任根。可直接打开：
+迁移。该 identity 明确不是生产信任根。任务把本地自动化 actor 标识为
+`docker-compose`，并把预期 embedded release、revision 和 build ID 绑定到编译镜像时使用的
+同一组值；它不会联系或冒充 GitHub Actions。可直接打开：
 
 - `http://127.0.0.1:8000/ready`：依赖就绪探针
 - `http://127.0.0.1:8000/live`：进程存活探针
@@ -27,12 +48,15 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 
 首次源码构建需要联网下载 Rust 依赖；后续构建会复用本地容器缓存。
 
-默认配置只用于 loopback 本地体验。PostgreSQL、Valkey、签名密钥和头像均使用
-命名卷，执行 `docker compose down` 后仍会保留。除非明确要删除全部本地数据，
-不要执行 `docker compose down -v`。
+默认配置只用于 loopback 本地体验。PostgreSQL、Valkey 和应用状态（包括签名密钥、头像、
+生成的秘密、bootstrap 状态及 UI release 缓存）均使用命名卷，执行
+`docker compose down` 后仍会保留。除非明确要删除全部本地数据，不要执行
+`docker compose down -v`。
 
-新数据库没有管理员时，服务日志会输出一个限时、单次使用的初始化 URL。该 URL
-等同密码；通过它可以在未配置 SMTP 的情况下创建首任管理员。
+新数据库没有管理员时，服务会在私有 bootstrap 状态中创建限时、单次使用的 token，
+但不会打印 token 或携带 token 的 URL。正式受管流程通过 `nazoauthctl bootstrap-admin`
+验证并读取私有的 runtime-owned 状态；授权服务器只暴露 JSON `POST /auth/bootstrap-admin` API，不再提供
+后端内嵌初始化页面。
 
 ## 公开部署
 
@@ -42,6 +66,7 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 sudo nazoauthctl install \
   --runtime auto \
   --public-url https://auth.example.com
+sudo nazoauthctl bootstrap-admin
 ```
 
 `auto` 优先使用 Podman，其次使用 Docker。已有 PostgreSQL/Valkey、宿主机安装、
@@ -55,6 +80,59 @@ sudo nazoauthctl install \
 
 宿主机端口需要变化时设置 `NAZOAUTH_PORT`。该变量只改变本机监听端口，不改变
 issuer；`PUBLIC_BASE_URL` 仍必须等于客户端看到的公开 HTTPS 地址。
+
+### 反向代理与 mTLS
+
+启用 RFC 8705 或完整 OIDF profile 时，TLS 终止代理必须请求客户端证书，并通过
+RFC 9440 `Client-Cert` header 转交。NazoAuth 再根据客户端注册信息认证该证书；
+代理不得接受公网客户端自行提交的 `Client-Cert` 或 `Client-Cert-Chain`。服务配置
+使用 `MTLS_CERTIFICATE_SOURCE=rfc9440`，`TRUSTED_PROXY_CIDRS` 只填写 NazoAuth
+实际看到的精确代理地址。一个宿主地址足够时，不得信任整个容器网段。
+
+NazoAuthCtl 一致性测试每轮都会生成新的 CA 与叶证书，因此测试部署前的代理不能向
+客户端公布过期的固定 client-CA 列表。开始创建 Suite module 前，必须安装本轮生成的
+公开 CA bundle，并在同一次运行的 cleanup 中恢复旧 bundle。HAProxy 3.2 可按以下方式配置：
+
+叶证书的 subject DN 必须与 CA 的 subject DN 不同，其 issuer DN 则必须匹配该 CA。
+预检必须执行 `openssl verify -CAfile run-ca.pem client.pem`；否则，不同密钥却复用同一
+subject/issuer DN 的叶证书可能被 OpenSSL/HAProxy 判为自签证书并拒绝握手。
+
+```haproxy
+frontend nazoauth
+  bind :443 ssl crt /run/nazoauth/server.pem ca-file /run/nazoauth/active-conformance-client-cas.pem verify optional ssl-min-ver TLSv1.2 ssl-max-ver TLSv1.3 no-tls-tickets ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384 ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
+  http-request del-header Client-Cert
+  http-request del-header Client-Cert-Chain
+  http-request set-header Client-Cert ":%[ssl_c_der,base64]:" if { ssl_c_used }
+  default_backend nazoauth
+
+backend nazoauth
+  server app 127.0.0.1:8000 check
+```
+
+同一个 listener 还承载普通 HTTPS 路由时，必须使用 `verify optional` 请求证书；
+`verify none` 不会请求。客户端一旦提交证书，就必须能链接到本轮 active bundle。
+NazoAuth 仍会验证注册的 subject/SAN 和可选证书摘要。同时还必须满足：
+
+- HAProxy 先删除公网请求中的证书 header，再写入自己从 TLS 连接取得的证书；
+- 明文 upstream 只绑定 loopback，或以其他方式确保公网客户端无法直连；
+- NazoAuth 只信任精确代理地址，并按已注册证书身份验证收到的叶证书；
+- TLS 1.2 与 TLS 1.3 分别限制为批准的 AES-GCM cipher suite。
+
+本轮 bundle 只能来自 active lease 绑定的公开 `mtls_trust_anchor_pem`。必须原子写入、
+校验整个 bundle、重载代理，并在创建 Suite module 前核对 digest。即使运行被中断，
+cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执行 install/restore；除非
+每轮拥有独立 listener 和 CA bundle，否则不能并发改变代理信任。严禁用
+`ca-ignore-err all` 或 `crt-ignore-err all` 代替安装本轮 CA：这会把全部证书链信任
+委托给应用，并可能削弱只按标准 subject selector 注册的 RFC 8705 客户端。
+
+普通生产客户端若由固定 CA 签发，应把该 CA 安装进 HAProxy，并在独立 mTLS listener
+使用 `verify required`。除非控制面能原子安装并恢复每轮 CA，否则不得让该 listener
+同时承担动态一致性测试证书。
+
+重载前必须使用相同 HAProxy 镜像或二进制执行
+`haproxy -c -f /path/to/candidate.cfg`，并保存 root-only 的旧配置。重载后验证
+`/ready`、Discovery、Suite 未授权边界、AES-GCM 握手成功，以及 CBC 与 CHACHA20
+被拒绝。任一检查失败都应立即恢复旧配置并再次重载。
 
 ## 验证
 

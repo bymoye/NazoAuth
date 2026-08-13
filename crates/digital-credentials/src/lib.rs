@@ -23,8 +23,10 @@ pub use jwe::{
     encrypt_ecdh_es_deflate,
 };
 pub use trust::{
-    CredentialFuture, CredentialSignInput, CredentialSignerPort, CredentialTrustError,
-    CredentialVerifierPort, PresentedCredential, VerifiedCredential,
+    CertificateRevocationEntry, CertificateRevocationPolicy, CertificateRevocationSnapshot,
+    CertificateRevocationSnapshotError, CertificateRevocationStatus, CredentialFuture,
+    CredentialSignInput, CredentialSignerPort, CredentialTrustError, CredentialVerifierPort,
+    PresentedCredential, VcIssuerTrustPolicy, VerifiedCredential, certificate_identity,
 };
 
 pub const SD_JWT_VC_MEDIA_TYPE: &str = "dc+sd-jwt";

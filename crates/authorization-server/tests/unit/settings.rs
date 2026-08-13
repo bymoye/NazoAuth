@@ -7,7 +7,7 @@ const KEY_ATTESTATION_JWKS: &str =
 const ATTESTATION_CREDENTIAL_CONFIGURATIONS: &str = r#"{"pid":{"format":"dc+sd-jwt","scope":"pid","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"attestation":{"proof_signing_alg_values_supported":["ES256"],"key_attestations_required":{"key_storage":["iso_18045_moderate"]}}},"vct":"https://issuer.example/credentials/pid"}}"#;
 
 #[test]
-fn key_attestation_policy_requires_its_own_trust_store() {
+fn key_attestation_policy_can_defer_trust_to_a_scoped_conformance_lease() {
     let config = ConfigSource::from_pairs_for_test([
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
         (
@@ -21,6 +21,11 @@ fn key_attestation_policy_requires_its_own_trust_store() {
         (
             "OPENID4VC_TRUST_ANCHORS_FILE",
             "runtime/openid4vc-roots.pem",
+        ),
+        ("OPENID4VC_REVOCATION_POLICY", "required"),
+        (
+            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
+            "runtime/openid4vc-revocation.json",
         ),
         (
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
@@ -36,15 +41,9 @@ fn key_attestation_policy_requires_its_own_trust_store() {
         ),
     ]);
 
-    let error = settings_error(
-        &config,
-        "holder key attestation needs an independent trust store",
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("OPENID4VC_KEY_ATTESTATION_JWKS_JSON is required")
-    );
+    let settings =
+        Settings::from_config(&config).expect("lease-scoped trust is resolved at request time");
+    assert!(settings.openid4vc.key_attestation_jwks.is_none());
 }
 
 #[test]
@@ -102,6 +101,38 @@ fn default_dpop_nonce_policy_is_required() {
     assert_eq!(
         settings.protocol.dpop_nonce_policy,
         DpopNoncePolicy::Required
+    );
+}
+
+#[test]
+fn shared_ip_admission_defaults_do_not_replace_failed_login_throttling() {
+    let settings = Settings::from_config(&ConfigSource::default()).unwrap();
+    let rate_limit = &settings.identity.rate_limit;
+
+    assert_eq!(rate_limit.window_seconds, 60);
+    assert_eq!(rate_limit.auth_max_requests, 100_000);
+    assert_eq!(rate_limit.token_max_requests, 100_000);
+    assert_eq!(rate_limit.token_management_max_requests, 100_000);
+    assert_eq!(rate_limit.login_failure_window_seconds, 900);
+    assert_eq!(rate_limit.login_failure_ip_email_max_attempts, 5);
+    assert_eq!(rate_limit.mfa_failure_window_seconds, 900);
+    assert_eq!(rate_limit.mfa_failure_max_attempts, 5);
+    assert_eq!(settings.session.pending_mfa_session_ttl_seconds, 600);
+}
+
+#[test]
+fn pending_mfa_session_ttl_must_be_shorter_than_full_session_ttl() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("SESSION_TTL_SECONDS", "600"),
+        ("PENDING_MFA_SESSION_TTL_SECONDS", "600"),
+    ]);
+    let error = settings_error(
+        &config,
+        "pending MFA session must expire before full session",
+    );
+    assert_eq!(
+        error.to_string(),
+        "PENDING_MFA_SESSION_TTL_SECONDS must be less than SESSION_TTL_SECONDS"
     );
 }
 
@@ -448,6 +479,58 @@ fn invalid_ciba_security_profile_is_rejected() {
 }
 
 #[test]
+fn ciba_automated_decision_requires_explicit_transport_and_secret() {
+    let token_only = ConfigSource::from_pairs_for_test([(
+        "CIBA_AUTOMATED_DECISION_TOKEN",
+        "test-ciba-automated-decision-token-32",
+    )]);
+    let lease_gated = Settings::from_config(&token_only).unwrap();
+    assert_eq!(
+        lease_gated.ciba.ciba_automated_decision_mode,
+        CibaAutomatedDecisionMode::Disabled
+    );
+    assert_eq!(
+        lease_gated.ciba.ciba_automated_decision_token.as_deref(),
+        Some("test-ciba-automated-decision-token-32")
+    );
+
+    let mode_only = ConfigSource::from_pairs_for_test([("CIBA_AUTOMATED_DECISION_MODE", "header")]);
+    assert!(Settings::from_config(&mode_only).is_err());
+
+    let configured = ConfigSource::from_pairs_for_test([
+        ("CIBA_AUTOMATED_DECISION_MODE", "header"),
+        (
+            "CIBA_AUTOMATED_DECISION_TOKEN",
+            "test-ciba-automated-decision-token-32",
+        ),
+    ]);
+    let settings = Settings::from_config(&configured).unwrap();
+    assert_eq!(
+        settings.ciba.ciba_automated_decision_mode,
+        CibaAutomatedDecisionMode::Header
+    );
+}
+
+#[test]
+fn secure_deployments_default_to_host_only_cookie_names() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("PUBLIC_BASE_URL", "https://auth.example"),
+        (
+            "CLIENT_SECRET_PEPPER",
+            "test-client-secret-pepper-at-least-32-bytes",
+        ),
+    ]);
+    let settings = Settings::from_config(&config).unwrap();
+
+    assert!(settings.session.cookie_secure);
+    assert_eq!(
+        settings.session.session_cookie_name,
+        "__Host-nazo_oauth_session"
+    );
+    assert_eq!(settings.session.csrf_cookie_name, "__Host-nazo_oauth_csrf");
+}
+
+#[test]
 fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     let defaults = Settings::from_config(&ConfigSource::default()).unwrap();
     assert!(!defaults.modules.enable_request_object);
@@ -458,6 +541,10 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     assert!(!defaults.modules.enable_frontchannel_logout);
     assert!(!defaults.modules.enable_session_management);
     assert!(!defaults.modules.enable_ciba);
+    assert_eq!(
+        defaults.ciba.ciba_automated_decision_mode,
+        CibaAutomatedDecisionMode::Disabled
+    );
     assert!(!defaults.modules.enable_native_sso);
     assert!(!defaults.modules.enable_scim_security_events);
     assert!(!defaults.modules.enable_openid4vci_issuer);
@@ -479,14 +566,7 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     assert!(defaults.ciba.ciba_notification_private_origins.is_empty());
 
     let config = ConfigSource::from_pairs_for_test([
-        ("ENABLE_REQUEST_OBJECT", "true"),
-        ("ENABLE_PAR_REQUEST_OBJECT", "true"),
         ("ENABLE_AUTHORIZATION_DETAILS", "true"),
-        ("ENABLE_DEVICE_AUTHORIZATION_GRANT", "true"),
-        ("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true"),
-        ("ENABLE_FRONTCHANNEL_LOGOUT", "true"),
-        ("ENABLE_SESSION_MANAGEMENT", "true"),
-        ("ENABLE_CIBA", "true"),
         ("ENABLE_NATIVE_SSO", "true"),
         ("ENABLE_SCIM_SECURITY_EVENTS", "true"),
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
@@ -502,6 +582,11 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
         (
             "OPENID4VC_TRUST_ANCHORS_FILE",
             "runtime/openid4vc-roots.pem",
+        ),
+        ("OPENID4VC_REVOCATION_POLICY", "required"),
+        (
+            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
+            "runtime/openid4vc-revocation.json",
         ),
         (
             "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
@@ -539,14 +624,14 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     ]);
     let settings = Settings::from_config(&config).unwrap();
 
-    assert!(settings.modules.enable_request_object);
-    assert!(settings.modules.enable_par_request_object);
+    assert!(!settings.modules.enable_request_object);
+    assert!(!settings.modules.enable_par_request_object);
     assert!(settings.modules.enable_authorization_details);
-    assert!(settings.modules.enable_device_authorization_grant);
+    assert!(!settings.modules.enable_device_authorization_grant);
     assert!(settings.modules.enable_dynamic_client_registration);
-    assert!(settings.modules.enable_frontchannel_logout);
-    assert!(settings.modules.enable_session_management);
-    assert!(settings.modules.enable_ciba);
+    assert!(!settings.modules.enable_frontchannel_logout);
+    assert!(!settings.modules.enable_session_management);
+    assert!(!settings.modules.enable_ciba);
     assert!(settings.modules.enable_native_sso);
     assert!(settings.modules.enable_scim_security_events);
     assert!(settings.modules.enable_openid4vci_issuer);
@@ -589,25 +674,15 @@ fn scim_event_retention_is_bounded_for_delivery_and_data_minimization() {
 }
 
 #[test]
-fn dynamic_client_registration_requires_initial_access_token() {
-    let missing_token =
-        ConfigSource::from_pairs_for_test([("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true")]);
-    let error = settings_error(
-        &missing_token,
-        "dynamic registration must not become open registration by accident",
-    );
-    assert_eq!(
-        error.to_string(),
-        "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN is required when ENABLE_DYNAMIC_CLIENT_REGISTRATION=true"
-    );
+fn dynamic_client_registration_is_enabled_only_with_an_initial_access_token() {
+    let missing_token = ConfigSource::from_pairs_for_test([]);
+    let settings = Settings::from_config(&missing_token).unwrap();
+    assert!(!settings.modules.enable_dynamic_client_registration);
 
-    let protected = ConfigSource::from_pairs_for_test([
-        ("ENABLE_DYNAMIC_CLIENT_REGISTRATION", "true"),
-        (
-            "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
-            "register-token",
-        ),
-    ]);
+    let protected = ConfigSource::from_pairs_for_test([(
+        "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
+        "register-token",
+    )]);
     let settings = Settings::from_config(&protected).unwrap();
     assert!(settings.modules.enable_dynamic_client_registration);
     assert_eq!(
@@ -617,6 +692,50 @@ fn dynamic_client_registration_requires_initial_access_token() {
             .as_deref(),
         Some("register-token")
     );
+}
+
+#[test]
+fn token_issuance_response_key_ring_requires_independent_current_pair() {
+    let missing = ConfigSource::from_pairs_for_test([]);
+    assert!(
+        crate::settings::token_issuance_response_key_ring(&missing)
+            .expect_err("missing response key must fail closed")
+            .to_string()
+            .contains("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")
+    );
+
+    let valid = ConfigSource::from_pairs_for_test([
+        (
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        ("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID", "current"),
+        (
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        ),
+        (
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID",
+            "previous",
+        ),
+    ]);
+    let ring = crate::settings::token_issuance_response_key_ring(&valid)
+        .expect("independent current/previous key ring should parse");
+    assert_eq!(ring.current_id(), "current");
+
+    let duplicate = ConfigSource::from_pairs_for_test([
+        (
+            "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        ("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID", "same"),
+        (
+            "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        ),
+        ("TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_ID", "same"),
+    ]);
+    assert!(crate::settings::token_issuance_response_key_ring(&duplicate).is_err());
 }
 
 #[test]
@@ -750,35 +869,36 @@ fn protected_resource_identifier_rejects_fragment_and_non_https_remote_url() {
 
 #[test]
 fn data_dir_drives_default_persistent_storage_paths() {
-    let config = ConfigSource::from_pairs_for_test([("DATA_DIR", "/srv/nazo-oauth")]);
+    let config = ConfigSource::from_pairs_for_test([("DATA_DIR", "test-runtime/nazo-oauth")]);
     let settings = Settings::from_config(&config).unwrap();
+    let data_dir = std::fs::canonicalize(".")
+        .unwrap()
+        .join("test-runtime/nazo-oauth");
 
     assert_eq!(
         settings.storage.avatar_storage_dir,
-        std::path::PathBuf::from("/srv/nazo-oauth/avatars")
+        data_dir.join("avatars")
     );
-    assert_eq!(
-        settings.keys.jwk_keys_dir,
-        std::path::PathBuf::from("/srv/nazo-oauth/keys")
-    );
+    assert_eq!(settings.keys.jwk_keys_dir, data_dir.join("keys"));
 }
 
 #[test]
 fn explicit_storage_paths_override_data_dir_derivations() {
     let config = ConfigSource::from_pairs_for_test([
-        ("DATA_DIR", "/srv/nazo-oauth"),
-        ("AVATAR_STORAGE_DIR", "/data/avatars"),
-        ("JWK_KEYS_DIR", "/secure/keys"),
+        ("DATA_DIR", "test-runtime/nazo-oauth"),
+        ("AVATAR_STORAGE_DIR", "test-runtime/avatars"),
+        ("JWK_KEYS_DIR", "test-runtime/keys"),
     ]);
     let settings = Settings::from_config(&config).unwrap();
+    let config_dir = std::fs::canonicalize(".").unwrap();
 
     assert_eq!(
         settings.storage.avatar_storage_dir,
-        std::path::PathBuf::from("/data/avatars")
+        config_dir.join("test-runtime/avatars")
     );
     assert_eq!(
         settings.keys.jwk_keys_dir,
-        std::path::PathBuf::from("/secure/keys")
+        config_dir.join("test-runtime/keys")
     );
 }
 

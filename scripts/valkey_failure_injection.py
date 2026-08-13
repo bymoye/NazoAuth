@@ -40,6 +40,7 @@ def main() -> int:
         "status": "not_ready",
         "checks": {
             "postgresql": {"status": "up"},
+            "signing_keys": {"status": "up"},
             "valkey": {"status": "down"},
         },
     }:

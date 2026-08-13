@@ -14,19 +14,26 @@ use actix_web::http::header::HeaderMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use chrono::Utc;
 use nazo_auth::normalize_sha256_thumbprint;
 use nazo_http_actix::IpCidr;
 use nazo_http_actix::request_from_trusted_proxy_cidrs;
-use openssl::asn1::Asn1Time;
-use openssl::nid::Nid;
-use openssl::x509::{X509, X509NameRef};
 use serde_json::Value;
 
 use sha2::Digest;
 use sha2::Sha256;
-use std::cmp::Ordering;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use x509_parser::{
+    certificate::X509Certificate,
+    extensions::GeneralName,
+    objects::{oid_registry, oid2sn},
+    oid_registry::{
+        OID_PKCS9_EMAIL_ADDRESS, OID_X509_COMMON_NAME, OID_X509_COUNTRY_NAME,
+        OID_X509_LOCALITY_NAME, OID_X509_ORGANIZATION_NAME, OID_X509_ORGANIZATIONAL_UNIT,
+        OID_X509_STATE_OR_PROVINCE_NAME,
+    },
+    parse_x509_certificate,
+    x509::X509Name,
+};
 
 const VERIFY_HEADER: &str = "x-ssl-client-verify";
 const DIRECT_THUMBPRINT_HEADERS: &[&str] = &[
@@ -208,27 +215,25 @@ pub(crate) fn certificate_pem_identity(value: &str) -> Option<MtlsClientCertific
 }
 
 pub(crate) fn certificate_der_identity(der: &[u8]) -> Option<MtlsClientCertificate> {
-    let x509 = X509::from_der(der).ok()?;
-    x509_is_current(&x509)?;
+    let x509 = parse_current_x509(der)?;
     let mut certificate = MtlsClientCertificate {
         thumbprint: Some(URL_SAFE_NO_PAD.encode(Sha256::digest(der))),
-        subject_dn: Some(subject_name_to_dn(x509.subject_name())?),
+        subject_dn: Some(subject_name_to_dn(x509.subject())?),
         verified_certificate_expiry: true,
         ..MtlsClientCertificate::default()
     };
-    if let Some(names) = x509.subject_alt_names() {
-        for name in names {
-            if let Some(value) = name.dnsname() {
-                certificate.san_dns.push(value.to_owned());
-            }
-            if let Some(value) = name.uri() {
-                certificate.san_uri.push(value.to_owned());
-            }
-            if let Some(value) = name.email() {
-                certificate.san_email.push(value.to_owned());
-            }
-            if let Some(value) = name.ipaddress().and_then(ipaddress_to_string) {
-                certificate.san_ip.push(value);
+    if let Some(names) = x509.subject_alternative_name().ok().flatten() {
+        for name in &names.value.general_names {
+            match name {
+                GeneralName::DNSName(value) => certificate.san_dns.push((*value).to_owned()),
+                GeneralName::URI(value) => certificate.san_uri.push((*value).to_owned()),
+                GeneralName::RFC822Name(value) => certificate.san_email.push((*value).to_owned()),
+                GeneralName::IPAddress(value) => {
+                    if let Some(value) = ipaddress_to_string(value) {
+                        certificate.san_ip.push(value);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -248,8 +253,7 @@ pub(crate) fn certificate_x5c_thumbprint(value: &str) -> Option<String> {
                 .collect::<String>(),
         )
         .ok()?;
-    let x509 = X509::from_der(&der).ok()?;
-    x509_is_current(&x509)?;
+    parse_current_x509(&der)?;
     Some(URL_SAFE_NO_PAD.encode(Sha256::digest(&der)))
 }
 
@@ -443,34 +447,44 @@ fn decode_forwarded_pem(value: &str) -> String {
     decoded.replace("\\n", "\n")
 }
 
-fn x509_is_current(x509: &X509) -> Option<()> {
-    let now = Asn1Time::from_unix(Utc::now().timestamp()).ok()?;
-    let not_before = x509.not_before().compare(&now).ok()?;
-    let not_after = x509.not_after().compare(&now).ok()?;
-    (not_before != Ordering::Greater && not_after != Ordering::Less).then_some(())
+fn x509_is_current(x509: &X509Certificate<'_>) -> Option<()> {
+    x509.validity().is_valid().then_some(())
 }
 
-fn subject_name_to_dn(name: &X509NameRef) -> Option<String> {
+fn parse_current_x509(der: &[u8]) -> Option<X509Certificate<'_>> {
+    let (remaining, certificate) = parse_x509_certificate(der).ok()?;
+    if !remaining.is_empty() {
+        return None;
+    }
+    x509_is_current(&certificate)?;
+    Some(certificate)
+}
+
+fn subject_name_to_dn(name: &X509Name<'_>) -> Option<String> {
     let mut parts = Vec::new();
-    for entry in name.entries() {
-        let short_name = nid_short_name(entry.object().nid())?;
-        let value = entry.data().to_string().ok()?;
-        parts.push(format!("{short_name}={}", escape_dn_value(&value)));
+    for entry in name.iter_attributes() {
+        let oid = entry.attr_type();
+        let short_name = if oid == &OID_X509_COMMON_NAME {
+            "CN"
+        } else if oid == &OID_X509_COUNTRY_NAME {
+            "C"
+        } else if oid == &OID_X509_STATE_OR_PROVINCE_NAME {
+            "ST"
+        } else if oid == &OID_X509_LOCALITY_NAME {
+            "L"
+        } else if oid == &OID_X509_ORGANIZATION_NAME {
+            "O"
+        } else if oid == &OID_X509_ORGANIZATIONAL_UNIT {
+            "OU"
+        } else if oid == &OID_PKCS9_EMAIL_ADDRESS {
+            "emailAddress"
+        } else {
+            oid2sn(oid, oid_registry()).ok()?
+        };
+        let value = entry.as_str().ok()?;
+        parts.push(format!("{short_name}={}", escape_dn_value(value)));
     }
     (!parts.is_empty()).then(|| parts.join(","))
-}
-
-fn nid_short_name(nid: Nid) -> Option<&'static str> {
-    match nid {
-        Nid::COMMONNAME => Some("CN"),
-        Nid::COUNTRYNAME => Some("C"),
-        Nid::STATEORPROVINCENAME => Some("ST"),
-        Nid::LOCALITYNAME => Some("L"),
-        Nid::ORGANIZATIONNAME => Some("O"),
-        Nid::ORGANIZATIONALUNITNAME => Some("OU"),
-        Nid::PKCS9_EMAILADDRESS => Some("emailAddress"),
-        _ => nid.short_name().ok(),
-    }
 }
 
 fn escape_dn_value(value: &str) -> String {

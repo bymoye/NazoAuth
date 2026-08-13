@@ -1,6 +1,7 @@
 //! RFC 8628 Device Authorization Grant.
-use crate::adapters::audit::audit_event;
-use crate::adapters::audit::audit_fields;
+use crate::adapters::audit::{
+    audit_event, audit_event_required, audit_fields, ensure_audit_storage,
+};
 use crate::adapters::security::ClientCredentials;
 use crate::adapters::security::blake3_hex;
 use crate::adapters::security::extract_client_credentials_with_trusted_proxies;
@@ -469,8 +470,8 @@ pub(crate) async fn device_decision(
     if !sessions.has_valid_csrf_token(&req, form.csrf_token.as_deref()) {
         return csrf_error();
     }
-    let user = match sessions.current_user_or_login_required(&req).await {
-        Ok(user) => user,
+    let session = match sessions.current_session_or_login_required(&req).await {
+        Ok(session) => session,
         Err(response) => return response,
     };
     let normalized_user_code = normalize_user_code(&form.user_code);
@@ -502,6 +503,48 @@ pub(crate) async fn device_decision(
             );
         }
     };
+    let decision_name = match form.decision.as_str() {
+        "approve" => "approve",
+        "deny" => "deny",
+        _ => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "授权决策无效."),
+    };
+    if let Err(error) = ensure_audit_storage().await {
+        tracing::error!(%error, "device decision audit preflight failed");
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "设备授权审计存储不可用.",
+        );
+    }
+    if let Err(error) = audit_event_required(
+        "device_decision_intent",
+        audit_fields(&[
+            ("client_id", json!(payload.client_id.clone())),
+            ("user_id", json!(session.user.id())),
+            ("decision", json!(decision_name)),
+            ("decision_source", json!("user")),
+            ("user_code_hash", json!(blake3_hex(&normalized_user_code))),
+            ("scope", json!(payload.scopes.join(" "))),
+            ("audience", json!(payload.resource_indicators.clone())),
+            (
+                "source_ip_hash",
+                json!(blake3_hex(&client_ip_with_context(
+                    &req,
+                    config.client_ip_header_mode,
+                    &config.trusted_proxy_cidrs,
+                ))),
+            ),
+        ]),
+    )
+    .await
+    {
+        tracing::error!(%error, "device decision audit intent failed");
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "设备授权审计无法持久化.",
+        );
+    }
     let result = match form.decision.as_str() {
         "deny" => device_service.deny(&normalized_user_code, Utc::now).await,
         "approve" => {
@@ -523,7 +566,7 @@ pub(crate) async fn device_decision(
                     );
                 }
             };
-            let subject = match device_authorization_subject(config, user.id(), &client) {
+            let subject = match device_authorization_subject(config, session.user.id(), &client) {
                 Ok(subject) => subject,
                 Err(error) => {
                     tracing::warn!(%error, "failed to compute device authorization subject");
@@ -538,11 +581,11 @@ pub(crate) async fn device_decision(
                 .approve(
                     &normalized_user_code,
                     DeviceAuthorizationApproval {
-                        user_id: user.id(),
+                        user_id: session.user.id(),
                         subject,
-                        auth_time: Utc::now().timestamp(),
-                        amr: vec!["pwd".to_owned()],
-                        oidc_sid: None,
+                        auth_time: session.auth_time,
+                        amr: session.amr.clone(),
+                        oidc_sid: Some(session.oidc_sid.clone()),
                     },
                     &client,
                     grant_repository,
@@ -550,10 +593,38 @@ pub(crate) async fn device_decision(
                 )
                 .await
         }
-        _ => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "授权决策无效."),
+        _ => unreachable!("validated device decision must be approve or deny"),
     };
+    // The required intent is persisted before the Valkey/PostgreSQL decision
+    // saga. The committed outcome remains best-effort because those stores
+    // cannot atomically include the audit ledger.
     match result {
-        Ok(()) => HttpResponse::Ok().finish(),
+        Ok(()) => {
+            let event = match form.decision.as_str() {
+                "approve" => "device_authorization_approved",
+                "deny" => "device_authorization_denied",
+                _ => unreachable!("validated device decision must be approve or deny"),
+            };
+            audit_event(
+                event,
+                audit_fields(&[
+                    ("client_id", json!(payload.client_id)),
+                    ("user_id", json!(session.user.id())),
+                    ("user_code_hash", json!(blake3_hex(&normalized_user_code))),
+                    ("scope", json!(payload.scopes.join(" "))),
+                    ("audience", json!(payload.resource_indicators)),
+                    (
+                        "source_ip_hash",
+                        json!(blake3_hex(&client_ip_with_context(
+                            &req,
+                            config.client_ip_header_mode,
+                            &config.trusted_proxy_cidrs,
+                        ))),
+                    ),
+                ]),
+            );
+            HttpResponse::Ok().finish()
+        }
         Err(
             DeviceDecisionFailure::Missing
             | DeviceDecisionFailure::AlreadyHandled

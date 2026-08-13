@@ -67,7 +67,7 @@ jobs:
   source-policy-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Check real HTTP source policy
         run: |
           python -m py_compile scripts/full_real_request_source_policy.py scripts/full_real_request_e2e.py scripts/rfc9967_scim_set_e2e.py
@@ -81,8 +81,8 @@ jobs:
   supply-chain-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
       - name: Install pinned Rust supply-chain tools
@@ -113,17 +113,32 @@ jobs:
           cache-to: type=gha,mode=max,scope=nazo-oauth-service
       - name: Scan service image
         run: |
-          docker save nazo-oauth-supply-chain:${{ github.sha }} -o /tmp/nazo-oauth-supply-chain.tar
+          mkdir -p target/ci-service-image
+          docker save nazo-oauth-supply-chain:${{ github.sha }} -o target/ci-service-image/nazo-oauth-service.tar
           docker run --rm \
-            -v /tmp/nazo-oauth-supply-chain.tar:/image.tar:ro \
+            -v "$PWD/target/ci-service-image/nazo-oauth-service.tar:/image.tar:ro" \
             docker.io/aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f image \
               --format table \
               --exit-code 1 \
               --severity CRITICAL,HIGH \
               --ignore-unfixed \
               --input /image.tar
+          docker image inspect nazo-oauth-supply-chain:${{ github.sha }} --format '{{.Id}}' \
+            > target/ci-service-image/image-id.txt
+          (
+            cd target/ci-service-image
+            sha256sum nazo-oauth-service.tar > nazo-oauth-service.tar.sha256
+          )
+      - name: Upload scanned service image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nazo-oauth-service-image-${{ github.sha }}
+          path: target/ci-service-image
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       - name: Upload SBOM
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nazo-oauth-rust-sbom
           path: target/nazo-oauth-server.cdx.json
@@ -135,17 +150,24 @@ jobs:
       - source-policy-gate
       - supply-chain-gate
     steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: docker/setup-buildx-action@v4.2.0
-      - name: Build service image
-        uses: docker/build-push-action@v7.3.0
+      - uses: actions/checkout@v7.0.1
+      - name: Download scanned service image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          context: .
-          file: Containerfile
-          tags: nazo-oauth-e2e:latest
-          load: true
-          cache-from: type=gha,scope=nazo-oauth-service
-          cache-to: type=gha,mode=max,scope=nazo-oauth-service
+          name: nazo-oauth-service-image-${{ github.sha }}
+          path: target/ci-service-image
+      - name: Verify and load scanned service image
+        run: |
+          (
+            cd target/ci-service-image
+            sha256sum --check nazo-oauth-service.tar.sha256
+          )
+          docker load --input target/ci-service-image/nazo-oauth-service.tar
+          expected_image_id="$(cat target/ci-service-image/image-id.txt)"
+          actual_image_id="$(docker image inspect nazo-oauth-supply-chain:${{ github.sha }} --format '{{.Id}}')"
+          test "$actual_image_id" = "$expected_image_id"
+          docker tag nazo-oauth-supply-chain:${{ github.sha }} nazo-oauth-e2e:latest
+      - uses: docker/setup-buildx-action@v4.2.0
       - name: Build E2E runner image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -157,11 +179,14 @@ jobs:
           file: .github/e2e-runner.Containerfile
       - name: Prepare isolated runtime config
         run: |
-          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap
+          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap runtime/e2e/ui-releases runtime/e2e/instance runtime/e2e/runtime-primary runtime/e2e/runtime-signed
           python scripts/ensure_runtime_keyset.py --key-dir runtime/e2e/keys --active-alg RS256 --required-alg RS256 --required-alg PS256
           cat > runtime/e2e/.env.yaml <<'YAML'
           BIND: "0.0.0.0:8000"
           DATA_DIR: "/var/lib/nazo_oauth"
+          DEPLOYMENT_ID: "deployment-ci"
+          RUNTIME_INSTANCE_ID: "e2e-primary"
+          INSTANCE_IDENTITY_DIR: "/var/lib/nazo_oauth/runtime-instance"
           DATABASE_URL: "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth"
           VALKEY_URL: "redis://nazo-oauth-e2e-valkey:6379/0"
           VALKEY_COMMAND_TIMEOUT_MS: 1000
@@ -181,17 +206,12 @@ jobs:
           AVATAR_MAX_BYTES: 2097152
           CLIENT_DELIVERY_TTL_SECONDS: 86400
           RATE_LIMIT_WINDOW_SECONDS: 60
-          AUTH_RATE_LIMIT_MAX_REQUESTS: 100000
-          TOKEN_RATE_LIMIT_MAX_REQUESTS: 100000
-          TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS: 100000
           TRUSTED_PROXY_CIDRS: ""
           CLIENT_IP_HEADER_MODE: "none"
           SUBJECT_TYPE: "public"
           PAIRWISE_SUBJECT_SECRET: ""
           PAR_TTL_SECONDS: 90
           REQUIRE_PUSHED_AUTHORIZATION_REQUESTS: false
-          ENABLE_REQUEST_OBJECT: true
-          ENABLE_PAR_REQUEST_OBJECT: true
           ENABLE_AUTHORIZATION_DETAILS: true
           ENABLE_FAPI_HTTP_SIGNATURES: false
           FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS: 60
@@ -217,7 +237,13 @@ jobs:
           JWK_KEYS_DIR: "/var/lib/nazo_oauth/keys"
           RUST_LOG: "info"
           YAML
+          mfa_totp_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+          {
+            echo 'MFA_TOTP_ENCRYPTION_KEY_ID: "e2e-ephemeral-v1"'
+            printf 'MFA_TOTP_ENCRYPTION_KEY: "%s"\n' "$mfa_totp_key"
+          } >> runtime/e2e/.env.yaml
           cp runtime/e2e/.env.yaml runtime/e2e/.env-signed.yaml
+          sed -i 's/RUNTIME_INSTANCE_ID: "e2e-primary"/RUNTIME_INSTANCE_ID: "e2e-signed"/' runtime/e2e/.env-signed.yaml
           sed -i 's/ENABLE_FAPI_HTTP_SIGNATURES: false/ENABLE_FAPI_HTTP_SIGNATURES: true/' runtime/e2e/.env-signed.yaml
       - name: Start PostgreSQL and Valkey
         run: |
@@ -238,11 +264,20 @@ jobs:
       - name: Migrate and start server
         run: |
           image_digest="$(docker image inspect nazo-oauth-e2e:latest --format '{{.Id}}')"
-          cargo run --locked --quiet -p nazo-operator-protocol --example ci_operator_task -- prepare \
+          secret_revision=ci-secret-revision
+          cargo run --locked --quiet -p nazo-operator-protocol --example automation_operator_task -- prepare \
             --config runtime/e2e/.env.yaml \
+            --deployment-id deployment-ci \
+            --actor-id github-actions \
+            --secret-revision "$secret_revision" \
             --image-ref nazo-oauth-e2e:latest \
             --image-digest "$image_digest" \
+            --embedded-release development \
+            --embedded-revision development \
+            --embedded-build-id local:development \
             --output runtime/e2e/operator
+          printf '%s' "$secret_revision" >runtime/e2e/operator/secret-revision
+          chmod 0400 runtime/e2e/operator/secret-revision
           docker run --rm -i --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
@@ -251,13 +286,66 @@ jobs:
             -v "$PWD/runtime/e2e/operator/receipt.key:/run/nazoauth-operator/receipt.key:ro" \
             -v "$PWD/runtime/e2e/operator/context.json:/run/nazoauth-operator/context.json:ro" \
             -v "$PWD/runtime/e2e/operator/config-manifest.json:/run/nazoauth-operator/config-manifest.json:ro" \
+            -v "$PWD/runtime/e2e/operator/secret-revision:/run/nazoauth-operator/secret-revision:ro" \
             -v "$PWD/runtime/e2e/operator/state:/var/lib/nazoauth/operator-state" \
             nazo-oauth-e2e:latest nazoauth operator-task \
             <runtime/e2e/operator/envelope.jws >runtime/e2e/operator/receipt.jws
-          cargo run --locked --quiet -p nazo-operator-protocol --example ci_operator_task -- verify \
+          cargo run --locked --quiet -p nazo-operator-protocol --example automation_operator_task -- verify \
             --receipt runtime/e2e/operator/receipt.jws \
             --public-key runtime/e2e/operator/receipt.pub \
             --request-sha256 runtime/e2e/operator/request.sha256
+          app_password="$(openssl rand -hex 24)"
+          docker exec nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE nazoauth_e2e_app LOGIN PASSWORD '$app_password' NOSUPERUSER NOBYPASSRLS NOINHERIT"
+          docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          GRANT CONNECT ON DATABASE oauth TO nazoauth_e2e_app;
+          GRANT USAGE ON SCHEMA public TO nazoauth_e2e_app;
+          DO $grant_business_tables$
+          DECLARE
+              relation RECORD;
+          BEGIN
+              FOR relation IN
+                  SELECT schemaname, tablename
+                  FROM pg_tables
+                  WHERE schemaname = 'public'
+                    AND tablename NOT IN (
+                        'security_audit_chain_state',
+                        'security_audit_events',
+                        'security_audit_event_outbox'
+                    )
+              LOOP
+                  EXECUTE format(
+                      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO nazoauth_e2e_app',
+                      relation.schemaname,
+                      relation.tablename
+                  );
+              END LOOP;
+          END
+          $grant_business_tables$;
+          GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO nazoauth_e2e_app;
+          REVOKE ALL ON TABLE
+              public.security_audit_chain_state,
+              public.security_audit_events,
+              public.security_audit_event_outbox
+          FROM nazoauth_e2e_app;
+          GRANT EXECUTE ON FUNCTION
+              public.nazo_security_audit_privilege_preflight(boolean, boolean, boolean),
+              public.nazo_security_audit_chain_head_for_update(),
+              public.nazo_append_security_audit_event(
+                  uuid, text, text, jsonb, timestamptz, bytea, bytea
+              ),
+              public.nazo_security_audit_anchor_freshness()
+          TO nazoauth_e2e_app;
+          SQL
+          test "$(
+            docker exec -e PGPASSWORD="$app_password" nazo-oauth-e2e-postgres \
+              psql -h 127.0.0.1 -U nazoauth_e2e_app -d oauth -At -v ON_ERROR_STOP=1 \
+              -c 'SELECT policy_satisfied FROM public.nazo_security_audit_privilege_preflight(true, true, false)'
+          )" = "t"
+          sed -i \
+            "s#postgresql://postgres:postgres@#postgresql://nazoauth_e2e_app:${app_password}@#" \
+            runtime/e2e/.env.yaml runtime/e2e/.env-signed.yaml
           docker run -d --name nazo-oauth-e2e-server --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
             -e NAZO_RUNTIME_INSTANCE_ID=e2e-primary \
@@ -266,6 +354,9 @@ jobs:
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
+            -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
+            -v "$PWD/runtime/e2e/runtime-primary:/var/lib/nazo_oauth/runtime-instance" \
             nazo-oauth-e2e:latest nazoauth server
           docker run -d --name nazo-oauth-e2e-server-signed --network nazo-oauth-e2e-net \
             --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
@@ -275,6 +366,9 @@ jobs:
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
             -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
+            -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
+            -v "$PWD/runtime/e2e/runtime-signed:/var/lib/nazo_oauth/runtime-instance" \
             nazo-oauth-e2e:latest nazoauth server
       - name: Require both non-root servers to become ready
         run: |

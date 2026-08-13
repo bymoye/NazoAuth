@@ -14,6 +14,10 @@ use nazo_runtime_modules::{
 };
 use uuid::Uuid;
 
+mod support;
+
+use support::{run_isolated_application_migrations, schema_database_url};
+
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -128,11 +132,6 @@ fn tagged_database_url(database_url: &str, application_name: &str) -> String {
     format!("{database_url}{separator}application_name={application_name}")
 }
 
-fn schema_database_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}%2Cpublic")
-}
-
 async fn wait_for_lock_wait(connection: &mut AsyncPgConnection) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -168,7 +167,7 @@ async fn clear_module(database_url: &str, module_id: &str) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn composable_default_policy_migration_materializes_legacy_and_missing_rows_once() {
     let Some(database_url) = database_url() else {
         return;
@@ -182,9 +181,7 @@ async fn composable_default_policy_migration_materializes_legacy_and_missing_row
         .await
         .expect("isolated schema should create");
     let isolated_url = schema_database_url(&database_url, &schema);
-    nazo_postgres::run_pending_migrations(&isolated_url)
-        .await
-        .expect("isolated schema migrations should apply");
+    run_isolated_application_migrations(&isolated_url).await;
     let mut fixture = AsyncPgConnection::establish(&isolated_url)
         .await
         .expect("isolated fixture database should connect");
@@ -252,7 +249,7 @@ async fn composable_default_policy_migration_materializes_legacy_and_missing_row
         .expect("isolated schema should drop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bulk_management_reads_return_domain_records_and_isolate_instances() {
     let Some(database_url) = database_url() else {
         return;
@@ -349,7 +346,7 @@ async fn bulk_management_reads_return_domain_records_and_isolate_instances() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guarded_desired_changes_are_serialized_across_database_connections() {
     let Some(database_url) = database_url() else {
         return;
@@ -433,7 +430,7 @@ async fn guarded_desired_changes_are_serialized_across_database_connections() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registry_generated_transition_events_are_postgresql_compatible() {
     let Some(database_url) = database_url() else {
         return;
@@ -511,7 +508,7 @@ async fn registry_generated_transition_events_are_postgresql_compatible() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desired_state_cas_is_atomic_stale_safe_and_noop_audited() {
     let Some(database_url) = database_url() else {
         return;
@@ -572,7 +569,7 @@ async fn desired_state_cas_is_atomic_stale_safe_and_noop_audited() {
     assert_eq!(event_count(&mut connection, "ciba").await, 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_event_page_returns_typed_newest_first_records() {
     let Some(database_url) = database_url() else {
         return;
@@ -618,7 +615,7 @@ async fn runtime_event_page_returns_typed_newest_first_records() {
     assert!(page.total >= 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn instance_completion_cannot_overwrite_a_newer_transition_revision() {
     let Some(database_url) = database_url() else {
         return;
@@ -752,7 +749,7 @@ async fn instance_completion_cannot_overwrite_a_newer_transition_revision() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desired_revision_change_commits_before_old_completion_and_forces_stale_audit() {
     let Some(database_url) = database_url() else {
         return;
@@ -876,7 +873,7 @@ async fn desired_revision_change_commits_before_old_completion_and_forces_stale_
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn instance_event_insert_failure_rolls_back_state_mutation() {
     let Some(database_url) = database_url() else {
         return;
@@ -936,7 +933,7 @@ async fn instance_event_insert_failure_rolls_back_state_mutation() {
     assert_eq!(stored.state, ModuleState::Starting);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_persistence_accepts_every_closed_event_kind() {
     let Some(database_url) = database_url() else {
         return;

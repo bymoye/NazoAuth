@@ -18,9 +18,15 @@ use nazo_openid4vc_http_actix::CredentialHttpError;
 use uuid::Uuid;
 
 use crate::{
-    adapters::audit::{audit_event, audit_fields},
+    adapters::audit::audit_fields,
     domain::{CredentialDatasetAdminService, PutCredentialDatasetRequest},
-    http::sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles},
+    http::{
+        admin::{persist_required_audit_or_unavailable, require_durable_audit_or_unavailable},
+        sessions::{
+            AdminSessionHandles, require_admin_or_forbidden_with_handles,
+            require_admin_with_recent_mfa_or_forbidden_with_handles,
+        },
+    },
 };
 
 pub(crate) async fn admin_put_credential_dataset(
@@ -33,11 +39,15 @@ pub(crate) async fn admin_put_credential_dataset(
     if !valid_csrf(&sessions, &request) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&sessions, &request).await {
-        Ok(admin) => admin,
-        Err(response) => return response,
-    };
+    let admin =
+        match require_admin_with_recent_mfa_or_forbidden_with_handles(&sessions, &request).await {
+            Ok(admin) => admin,
+            Err(response) => return response,
+        };
     let (subject_id, configuration_id) = path.into_inner();
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     match endpoint
         .put_dataset(
             admin.principal.tenant.tenant_id.as_uuid(),
@@ -49,7 +59,7 @@ pub(crate) async fn admin_put_credential_dataset(
         .await
     {
         Ok(dataset) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 "openid4vci_credential_dataset_updated",
                 audit_fields(&[
                     ("admin_user_id", serde_json::json!(admin.id())),
@@ -59,7 +69,11 @@ pub(crate) async fn admin_put_credential_dataset(
                         serde_json::json!(configuration_id),
                     ),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             json_response_no_store(dataset)
         }
         Err(error) => dataset_error(error),
@@ -99,11 +113,15 @@ pub(crate) async fn admin_delete_credential_dataset(
     if !valid_csrf(&sessions, &request) {
         return csrf_error();
     }
-    let admin = match require_admin_or_forbidden_with_handles(&sessions, &request).await {
-        Ok(admin) => admin,
-        Err(response) => return response,
-    };
+    let admin =
+        match require_admin_with_recent_mfa_or_forbidden_with_handles(&sessions, &request).await {
+            Ok(admin) => admin,
+            Err(response) => return response,
+        };
     let (subject_id, configuration_id) = path.into_inner();
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
     match endpoint
         .delete_dataset(
             admin.principal.tenant.tenant_id.as_uuid(),
@@ -114,7 +132,7 @@ pub(crate) async fn admin_delete_credential_dataset(
         .await
     {
         Ok(()) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 "openid4vci_credential_dataset_deleted",
                 audit_fields(&[
                     ("admin_user_id", serde_json::json!(admin.id())),
@@ -124,7 +142,11 @@ pub(crate) async fn admin_delete_credential_dataset(
                         serde_json::json!(configuration_id),
                     ),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             empty_response_no_store(StatusCode::NO_CONTENT)
         }
         Err(error) => dataset_error(error),
@@ -151,3 +173,7 @@ fn valid_csrf(sessions: &AdminSessionHandles, request: &HttpRequest) -> bool {
         config.csrf_cookie_name(),
     )
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/http/admin/openid4vc.rs"]
+mod tests;

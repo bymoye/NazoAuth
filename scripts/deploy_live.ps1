@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
     [ValidateSet('install', 'status', 'doctor', 'plan', 'update', 'rollback', 'recover')]
-    [string]$Action = 'update',
-    [string]$SshHost = 'hostinger',
+    [string]$Action = 'status',
+    [Parameter(Mandatory = $true)]
+    [string]$SshHost,
     [string]$Config = '/etc/nazoauth/update.json',
     [string]$Version = '',
     [ValidateSet('auto', 'podman', 'docker', 'host')]
@@ -26,7 +27,10 @@ if ($Version -and $Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.
 function ConvertTo-ShellWord {
     param([string]$Value)
 
-    return "'" + $Value.Replace("'", "'\"'\"'") + "'"
+    $singleQuote = [string][char]39
+    $backslash = [string][char]92
+    $escapedQuote = $singleQuote + $backslash + $singleQuote + $singleQuote
+    return $singleQuote + $Value.Replace($singleQuote, $escapedQuote) + $singleQuote
 }
 
 function Invoke-NazoAuthCtl {

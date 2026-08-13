@@ -1,8 +1,8 @@
 # NazoAuth 管理控制面安全交互与易用性计划书
 
-状态：已选定目标设计，尚未实施  
-日期：2026-07-31  
-证据基线：`497a0adb441f4e3391e4521f821d9a81922e3961` 上的当前工作树  
+状态：实施与验证中；第 18 节唯一远端验收未完成，不构成完成声明
+日期：2026-08-01
+证据基线：`codex/cosign-private-staging` 当前工作树；最终精确 commit 只在第 18 节验收后记录
 配套任务书：[operator-task-protocol-implementation-task.zh-CN.md](../project/operator-task-protocol-implementation-task.zh-CN.md)
 
 ## 1. 决策摘要
@@ -21,7 +21,7 @@
 六组命令。只有外部数据库、外部密钥系统、DNS/TLS、在线管理员批准或外部审计目的地
 这类无法由程序安全推断的事实才要求用户配置。
 
-本文件是设计和验收计划，不是完成声明。只有第 18 节全部满足并保留对应证据后，才能
+本文件同时是实施约束和验收计划，不是完成声明。只有第 18 节全部满足并保留对应证据后，才能
 宣布该交互达到计划中的安全与易用性目标。
 
 ## 2. 证据基础与当前事实
@@ -109,7 +109,7 @@ Podman、SELinux/AppArmor、TPM/PKCS#11/HSM 和外部审计继续缩小该残余
 - 不要求 NazoAuth 正在在线运行才能进行迁移、恢复或 break-glass 操作。
 - 不让 `nazoauthctl` 依赖完整授权服务器实现。
 - 不因控制面协议而改变对外 OAuth/OIDC/FAPI 行为。
-- 默认支持当前声明的 Linux x86_64 部署边界；新增平台必须有真实运行证据。
+- 默认支持当前声明的 Linux x86_64 与 aarch64 部署边界；新增平台必须有真实运行证据。
 
 ### 4.3 非目标
 
@@ -399,6 +399,18 @@ target digest，但后者只是回显绑定，不是应用独立证明。ctl 在
 ID/进程、request digest、退出状态和结构化结果同时写入最终收据。在没有 TEE 的本地 root
 信任模型中，不额外授予 OAuth 签名私钥来制造伪“远程证明”。
 
+传输退出状态与签名结果状态是两个边界，不能混用：
+
+- 请求已验签且任务进程能够加载 receipt key 时，即使操作失败或 PostgreSQL 迁移超时，也
+  必须在 stdout 输出可验证的 `RuntimeReceipt`（`TaskOutcome::Failed`），并以 transport
+  成功退出；ctl 先验签并读取结构化结果，再按 signed outcome 决定重试或报告失败。尚未
+  claim 请求前的 task lock 竞争不能伪造 final receipt：它在 25 秒内以 transport 失败返回，
+  ctl 保留 intent 并重试/观察同一 JTI。
+- 验签、部署绑定、配置清单或 receipt key 等前置条件失败时，没有可验证收据，进程才以
+  transport 失败退出；ctl 不得把空 stdout 当成一个已签名的操作失败。
+- ctl 自身的超时、kill 或 engine 中断可能没有收到 stdout；这只表示 transport 证据缺失，
+  不能推断迁移未执行。重试必须依据状态所有者的 ledger/receipt 恢复边界处理。
+
 ## 10. 身份、授权和恢复
 
 ### 10.1 默认安装身份
@@ -582,6 +594,8 @@ nazoauthctl doctor
 nazoauthctl update [--to VERSION] [--plan] [--yes]
 nazoauthctl rollback [--yes]
 nazoauthctl recover [--yes]
+nazoauthctl recover-update --yes
+nazoauthctl recover-identity --yes
 nazoauthctl migrate [--yes]
 nazoauthctl keys list
 nazoauthctl keys validate
@@ -823,7 +837,7 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
 
 ### 18.7 唯一远端最终验收
 
-本次任务只有一次最终验收入口，目标为 `ssh hostinger` 上的 `https://auth.nazo.run`。本地代码
+本次任务只有一次最终验收入口，目标为私有部署服务器上的 `https://auth.nazo.run`。本地代码
 和验证完成后必须依次执行：
 
 1. 以只读方式记录远端当前 NazoAuth 服务、容器、镜像、网络、volume、systemd、进程、端口、
@@ -839,7 +853,7 @@ legacy state-changing keyctl 绕过；server auto-migrate 改为 schema compatib
    接口，但不得跳过签名、授权、防重放、审计、备份、健康检查或回滚/barrier 保护。
 5. 验证实际最小权限、推荐秘密通道无 argv/env/inspect/journal/log/audit 泄漏、managed runtime
    无 DDL 权限、legacy mutation 不可绕过、防重放/幂等恢复、审计链及签名检查点。
-6. 以上全部通过后，使用 hostinger 本地 OIDF Conformance Suite，针对刚部署的实例串行运行
+6. 以上全部通过后，使用同机私有 OIDF Conformance Suite，针对刚部署的实例串行运行
    项目正式声明支持的完整 plan/variant 矩阵。不得抽样、只跑失败项、关闭声明能力、修改套件
    判定或添加无规范依据的 expected skip。
 

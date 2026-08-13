@@ -1,9 +1,12 @@
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +22,150 @@ def load(name: str):
 
 
 class Openid4vcOidfTests(unittest.TestCase):
+    def test_p028_selector_is_derived_from_the_matrix_registry(self):
+        materializer = load("materialize_openid4vc_oidf_config.py")
+        self.assertEqual(
+            materializer.p028_plan_expression(),
+            (
+                "oid4vci-1_0-issuer-test-plan[fapi_profile=vci]"
+                "[client_auth_type=private_key_jwt][sender_constrain=dpop]"
+                "[fapi_request_method=unsigned][authorization_request_type=simple]"
+                "[openid=plain_oauth][fapi_response_mode=plain_response]"
+                "[vci_grant_type=authorization_code]"
+                "[vci_authorization_code_flow_variant=wallet_initiated]"
+                "[credential_format=sd_jwt_vc]"
+                "[vci_credential_encryption=plain] "
+                "openid4vc-vci-sd-wallet-plain.json"
+            ),
+        )
+
+    def test_lease_dataset_source_validates_binding_without_admin_mutation(self):
+        module = load("run_openid4vc_conformance.py")
+        config = {
+            "dataset_source": "lease",
+            "target_origin": "https://issuer.example",
+            "issuer": {
+                "dedicated_conformance_subject": True,
+                "subject_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "lease_binding": {
+                "lease_id": "00000000-0000-0000-0000-000000000456",
+                "applicant_id": "00000000-0000-0000-0000-000000000123",
+                "request_jti": "request-abc123",
+                "matrix_sha256": "a" * 64,
+                "bundle_sha256": "b" * 64,
+                "expires_at": 1_900_000_000,
+            },
+        }
+        with patch.object(module, "install_credential_datasets") as install:
+            self.assertEqual(
+                module.install_credential_datasets_if_needed(config, {}, "lease"),
+                [],
+            )
+        install.assert_not_called()
+        with patch.object(module, "cleanup_credential_datasets") as cleanup:
+            module.cleanup_credential_datasets_if_needed(config, {}, "lease", [])
+        cleanup.assert_not_called()
+
+    def test_lease_dataset_source_rejects_mixed_admin_binding(self):
+        module = load("run_openid4vc_conformance.py")
+        config = {
+            "dataset_source": "admin",
+            "lease_binding": {},
+        }
+        with self.assertRaisesRegex(RuntimeError, "cannot include lease_binding"):
+            module.validate_dataset_source(config, "admin")
+        with self.assertRaisesRegex(RuntimeError, "dataset_source=lease"):
+            module.validate_dataset_source({"dataset_source": "admin"}, "lease")
+
+    def test_lease_dataset_source_rejects_expired_binding(self):
+        module = load("run_openid4vc_conformance.py")
+        config = {
+            "dataset_source": "lease",
+            "issuer": {
+                "dedicated_conformance_subject": True,
+                "subject_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "lease_binding": {
+                "lease_id": "00000000-0000-0000-0000-000000000456",
+                "applicant_id": "00000000-0000-0000-0000-000000000123",
+                "request_jti": "request-abc123",
+                "matrix_sha256": "a" * 64,
+                "bundle_sha256": "b" * 64,
+                "expires_at": 1,
+            },
+        }
+        with self.assertRaisesRegex(RuntimeError, "not in the future"):
+            module.validate_dataset_source(config, "lease")
+
+    def test_cli_rejects_operator_credentials_in_lease_mode(self):
+        module = load("run_openid4vc_conformance.py")
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "run_openid4vc_conformance.py",
+                    "--driver-config-json-file",
+                    "driver.json",
+                    "--dataset-source",
+                    "lease",
+                    "--operator-credentials-file",
+                    "operator.json",
+                    "--suite-token-file",
+                    "suite.token",
+                    "--",
+                    "--suite-dir",
+                    "suite",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            module.parse_args()
+
+    def test_p028_target_selection_preserves_full_matrix_inputs(self):
+        module = load("run_openid4vc_conformance.py")
+        arguments = [
+            "--config-json-file",
+            "configs.json",
+            "--plan-set-json-file",
+            "plans.json",
+        ]
+        selected = module.apply_targeted_plan_selection(
+            arguments,
+            p028_only=True,
+            plan_group_size=0,
+        )
+        self.assertEqual(selected[:4], arguments)
+        self.assertEqual(selected[-2], "--plan-expression")
+        self.assertEqual(
+            selected[-1],
+            load("materialize_openid4vc_oidf_config.py").p028_plan_expression(),
+        )
+        with self.assertRaisesRegex(SystemExit, "requires --plan-group-size 0"):
+            module.apply_targeted_plan_selection(
+                arguments,
+                p028_only=True,
+                plan_group_size=4,
+            )
+
+    def test_admin_credentials_have_only_a_private_file_contract(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "scripts"
+            / "run_openid4vc_conformance.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--operator-credentials-file", source)
+        required_fields = re.search(
+            r"required_fields\s*=\s*\((?P<body>.*?)\)", source, flags=re.DOTALL
+        )
+        self.assertIsNotNone(required_fields)
+        assert required_fields is not None
+        for field in ("admin_email", "admin_password", "admin_mfa_totp_secret"):
+            self.assertIn(f'"{field}"', required_fields.group("body"))
+        self.assertIn("read_secret_document", source)
+        self.assertNotIn("OIDF_ADMIN_EMAIL", source)
+        self.assertNotIn("OIDF_ADMIN_PASSWORD", source)
+
     def test_dataset_fixture_uses_admin_session_csrf_and_is_cleaned_up(self):
         module = load("run_openid4vc_conformance.py")
 
@@ -46,20 +193,32 @@ class Openid4vcOidfTests(unittest.TestCase):
                 "credential_datasets": {"pid/1": {"given_name": "Ada"}},
             },
         }
-        with (
-            patch.dict(
-                module.os.environ,
-                {"OIDF_ADMIN_EMAIL": "admin@example.test", "OIDF_ADMIN_PASSWORD": "secret"},
-                clear=True,
-            ),
-            patch.object(module.ControlPlaneSession, "login", return_value=session) as login,
-        ):
-            admin, installed = module.install_credential_datasets(config)
-            module.cleanup_credential_datasets(admin, installed)
+        credentials = {
+            "admin_email": "admin@example.test",
+            "admin_password": "secret",
+            "admin_mfa_totp_secret": "123456",
+        }
+        with patch.object(module.ControlPlaneSession, "login", return_value=session) as login:
+            admin, installed = module.install_credential_datasets(
+                config,
+                credentials,
+            )
+            module.cleanup_credential_datasets("https://issuer.example", credentials, installed)
 
-        login.assert_called_once_with(
-            "https://issuer.example", "admin@example.test", "secret"
-        )
+        self.assertEqual(login.call_args_list, [
+            call(
+                "https://issuer.example",
+                "admin@example.test",
+                "secret",
+                mfa_totp_secret="123456",
+            ),
+            call(
+                "https://issuer.example",
+                "admin@example.test",
+                "secret",
+                mfa_totp_secret="123456",
+            ),
+        ])
         put = next(call for call in session.json_calls if call[0] == "PUT")
         self.assertEqual(
             put[1],
@@ -84,7 +243,8 @@ class Openid4vcOidfTests(unittest.TestCase):
                         "subject_id": "00000000-0000-0000-0000-000000000123",
                         "credential_datasets": {"pid": {"given_name": "Ada"}},
                     },
-                }
+                },
+                {"admin_email": "admin@example.test", "admin_password": "secret"},
             )
         login.assert_not_called()
 
@@ -138,6 +298,11 @@ class Openid4vcOidfTests(unittest.TestCase):
                             "exposed": {
                                 "credential_offer_endpoint": "https://suite.example/credential_offer"
                             },
+                            "browser": {
+                                "urls": [
+                                    "https://issuer.example/authorize?request_uri=urn%3Aexample"
+                                ]
+                            },
                         },
                     ),
                 ],
@@ -149,6 +314,10 @@ class Openid4vcOidfTests(unittest.TestCase):
         self.assertEqual(
             entries[0]["exposed"]["credential_offer_endpoint"],
             "https://suite.example/credential_offer",
+        )
+        self.assertEqual(
+            entries[0]["browser"]["urls"],
+            ["https://issuer.example/authorize?request_uri=urn%3Aexample"],
         )
         self.assertEqual(
             [call.args[2] for call in request.call_args_list],
@@ -199,6 +368,9 @@ class Openid4vcOidfTests(unittest.TestCase):
             },
             module.threading.Event(),
         )
+        driver.completed_hosted_authorizations["finished-module"] = {
+            "https://issuer.example/authorize?request_uri=old"
+        }
         with patch.object(
             module,
             "module_entries",
@@ -214,7 +386,47 @@ class Openid4vcOidfTests(unittest.TestCase):
             driver.drive_once()
 
         self.assertEqual(driver.terminal_modules, {"finished-module"})
+        self.assertNotIn("finished-module", driver.completed_hosted_authorizations)
         self.assertEqual(entries.call_args_list[1].kwargs["ignored_module_ids"], {"finished-module"})
+
+    def test_driver_retryable_module_error_does_not_starve_later_modules(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "test-token",
+                "aliases": ["issuer-alias", "verifier-alias"],
+            },
+            module.threading.Event(),
+        )
+        issuer = {
+            "_driver_module_id": "issuer-module",
+            "_driver_plan": "oid4vci-1_0-issuer-test-plan",
+            "status": "WAITING",
+            "variant": {"vci_authorization_code_flow_variant": "wallet_initiated"},
+        }
+        verifier = {
+            "_driver_module_id": "verifier-module",
+            "_driver_plan": "oid4vp-1final-verifier-test-plan",
+            "status": "WAITING",
+            "variant": {},
+        }
+        output = io.StringIO()
+        with (
+            patch.object(module, "module_entries", return_value=[issuer, verifier]),
+            patch.object(
+                driver,
+                "drive_wallet_initiated_issuer",
+                side_effect=RuntimeError("module-secret-canary"),
+            ),
+            patch.object(driver, "drive_verifier") as drive_verifier,
+            contextlib.redirect_stdout(output),
+        ):
+            driver.drive_once()
+
+        drive_verifier.assert_called_once_with("verifier-module", verifier, {}, False)
+        self.assertIn("issuer-module RuntimeError", output.getvalue())
+        self.assertNotIn("module-secret-canary", output.getvalue())
 
     def test_driver_loop_scans_before_first_sleep(self):
         module = load("run_openid4vc_conformance.py")
@@ -239,6 +451,45 @@ class Openid4vcOidfTests(unittest.TestCase):
             driver.run()
 
         self.assertEqual(calls, 1)
+
+    def test_issuer_initiated_authorization_code_dispatches_offer_and_hosted_login(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "test-token",
+                "aliases": ["issuer-alias"],
+            },
+            module.threading.Event(),
+        )
+        info = {
+            "_driver_module_id": "module-id",
+            "_driver_plan": "oid4vci-1_0-issuer-test-plan",
+            "status": "WAITING",
+            "variant": {
+                "vci_authorization_code_flow_variant": "issuer_initiated",
+                "vci_grant_type": "authorization_code",
+            },
+        }
+
+        def deliver_offer(module_id, *_args):
+            driver.triggered.add(module_id)
+
+        with (
+            patch.object(module, "module_entries", return_value=[info]) as entries,
+            patch.object(driver, "drive_issuer", side_effect=deliver_offer) as drive_issuer,
+            patch.object(driver, "drive_wallet_initiated_issuer") as drive_hosted,
+        ):
+            driver.drive_once()
+            driver.drive_once()
+
+        self.assertEqual(
+            [call.kwargs["ignored_module_ids"] for call in entries.call_args_list],
+            [set(), set()],
+        )
+        drive_issuer.assert_called_once()
+        self.assertEqual(drive_hosted.call_count, 2)
+        drive_hosted.assert_called_with("module-id", info)
 
     def test_issuer_driver_delivers_one_offer_for_preauthorized_module(self):
         module = load("run_openid4vc_conformance.py")
@@ -293,7 +544,7 @@ class Openid4vcOidfTests(unittest.TestCase):
         )
         self.assertEqual(driver.triggered, {"module-id"})
 
-    def test_issuer_driver_does_not_repeat_single_client_offer(self):
+    def test_issuer_driver_delivers_distinct_offers_to_preauthorized_multiple_clients(self):
         module = load("run_openid4vc_conformance.py")
         driver = module.Openid4vcDriver(
             {
@@ -305,6 +556,7 @@ class Openid4vcOidfTests(unittest.TestCase):
                     "credential_configuration_ids": {"sd_jwt_vc": "pid"},
                     "management_token": "management-token",
                     "subject_id": "00000000-0000-0000-0000-000000000123",
+                    "tx_code": "123456",
                 },
             },
             module.threading.Event(),
@@ -313,25 +565,486 @@ class Openid4vcOidfTests(unittest.TestCase):
             patch.object(
                 module,
                 "request_json",
-                return_value={"credential_offer_uri": "https://issuer.example/offers/one"},
+                side_effect=[
+                    {"credential_offer_uri": "https://issuer.example/offers/one"},
+                    {"credential_offer_uri": "https://issuer.example/offers/two"},
+                ],
             ) as create_offer,
-            patch.object(module, "get_url"),
+            patch.object(module, "get_url") as deliver_offer,
         ):
             driver.drive_issuer(
                 "module-id",
                 {
-                    "testName": "oid4vci-1_0-issuer-happy-flow",
+                    "testName": module.VCI_MULTIPLE_CLIENTS_MODULE,
                     "exposed": {
                         "credential_offer_endpoint": (
                             "https://suite.example/test/a/issuer/credential_offer"
                         )
                     },
                 },
-                {"credential_format": "sd_jwt_vc"},
+                {
+                    "credential_format": "sd_jwt_vc",
+                    "vci_grant_type": "pre_authorization_code",
+                },
             )
 
-        self.assertEqual(create_offer.call_count, 1)
+        self.assertEqual(create_offer.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in deliver_offer.call_args_list],
+            [
+                (
+                    "https://suite.example/test/a/issuer/credential_offer?"
+                    "credential_offer_uri=https%3A%2F%2Fissuer.example%2Foffers%2Fone"
+                ),
+                (
+                    "https://suite.example/test/a/issuer/credential_offer?"
+                    "credential_offer_uri=https%3A%2F%2Fissuer.example%2Foffers%2Ftwo"
+                ),
+            ],
+        )
         self.assertIn("module-id", driver.triggered)
+        self.assertEqual(driver.completed_trigger_count(), 2)
+
+    def test_wallet_initiated_issuer_completes_hosted_authorization(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "correct horse battery staple",
+                },
+            },
+            module.threading.Event(),
+        )
+        session = Mock()
+        session.opener = object()
+        session.request_json.return_value = {"csrf_token": "csrf-secret"}
+        with (
+            patch.object(module.ControlPlaneSession, "login", return_value=session) as login,
+            patch.object(module, "capture_control_plane_redirects") as capture_redirects,
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(
+                module,
+                "redirect_location",
+                side_effect=[
+                    "https://issuer.example/ui/consent?request_id=request-1",
+                    "https://suite.example/test/a/issuer/callback?code=one&state=two",
+                ],
+            ) as redirect,
+            patch.object(module, "complete_suite_browser_callback") as complete_callback,
+        ):
+            driver.drive_wallet_initiated_issuer(
+                "module-id",
+                {
+                    "browser": {
+                        "urls": [
+                            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+                        ]
+                    }
+                },
+            )
+
+        login.assert_called_once_with(
+            "https://issuer.example",
+            "user@example.test",
+            "correct horse battery staple",
+        )
+        capture_redirects.assert_called_once_with(session)
+        mark_visited.assert_called_once_with(
+            "https://suite.example",
+            "suite-token",
+            "module-id",
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample",
+        )
+        self.assertEqual(
+            redirect.call_args_list[0].args[1].full_url,
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample",
+        )
+        session.request_json.assert_called_once_with(
+            "GET",
+            "/authorize/consent?request_id=request-1",
+            expected_status=200,
+            csrf=False,
+        )
+        decision = redirect.call_args_list[1].args[1]
+        self.assertEqual(decision.full_url, "https://issuer.example/authorize/decision")
+        self.assertEqual(
+            module.urllib.parse.parse_qs(decision.data.decode("utf-8")),
+            {
+                "request_id": ["request-1"],
+                "decision": ["approve"],
+                "csrf_token": ["csrf-secret"],
+            },
+        )
+        complete_callback.assert_called_once_with(
+            "https://suite.example",
+            "https://suite.example/test/a/issuer/callback?code=one&state=two",
+        )
+        self.assertEqual(driver.triggered, set())
+        self.assertEqual(
+            driver.completed_hosted_authorizations,
+            {
+                "module-id": {
+                    "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+                }
+            },
+        )
+
+    def test_hosted_authorization_preserves_login_cookie_jar_while_capturing_redirects(self):
+        module = load("run_openid4vc_conformance.py")
+        cookie_jar = module.http.cookiejar.CookieJar()
+        session = Mock()
+        session.opener = module.urllib.request.build_opener(
+            module.urllib.request.HTTPCookieProcessor(cookie_jar)
+        )
+
+        module.capture_control_plane_redirects(session)
+
+        processors = [
+            handler
+            for handler in session.opener.handlers
+            if isinstance(handler, module.urllib.request.HTTPCookieProcessor)
+        ]
+        self.assertEqual(len(processors), 1)
+        self.assertIs(processors[0].cookiejar, cookie_jar)
+        self.assertTrue(
+            any(
+                isinstance(handler, module.CaptureRedirectHandler)
+                for handler in session.opener.handlers
+            )
+        )
+
+    def test_hosted_authorization_accepts_direct_suite_error_callback(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "secret",
+                },
+            },
+            module.threading.Event(),
+        )
+        session = Mock()
+        session.opener = object()
+        with (
+            patch.object(module.ControlPlaneSession, "login", return_value=session),
+            patch.object(module, "capture_control_plane_redirects"),
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(
+                module,
+                "redirect_location",
+                return_value=(
+                    "https://suite.example/test/a/issuer/callback?"
+                    "error=invalid_request&state=one"
+                ),
+            ) as redirect,
+            patch.object(module, "complete_suite_browser_callback") as complete_callback,
+        ):
+            driver.drive_wallet_initiated_issuer(
+                "module-id",
+                {
+                    "testName": "negative-module",
+                    "browser": {
+                        "urls": [
+                            "https://issuer.example/authorize?request_uri=urn%3Ainvalid"
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(redirect.call_count, 1)
+        mark_visited.assert_called_once()
+        session.request_json.assert_not_called()
+        complete_callback.assert_called_once_with(
+            "https://suite.example",
+            "https://suite.example/test/a/issuer/callback?error=invalid_request&state=one",
+        )
+        self.assertEqual(driver.completed_trigger_total, 1)
+
+    def test_reused_request_uri_module_visits_anonymously_before_hosted_login(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "secret",
+                },
+            },
+            module.threading.Event(),
+        )
+        authorization_url = (
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+        )
+        info = {
+            "testName": (
+                "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds"
+            ),
+            "browser": {"urls": [authorization_url], "visited": []},
+        }
+        with (
+            patch.object(module, "visit_initial_hosted_login_page") as visit_login,
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(module.ControlPlaneSession, "login") as login,
+        ):
+            driver.drive_wallet_initiated_issuer("module-id", info)
+
+        visit_login.assert_called_once_with("https://issuer.example", authorization_url)
+        mark_visited.assert_called_once_with(
+            "https://suite.example",
+            "suite-token",
+            "module-id",
+            authorization_url,
+        )
+        login.assert_not_called()
+        self.assertEqual(driver.completed_hosted_authorizations, {"module-id": set()})
+
+    def test_consumed_request_uri_module_drives_second_visit_to_error_callback(self):
+        module = load("run_openid4vc_conformance.py")
+        driver = module.Openid4vcDriver(
+            {
+                "conformance_server": "https://suite.example",
+                "conformance_token": "suite-token",
+                "target_origin": "https://issuer.example",
+                "hosted_authorization": {
+                    "email": "user@example.test",
+                    "password": "secret",
+                },
+            },
+            module.threading.Event(),
+        )
+        authorization_url = (
+            "https://issuer.example/authorize?client_id=wallet&request_uri=urn%3Aexample"
+        )
+        driver.completed_hosted_authorizations["module-id"] = {authorization_url}
+        session = Mock()
+        session.opener = object()
+        with (
+            patch.object(module.ControlPlaneSession, "login", return_value=session),
+            patch.object(module, "capture_control_plane_redirects"),
+            patch.object(module, "mark_suite_browser_url_visited") as mark_visited,
+            patch.object(
+                module,
+                "redirect_location",
+                return_value=(
+                    "https://suite.example/test/a/issuer/callback?"
+                    "error=invalid_request_uri&state=one"
+                ),
+            ) as redirect,
+            patch.object(module, "complete_suite_browser_callback") as complete_callback,
+        ):
+            driver.drive_wallet_initiated_issuer(
+                "module-id",
+                {
+                    "testName": "fapi2-security-profile-final-par-attempt-reuse-request_uri",
+                    "browser": {"urls": [authorization_url], "visited": [authorization_url]},
+                },
+            )
+
+        mark_visited.assert_called_once()
+        self.assertEqual(redirect.call_count, 1)
+        complete_callback.assert_called_once_with(
+            "https://suite.example",
+            "https://suite.example/test/a/issuer/callback?error=invalid_request_uri&state=one",
+        )
+        self.assertEqual(driver.completed_trigger_total, 1)
+
+    def test_initial_anonymous_visit_requires_exact_same_origin_login_route(self):
+        module = load("run_openid4vc_conformance.py")
+        opener = object()
+        with (
+            patch.object(module.urllib.request, "build_opener", return_value=opener),
+            patch.object(
+                module,
+                "redirect_location",
+                return_value="https://issuer.example/ui/auth?next=%2Fauthorize%3Fclient_id%3Dwallet",
+            ) as redirect,
+        ):
+            module.visit_initial_hosted_login_page(
+                "https://issuer.example",
+                "https://issuer.example/authorize?client_id=wallet",
+            )
+
+        self.assertIs(redirect.call_args.args[0], opener)
+        for location in (
+            "https://other.example/ui/auth?next=%2Fauthorize",
+            "https://issuer.example/ui/consent?next=%2Fauthorize",
+            "https://issuer.example/ui/auth?next=one&next=two",
+            "https://issuer.example/ui/auth?next=one&extra=two",
+        ):
+            with (
+                self.subTest(location=location),
+                patch.object(module.urllib.request, "build_opener", return_value=opener),
+                patch.object(module, "redirect_location", return_value=location),
+                self.assertRaisesRegex(RuntimeError, "did not reach the login page"),
+            ):
+                module.visit_initial_hosted_login_page(
+                    "https://issuer.example",
+                    "https://issuer.example/authorize?client_id=wallet",
+                )
+
+    def test_suite_browser_visit_uses_authenticated_official_runner_api(self):
+        module = load("run_openid4vc_conformance.py")
+        with patch.object(module.oidf, "oidf_api_request") as request:
+            module.mark_suite_browser_url_visited(
+                "https://suite.example",
+                "suite-token",
+                "module-id",
+                "https://issuer.example/authorize?client_id=wallet",
+            )
+
+        request.assert_called_once_with(
+            "POST",
+            "https://suite.example",
+            "api/runner/browser/module-id/visit",
+            "suite-token",
+            query={"url": "https://issuer.example/authorize?client_id=wallet"},
+            expected_statuses={204},
+        )
+
+    def test_hosted_authorization_rejects_ambiguous_or_cross_origin_urls(self):
+        module = load("run_openid4vc_conformance.py")
+        self.assertIsNone(
+            module.hosted_authorization_url(
+                "https://issuer.example",
+                {"urls": ["https://other.example/authorize?request_uri=one"]},
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+            module.hosted_authorization_url(
+                "https://issuer.example",
+                {
+                    "urls": [
+                        "https://issuer.example/authorize?request_uri=one",
+                        "https://issuer.example/authorize?request_uri=two",
+                    ]
+                },
+            )
+        self.assertEqual(
+            module.hosted_authorization_url(
+                "https://issuer.example",
+                {
+                    "urls": [
+                        "https://issuer.example/authorize?request_uri=one",
+                        "https://issuer.example/authorize?request_uri=two",
+                    ]
+                },
+                {"https://issuer.example/authorize?request_uri=one"},
+            ),
+            "https://issuer.example/authorize?request_uri=two",
+        )
+        for location in (
+            "https://other.example/ui/consent?request_id=one",
+            "https://issuer.example/ui/consent?request_id=one&request_id=two",
+            "https://issuer.example/other?request_id=one",
+        ):
+            with self.subTest(location=location), self.assertRaises(RuntimeError):
+                module.hosted_consent_request_id("https://issuer.example", location)
+        with self.assertRaises(RuntimeError):
+                module.hosted_suite_callback_url(
+                "https://suite.example",
+                "https://other.example/test/a/issuer/callback?code=secret",
+            )
+
+    def test_hosted_authorization_denies_only_exact_user_reject_modules(self):
+        module = load("run_openid4vc_conformance.py")
+        for test_name in module.oidf.FAPI_SECURITY_USER_REJECTS_AUTHENTICATION_MODULES:
+            with self.subTest(test_name=test_name):
+                self.assertEqual(
+                    module.hosted_authorization_decision({"testName": test_name}),
+                    "deny",
+                )
+        for test_name in (
+            "oid4vci-1_0-issuer-happy-flow",
+            "fapi2-security-profile-final-user-rejects-authentication-extra",
+            "",
+        ):
+            with self.subTest(test_name=test_name):
+                self.assertEqual(
+                    module.hosted_authorization_decision({"testName": test_name}),
+                    "approve",
+                )
+
+    def test_suite_implicit_submission_is_unique_and_same_origin(self):
+        module = load("run_openid4vc_conformance.py")
+        html = b"""
+            <script>
+              xhr.open('POST', "https://suite.example/test/a/issuer/implicit/random123", true);
+            </script>
+        """
+        self.assertEqual(
+            module.suite_implicit_submit_url("https://suite.example", html),
+            "https://suite.example/test/a/issuer/implicit/random123",
+        )
+        for invalid in (
+            b"<html>missing</html>",
+            html + html,
+            b"xhr.open('POST', \"https://other.example/test/a/issuer/implicit/random123\", true);",
+            b"xhr.open('POST', \"https://suite.example/admin/implicit/random123\", true);",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                module.suite_implicit_submit_url("https://suite.example", invalid)
+
+    def test_suite_browser_callback_posts_empty_fragment_as_text_plain(self):
+        module = load("run_openid4vc_conformance.py")
+        html = b"""
+            <script>
+              xhr.open('POST', "https://suite.example/test/a/issuer/implicit/random123", true);
+            </script>
+        """
+
+        class Response:
+            def __init__(self, status, content_type, body):
+                self.status = status
+                self.headers = {"Content-Type": content_type}
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self, *_):
+                return self.body
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+                self.responses = [
+                    Response(200, "text/html; charset=utf-8", html),
+                    Response(204, "text/plain", b""),
+                ]
+
+            def open(self, request, **_kwargs):
+                self.requests.append(request)
+                return self.responses.pop(0)
+
+        opener = Opener()
+        with patch.object(module.urllib.request, "build_opener", return_value=opener):
+            module.complete_suite_browser_callback(
+                "https://suite.example",
+                "https://suite.example/test/a/issuer/callback?code=one",
+            )
+
+        self.assertEqual(opener.requests[0].get_method(), "GET")
+        submission = opener.requests[1]
+        self.assertEqual(submission.get_method(), "POST")
+        self.assertEqual(
+            submission.full_url,
+            "https://suite.example/test/a/issuer/implicit/random123",
+        )
+        self.assertEqual(submission.data, b"")
+        self.assertEqual(submission.headers["Content-type"], "text/plain")
 
     def test_wrapper_rejects_tokenless_or_insecure_suite_modes(self):
         module = load("run_openid4vc_conformance.py")
@@ -341,12 +1054,26 @@ class Openid4vcOidfTests(unittest.TestCase):
         try:
             for forbidden in ("--disable-ssl-verify", "--no-api-token"):
                 with (
+                    patch.object(
+                        module,
+                        "read_secret_document",
+                        return_value={
+                            "admin_email": "admin@example.test",
+                            "admin_password": "secret",
+                        },
+                    ),
+                    patch.object(module, "read_secret_value", return_value="suite-token"),
+                    patch.object(module, "read_private_text", return_value='{"aliases":[]}'),
                     patch(
                         "sys.argv",
                         [
                             "run_openid4vc_conformance.py",
                             "--driver-config-json-file",
                             config_path,
+                            "--operator-credentials-file",
+                            "operator-credentials.json",
+                            "--suite-token-file",
+                            "suite-token",
                             "--",
                             forbidden,
                         ],
@@ -603,7 +1330,7 @@ class Openid4vcOidfTests(unittest.TestCase):
 
         process = Process()
         with (
-            patch.object(module.subprocess, "Popen", return_value=process),
+            patch.object(module.subprocess, "Popen", return_value=process) as popen,
             patch.object(module.os, "killpg", create=True) as killpg,
             self.assertRaises(KeyboardInterrupt),
         ):
@@ -611,6 +1338,26 @@ class Openid4vcOidfTests(unittest.TestCase):
 
         killpg.assert_called_once_with(process.pid, module.signal.SIGTERM)
         self.assertEqual(process.waits, 2)
+        self.assertIs(popen.call_args.kwargs["stdout"], module.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
+
+    def test_openid4vc_wrapper_suppresses_child_output_when_delivering_suite_token(self):
+        module = load("run_openid4vc_conformance.py")
+        process = Mock()
+        process.wait.return_value = 0
+
+        with patch.object(module.subprocess, "Popen", return_value=process) as popen:
+            self.assertEqual(
+                module.run_runner_invocations(
+                    [["--suite-dir", "suite"]],
+                    suite_token="private-suite-token",
+                ),
+                0,
+            )
+
+        self.assertEqual(len(popen.call_args.kwargs["pass_fds"]), 1)
+        self.assertIs(popen.call_args.kwargs["stdout"], module.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stderr"], module.subprocess.DEVNULL)
 
     def test_official_openid4vc_workflow_uses_bounded_groups(self):
         workflow = (ROOT / ".github" / "workflows" / "openid4vc-conformance.yml").read_text(
@@ -636,7 +1383,7 @@ class Openid4vcOidfTests(unittest.TestCase):
             def __exit__(self, *_):
                 return None
 
-            def read(self):
+            def read(self, _size=-1):
                 return b""
 
         try:
@@ -653,6 +1400,27 @@ class Openid4vcOidfTests(unittest.TestCase):
             self.assertIs(https_handler._context, context)
         finally:
             module.oidf.OIDF_API_SSL_CONTEXT = None
+
+    def test_driver_callback_get_rejects_oversized_response(self):
+        module = load("run_openid4vc_conformance.py")
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self, _size=-1):
+                return b"x" * (module.oidf.MAX_OIDF_API_RESPONSE_BYTES + 1)
+
+        class Opener:
+            def open(self, *_args, **_kwargs):
+                return Response()
+
+        with patch.object(module.urllib.request, "build_opener", return_value=Opener()):
+            with self.assertRaisesRegex(RuntimeError, "exceeds 1 MiB"):
+                module.get_url("https://suite.example/test/a/alias/callback")
 
     def test_wallet_redirect_handler_accepts_only_the_exact_completion_url(self):
         module = load("run_openid4vc_conformance.py")
@@ -685,8 +1453,31 @@ class Openid4vcOidfTests(unittest.TestCase):
                 "018f0000-0000-7000-8000-000000000001",
             ),
         ):
-            with self.subTest(code=code, location=location), self.assertRaises(RuntimeError):
-                handler.redirect_request(request, None, code, "redirect", {}, location)
+            with self.subTest(code=code, location=location), self.assertRaises(RuntimeError) as raised:
+                handler.redirect_request(
+                    request,
+                    None,
+                    code,
+                    "redirect",
+                    {},
+                    f"{location}?code=redirect-secret-canary",
+                )
+            self.assertNotIn("redirect-secret-canary", str(raised.exception))
+
+    def test_driver_retry_log_never_renders_exception_details(self):
+        module = load("run_openid4vc_conformance.py")
+        stop = module.threading.Event()
+        driver = module.Openid4vcDriver({"poll_interval_seconds": 1}, stop)
+
+        def fail_once():
+            stop.set()
+            raise RuntimeError("credential_offer=driver-secret-canary")
+
+        output = io.StringIO()
+        with patch.object(driver, "drive_once", side_effect=fail_once), contextlib.redirect_stdout(output):
+            driver.run()
+        self.assertIn("RuntimeError", output.getvalue())
+        self.assertNotIn("driver-secret-canary", output.getvalue())
 
     def test_suite_callbacks_are_exact_public_origin_and_never_rewritten(self):
         module = load("run_openid4vc_conformance.py")
@@ -814,13 +1605,17 @@ class Openid4vcOidfTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            written, aliases = module.write_plan_configs(
-                suite_scripts,
-                "ignored.json",
-                "OPENID4VC_CONFIGS",
-                str(config_json),
-                "https://issuer.example",
-            )
+            with patch.object(
+                module,
+                "read_private_text",
+                return_value=config_json.read_text(encoding="utf-8"),
+            ):
+                written, aliases = module.write_plan_configs(
+                    suite_scripts,
+                    "ignored.json",
+                    str(config_json),
+                    "https://issuer.example",
+                )
 
         self.assertEqual(written, {"openid4vc-vci-sd-wallet-plain.json"})
         self.assertEqual(
@@ -873,13 +1668,17 @@ class Openid4vcOidfTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            module.write_plan_configs(
-                suite_scripts,
-                "ignored.json",
-                "OPENID4VC_CONFIGS",
-                str(config_json),
-                "https://issuer.example",
-            )
+            with patch.object(
+                module,
+                "read_private_text",
+                return_value=config_json.read_text(encoding="utf-8"),
+            ):
+                module.write_plan_configs(
+                    suite_scripts,
+                    "ignored.json",
+                    str(config_json),
+                    "https://issuer.example",
+                )
             written = json.loads(
                 (suite_scripts / "openid4vc-vci-haip-sd-wallet.json").read_text(
                     encoding="utf-8"
@@ -1132,11 +1931,7 @@ class Openid4vcOidfTests(unittest.TestCase):
             self.assertEqual(len(preauthorized_plans), 2)
             self.assertTrue(
                 all(
-                    module.VCI_MULTIPLE_CLIENTS_MODULE not in plan
-                    and all(
-                        applicable in plan
-                        for applicable in module.VCI_PREAUTHORIZED_APPLICABLE_MODULES
-                    )
+                    ":" not in plan.partition(" ")[0]
                     for plan in preauthorized_plans
                 )
             )
@@ -1157,6 +1952,12 @@ class Openid4vcOidfTests(unittest.TestCase):
             for filename, config in configs.items():
                 if "vp-" in filename:
                     self.assertEqual(config["client"]["client_id"], "issuer.example")
+                    self.assertEqual(
+                        config["browser"],
+                        module.vp_verification_evidence_browser_automation(
+                            "https://suite.example"
+                        ),
+                    )
                     if "redirect-query" in filename:
                         self.assertNotIn("request_object_trust_anchor_pem", config["client"])
                     else:
@@ -1237,6 +2038,24 @@ class Openid4vcOidfTests(unittest.TestCase):
         self.assertTrue(all(value.startswith("oidf-bb-example-") for value in ids.values()))
         with self.assertRaisesRegex(SystemExit, "valid client namespace"):
             module.vci_client_ids("operator-black-box", "official")
+
+    def test_operator_plan_aliases_are_namespaced_without_changing_official_aliases(self):
+        module = load("materialize_openid4vc_oidf_config.py")
+
+        self.assertEqual(
+            module.plan_alias("nazo-openid4vc-vci", "vci-sd-preauth", None),
+            "nazo-openid4vc-vci-vci-sd-preauth",
+        )
+        self.assertEqual(
+            module.plan_alias(
+                "nazo-openid4vc-vci", "vci-sd-preauth", "stage-84e35c03-0802y"
+            ),
+            "nazo-openid4vc-vci-stage-84e35c03-0802y-vci-sd-preauth",
+        )
+        self.assertNotEqual(
+            module.plan_alias("nazo-openid4vc-vci", "vci-sd-preauth", "run-a"),
+            module.plan_alias("nazo-openid4vc-vci", "vci-sd-preauth", "run-b"),
+        )
 
     def test_operator_subject_id_is_explicitly_bound_to_current_user(self):
         module = load("materialize_openid4vc_oidf_config.py")

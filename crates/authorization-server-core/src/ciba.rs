@@ -8,6 +8,14 @@ const CIBA_EXPIRED_STATE_RETENTION_SECONDS: i64 = 120;
 const CIBA_SLOW_DOWN_INCREMENT_SECONDS: u64 = 5;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CibaAuthenticationContext {
+    pub auth_time: i64,
+    pub amr: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_sid: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CibaRequestState {
     pub client_id: String,
     pub user_id: Uuid,
@@ -15,6 +23,8 @@ pub struct CibaRequestState {
     pub audiences: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_context: Option<CibaAuthenticationContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_message: Option<String>,
     #[serde(default)]
@@ -127,6 +137,17 @@ pub trait CibaStateStorePort: Send + Sync {
         state: &'a CibaRequestState,
     ) -> CibaStateFuture<'a, CibaAtomicResult>;
 
+    /// Creates a request while optionally enforcing an external capability
+    /// deadline in the state-store atomic operation itself.
+    fn create_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        state: &'a CibaRequestState,
+        _lease_expires_at: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        self.create(auth_req_id, state)
+    }
+
     fn replace<'a>(
         &'a self,
         auth_req_id: &'a str,
@@ -134,11 +155,37 @@ pub trait CibaStateStorePort: Send + Sync {
         state: &'a CibaRequestState,
     ) -> CibaStateFuture<'a, CibaAtomicResult>;
 
+    /// Replaces a request while optionally enforcing an external capability
+    /// deadline in the state-store CAS itself. Implementations that do not
+    /// have an external deadline-aware CAS can safely fall back to the normal
+    /// state transition; the PostgreSQL lease guard still serializes explicit
+    /// revocation with the transition.
+    fn replace_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        state: &'a CibaRequestState,
+        _lease_expires_at: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        self.replace(auth_req_id, version, state)
+    }
+
     fn delete<'a>(
         &'a self,
         auth_req_id: &'a str,
         version: &'a Self::Version,
     ) -> CibaStateFuture<'a, CibaAtomicResult>;
+
+    /// Deletes a request while optionally enforcing an external capability
+    /// deadline in the state-store CAS itself.
+    fn delete_with_lease_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        _lease_expires_at: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        self.delete(auth_req_id, version)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,6 +293,19 @@ where
     pub async fn create_unique<F>(
         &self,
         state: &CibaRequestState,
+        generate_id: F,
+    ) -> Result<String, CibaCreateFailure>
+    where
+        F: FnMut() -> String,
+    {
+        self.create_unique_with_lease_deadline(state, None, generate_id)
+            .await
+    }
+
+    pub async fn create_unique_with_lease_deadline<F>(
+        &self,
+        state: &CibaRequestState,
+        lease_expires_at: Option<i64>,
         mut generate_id: F,
     ) -> Result<String, CibaCreateFailure>
     where
@@ -254,7 +314,11 @@ where
         validate_new_state(state).map_err(CibaCreateFailure::Storage)?;
         for _ in 0..CIBA_TRANSITION_MAX_ATTEMPTS {
             let auth_req_id = generate_id();
-            match self.store.create(&auth_req_id, state).await {
+            match self
+                .store
+                .create_with_lease_deadline(&auth_req_id, state, lease_expires_at)
+                .await
+            {
                 Ok(CibaAtomicResult::Applied) => return Ok(auth_req_id),
                 Ok(CibaAtomicResult::Conflict) => continue,
                 Ok(CibaAtomicResult::DeadlineElapsed) => {
@@ -271,6 +335,50 @@ where
         auth_req_id: &str,
         decision: CibaDecision,
         expected_user_id: Option<Uuid>,
+        current_time: F,
+    ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
+    where
+        F: FnMut() -> i64,
+    {
+        self.decide_with_authentication_context(
+            auth_req_id,
+            decision,
+            expected_user_id,
+            None,
+            current_time,
+        )
+        .await
+    }
+
+    pub async fn decide_with_authentication_context<F>(
+        &self,
+        auth_req_id: &str,
+        decision: CibaDecision,
+        expected_user_id: Option<Uuid>,
+        authentication_context: Option<CibaAuthenticationContext>,
+        current_time: F,
+    ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
+    where
+        F: FnMut() -> i64,
+    {
+        self.decide_with_authentication_context_and_lease_deadline(
+            auth_req_id,
+            decision,
+            expected_user_id,
+            authentication_context,
+            None,
+            current_time,
+        )
+        .await
+    }
+
+    pub async fn decide_with_authentication_context_and_lease_deadline<F>(
+        &self,
+        auth_req_id: &str,
+        decision: CibaDecision,
+        expected_user_id: Option<Uuid>,
+        authentication_context: Option<CibaAuthenticationContext>,
+        lease_expires_at: Option<i64>,
         mut current_time: F,
     ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
     where
@@ -282,8 +390,13 @@ where
                 .await
                 .map_err(CibaDecisionFailure::Storage)?
                 .ok_or(CibaDecisionFailure::Missing)?;
-            match evaluate_ciba_decision(&stored.state, expected_user_id, decision, current_time())
-            {
+            match evaluate_ciba_decision_with_authentication_context(
+                &stored.state,
+                expected_user_id,
+                decision,
+                authentication_context.clone(),
+                current_time(),
+            ) {
                 CibaDecisionEvaluation::UserMismatch => {
                     return Err(CibaDecisionFailure::UserMismatch);
                 }
@@ -291,7 +404,11 @@ where
                     return Err(CibaDecisionFailure::AlreadyHandled);
                 }
                 CibaDecisionEvaluation::Expired => {
-                    match self.store.delete(auth_req_id, &stored.version).await {
+                    match self
+                        .store
+                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
+                        .await
+                    {
                         Ok(CibaAtomicResult::Applied | CibaAtomicResult::DeadlineElapsed) => {
                             return Err(CibaDecisionFailure::Expired);
                         }
@@ -302,7 +419,12 @@ where
                 CibaDecisionEvaluation::Commit(next) => {
                     match self
                         .store
-                        .replace(auth_req_id, &stored.version, &next)
+                        .replace_with_lease_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            &next,
+                            lease_expires_at,
+                        )
                         .await
                     {
                         Ok(CibaAtomicResult::Applied) => {
@@ -327,7 +449,22 @@ where
         &self,
         auth_req_id: &str,
         expected_client_id: &str,
+        stored: CibaStoredRequest<S::Version>,
+        current_time: F,
+    ) -> Result<CibaPollCommit, CibaPollFailure>
+    where
+        F: FnMut() -> i64,
+    {
+        self.poll_with_lease_deadline(auth_req_id, expected_client_id, stored, None, current_time)
+            .await
+    }
+
+    pub async fn poll_with_lease_deadline<F>(
+        &self,
+        auth_req_id: &str,
+        expected_client_id: &str,
         mut stored: CibaStoredRequest<S::Version>,
+        lease_expires_at: Option<i64>,
         mut current_time: F,
     ) -> Result<CibaPollCommit, CibaPollFailure>
     where
@@ -341,7 +478,12 @@ where
                 CibaPollTransition::AuthorizationPending(next) => {
                     match self
                         .store
-                        .replace(auth_req_id, &stored.version, &next)
+                        .replace_with_lease_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            &next,
+                            lease_expires_at,
+                        )
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -354,7 +496,12 @@ where
                 CibaPollTransition::SlowDown(next) => {
                     match self
                         .store
-                        .replace(auth_req_id, &stored.version, &next)
+                        .replace_with_lease_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            &next,
+                            lease_expires_at,
+                        )
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -365,7 +512,7 @@ where
                 CibaPollTransition::Approved => {
                     match self
                         .store
-                        .delete(auth_req_id, &stored.version)
+                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -378,7 +525,7 @@ where
                 CibaPollTransition::Denied => {
                     match self
                         .store
-                        .delete(auth_req_id, &stored.version)
+                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -389,7 +536,7 @@ where
                 CibaPollTransition::Expired => {
                     match self
                         .store
-                        .delete(auth_req_id, &stored.version)
+                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -453,6 +600,17 @@ pub fn evaluate_ciba_decision(
     decision: CibaDecision,
     now: i64,
 ) -> CibaDecisionEvaluation {
+    evaluate_ciba_decision_with_authentication_context(state, expected_user_id, decision, None, now)
+}
+
+#[must_use]
+pub fn evaluate_ciba_decision_with_authentication_context(
+    state: &CibaRequestState,
+    expected_user_id: Option<Uuid>,
+    decision: CibaDecision,
+    authentication_context: Option<CibaAuthenticationContext>,
+    now: i64,
+) -> CibaDecisionEvaluation {
     if expected_user_id.is_some_and(|user_id| user_id != state.user_id) {
         return CibaDecisionEvaluation::UserMismatch;
     }
@@ -467,6 +625,9 @@ pub fn evaluate_ciba_decision(
         CibaDecision::Approve => CibaStatus::Approved,
         CibaDecision::Deny => CibaStatus::Denied,
     };
+    if decision == CibaDecision::Approve {
+        next.authentication_context = authentication_context;
+    }
     if let Some(notification) = next.ping_notification.as_mut() {
         notification.status = CibaPingNotificationStatus::Pending;
         notification.next_attempt_at = Some(now);
@@ -501,6 +662,18 @@ fn validate_state_shape(
     require_persisted_auth_req_id: bool,
 ) -> Result<(), CibaStatePortError> {
     if state.expires_at <= 0 || state.retention_expires_at < state.expires_at {
+        return Err(CibaStatePortError::CorruptData);
+    }
+    if state
+        .authentication_context
+        .as_ref()
+        .is_some_and(|context| {
+            context.auth_time <= 0
+                || context.amr.is_empty()
+                || context.amr.iter().any(|method| method.trim().is_empty())
+                || context.oidc_sid.as_deref().is_some_and(str::is_empty)
+        })
+    {
         return Err(CibaStatePortError::CorruptData);
     }
     if let Some(notification) = &state.ping_notification

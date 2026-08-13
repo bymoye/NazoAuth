@@ -1,6 +1,5 @@
 use super::*;
 use aws_lc_rs::key_wrap::{AES_128, AES_256, AesKek, KeyWrap};
-use openssl::symm::decrypt_aead;
 use p256::elliptic_curve::Generate;
 
 #[test]
@@ -155,15 +154,8 @@ fn decrypt_ecdh_compact_jwe(compact: &str, recipient: &SecretKey) -> Vec<u8> {
         .expect("tag")
         .try_into()
         .expect("128-bit tag");
-    decrypt_aead(
-        Cipher::aes_256_gcm(),
-        &cek,
-        Some(&iv),
-        parts[0].as_bytes(),
-        &ciphertext,
-        &tag,
-    )
-    .expect("decrypt compact JWE")
+    crate::crypto::aes_256_gcm_decrypt(&cek, &iv, parts[0].as_bytes(), &ciphertext, &tag)
+        .expect("decrypt compact JWE")
 }
 
 fn aes_key_unwrap(kek: &[u8], encrypted_key: &[u8]) -> Vec<u8> {

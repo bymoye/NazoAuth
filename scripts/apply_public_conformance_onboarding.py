@@ -9,17 +9,22 @@ and mTLS trust review steps available to ordinary operators.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import http.cookiejar
 import hashlib
+import hmac
 import json
 import os
 import ssl
+import struct
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,10 +33,21 @@ MAX_CREDENTIAL_BYTES = 16 * 1024
 DEFAULT_TIMEOUT_SECONDS = 20.0
 LOGIN_TRANSPORT_ATTEMPTS = 3
 LOGIN_RETRY_BASE_SECONDS = 1.0
+MFA_VERIFICATION_ATTEMPTS = 2
+TOTP_PERIOD_SECONDS = 30
+TOTP_DIGITS = 6
 
 
 class OnboardingError(RuntimeError):
     pass
+
+
+class OnboardingHttpError(OnboardingError):
+    def __init__(self, method: str, path: str, status: int) -> None:
+        super().__init__(f"{method} {path} returned HTTP {status}")
+        self.method = method
+        self.path = path
+        self.status = status
 
 
 def closed_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -79,10 +95,11 @@ def read_operator_credentials(args: argparse.Namespace) -> dict[str, str]:
         "applicant_password",
         "admin_email",
         "admin_password",
+        "admin_mfa_totp_secret",
     }
     if not isinstance(value, dict) or set(value) != required:
         raise OnboardingError(
-            "operator credentials must contain exactly applicant_email, applicant_password, admin_email, and admin_password"
+            "operator credentials must contain exactly applicant_email, applicant_password, admin_email, admin_password, and admin_mfa_totp_secret"
         )
     if any(
         not isinstance(value[field], str)
@@ -98,7 +115,27 @@ def read_operator_credentials(args: argparse.Namespace) -> dict[str, str]:
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        raise OnboardingError(f"unexpected redirect from control-plane request: {code} {newurl}")
+        raise OnboardingError(
+            f"unexpected redirect from control-plane request: HTTP {code}"
+        )
+
+
+def totp_code(secret_base32: str, timestamp: float | None = None) -> str:
+    normalized = "".join(secret_base32.split()).upper()
+    if not normalized or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for character in normalized):
+        raise OnboardingError("administrator TOTP secret is not canonical base32")
+    padded = normalized + "=" * ((8 - len(normalized) % 8) % 8)
+    try:
+        secret = base64.b32decode(padded, casefold=False)
+    except binascii.Error as error:
+        raise OnboardingError("administrator TOTP secret is not canonical base32") from error
+    if len(secret) < 16:
+        raise OnboardingError("administrator TOTP secret is too short")
+    counter = int(time.time() if timestamp is None else timestamp) // TOTP_PERIOD_SECONDS
+    digest = hmac.new(secret, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = int.from_bytes(digest[offset : offset + 4], "big") & 0x7FFF_FFFF
+    return f"{value % (10**TOTP_DIGITS):0{TOTP_DIGITS}d}"
 
 
 def canonical_https_origin(value: str, *, label: str) -> str:
@@ -183,7 +220,14 @@ class ControlPlaneSession:
         self.csrf_token = csrf_token
 
     @classmethod
-    def login(cls, origin: str, email: str, password: str) -> "ControlPlaneSession":
+    def login(
+        cls,
+        origin: str,
+        email: str,
+        password: str,
+        *,
+        mfa_totp_secret: str | None = None,
+    ) -> "ControlPlaneSession":
         for attempt in range(LOGIN_TRANSPORT_ATTEMPTS):
             cookie_jar = http.cookiejar.CookieJar()
             opener = urllib.request.build_opener(
@@ -212,12 +256,37 @@ class ControlPlaneSession:
 
             csrf_token = body.get("csrf_token") if isinstance(body, dict) else None
             if not isinstance(csrf_token, str) or not csrf_token:
-                raise OnboardingError(f"login for {email} did not establish a CSRF token")
-            if body.get("mfa_required") is True:
-                raise OnboardingError(
-                    f"login for {email} requires interactive MFA; use an approved automation identity"
-                )
+                raise OnboardingError("login did not establish a CSRF token")
             session.csrf_token = csrf_token
+            if body.get("mfa_required") is True:
+                if mfa_totp_secret is None:
+                    raise OnboardingError(
+                        "login requires interactive MFA and no TOTP secret was supplied"
+                    )
+                for mfa_attempt in range(MFA_VERIFICATION_ATTEMPTS):
+                    try:
+                        session.request_json(
+                            "POST",
+                            "/auth/mfa/verify",
+                            {"code": totp_code(mfa_totp_secret), "remember_device": False},
+                            expected_status=200,
+                            csrf=True,
+                        )
+                        break
+                    except OnboardingHttpError as error:
+                        if error.status not in {400, 401} or mfa_attempt + 1 == MFA_VERIFICATION_ATTEMPTS:
+                            raise
+                        wait_seconds = TOTP_PERIOD_SECONDS - (time.time() % TOTP_PERIOD_SECONDS) + 1
+                        time.sleep(wait_seconds)
+                refreshed = session.request_json(
+                    "GET",
+                    "/auth/csrf",
+                    expected_status=200,
+                )
+                refreshed_token = refreshed.get("csrf_token") if isinstance(refreshed, dict) else None
+                if not isinstance(refreshed_token, str) or not refreshed_token:
+                    raise OnboardingError("MFA verification did not refresh the CSRF token")
+                session.csrf_token = refreshed_token
             return session
 
         raise AssertionError("login retry loop exhausted without returning or raising")
@@ -230,13 +299,24 @@ class ControlPlaneSession:
         *,
         expected_status: int,
         csrf: bool = False,
+        raw_body: bytes | None = None,
+        content_type: str | None = None,
     ) -> tuple[bytes, str]:
         if not path.startswith("/") or path.startswith("//"):
             raise OnboardingError(f"control-plane path must be origin-relative: {path}")
         url = f"{self.origin}{path}"
         data = None
         headers = {"Accept": "application/json", "User-Agent": "nazo-conformance-onboarding/1"}
-        if payload is not None:
+        if payload is not None and raw_body is not None:
+            raise OnboardingError("control-plane request cannot combine JSON and raw bodies")
+        if raw_body is not None:
+            if not content_type:
+                raise OnboardingError("control-plane raw request requires a content type")
+            data = raw_body
+            headers["Content-Type"] = content_type
+        elif content_type is not None:
+            raise OnboardingError("control-plane content type requires a raw body")
+        elif payload is not None:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if csrf:
@@ -247,20 +327,19 @@ class ControlPlaneSession:
         try:
             response = self.opener.open(request, timeout=DEFAULT_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as error:
-            body = error.read(MAX_RESPONSE_BYTES + 1)
-            detail = body[:MAX_RESPONSE_BYTES].decode("utf-8", errors="replace")
-            raise OnboardingError(f"{method} {path} returned {error.code}: {detail}") from error
+            with error:
+                error.read(MAX_RESPONSE_BYTES + 1)
+                raise OnboardingHttpError(method, path, error.code) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise OnboardingError(f"{method} {path} failed: {error}") from error
+            raise OnboardingError(
+                f"{method} {path} failed: {type(error).__name__}"
+            ) from error
         with response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
             if len(body) > MAX_RESPONSE_BYTES:
                 raise OnboardingError(f"{method} {path} response exceeds {MAX_RESPONSE_BYTES} bytes")
             if response.status != expected_status:
-                detail = body.decode("utf-8", errors="replace")
-                raise OnboardingError(
-                    f"{method} {path} returned {response.status}, expected {expected_status}: {detail}"
-                )
+                raise OnboardingHttpError(method, path, response.status)
             final = urllib.parse.urlsplit(response.geturl())
             if f"{final.scheme}://{final.netloc}" != self.origin:
                 raise OnboardingError(f"{method} {path} escaped the configured origin")
@@ -274,6 +353,8 @@ class ControlPlaneSession:
         *,
         expected_status: int,
         csrf: bool = False,
+        raw_body: bytes | None = None,
+        content_type: str | None = None,
     ) -> dict[str, Any]:
         body, content_type = self.request(
             method,
@@ -281,6 +362,8 @@ class ControlPlaneSession:
             payload,
             expected_status=expected_status,
             csrf=csrf,
+            raw_body=raw_body,
+            content_type=content_type,
         )
         if "application/json" not in content_type.lower():
             raise OnboardingError(f"{method} {path} did not return JSON")
@@ -313,7 +396,7 @@ def replace_client_material(value: Any, logical_id: str, actual_id: str, secret:
 
 def write_runner_env(
     path: Path,
-    plan_document: dict[str, Any],
+    plan_config_path: Path,
     plan_set_path: Path,
     plan_manifest_path: Path,
 ) -> None:
@@ -325,9 +408,10 @@ def write_runner_env(
         path,
         "\n".join(
             (
-                f"OIDF_PLAN_CONFIG_JSON={json.dumps(plan_document, separators=(',', ':'))}",
-                f"OIDF_PLAN_SET_JSON={json.dumps(plan_set, separators=(',', ':'))}",
-                f"OIDF_PLAN_MANIFEST_JSON={json.dumps(plan_manifest, separators=(',', ':'))}",
+                "# Secret-free path hints; pass these files explicitly to the runner.",
+                f"OIDF_PLAN_CONFIG_FILE={plan_config_path.name}",
+                f"OIDF_PLAN_SET_FILE={plan_set_path.name}",
+                f"OIDF_PLAN_MANIFEST_FILE={plan_manifest_path.name}",
                 "",
             )
         ),
@@ -396,6 +480,11 @@ def delivered_client_for_request(
 
 
 def apply_onboarding(args: argparse.Namespace) -> int:
+    try:
+        lease_id = str(uuid.UUID(args.lease_id))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise OnboardingError("apply requires --lease-id UUID") from error
+    manifest_sha256 = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
     manifest = require_manifest(args.manifest)
     origin = canonical_https_origin(str(manifest.get("target_issuer", "")), label="target_issuer")
     configured = canonical_https_origin(args.target_issuer, label="--target-issuer")
@@ -412,6 +501,7 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     applicant_password = credentials["applicant_password"]
     admin_email = credentials["admin_email"]
     admin_password = credentials["admin_password"]
+    admin_mfa_totp_secret = credentials["admin_mfa_totp_secret"]
     if args.state_file.exists():
         raise OnboardingError(f"state file already exists; clean up the prior onboarding first: {args.state_file}")
 
@@ -419,7 +509,12 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     if not isinstance(plan_document, dict) or not isinstance(plan_document.get("configs"), dict):
         raise OnboardingError("plan config document must contain a configs object")
     applicant = ControlPlaneSession.login(origin, applicant_email, applicant_password)
-    admin = ControlPlaneSession.login(origin, admin_email, admin_password)
+    admin = ControlPlaneSession.login(
+        origin,
+        admin_email,
+        admin_password,
+        mfa_totp_secret=admin_mfa_totp_secret,
+    )
     applicant_me = applicant.request_json("GET", "/auth/me", expected_status=200)
     admin_me = admin.request_json("GET", "/auth/me", expected_status=200)
     if applicant_me.get("id") == admin_me.get("id"):
@@ -430,6 +525,8 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     state: dict[str, Any] = {
         "schema": 1,
         "target_issuer": origin,
+        "conformance_lease_id": lease_id,
+        "manifest_sha256": manifest_sha256,
         "applicant_user_id": applicant_me.get("id"),
         "approver_user_id": admin_me.get("id"),
         "clients": [],
@@ -458,10 +555,12 @@ def apply_onboarding(args: argparse.Namespace) -> int:
             raise OnboardingError(f"access request for {logical_id} returned no id")
         state_entry["access_request_id"] = request_id
         persist_onboarding_state(args.state_file, state)
+        client_request = dict(item["request"])
+        client_request["conformance_lease_id"] = lease_id
         approval = admin.request_json(
             "POST",
             f"/admin/access-requests/{urllib.parse.quote(request_id, safe='')}/approve",
-            item["request"],
+            client_request,
             expected_status=200,
             csrf=True,
         )
@@ -520,13 +619,20 @@ def apply_onboarding(args: argparse.Namespace) -> int:
     state["trust_bundle_sha256"] = hashlib.sha256(bundle).hexdigest()
     write_private_json(args.plan_configs, plan_document)
     if not args.no_runner_env:
-        write_runner_env(args.runner_env, plan_document, args.plan_set, args.plan_manifest)
+        write_runner_env(
+            args.runner_env,
+            args.plan_configs,
+            args.plan_set,
+            args.plan_manifest,
+        )
     write_private_json(
         args.delivered_client_material,
         {
             "schema": 1,
             "target_issuer": origin,
             "suite_base_url": manifest["suite_base_url"],
+            "conformance_lease_id": lease_id,
+            "manifest_sha256": manifest_sha256,
             "clients": delivered_clients,
         },
     )
@@ -549,8 +655,14 @@ def cleanup_onboarding(args: argparse.Namespace) -> int:
     applicant_password = credentials["applicant_password"]
     admin_email = credentials["admin_email"]
     admin_password = credentials["admin_password"]
+    admin_mfa_totp_secret = credentials["admin_mfa_totp_secret"]
     applicant = ControlPlaneSession.login(origin, applicant_email, applicant_password)
-    admin = ControlPlaneSession.login(origin, admin_email, admin_password)
+    admin = ControlPlaneSession.login(
+        origin,
+        admin_email,
+        admin_password,
+        mfa_totp_secret=admin_mfa_totp_secret,
+    )
     for item in reversed(state.get("clients", [])):
         if not isinstance(item, dict):
             raise OnboardingError("cleanup state contains an invalid client record")
@@ -625,6 +737,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("apply", "cleanup"))
     parser.add_argument("--target-issuer", required=True)
+    parser.add_argument("--lease-id")
     credentials = parser.add_mutually_exclusive_group(required=True)
     credentials.add_argument("--credentials-stdin", action="store_true")
     credentials.add_argument("--credentials-fd", type=int)

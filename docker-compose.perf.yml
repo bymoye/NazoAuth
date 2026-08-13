@@ -81,19 +81,27 @@ services:
       - sh
       - -euc
       - |
-        ci_operator_task prepare \
+        automation_operator_task prepare \
           --config /app/.env.yaml \
           --output /tmp/operator \
+          --deployment-id development-perf \
+          --actor-id docker-compose-perf \
+          --secret-revision perf-static-secrets \
           --image-ref localhost/nazoauth-perf:development \
-          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
+          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+          --embedded-release development \
+          --embedded-revision development \
+          --embedded-build-id local:development
+        printf '%s' perf-static-secrets > /tmp/operator/secret-revision
         NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
         NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
         NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
+        NAZOAUTH_OPERATOR_SECRET_REVISION_FILE=/tmp/operator/secret-revision \
         NAZOAUTH_OPERATOR_STATE_DIRECTORY=/tmp/operator/state \
         NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
         NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
           nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws
-        ci_operator_task verify \
+        automation_operator_task verify \
           --receipt /tmp/operator/receipt.jws \
           --public-key /tmp/operator/receipt.pub \
           --request-sha256 /tmp/operator/request.sha256

@@ -1,9 +1,13 @@
 //! 管理端客户端更新端点。
 use super::{AdminClientConfig, ServerAdminClientService};
-use crate::adapters::audit::audit_event;
 use crate::adapters::audit::audit_fields;
 use crate::adapters::security::blake3_hex;
-use crate::http::sessions::{AdminSessionHandles, require_admin_or_forbidden_with_handles};
+use crate::http::admin::{
+    persist_required_audit_or_unavailable, require_durable_audit_or_unavailable,
+};
+use crate::http::sessions::{
+    AdminSessionHandles, require_admin_with_recent_mfa_or_forbidden_with_handles,
+};
 use crate::http::views::client_json;
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json};
@@ -32,12 +36,17 @@ pub(crate) async fn admin_patch_client(
     ) {
         return csrf_error();
     }
-    if let Err(response) = require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
+    if let Err(response) =
+        require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req).await
+    {
+        return response;
+    }
+    if let Err(response) = require_durable_audit_or_unavailable().await {
         return response;
     }
     match service.update(&client_id, payload).await {
         Ok(client) => {
-            audit_event(
+            if let Err(response) = persist_required_audit_or_unavailable(
                 "client_updated",
                 audit_fields(&[
                     ("client_id", json!(client.client_id)),
@@ -46,7 +55,11 @@ pub(crate) async fn admin_patch_client(
                         json!(blake3_hex(&client_ip_with_config(&req, config.client_ip()))),
                     ),
                 ]),
-            );
+            )
+            .await
+            {
+                return response;
+            }
             json_response(client_json(client))
         }
         Err(AdminClientError::NotFound) => {

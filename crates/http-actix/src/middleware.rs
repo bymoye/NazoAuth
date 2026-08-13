@@ -44,6 +44,14 @@ pub fn apply_security_headers(headers: &mut HeaderMap, is_check_session_iframe: 
         HeaderName::from_static("permissions-policy"),
         "interest-cohort=()",
     );
+    // Browsers ignore HSTS received over plaintext HTTP, so emitting this at
+    // the application boundary also covers deployments terminated by a
+    // trusted TLS reverse proxy without affecting loopback development.
+    insert_static_header(
+        headers,
+        HeaderName::from_static("strict-transport-security"),
+        "max-age=31536000",
+    );
     insert_static_header(headers, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
 }
 

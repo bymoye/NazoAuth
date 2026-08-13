@@ -127,6 +127,9 @@ impl MtlsTrustAnchorRepository {
                  SELECT c.id
                  FROM oauth_clients c
                  WHERE c.tenant_id = $2 AND c.client_id = $4 AND c.is_active = TRUE
+                   AND nazo_oauth_conformance_lease_is_active(
+                       c.tenant_id, c.conformance_lease_id
+                   )
                    AND (
                        (
                            c.token_endpoint_auth_method = 'tls_client_auth'
@@ -338,6 +341,16 @@ impl MtlsTrustAnchorRepository {
                AND EXISTS (SELECT 1 FROM admin_actor)
                AND ($4 <> 1 OR (
                    not_before <= CURRENT_TIMESTAMP AND not_after > CURRENT_TIMESTAMP
+                   AND EXISTS (
+                       SELECT 1 FROM oauth_clients requested_client
+                       WHERE requested_client.tenant_id = $1
+                         AND requested_client.id = oauth_client_mtls_trust_anchor_requests.client_id
+                         AND requested_client.is_active = TRUE
+                         AND nazo_oauth_conformance_lease_is_active(
+                             requested_client.tenant_id,
+                             requested_client.conformance_lease_id
+                         )
+                   )
                    AND (
                        EXISTS (
                            SELECT 1
@@ -358,6 +371,10 @@ impl MtlsTrustAnchorRepository {
                              AND active.not_before <= CURRENT_TIMESTAMP
                              AND active.not_after > CURRENT_TIMESTAMP
                              AND active_client.is_active = TRUE
+                             AND nazo_oauth_conformance_lease_is_active(
+                                 active_client.tenant_id,
+                                 active_client.conformance_lease_id
+                             )
                        ) < $6
                    )
                    AND (
@@ -458,6 +475,9 @@ impl MtlsTrustAnchorRepository {
              JOIN oauth_clients c ON c.id = r.client_id AND c.tenant_id = r.tenant_id
              WHERE r.tenant_id = $1 AND r.status = 1 AND r.not_before <= CURRENT_TIMESTAMP
                AND r.not_after > CURRENT_TIMESTAMP AND c.is_active = TRUE
+               AND nazo_oauth_conformance_lease_is_active(
+                   c.tenant_id, c.conformance_lease_id
+               )
                AND (
                    c.token_endpoint_auth_method = 'tls_client_auth'
                    OR c.require_mtls_bound_tokens = TRUE
@@ -483,6 +503,218 @@ impl MtlsTrustAnchorRepository {
     }
 }
 
+/// Inserts an already-approved trust request on a caller-owned onboarding
+/// transaction.  This is deliberately the same policy boundary as
+/// `resolve(..., Approved)`: the applicant is checked, validity and
+/// tenant/client limits are enforced, and the append-only request/approval
+/// events are recorded.  The operator task is a narrow server-side
+/// capability, so it does not synthesize a user-facing access request or
+/// impersonate a user actor merely to satisfy the browser approval route.
+pub(crate) struct ConformanceApprovedTrustAnchor<'a> {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) applicant_user_id: Uuid,
+    pub(crate) client_id: Uuid,
+    pub(crate) certificate_pem: &'a str,
+    pub(crate) certificate_sha256: &'a str,
+    pub(crate) subject_dn: &'a str,
+    pub(crate) not_before: DateTime<Utc>,
+    pub(crate) not_after: DateTime<Utc>,
+}
+
+pub(crate) async fn insert_conformance_approved_trust_anchor_on_connection(
+    connection: &mut AsyncPgConnection,
+    request: ConformanceApprovedTrustAnchor<'_>,
+) -> Result<Uuid, RepositoryError> {
+    let ConformanceApprovedTrustAnchor {
+        tenant_id,
+        applicant_user_id,
+        client_id,
+        certificate_pem,
+        certificate_sha256,
+        subject_dn,
+        not_before,
+        not_after,
+    } = request;
+    if certificate_pem.len() > 16 * 1024
+        || !certificate_pem.starts_with("-----BEGIN CERTIFICATE-----")
+        || !certificate_pem.contains("-----END CERTIFICATE-----")
+        || subject_dn.trim().is_empty()
+        || subject_dn.len() > 2048
+        || subject_dn.chars().any(char::is_control)
+        || not_after <= not_before
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance trust anchor metadata is invalid".to_owned(),
+        ));
+    }
+    // The authoritative trust-boundary validator computes this digest over
+    // the certificate DER, not over the presentation-dependent PEM text.
+    // Persistence must preserve that identity instead of inventing a second,
+    // incompatible PEM digest. The authorization domain has already parsed
+    // the X.509 CA and supplied its canonical DER digest; this layer only
+    // enforces the persisted encoding before binding it transactionally.
+    if certificate_sha256.len() != 64
+        || !certificate_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RepositoryError::Consistency(
+            "conformance trust anchor digest is not a lowercase SHA-256 value".to_owned(),
+        ));
+    }
+
+    acquire_tenant_trust_lock(connection, tenant_id)
+        .await
+        .map_err(map_error)?;
+    // Cleanup locks the lease row before revoking/deleting its clients.  Take
+    // a conflicting row lock here so an onboarding trust insert cannot race
+    // with cleanup after the active-lease predicate has been evaluated.
+    sql_query(
+        "SELECT lease.id
+         FROM conformance_leases lease
+         JOIN oauth_clients client
+           ON client.tenant_id = lease.tenant_id
+          AND client.conformance_lease_id = lease.id
+         JOIN conformance_lease_applicants owner
+           ON owner.tenant_id = lease.tenant_id
+          AND owner.lease_id = lease.id
+          AND owner.applicant_user_id = $2
+          AND owner.cleaned_at IS NULL
+          AND owner.deleted_at IS NULL
+         WHERE lease.tenant_id = $1
+           AND client.id = $3
+           AND lease.expires_at > CURRENT_TIMESTAMP
+           AND lease.revoked_at IS NULL
+           AND lease.cleaned_at IS NULL
+           AND client.is_active = TRUE
+           AND (
+               (client.token_endpoint_auth_method = 'tls_client_auth'
+                AND client.tls_client_auth_cert_sha256 IS NOT NULL)
+               OR client.require_mtls_bound_tokens = TRUE
+           )
+         FOR SHARE",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(applicant_user_id)
+    .bind::<sql_types::Uuid, _>(client_id)
+    .get_result::<IdRow>(connection)
+    .await
+    .optional()
+    .map_err(map_error)?
+    .ok_or_else(|| {
+        RepositoryError::Consistency(
+            "conformance trust anchor client or lease is not eligible".to_owned(),
+        )
+    })?;
+    let request_id = Uuid::now_v7();
+    let inserted = sql_query(
+        "INSERT INTO oauth_client_mtls_trust_anchor_requests (
+             id, tenant_id, user_id, client_id, certificate_pem,
+             certificate_sha256, subject_dn, not_before, not_after,
+             status, source, admin_note, resolved_at
+         )
+         SELECT $1, $2, $3, client.id, $4, $5, $6, $7, $8,
+                1, 'operator-conformance', 'OIDF conformance onboarding', CURRENT_TIMESTAMP
+         FROM oauth_clients client
+         WHERE client.tenant_id = $2
+            AND client.id = $9
+            AND client.is_active = TRUE
+            AND client.conformance_lease_id IS NOT NULL
+            AND nazo_oauth_conformance_lease_is_active(
+                client.tenant_id, client.conformance_lease_id
+            )
+            AND (
+                (client.token_endpoint_auth_method = 'tls_client_auth'
+                 AND client.tls_client_auth_cert_sha256 IS NOT NULL)
+                OR client.require_mtls_bound_tokens = TRUE
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM conformance_lease_applicants owner
+                WHERE owner.tenant_id = $2
+                  AND owner.lease_id = client.conformance_lease_id
+                  AND owner.applicant_user_id = $3
+                  AND owner.cleaned_at IS NULL
+                  AND owner.deleted_at IS NULL
+            )
+           AND $7 <= CURRENT_TIMESTAMP AND $8 > CURRENT_TIMESTAMP
+           AND EXISTS (
+               SELECT 1 FROM users applicant
+               WHERE applicant.tenant_id = $2 AND applicant.id = $3
+                 AND applicant.is_active = TRUE
+                 AND applicant.role = 'user' AND applicant.admin_level = 0
+           )
+           AND (
+               EXISTS (
+                   SELECT 1
+                   FROM oauth_client_mtls_trust_anchor_requests existing
+                   WHERE existing.tenant_id = $2
+                     AND existing.status = 1
+                     AND existing.not_before <= CURRENT_TIMESTAMP
+                     AND existing.not_after > CURRENT_TIMESTAMP
+                      AND existing.certificate_sha256 = $5
+               )
+               OR (
+                   SELECT COUNT(DISTINCT active.certificate_sha256)
+                   FROM oauth_client_mtls_trust_anchor_requests active
+                   JOIN oauth_clients active_client
+                     ON active_client.id = active.client_id
+                    AND active_client.tenant_id = active.tenant_id
+                   WHERE active.tenant_id = $2 AND active.status = 1
+                     AND active.not_before <= CURRENT_TIMESTAMP
+                     AND active.not_after > CURRENT_TIMESTAMP
+                     AND active_client.is_active = TRUE
+                     AND nazo_oauth_conformance_lease_is_active(
+                         active_client.tenant_id, active_client.conformance_lease_id
+                     )
+               ) < $10
+           )
+           AND (
+               SELECT COUNT(*)
+               FROM oauth_client_mtls_trust_anchor_requests active
+               WHERE active.tenant_id = $2 AND active.status = 1
+                 AND active.not_before <= CURRENT_TIMESTAMP
+                 AND active.not_after > CURRENT_TIMESTAMP
+                 AND active.client_id = client.id
+           ) < $11
+         ON CONFLICT (tenant_id, client_id, certificate_sha256) DO NOTHING
+         RETURNING id",
+    )
+    .bind::<sql_types::Uuid, _>(request_id)
+    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(applicant_user_id)
+    .bind::<sql_types::Text, _>(certificate_pem)
+    .bind::<sql_types::Text, _>(certificate_sha256)
+    .bind::<sql_types::Text, _>(subject_dn)
+    .bind::<sql_types::Timestamptz, _>(not_before)
+    .bind::<sql_types::Timestamptz, _>(not_after)
+    .bind::<sql_types::Uuid, _>(client_id)
+    .bind::<sql_types::BigInt, _>(MAX_ACTIVE_TRUST_ANCHORS_PER_TENANT)
+    .bind::<sql_types::BigInt, _>(MAX_ACTIVE_TRUST_ANCHORS_PER_CLIENT)
+    .get_result::<IdRow>(connection)
+    .await
+    .optional()
+    .map_err(map_error)?;
+    let Some(inserted) = inserted else {
+        return Err(RepositoryError::Consistency(
+            "conformance trust anchor activation policy rejected the request".to_owned(),
+        ));
+    };
+
+    sql_query(
+        "INSERT INTO oauth_client_mtls_trust_anchor_events
+             (tenant_id, request_id, actor_user_id, action, note)
+         VALUES ($1, $2, NULL, 0, 'OIDF conformance onboarding'),
+                ($1, $2, NULL, 1, 'OIDF conformance onboarding')",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(inserted.id)
+    .execute(connection)
+    .await
+    .map_err(map_error)?;
+    Ok(inserted.id)
+}
+
 #[derive(QueryableByName)]
 struct IdRow {
     #[diesel(sql_type = sql_types::Uuid)]
@@ -499,7 +731,7 @@ fn map_error(error: diesel::result::Error) -> RepositoryError {
     }
 }
 
-async fn acquire_tenant_trust_lock(
+pub(crate) async fn acquire_tenant_trust_lock(
     connection: &mut AsyncPgConnection,
     tenant_id: TenantId,
 ) -> Result<(), diesel::result::Error> {

@@ -384,6 +384,30 @@ pub(super) async fn insert_identity_security_event(
     Ok(())
 }
 
+pub(super) async fn insert_initial_admin_created_event(
+    connection: &mut AsyncPgConnection,
+    request_id: &str,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    occurred_at: DateTime<Utc>,
+) -> diesel::QueryResult<()> {
+    diesel::insert_into(identity_security_events::table)
+        .values((
+            identity_security_events::tenant_id.eq(tenant_id),
+            identity_security_events::category.eq("admin"),
+            identity_security_events::event_type.eq("initial_admin_bootstrap"),
+            identity_security_events::outcome.eq("success"),
+            identity_security_events::actor_id.eq::<Option<Uuid>>(None),
+            identity_security_events::target_user_id.eq(Some(user_id)),
+            identity_security_events::reason_code.eq("initial_admin_created"),
+            identity_security_events::occurred_at.eq(occurred_at),
+            identity_security_events::request_id.eq(Some(request_id)),
+        ))
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
 const fn security_category(event_type: IdentitySecurityEventType) -> &'static str {
     match event_type {
         IdentitySecurityEventType::MfaTotpAttempt

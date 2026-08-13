@@ -25,7 +25,7 @@ jobs:
     name: Validate inventory and active pins
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Validate GitHub Actions workflows
         run: >-
           docker run --rm -v "$PWD:/repo" -w /repo
@@ -34,7 +34,7 @@ jobs:
           .github/workflows/oidf-conformance.yml
           .github/workflows/oidf-conformance-full.yml
           .github/workflows/oidf-public-onboarding-material.yml
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
       - run: python -m unittest tests.unit.test_spec_freshness tests.unit.test_oidf_workflows
@@ -46,8 +46,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
       - run: python scripts/check_spec_freshness.py

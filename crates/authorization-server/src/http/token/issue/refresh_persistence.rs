@@ -22,6 +22,41 @@ fn refresh_token_persistence_scopes(
         .to_vec()
 }
 
+fn refresh_authentication_context(
+    issue: &TokenIssue,
+    issuer: &str,
+    audience: &str,
+    id_token_sid: Option<&str>,
+) -> Option<nazo_auth::RefreshTokenAuthenticationContext> {
+    // Only an OpenID authorization has an ID-token authentication/claims
+    // contract to carry forward. The auth_time is deliberately required:
+    // an absent value means that the original context is unknown and must
+    // never be replaced with the refresh issuance time.
+    let authorization_scopes = issue
+        .refresh_token_scopes
+        .as_deref()
+        .unwrap_or(&issue.scopes);
+    if !authorization_scopes.iter().any(|scope| scope == "openid") {
+        return None;
+    }
+    let context = nazo_auth::RefreshTokenAuthenticationContext {
+        version: nazo_auth::RefreshTokenAuthenticationContext::CURRENT_VERSION,
+        issuer: issuer.to_owned(),
+        audience: audience.to_owned(),
+        auth_time: issue.auth_time?,
+        amr: issue.amr.clone(),
+        oidc_sid: issue.oidc_sid.clone(),
+        id_token_sid: id_token_sid.map(ToOwned::to_owned),
+        acr: issue.acr.clone(),
+        nonce: issue.nonce.clone(),
+        userinfo_claims: issue.userinfo_claims.clone(),
+        userinfo_claim_requests: issue.userinfo_claim_requests.clone(),
+        id_token_claims: issue.id_token_claims.clone(),
+        id_token_claim_requests: issue.id_token_claim_requests.clone(),
+    };
+    context.is_well_formed().then_some(context)
+}
+
 pub(crate) fn should_issue_refresh_token(
     client: &ClientRow,
     scopes: &[String],
@@ -35,8 +70,10 @@ pub(crate) fn should_issue_refresh_token(
 pub(super) async fn persist_refresh_token(
     service: &ServerTokenService,
     client: &ClientRow,
+    issuer: &str,
     issue: &TokenIssue,
     refresh: &PendingRefreshToken,
+    id_token_sid: Option<&str>,
 ) -> anyhow::Result<RefreshPersistResult> {
     service
         .persist_refresh_token(nazo_auth::NewRefreshToken {
@@ -64,6 +101,12 @@ pub(super) async fn persist_refresh_token(
             dpop_jkt: issue.refresh_token_dpop_jkt.clone(),
             mtls_x5t_s256: issue.refresh_token_mtls_x5t_s256.clone(),
             client_attestation_jkt: issue.refresh_token_client_attestation_jkt.clone(),
+            authentication_context: refresh_authentication_context(
+                issue,
+                issuer,
+                &client.client_id,
+                id_token_sid,
+            ),
         })
         .await
         .map_err(|error| anyhow::anyhow!("failed to persist refresh token: {error:?}"))

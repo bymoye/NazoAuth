@@ -35,6 +35,8 @@ pub(crate) struct RefreshTokenRow {
     pub(crate) mtls_x5t_s256: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::VarChar>)]
     pub(crate) client_attestation_jkt: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
+    pub(crate) oidc_auth_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, diesel::QueryableByName)]

@@ -42,7 +42,7 @@ pub(crate) async fn token_jwt_bearer(
 ) -> HttpResponse {
     let connection = state.valkey_connection();
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
         state.keyset.clone(),
     );
@@ -210,6 +210,13 @@ async fn live_jwt_bearer_state() -> Option<TestInfrastructure> {
     valkey.init().await.expect("valkey should connect");
     let mut state = jwt_bearer_state();
     state.valkey = valkey;
+    Some(state)
+}
+
+async fn live_jwt_bearer_issuance_state() -> Option<TestInfrastructure> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let mut state = live_jwt_bearer_state().await?;
+    state.diesel_db = create_pool(database_url, 2).expect("JWT bearer test database should build");
     Some(state)
 }
 
@@ -418,4 +425,48 @@ async fn jwt_bearer_assertion_jti_replay_is_rejected() {
         consume_jwt_bearer_assertion(&state, &client, &assertion).await,
         Err(JwtBearerAssertionError::ReplayDetected)
     ));
+}
+
+#[actix_web::test]
+async fn jwt_bearer_replay_rejects_a_consumed_jti_even_with_a_persisted_response() {
+    let Some(state) = live_jwt_bearer_issuance_state().await else {
+        return;
+    };
+    let private_key = client_signing_fixture(jsonwebtoken::Algorithm::RS256);
+    let client = jwt_bearer_client("client-a", "jwt-bearer-replay-kid", &private_key);
+    let assertion = signed_jwt_bearer_assertion(
+        "client-a",
+        "jwt-bearer-replay-kid",
+        &private_key,
+        json!({"jti": format!("jwt-bearer-endpoint-replay-{}", Uuid::now_v7())}),
+    );
+    let validated = validate_jwt_bearer_assertion(&jwt_bearer_settings(), &client, &assertion)
+        .expect("JWT bearer replay fixture should validate");
+    consume_jwt_bearer_assertion(&state, &client, &validated)
+        .await
+        .expect("first JWT bearer assertion use should be accepted");
+
+    let grant_key = jwt_bearer_grant_key(&validated.jti, None, None);
+    crate::http::token::issue::tests::persist_token_issuance_response_for_test(
+        &state, &client, &grant_key,
+    )
+    .await;
+
+    let request = TestRequest::post().uri("/token").to_http_request();
+    let response = token_jwt_bearer(
+        &state,
+        &request,
+        &client,
+        &jwt_bearer_form(Some(&assertion)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<OAuthJsonErrorFields>()
+            .map(|fields| fields.error.as_str()),
+        Some("invalid_grant")
+    );
 }

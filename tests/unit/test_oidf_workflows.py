@@ -9,6 +9,67 @@ def workflow_heredoc_json(workflow: str, name: str):
     return json.loads(payload)
 
 class OidfWorkflowTests(unittest.TestCase):
+    def test_github_secrets_are_scoped_to_the_single_materializer_step_per_job(self):
+        root = Path(__file__).resolve().parents[2]
+        workflows = {
+            "oidf-conformance.yml": {
+                "jobs": 1,
+                "secrets": (
+                    "OIDF_PLAN_CONFIG_AGE_IDENTITY",
+                    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
+                    "OIDF_CONFORMANCE_TOKEN",
+                ),
+            },
+            "oidf-conformance-full.yml": {
+                "jobs": 2,
+                "secrets": (
+                    "OIDF_PLAN_CONFIG_AGE_IDENTITY",
+                    "OIDF_MTLS_MATERIAL_AGE_IDENTITY",
+                    "OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN",
+                    "OIDF_CIBA_AUTOMATED_DECISION_TOKEN",
+                    "OIDF_DELIVERED_CLIENT_MATERIAL_JSON",
+                    "OIDF_CONFORMANCE_TOKEN",
+                    "OIDF_USER_EMAIL",
+                    "OIDF_USER_PASSWORD",
+                ),
+            },
+            "openid4vc-conformance.yml": {
+                "jobs": 1,
+                "secrets": (
+                    "OIDF_CONFORMANCE_TOKEN",
+                    "OPENID4VC_OIDF_BASE_CONFIG_JSON",
+                    "OPENID4VC_OIDF_MTLS_CONFIG_JSON",
+                    "OPENID4VC_OIDF_DRIVER_CONFIG_JSON",
+                    "OIDF_DELIVERED_CLIENT_MATERIAL_JSON",
+                    "OIDF_USER_EMAIL",
+                    "OIDF_USER_PASSWORD",
+                    "OIDF_ADMIN_EMAIL",
+                    "OIDF_ADMIN_PASSWORD",
+                ),
+            },
+        }
+        for name, contract in workflows.items():
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            jobs = contract["jobs"]
+            self.assertEqual(
+                workflow.count("materialize_github_oidf_secrets.py"),
+                jobs,
+                name,
+            )
+            self.assertEqual(
+                workflow.count('rm -rf -- "$RUNNER_TEMP/oidf-secrets"'),
+                jobs,
+                name,
+            )
+            for secret in contract["secrets"]:
+                self.assertEqual(
+                    workflow.count(f"${{{{ secrets.{secret} }}}}"),
+                    jobs,
+                    f"{name}: {secret} must appear only on its materializer step",
+                )
+
     def test_public_onboarding_workflow_derives_the_complete_ciba_matrix(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (
@@ -20,12 +81,16 @@ class OidfWorkflowTests(unittest.TestCase):
             '--ciba-notification-base-url "$SUITE_BASE_URL"',
             workflow,
         )
-        self.assertIn("suite_base_url:", workflow)
+        self.assertNotIn("suite_base_url:", workflow)
         self.assertIn(
             '--suite-base-url "$SUITE_BASE_URL"',
             workflow,
         )
-        self.assertNotIn("https://www.certification.openid.net", workflow)
+        self.assertIn(
+            "SUITE_BASE_URL: https://www.certification.openid.net",
+            workflow,
+        )
+        self.assertNotIn("OIDF_CONFORMANCE_SERVER", workflow)
         self.assertIn("materialize_openid4vc_oidf_config.py", workflow)
         self.assertIn(
             "--config-json-file runtime/openid4vc/materialized/openid4vc-plan-configs.json",
@@ -92,6 +157,7 @@ class OidfWorkflowTests(unittest.TestCase):
             "credential_holder_email_sha256: ${{ inputs.credential_holder_email_sha256 }}",
             workflow,
         )
+        self.assertIn("release_tag: ${{ inputs.release_tag }}", workflow)
         self.assertIn("secrets: inherit", workflow)
         self.assertIn("if: ${{ !inputs.onboarding_material_only }}", workflow)
         self.assertIn(
@@ -100,16 +166,16 @@ class OidfWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow.count(
-                "--dynamic-registration-token-file dynamic-registration-initial-access-token"
+                '--dynamic-registration-token-file "$RUNNER_TEMP/oidf-secrets/dynamic-registration-token"'
             ),
             2,
         )
         self.assertEqual(
-            workflow.count(
-                "unset OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN "
-                "OIDF_CIBA_AUTOMATED_DECISION_TOKEN "
-                "OIDF_DELIVERED_CLIENT_MATERIAL_JSON"
-            ),
+            workflow.count("python scripts/materialize_github_oidf_secrets.py"),
+            2,
+        )
+        self.assertEqual(
+            workflow.count('rm -rf -- "$RUNNER_TEMP/oidf-secrets"'),
             2,
         )
 
@@ -123,6 +189,25 @@ class OidfWorkflowTests(unittest.TestCase):
             self.assertIn("apply_oidf_delivered_client_material.py", workflow)
             self.assertIn("--expected-target-issuer", workflow)
             self.assertIn("--expected-suite-base-url", workflow)
+
+    def test_github_oidf_workflows_only_target_the_official_service(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in (
+            "oidf-conformance.yml",
+            "oidf-conformance-full.yml",
+            "oidf-public-onboarding-material.yml",
+            "openid4vc-conformance.yml",
+        ):
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                self.assertIn(
+                    "https://www.certification.openid.net",
+                    workflow,
+                )
+                self.assertNotIn("vars.OIDF_CONFORMANCE_SERVER", workflow)
+                self.assertNotIn("oauth-test.nazo.run", workflow)
 
     def test_public_onboarding_artifacts_include_a_validated_mtls_ca_bundle(self):
         root = Path(__file__).resolve().parents[2]
@@ -144,6 +229,98 @@ class OidfWorkflowTests(unittest.TestCase):
             root / ".github" / "workflows" / "oidf-conformance-full.yml"
         ).read_text(encoding="utf-8")
         self.assertNotIn("Upload public OIDF onboarding material", conformance)
+
+    def test_public_workflows_accept_only_exact_tag_bound_release_source(self):
+        root = Path(__file__).resolve().parents[2]
+        workflows = {
+            "oidf-public-onboarding-material.yml": "SOURCE_COMMIT",
+            "oidf-conformance-full.yml": "DEPLOYED_SHA",
+        }
+        for name, source_variable in workflows.items():
+            workflow = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=name):
+                self.assertIn("release_tag:", workflow)
+                self.assertIn("required: true", workflow)
+                self.assertIn("attestations: read", workflow)
+                self.assertIn("RELEASE_TAG: ${{ inputs.release_tag }}", workflow)
+                self.assertIn(
+                    'git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"',
+                    workflow,
+                )
+                self.assertIn(
+                    f'test "$(git rev-parse "refs/tags/$RELEASE_TAG^{{commit}}")" = "${source_variable}"',
+                    workflow,
+                )
+                self.assertNotIn(
+                    f'if ! git merge-base --is-ancestor "${source_variable}" "origin/${{{{ github.event.repository.default_branch }}}}"; then',
+                    workflow,
+                )
+                self.assertIn(
+                    'gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft',
+                    workflow,
+                )
+                self.assertIn(
+                    'test "$(jq -r \'.isDraft\' <<<"$release_json")" = false',
+                    workflow,
+                )
+                self.assertIn(
+            'bootstrap_subject="nazoauth-x86_64-unknown-linux-gnu"',
+                    workflow,
+                )
+                self.assertIn(
+            'bootstrap_subject="nazoauth-aarch64-unknown-linux-gnu"',
+                    workflow,
+                )
+                self.assertIn('gh release download "$RELEASE_TAG"', workflow)
+                self.assertIn('gh attestation verify "$subject"', workflow)
+                self.assertIn(
+                    '--cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release-security.yml@refs/tags/$RELEASE_TAG"',
+                    workflow,
+                )
+                self.assertIn('--source-ref "refs/tags/$RELEASE_TAG"', workflow)
+                self.assertIn(f'--source-digest "${source_variable}"', workflow)
+                self.assertIn(
+                    '--predicate-type "https://nazo.run/attestations/release-manifest/v1"',
+                    workflow,
+                )
+                self.assertIn("--deny-self-hosted-runners", workflow)
+                self.assertNotIn("github.head_ref", workflow)
+                self.assertNotIn("refs/heads/$RELEASE_TAG", workflow)
+
+                attestation = workflow.index('gh attestation verify "$subject"')
+                checkout = workflow.index(f'git checkout --detach "${source_variable}"')
+                self.assertLess(attestation, checkout)
+
+        onboarding = (
+            root / ".github" / "workflows" / "oidf-public-onboarding-material.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(onboarding.count("release_tag:"), 2)
+        full = (root / ".github" / "workflows" / "oidf-conformance-full.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(full.count("needs: verify-release-source"), 2)
+        self.assertEqual(full.count("ref: ${{ inputs.deployed_sha }}"), 2)
+        self.assertEqual(full.count("git merge-base --is-ancestor"), 0)
+
+    def test_public_runner_checks_out_the_exact_deployed_revision(self):
+        root = Path(__file__).resolve().parents[2]
+        for name in ("oidf-conformance.yml", "openid4vc-conformance.yml"):
+            workflow = (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            with self.subTest(workflow=name):
+                self.assertIn('git checkout --detach "$DEPLOYED_SHA"', workflow)
+                self.assertIn('test "$(git rev-parse HEAD)" = "$DEPLOYED_SHA"', workflow)
+                self.assertIn(
+                    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                    workflow,
+                )
+
+        oidf = (root / ".github" / "workflows" / "oidf-conformance.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(oidf.count('"$RUNNER_TEMP/oidf-secrets/plan-config.agekey"'), 2)
+        self.assertNotIn("--identity oidf-plan-config.agekey", oidf)
 
     def test_oidf_workflows_default_to_latest_verified_release(self):
         root = Path(__file__).resolve().parents[2]

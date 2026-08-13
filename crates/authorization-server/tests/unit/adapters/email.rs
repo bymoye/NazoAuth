@@ -80,3 +80,19 @@ fn delivery_adapter_projects_only_focused_smtp_configuration() {
         "the delivery adapter must not retain the aggregate Settings object"
     );
 }
+
+#[test]
+fn smtp_tls_modes_build_with_the_configured_rustls_backend() {
+    for tls in [SmtpTlsMode::StartTls, SmtpTlsMode::ImplicitTls] {
+        let smtp = SmtpEmailSettings {
+            host: "smtp.example.test".to_owned(),
+            port: 465,
+            tls,
+            username: None,
+            password: None,
+            from: "Nazo <no-reply@example.test>".parse().unwrap(),
+        };
+
+        build_smtp_transport(&smtp).unwrap();
+    }
+}

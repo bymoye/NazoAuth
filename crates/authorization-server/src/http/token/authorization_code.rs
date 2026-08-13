@@ -15,8 +15,6 @@ use crate::domain::{
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::dpop::validate_dpop_proof_with_authorization_service;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
 
 use actix_web::http::StatusCode;
 
@@ -25,13 +23,16 @@ use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
 
 use nazo_http_actix::oauth_token_error;
+use serde_json::json;
 
 // 只消费授权码并转入统一令牌签发逻辑。
 use super::issue::TokenIssuanceConfig;
 use super::{
-    ServerTokenService, TokenForm, consume_token_client_assertion_with_authorization_service,
-    issue::{TokenIssuanceContext, issue_token_response_with_service},
+    SenderConstraintValidationError, ServerTokenService, TokenForm,
+    consume_token_client_assertion_with_authorization_service,
+    issue::{TokenIssuanceContext, issue_token_response_with_service_and_grant},
     native_sso_requested, new_native_sso_token_binding, revoke_issued_authorization_code_tokens,
+    sender_constraint_multiple_error, validate_token_sender_constraints,
 };
 
 enum AuthorizationCodeConsumption {
@@ -124,6 +125,43 @@ fn authorization_code_client_mismatch_response() -> HttpResponse {
     )
 }
 
+/// Bind the one-time authorization-code redemption to the request proofs that
+/// produced its tokens. The binding is retained only to decide whether a
+/// later replay may revoke those tokens; a replay never recovers a response.
+fn authorization_code_grant_key(
+    code_hash: &str,
+    form: &TokenForm,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    client_attestation_jkt: Option<&str>,
+) -> String {
+    let proof = json!({
+        "code_hash": code_hash,
+        "code_verifier": form.code_verifier.as_deref().map(blake3_hex),
+        "redirect_uri": form.redirect_uri.as_deref().map(blake3_hex),
+        "scope": form.scope.as_deref().map(blake3_hex),
+        "audiences": &form.audiences,
+        "dpop_jkt": dpop_jkt,
+        "mtls_x5t_s256": mtls_x5t_s256,
+        "client_attestation_jkt": client_attestation_jkt,
+    });
+    format!("authorization_code:{}", blake3_hex(&proof.to_string()))
+}
+
+fn replay_matches_original_redemption(
+    marker: &ConsumedAuthorizationCode,
+    client_id: uuid::Uuid,
+    redemption_binding: &str,
+) -> bool {
+    marker.client_id == client_id
+        && marker
+            .redemption_binding
+            .as_deref()
+            .is_some_and(|expected| {
+                constant_time_eq(expected.as_bytes(), redemption_binding.as_bytes())
+            })
+}
+
 struct AuthorizationCodeIssueInput {
     payload: CodePayload,
     subject: String,
@@ -155,6 +193,7 @@ fn token_issue_from_authorization_code(input: AuthorizationCodeIssueInput) -> To
         userinfo_claim_requests: input.payload.userinfo_claim_requests,
         id_token_claims: input.payload.id_token_claims,
         id_token_claim_requests: input.payload.id_token_claim_requests,
+        refresh_id_token_sid: None,
         include_refresh: true,
         refresh_token_policy: RefreshTokenPolicy::IssueNew,
         dpop_jkt: input.dpop_jkt,
@@ -315,42 +354,36 @@ pub(crate) async fn token_authorization_code_with_service(
     let expected_mtls_x5t_s256 = expected_payload
         .as_ref()
         .and_then(|payload| payload.mtls_x5t_s256.clone());
-    let dpop_jkt = match validate_dpop_proof_with_authorization_service(
-        issuance.authorization,
-        issuance.config.issuer(),
-        issuance.config.mtls_endpoint_base_url(),
-        issuance.config.dpop_nonce_policy(),
+    let sender = match validate_token_sender_constraints(
+        issuance,
         req,
+        client,
         None,
         expected_dpop_jkt.as_deref(),
+        expected_mtls_x5t_s256.as_deref(),
     )
     .await
     {
-        Ok(value) => value.or(expected_dpop_jkt),
-        Err(error) => return authorization_code_dpop_error_response(error),
-    };
-    if client.require_dpop_bound_tokens && dpop_jkt.is_none() {
-        return authorization_code_dpop_error_response(DpopError::MissingProof);
-    }
-    let request_mtls_x5t_s256 =
-        request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs());
-    let mtls_x5t_s256 = match (expected_mtls_x5t_s256, request_mtls_x5t_s256) {
-        (Some(expected), Some(actual))
-            if constant_time_eq(expected.as_bytes(), actual.as_bytes()) =>
-        {
-            Some(expected)
+        Ok(value) => value,
+        Err(SenderConstraintValidationError::Dpop(error)) => {
+            return authorization_code_dpop_error_response(error);
         }
-        (Some(_), _) => {
+        Err(SenderConstraintValidationError::MissingMtls) => {
             return authorization_code_mtls_holder_error_response();
         }
-        (None, actual) if client.require_mtls_bound_tokens => {
-            let Some(actual) = actual else {
-                return authorization_code_mtls_holder_error_response();
-            };
-            Some(actual)
+        Err(SenderConstraintValidationError::Multiple) => {
+            return sender_constraint_multiple_error();
         }
-        (None, _) => None,
     };
+    let dpop_jkt = sender.dpop_jkt;
+    let mtls_x5t_s256 = sender.mtls_x5t_s256;
+    let authorization_code_grant_key = authorization_code_grant_key(
+        &code_hash,
+        form,
+        dpop_jkt.as_deref(),
+        mtls_x5t_s256.as_deref(),
+        client_attestation_jkt,
+    );
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
         client,
@@ -364,6 +397,23 @@ pub(crate) async fn token_authorization_code_with_service(
         match begin_authorization_code_consumption_with_service(token_service, &code_hash).await {
             Ok(AuthorizationCodeConsumption::Consuming(payload)) => payload,
             Ok(AuthorizationCodeConsumption::Consumed(marker)) => {
+                // Authorization codes are single-use even when the original
+                // HTTP response may have been lost. Only an exact replay by
+                // the same client and proof set can trigger revocation; all
+                // other attempts are rejected without becoming a revocation
+                // oracle for another client's tokens.
+                if !replay_matches_original_redemption(
+                    &marker,
+                    client.id,
+                    &authorization_code_grant_key,
+                ) {
+                    return oauth_token_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_grant",
+                        "授权码已被使用.",
+                        false,
+                    );
+                }
                 match revoke_replayed_authorization_code(token_service, marker).await {
                     Ok(true) => {
                         return oauth_token_error(
@@ -418,6 +468,21 @@ pub(crate) async fn token_authorization_code_with_service(
             Err(response) => return response,
         };
     let payload = *payload;
+    if payload.expires_at <= Utc::now() {
+        mark_failed_authorization_code(
+            token_service,
+            issuance.config.auth_code_ttl_seconds(),
+            &code_hash,
+            "authorization_code_expired",
+        )
+        .await;
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "授权码无效或已过期.",
+            false,
+        );
+    }
     if payload.client_id != client.client_id
         || !redirect_uri_matches_authorization_request(&payload, form.redirect_uri.as_deref())
     {
@@ -570,10 +635,11 @@ pub(crate) async fn token_authorization_code_with_service(
             return oauth_token_error(status, error, description, false);
         }
     };
-    issue_token_response_with_service(
+    issue_token_response_with_service_and_grant(
         issuance,
         token_service,
         client,
+        Some(&authorization_code_grant_key),
         token_issue_from_authorization_code(AuthorizationCodeIssueInput {
             payload,
             subject,

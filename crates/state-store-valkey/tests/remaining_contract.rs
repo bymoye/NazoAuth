@@ -4,7 +4,8 @@ use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
 use nazo_identity::ports::{
     EmailVerificationConsume, EmailVerificationStorePort, FederationStatePort, LoginSessionCreate,
-    LoginSessionPort, PasskeyCeremonyPort, PasswordHashInput,
+    LoginSessionPort, MfaAttemptThrottleDecision, MfaAttemptThrottlePort, PasskeyCeremonyPort,
+    PasswordHashInput,
 };
 use nazo_identity::session::SessionRecord;
 use nazo_valkey::{
@@ -65,6 +66,38 @@ async fn authentication_short_state_preserves_exact_keys_and_one_time_semantics(
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn social_federation_state_is_consumed_once_and_keeps_provider_binding() {
+    let Some((connection, _inspector)) = setup().await else {
+        return;
+    };
+    let store = AuthenticationStore::new(&connection);
+    let state = format!("social-{}", uuid::Uuid::now_v7());
+    let value = nazo_identity::federation::SocialFederationState {
+        provider_id: "github".to_owned(),
+        pkce_verifier: "verifier".to_owned(),
+        created_at: 1_700_000_000,
+    };
+
+    FederationStatePort::store_social(&store, &state, &value, 30)
+        .await
+        .unwrap();
+    assert_eq!(
+        FederationStatePort::take_social(&store, &state)
+            .await
+            .unwrap()
+            .map(|stored| (stored.provider_id, stored.pkce_verifier, stored.created_at)),
+        Some(("github".to_owned(), "verifier".to_owned(), 1_700_000_000))
+    );
+    assert!(
+        FederationStatePort::take_social(&store, &state)
+            .await
+            .unwrap()
+            .is_none(),
+        "social federation callback state must be one-time"
     );
 }
 
@@ -316,6 +349,59 @@ async fn concurrent_rate_counters_are_atomic_and_preserve_first_window_ttl() {
         blake3::hash(subject.as_bytes()).to_hex()
     );
     assert!((1..=30).contains(&inspector.ttl::<i64, _>(&key).await.unwrap()));
+}
+
+#[tokio::test]
+async fn mfa_failure_budget_is_session_bound_and_clears_after_success() {
+    let Some((connection, inspector)) = setup().await else {
+        return;
+    };
+    let store = RateLimitStore::new(&connection);
+    let tenant = nazo_identity::TenantId::new(uuid::Uuid::from_u128(1)).unwrap();
+    let user = nazo_identity::UserId::new(uuid::Uuid::from_u128(2)).unwrap();
+    let session = format!("pending-{}", uuid::Uuid::now_v7());
+
+    for _ in 0..5 {
+        assert_eq!(
+            store
+                .reserve_attempt(tenant, user, &session, 30, 5)
+                .await
+                .unwrap(),
+            MfaAttemptThrottleDecision::Allowed
+        );
+    }
+    assert_eq!(
+        store
+            .reserve_attempt(tenant, user, &session, 30, 5)
+            .await
+            .unwrap(),
+        MfaAttemptThrottleDecision::Limited {
+            retry_after_seconds: 30
+        }
+    );
+    let subject = format!("{}:{}:{session}", tenant.as_uuid(), user.as_uuid());
+    let key = format!(
+        "oauth:mfa_failure:{}",
+        blake3::hash(subject.as_bytes()).to_hex()
+    );
+    assert!((1..=30).contains(&inspector.ttl::<i64, _>(&key).await.unwrap()));
+
+    store.clear_attempts(tenant, user, &session).await.unwrap();
+    assert_eq!(
+        store
+            .reserve_attempt(tenant, user, &session, 30, 5)
+            .await
+            .unwrap(),
+        MfaAttemptThrottleDecision::Allowed
+    );
+    let other_session = format!("pending-{}", uuid::Uuid::now_v7());
+    assert_eq!(
+        store
+            .reserve_attempt(tenant, user, &other_session, 30, 5)
+            .await
+            .unwrap(),
+        MfaAttemptThrottleDecision::Allowed
+    );
 }
 
 #[tokio::test]

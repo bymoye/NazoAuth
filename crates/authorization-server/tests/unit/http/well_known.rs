@@ -29,7 +29,7 @@ async fn readiness_reports_each_dependency_without_leaking_errors() {
         (true, false, StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
         (false, false, StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
     ] {
-        let response = readiness_response(postgresql, valkey);
+        let response = readiness_response(postgresql, valkey, true);
         assert_eq!(response.status(), status);
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
@@ -43,6 +43,13 @@ async fn readiness_reports_each_dependency_without_leaking_errors() {
             if valkey { "up" } else { "down" }
         );
     }
+
+    let response = readiness_response(true, true, false);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+    assert_eq!(body["status"], "not_ready");
+    assert_eq!(body["checks"]["signing_keys"]["status"], "down");
 }
 
 #[actix_web::test]
@@ -65,7 +72,11 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
     });
     let client = builder.build().expect("test Valkey client should build");
     let connection = nazo_valkey::ValkeyConnection::from_existing_client(client);
-    let dependencies = Data::new(ReadinessDependencies::new(database, connection));
+    let dependencies = Data::new(ReadinessDependencies::new(
+        database,
+        connection,
+        nazo_key_management::KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA),
+    ));
 
     let response = ready(dependencies).await;
 
@@ -75,5 +86,6 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
     assert_eq!(body["status"], "not_ready");
     assert_eq!(body["checks"]["postgresql"]["status"], "down");
     assert_eq!(body["checks"]["valkey"]["status"], "down");
+    assert_eq!(body["checks"]["signing_keys"]["status"], "up");
     assert_eq!(body.as_object().unwrap().len(), 2);
 }

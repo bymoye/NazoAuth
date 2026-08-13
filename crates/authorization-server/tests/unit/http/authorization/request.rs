@@ -83,7 +83,7 @@ use std::sync::Arc;
 
 use crate::config::ConfigSource;
 use nazo_auth::{
-    AUTHORIZATION_NONCE_MAX_BYTES, AuthorizationPolicyError, NormalizedAuthorizationRequest,
+    AUTHORIZATION_NONCE_MAX_CHARS, AuthorizationPolicyError, NormalizedAuthorizationRequest,
     OidcClaimRequest, PlainAuthorizationResponse, PromptDirectives, RequestedClaims,
     authorization_session_decision, plain_authorization_response_uri,
 };
@@ -234,14 +234,14 @@ fn requested_prompt(q: &HashMap<String, String>) -> Result<PromptDirectives, ()>
 }
 
 fn authorization_pkce(q: &HashMap<String, String>) -> Result<(Option<String>, Option<String>), ()> {
-    normalize_pkce_case(q, "confidential")
+    normalize_pkce_case(q, false)
         .map(|normalized| (normalized.code_challenge, normalized.code_challenge_method))
         .map_err(|_| ())
 }
 
 fn normalize_pkce_case(
     supplied: &HashMap<String, String>,
-    client_type: &str,
+    pkce_required: bool,
 ) -> Result<NormalizedAuthorizationRequest, AuthorizationPolicyError> {
     let mut parameters = query(&[("response_type", "code"), ("scope", "openid")]);
     parameters.extend(supplied.clone());
@@ -249,7 +249,7 @@ fn normalize_pkce_case(
     normalize_authorization_request(
         &parameters,
         AuthorizationClientPolicy {
-            client_type,
+            client_type: "confidential",
             allowed_scopes: &scopes,
             allowed_audiences: &[],
             require_dpop_bound_tokens: false,
@@ -263,7 +263,7 @@ fn normalize_pkce_case(
         },
         AuthorizationProfilePolicy {
             signed_authorization_response_required: false,
-            pkce_required: false,
+            pkce_required,
         },
         false,
     )
@@ -334,6 +334,80 @@ fn reauth_nonce_state_with_valkey(valkey: fred::prelude::Client) -> TestInfrastr
         settings: Arc::new(settings),
         keyset: crate::test_support::test_key_manager(),
     }
+}
+
+#[test]
+fn authorization_policy_enforces_runtime_modules_and_extracts_credential_ids() {
+    let authorization_details = json!([
+        {
+            "type": "openid_credential",
+            "credential_configuration_id": "university_degree"
+        },
+        {
+            "type": "openid_credential"
+        },
+        {
+            "type": "payment",
+            "credential_configuration_id": "ignored_type"
+        },
+        {
+            "type": "openid_credential",
+            "credential_configuration_id": 42
+        }
+    ]);
+    assert_eq!(
+        credential_configuration_ids(&authorization_details),
+        vec!["university_degree".to_owned()]
+    );
+    assert!(credential_configuration_ids(&json!({})).is_empty());
+
+    let mut state = reauth_nonce_state_with_valkey(disconnected_valkey_client());
+    {
+        let settings = Arc::make_mut(&mut state.settings);
+        settings.modules.enable_authorization_details = true;
+        settings.modules.enable_native_sso = true;
+    }
+    let dependencies =
+        crate::http::authorization::test_support::TestAuthorizationDependencies::new(&state);
+    for (module, parameters, expected_error) in [
+        (
+            nazo_runtime_modules::ModuleId::RequestObjects,
+            query(&[("request", "signed-request-object")]),
+            "invalid_request",
+        ),
+        (
+            nazo_runtime_modules::ModuleId::AuthorizationDetails,
+            query(&[("authorization_details", "[]")]),
+            "invalid_request",
+        ),
+        (
+            nazo_runtime_modules::ModuleId::Jarm,
+            query(&[("response_mode", "jwt")]),
+            "unsupported_response_mode",
+        ),
+        (
+            nazo_runtime_modules::ModuleId::NativeSso,
+            query(&[("scope", "openid device_sso")]),
+            "invalid_scope",
+        ),
+    ] {
+        let mut context = dependencies.context();
+        assert!(
+            context.modules.accepting.remove(&module),
+            "{module:?} must be enabled by the test fixture"
+        );
+        let response = runtime_authorization_capability_error(&context, &parameters)
+            .expect("disabled module capability should fail closed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_oauth_error_code(&response).as_deref(),
+            Some(expected_error)
+        );
+    }
+
+    assert!(
+        runtime_authorization_capability_error(&dependencies.context(), &HashMap::new()).is_none()
+    );
 }
 
 async fn live_reauth_nonce_state() -> Option<TestInfrastructure> {
@@ -710,9 +784,17 @@ fn authorization_nonce_length_check_allows_long_state_but_rejects_long_nonce() {
         "state",
         &"s".repeat(1000),
     )])));
+    assert!(!authorization_nonce_too_long(&query(&[(
+        "nonce",
+        &"n".repeat(AUTHORIZATION_NONCE_MAX_CHARS),
+    )])));
+    assert!(!authorization_nonce_too_long(&query(&[(
+        "nonce",
+        &"界".repeat(AUTHORIZATION_NONCE_MAX_CHARS),
+    )])));
     assert!(authorization_nonce_too_long(&query(&[(
         "nonce",
-        &"n".repeat(AUTHORIZATION_NONCE_MAX_BYTES + 1),
+        &"n".repeat(AUTHORIZATION_NONCE_MAX_CHARS + 1),
     )])));
 }
 
@@ -860,8 +942,12 @@ fn prompt_parsing_accepts_oidc_values_and_rejects_invalid_combinations() {
 }
 
 #[test]
-fn authorization_pkce_allows_absent_value_for_baseline_confidential_oidc() {
-    assert_eq!(authorization_pkce(&query(&[])).unwrap(), (None, None));
+fn authorization_pkce_compatibility_keeps_oidc_nonce_optional() {
+    assert_eq!(authorization_pkce(&HashMap::new()).unwrap(), (None, None));
+    assert_eq!(
+        authorization_pkce(&query(&[("nonce", "fresh-nonce")])).unwrap(),
+        (None, None)
+    );
     let valid_challenge = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
 
     assert!(
@@ -882,10 +968,11 @@ fn authorization_pkce_allows_absent_value_for_baseline_confidential_oidc() {
 }
 
 #[test]
-fn authorization_request_pkce_policy_preserves_client_profile_boundary() {
-    assert!(normalize_pkce_case(&HashMap::new(), "confidential").is_ok());
+fn authorization_request_pkce_policy_preserves_effective_profile_boundary() {
+    assert!(normalize_pkce_case(&HashMap::new(), false).is_ok());
+    assert!(normalize_pkce_case(&query(&[("nonce", "fresh-nonce")]), false).is_ok());
     assert_eq!(
-        normalize_pkce_case(&HashMap::new(), "public"),
+        normalize_pkce_case(&HashMap::new(), true),
         Err(AuthorizationPolicyError::InvalidRequest),
     );
 }

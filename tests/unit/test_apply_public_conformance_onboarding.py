@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -23,6 +24,66 @@ def load_module():
 
 
 class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
+    def test_raw_request_sets_explicit_content_type_without_json_encoding(self):
+        module = load_module()
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"avatar_url":"/auth/me/avatar?v=1"}'
+        response.headers = {"Content-Type": "application/json"}
+        response.geturl.return_value = "https://issuer.example/auth/me/avatar"
+        opener = mock.Mock()
+        opener.open.return_value = response
+        session = module.ControlPlaneSession(
+            origin="https://issuer.example",
+            opener=opener,
+            csrf_token="csrf-token",
+        )
+
+        result = session.request_json(
+            "POST",
+            "/auth/me/avatar",
+            expected_status=200,
+            csrf=True,
+            raw_body=b"multipart-body",
+            content_type="multipart/form-data; boundary=test",
+        )
+
+        self.assertEqual(result["avatar_url"], "/auth/me/avatar?v=1")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.data, b"multipart-body")
+        self.assertEqual(request.get_header("Content-type"), "multipart/form-data; boundary=test")
+
+    def test_http_failure_does_not_include_response_body_in_error(self):
+        module = load_module()
+        response_secret = "server-leaked-password"
+        http_error = urllib.error.HTTPError(
+            "https://issuer.example/admin/users",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(response_secret.encode("utf-8")),
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = http_error
+        session = module.ControlPlaneSession(
+            origin="https://issuer.example",
+            opener=opener,
+            csrf_token="csrf-token",
+        )
+
+        with self.assertRaises(module.OnboardingHttpError) as raised:
+            session.request_json(
+                "POST",
+                "/admin/users",
+                {"email": "applicant@example.test", "password": "request-secret"},
+                expected_status=201,
+                csrf=True,
+            )
+
+        self.assertEqual(str(raised.exception), "POST /admin/users returned HTTP 409")
+        self.assertNotIn(response_secret, str(raised.exception))
+        self.assertNotIn("request-secret", str(raised.exception))
+
     def test_credentials_are_read_from_a_bounded_fd_without_environment_fallback(self):
         module = load_module()
         read_fd, write_fd = os.pipe()
@@ -35,6 +96,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     }
                 ).encode("utf-8"),
             )
@@ -119,6 +181,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
         http_error = urllib.error.HTTPError(
             "https://issuer.example/auth/login", 401, "Unauthorized", {}, None
         )
+        self.addCleanup(http_error.close)
         authentication_error = module.OnboardingError("POST /auth/login returned 401")
         authentication_error.__cause__ = http_error
         with (
@@ -135,6 +198,42 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
             )
         request_json.assert_called_once()
         sleep.assert_not_called()
+
+    def test_totp_uses_the_rfc6238_sha1_six_digit_profile(self):
+        module = load_module()
+
+        self.assertEqual(
+            module.totp_code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59),
+            "287082",
+        )
+
+    def test_login_completes_mfa_challenge_and_refreshes_csrf(self):
+        module = load_module()
+
+        with (
+            mock.patch.object(
+                module.ControlPlaneSession,
+                "request_json",
+                side_effect=[
+                    {"csrf_token": "pending-csrf", "mfa_required": True},
+                    {"success": True, "method": "totp"},
+                    {"csrf_token": "fresh-csrf"},
+                ],
+            ) as request_json,
+            mock.patch.object(module, "totp_code", return_value="123456"),
+        ):
+            session = module.ControlPlaneSession.login(
+                "https://issuer.example",
+                "operator@example.com",
+                "password",
+                mfa_totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+            )
+
+        self.assertEqual(session.csrf_token, "fresh-csrf")
+        self.assertEqual(request_json.call_count, 3)
+        self.assertEqual(request_json.call_args_list[1].args[:2], ("POST", "/auth/mfa/verify"))
+        self.assertEqual(request_json.call_args_list[1].args[2]["code"], "123456")
+        self.assertEqual(request_json.call_args_list[2].args[:2], ("GET", "/auth/csrf"))
 
     def test_access_request_site_name_is_stable_unique_and_within_product_limit(self):
         module = load_module()
@@ -185,6 +284,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
 
     def test_apply_journals_partial_state_before_remote_approval_failure(self):
         module = load_module()
+        approval_payloads = []
 
         class Applicant:
             def request_json(self, method, path, payload=None, **kwargs):
@@ -199,6 +299,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                 if (method, path) == ("GET", "/auth/me"):
                     return {"id": "admin", "admin_level": 1}
                 if method == "POST" and path.endswith("/approve"):
+                    approval_payloads.append(payload)
                     raise module.OnboardingError("approval rejected")
                 raise AssertionError((method, path, payload, kwargs))
 
@@ -232,6 +333,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
             plan_set.write_text("[]", encoding="utf-8")
             plan_manifest.write_text("{}", encoding="utf-8")
             args = SimpleNamespace(
+                lease_id="018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
                 manifest=manifest,
                 target_issuer="https://issuer.example",
                 state_file=state,
@@ -253,6 +355,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     },
                 ),
                 mock.patch.object(
@@ -266,6 +369,15 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
 
             journal = json.loads(state.read_text(encoding="utf-8"))
             self.assertNotIn("complete", journal)
+            self.assertEqual(
+                journal["conformance_lease_id"],
+                "018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
+            )
+            self.assertEqual(len(journal["manifest_sha256"]), 64)
+            self.assertEqual(
+                approval_payloads[0]["conformance_lease_id"],
+                "018f3f2a-7b55-7a25-8f20-6d526f8f44e1",
+            )
             self.assertEqual(
                 journal["clients"],
                 [
@@ -325,6 +437,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     },
                 ),
                 mock.patch.object(
@@ -371,6 +484,7 @@ class ApplyPublicConformanceOnboardingTests(unittest.TestCase):
                         "applicant_password": "applicant-password",
                         "admin_email": "admin@example.com",
                         "admin_password": "admin-password",
+                        "admin_mfa_totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                     },
                 ),
                 mock.patch.object(

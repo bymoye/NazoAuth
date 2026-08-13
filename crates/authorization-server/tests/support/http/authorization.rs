@@ -125,6 +125,7 @@ impl<'a> AuthorizationRequestContext<'a> {
             },
             remote_client_documents: None,
             request_object_keys,
+            tenant_id: nazo_identity::DEFAULT_TENANT_ID,
             credential_authorization_offers: None,
         }
     }

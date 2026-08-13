@@ -5,23 +5,42 @@ system under test is the normal public production deployment. Conformance tools
 must not receive database access, private service-network addresses, privileged
 runtime mounts, or alternate protocol behavior.
 
-## Reproduction in four steps
+## Local reproduction in four steps
 
 The security boundary makes production onboarding unavoidable, but the operator
-path is fixed and short:
+path is fixed and does not depend on GitHub:
 
-1. Deploy an exact repository commit and record its full SHA.
-2. Run `oidf-conformance-full.yml` with `deployed_sha`, `target_issuer`, and
-   `onboarding_material_only=true`; download and verify the generated bundle.
-3. Apply the bundle through `apply_public_conformance_onboarding.py` using a
-   normal applicant and a distinct approver. No database seed or private network
-   access is permitted.
-4. Run the 27-plan OIDC/FAPI/FAPI-CIBA/Logout matrix with the same inputs and
-   `onboarding_material_only=false`, then run the 17-plan OpenID4VC Final/HAIP
-   matrix. The workflows check out the deployed SHA, clone the exact official
-   suite revision, and refuse tracked modifications before execution.
+1. Deploy an exact immutable Release tag and record both the tag and its full
+   source commit SHA.
+2. On the operator's own Linux host, check out that source commit and an exact
+   official Suite commit. Run `prepare_host_local_oidf_install.py` to create
+   one-use OpenID4VC installation material for this run.
+3. Prepare two distinct public product identities, a short-lived official Suite
+   API token, and VCI/VP management tokens. Supply the closed secret document
+   only through stdin, an inherited descriptor, or a POSIX mode-`0600` file.
+4. Run `run_official_oidf_full_matrix.py`. It is pinned to
+   `https://www.certification.openid.net`, runs the 27-plan
+   OIDC/FAPI/FAPI-CIBA/Logout/Session matrix followed by the 17-plan OpenID4VC
+   Final/HAIP matrix, cleans up through the public control plane, and reduces
+   raw ZIPs to one credential-free 44-plan evidence manifest and receipt.
 
-The required repository Secret names and their rotation rules are listed in
+`.github/workflows/oidf-conformance-full.yml` and the OpenID4VC workflow are
+optional remote wrappers. They are not the sole source of the Suite token,
+source material, execution logic, or evidence reduction. The local entry point
+does not call `gh`, the GitHub API, or Actions artifacts.
+
+`--ref` selects the workflow definition to run; it is not a source-trust
+allowlist. Both workflows always require the supplied tag to dereference to the
+supplied commit. If that commit is not an ancestor of the repository default
+branch, they additionally require a non-draft GitHub Release, download the
+current runner's Linux `nazoauthctl` bootstrap subject, and verify its GitHub
+attestation against the exact
+`release-security.yml@refs/tags/<release-tag>` certificate identity, source ref,
+source digest, custom Release predicate, and hosted-runner policy. Source from
+the requested commit is not checked out or executed until this proof succeeds.
+No branch-name exception exists.
+
+Secret names and rotation rules for the optional GitHub wrappers are listed in
 [`GitHub Actions secrets`](../operations/github-actions-secrets.md). Each fork
 supplies its own issuer, accounts, client material, and suite token; this
 repository provides no shared deployment target.
@@ -60,6 +79,13 @@ claimed by RFC 8705 or RFC 6024.
 - The suite reaches only public HTTPS endpoints. Private DNS names, raw IPs,
   loopback addresses, service-network aliases, and disabled TLS verification are
   forbidden.
+- A shared TLS origin serving the FAPI 1.0 Advanced endpoints uses an RSA
+  certificate of at least 2048 bits and, for TLS 1.2, only
+  `ECDHE-RSA-AES128-GCM-SHA256` and `ECDHE-RSA-AES256-GCM-SHA384`. This is the
+  forward-secret intersection of [FAPI 1.0 Advanced section 8.5](https://openid.net/specs/openid-financial-api-part-2-1_0.html#tls-considerations)
+  and [RFC 9325 section 4.2](https://www.rfc-editor.org/rfc/rfc9325.html#section-4.2);
+  TLS 1.3 remains enabled. The authorization-endpoint interoperability exception
+  does not widen other endpoints on the same TLS listener.
 - Product behavior cannot branch on plan names, suite aliases, callback paths,
   test headers, or a conformance build flag.
 - Conformance preparation cannot execute SQL or load production server crates.
@@ -91,23 +117,75 @@ token returns `401`. Do not create suite tokens in MongoDB, reuse a product
 administrator session as a suite bearer token, or depend on a source-control
 provider account.
 
-## Recommended entry point: one reversible run
+## Recommended entry point: one local reversible 44-plan run
+
+First create fresh source-bound OpenID4VC material in the same continuous
+acceptance operation:
+
+```sh
+python scripts/prepare_host_local_oidf_install.py \
+  --source-dir /opt/nazoauth/source \
+  --source-commit <deployed-sha> \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <exact-suite-sha> \
+  --suite-origin https://www.certification.openid.net \
+  --output-dir /run/nazoauth-official-oidf-install
+```
+
+Then start the full matrix with one closed eight-field JSON document. The
+`secret-provider` below is local operator infrastructure, not GitHub Secrets:
+
+```sh
+umask 077
+run_id="oidf-$(date -u +%m%d%H%M)-$(openssl rand -hex 2)"
+secret-provider read nazoauth/official-oidf-run | \
+python scripts/run_official_oidf_full_matrix.py --secrets-stdin \
+  --deployed-sha <deployed-sha> \
+  --runner-sha <runner-sha> \
+  --target-issuer https://issuer.example \
+  --suite-dir /opt/oidf/conformance-suite \
+  --suite-revision <exact-suite-sha> \
+  --work-dir "/var/lib/nazo-oidf/runs/$run_id" \
+  --export-dir "/var/lib/nazo-oidf/results/$run_id" \
+  --run-namespace "$run_id" \
+  --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
+  --proxy-executable /usr/sbin/nginx \
+  --prepared-install-dir /run/nazoauth-official-oidf-install \
+  --request-object-trust-anchor-pem /etc/nazoauth/public/vp-request-object-anchor.pem \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
+```
+
+Keep the base `run_id` at 22 characters or fewer. The coordinator appends
+`-protocol` and `-openid4vc`, and each resulting namespace must remain within
+the downstream 32-character contract.
+
+The command runs in the foreground. When the operator reaches the host through
+an SSH session that may disappear, supervise this exact local command with the
+host's service manager and send stdout/stderr to a root/operator-owned mode-`0600`
+file. The execution lifecycle must not depend on the SSH transport; a supervisor
+is only an operating-system wrapper and does not add a GitHub dependency.
+
+The strict JSON fields are exactly `applicant_email`, `applicant_password`,
+`admin_email`, `admin_password`, `admin_mfa_totp_secret`,
+`oidf_conformance_token`, `issuer_management_token`, and
+`verifier_management_token`. The coordinator forwards only the required subset
+to the existing 27-plan and 17-plan runners through child-process stdin; it
+does not put secrets in argv or the environment. A successful receipt must bind
+exactly `27 + 17 = 44` distinct plan IDs, or the operation fails.
+
+## Independent 27-plan entry point
 
 Use the unified runner for the operator-run public OIDC/FAPI/FAPI-CIBA matrix
 instead of assembling the internal commands below by hand. Provide only the
-two separate production identities, the dynamic-registration/CIBA tokens, and
-a short-lived public-suite API token:
+two separate production identities, the CIBA decision token, and a short-lived
+public-suite API token. The runner generates a distinct dynamic-registration
+initial access token for each lease:
 
 ```sh
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-export OIDF_CONFORMANCE_TOKEN=...
-
-python scripts/run_public_oidf_conformance.py \
+secret-provider read nazoauth/oidf-run-secrets | \
+python scripts/run_public_oidf_conformance.py --secrets-stdin \
   --deployed-sha <deployed-sha> \
   --target-issuer https://issuer.example \
   --conformance-server https://suite.example \
@@ -117,8 +195,55 @@ python scripts/run_public_oidf_conformance.py \
   --export-dir /var/lib/nazo-oidf/results/<run-id> \
   --run-namespace <run-id> \
   --proxy-trust-bundle /etc/proxy/oidf-mtls-ca.crt \
-  --proxy-executable /usr/sbin/nginx
+  --proxy-executable /usr/sbin/nginx \
+  --nazoauthctl /usr/local/bin/nazoauthctl \
+  --nazoauthctl-config /etc/nazoauth/update.json \
+  --lease-ttl-seconds 28800
 ```
+
+The input is strict JSON with exactly `oidf_applicant_email`,
+`oidf_applicant_password`, `oidf_admin_email`, `oidf_admin_password`,
+`oidf_admin_totp_secret`, and `oidf_conformance_token`. The same
+document may instead be supplied through `--secret-fd N` or a regular,
+single-link, current-user/root-owned mode-`0600` `--secret-file` on POSIX.
+Windows operators must use stdin or an inherited descriptor because POSIX mode
+bits do not prove a Windows DACL. No secret has an argv or environment fallback.
+
+When the active deployment was installed with the generic
+`nazoauthctl development activate` path, omit all candidate options: the
+controller reads and verifies the active local image's embedded build identity
+and digest. This local path is available to any operator and does not depend on
+GitHub or a particular host.
+
+The four options below are a separate signed-candidate path. For a private
+pre-release gate, the same runner may bind every lease operation to an
+unreleased container by adding all four options. The active
+container must itself use the matching digest-pinned image reference, and its
+embedded identity must match every value. Omitting any option fails closed.
+
+```text
+--candidate-release vX.Y.Z
+--candidate-revision <exact-git-object-id>
+--candidate-build-id <exact-embedded-build-id>
+--candidate-oci-digest sha256:<manifest-digest>
+```
+
+Before testing a schema-changing private candidate, apply its migrations through
+the same exact target binding (never through raw SQL or a legacy server command):
+
+```text
+sudo nazoauthctl migrate --yes \
+  --candidate-release vX.Y.Z \
+  --candidate-revision <exact-git-object-id> \
+  --candidate-build-id <exact-embedded-build-id> \
+  --candidate-oci-digest sha256:<manifest-digest>
+```
+
+The exception exists only for this signed candidate migration and
+`conformance lease` operations. It neither
+changes the signed active Release nor counts as release, provenance, or official
+certification evidence. Normal `nazoauthctl` operations continue to require the
+signed active Release manifest.
 
 The entry point verifies the deployed product commit, the explicitly selected
 official-suite commit, and clean tracked source trees. It then generates source-bound material,
@@ -126,9 +251,16 @@ performs application, approval, one-time delivery, and trust approval under
 separate identities, atomically installs the approved trust bundle, verifies
 the suite API's `401/200` boundary, and runs all 27 plans in concurrent, CIBA,
 RP-Initiated Logout, Back-Channel Logout, Front-Channel Logout, and Session
-Management groups. Success and failure both
-deactivate the run's clients, revoke trust through the public control plane,
-and restore the proxy configuration. Private inputs remain in unique work
+Management groups. Before onboarding it creates a time-bounded conformance
+lease through `nazoauthctl`, binds the SHA-256 of the generated registration
+and CIBA automated-decision tokens to that lease, and binds every temporary
+client to the same lease. These independently generated tokens open only their
+lease-owned DCR and CIBA transactions and become unusable immediately on expiry
+or revocation. Browser-driving modules and plan groups run serially because the
+official suite shares browser cookie/session state across parallel modules.
+Success and failure both deactivate the run's clients, revoke and physically
+clean the lease-owned data, revoke trust through the public control plane, and
+restore the proxy configuration. Private inputs remain in unique work
 directories. Raw suite ZIPs are reduced to `evidence-manifest.json` and deleted,
 so credentials and log bodies are not retained as evidence.
 
@@ -142,10 +274,11 @@ Approval remains a real, auditable authorization event. Automation removes file
 copying, path inference, command assembly, and recovery work; it does not
 collapse applicant and approver identities.
 
-Runtime `OIDF_USER_EMAIL` and `OIDF_USER_PASSWORD` values are authoritative for
-browser automation. Matching `nazo` fields in plan configuration are an
-explicit fallback for local operator runs only. GitHub Actions secrets override
-them so rotating a secret cannot silently leave stale plan credentials active.
+The unified runner idempotently provisions the applicant through administrator
+login, CSRF, and public `POST /admin/users`, then verifies the applicant by a
+normal public login. Browser credentials are copied only into mode-`0600`
+private plan files. Spawned processes receive a closed environment allowlist;
+unknown parent settings are not copied at all.
 
 ## 1. Prepare immutable runner material
 
@@ -156,14 +289,18 @@ caller-supplied values:
 export OIDF_TARGET_ISSUER=https://issuer.example
 export OIDF_MTLS_TARGET_ISSUER=https://mtls.issuer.example
 export OIDF_SUITE_BASE_URL=https://suite.example
-export OIDF_APPLICANT_EMAIL=conformance-applicant@example.com
-export OIDF_APPLICANT_PASSWORD=...
-export OIDF_ADMIN_EMAIL=conformance-approver@example.com
-export OIDF_ADMIN_PASSWORD=...
-export OIDF_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN=...
-export OIDF_CIBA_AUTOMATED_DECISION_TOKEN=...
-python scripts/prepare_oidf_black_box.py
+secret-provider mount nazoauth/oidf-preparation /run/secrets/nazoauth-oidf-preparation.json
+chmod 0600 /run/secrets/nazoauth-oidf-preparation.json
+python scripts/prepare_oidf_black_box.py \
+  --secret-file /run/secrets/nazoauth-oidf-preparation.json
 ```
+
+The preparation document is a closed four-field JSON object containing only
+`oidf_applicant_email`, `oidf_applicant_password`,
+`oidf_dynamic_registration_initial_access_token`, and
+`oidf_ciba_automated_decision_token`. Remove the provider mount immediately
+after preparation. `--secrets-stdin` and `--secret-fd N` accept the same closed
+document when a provider can stream it without a filesystem mount.
 
 The command generates runner configurations, keys, certificates, an onboarding
 manifest, and exact plan/skip/review registries under `runtime/oidf`. These are
@@ -174,19 +311,28 @@ When the official runner configuration is stored in the repository's encrypted
 material, export it without creating suite plans:
 
 ```sh
-gh workflow run oidf-conformance-full.yml \
-  --ref <exact-branch> \
+run_url="$(gh workflow run oidf-conformance-full.yml \
+  --ref <workflow-definition-ref> \
+  -f release_tag=<exact-release-tag> \
   -f deployed_sha=<deployed-sha> \
   -f target_issuer=https://issuer.example \
   -f credential_holder_email_sha256=<sha256-of-fresh-applicant-email> \
-  -f onboarding_material_only=true
+  -f onboarding_material_only=true)"
+run_id="${run_url##*/}"
+test -n "$run_id"
+gh run watch "$run_id" --exit-status
+gh run download "$run_id" \
+  --name oidf-public-onboarding-material \
+  --dir runtime/official-onboarding
 ```
 
-This mode calls the reusable onboarding-material workflow, binds the fresh
+This mode calls the reusable onboarding-material workflow, binds the exact
+Release tag to the deployed source commit, and binds the fresh
 applicant email commitment without exposing the email or a password hash,
 validates the bundle, and uploads the private artifact. Both conformance jobs
-are skipped. Download and
-verify that artifact at the same source commit before step 3. The artifact still
+are skipped. Capturing the dispatch URL binds the download to that exact run;
+do not select the newest run by branch or workflow name. Verify the downloaded
+artifact at the same source commit before step 3. The artifact still
 has no production authority: client creation and CA approval remain separate
 applicant and administrator operations through the public control plane.
 
@@ -255,12 +401,25 @@ health endpoint, Discovery issuer, JWKS, UI assets, and rollback record.
 
 ## 3. Onboard clients through the production control plane
 
-Run:
+Create a bounded lease on the deployment host first. The manifest is public
+onboarding material; copy the exact, unmodified file to the host without any
+runner private keys or delivered client secrets:
+
+```sh
+sudo nazoauthctl conformance lease create \
+  --profile oidf-full \
+  --material /run/nazoauth/oidf-onboarding-manifest.json \
+  --ttl-seconds 28800 \
+  --yes
+```
+
+Record the returned `lease_id`, then run:
 
 ```sh
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin \
   --target-issuer "$OIDF_TARGET_ISSUER" \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" \
   --manifest runtime/official-onboarding-apply/oidf-onboarding-manifest.json \
   --plan-configs runtime/official-onboarding-apply/oidf-plan-configs.json \
   --delivered-client-material runtime/official-onboarding-apply/oidf-delivered-client-material.json \
@@ -269,7 +428,10 @@ python scripts/apply_public_conformance_onboarding.py apply --credentials-stdin 
   --no-runner-env
 ```
 
-The credential payload is strict JSON with exactly `applicant_email`,
+The signed Operator Task stores only the manifest SHA-256 and lease metadata.
+The server never receives a runner private key or plaintext client secret from
+this command. Client creation atomically binds each production-control-plane
+approval to the active lease. The credential payload is strict JSON with exactly `applicant_email`,
 `applicant_password`, `admin_email`, and `admin_password`. Automation may use
 `--credentials-fd N` instead. The tool has no environment-variable or argv
 fallback for passwords.
@@ -375,7 +537,8 @@ After one onboarding cycle, the standard automation entry points are:
 
 ```sh
 gh workflow run oidf-conformance-full.yml \
-  --ref main \
+  --ref <workflow-definition-ref> \
+  -f release_tag=<exact-release-tag> \
   -f deployed_sha=<deployed-sha> \
   -f target_issuer=https://issuer.example \
   -f runner_mode=parallel-isolated \
@@ -387,8 +550,12 @@ gh workflow run openid4vc-conformance.yml \
   -f target_origin=https://issuer.example
 ```
 
-Both workflows read rotated suite tokens, automation accounts, and delivered
-client material from the `oidf-conformance` environment. The workflow isolates
+GitHub Actions exposes repository secrets to one short-lived materializer step
+because that platform boundary has no native inherited-FD input. That step is
+the only process with secret environment entries; it writes mode-`0600` files
+under `RUNNER_TEMP`, and later steps receive only paths or inherited FDs and
+delete the directory with `if: always()`. This narrows but does not pretend to
+eliminate the GitHub runner's trust boundary. The workflow isolates
 the OIDC/FAPI concurrent groups, four CIBA groups, and two browser-sensitive
 plans. OpenID4VC runs its 17 plans in bounded groups. Operators do not manually
 split plans, copy configuration, or alter runner concurrency.
@@ -401,10 +568,21 @@ Always run:
 secret-provider read nazoauth/oidf-operator-credentials | \
 python scripts/apply_public_conformance_onboarding.py cleanup \
   --credentials-stdin --target-issuer "$OIDF_TARGET_ISSUER"
+
+sudo nazoauthctl conformance lease revoke \
+  --lease-id "$OIDF_CONFORMANCE_LEASE_ID" --yes
+sudo nazoauthctl conformance lease cleanup --yes
 ```
 
 Cleanup revokes approved trust requests and deactivates created clients through
-the public admin API. Remove installed CA bytes only after the proxy rollback
+the public admin API. Lease revocation atomically disables all bound clients;
+the cleanup task deletes their tokens, grants, revocations, access requests,
+mTLS trust events and client records. If explicit cleanup cannot run, the server
+rejects the clients at the lease deadline and its periodic idempotent cleaner
+performs the same database deletion. The non-secret lease tombstone remains for
+audit. Existing TTL-bound Valkey protocol state is unusable after client expiry
+and expires on its own schedule; this implementation does not scan the shared
+Valkey namespace. Remove installed CA bytes only after the proxy rollback
 procedure confirms the previous trust configuration. Retain redacted results,
 the exact commit, plan manifest, bundle digest, approval/revocation audit IDs,
 and official run IDs. Never retain passwords, private keys, session cookies,

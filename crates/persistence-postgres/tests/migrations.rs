@@ -45,7 +45,7 @@ fn database_url() -> Option<String> {
     url
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn social_provider_type_migration_preserves_existing_rows_and_has_safe_down_policy() {
     let Some(database_url) = database_url() else {
         return;
@@ -134,7 +134,7 @@ async fn social_provider_type_migration_preserves_existing_rows_and_has_safe_dow
         .expect("test schema should drop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_migrations_create_all_runtime_module_state_tables() {
     let Some(database_url) = database_url() else {
         return;
@@ -209,7 +209,7 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_module_state_migration_enforces_catalogs_and_round_trips() {
     let Some(database_url) = database_url() else {
         return;
@@ -287,7 +287,7 @@ async fn runtime_module_state_migration_enforces_catalogs_and_round_trips() {
         .expect("test schema should drop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn identity_security_event_migration_is_additive_redacted_and_round_trips() {
     let Some(database_url) = database_url() else {
         return;
@@ -387,7 +387,7 @@ async fn identity_security_event_migration_is_additive_redacted_and_round_trips(
         .expect("test schema should drop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn totp_invalid_audit_migration_extends_and_restores_the_closed_catalog() {
     let Some(database_url) = database_url() else {
         return;
@@ -462,7 +462,7 @@ async fn totp_invalid_audit_migration_extends_and_restores_the_closed_catalog() 
         .expect("test schema should drop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oidc_logout_idempotency_migration_is_additive_partial_and_reversible() {
     let Some(database_url) = database_url() else {
         return;

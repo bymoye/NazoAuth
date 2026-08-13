@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from full_real_request_source_policy import (
     RuntimeCaseEvidence,
@@ -78,6 +79,67 @@ def load_registry() -> tuple[tuple[str, str, dict[str, object]], ...]:
     )
 
 
+def assert_destructive_targets_are_e2e() -> None:
+    """Refuse SCIM seed/cleanup against an unrecognised database or service.
+
+    This runner writes and deletes rows.  A loopback default is convenient for
+    HTTP-only checks but is unsafe for a destructive matrix, so only the
+    repository-owned Docker E2E target (or an explicitly named disposable
+    coverage/same-container fixture) is accepted.
+    """
+
+    database = urlparse(DATABASE_URL)
+    base = urlparse(BASE_URL)
+    actual = {
+        "database_scheme": database.scheme,
+        "database_host": database.hostname,
+        "database_port": database.port,
+        "database_name": database.path.lstrip("/"),
+        "base_scheme": base.scheme,
+        "base_host": base.hostname,
+        "base_port": base.port,
+    }
+    allowed_targets = [
+        {
+            "database_scheme": "postgresql",
+            "database_host": "nazo-oauth-e2e-postgres",
+            "database_port": 5432,
+            "database_name": "oauth",
+            "base_scheme": "http",
+            "base_host": "nazo-oauth-e2e-server",
+            "base_port": 8000,
+        }
+    ]
+    if os.environ.get("E2E_ALLOW_SAME_CONTAINER_LOOPBACK") == "1":
+        allowed_targets.append(
+            {
+                "database_scheme": "postgresql",
+                "database_host": "postgres",
+                "database_port": 5432,
+                "database_name": "oauth",
+                "base_scheme": "http",
+                "base_host": "127.0.0.1",
+                "base_port": 8000,
+            }
+        )
+    if os.environ.get("E2E_ALLOW_CODEX_COVERAGE_LOOPBACK") == "1":
+        allowed_targets.append(
+            {
+                "database_scheme": "postgresql",
+                "database_host": "127.0.0.1",
+                "database_port": 15432,
+                "database_name": "oauth",
+                "base_scheme": "http",
+                "base_host": "127.0.0.1",
+                "base_port": 18000,
+            }
+        )
+    if actual not in allowed_targets:
+        raise AssertionError(
+            f"refusing destructive RFC 9967 seed outside Docker E2E targets: {actual}"
+        )
+
+
 def expect_status(response: requests.Response, status: int) -> requests.Response:
     if response.status_code != status:
         raise AssertionError(
@@ -109,6 +171,7 @@ class MatrixContext:
         self.evidence.observe(case, condition)
 
     def seed_tokens(self) -> None:
+        assert_destructive_targets_are_e2e()
         definitions = {
             "a": (["scim:read", "scim:write", "scim:events"], "https://receiver-a.example/events"),
             "b": (["scim:read", "scim:write", "scim:events"], "https://receiver-b.example/events"),
@@ -138,20 +201,39 @@ class MatrixContext:
                     self.token_ids.append(token_id)
 
     def cleanup(self) -> None:
+        assert_destructive_targets_are_e2e()
+        errors: list[str] = []
         if self.user_id is not None and "a" in self.tokens:
-            requests.delete(
-                f"{BASE_URL}/scim/v2/Users/{self.user_id}",
-                headers=self.headers(self.tokens["a"]),
-                timeout=10,
-            )
-        if self.token_ids:
-            with psycopg.connect(DATABASE_URL) as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "DELETE FROM scim_audit_events WHERE scim_token_id = ANY(%s)",
-                        (self.token_ids,),
+            try:
+                response = requests.delete(
+                    f"{BASE_URL}/scim/v2/Users/{self.user_id}",
+                    headers=self.headers(self.tokens["a"]),
+                    timeout=10,
+                )
+                if response.status_code not in {204, 404}:
+                    errors.append(
+                        f"SCIM user cleanup returned HTTP {response.status_code}: "
+                        f"{response.text[:200]}"
                     )
-                    cursor.execute("DELETE FROM scim_tokens WHERE id = ANY(%s)", (self.token_ids,))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"SCIM user cleanup failed: {exc}")
+        if self.token_ids:
+            try:
+                with psycopg.connect(DATABASE_URL) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM scim_audit_events WHERE scim_token_id = ANY(%s)",
+                            (self.token_ids,),
+                        )
+                        cursor.execute(
+                            "DELETE FROM scim_tokens WHERE id = ANY(%s)",
+                            (self.token_ids,),
+                        )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"SCIM token cleanup failed: {exc}")
+        if errors:
+            raise RuntimeError("RFC 9967 cleanup incomplete: " + "; ".join(errors))
+        print("RFC 9967 fixture cleanup complete", flush=True)
 
     def poll(
         self,
@@ -458,6 +540,7 @@ def main() -> None:
         source_policy_check()
         return
 
+    assert_destructive_targets_are_e2e()
     global blake3, jwt, psycopg, requests
     import blake3
     import jwt

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use nazo_openid4vci::AuthorizationOfferPort;
 use nazo_runtime_modules::{ActiveModuleSnapshot, ModuleId};
+use uuid::Uuid;
 
 use crate::domain::remote_client_documents::RemoteClientDocumentResolver;
 use crate::http::sessions::AdminSessionHandles;
@@ -36,10 +37,12 @@ pub(crate) struct AuthorizationEndpoint {
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     remote_client_documents: Arc<RemoteClientDocumentResolver>,
     request_object_keys: nazo_key_management::KeyManager,
+    tenant_id: Uuid,
     credential_authorization_offers: Option<Arc<dyn AuthorizationOfferPort>>,
 }
 
 impl AuthorizationEndpoint {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         service: Arc<ServerAuthorizationService>,
         config: Arc<AuthorizationHttpConfig>,
@@ -47,6 +50,7 @@ impl AuthorizationEndpoint {
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
         remote_client_documents: Arc<RemoteClientDocumentResolver>,
         request_object_keys: nazo_key_management::KeyManager,
+        tenant_id: Uuid,
         credential_authorization_offers: Option<Arc<dyn AuthorizationOfferPort>>,
     ) -> Self {
         Self {
@@ -56,6 +60,7 @@ impl AuthorizationEndpoint {
             runtime_modules,
             remote_client_documents,
             request_object_keys,
+            tenant_id,
             credential_authorization_offers,
         }
     }
@@ -68,6 +73,7 @@ impl AuthorizationEndpoint {
             modules: self.runtime_modules.snapshot().as_ref().clone(),
             remote_client_documents: Some(&self.remote_client_documents),
             request_object_keys: &self.request_object_keys,
+            tenant_id: self.tenant_id,
             credential_authorization_offers: self.credential_authorization_offers.as_deref(),
         }
     }
@@ -80,6 +86,7 @@ pub(crate) struct AuthorizationRequestContext<'a> {
     pub(crate) modules: ActiveModuleSnapshot,
     pub(crate) remote_client_documents: Option<&'a RemoteClientDocumentResolver>,
     pub(crate) request_object_keys: &'a nazo_key_management::KeyManager,
+    pub(crate) tenant_id: Uuid,
     pub(crate) credential_authorization_offers: Option<&'a dyn AuthorizationOfferPort>,
 }
 

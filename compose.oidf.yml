@@ -1,0 +1,46 @@
+services:
+  secrets-init:
+    environment:
+      NAZOAUTH_GENERATE_CONFORMANCE_SECRETS: "1"
+
+  server:
+    environment:
+      ENABLE_AUTHORIZATION_DETAILS: "true"
+      DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE: /run/nazoauth-secrets/dynamic-registration-token
+      CIBA_AUTOMATED_DECISION_TOKEN_FILE: /run/nazoauth-secrets/ciba-decision-token
+      CIBA_AUTOMATED_DECISION_MODE: query
+      CIBA_NOTIFICATION_PRIVATE_ORIGINS: ${NAZOAUTH_OIDF_SUITE_ORIGIN:?set NAZOAUTH_OIDF_SUITE_ORIGIN}
+      BACKCHANNEL_LOGOUT_PRIVATE_ORIGINS: ${NAZOAUTH_OIDF_SUITE_ORIGIN:?set NAZOAUTH_OIDF_SUITE_ORIGIN}
+      MTLS_CERTIFICATE_SOURCE: legacy-verified-headers
+      TRUSTED_PROXY_CIDRS: 172.30.250.0/24
+    networks:
+      nazo_oauth_net:
+      oidf_bridge:
+        aliases:
+          - nazoauth-target
+
+  mtls-proxy:
+    build:
+      context: .
+      dockerfile: deploy/oidf-proxy/Containerfile
+      target: proxy
+    restart: unless-stopped
+    volumes:
+      - oidf_proxy_pki:/etc/nginx/pki
+    depends_on:
+      server:
+        condition: service_started
+    networks:
+      oidf_bridge:
+        aliases:
+          - 567t0yglur-443.cnb.run
+
+volumes:
+  oidf_proxy_pki:
+    external: true
+    name: nazoauth-oidf-proxy-pki
+
+networks:
+  oidf_bridge:
+    external: true
+    name: nazoauth-oidf-bridge

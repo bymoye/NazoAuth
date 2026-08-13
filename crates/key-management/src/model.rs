@@ -1,11 +1,20 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
+    time::Duration,
+};
 
 use crate::local::SigningBackend;
 use arc_swap::ArcSwap;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{Engine, encoded_len, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_auth::{SignError, SignRequest, Signature, Signer, SigningPurpose};
 use serde::Serialize;
 use serde_json::Value;
+use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyState {
@@ -13,6 +22,72 @@ pub enum KeyState {
     Active,
     Grace,
     Retired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyHealthStatus {
+    Healthy,
+    Unhealthy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyHealth {
+    pub status: KeyHealthStatus,
+    pub consecutive_failures: u32,
+}
+
+impl KeyHealth {
+    #[must_use]
+    pub const fn healthy() -> Self {
+        Self {
+            status: KeyHealthStatus::Healthy,
+            consecutive_failures: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_healthy(self) -> bool {
+        matches!(self.status, KeyHealthStatus::Healthy)
+    }
+}
+
+pub(crate) struct LifecycleHealth {
+    healthy: AtomicBool,
+    consecutive_failures: AtomicU32,
+}
+
+impl LifecycleHealth {
+    fn new() -> Self {
+        Self {
+            healthy: AtomicBool::new(true),
+            consecutive_failures: AtomicU32::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> KeyHealth {
+        KeyHealth {
+            status: if self.healthy.load(Ordering::Acquire) {
+                KeyHealthStatus::Healthy
+            } else {
+                KeyHealthStatus::Unhealthy
+            },
+            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    fn mark_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.healthy.store(true, Ordering::Release);
+    }
+
+    fn mark_failure(&self) {
+        self.consecutive_failures
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_add(1))
+            })
+            .ok();
+        self.healthy.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Clone)]
@@ -194,6 +269,8 @@ pub(crate) struct KeyGeneration {
 pub(crate) struct KeyManagerInner {
     pub(crate) generation: ArcSwap<KeyGeneration>,
     pub(crate) settings: KeySettings,
+    pub(crate) health: Arc<LifecycleHealth>,
+    pub(crate) lifecycle_shutdown: watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -203,6 +280,7 @@ pub struct KeyManager {
 
 pub struct HttpSigningLease {
     generation: Arc<KeyGeneration>,
+    health: Arc<LifecycleHealth>,
     kid: String,
     algorithm: jsonwebtoken::Algorithm,
     http_algorithm: &'static str,
@@ -220,6 +298,9 @@ impl HttpSigningLease {
     }
 
     pub async fn sign(&self, signing_input: &[u8]) -> anyhow::Result<Signature> {
+        if !self.health.snapshot().is_healthy() {
+            anyhow::bail!("signing key lifecycle is unhealthy");
+        }
         let selected = self
             .generation
             .loaded
@@ -389,6 +470,8 @@ impl KeyManager {
                     prepublish_window: chrono::Duration::days(1),
                     verification_grace: chrono::Duration::minutes(10),
                 },
+                health: Arc::new(LifecycleHealth::new()),
+                lifecycle_shutdown: watch::channel(false).0,
             }),
         }
     }
@@ -454,8 +537,28 @@ impl KeyManager {
             inner: Arc::new(KeyManagerInner {
                 generation: ArcSwap::from_pointee(KeyGeneration::new(loaded)),
                 settings,
+                health: Arc::new(LifecycleHealth::new()),
+                lifecycle_shutdown: watch::channel(false).0,
             }),
         }
+    }
+
+    #[must_use]
+    pub fn health(&self) -> KeyHealth {
+        self.inner.health.snapshot()
+    }
+
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.health().is_healthy()
+    }
+
+    /// Stop the lifecycle loop owned by the caller's background task.
+    ///
+    /// The manager remains usable for inspection, but no further automatic
+    /// refreshes are attempted after the loop observes this signal.
+    pub fn stop_lifecycle(&self) {
+        self.inner.lifecycle_shutdown.send_replace(true);
     }
 
     #[must_use]
@@ -469,6 +572,9 @@ impl KeyManager {
         header: &jsonwebtoken::Header,
         claims: &T,
     ) -> jsonwebtoken::errors::Result<String> {
+        if !self.is_healthy() {
+            return Err(jsonwebtoken::errors::ErrorKind::InvalidKeyFormat.into());
+        }
         let generation = self.inner.generation.load_full();
         let selected = generation
             .loaded
@@ -479,19 +585,39 @@ impl KeyManager {
         }
         let mut header = header.clone();
         header.kid = Some(selected.kid.to_owned());
-        let encoded_header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
-        let encoded_claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?);
-        let signing_input = format!("{encoded_header}.{encoded_claims}");
+        let header_json = serde_json::to_vec(&header)?;
+        let claims_json = serde_json::to_vec(claims)?;
+        let mut signing_input = String::with_capacity(
+            encoded_len(header_json.len(), false)
+                .expect("JWT header is too large to encode")
+                .saturating_add(1)
+                .saturating_add(
+                    encoded_len(claims_json.len(), false)
+                        .expect("JWT claims are too large to encode"),
+                ),
+        );
+        URL_SAFE_NO_PAD.encode_string(&header_json, &mut signing_input);
+        signing_input.push('.');
+        URL_SAFE_NO_PAD.encode_string(&claims_json, &mut signing_input);
+        drop(header_json);
+        drop(claims_json);
         let signature = sign_selected(&selected, signing_input.as_bytes())
             .await
             .map_err(sign_error_to_jwt)?;
-        Ok(format!(
-            "{signing_input}.{}",
-            URL_SAFE_NO_PAD.encode(signature.as_bytes())
-        ))
+        signing_input.reserve(
+            encoded_len(signature.as_bytes().len(), false)
+                .expect("JWT signature is too large to encode")
+                .saturating_add(1),
+        );
+        signing_input.push('.');
+        URL_SAFE_NO_PAD.encode_string(signature.as_bytes(), &mut signing_input);
+        Ok(signing_input)
     }
 
     pub fn prepare_http_signing(&self) -> anyhow::Result<HttpSigningLease> {
+        if !self.is_healthy() {
+            anyhow::bail!("signing key lifecycle is unhealthy");
+        }
         let generation = self.inner.generation.load_full();
         let selected = generation
             .loaded
@@ -508,15 +634,24 @@ impl KeyManager {
             kid: selected.kid.to_owned(),
             http_algorithm,
             generation,
+            health: Arc::clone(&self.inner.health),
         })
     }
 
     pub async fn refresh(&self) -> anyhow::Result<()> {
-        let loaded = crate::store::load_or_create_keyset(&self.inner.settings).await?;
-        self.inner
-            .generation
-            .store(Arc::new(KeyGeneration::new(loaded)));
-        Ok(())
+        match crate::store::load_or_create_keyset(&self.inner.settings).await {
+            Ok(loaded) => {
+                self.inner
+                    .generation
+                    .store(Arc::new(KeyGeneration::new(loaded)));
+                self.inner.health.mark_success();
+                Ok(())
+            }
+            Err(error) => {
+                self.inner.health.mark_failure();
+                Err(error)
+            }
+        }
     }
 }
 
@@ -549,6 +684,9 @@ fn external_failure_command(stderr: &str) -> Vec<String> {
 
 impl Signer for KeyManager {
     async fn sign<'a>(&'a self, request: SignRequest<'a>) -> Result<Signature, SignError> {
+        if !self.is_healthy() {
+            return Err(SignError::KeyUnavailable);
+        }
         let algorithm = crate::store::signing_algorithm_from_name(request.algorithm)
             .ok_or(SignError::UnsupportedAlgorithm)?;
         let generation = self.inner.generation.load_full();
@@ -655,9 +793,7 @@ pub(crate) fn snapshot_from_loaded(loaded: &LoadedKeyset) -> KeySnapshot {
 
 #[cfg(any(test, feature = "test-support"))]
 fn test_request_object_decryption_key() -> anyhow::Result<Vec<u8>> {
-    use openssl::{pkey::PKey, rsa::Rsa};
-
-    Ok(PKey::from_rsa(Rsa::generate(2048)?)?.private_key_to_pem_pkcs8()?)
+    crate::crypto::generate_rsa_pkcs8_pem(2048)
 }
 
 #[cfg(any(test, feature = "test-support"))]

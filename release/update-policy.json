@@ -1,10 +1,10 @@
 {
   "schema": 2,
   "artifact_rollback": true,
-  "schema_compatible": true,
+  "schema_compatible": false,
   "database_restore": "backup",
-  "irreversible_migration": false,
-  "minimum_supported_version": "0.0.0",
-  "migration_floor": "20260731000200",
-  "rationale": "All migrations through the declared floor are additive for the immediately previous release. Change this declaration whenever an upgrade cannot safely restart the previous application image."
+  "irreversible_migration": true,
+  "minimum_supported_version": "0.1.8",
+  "migration_floor": "20260811000300",
+  "rationale": "The TOTP envelope migration clears plaintext secrets after encrypting them, and durable token-issuance records prevent a safe schema downgrade once used. The previous application therefore cannot resume on the migrated database. Recovery requires the controller-created, separately verified pre-update database backup; artifact-only rollback is intentionally blocked across this migration barrier."
 }

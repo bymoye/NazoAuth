@@ -7,14 +7,17 @@ use nazo_auth::{
     CibaPingResponseAction, classify_ciba_ping_status, next_ciba_ping_retry_at,
     validate_ciba_notification_endpoint,
 };
-use nazo_valkey::{CibaPingDelivery, CibaPingFinishOutcome, CibaStore};
+use nazo_valkey::{CibaPingDelivery, CibaPingFinishOutcome, CibaPingFinishResult, CibaStore};
 use reqwest::{StatusCode, header};
 use serde_json::json;
 
 use super::{ciba_ping_tls::apply_ciba_ping_tls_policy, sector_identifier::is_blocked_ip};
 
-const DELIVERY_BATCH_SIZE: usize = 20;
 const DELIVERY_CONCURRENCY: usize = 8;
+// One claim is processed in a single concurrency wave.  Keeping the batch at
+// the concurrency limit ensures the 15-second Valkey claim lease covers the
+// worst case request timeout instead of allowing a later wave to outlive it.
+const DELIVERY_BATCH_SIZE: usize = DELIVERY_CONCURRENCY;
 const DELIVERY_LOCK_SECONDS: i64 = 15;
 const LOOP_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -78,15 +81,14 @@ impl CibaPingDeliveryWorker {
             Ok(PingPostOutcome::Terminal(status)) => {
                 tracing::warn!(
                     %status,
-                    endpoint = %delivery.endpoint,
+                    endpoint_origin = %endpoint_origin_for_log(&delivery.endpoint),
                     "CIBA ping endpoint rejected the notification; delivery is terminal"
                 );
                 CibaPingFinishOutcome::Failed
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
-                    %error,
-                    endpoint = %delivery.endpoint,
+                    endpoint_origin = %endpoint_origin_for_log(&delivery.endpoint),
                     attempts = delivery.attempts,
                     "CIBA ping notification transport failed"
                 );
@@ -101,10 +103,20 @@ impl CibaPingDeliveryWorker {
                 )
             }
         };
-        self.store
+        let finish_result = self
+            .store
             .finish_ping(&delivery, outcome)
             .await
             .context("failed to record CIBA ping delivery outcome")?;
+        match finish_result {
+            CibaPingFinishResult::Applied => {}
+            CibaPingFinishResult::Missing | CibaPingFinishResult::Conflict => {
+                tracing::debug!(
+                    attempts = delivery.attempts,
+                    "CIBA ping finish skipped because the delivery claim is stale"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -138,6 +150,10 @@ impl CibaPingDeliveryWorker {
         let response = client
             .post(endpoint)
             .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::HeaderName::from_static("idempotency-key"),
+                ciba_ping_idempotency_key(&delivery.auth_req_id_hash),
+            )
             .bearer_auth(&delivery.client_notification_token)
             .json(&json!({"auth_req_id": delivery.auth_req_id}))
             .send()
@@ -153,6 +169,16 @@ impl CibaPingDeliveryWorker {
             }
         }
     }
+}
+
+fn endpoint_origin_for_log(raw: &str) -> String {
+    validate_ciba_notification_endpoint(raw)
+        .map(|endpoint| endpoint.origin().ascii_serialization())
+        .unwrap_or_else(|_| "<invalid>".to_owned())
+}
+
+fn ciba_ping_idempotency_key(auth_req_id_hash: &str) -> String {
+    format!("nazo-ciba-ping-{auth_req_id_hash}")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

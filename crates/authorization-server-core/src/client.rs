@@ -22,10 +22,7 @@ pub fn validate_token_request_profile(
     }
     if !matches!(
         client.authentication_method,
-        "private_key_jwt"
-            | "tls_client_auth"
-            | "self_signed_tls_client_auth"
-            | "attest_jwt_client_auth"
+        "private_key_jwt" | "tls_client_auth" | "self_signed_tls_client_auth"
     ) {
         return Err(ProtocolError::new(
             ProtocolErrorCode::InvalidClient,

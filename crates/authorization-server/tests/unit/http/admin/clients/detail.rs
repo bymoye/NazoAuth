@@ -129,6 +129,7 @@ fn test_state() -> TestInfrastructure {
 
 fn create_client_request(client_name: &str) -> CreateClientRequest {
     CreateClientRequest {
+        conformance_lease_id: None,
         client_name: client_name.to_owned(),
         client_type: "confidential".to_owned(),
         redirect_uris: vec!["https://client.example/callback".to_owned()],
@@ -265,7 +266,7 @@ impl LiveAdminClientDetailFixture {
         let payload = SessionPayload {
             user_id: user.id,
             auth_time: Utc::now().timestamp(),
-            amr: vec!["pwd".to_owned()],
+            amr: vec!["pwd".to_owned(), "otp".to_owned(), "mfa".to_owned()],
             pending_mfa: false,
             oidc_sid: Some(format!("oidc-{sid}")),
         };

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import http.client
 import ipaddress
@@ -13,6 +14,7 @@ import re
 import shlex
 import signal
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,12 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oidf_evidence import sanitize_evidence_tree  # noqa: E402
+from oidf_secret_input import (  # noqa: E402
+    SecretInputError,
+    read_private_text,
+    read_secret_value,
+    sanitized_environment,
+)
 
 
 OIDCC_CONFIG_FILE = "oidf-oidcc-plan-config.json"
@@ -77,6 +85,9 @@ OIDF_BAD_FINAL_RESULTS = {"FAILED", "INTERRUPTED", "WARNING"}
 OIDF_UNACCEPTABLE_FINAL_RESULTS = OIDF_BAD_FINAL_RESULTS | {"SKIPPED"}
 OIDF_BAD_STATUS_VALUES = {"FAILED", "INTERRUPTED"}
 OIDF_BAD_LOG_RESULTS = {"FAILURE", "WARNING"}
+MAX_OIDF_API_RESPONSE_BYTES = 1024 * 1024
+MAX_OIDF_LOG_RESPONSE_BYTES = 8 * 1024 * 1024
+OIDF_PLAN_PAGE_LENGTH = 20
 OIDF_LOG_CONTEXT_SOURCES = {
     "BROWSER",
     "CallBackchannelAuthenticationEndpoint",
@@ -163,6 +174,36 @@ OIDF_ALLOWED_REVIEW_CONTEXTS_BY_CONFIG = {
             "oidcc-ensure-registered-redirect-uri",
         }),
     ),
+    **{
+        f"openid4vc-{slug}.json": (
+            plan,
+            frozenset(
+                {
+                    "oid4vp-1final-verifier-happy-flow",
+                    "oid4vp-1final-verifier-minimal-cnf-jwk",
+                    "oid4vp-1final-verifier-request-uri-method-post",
+                    "oid4vp-1final-verifier-request-uri-fetched-twice",
+                }
+            ),
+        )
+        for plan, slugs in (
+            (
+                "oid4vp-1final-verifier-test-plan",
+                (
+                    "vp-sd-redirect-query",
+                    "vp-sd-x509dns-signed",
+                    "vp-mdoc-x509dns-signed-jwt",
+                    "vp-sd-x509hash-signed-jwt",
+                    "vp-mdoc-x509hash-signed",
+                ),
+            ),
+            (
+                "oid4vp-1final-verifier-haip-test-plan",
+                ("vp-haip-sd", "vp-haip-mdoc"),
+            ),
+        )
+        for slug in slugs
+    },
 }
 OIDF_CALLBACK_PATH_PATTERN = re.compile(r"/test/a/[^/]+/callback")
 OIDF_BROWSER_CALLBACK_TIMEOUT_SECONDS = max(
@@ -262,6 +303,78 @@ def atomic_write_json_file(path: Path, value: object) -> None:
             os.close(descriptor)
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+PlanConfigBackup = tuple[bytes | None, int | None]
+
+
+def remember_plan_config(
+    path: Path,
+    backups: dict[Path, PlanConfigBackup],
+) -> None:
+    if path in backups:
+        return
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        backups[path] = (None, None)
+        return
+    except OSError as error:
+        fail(f"unable to inspect private OIDF config target {path}: {error}")
+    if stat.S_ISLNK(metadata.st_mode):
+        fail(f"refusing to overwrite symlinked private OIDF config target {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        fail(f"private OIDF config target is not a regular file: {path}")
+    try:
+        original_bytes = path.read_bytes()
+    except OSError as error:
+        fail(f"unable to back up private OIDF config target {path}: {error}")
+    backups[path] = (original_bytes, stat.S_IMODE(metadata.st_mode))
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def restore_plan_configs(backups: dict[Path, PlanConfigBackup]) -> None:
+    errors: list[str] = []
+    for path, backup in reversed(tuple(backups.items())):
+        try:
+            original_bytes, original_mode = backup
+            if original_bytes is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write_bytes(path, original_bytes)
+                assert original_mode is not None
+                path.chmod(original_mode)
+        except OSError as error:
+            errors.append(f"{path}: {error}")
+    if errors:
+        raise RuntimeError(
+            "OIDF private plan config cleanup incomplete: " + "; ".join(errors)
+        )
+    if backups:
+        print("OIDF private plan config cleanup complete", flush=True)
 
 
 def issuer_from_discovery_url(discovery_url: str) -> str | None:
@@ -364,21 +477,19 @@ def nazo_automation_credentials(config_value: dict[str, object]) -> tuple[str, s
     nazo = config_value.get("nazo")
     nazo_object = nazo if isinstance(nazo, dict) else {}
     email = (
-        non_empty_string(os.environ.get("OIDF_USER_EMAIL"))
-        or non_empty_string(nazo_object.get("oidf_user_email"))
+        non_empty_string(nazo_object.get("oidf_user_email"))
         or non_empty_string(nazo_object.get("user_email"))
         or non_empty_string(nazo_object.get("login_email"))
     )
     password = (
-        non_empty_string(os.environ.get("OIDF_USER_PASSWORD"))
-        or non_empty_string(nazo_object.get("oidf_user_password"))
+        non_empty_string(nazo_object.get("oidf_user_password"))
         or non_empty_string(nazo_object.get("user_password"))
         or non_empty_string(nazo_object.get("login_password"))
     )
     if not email or not password:
         fail(
-            "Nazo user-facing /ui browser automation requires OIDF_USER_EMAIL and "
-            "OIDF_USER_PASSWORD secrets, or matching nazo.oidf_user_* fields in the plan config"
+            "Nazo user-facing /ui browser automation requires matching "
+            "nazo.oidf_user_* fields in the private plan config"
         )
     return email, password
 
@@ -1075,24 +1186,29 @@ def add_nazo_browser_overrides(config_value: dict[str, object]) -> None:
 def write_plan_configs(
     suite_scripts: Path,
     file_name: str,
-    env_name: str,
     config_json_file: str,
     target_issuer: str,
+    *,
+    backups: dict[Path, PlanConfigBackup] | None = None,
 ) -> tuple[set[str], dict[str, str]]:
+    config_backups = backups if backups is not None else {}
+
+    def write_config(config_name: str, config_value: dict[str, object]) -> None:
+        target = suite_scripts / config_name
+        remember_plan_config(target, config_backups)
+        atomic_write_json_file(target, config_value)
+
     validate_config_file_name(file_name)
-    raw_config = (
-        non_empty_file(config_json_file, "--config-json-file")
-        if config_json_file
-        else non_empty_env(env_name)
-    )
+    try:
+        raw_config = read_private_text(Path(config_json_file))
+    except SecretInputError as error:
+        fail(str(error))
     try:
         parsed = json.loads(raw_config)
     except json.JSONDecodeError as exc:
-        source = config_json_file if config_json_file else env_name
-        fail(f"{source} is not valid JSON: {exc}")
+        fail(f"{config_json_file} is not valid JSON: {exc}")
     if not isinstance(parsed, dict):
-        source = config_json_file if config_json_file else env_name
-        fail(f"{source} must contain a JSON object")
+        fail(f"{config_json_file} must contain a JSON object")
 
     configs = parsed.get("configs")
     if configs is None:
@@ -1103,8 +1219,7 @@ def write_plan_configs(
         if target_issuer:
             assert_config_target_boundaries(parsed, file_name, target_issuer)
         validate_browser_automation(file_name, parsed)
-        target = suite_scripts / file_name
-        atomic_write_json_file(target, parsed)
+        write_config(file_name, parsed)
         aliases_by_config = {file_name: alias} if (alias := config_alias(parsed)) else {}
         return {file_name}, aliases_by_config
 
@@ -1129,8 +1244,7 @@ def write_plan_configs(
         alias = config_alias(config_value)
         if alias:
             aliases_by_config[config_name] = alias
-        target = suite_scripts / config_name
-        atomic_write_json_file(target, config_value)
+        write_config(config_name, config_value)
         written.add(config_name)
     return written, aliases_by_config
 
@@ -1150,6 +1264,7 @@ def oidf_api_request(
     *,
     query: dict[str, str | int] | None = None,
     expected_statuses: set[int],
+    max_response_bytes: int = MAX_OIDF_API_RESPONSE_BYTES,
 ) -> tuple[int, object | None]:
     headers = {"Accept": "application/json"}
     if token is not None:
@@ -1169,10 +1284,16 @@ def oidf_api_request(
                 context=OIDF_API_SSL_CONTEXT,
             ) as response:
                 status = response.status
-                body = response.read()
+                body = response.read(max_response_bytes + 1)
         except urllib.error.HTTPError as exc:
-            status = exc.code
-            body = exc.read()
+            with exc:
+                status = exc.code
+                body = exc.read(max_response_bytes + 1)
+            if len(body) > max_response_bytes:
+                fail(
+                    f"OIDF API {method} {path} response exceeds "
+                    f"{max_response_bytes} bytes"
+                )
             if status < 500 or attempt == attempts:
                 break
             time.sleep(min(attempt * 2, 15))
@@ -1187,15 +1308,25 @@ def oidf_api_request(
     else:
         fail(f"OIDF API {method} {path} failed: {last_error}")
 
+    if len(body) > max_response_bytes:
+        fail(
+            f"OIDF API {method} {path} response exceeds "
+            f"{max_response_bytes} bytes"
+        )
+
     if status not in expected_statuses:
         text = body.decode("utf-8", "replace")[:300] if body else ""
         fail(f"OIDF API {method} {path} failed with HTTP {status}: {text}")
 
     if not body:
+        if method.upper() == "GET" and status == 200:
+            fail(f"OIDF API {method} {path} returned an empty HTTP 200 response")
         return status, None
     try:
         return status, json.loads(body.decode("utf-8"))
     except json.JSONDecodeError:
+        if method.upper() == "GET" and status == 200:
+            fail(f"OIDF API {method} {path} returned invalid JSON for HTTP 200")
         return status, None
 
 
@@ -1697,7 +1828,7 @@ def fetch_alias_plans(
         return []
 
     start = 0
-    length = 200
+    length = OIDF_PLAN_PAGE_LENGTH
     matched: list[dict[str, object]] = []
     while True:
         _, payload = oidf_api_request(
@@ -1709,15 +1840,17 @@ def fetch_alias_plans(
             expected_statuses={200},
         )
         if not isinstance(payload, dict):
-            return matched
+            fail("OIDF API api/plan returned a non-object JSON payload")
 
         plans = payload.get("data")
-        if not isinstance(plans, list) or not plans:
+        if not isinstance(plans, list):
+            fail("OIDF API api/plan response data must be an array")
+        if not plans:
             return matched
 
         for plan in plans:
             if not isinstance(plan, dict):
-                continue
+                fail("OIDF API api/plan response contains a non-object plan")
             config = plan.get("config")
             alias = config.get("alias") if isinstance(config, dict) else None
             if alias in aliases:
@@ -1725,7 +1858,11 @@ def fetch_alias_plans(
 
         start += len(plans)
         total = payload.get("recordsTotal")
+        if total is not None and (not isinstance(total, int) or total < 0):
+            fail("OIDF API api/plan response recordsTotal must be a non-negative integer")
         if isinstance(total, int) and start >= total:
+            return matched
+        if total is None and len(plans) < length:
             return matched
 
 
@@ -1778,7 +1915,9 @@ def inspect_oidf_state(
             token,
             expected_statuses={200, 404},
         )
-        if status_code == 200 and info is not None:
+        if status_code == 200 and not isinstance(info, dict):
+            return f"{module_id} returned an invalid HTTP 200 module info payload"
+        if status_code == 200:
             result = value_as_upper(info.get("result")) if isinstance(info, dict) else ""
             if result == "SKIPPED" and is_allowed_expected_skip(
                 info,
@@ -1816,6 +1955,7 @@ def inspect_oidf_state(
                     f"api/log/{module_id}",
                     token,
                     expected_statuses={200, 404},
+                    max_response_bytes=MAX_OIDF_LOG_RESPONSE_BYTES,
                 )
                 log_failure = oidf_log_failure(
                     module_id,
@@ -1844,8 +1984,11 @@ def inspect_oidf_state(
             f"api/log/{module_id}",
             token,
             expected_statuses={200, 404},
+            max_response_bytes=MAX_OIDF_LOG_RESPONSE_BYTES,
         )
         if status_code == 200:
+            if not isinstance(logs, list):
+                return f"{module_id} returned an invalid HTTP 200 log payload"
             failure = oidf_log_failure(
                 module_id,
                 logs,
@@ -1858,12 +2001,8 @@ def inspect_oidf_state(
     return None
 
 
-def ciba_config_has_automated_approval_url(config_json_file: str, env_name: str) -> bool:
-    raw_config = (
-        non_empty_file(config_json_file, "--config-json-file")
-        if config_json_file
-        else os.environ.get(env_name, "")
-    )
+def ciba_config_has_automated_approval_url(config_json_file: str) -> bool:
+    raw_config = non_empty_file(config_json_file, "--config-json-file")
     if not raw_config.strip():
         return False
     try:
@@ -2029,7 +2168,7 @@ def cleanup_existing_alias_plans(base_url: str, token: str, aliases: set[str]) -
 
 def cleanup_existing_alias_plans_pass(base_url: str, token: str, aliases: set[str]) -> int:
     start = 0
-    length = 200
+    length = OIDF_PLAN_PAGE_LENGTH
     deleted = 0
     while True:
         _, payload = oidf_api_request(
@@ -2041,19 +2180,27 @@ def cleanup_existing_alias_plans_pass(base_url: str, token: str, aliases: set[st
             expected_statuses={200},
         )
         if not isinstance(payload, dict):
-            return deleted
+            fail("OIDF API api/plan returned a non-object JSON payload during cleanup")
 
         plans = payload.get("data")
-        if not isinstance(plans, list) or not plans:
+        if not isinstance(plans, list):
+            fail("OIDF API api/plan response data must be an array during cleanup")
+        if not plans:
             return deleted
 
         for plan in plans:
+            if not isinstance(plan, dict):
+                fail("OIDF API api/plan response contains a non-object plan during cleanup")
             if cleanup_alias_plan(base_url, token, aliases, plan):
                 deleted += 1
 
         start += len(plans)
         total = payload.get("recordsTotal")
+        if total is not None and (not isinstance(total, int) or total < 0):
+            fail("OIDF API api/plan response recordsTotal must be a non-negative integer during cleanup")
         if isinstance(total, int) and start >= total:
+            return deleted
+        if total is None and len(plans) < length:
             return deleted
 
 
@@ -2212,11 +2359,10 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="read the JSON array of plan expressions from this file instead of --plan-set-env",
     )
-    parser.add_argument("--config-env", default="OIDF_PLAN_CONFIG_JSON")
     parser.add_argument(
         "--config-json-file",
-        default="",
-        help="read the plan configuration JSON object from this file instead of --config-env",
+        required=True,
+        help="read the private plan configuration JSON object from this file",
     )
     parser.add_argument("--config-file-name", default="oidf-plan-config.json")
     parser.add_argument(
@@ -2224,7 +2370,17 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("OIDF_TARGET_ISSUER", ""),
         help="expected HTTPS issuer origin supplied by the operator; no repository default is provided",
     )
-    parser.add_argument("--token-env", default="OIDF_CONFORMANCE_TOKEN")
+    token_source = parser.add_mutually_exclusive_group()
+    token_source.add_argument(
+        "--token-fd",
+        type=int,
+        help="read the suite bearer token from an inherited descriptor >= 3",
+    )
+    token_source.add_argument(
+        "--token-file",
+        type=Path,
+        help="read the suite bearer token from a POSIX non-symlink mode-0600 file",
+    )
     parser.add_argument(
         "--no-api-token",
         action="store_true",
@@ -2288,6 +2444,7 @@ def run_official_runner(
     allowed_expected_skips_by_alias: dict[
         str, frozenset[tuple[str, tuple[tuple[str, str], ...] | None]]
     ],
+    token_fd: int | None,
 ) -> int:
     if timeout_seconds <= 0:
         fail("--timeout-seconds must be greater than zero")
@@ -2307,6 +2464,9 @@ def run_official_runner(
         command,
         cwd=suite_scripts,
         env=env,
+        pass_fds=(() if token_fd is None else (token_fd,)),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
     monitor: OidfEarlyStopMonitor | None = None
@@ -2439,14 +2599,16 @@ def verify_pristine_oidf_suite(suite_dir: Path, expected_revision: str) -> None:
         fail("official suite contains tracked modifications; refusing to run")
 
 
-def official_runner_command(suite_scripts: Path, runner: Path) -> list[str]:
+def official_runner_command(
+    suite_scripts: Path,
+    runner: Path,
+    token_fd: int | None,
+) -> list[str]:
     bootstrap = (
-        "import runpy,sys,sysconfig;"
-        "paths=sysconfig.get_paths();"
-        "sys.path.extend(dict.fromkeys([paths['purelib'],paths['platlib']]));"
-        "suite_scripts=sys.argv.pop(1);runner=sys.argv.pop(1);"
-        "sys.path.insert(0,suite_scripts);sys.argv[0]=runner;"
-        "runpy.run_path(runner,run_name='__main__')"
+        "import runpy,sys;"
+        "bootstrap=sys.argv.pop(1);"
+        "sys.argv[0]=bootstrap;"
+        "runpy.run_path(bootstrap,run_name='__main__')"
     )
     return [
         sys.executable,
@@ -2456,17 +2618,69 @@ def official_runner_command(suite_scripts: Path, runner: Path) -> list[str]:
         "-u",
         "-c",
         bootstrap,
+        str(Path(__file__).with_name("oidf_fd_bootstrap.py")),
         str(suite_scripts),
         str(runner),
+        "-" if token_fd is None else str(token_fd),
     ]
 
 
 def sanitized_runner_environment() -> dict[str, str]:
     return {
         name: value
-        for name, value in os.environ.items()
+        for name, value in sanitized_environment().items()
         if not name.upper().startswith("PYTHON")
     }
+
+
+def suite_token(args: argparse.Namespace) -> str | None:
+    has_source = args.token_fd is not None or args.token_file is not None
+    if args.no_api_token:
+        if has_source:
+            fail("--no-api-token cannot be combined with a token source")
+        return None
+    if not has_source:
+        fail("select --token-fd or --token-file for the suite bearer token")
+    try:
+        return read_secret_value(descriptor=args.token_fd, path=args.token_file)
+    except SecretInputError as error:
+        fail(str(error))
+
+
+@contextlib.contextmanager
+def inherited_token_descriptor(token: str | None):
+    if token is None:
+        yield None
+        return
+    if os.name == "nt":
+        fail("suite token descriptor transport requires a POSIX host")
+    reader, writer = os.pipe()
+    write_errors: list[OSError] = []
+
+    def write_secret() -> None:
+        payload = token.encode("utf-8")
+        try:
+            written = 0
+            while written < len(payload):
+                written += os.write(writer, payload[written:])
+        except OSError as error:
+            write_errors.append(error)
+        finally:
+            os.close(writer)
+
+    delivery = threading.Thread(
+        target=write_secret,
+        name="oidf-secret-fd-writer",
+        daemon=True,
+    )
+    delivery.start()
+    try:
+        yield reader
+    finally:
+        os.close(reader)
+        delivery.join()
+        if write_errors and sys.exc_info()[0] is None:
+            fail("suite token descriptor delivery failed")
 
 
 def main() -> int:
@@ -2485,104 +2699,131 @@ def main() -> int:
     if not runner.is_file():
         fail(f"official runner not found: {runner}")
 
-    config_names, aliases_by_config = write_plan_configs(
-        suite_scripts,
-        args.config_file_name,
-        args.config_env,
-        args.config_json_file,
-        target_issuer,
-    )
-    expressions = plan_expressions(
-        args.plan_expression,
-        args.plan_set_env,
-        args.plan_set_json_file,
-        config_names,
-        args.config_file_name,
-    )
-    selected_config_names = config_names_from_plan_expressions(expressions, config_names)
-    aliases = {
-        alias
-        for config_name, alias in aliases_by_config.items()
-        if config_name in selected_config_names
-    }
+    plan_config_backups: dict[Path, PlanConfigBackup] = {}
+    config_names: set[str] = set()
+    aliases_by_config: dict[str, str] = {}
+    aliases: set[str] = set()
 
     env = sanitized_runner_environment()
-    env["CONFORMANCE_SERVER"] = args.conformance_server
-    token = None if args.no_api_token else non_empty_env(args.token_env)
-    if token is not None:
-        env["CONFORMANCE_TOKEN"] = token
-    else:
-        env.pop("CONFORMANCE_TOKEN", None)
-        env["CONFORMANCE_DEV_MODE"] = "1"
-    if args.disable_ssl_verify:
-        env["DISABLE_SSL_VERIFY"] = "1"
-
-    if not args.list and not args.rerun:
-        cleanup_existing_alias_plans(args.conformance_server, token, aliases)
-
-    command = official_runner_command(suite_scripts, runner)
-    if args.list:
-        command.append("--list")
-    if args.no_parallel:
-        command.append("--no-parallel")
-    if args.rerun:
-        command.extend(["--rerun", args.rerun])
-    expected_failures_file = (
-        Path(args.expected_failures_file).resolve() if args.expected_failures_file else None
-    )
-    if expected_failures_file is not None:
-        command.extend(["--expected-failures-file", str(expected_failures_file)])
-    expected_skips_file = None
-    if args.expected_skips_file:
-        expected_skips_file = Path(args.expected_skips_file).resolve()
-        command.extend(["--expected-skips-file", str(expected_skips_file)])
-    export_dir = None
-    if args.export_dir:
-        export_dir = Path(args.export_dir).resolve()
-        export_dir.mkdir(parents=True, exist_ok=True)
-        command.extend(["--export-dir", str(export_dir)])
-    if args.verbose:
-        command.append("--verbose")
-    for expression in expressions:
-        command.extend(shlex.split(expression))
-
-    monitor_aliases = set() if args.list else aliases
-    if monitor_aliases and any("ciba" in alias for alias in monitor_aliases):
-        if not ciba_config_has_automated_approval_url(args.config_json_file, args.config_env):
-            fail(
-                "FAPI-CIBA conformance automation requires automated_ciba_approval_url "
-                "so the official suite controls approve/deny timing"
-            )
-
-    monitor_interval_seconds = effective_monitor_interval_seconds(
-        monitor_aliases,
-        args.monitor_interval_seconds,
-    )
-    if monitor_interval_seconds != args.monitor_interval_seconds:
-        print(
-            "OIDF early-stop monitor interval raised to "
-            f"{monitor_interval_seconds} seconds because runnable aliases are present",
-            flush=True,
-        )
+    token = suite_token(args)
 
     try:
-        return run_official_runner(
-            command,
-            expressions,
+        config_names, aliases_by_config = write_plan_configs(
             suite_scripts,
-            env,
-            args.timeout_seconds,
-            args.conformance_server,
-            monitor_aliases,
-            token,
-            monitor_interval_seconds,
-            allowed_review_contexts_by_alias(aliases_by_config),
-            expected_problem_contexts_by_alias(expected_failures_file, aliases_by_config),
-            expected_skip_contexts_by_alias(expected_skips_file, aliases_by_config),
+            args.config_file_name,
+            args.config_json_file,
+            target_issuer,
+            backups=plan_config_backups,
         )
+        expressions = plan_expressions(
+            args.plan_expression,
+            args.plan_set_env,
+            args.plan_set_json_file,
+            config_names,
+            args.config_file_name,
+        )
+        selected_config_names = config_names_from_plan_expressions(expressions, config_names)
+        aliases = {
+            alias
+            for config_name, alias in aliases_by_config.items()
+            if config_name in selected_config_names
+        }
+
+        env["CONFORMANCE_SERVER"] = args.conformance_server
+        env.pop("CONFORMANCE_TOKEN", None)
+        if token is None:
+            env["CONFORMANCE_DEV_MODE"] = "1"
+        if args.disable_ssl_verify:
+            env["DISABLE_SSL_VERIFY"] = "1"
+
+        if not args.list and not args.rerun:
+            cleanup_existing_alias_plans(args.conformance_server, token, aliases)
+
+        expected_failures_file = (
+            Path(args.expected_failures_file).resolve() if args.expected_failures_file else None
+        )
+        expected_skips_file = None
+        if args.expected_skips_file:
+            expected_skips_file = Path(args.expected_skips_file).resolve()
+        export_dir = None
+        if args.export_dir:
+            export_dir = Path(args.export_dir).resolve()
+            export_dir.mkdir(parents=True, exist_ok=True)
+
+        monitor_aliases = set() if args.list else aliases
+        if monitor_aliases and any("ciba" in alias for alias in monitor_aliases):
+            if not ciba_config_has_automated_approval_url(args.config_json_file):
+                fail(
+                    "FAPI-CIBA conformance automation requires automated_ciba_approval_url "
+                    "so the official suite controls approve/deny timing"
+                )
+
+        monitor_interval_seconds = effective_monitor_interval_seconds(
+            monitor_aliases,
+            args.monitor_interval_seconds,
+        )
+        if monitor_interval_seconds != args.monitor_interval_seconds:
+            print(
+                "OIDF early-stop monitor interval raised to "
+                f"{monitor_interval_seconds} seconds because runnable aliases are present",
+                flush=True,
+            )
+
+        with inherited_token_descriptor(token) as token_fd:
+            command = official_runner_command(suite_scripts, runner, token_fd)
+            if args.list:
+                command.append("--list")
+            if args.no_parallel:
+                command.append("--no-parallel")
+            if args.rerun:
+                command.extend(["--rerun", args.rerun])
+            if expected_failures_file is not None:
+                command.extend(
+                    ["--expected-failures-file", str(expected_failures_file)]
+                )
+            if expected_skips_file is not None:
+                command.extend(["--expected-skips-file", str(expected_skips_file)])
+            if export_dir is not None:
+                command.extend(["--export-dir", str(export_dir)])
+            if args.verbose:
+                command.append("--verbose")
+            for expression in expressions:
+                command.extend(shlex.split(expression))
+            return run_official_runner(
+                command,
+                expressions,
+                suite_scripts,
+                env,
+                args.timeout_seconds,
+                args.conformance_server,
+                monitor_aliases,
+                token,
+                monitor_interval_seconds,
+                allowed_review_contexts_by_alias(aliases_by_config),
+                expected_problem_contexts_by_alias(
+                    expected_failures_file, aliases_by_config
+                ),
+                expected_skip_contexts_by_alias(expected_skips_file, aliases_by_config),
+                token_fd,
+            )
     finally:
+        active_error = sys.exc_info()[1]
+        cleanup_errors: list[str] = []
+        try:
+            restore_plan_configs(plan_config_backups)
+        except BaseException as error:  # noqa: BLE001
+            cleanup_errors.append(str(error))
+        export_dir = locals().get("export_dir")
         if export_dir is not None:
-            sanitize_evidence_tree(export_dir)
+            try:
+                sanitize_evidence_tree(export_dir)
+            except BaseException as error:  # noqa: BLE001
+                cleanup_errors.append(f"evidence sanitization failed: {error}")
+        if cleanup_errors:
+            message = "OIDF conformance cleanup incomplete: " + "; ".join(cleanup_errors)
+            if active_error is None:
+                raise RuntimeError(message)
+            print(message, file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

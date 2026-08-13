@@ -16,6 +16,14 @@ fn parses_all_product_commands() {
         parse(&["nazoauth", "operator-task"]).unwrap(),
         Command::OperatorTask
     );
+    assert_eq!(
+        parse(&["nazoauth", "audit-anchor-worker"]).unwrap(),
+        Command::AuditAnchorWorker
+    );
+    assert_eq!(
+        parse(&["nazoauth", "build-identity"]).unwrap(),
+        Command::BuildIdentity
+    );
 }
 
 #[test]
@@ -26,6 +34,13 @@ fn help_is_available_without_starting_a_runtime() {
 #[tokio::test]
 async fn public_help_command_completes_without_loading_runtime_configuration() {
     run(["nazoauth".to_owned(), "help".to_owned()])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn build_identity_completes_without_loading_runtime_configuration() {
+    run(["nazoauth".to_owned(), "build-identity".to_owned()])
         .await
         .unwrap();
 }

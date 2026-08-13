@@ -28,6 +28,11 @@ pub struct ClientSecurityPolicy {
     pub session_management: bool,
     #[serde(default)]
     pub allow_cross_device_flows: bool,
+    /// Explicit compatibility exception for confidential OIDC clients.
+    /// New and legacy clients default to PKCE-required; callers must constrain
+    /// this exception to a separately controlled compatibility boundary.
+    #[serde(default)]
+    pub allow_confidential_oidc_without_pkce: bool,
 }
 
 impl Default for ClientSecurityPolicy {
@@ -40,6 +45,7 @@ impl Default for ClientSecurityPolicy {
             require_signed_introspection_response: false,
             session_management: false,
             allow_cross_device_flows: false,
+            allow_confidential_oidc_without_pkce: false,
         }
     }
 }

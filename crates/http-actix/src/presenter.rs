@@ -62,7 +62,21 @@ pub fn oauth_bearer_error(status: StatusCode, error: &str, description: &str) ->
 }
 
 pub fn redirect_found(location: String) -> HttpResponse {
-    let mut response = empty_response(StatusCode::FOUND);
+    redirect_with_status(StatusCode::FOUND, location)
+}
+
+/// Redirect a completed credential-bearing POST to a follow-up GET.
+///
+/// `303 See Other` makes the method transition explicit.  This is distinct
+/// from the ordinary `302 Found` helper because browser-facing OAuth
+/// authorization responses and external-login starts have different
+/// redirect contracts.
+pub fn redirect_see_other(location: String) -> HttpResponse {
+    redirect_with_status(StatusCode::SEE_OTHER, location)
+}
+
+fn redirect_with_status(status: StatusCode, location: String) -> HttpResponse {
+    let mut response = empty_response(status);
     if let Ok(value) = HeaderValue::from_str(&location) {
         response.headers_mut().insert(header::LOCATION, value);
     }

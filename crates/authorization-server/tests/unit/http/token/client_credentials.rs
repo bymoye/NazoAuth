@@ -35,7 +35,7 @@ pub(crate) async fn token_client_credentials(
 ) -> HttpResponse {
     let connection = state.valkey_connection();
     let service = ServerTokenService::new(
-        nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
         state.keyset.clone(),
     );
@@ -338,7 +338,7 @@ async fn token_client_credentials_binds_mtls_thumbprint_from_verified_certificat
 
     let response = token_client_credentials(&state, &req, &client, &form(None, &[]), None).await;
 
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(oauth_error_code(&response), "server_error");
 }
 

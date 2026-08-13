@@ -1,5 +1,6 @@
 # Rust build output
 /target/
+/artifacts/
 **/__pycache__/
 
 # Local runtime data created by Docker and development runs

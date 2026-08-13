@@ -233,7 +233,8 @@ CIBA 等 profile 明确注册、测试和运维。
 
 预计涉及：
 
-- `crates/authorization-server/src/http/dynamic_client_registration.rs`
+- `crates/http-actix/src/dynamic_client_registration.rs`
+- `crates/authorization-server-core/src/dynamic_client_registration/mod.rs`
 - `crates/authorization-server/src/http/admin/clients/create.rs`
 - `crates/authorization-server/src/http/well_known.rs`
 - `crates/http-actix/tests/unit/dynamic_client_registration.rs`
@@ -265,7 +266,7 @@ baseline 和 FAPI2 默认链路。
 
 - `crates/authorization-server/src/http/token/token_exchange.rs`
 - `crates/authorization-server/src/http/token/jwt_bearer.rs`
-- `crates/authorization-server/src/http/token/dispatch.rs`
+- `crates/authorization-server/src/http/token/dispatch/mod.rs`
 - `crates/authorization-server/tests/unit/http/token/token_exchange.rs`
 - `crates/authorization-server/tests/unit/http/token/jwt_bearer.rs`
 
@@ -345,13 +346,13 @@ cargo test --locked session --lib
   - `fapi-ciba-id1` 保持官方 FAPI-CIBA ID1 兼容 profile，认证与交付模式正交组合。
   - `fapi2-ciba` 只声明为内部强化 profile，不在 OIDF/README 中作为官方标准广告。
 - [x] **M6-03：保持 CIBA metadata truth**
-  - 只有 `ENABLE_CIBA=true` 且 client 注册 CIBA grant 时才广告和执行。
+  - CIBA 的服务器能力由 runtime-module 状态控制，且只有 client 注册 CIBA grant 时才广告和执行。
   - 不把 authorization-code-only 的 PAR、PKCE、`response_type=code` 要求套用到 CIBA。
 
 预计涉及：
 
 - `crates/authorization-server/src/http/token/ciba.rs`
-- `crates/authorization-server/src/http/token/dispatch.rs`
+- `crates/authorization-server/src/http/token/dispatch/mod.rs`
 - `crates/authorization-server/src/http/well_known.rs`
 - `crates/authorization-server/src/settings/profile.rs`
 - `crates/authorization-server/tests/unit/http/token/ciba.rs`
