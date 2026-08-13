@@ -3,6 +3,16 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.1.36 - 2026-08-13
+
+### Fixed
+
+- Validate BuildKit's current OCI artifact attestation manifests with a closed
+  schema that binds the canonical empty config, artifact type, image subject,
+  and exact SBOM and provenance predicates before publication.
+- Pin release OCI exports to the reviewed artifact representation so runner
+  defaults cannot silently change the publication contract.
+
 ## 0.1.35 - 2026-08-13
 
 ### Changed
