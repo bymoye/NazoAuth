@@ -90,17 +90,18 @@ class OciFixture:
         attestation = {
             "schemaVersion": 2,
             "mediaType": validator.OCI_MANIFEST,
+            "artifactType": validator.ATTESTATION_ARTIFACT,
             "config": self.descriptor(
-                validator.OCI_CONFIG,
-                self.blob(
-                    {
-                        "os": "unknown",
-                        "architecture": "unknown",
-                        "config": {},
-                    }
-                ),
+                validator.OCI_EMPTY,
+                self.blob({}),
+                data="e30=",
             ),
             "layers": attestation_layers,
+            "subject": {
+                "mediaType": validator.OCI_MANIFEST,
+                "digest": image["digest"],
+                "size": image["size"],
+            },
         }
         self.release_descriptors.append(
             self.descriptor(
@@ -141,6 +142,10 @@ class OciFixture:
                 "vnd.docker.reference.digest"
             ) == previous_digest:
                 annotations["vnd.docker.reference.digest"] = replacement_digest
+                attestation = json.loads(self.blobs[descriptor["digest"]])
+                attestation["subject"]["digest"] = replacement_digest
+                attestation["subject"]["size"] = replacement_size
+                descriptor["digest"], descriptor["size"] = self.blob(attestation)
 
     def mismatch_attestation_subject(
         self, architecture: str, subject_position: int = 0
@@ -177,6 +182,21 @@ class OciFixture:
             del self.blobs[previous_layer_digest]
         descriptor["digest"], descriptor["size"] = self.blob(manifest)
         del self.blobs[previous_manifest_digest]
+
+    def mutate_attestation_manifest(
+        self, architecture: str, mutation: Callable[[dict[str, Any]], None]
+    ) -> None:
+        image_digest = self.images[architecture]
+        descriptor = next(
+            item
+            for item in self.release_descriptors
+            if item.get("annotations", {}).get("vnd.docker.reference.digest") == image_digest
+        )
+        previous_digest = descriptor["digest"]
+        manifest = json.loads(self.blobs[previous_digest])
+        mutation(manifest)
+        descriptor["digest"], descriptor["size"] = self.blob(manifest)
+        del self.blobs[previous_digest]
 
     def write(
         self,
@@ -360,6 +380,36 @@ class ReleaseOciTests(unittest.TestCase):
                 "subject does not bind its image manifest",
             ):
                 self.validate(archive, expected, root)
+
+    def test_requires_closed_oci_artifact_attestation_schema(self) -> None:
+        def redirect_subject(manifest: dict[str, Any]) -> None:
+            manifest["subject"]["digest"] = fixture.images["arm64"]
+            manifest["subject"]["size"] = len(fixture.blobs[fixture.images["arm64"]])
+
+        cases = {
+            "artifact-type": (
+                lambda manifest: manifest.__setitem__("artifactType", "application/example"),
+                "closed OCI BuildKit attestation artifact schema",
+            ),
+            "embedded-config": (
+                lambda manifest: manifest["config"].__setitem__("data", "e30=\n"),
+                "closed OCI BuildKit attestation artifact schema",
+            ),
+            "subject": (redirect_subject, "subject does not bind the referenced image manifest"),
+            "unknown-field": (
+                lambda manifest: manifest.__setitem__("unreviewed", True),
+                "unexpected closed schema",
+            ),
+        }
+        for name, (mutation, error) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive = root / "candidate.oci.tar"
+                fixture = OciFixture()
+                fixture.mutate_attestation_manifest("amd64", mutation)
+                expected = fixture.write(archive)
+                with self.assertRaisesRegex(validator.OciValidationError, error):
+                    self.validate(archive, expected, root)
 
     def test_accepts_multiple_names_only_when_every_subject_binds_the_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

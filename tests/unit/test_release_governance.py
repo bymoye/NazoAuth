@@ -385,7 +385,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("platforms: linux/amd64,linux/arm64", release)
         self.assertIn(
             "outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,"
-            "name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }}",
+            "name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }},"
+            "oci-artifact=true",
             release,
         )
         scan = release.split(

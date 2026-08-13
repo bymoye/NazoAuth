@@ -420,7 +420,7 @@ jobs:
           context: .
           file: Containerfile.release
           platforms: linux/amd64,linux/arm64
-          outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }}
+          outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }},oci-artifact=true
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=nazoauth-release-oci
