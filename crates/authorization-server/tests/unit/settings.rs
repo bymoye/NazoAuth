@@ -875,6 +875,81 @@ fn public_transport_mode_is_explicit_and_fail_closed() {
 }
 
 #[test]
+fn transport_modes_reject_conflicting_endpoint_ownership() {
+    let pepper = "client-secret-pepper-for-tests-000000000001";
+
+    for (config, expected) in [
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "loopback-http"),
+            ]),
+            "TRANSPORT_MODE=loopback-http requires a loopback HTTP issuer",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([("TRANSPORT_MODE", "direct-tls")]),
+            "direct-tls transport requires an HTTPS issuer",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "other"),
+            ]),
+            "TRANSPORT_MODE must be loopback-http, direct-tls, or trusted-proxy; got other",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("TRANSPORT_MODE", "loopback-http"),
+                ("TRUSTED_PROXY_CIDRS", "192.0.2.0/24"),
+            ]),
+            "loopback-http transport must not configure TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("TRANSPORT_MODE", "loopback-http"),
+                ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+            ]),
+            "loopback-http transport must not configure MTLS_CERTIFICATE_SOURCE",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "direct-tls"),
+                ("TRUSTED_PROXY_CIDRS", "192.0.2.0/24"),
+            ]),
+            "direct-tls transport must not configure TRUSTED_PROXY_CIDRS",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "direct-tls"),
+                ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+            ]),
+            "direct-tls transport cannot use a proxy certificate source",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "trusted-proxy"),
+                ("TRUSTED_PROXY_CIDRS", "192.0.2.0/24"),
+                ("MTLS_CERTIFICATE_SOURCE", "direct-tls"),
+            ]),
+            "trusted-proxy transport cannot use MTLS_CERTIFICATE_SOURCE=direct-tls",
+        ),
+    ] {
+        assert_eq!(
+            settings_error(&config, "conflicting transport ownership must fail").to_string(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn trusted_proxy_requires_peer_boundary_and_certificate_contract() {
     let missing_peer = ConfigSource::from_pairs_for_test([
         ("PUBLIC_BASE_URL", "https://auth.example.test"),
