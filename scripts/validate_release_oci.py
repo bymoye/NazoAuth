@@ -14,8 +14,11 @@ from typing import Any
 OCI_INDEX = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
+OCI_EMPTY = "application/vnd.oci.empty.v1+json"
 OCI_LAYER_GZIP = "application/vnd.oci.image.layer.v1.tar+gzip"
 IN_TOTO = "application/vnd.in-toto+json"
+ATTESTATION_ARTIFACT = "application/vnd.docker.attestation.manifest.v1+json"
+EMPTY_JSON_DIGEST = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
 IN_TOTO_STATEMENT_TYPES = {
     "https://in-toto.io/Statement/v0.1",
     "https://in-toto.io/Statement/v1",
@@ -214,7 +217,15 @@ class Layout:
         descriptor = _closed_object(
             value,
             {"mediaType", "digest", "size"},
-            {"mediaType", "digest", "size", "annotations", "artifactType", "platform"},
+            {
+                "mediaType",
+                "digest",
+                "size",
+                "annotations",
+                "artifactType",
+                "platform",
+                "data",
+            },
             name,
         )
         _bounded_string(descriptor["mediaType"], f"{name}.mediaType", 256)
@@ -231,6 +242,8 @@ class Layout:
             _annotations(descriptor["annotations"], f"{name}.annotations")
         if "artifactType" in descriptor:
             _bounded_string(descriptor["artifactType"], f"{name}.artifactType", 256)
+        if "data" in descriptor:
+            _bounded_string(descriptor["data"], f"{name}.data", 1024)
         self.referenced.add(digest)
         return descriptor
 
@@ -283,24 +296,48 @@ def _manifest(
     attestation: bool,
     attested_image_digest: str | None = None,
 ) -> None:
+    required = {"schemaVersion", "mediaType", "config", "layers"}
+    if attestation:
+        required |= {"artifactType", "subject"}
     manifest = _closed_object(
         layout.json_blob(descriptor["digest"], name),
-        {"schemaVersion", "mediaType", "config", "layers"},
-        {"schemaVersion", "mediaType", "config", "layers"},
+        required,
+        required,
         name,
     )
     if manifest["schemaVersion"] != 2 or manifest["mediaType"] != OCI_MANIFEST:
         _fail(f"{name} is not an OCI image manifest")
     config = layout.descriptor(manifest["config"], f"{name}.config")
-    if config["mediaType"] != OCI_CONFIG or set(config) != {"mediaType", "digest", "size"}:
-        _fail(f"{name}.config is not an OCI image config descriptor")
-    operating_system, architecture = platform.split("/", 1)
-    config_document = layout.json_blob(config["digest"], f"{name}.config document")
-    if (
-        config_document.get("os") != operating_system
-        or config_document.get("architecture") != architecture
-    ):
-        _fail(f"{name}.config document does not match its index platform")
+    if attestation:
+        if (
+            manifest["artifactType"] != ATTESTATION_ARTIFACT
+            or config["mediaType"] != OCI_EMPTY
+            or set(config) != {"mediaType", "digest", "size", "data"}
+            or config["digest"] != EMPTY_JSON_DIGEST
+            or config["size"] != 2
+            or config["data"] != "e30="
+            or layout.json_blob(config["digest"], f"{name}.config document") != {}
+        ):
+            _fail(f"{name} is not the closed OCI BuildKit attestation artifact schema")
+        subject = layout.descriptor(manifest["subject"], f"{name}.subject")
+        if (
+            attested_image_digest is None
+            or subject["mediaType"] != OCI_MANIFEST
+            or set(subject) != {"mediaType", "digest", "size"}
+            or subject["digest"] != attested_image_digest
+            or subject["size"] != layout.blobs[attested_image_digest][1]
+        ):
+            _fail(f"{name}.subject does not bind the referenced image manifest")
+    else:
+        if config["mediaType"] != OCI_CONFIG or set(config) != {"mediaType", "digest", "size"}:
+            _fail(f"{name}.config is not an OCI image config descriptor")
+        operating_system, architecture = platform.split("/", 1)
+        config_document = layout.json_blob(config["digest"], f"{name}.config document")
+        if (
+            config_document.get("os") != operating_system
+            or config_document.get("architecture") != architecture
+        ):
+            _fail(f"{name}.config document does not match its index platform")
     layers = manifest["layers"]
     if not isinstance(layers, list) or not layers:
         _fail(f"{name}.layers must be a non-empty list")
@@ -308,7 +345,7 @@ def _manifest(
     predicates: set[str] = set()
     for position, value in enumerate(layers):
         layer = layout.descriptor(value, f"{name}.layers[{position}]")
-        if "platform" in layer or "artifactType" in layer:
+        if "platform" in layer or "artifactType" in layer or "data" in layer:
             _fail(f"{name}.layers[{position}] contains unsupported routing metadata")
         if not attestation:
             if layer["mediaType"] != OCI_LAYER_GZIP or "annotations" in layer:
@@ -390,6 +427,7 @@ def validate_layout(root: Path, expected_index_digest: str, repository: str) -> 
         or release_descriptor["digest"] != expected_index_digest
         or "platform" in release_descriptor
         or "artifactType" in release_descriptor
+        or "data" in release_descriptor
     ):
         _fail("OCI layout root does not bind the expected Buildx release index digest")
 
@@ -405,7 +443,11 @@ def validate_layout(root: Path, expected_index_digest: str, repository: str) -> 
     attestation_digests: set[str] = set()
     for position, value in enumerate(release_index["manifests"]):
         descriptor = layout.descriptor(value, f"OCI release descriptor[{position}]")
-        if descriptor["mediaType"] != OCI_MANIFEST or "artifactType" in descriptor:
+        if (
+            descriptor["mediaType"] != OCI_MANIFEST
+            or "artifactType" in descriptor
+            or "data" in descriptor
+        ):
             _fail(f"OCI release descriptor[{position}] is not an image manifest descriptor")
         platform = _platform(descriptor.get("platform"), f"OCI release descriptor[{position}].platform")
         annotations = descriptor.get("annotations")
