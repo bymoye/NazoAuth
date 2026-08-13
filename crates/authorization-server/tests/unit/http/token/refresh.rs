@@ -434,6 +434,11 @@ fn refresh_form_without_token() -> TokenForm {
 fn mtls_refresh_request(thumbprint: &str) -> HttpRequest {
     actix_web::test::TestRequest::post()
         .uri("/oauth/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((
             header::HeaderName::from_static("x-ssl-client-verify"),
@@ -2201,6 +2206,11 @@ async fn refresh_grant_rejects_mtls_bound_tokens_without_matching_verified_certi
     mismatch_form.refresh_token = Some(mismatch_raw);
     let mismatch_req = actix_web::test::TestRequest::post()
         .uri("/oauth/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((
             header::HeaderName::from_static("x-ssl-client-verify"),

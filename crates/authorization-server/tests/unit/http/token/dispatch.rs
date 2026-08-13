@@ -9,7 +9,7 @@ use crate::domain::tenancy::DEFAULT_TENANT_ID;
 use crate::domain::CodePayload;
 use crate::test_support::TestInfrastructure;
 
-use crate::settings::Settings;
+use crate::settings::{Settings, TransportMode};
 
 use base64::Engine;
 
@@ -272,6 +272,7 @@ async fn live_token_state(profile: AuthorizationServerProfile) -> Option<Data<Te
     });
     let config = ConfigSource::from_pairs_for_test([
         ("ISSUER", "https://issuer.example"),
+        ("TRANSPORT_MODE", "direct-tls"),
         (
             "CLIENT_SECRET_PEPPER",
             "client-secret-pepper-for-tests-000000000001",
@@ -311,6 +312,7 @@ async fn live_valkey_invalid_db_token_state(
     let valkey_url = std::env::var("VALKEY_URL").ok()?;
     let config = ConfigSource::from_pairs_for_test([
         ("ISSUER", "https://issuer.example"),
+        ("TRANSPORT_MODE", "direct-tls"),
         (
             "CLIENT_SECRET_PEPPER",
             "client-secret-pepper-for-tests-000000000001",
@@ -354,6 +356,9 @@ async fn live_trusted_proxy_invalid_db_token_state(
 ) -> Option<Data<TestInfrastructure>> {
     let state = live_valkey_invalid_db_token_state(profile).await?;
     let mut updated = (*state.settings).clone();
+    updated.endpoint.transport_mode = TransportMode::TrustedProxy;
+    updated.endpoint.mtls_certificate_source =
+        crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders;
     updated.endpoint.trusted_proxy_cidrs =
         vec![IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse")];
     Some(Data::new(TestInfrastructure {
@@ -369,6 +374,9 @@ async fn live_trusted_proxy_token_state(
 ) -> Option<Data<TestInfrastructure>> {
     let state = live_token_state(profile).await?;
     let mut updated = (*state.settings).clone();
+    updated.endpoint.transport_mode = TransportMode::TrustedProxy;
+    updated.endpoint.mtls_certificate_source =
+        crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders;
     updated.endpoint.trusted_proxy_cidrs =
         vec![IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse")];
     Some(Data::new(TestInfrastructure {
@@ -1172,6 +1180,9 @@ async fn token_endpoint_rejects_mtls_client_with_mismatched_verified_certificate
     set_client_mtls_thumbprint(&state, "mtls-token-client-mismatch", &registered_thumbprint).await;
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
+            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
         .insert_header((
@@ -1429,6 +1440,9 @@ async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without
 
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
+            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
         .insert_header((
@@ -1465,6 +1479,9 @@ async fn mtls_client_credentials_without_client_id_returns_none_when_client_not_
     let presented_thumbprint = fixture_mtls_thumbprint("unknown-client");
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
+            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
         .insert_header((
@@ -1737,6 +1754,9 @@ async fn token_endpoint_fails_closed_when_certificate_only_mtls_client_lookup_er
     let presented_thumbprint = fixture_mtls_thumbprint("lookup-error");
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
+            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
         .insert_header((
