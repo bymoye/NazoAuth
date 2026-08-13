@@ -68,8 +68,14 @@ export OIDF_SUITE_TOKEN_METADATA_FILE=/opt/nazo-oauth/conformance/secrets/api-to
 export OIDF_OPERATOR_ISSUER=https://auth.nazo.run
 export OIDF_TARGET_HOSTNAME=auth.nazo.run
 export OIDF_CONTAINER_RUNTIME=podman
+# 可选；仅当默认回环端口 18443 已被占用时设置。
+export OIDF_SUITE_BOOTSTRAP_BIND_PORT=18445
 sh /opt/nazoauth/source/deploy/oidf-suite/bootstrap-api-token.sh
 ```
+
+`OIDF_SUITE_BOOTSTRAP_BIND_PORT` 只控制一次性 Token 进程的
+`127.0.0.1` 绑定，必须是 `1..65535`。它不改变正式 Suite、公开 TLS 入口、issuer
+或任何测试计划 URL；未设置时仍使用 `18443`。
 
 脚本的成功条件是公网 `/api/server` 未认证返回 `401`，使用新 Token 返回 `200`。
 官方套件在非开发模式启动时必须解析其操作员登录 OIDC issuer；
