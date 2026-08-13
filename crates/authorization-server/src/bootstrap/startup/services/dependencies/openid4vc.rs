@@ -155,10 +155,7 @@ pub(super) async fn build(
                             .into_bytes(),
                     )
                     .with_client_certificate_extractor(move |request| {
-                        crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy(
-                            request,
-                            &trusted_proxy_cidrs,
-                        )
+                        crate::http::mtls::request_mtls_thumbprint(request, &trusted_proxy_cidrs)
                     }),
                 )),
                 Some(web::Data::new(CredentialDatasetAdminService::new(

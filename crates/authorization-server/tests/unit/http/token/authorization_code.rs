@@ -280,15 +280,13 @@ impl LiveAuthorizationCodeFixture {
             ),
             ("MTLS_ENDPOINT_BASE_URL", "https://issuer.example"),
             ("FRONTEND_BASE_URL", "https://app.example"),
+            ("TRANSPORT_MODE", "trusted-proxy"),
+            ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+            ("MTLS_CERTIFICATE_SOURCE", "legacy-verified-headers"),
             ("COOKIE_SECURE", "true"),
             ("TOKEN_RATE_LIMIT_MAX_REQUESTS", "100000"),
         ]);
-        let mut settings = Settings::from_config(&config).expect("test settings should load");
-        settings.endpoint.trusted_proxy_cidrs = vec![
-            nazo_http_actix::IpCidr::parse("127.0.0.1/32")
-                .expect("trusted proxy CIDR should parse"),
-        ];
-        settings
+        Settings::from_config(&config).expect("test settings should load")
     }
 
     async fn new_with_settings_and_keyset(

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::adapters::security::ClientCredentials;
 use crate::http::client_attestation::client_attestation_headers;
 use crate::http::dpop::dpop_proof_present;
-use crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy;
+use crate::http::mtls::request_mtls_client_certificate;
 use actix_web::http::StatusCode;
 #[cfg(test)]
 use actix_web::http::header;
@@ -188,11 +188,8 @@ pub(crate) async fn token_with_service(
     };
     let has_client_attestation_material = req.headers().contains_key("OAuth-Client-Attestation")
         || req.headers().contains_key("OAuth-Client-Attestation-PoP");
-    let has_mtls_material = request_mtls_client_certificate_from_trusted_proxy(
-        &req,
-        issuance_config.trusted_proxy_cidrs(),
-    )
-    .is_some();
+    let has_mtls_material =
+        request_mtls_client_certificate(&req, issuance_config.trusted_proxy_cidrs()).is_some();
 
     if form.grant_type == nazo_openid4vci::PRE_AUTHORIZED_CODE_GRANT {
         let preauth_has_authenticated_client_material = client_auth_context
@@ -296,11 +293,8 @@ pub(crate) async fn token_with_service(
             form.client_id
                 .as_ref()
                 .filter(|_| {
-                    request_mtls_client_certificate_from_trusted_proxy(
-                        &req,
-                        issuance_config.trusted_proxy_cidrs(),
-                    )
-                    .is_some()
+                    request_mtls_client_certificate(&req, issuance_config.trusted_proxy_cidrs())
+                        .is_some()
                 })
                 .cloned()
         } else {

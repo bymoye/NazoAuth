@@ -2281,6 +2281,11 @@ async fn refresh_grant_accepts_existing_mtls_bound_token_with_matching_certifica
     form.refresh_token = Some(raw_refresh_token);
     let req = actix_web::test::TestRequest::post()
         .uri("/oauth/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((
             header::HeaderName::from_static("x-ssl-client-verify"),
@@ -2344,6 +2349,11 @@ async fn refresh_grant_binds_access_tokens_to_verified_mtls_certificate_when_req
     form.refresh_token = Some(raw_refresh_token);
     let req = actix_web::test::TestRequest::post()
         .uri("/oauth/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((
             header::HeaderName::from_static("x-ssl-client-verify"),
@@ -2358,7 +2368,7 @@ async fn refresh_grant_binds_access_tokens_to_verified_mtls_certificate_when_req
             "CN=refresh-actual",
         ))
         .to_http_request();
-    let request_thumbprint = crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy(
+    let request_thumbprint = crate::http::mtls::request_mtls_thumbprint(
         &req,
         &state.settings.endpoint.trusted_proxy_cidrs,
     )
