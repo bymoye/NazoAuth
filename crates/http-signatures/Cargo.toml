@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
-httpsig = "0.0.24"
+httpsig = "0.0.26"
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 serde_json.workspace = true
 sfv = "0.15.0"
