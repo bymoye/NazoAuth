@@ -25,6 +25,9 @@ Compose 将初始化脚本和安全默认配置随构建上下文放入镜像，
 NAZOAUTH_PORT=443 \
 NAZOAUTH_BIND_ADDRESS=0.0.0.0 \
 NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
+NAZOAUTH_TRANSPORT_MODE=trusted-proxy \
+NAZOAUTH_TRUSTED_PROXY_CIDRS=<NazoAuth实际看到的入口代理CIDR> \
+NAZOAUTH_MTLS_CERTIFICATE_SOURCE=disabled \
 NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
 NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
 docker compose up -d --build
@@ -35,6 +38,9 @@ docker compose up -d --build
 当容器化 WebIDE 或平台端口映射通过非 loopback 接口访问宿主机发布端口时，必须设置
 `NAZOAUTH_BIND_ADDRESS=0.0.0.0`。如果由同一宿主机上的反向代理终止 TLS，则保留默认的
 `127.0.0.1`。只有平台或防火墙能够限制明文端口的直接访问时，才能绑定所有接口。
+
+必须把 `<NazoAuth实际看到的入口代理CIDR>` 替换为 TLS 终止入口的精确地址。Compose
+路径属于 trusted-proxy 部署，不会挂载 Direct TLS 所需的服务端证书和客户端 CA 文件。
 
 Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务，并用
 短生命周期的开发 operator identity 通过同一个签名 `nazoauth operator-task` 入口执行

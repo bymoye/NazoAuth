@@ -15,7 +15,7 @@ use crate::domain::client_jwe::{JwePayloadKind, client_jwe_key, encrypt_compact_
 use crate::domain::client_policy::parse_scope;
 use crate::domain::oidc_claims::oidc_user_claims;
 use crate::http::dpop::{DpopError, validate_dpop_proof_with_store};
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
+use crate::http::mtls::request_mtls_thumbprint;
 use crate::settings::{DpopNoncePolicy, Settings};
 use nazo_http_actix::IpCidr;
 
@@ -354,7 +354,7 @@ impl UserinfoHandles {
     }
 
     pub(crate) fn request_mtls_thumbprint(&self, req: &HttpRequest) -> Option<String> {
-        request_mtls_thumbprint_from_trusted_proxy(req, &self.config.trusted_proxy_cidrs)
+        request_mtls_thumbprint(req, &self.config.trusted_proxy_cidrs)
     }
 
     pub(crate) async fn sign_response_jwt(

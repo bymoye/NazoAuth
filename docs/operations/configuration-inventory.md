@@ -21,7 +21,7 @@ Legend:
 |---|---|
 | `BIND`, `PUBLIC_BASE_URL`, `DATA_DIR`, `RUST_LOG` | **保留**。The process listener, public contract, durable state root, and diagnostics have no redundant owner. |
 | `ISSUER`, `FRONTEND_BASE_URL`, `MTLS_ENDPOINT_BASE_URL`, `CORS_ALLOWED_ORIGINS`, `COOKIE_SECURE`, `SESSION_COOKIE_NAME`, `CSRF_COOKIE_NAME` | **保留（默认/派生）**。All default from the public issuer; explicit values remain for split-origin or reverse-proxy deployments. |
-| `CLIENT_IP_HEADER_MODE`, `TRUSTED_PROXY_CIDRS`, `MTLS_CERTIFICATE_SOURCE` | **保留（外部）**。These describe a real proxy trust boundary and must not be guessed. |
+| `TRANSPORT_MODE`, `CLIENT_IP_HEADER_MODE`, `TRUSTED_PROXY_CIDRS`, `MTLS_CERTIFICATE_SOURCE` | **保留（外部）**。These describe the direct-TLS or proxy trust boundary and must not be guessed. |
 | `TLS_BIND`, `TLS_CERTIFICATE_FILE`, `TLS_PRIVATE_KEY_FILE`, `TLS_CLIENT_CA_FILE` | **保留（外部）**。Certificate lifecycle belongs to the TLS owner; silently creating a production certificate would be unsafe. |
 | `UI_CACHE_DIR`, `UI_STATIC_DIR`, `AVATAR_STORAGE_DIR`, `AVATAR_MAX_BYTES` | **保留（默认/派生）**。Paths and the upload bound are operational policy; storage paths default below `DATA_DIR`. |
 | `DATABASE_URL`, `DATABASE_URL_FILE`, `DATABASE_MAX_CONNECTIONS`, `VALKEY_URL`, `VALKEY_URL_FILE`, `VALKEY_COMMAND_TIMEOUT_MS` | **保留（外部/默认）**。CTL generates local managed dependency URLs; an independent server cannot create a reachable external database or Valkey service. File aliases are transport forms, not second sources of truth. |

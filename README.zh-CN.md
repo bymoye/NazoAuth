@@ -106,11 +106,18 @@ nazoauth server
 ```yaml
 BIND: "0.0.0.0:8000"
 PUBLIC_BASE_URL: "https://auth.example.com"
+TRANSPORT_MODE: "trusted-proxy"
+TRUSTED_PROXY_CIDRS: "127.0.0.1/32"
+MTLS_CERTIFICATE_SOURCE: "disabled"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 RUST_LOG: "info"
 ```
+
+不使用反向代理时，设置 `TRANSPORT_MODE: "direct-tls"`，并按
+[`docs/operations/configuration.md`](docs/operations/configuration.md) 配置服务端证书、
+私钥、mTLS 客户端 CA 和独立 mTLS 监听地址。
 
 新部署使用可组合的服务端能力与显式的按客户端策略。
 `AUTHORIZATION_SERVER_PROFILE` 只作为未持久化客户端策略的旧客户端兼容预设。

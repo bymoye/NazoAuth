@@ -559,6 +559,9 @@ fn par_form_request() -> HttpRequest {
 fn par_form_request_from_trusted_proxy() -> HttpRequest {
     TestRequest::post()
         .uri("/oauth/par")
+        .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
+            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("127.0.0.1:443".parse().expect("peer address should parse"))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
         .insert_header(("x-ssl-client-verify", "SUCCESS"))

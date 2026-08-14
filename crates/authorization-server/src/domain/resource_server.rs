@@ -50,8 +50,8 @@ mod production {
     use nazo_runtime_modules::ModuleId;
 
     use crate::{
-        http::mtls::request_mtls_thumbprint_from_trusted_proxy,
-        runtime_modules::ServerRuntimeModuleRegistry, settings::DpopNoncePolicy,
+        http::mtls::request_mtls_thumbprint, runtime_modules::ServerRuntimeModuleRegistry,
+        settings::DpopNoncePolicy,
     };
 
     use super::ResourceServerConfig;
@@ -196,7 +196,7 @@ mod production {
 
     impl FapiMtlsThumbprintResolver for ServerFapiMtlsResolver {
         fn resolve(&self, request: &HttpRequest) -> Option<String> {
-            request_mtls_thumbprint_from_trusted_proxy(request, &self.trusted_proxy_cidrs)
+            request_mtls_thumbprint(request, &self.trusted_proxy_cidrs)
         }
     }
 

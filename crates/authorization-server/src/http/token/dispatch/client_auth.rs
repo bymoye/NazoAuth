@@ -2,9 +2,7 @@ use super::super::{ServerTokenService, TokenForm};
 use crate::adapters::security::{ClientCredentials, blake3_hex};
 use crate::domain::{AuthorizationCodeState, ClientRow};
 use crate::http::authorization::ServerAuthorizationService;
-use crate::http::mtls::{
-    client_mtls_certificate_matches, request_mtls_client_certificate_from_trusted_proxy,
-};
+use crate::http::mtls::{client_mtls_certificate_matches, request_mtls_client_certificate};
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
 use nazo_auth::{
@@ -29,9 +27,7 @@ pub(super) async fn mtls_client_credentials_without_client_id(
     trusted_proxy_cidrs: &[nazo_http_actix::IpCidr],
     req: &HttpRequest,
 ) -> Result<Option<ClientCredentials>, HttpResponse> {
-    let Some(certificate) =
-        request_mtls_client_certificate_from_trusted_proxy(req, trusted_proxy_cidrs)
-    else {
+    let Some(certificate) = request_mtls_client_certificate(req, trusted_proxy_cidrs) else {
         return Ok(None);
     };
     match service.active_mtls_candidates(1000).await {

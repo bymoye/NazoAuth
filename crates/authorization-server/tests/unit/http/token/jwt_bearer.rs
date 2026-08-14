@@ -178,6 +178,7 @@ fn jwt_bearer_settings() -> Settings {
             "client-secret-pepper-for-tests-000000000001",
         ),
         ("PUBLIC_BASE_URL", "https://issuer.example"),
+        ("TRANSPORT_MODE", "direct-tls"),
         ("FRONTEND_BASE_URL", "https://app.example"),
         ("COOKIE_SECURE", "true"),
     ]))
