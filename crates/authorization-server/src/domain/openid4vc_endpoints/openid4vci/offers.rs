@@ -177,6 +177,25 @@ impl ServerCredentialIssuerOperations {
                         "Pre-authorized code or transaction code is invalid.",
                     )
                 })?;
+            if self
+                .token_service
+                .active_subject_claims(authorization.tenant_id, authorization.subject_id)
+                .await
+                .map_err(|_| {
+                    vci_error(
+                        503,
+                        "server_error",
+                        "Credential subject state is unavailable.",
+                    )
+                })?
+                .is_none()
+            {
+                return Err(vci_error(
+                    400,
+                    "invalid_grant",
+                    "Credential subject is inactive.",
+                ));
+            }
             let authorization_details = authorization
                 .configuration_ids
                 .iter()

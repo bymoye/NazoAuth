@@ -624,7 +624,15 @@ pub fn validate_tenant_resource_task(task: &TenantResourceTask) -> Result<(), Pr
     }
     validate_file_identifier(&task.change_set_id)?;
     validate_lower_hex(&task.change_set_sha256, 64)?;
+    validate_lower_hex(&task.baseline_manifest_sha256, 64)?;
     validate_lower_hex(&task.resource_manifest_sha256, 64)?;
+    if matches!(task.operation, TenantResourceOperation::Enumerate)
+        && task.resource_manifest_sha256 != task.baseline_manifest_sha256
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource enumerate manifest must equal baseline",
+        ));
+    }
     validate_tenant_resource_task_payload(&task.operation, &task.payload)?;
     Ok(())
 }
@@ -770,14 +778,22 @@ pub fn validate_tenant_resource_receipt(
     validate_lower_hex(&receipt.request_sha256, 64)?;
     validate_file_identifier(&receipt.change_set_id)?;
     validate_lower_hex(&receipt.change_set_sha256, 64)?;
+    validate_lower_hex(&receipt.baseline_manifest_sha256, 64)?;
     validate_lower_hex(&receipt.resource_manifest_sha256, 64)?;
+    if matches!(receipt.operation, TenantResourceOperation::Enumerate)
+        && receipt.resource_manifest_sha256 != receipt.baseline_manifest_sha256
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource enumerate receipt manifest must equal baseline",
+        ));
+    }
     validate_tenant_resource_identities(&receipt.resources, false)?;
     if receipt.started_at <= 0
         || receipt.completed_at < receipt.started_at
         || receipt.exp < receipt.completed_at
         || receipt
             .exp
-            .checked_sub(receipt.started_at)
+            .checked_sub(receipt.completed_at)
             .is_none_or(|lifetime| lifetime > MAX_TASK_LIFETIME_SECONDS)
         || receipt.audit_sequence == 0
     {
@@ -793,11 +809,24 @@ pub fn validate_tenant_resource_receipt(
                 "failed tenant resource receipt claims a resource change",
             ));
         }
+    } else {
+        let revision_matches = match receipt.operation {
+            TenantResourceOperation::Enumerate => receipt.revision == receipt.expected_revision,
+            TenantResourceOperation::Apply | TenantResourceOperation::Revoke => receipt
+                .expected_revision
+                .checked_add(1)
+                .is_some_and(|next| receipt.revision == next),
+        };
+        if !revision_matches {
+            return Err(ProtocolError::Policy(
+                "successful tenant resource receipt revision is invalid",
+            ));
+        }
     }
     Ok(())
 }
 
-fn validate_tenant_resource_identities(
+pub(crate) fn validate_tenant_resource_identities(
     resources: &[TenantResourceIdentity],
     require_nonempty: bool,
 ) -> Result<(), ProtocolError> {
@@ -810,7 +839,7 @@ fn validate_tenant_resource_identities(
     }
     let mut identities = std::collections::BTreeSet::new();
     for resource in resources {
-        validate_identifier(&resource.resource_id)?;
+        validate_file_identifier(&resource.resource_id)?;
         validate_lower_hex(&resource.digest, 64)?;
         if !identities.insert(resource.resource_id.as_str()) {
             return Err(ProtocolError::Policy(
@@ -831,7 +860,7 @@ fn validate_tenant_resource_selectors(
     }
     let mut identities = std::collections::BTreeSet::new();
     for selector in selectors {
-        validate_identifier(&selector.resource_id)?;
+        validate_file_identifier(&selector.resource_id)?;
         if !identities.insert((selector.kind, selector.resource_id.as_str())) {
             return Err(ProtocolError::Policy(
                 "tenant resource selectors must be unique",
@@ -863,12 +892,10 @@ pub fn validate_tenant_resource_task_deployment_binding(
 
 /// Bind a task to a freshly discovered capability.
 ///
-/// The task's expected revision must equal the capability's current revision.
-/// For read/revoke operations the task manifest is a baseline commitment and
-/// must equal the capability manifest.  Apply carries a desired external
-/// manifest, so its digest may intentionally differ while its resource kinds
-/// must all be advertised by the capability.  No manifest bytes are inferred
-/// from the task payload.
+/// The task's expected revision and baseline manifest must equal the
+/// capability's current values.  Apply and Revoke carry a desired external
+/// manifest that may intentionally differ; Enumerate must retain the baseline.
+/// No manifest bytes are inferred from the task payload.
 pub fn validate_tenant_resource_task_capability_binding(
     task: &TenantResourceTask,
     capability: &TenantResourceCapability,
@@ -885,13 +912,16 @@ pub fn validate_tenant_resource_task_capability_binding(
             "tenant resource task capability binding mismatch",
         ));
     }
-    if matches!(
-        task.operation,
-        TenantResourceOperation::Enumerate | TenantResourceOperation::Revoke
-    ) && task.resource_manifest_sha256 != capability.resource_manifest_sha256
+    if task.baseline_manifest_sha256 != capability.resource_manifest_sha256 {
+        return Err(ProtocolError::Policy(
+            "tenant resource task capability baseline manifest mismatch",
+        ));
+    }
+    if matches!(task.operation, TenantResourceOperation::Enumerate)
+        && task.resource_manifest_sha256 != task.baseline_manifest_sha256
     {
         return Err(ProtocolError::Policy(
-            "tenant resource task baseline manifest does not match capability",
+            "tenant resource enumerate manifest must equal baseline",
         ));
     }
     match &task.payload {
@@ -953,9 +983,9 @@ pub fn validate_tenant_resource_task_capability_binding_at(
 }
 
 /// Bind receipt evidence to the capability that authorized the operation.
-/// Apply may report a new desired manifest/revision; enumerate and revoke
-/// retain the capability's baseline manifest.  Every returned resource kind
-/// must be advertised by the capability.
+/// Apply and Revoke may report a new desired/result manifest and revision;
+/// Enumerate retains the capability's baseline manifest.  Every returned
+/// resource kind must be advertised by the capability.
 pub fn validate_tenant_resource_receipt_capability_binding(
     receipt: &TenantResourceReceipt,
     capability: &TenantResourceCapability,
@@ -972,13 +1002,16 @@ pub fn validate_tenant_resource_receipt_capability_binding(
             "tenant resource receipt capability binding mismatch",
         ));
     }
-    if matches!(
-        receipt.operation,
-        TenantResourceOperation::Enumerate | TenantResourceOperation::Revoke
-    ) && receipt.resource_manifest_sha256 != capability.resource_manifest_sha256
+    if receipt.baseline_manifest_sha256 != capability.resource_manifest_sha256 {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt capability baseline manifest mismatch",
+        ));
+    }
+    if matches!(receipt.operation, TenantResourceOperation::Enumerate)
+        && receipt.resource_manifest_sha256 != receipt.baseline_manifest_sha256
     {
         return Err(ProtocolError::Policy(
-            "tenant resource receipt baseline manifest does not match capability",
+            "tenant resource enumerate receipt manifest must equal baseline",
         ));
     }
     if receipt
@@ -1044,6 +1077,7 @@ pub fn validate_tenant_resource_receipt_binding(
         || receipt.change_set_id != task.change_set_id
         || receipt.change_set_sha256 != task.change_set_sha256
         || receipt.operation != task.operation
+        || receipt.baseline_manifest_sha256 != task.baseline_manifest_sha256
         || receipt.resource_manifest_sha256 != task.resource_manifest_sha256
         || receipt.iss != format!("runtime:{}", task.deployment_id)
         || receipt.aud != format!("controller:{}", task.deployment_id)
@@ -1058,7 +1092,7 @@ pub fn validate_tenant_resource_receipt_binding(
         match (&task.operation, &task.payload) {
             (TenantResourceOperation::Apply, TenantResourceTaskPayload::Apply { resources })
             | (TenantResourceOperation::Revoke, TenantResourceTaskPayload::Revoke { resources })
-                if receipt.resources.as_slice() != resources.as_slice() =>
+                if !tenant_resource_identity_sets_equal(&receipt.resources, resources) =>
             {
                 return Err(ProtocolError::Policy(
                     "tenant resource receipt resources do not match request",
@@ -1083,6 +1117,38 @@ pub fn validate_tenant_resource_receipt_binding(
         }
     }
     Ok(())
+}
+
+fn tenant_resource_identity_sets_equal(
+    left: &[TenantResourceIdentity],
+    right: &[TenantResourceIdentity],
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left = left
+        .iter()
+        .map(|identity| {
+            (
+                identity.kind,
+                identity.resource_id.as_str(),
+                identity.digest.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut right = right
+        .iter()
+        .map(|identity| {
+            (
+                identity.kind,
+                identity.resource_id.as_str(),
+                identity.digest.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 pub fn validate_tenant_resource_receipt_request_binding(

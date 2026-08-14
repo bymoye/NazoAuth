@@ -3,10 +3,11 @@ use crate::{
     convert::identity,
     repositories::audit::insert_identity_security_event,
     rows::identity::{AuthenticationIdentityRow, PrincipalRow, PublicAccountRow, SubjectClaimsRow},
-    schema::users,
+    schema::{oauth_tokens, user_client_grants, users},
 };
 use diesel::{
     ExpressionMethods, OptionalExtension, PgExpressionMethods, QueryDsl, SelectableHelper,
+    sql_query, sql_types,
 };
 use diesel_async::AsyncPgConnection;
 use diesel_async::RunQueryDsl;
@@ -489,53 +490,183 @@ impl UserRepository {
     }
 }
 
-/// Inserts the ordinary applicant used by an atomic conformance onboarding
-/// transaction without acquiring another database connection.  This helper
-/// deliberately writes the role boundary explicitly instead of relying on
-/// database defaults: a conformance applicant can never become an admin as a
-/// side effect of a malformed or replayed bundle.
-pub(crate) async fn insert_conformance_applicant_on_connection(
+/// Caller-owned user creation input shared by ordinary operator management and
+/// the legacy conformance onboarding transaction.  The persistence boundary
+/// owns the role invariant (`user`, level `0`); callers cannot provision an
+/// administrator through this path.
+pub struct UserInsert<'a> {
+    pub tenant: TenantContext,
+    pub username: &'a str,
+    pub email: &'a str,
+    pub password_hash: &'a str,
+    pub email_verified: bool,
+    pub display_name: Option<&'a str>,
+    pub given_name: Option<&'a str>,
+    pub family_name: Option<&'a str>,
+    pub middle_name: Option<&'a str>,
+    pub nickname: Option<&'a str>,
+    pub profile_url: Option<&'a str>,
+    pub avatar_url: Option<&'a str>,
+    pub website_url: Option<&'a str>,
+    pub gender: Option<&'a str>,
+    pub birthdate: Option<&'a str>,
+    pub zoneinfo: Option<&'a str>,
+    pub locale: Option<&'a str>,
+    pub address_formatted: Option<&'a str>,
+    pub address_street_address: Option<&'a str>,
+    pub address_locality: Option<&'a str>,
+    pub address_region: Option<&'a str>,
+    pub address_postal_code: Option<&'a str>,
+    pub address_country: Option<&'a str>,
+    pub phone_number: Option<&'a str>,
+    pub phone_number_verified: bool,
+}
+
+/// Inserts a user on a caller-owned transaction connection.  This is
+/// ownership-neutral: no conformance lease or suite metadata is consulted.
+/// The explicit role columns preserve the tenant's ordinary-user boundary.
+pub async fn insert_user_on_connection(
     connection: &mut AsyncPgConnection,
-    tenant: nazo_identity::TenantContext,
-    applicant: &crate::repositories::conformance_leases::ConformanceApplicant,
+    user: UserInsert<'_>,
 ) -> Result<Uuid, diesel::result::Error> {
     diesel::insert_into(users::table)
         .values((
-            users::tenant_id.eq(tenant.tenant_id.as_uuid()),
-            users::realm_id.eq(tenant.realm_id.as_uuid()),
-            users::organization_id.eq(tenant.organization_id.as_uuid()),
-            users::username.eq(&applicant.username),
-            users::email.eq(&applicant.email),
-            users::password_hash.eq(applicant.password_hash.clone().into_persistence_value()),
+            users::tenant_id.eq(user.tenant.tenant_id.as_uuid()),
+            users::realm_id.eq(user.tenant.realm_id.as_uuid()),
+            users::organization_id.eq(user.tenant.organization_id.as_uuid()),
+            users::username.eq(user.username),
+            users::email.eq(user.email),
+            users::password_hash.eq(user.password_hash),
             users::is_active.eq(true),
             users::mfa_enabled.eq(false),
-            users::email_verified.eq(applicant.email_verified),
-            users::display_name.eq(Some(applicant.display_name.as_str())),
-            users::given_name.eq(Some(applicant.given_name.as_str())),
-            users::family_name.eq(Some(applicant.family_name.as_str())),
-            users::middle_name.eq(Some(applicant.middle_name.as_str())),
-            users::nickname.eq(Some(applicant.nickname.as_str())),
-            users::profile_url.eq(Some(applicant.profile_url.as_str())),
-            users::avatar_url.eq(Some(applicant.avatar_url.as_str())),
-            users::website_url.eq(Some(applicant.website_url.as_str())),
-            users::gender.eq(Some(applicant.gender.as_str())),
-            users::birthdate.eq(Some(applicant.birthdate.as_str())),
-            users::zoneinfo.eq(Some(applicant.zoneinfo.as_str())),
-            users::locale.eq(Some(applicant.locale.as_str())),
-            users::address_formatted.eq(applicant.address.formatted.as_deref()),
-            users::address_street_address.eq(applicant.address.street_address.as_deref()),
-            users::address_locality.eq(applicant.address.locality.as_deref()),
-            users::address_region.eq(applicant.address.region.as_deref()),
-            users::address_postal_code.eq(applicant.address.postal_code.as_deref()),
-            users::address_country.eq(applicant.address.country.as_deref()),
-            users::phone_number.eq(Some(applicant.phone_number.as_str())),
-            users::phone_number_verified.eq(applicant.phone_number_verified),
+            users::email_verified.eq(user.email_verified),
+            users::display_name.eq(user.display_name),
+            users::given_name.eq(user.given_name),
+            users::family_name.eq(user.family_name),
+            users::middle_name.eq(user.middle_name),
+            users::nickname.eq(user.nickname),
+            users::profile_url.eq(user.profile_url),
+            users::avatar_url.eq(user.avatar_url),
+            users::website_url.eq(user.website_url),
+            users::gender.eq(user.gender),
+            users::birthdate.eq(user.birthdate),
+            users::zoneinfo.eq(user.zoneinfo),
+            users::locale.eq(user.locale),
+            users::address_formatted.eq(user.address_formatted),
+            users::address_street_address.eq(user.address_street_address),
+            users::address_locality.eq(user.address_locality),
+            users::address_region.eq(user.address_region),
+            users::address_postal_code.eq(user.address_postal_code),
+            users::address_country.eq(user.address_country),
+            users::phone_number.eq(user.phone_number),
+            users::phone_number_verified.eq(user.phone_number_verified),
             users::role.eq("user"),
             users::admin_level.eq(0),
         ))
         .returning(users::id)
         .get_result(connection)
         .await
+}
+
+/// Disables a user on a caller-owned transaction connection.  The operation
+/// is tenant-bound and idempotent: `false` means the target was already
+/// disabled or did not belong to the tenant, and no other state is changed.
+pub async fn disable_user_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: TenantId,
+    user_id: UserId,
+) -> Result<bool, diesel::result::Error> {
+    sql_query(
+        "UPDATE openid4vci_offers
+         SET consumed_at = GREATEST(CURRENT_TIMESTAMP, created_at)
+         WHERE tenant_id = $1 AND subject_id = $2 AND consumed_at IS NULL",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(user_id.as_uuid())
+    .execute(connection)
+    .await?;
+    let changed = diesel::update(
+        users::table
+            .filter(users::tenant_id.eq(tenant_id.as_uuid()))
+            .filter(users::id.eq(user_id.as_uuid()))
+            .filter(users::is_active.eq(true)),
+    )
+    .set((
+        users::is_active.eq(false),
+        users::updated_at.eq(diesel::dsl::now),
+    ))
+    .execute(connection)
+    .await?;
+    if changed != 1 {
+        return Ok(false);
+    }
+    super::token_issuance::revoke_access_tokens_for_owner_on_connection(
+        connection,
+        tenant_id.as_uuid(),
+        None,
+        Some(user_id.as_uuid()),
+    )
+    .await?;
+    diesel::update(
+        oauth_tokens::table
+            .filter(oauth_tokens::tenant_id.eq(tenant_id.as_uuid()))
+            .filter(oauth_tokens::user_id.eq(user_id.as_uuid()))
+            .filter(oauth_tokens::revoked_at.is_null()),
+    )
+    .set(oauth_tokens::revoked_at.eq(diesel::dsl::now))
+    .execute(connection)
+    .await?;
+    diesel::delete(
+        user_client_grants::table
+            .filter(user_client_grants::tenant_id.eq(tenant_id.as_uuid()))
+            .filter(user_client_grants::user_id.eq(user_id.as_uuid())),
+    )
+    .execute(connection)
+    .await?;
+    Ok(true)
+}
+
+/// Inserts the ordinary applicant used by an atomic conformance onboarding
+/// transaction without acquiring another database connection.  This helper
+/// delegates to the ownership-neutral primitive while preserving every
+/// existing profile fixture and role invariant.
+pub(crate) async fn insert_conformance_applicant_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant: nazo_identity::TenantContext,
+    applicant: &crate::repositories::conformance_leases::ConformanceApplicant,
+) -> Result<Uuid, diesel::result::Error> {
+    let password_hash = applicant.password_hash.clone().into_persistence_value();
+    insert_user_on_connection(
+        connection,
+        UserInsert {
+            tenant,
+            username: &applicant.username,
+            email: &applicant.email,
+            password_hash: &password_hash,
+            email_verified: applicant.email_verified,
+            display_name: Some(&applicant.display_name),
+            given_name: Some(&applicant.given_name),
+            family_name: Some(&applicant.family_name),
+            middle_name: Some(&applicant.middle_name),
+            nickname: Some(&applicant.nickname),
+            profile_url: Some(&applicant.profile_url),
+            avatar_url: Some(&applicant.avatar_url),
+            website_url: Some(&applicant.website_url),
+            gender: Some(&applicant.gender),
+            birthdate: Some(&applicant.birthdate),
+            zoneinfo: Some(&applicant.zoneinfo),
+            locale: Some(&applicant.locale),
+            address_formatted: applicant.address.formatted.as_deref(),
+            address_street_address: applicant.address.street_address.as_deref(),
+            address_locality: applicant.address.locality.as_deref(),
+            address_region: applicant.address.region.as_deref(),
+            address_postal_code: applicant.address.postal_code.as_deref(),
+            address_country: applicant.address.country.as_deref(),
+            phone_number: Some(&applicant.phone_number),
+            phone_number_verified: applicant.phone_number_verified,
+        },
+    )
+    .await
 }
 
 fn admin_event(

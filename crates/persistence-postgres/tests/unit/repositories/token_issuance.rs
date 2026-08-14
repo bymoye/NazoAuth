@@ -25,6 +25,7 @@ fn row(phase: &str) -> TokenIssuanceRow {
         issuance_id: Uuid::now_v7(),
         tenant_id: Uuid::now_v7(),
         client_id: Uuid::now_v7(),
+        user_id: None,
         grant_key_blake3: "grant-hash".to_owned(),
         request_digest: "request-digest".to_owned(),
         phase: phase.to_owned(),

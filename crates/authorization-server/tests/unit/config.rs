@@ -966,6 +966,8 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TLS_CERTIFICATE_FILE",
             "TLS_CLIENT_CA_FILE",
             "TLS_PRIVATE_KEY_FILE",
+            "TLS_RELOAD_INTERVAL_SECONDS",
+            "TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE",
             "TRANSPORT_MODE",
             "TRUSTED_PROXY_CIDRS",
             "UI_CACHE_DIR",

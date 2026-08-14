@@ -4,6 +4,7 @@ use super::*;
 mod dependencies;
 mod factory;
 mod identity;
+mod tenant_resource;
 
 /// The service phase is deliberately a small composition facade.  Process-wide
 /// resources are initialized by [`super::configuration`]; this phase wires

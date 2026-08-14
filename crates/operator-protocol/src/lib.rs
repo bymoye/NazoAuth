@@ -62,11 +62,11 @@ mod wire;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub use signing::{
-    canonical_config_sha256, compact_sha256, decode_instance_public_key,
-    encode_instance_public_key, instance_key_id, protected_header, sign_adoption_receipt,
-    sign_deployment_statement, sign_discovery_statement, sign_final_receipt, sign_management_event,
-    sign_runtime_receipt, sign_task, sign_tenant_resource_capability, sign_tenant_resource_receipt,
-    sign_tenant_resource_task, sign_trust_transition,
+    canonical_config_sha256, canonical_tenant_resource_manifest_sha256, compact_sha256,
+    decode_instance_public_key, encode_instance_public_key, instance_key_id, protected_header,
+    sign_adoption_receipt, sign_deployment_statement, sign_discovery_statement, sign_final_receipt,
+    sign_management_event, sign_runtime_receipt, sign_task, sign_tenant_resource_capability,
+    sign_tenant_resource_receipt, sign_tenant_resource_task, sign_trust_transition,
 };
 pub use verification::{
     validate_conformance_matrix_descriptor, validate_discovery_request,

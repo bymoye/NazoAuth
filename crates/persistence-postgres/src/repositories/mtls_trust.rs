@@ -25,8 +25,8 @@ struct RequestRow {
     id: Uuid,
     #[diesel(sql_type = sql_types::Uuid)]
     tenant_id: Uuid,
-    #[diesel(sql_type = sql_types::Uuid)]
-    user_id: Uuid,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+    user_id: Option<Uuid>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     requester_email: Option<String>,
     #[diesel(sql_type = sql_types::Text)]
@@ -79,26 +79,32 @@ struct CreateOutcomeRow {
     eligible: bool,
 }
 
-impl From<RequestRow> for MtlsTrustAnchorRequest {
-    fn from(row: RequestRow) -> Self {
-        Self {
-            id: row.id,
-            tenant_id: row.tenant_id,
-            user_id: row.user_id,
-            requester_email: row.requester_email,
-            client_id: row.client_id,
-            certificate_pem: row.certificate_pem,
-            certificate_sha256: row.certificate_sha256,
-            subject_dn: row.subject_dn,
-            not_before: row.not_before,
-            not_after: row.not_after,
-            status: row.status,
-            admin_note: row.admin_note,
-            created_at: row.created_at,
-            resolved_at: row.resolved_at,
-            revoked_at: row.revoked_at,
-        }
-    }
+fn map_request_row(row: RequestRow) -> Result<MtlsTrustAnchorRequest, RepositoryError> {
+    let Some(user_id) = row.user_id else {
+        // Operator-managed anchors deliberately have no user actor.  The
+        // browser/admin projection cannot represent that state, so fail
+        // closed instead of inventing a requester identity.
+        return Err(RepositoryError::Consistency(
+            "operator-managed trust anchor is not an admin user request".to_owned(),
+        ));
+    };
+    Ok(MtlsTrustAnchorRequest {
+        id: row.id,
+        tenant_id: row.tenant_id,
+        user_id,
+        requester_email: row.requester_email,
+        client_id: row.client_id,
+        certificate_pem: row.certificate_pem,
+        certificate_sha256: row.certificate_sha256,
+        subject_dn: row.subject_dn,
+        not_before: row.not_before,
+        not_after: row.not_after,
+        status: row.status,
+        admin_note: row.admin_note,
+        created_at: row.created_at,
+        resolved_at: row.resolved_at,
+        revoked_at: row.revoked_at,
+    })
 }
 
 const REQUEST_PROJECTION: &str = "
@@ -224,8 +230,10 @@ impl MtlsTrustAnchorRepository {
         .bind::<sql_types::Uuid, _>(user_id.as_uuid())
         .load::<RequestRow>(&mut connection)
         .await
-        .map(|rows| rows.into_iter().map(Into::into).collect())
-        .map_err(map_error)
+        .map_err(map_error)?
+        .into_iter()
+        .map(map_request_row)
+        .collect()
     }
 
     pub async fn page(
@@ -240,7 +248,8 @@ impl MtlsTrustAnchorRepository {
         let count = sql_query(
             "SELECT COUNT(*)::bigint AS count
              FROM oauth_client_mtls_trust_anchor_requests
-             WHERE tenant_id = $1 AND ($2::smallint IS NULL OR status = $2)",
+             WHERE tenant_id = $1 AND user_id IS NOT NULL
+               AND ($2::smallint IS NULL OR status = $2)",
         )
         .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
         .bind::<sql_types::Nullable<sql_types::SmallInt>, _>(status)
@@ -264,8 +273,8 @@ impl MtlsTrustAnchorRepository {
         .await
         .map_err(map_error)?
         .into_iter()
-        .map(Into::into)
-        .collect();
+        .map(map_request_row)
+        .collect::<Result<Vec<_>, _>>()?;
         Ok(MtlsTrustAnchorRequestPage {
             total: count,
             items,
@@ -290,8 +299,9 @@ impl MtlsTrustAnchorRepository {
         .get_result::<RequestRow>(&mut connection)
         .await
         .optional()
-        .map(|row| row.map(Into::into))
-        .map_err(map_error)
+        .map_err(map_error)?
+        .map(map_request_row)
+        .transpose()
     }
 
     pub async fn approve(
@@ -338,6 +348,7 @@ impl MtlsTrustAnchorRepository {
              SET status = $4, admin_note = $5, resolved_by_user_id = $3,
                  resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE tenant_id = $1 AND id = $2 AND status = 0 AND user_id <> $3
+               AND source = 'admin-session'
                AND EXISTS (SELECT 1 FROM admin_actor)
                AND ($4 <> 1 OR (
                    not_before <= CURRENT_TIMESTAMP AND not_after > CURRENT_TIMESTAMP
@@ -438,6 +449,7 @@ impl MtlsTrustAnchorRepository {
              SET status = 3, admin_note = $4, revoked_by_user_id = $3,
                  revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE tenant_id = $1 AND id = $2 AND status = 1
+               AND source = 'admin-session'
                AND EXISTS (SELECT 1 FROM admin_actor)
              RETURNING id, tenant_id, revoked_by_user_id
              ), recorded AS (
@@ -535,34 +547,25 @@ pub(crate) async fn insert_conformance_approved_trust_anchor_on_connection(
         not_before,
         not_after,
     } = request;
-    if certificate_pem.len() > 16 * 1024
-        || !certificate_pem.starts_with("-----BEGIN CERTIFICATE-----")
-        || !certificate_pem.contains("-----END CERTIFICATE-----")
-        || subject_dn.trim().is_empty()
-        || subject_dn.len() > 2048
-        || subject_dn.chars().any(char::is_control)
-        || not_after <= not_before
-    {
-        return Err(RepositoryError::Consistency(
-            "conformance trust anchor metadata is invalid".to_owned(),
-        ));
-    }
+    validate_trust_anchor_metadata(
+        certificate_pem,
+        certificate_sha256,
+        subject_dn,
+        not_before,
+        not_after,
+    )
+    .map_err(|error| match error {
+        RepositoryError::Consistency(_) => {
+            RepositoryError::Consistency("conformance trust anchor metadata is invalid".to_owned())
+        }
+        other => other,
+    })?;
     // The authoritative trust-boundary validator computes this digest over
     // the certificate DER, not over the presentation-dependent PEM text.
     // Persistence must preserve that identity instead of inventing a second,
     // incompatible PEM digest. The authorization domain has already parsed
     // the X.509 CA and supplied its canonical DER digest; this layer only
     // enforces the persisted encoding before binding it transactionally.
-    if certificate_sha256.len() != 64
-        || !certificate_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(RepositoryError::Consistency(
-            "conformance trust anchor digest is not a lowercase SHA-256 value".to_owned(),
-        ));
-    }
-
     acquire_tenant_trust_lock(connection, tenant_id)
         .await
         .map_err(map_error)?;
@@ -713,6 +716,197 @@ pub(crate) async fn insert_conformance_approved_trust_anchor_on_connection(
     .await
     .map_err(map_error)?;
     Ok(inserted.id)
+}
+
+/// Input for an already-approved operator-managed mTLS trust anchor.  The
+/// operator task is the authority for this mutation; no administrator or
+/// browser requester is synthesized.  `requester_user_id` remains optional so
+/// the migration can preserve a user subject when a deployment has one while
+/// still supporting automation-only anchors.
+pub struct OperatorManagedTrustAnchor<'a> {
+    pub tenant_id: TenantId,
+    pub client_id: Uuid,
+    pub certificate_pem: &'a str,
+    pub certificate_sha256: &'a str,
+    pub subject_dn: &'a str,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+}
+
+/// Inserts an already-approved operator-managed trust anchor on a
+/// caller-owned transaction connection.  The request source and event actor
+/// are both explicit: `source='operator-managed'`, `actor_user_id=NULL`.
+pub async fn insert_operator_managed_trust_anchor_on_connection(
+    connection: &mut AsyncPgConnection,
+    request: OperatorManagedTrustAnchor<'_>,
+) -> Result<Uuid, RepositoryError> {
+    let OperatorManagedTrustAnchor {
+        tenant_id,
+        client_id,
+        certificate_pem,
+        certificate_sha256,
+        subject_dn,
+        not_before,
+        not_after,
+    } = request;
+    validate_trust_anchor_metadata(
+        certificate_pem,
+        certificate_sha256,
+        subject_dn,
+        not_before,
+        not_after,
+    )?;
+
+    acquire_tenant_trust_lock(connection, tenant_id)
+        .await
+        .map_err(map_error)?;
+    let request_id = Uuid::now_v7();
+    let inserted = sql_query(
+        "WITH eligible AS MATERIALIZED (
+             SELECT c.id
+             FROM oauth_clients c
+             WHERE c.tenant_id = $2 AND c.id = $3 AND c.is_active = TRUE
+               AND (
+                   (c.token_endpoint_auth_method = 'tls_client_auth'
+                    AND c.tls_client_auth_cert_sha256 IS NOT NULL)
+                   OR c.require_mtls_bound_tokens = TRUE
+               )
+               AND $8 <= CURRENT_TIMESTAMP AND $9 > CURRENT_TIMESTAMP
+               AND (
+                   EXISTS (
+                       SELECT 1
+                       FROM oauth_client_mtls_trust_anchor_requests existing
+                       WHERE existing.tenant_id = $2 AND existing.status = 1
+                         AND existing.not_before <= CURRENT_TIMESTAMP
+                         AND existing.not_after > CURRENT_TIMESTAMP
+                         AND existing.certificate_sha256 = $6
+                   )
+                   OR (
+                       SELECT COUNT(DISTINCT active.certificate_sha256)
+                       FROM oauth_client_mtls_trust_anchor_requests active
+                       JOIN oauth_clients active_client
+                         ON active_client.id = active.client_id
+                        AND active_client.tenant_id = active.tenant_id
+                       WHERE active.tenant_id = $2 AND active.status = 1
+                         AND active.not_before <= CURRENT_TIMESTAMP
+                         AND active.not_after > CURRENT_TIMESTAMP
+                         AND active_client.is_active = TRUE
+                   ) < $10
+               )
+               AND (
+                   SELECT COUNT(*)
+                   FROM oauth_client_mtls_trust_anchor_requests active
+                   WHERE active.tenant_id = $2 AND active.status = 1
+                     AND active.not_before <= CURRENT_TIMESTAMP
+                     AND active.not_after > CURRENT_TIMESTAMP
+                     AND active.client_id = c.id
+               ) < $11
+         ), inserted AS (
+             INSERT INTO oauth_client_mtls_trust_anchor_requests (
+                 id, tenant_id, user_id, client_id, certificate_pem,
+                 certificate_sha256, subject_dn, not_before, not_after,
+                 status, source, admin_note, resolved_at
+             )
+             SELECT $1, $2, $4, eligible.id, $5, $6, $7, $8, $9,
+                    1, 'operator-managed', 'operator-managed', CURRENT_TIMESTAMP
+             FROM eligible
+             ON CONFLICT (tenant_id, client_id, certificate_sha256) DO NOTHING
+             RETURNING id, tenant_id
+         ), recorded AS (
+             INSERT INTO oauth_client_mtls_trust_anchor_events
+                 (tenant_id, request_id, actor_user_id, action, note)
+             SELECT tenant_id, id, NULL, action, 'operator-managed'
+             FROM inserted
+             CROSS JOIN (VALUES (0::smallint), (1::smallint)) AS actions(action)
+             RETURNING request_id
+         )
+         SELECT id FROM inserted",
+    )
+    .bind::<sql_types::Uuid, _>(request_id)
+    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(client_id)
+    .bind::<sql_types::Nullable<sql_types::Uuid>, _>(None::<Uuid>)
+    .bind::<sql_types::Text, _>(certificate_pem)
+    .bind::<sql_types::Text, _>(certificate_sha256)
+    .bind::<sql_types::Text, _>(subject_dn)
+    .bind::<sql_types::Timestamptz, _>(not_before)
+    .bind::<sql_types::Timestamptz, _>(not_after)
+    .bind::<sql_types::BigInt, _>(MAX_ACTIVE_TRUST_ANCHORS_PER_TENANT)
+    .bind::<sql_types::BigInt, _>(MAX_ACTIVE_TRUST_ANCHORS_PER_CLIENT)
+    .get_result::<IdRow>(connection)
+    .await
+    .optional()
+    .map_err(map_error)?;
+    inserted.map(|row| row.id).ok_or(RepositoryError::Conflict)
+}
+
+/// Revokes only an operator-managed anchor.  Admin-session and
+/// operator-conformance rows are intentionally excluded so an ordinary
+/// resource task cannot cross provenance boundaries.
+pub async fn revoke_operator_managed_trust_anchor_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: TenantId,
+    request_id: Uuid,
+) -> Result<bool, RepositoryError> {
+    acquire_tenant_trust_lock(connection, tenant_id)
+        .await
+        .map_err(map_error)?;
+    let revoked = sql_query(
+        "WITH updated AS (
+             UPDATE oauth_client_mtls_trust_anchor_requests
+             SET status = 3, admin_note = 'operator-managed',
+                 revoked_by_user_id = NULL, revoked_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE tenant_id = $1 AND id = $2 AND status = 1
+               AND source = 'operator-managed'
+             RETURNING id, tenant_id
+         ), recorded AS (
+             INSERT INTO oauth_client_mtls_trust_anchor_events
+                 (tenant_id, request_id, actor_user_id, action, note)
+             SELECT tenant_id, id, NULL, 3, 'operator-managed'
+             FROM updated
+             RETURNING request_id
+         )
+         SELECT request_id AS id FROM recorded",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(request_id)
+    .get_result::<IdRow>(connection)
+    .await
+    .optional()
+    .map_err(map_error)?;
+    Ok(revoked.is_some())
+}
+
+fn validate_trust_anchor_metadata(
+    certificate_pem: &str,
+    certificate_sha256: &str,
+    subject_dn: &str,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    if certificate_pem.len() > 16 * 1024
+        || !certificate_pem.starts_with("-----BEGIN CERTIFICATE-----")
+        || !certificate_pem.contains("-----END CERTIFICATE-----")
+        || subject_dn.trim().is_empty()
+        || subject_dn.len() > 2048
+        || subject_dn.chars().any(char::is_control)
+        || not_after <= not_before
+    {
+        return Err(RepositoryError::Consistency(
+            "operator-managed trust anchor metadata is invalid".to_owned(),
+        ));
+    }
+    if certificate_sha256.len() != 64
+        || !certificate_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RepositoryError::Consistency(
+            "operator-managed trust anchor digest is not a lowercase SHA-256 value".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(QueryableByName)]

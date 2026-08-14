@@ -144,6 +144,7 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             issuance_id: Uuid::now_v7(),
             tenant_id: client.tenant_id,
             client_id: client.id,
+            user_id: issue.user_id,
             grant_key: grant_key.clone(),
             request_digest: request_digest.clone(),
             expires_at: Utc::now()

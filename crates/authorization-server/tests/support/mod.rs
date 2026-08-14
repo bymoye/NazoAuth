@@ -6,7 +6,7 @@ pub(crate) use database_user_fixture::{
     DatabaseExternalIdentityFixture, DatabasePasskeyFixture, DatabaseUserFixture,
 };
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use aws_lc_rs::{
     encoding::{AsDer, Pkcs8V1Der},
@@ -92,7 +92,23 @@ pub(crate) fn token_issuance_repository(
     )
 }
 
-pub(crate) fn initialize_audit_dependencies(pool: &nazo_postgres::DbPool) {
+pub(crate) fn initialize_audit_dependencies(_pool: &nazo_postgres::DbPool) {
+    static PROCESS_AUDIT_POOL: OnceLock<nazo_postgres::DbPool> = OnceLock::new();
+
+    // The production audit sink is process-lifetime state.  Some endpoint tests
+    // intentionally use a pool whose search_path points at a small isolated
+    // schema, so allowing the first such test to install that pool makes all
+    // later required-audit calls depend on tables the isolated fixture does not
+    // own.  Keep the process-lifetime test sink on the canonical public test
+    // database; focused repositories continue to use their caller-provided
+    // pool below.
+    let audit_pool = PROCESS_AUDIT_POOL.get_or_init(|| {
+        let database_url = std::env::var("NAZO_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("database-backed tests require NAZO_TEST_DATABASE_URL or DATABASE_URL");
+        nazo_postgres::create_pool(database_url, 4)
+            .expect("test durable audit database pool should build")
+    });
     let preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
         crate::adapters::audit_anchor::AuditAnchorPreflightConfig {
             mode: crate::adapters::audit_anchor::config::AuditAnchorMode::Disabled,
@@ -104,7 +120,7 @@ pub(crate) fn initialize_audit_dependencies(pool: &nazo_postgres::DbPool) {
     )
     .expect("test audit anchor preflight config is valid");
     crate::adapters::audit::install_persistent_audit_sink(
-        nazo_postgres::AuditLedgerRepository::new(pool.clone()),
+        nazo_postgres::AuditLedgerRepository::new(audit_pool.clone()),
         false,
         preflight,
     )

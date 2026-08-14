@@ -21,6 +21,8 @@ mod runtime_modules;
 #[path = "../tests/support/schema.rs"]
 mod schema;
 mod settings;
+mod tenant_resource_executor;
+mod tenant_resource_provider;
 
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]

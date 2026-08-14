@@ -74,6 +74,7 @@ fn tenant_resource_task() -> TenantResourceTask {
                 digest: "b".repeat(64),
             }],
         },
+        baseline_manifest_sha256: "e".repeat(64),
         resource_manifest_sha256: "c".repeat(64),
     }
 }
@@ -137,6 +138,7 @@ fn tenant_resource_receipt() -> TenantResourceReceipt {
             resource_id: "client:primary".to_owned(),
             digest: "b".repeat(64),
         }],
+        baseline_manifest_sha256: "e".repeat(64),
         resource_manifest_sha256: task.resource_manifest_sha256,
         started_at: 1_001,
         completed_at: 1_010,
@@ -2651,6 +2653,12 @@ fn tenant_resource_contract_rejects_temporal_scope_and_operation_confusion() {
         .unwrap();
 
     let capability = tenant_resource_capability();
+    let mut invalid_baseline_task = valid.clone();
+    invalid_baseline_task.baseline_manifest_sha256 = "f".repeat(64);
+    assert!(
+        validate_tenant_resource_task_capability_binding(&invalid_baseline_task, &capability)
+            .is_err()
+    );
     let mut invalid_capability = capability.clone();
     invalid_capability.revision = 8;
     assert!(validate_tenant_resource_task_capability_binding(&valid, &invalid_capability).is_err());
@@ -2690,12 +2698,12 @@ fn tenant_resource_contract_rejects_temporal_scope_and_operation_confusion() {
         },
         ..valid.clone()
     };
-    validate_tenant_resource_task(&enumerate).unwrap();
-    validate_tenant_resource_task_capability_binding(&enumerate, &capability).unwrap_err();
+    assert!(validate_tenant_resource_task(&enumerate).is_err());
     let enumerate = TenantResourceTask {
         resource_manifest_sha256: capability.resource_manifest_sha256.clone(),
         ..enumerate
     };
+    validate_tenant_resource_task(&enumerate).unwrap();
     validate_tenant_resource_task_capability_binding(&enumerate, &capability).unwrap();
     let enumerate = TenantResourceTask {
         payload: TenantResourceTaskPayload::Enumerate {
@@ -2801,10 +2809,87 @@ fn tenant_resource_capability_and_receipt_fail_closed() {
     invalid.capability_jti = "tenant-resource-capability-2".to_owned();
     assert!(validate_tenant_resource_receipt_capability_binding(&invalid, &capability).is_err());
     let mut invalid = receipt.clone();
+    invalid.baseline_manifest_sha256 = "f".repeat(64);
+    assert!(validate_tenant_resource_receipt_capability_binding(&invalid, &capability).is_err());
+    let mut invalid = receipt.clone();
+    invalid.operation = TenantResourceOperation::Enumerate;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
     invalid.started_at = invalid.exp + 1;
     assert!(validate_tenant_resource_receipt(&invalid).is_err());
     let mut invalid = receipt;
     invalid.resources.push(invalid.resources[0].clone());
     assert!(validate_tenant_resource_receipt(&invalid).is_err());
     assert!(serde_json::from_value::<TenantResourceKind>(serde_json::json!("bucket")).is_err());
+}
+
+#[test]
+fn tenant_resource_receipt_resource_binding_is_order_independent() {
+    let mut task = tenant_resource_task();
+    let second = TenantResourceIdentity {
+        kind: TenantResourceKind::User,
+        resource_id: "user:secondary".to_owned(),
+        digest: "d".repeat(64),
+    };
+    if let TenantResourceTaskPayload::Apply { resources } = &mut task.payload {
+        resources.push(second.clone());
+    } else {
+        unreachable!();
+    }
+    let mut receipt = tenant_resource_receipt();
+    receipt.resources.push(second);
+    receipt.resources.reverse();
+
+    validate_tenant_resource_receipt_binding(&task, &receipt).unwrap();
+}
+
+#[test]
+fn tenant_resource_manifest_digest_is_canonical_and_rejects_invalid_sets() {
+    let resources = vec![
+        TenantResourceIdentity {
+            kind: TenantResourceKind::User,
+            resource_id: "user:alice".to_owned(),
+            digest: "a".repeat(64),
+        },
+        TenantResourceIdentity {
+            kind: TenantResourceKind::OauthClient,
+            resource_id: "client:primary".to_owned(),
+            digest: "b".repeat(64),
+        },
+    ];
+    let mut reversed = resources.clone();
+    reversed.reverse();
+    assert_eq!(
+        canonical_tenant_resource_manifest_sha256(&resources).unwrap(),
+        canonical_tenant_resource_manifest_sha256(&reversed).unwrap()
+    );
+
+    let mut changed = resources.clone();
+    changed[0].digest = "c".repeat(64);
+    assert_ne!(
+        canonical_tenant_resource_manifest_sha256(&resources).unwrap(),
+        canonical_tenant_resource_manifest_sha256(&changed).unwrap()
+    );
+    let mut changed_kind = resources.clone();
+    changed_kind[0].kind = TenantResourceKind::MtlsTrustAnchor;
+    assert_ne!(
+        canonical_tenant_resource_manifest_sha256(&resources).unwrap(),
+        canonical_tenant_resource_manifest_sha256(&changed_kind).unwrap()
+    );
+    let mut invalid = resources.clone();
+    invalid[0].resource_id = "not an identifier".to_owned();
+    assert!(canonical_tenant_resource_manifest_sha256(&invalid).is_err());
+    let mut duplicate = resources.clone();
+    duplicate.push(resources[0].clone());
+    assert!(canonical_tenant_resource_manifest_sha256(&duplicate).is_err());
+
+    let empty = canonical_tenant_resource_manifest_sha256(&[]).unwrap();
+    assert_eq!(
+        empty,
+        canonical_tenant_resource_manifest_sha256(&[]).unwrap()
+    );
+    assert_eq!(
+        empty,
+        "b5872ae433b0e5470e831afe4d88a816996f28e6bcaf409a5a333107f00789f2"
+    );
 }

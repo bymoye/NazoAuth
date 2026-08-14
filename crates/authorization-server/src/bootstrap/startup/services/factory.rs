@@ -72,6 +72,8 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
+    let tenant_resource_management_enabled = core.tenant_resource_provider.is_some();
+
     let server = HttpServer::new(move || {
         let app = App::new()
             .wrap(from_fn(request_timeout))
@@ -186,14 +188,24 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
         } else {
             app
         };
+        let app = if let Some(provider) = core.tenant_resource_provider.clone() {
+            app.app_data(provider)
+        } else {
+            app
+        };
         let app = if let Some(path) = ui_static_dir.clone() {
             app.service(crate::bootstrap::ui_static_files(path))
         } else {
             app
         };
-        app.configure(|cfg| {
+        let app = app.configure(|cfg| {
             crate::bootstrap::routes::configure(cfg, &settings, perf_metrics_enabled)
-        })
+        });
+        if tenant_resource_management_enabled {
+            app.configure(crate::bootstrap::routes::configure_tenant_resource_management)
+        } else {
+            app
+        }
     })
     .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
     .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)

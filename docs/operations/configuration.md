@@ -379,6 +379,29 @@ rollout. Multi-identity SNI selection remains part of the tenant transport
 snapshot work; an unknown DNS SNI is rejected instead of falling back to the
 single configured identity.
 
+Tenant resource management is an optional machine control-plane surface,
+independent from browser `/admin`, SCIM bearer authentication, and any OIDF
+Suite integration. Set `TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE` to a
+privileged regular file containing the controller Ed25519 public key as
+unpadded base64url. When it is absent, the machine resource routes are not
+registered. When it is present but unreadable or invalid, startup fails
+closed. The instance identity signs short-lived capability and operation
+receipt JWS values; the pinned controller key verifies short-lived tasks.
+Resource mutations, audit-chain append, revision CAS, and receipt persistence
+commit in one PostgreSQL transaction. Rotate the controller trust anchor with
+a controlled restart; this initial boundary deliberately has no remote key
+rotation endpoint.
+
+An active machine-resource binding is the sole authority for its managed user,
+OAuth client, mTLS anchor, or OpenID4VC dataset. Ordinary admin/SCIM writes may
+not change an actively bound user or client; the database rejects such drift.
+Resource identities are immutable version fences: changing payload content
+requires an explicit digest-fenced Revoke followed by Apply (normally with a
+new resource identity), and clearing the desired set uses explicit Revoke.
+Successful user/client revocation disables the resource, removes grants and
+refresh credentials, and blacklists every still-live OAuth and OpenID4VC access
+token owned by the resource in the same transaction.
+
 `EMAIL_SMTP_TLS` accepts only `starttls`, `implicit`, or `none`. The `none`
 mode is rejected unless the issuer is loopback HTTP and no SMTP credentials
 are configured; production deployments must use encrypted mail submission.

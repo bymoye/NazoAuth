@@ -16,19 +16,22 @@ mod runtime_modules;
 mod scim;
 mod scim_events;
 mod tenancy;
+mod tenant_resources;
 mod token_issuance;
 mod tokens;
 mod users;
 pub use access_requests::AccessRequestRepository;
 pub use audit::AuditRepository;
 pub use audit_ledger::{
-    AuditLedgerRepository, MAX_SECURITY_AUDIT_PAYLOAD_BYTES, SecurityAuditAnchorFreshness,
-    SecurityAuditAnchorHealth, SecurityAuditEvent, SecurityAuditOutboxDelivery,
-    SecurityAuditReceipt,
+    AuditLedgerRepository, FreshSecurityAuditReceipt, MAX_SECURITY_AUDIT_PAYLOAD_BYTES,
+    SecurityAuditAnchorFreshness, SecurityAuditAnchorHealth, SecurityAuditEvent,
+    SecurityAuditOutboxDelivery, SecurityAuditReceipt, append_fresh_security_audit_on_connection,
 };
 pub use authorization::AuthorizationRepository;
 pub use authorization_flow::AuthorizationFlowRepository;
-pub use clients::OAuthClientRepository;
+pub use clients::{
+    OAuthClientRepository, deactivate_client_on_connection, insert_client_on_connection,
+};
 pub use conformance_leases::{
     ConformanceApplicant, ConformanceClient, ConformanceClientMapping, ConformanceLease,
     ConformanceLeaseCleanup, ConformanceLeasePublicMaterial, ConformanceLeaseRepository,
@@ -42,17 +45,30 @@ pub use initial_admin_bootstrap::{
     InitialAdminBootstrapRepository, InitialAdminBootstrapState, InitialAdminClaimOutcome,
 };
 pub use mfa::MfaRepository;
-pub use mtls_trust::MtlsTrustAnchorRepository;
+pub use mtls_trust::{
+    MtlsTrustAnchorRepository, OperatorManagedTrustAnchor,
+    insert_operator_managed_trust_anchor_on_connection,
+    revoke_operator_managed_trust_anchor_on_connection,
+};
 pub use openid4vc::{
     ManagedCredentialDataset, ManagedCredentialDatasetWrite, Openid4vciDatasetRepository,
-    Openid4vciRepository, Openid4vpRepository,
+    Openid4vciRepository, Openid4vpRepository, delete_operator_managed_dataset_on_connection,
+    protect_dataset_claims, unprotect_dataset_claims,
+    upsert_operator_managed_dataset_on_connection,
 };
 pub use passkeys::PasskeyRepository;
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};
 pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;
 pub use tenancy::ActiveTenantBoundaryRepository;
+pub use tenant_resources::{
+    NewTenantResourceBinding, NewTenantResourceOperation, TenantResourceBinding,
+    TenantResourceBindingDeactivate, TenantResourceOperationRecord, TenantResourceOperationWrite,
+    TenantResourceRepository, TenantResourceState, TenantResourceStateCas,
+};
 pub use token_issuance::TokenIssuanceRepository;
 pub use token_issuance::{TokenIssuanceResponseKeyError, TokenIssuanceResponseKeyRing};
 pub use tokens::TokenRepository;
-pub use users::UserRepository;
+pub use users::{
+    UserInsert, UserRepository, disable_user_on_connection, insert_user_on_connection,
+};

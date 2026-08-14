@@ -92,6 +92,7 @@ pub struct TokenIssuanceRecord {
     pub issuance_id: Uuid,
     pub tenant_id: Uuid,
     pub client_id: Uuid,
+    pub user_id: Option<Uuid>,
     pub grant_key: String,
     pub request_digest: String,
     pub phase: TokenIssuancePhase,
@@ -108,6 +109,9 @@ pub struct PrepareTokenIssuance {
     pub issuance_id: Uuid,
     pub tenant_id: Uuid,
     pub client_id: Uuid,
+    /// Internal subject ownership for later tenant-scoped revocation.  Client
+    /// credentials and other subjectless grants deliberately store `None`.
+    pub user_id: Option<Uuid>,
     /// A stable, server-derived grant identity (for example an authorization
     /// code hash or CIBA auth_req_id).  It is never exposed to clients.
     pub grant_key: String,

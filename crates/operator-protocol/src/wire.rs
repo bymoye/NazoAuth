@@ -127,13 +127,18 @@ pub struct TenantResourceTask {
     /// CAS revision expected by the provider.  Zero is the initial state.
     pub expected_revision: u64,
     pub change_set_id: String,
+    /// SHA-256 of the external raw Apply-manifest bytes.  Those bytes are
+    /// intentionally not carried in this wire contract.
     pub change_set_sha256: String,
     pub operation: TenantResourceOperation,
     pub payload: TenantResourceTaskPayload,
-    /// SHA-256 of the external canonical resource manifest.  The manifest
-    /// bytes are intentionally outside this wire contract; this digest binds
-    /// the provider's desired/baseline document without carrying endpoints or
-    /// resource configuration in a signed task.
+    /// SHA-256 of the capability's current external canonical resource
+    /// manifest.  Every operation is fenced against this baseline.
+    pub baseline_manifest_sha256: String,
+    /// SHA-256 of the canonical digest computed from the complete final active
+    /// `TenantResourceIdentity` set expected after the operation.  Apply and
+    /// Revoke may change it; Enumerate must retain the baseline.  Manifest
+    /// bytes remain outside this wire contract.
     pub resource_manifest_sha256: String,
 }
 
@@ -197,12 +202,18 @@ pub struct TenantResourceReceipt {
     pub capability_sha256: String,
     pub actor: Actor,
     pub change_set_id: String,
+    /// SHA-256 of the external raw Apply-manifest bytes echoed from the task.
     pub change_set_sha256: String,
     pub operation: TenantResourceOperation,
     pub expected_revision: u64,
     pub revision: u64,
     pub outcome: TenantResourceOutcome,
     pub resources: Vec<TenantResourceIdentity>,
+    /// Baseline manifest echoed from the task/capability fence.
+    pub baseline_manifest_sha256: String,
+    /// Canonical digest of the complete final active identity set echoed from
+    /// the task.  Apply and Revoke may differ from the baseline; Enumerate must
+    /// equal it.
     pub resource_manifest_sha256: String,
     pub started_at: i64,
     pub completed_at: i64,
