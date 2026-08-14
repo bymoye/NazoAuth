@@ -71,6 +71,7 @@ impl TenantResourceReceiptIssuer for TestReceiptIssuer {
                 revision: result.revision,
                 outcome: TenantResourceOutcome::Succeeded,
                 resources: result.resources,
+                resource_mappings: result.resource_mappings,
                 baseline_manifest_sha256: self.task.baseline_manifest_sha256.clone(),
                 resource_manifest_sha256: self.task.resource_manifest_sha256.clone(),
                 started_at: 1_800_000_000,
@@ -125,6 +126,7 @@ fn locators_are_kind_fenced_and_round_trip() {
     let client = Uuid::now_v7();
     let anchor = Uuid::now_v7();
     let dataset = Uuid::now_v7();
+    let trust_policy = Uuid::now_v7();
 
     assert!(matches!(
         parse_locator(&user_locator(user), TenantResourceKind::User),
@@ -137,6 +139,13 @@ fn locators_are_kind_fenced_and_round_trip() {
     assert!(matches!(
         parse_locator(&mtls_locator(anchor), TenantResourceKind::MtlsTrustAnchor),
         Ok(ResourceLocator::Mtls(value)) if value == anchor
+    ));
+    assert!(matches!(
+        parse_locator(
+            &trust_policy_locator(trust_policy),
+            TenantResourceKind::Openid4vcTrustPolicy
+        ),
+        Ok(ResourceLocator::TrustPolicy(value)) if value == trust_policy
     ));
     let dataset_locator = dataset_locator(dataset, "openid4vc-example");
     assert!(matches!(
@@ -188,7 +197,7 @@ fn identity_sorting_is_kind_then_logical_id() {
 }
 
 #[test]
-fn desired_state_requires_mtls_and_dataset_parent_resources() {
+fn delta_dependencies_accept_existing_mtls_and_dataset_parent_resources() {
     let mtls_identity = TenantResourceIdentity {
         kind: TenantResourceKind::MtlsTrustAnchor,
         resource_id: "anchor".to_owned(),
@@ -216,7 +225,7 @@ fn desired_state_requires_mtls_and_dataset_parent_resources() {
             claims: json!({}),
         })),
     ];
-    let desired = [
+    let delta = [
         ResourceKey::from_identity(&mtls_identity),
         ResourceKey::from_identity(&dataset_identity),
     ]
@@ -224,20 +233,20 @@ fn desired_state_requires_mtls_and_dataset_parent_resources() {
     .collect();
 
     assert!(matches!(
-        validate_desired_dependencies(&payloads, &desired),
+        validate_desired_dependencies(&payloads, &delta),
         Err(ExecutorTransactionError::Executor(
             TenantResourceExecutorError::Rejected
         ))
     ));
 
-    let desired = desired
+    let available = delta
         .into_iter()
         .chain([
             ResourceKey::new(TenantResourceKind::OauthClient, "client"),
             ResourceKey::new(TenantResourceKind::User, "user"),
         ])
         .collect();
-    assert!(validate_desired_dependencies(&payloads, &desired).is_ok());
+    assert!(validate_desired_dependencies(&payloads, &available).is_ok());
 }
 
 #[test]
@@ -548,6 +557,99 @@ async fn postgres_executor_applies_replays_and_revokes_one_owned_user_atomically
         drift.is_err(),
         "active machine-owned user drift must fail closed"
     );
+
+    // Apply is an atomic delta: an omitted active resource remains managed
+    // while the new resource is created and bound in the same transaction.
+    let identity_two = TenantResourceIdentity {
+        kind: TenantResourceKind::User,
+        resource_id: format!("managed-user-two-{tenant_id}"),
+        digest: "e".repeat(64),
+    };
+    let full_manifest =
+        canonical_tenant_resource_manifest_sha256(&[identity.clone(), identity_two.clone()])
+            .expect("full delta manifest");
+    let delta_task = resource_task(
+        tenant_id,
+        "apply-user-two",
+        "apply-user-two-change",
+        TenantResourceOperation::Apply,
+        TenantResourceTaskPayload::Apply {
+            resources: vec![identity_two.clone()],
+        },
+        1,
+        (desired_manifest.clone(), full_manifest.clone()),
+    );
+    let delta_request_sha256 = "6".repeat(64);
+    let delta = PreparedTenantResourceTask {
+        task: delta_task.clone(),
+        request_sha256: delta_request_sha256.clone(),
+        resources: vec![PreparedTenantResource {
+            identity: identity_two.clone(),
+            payload: Some(TenantResourcePayload::User(UserResourcePayload {
+                username: format!("user-two-{tenant_id}"),
+                email: format!("user-two-{tenant_id}@example.test"),
+                password: "test-password-two".to_owned(),
+                email_verified: true,
+                profile: None,
+            })),
+        }],
+    };
+    let delta_calls = Arc::new(AtomicUsize::new(0));
+    let delta_issuer = TestReceiptIssuer {
+        task: delta_task,
+        request_sha256: delta_request_sha256,
+        calls: delta_calls.clone(),
+    };
+    let stale_delta = {
+        let mut stale = delta.clone();
+        stale.task.baseline_manifest_sha256 = "f".repeat(64);
+        stale.request_sha256 = "7".repeat(64);
+        stale.task.change_set_id = "apply-user-two-stale".to_owned();
+        stale
+    };
+    assert!(matches!(
+        TenantResourceExecutor::execute(&executor, stale_delta, &delta_issuer).await,
+        Err(TenantResourceExecutorError::Conflict)
+    ));
+    let delta_receipt = TenantResourceExecutor::execute(&executor, delta.clone(), &delta_issuer)
+        .await
+        .expect("delta apply");
+    assert_eq!(
+        delta_receipt,
+        TenantResourceExecutor::execute(&executor, delta.clone(), &delta_issuer)
+            .await
+            .expect("delta replay")
+    );
+    assert_eq!(delta_calls.as_ref().load(Ordering::SeqCst), 1);
+    let mut changed_digest = delta.clone();
+    changed_digest.task.jti = "apply-user-two-digest-conflict".to_owned();
+    changed_digest.task.change_set_id = "apply-user-two-digest-conflict-change".to_owned();
+    changed_digest.request_sha256 = "8".repeat(64);
+    changed_digest.resources[0].identity.digest = "f".repeat(64);
+    if let TenantResourceTaskPayload::Apply { resources } = &mut changed_digest.task.payload {
+        resources[0].digest = "f".repeat(64);
+    }
+    let changed_full_manifest = canonical_tenant_resource_manifest_sha256(&[
+        identity.clone(),
+        changed_digest.resources[0].identity.clone(),
+    ])
+    .expect("changed digest manifest");
+    changed_digest.task.resource_manifest_sha256 = changed_full_manifest;
+    assert!(matches!(
+        TenantResourceExecutor::execute(&executor, changed_digest, &delta_issuer).await,
+        Err(TenantResourceExecutorError::Conflict)
+    ));
+    let state = TenantResourceStateSource::current(&executor)
+        .await
+        .expect("delta state");
+    assert_eq!(state.revision, 2);
+    assert_eq!(state.resource_manifest_sha256, full_manifest);
+    let active_after_delta =
+        TenantResourceRepository::active_bindings_on_connection(&mut connection, tenant_id)
+            .await
+            .expect("active delta bindings");
+    assert_eq!(active_after_delta.len(), 2);
+
     let public_client_id = format!("revocation-client-{tenant_id}");
     let client_id = sql_query(
         "INSERT INTO oauth_clients (
@@ -632,6 +734,9 @@ async fn postgres_executor_applies_replays_and_revokes_one_owned_user_atomically
     .expect("openid4vci pre-authorized offer");
     drop(connection);
 
+    let remaining_manifest =
+        canonical_tenant_resource_manifest_sha256(std::slice::from_ref(&identity_two))
+            .expect("remaining manifest");
     let revoke_task = resource_task(
         tenant_id,
         "revoke-user",
@@ -640,8 +745,8 @@ async fn postgres_executor_applies_replays_and_revokes_one_owned_user_atomically
         TenantResourceTaskPayload::Revoke {
             resources: vec![identity.clone()],
         },
-        1,
-        (desired_manifest, empty_manifest.clone()),
+        2,
+        (full_manifest.clone(), remaining_manifest.clone()),
     );
     let revoke_request_sha256 = "f".repeat(64);
     let revoke = PreparedTenantResourceTask {
@@ -669,8 +774,8 @@ async fn postgres_executor_applies_replays_and_revokes_one_owned_user_atomically
     let state = TenantResourceStateSource::current(&executor)
         .await
         .expect("state");
-    assert_eq!(state.revision, 2);
-    assert_eq!(state.resource_manifest_sha256, empty_manifest);
+    assert_eq!(state.revision, 3);
+    assert_eq!(state.resource_manifest_sha256, remaining_manifest);
     let mut connection = nazo_postgres::get_conn(&pool).await.expect("connection");
     let user = sql_query(
         "SELECT is_active FROM users
@@ -734,5 +839,50 @@ async fn postgres_executor_applies_replays_and_revokes_one_owned_user_atomically
         TenantResourceRepository::active_bindings_on_connection(&mut connection, tenant_id)
             .await
             .expect("active bindings");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].resource_id, identity_two.resource_id);
+
+    let final_revoke_task = resource_task(
+        tenant_id,
+        "revoke-user-two",
+        "revoke-user-two-change",
+        TenantResourceOperation::Revoke,
+        TenantResourceTaskPayload::Revoke {
+            resources: vec![identity_two.clone()],
+        },
+        3,
+        (remaining_manifest, empty_manifest.clone()),
+    );
+    let final_revoke_request_sha256 = "9".repeat(64);
+    let final_revoke = PreparedTenantResourceTask {
+        task: final_revoke_task.clone(),
+        request_sha256: final_revoke_request_sha256.clone(),
+        resources: vec![PreparedTenantResource {
+            identity: identity_two,
+            payload: None,
+        }],
+    };
+    let final_revoke_calls = Arc::new(AtomicUsize::new(0));
+    let final_revoke_issuer = TestReceiptIssuer {
+        task: final_revoke_task,
+        request_sha256: final_revoke_request_sha256,
+        calls: final_revoke_calls.clone(),
+    };
+    TenantResourceExecutor::execute(&executor, final_revoke.clone(), &final_revoke_issuer)
+        .await
+        .expect("final revoke");
+    TenantResourceExecutor::execute(&executor, final_revoke, &final_revoke_issuer)
+        .await
+        .expect("final revoke replay");
+    assert_eq!(final_revoke_calls.as_ref().load(Ordering::SeqCst), 1);
+    let state = TenantResourceStateSource::current(&executor)
+        .await
+        .expect("final state");
+    assert_eq!(state.revision, 4);
+    assert_eq!(state.resource_manifest_sha256, empty_manifest);
+    let active =
+        TenantResourceRepository::active_bindings_on_connection(&mut connection, tenant_id)
+            .await
+            .expect("final active bindings");
     assert!(active.is_empty());
 }

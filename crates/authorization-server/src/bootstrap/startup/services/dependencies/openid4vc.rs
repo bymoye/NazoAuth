@@ -96,9 +96,9 @@ pub(super) async fn build(
         .modules
         .enable_openid4vci_issuer
         .then(|| {
-            Openid4vcClientAttestationValidator::with_conformance_leases(
+            Openid4vcClientAttestationValidator::with_trust_policies(
                 static_client_attestation,
-                nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
+                nazo_postgres::TenantResourceRepository::new(diesel_db.clone()),
                 settings.tenant.context.tenant_id.as_uuid(),
             )
             .map(Arc::new)
@@ -117,8 +117,8 @@ pub(super) async fn build(
                     .clone()
                     .unwrap_or_else(|| serde_json::json!({"keys": []})),
             )?
-            .with_conformance_leases(
-                nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
+            .with_trust_policies(
+                nazo_postgres::TenantResourceRepository::new(diesel_db.clone()),
                 settings.tenant.context.tenant_id.as_uuid(),
             );
             let operations = Arc::new(ServerCredentialIssuerOperations::new(

@@ -102,6 +102,7 @@ fn tenant_resource_capability() -> TenantResourceCapability {
             TenantResourceKind::OauthClient,
             TenantResourceKind::MtlsTrustAnchor,
             TenantResourceKind::Openid4vcDataset,
+            TenantResourceKind::Openid4vcTrustPolicy,
             TenantResourceKind::User,
         ],
         actions: vec![
@@ -137,6 +138,11 @@ fn tenant_resource_receipt() -> TenantResourceReceipt {
             kind: TenantResourceKind::OauthClient,
             resource_id: "client:primary".to_owned(),
             digest: "b".repeat(64),
+        }],
+        resource_mappings: vec![TenantResourceMapping {
+            kind: TenantResourceKind::OauthClient,
+            resource_id: "client:primary".to_owned(),
+            public_id: "client-public-1".to_owned(),
         }],
         baseline_manifest_sha256: "e".repeat(64),
         resource_manifest_sha256: task.resource_manifest_sha256,
@@ -298,6 +304,11 @@ fn security_sensitive_wire_models_reject_unknown_fields() {
     });
     assert_wire_rejects_unknown_field(tenant_resource_capability());
     assert_wire_rejects_unknown_field(tenant_resource_receipt());
+    assert_wire_rejects_unknown_field(TenantResourceMapping {
+        kind: TenantResourceKind::OauthClient,
+        resource_id: "client:primary".to_owned(),
+        public_id: "client-public-1".to_owned(),
+    });
     assert_wire_rejects_unknown_field(TenantResourceOutcome::Failed {
         code: "failed".to_owned(),
     });
@@ -341,6 +352,14 @@ fn security_sensitive_wire_models_reject_unknown_fields() {
         client_attestation_jwks: serde_json::json!({"keys": []}),
         key_attestation_jwks: serde_json::json!({"keys": []}),
         credential_trust_anchor_pem: "public".to_owned(),
+    });
+    assert_wire_rejects_unknown_field(Openid4vcTrustPolicy {
+        schema: 1,
+        client_attestation_issuer: "https://issuer.example".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": []}),
+        key_attestation_jwks: serde_json::json!({"keys": []}),
+        credential_trust_anchor_pem: "public".to_owned(),
+        wallet_authorization_origins: vec!["https://wallet.example".to_owned()],
     });
     assert_wire_rejects_unknown_field(ConformanceMatrixCryptoPolicy::default());
     assert_wire_rejects_unknown_field(ConformanceMatrixSource {
@@ -1632,6 +1651,118 @@ fn openid4vc_trust_rejects_ambiguous_or_malformed_public_jwks() {
 }
 
 #[test]
+fn openid4vc_trust_policy_accepts_bounded_public_bundle_and_rejects_unknowns() {
+    let coordinate = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let ec_key = |kid: &str| {
+        serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": coordinate,
+            "y": coordinate,
+            "kid": kid,
+        })
+    };
+    let certificate =
+        |label: &str| format!("-----BEGIN CERTIFICATE-----\n{label}\n-----END CERTIFICATE-----\n");
+    let policy = Openid4vcTrustPolicy {
+        schema: 1,
+        client_attestation_issuer: "https://issuer.example/attestation".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [ec_key("client")]}),
+        key_attestation_jwks: serde_json::json!({"keys": [ec_key("holder")]}),
+        credential_trust_anchor_pem: format!("{}{}", certificate("MA=="), certificate("MDE=")),
+        wallet_authorization_origins: vec!["https://wallet.example".to_owned()],
+    };
+    validate_openid4vc_trust_policy(&policy).unwrap();
+
+    let mut unknown_wire = serde_json::to_value(&policy).unwrap();
+    unknown_wire["unexpected_wire_field"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<Openid4vcTrustPolicy>(unknown_wire).is_err());
+
+    let mut invalid_schema = policy.clone();
+    invalid_schema.schema = 2;
+    assert!(validate_openid4vc_trust_policy(&invalid_schema).is_err());
+
+    for issuer in [
+        "",
+        "http://issuer.example",
+        "https://",
+        "https://issuer.example/path?x=1",
+    ] {
+        let mut invalid = policy.clone();
+        invalid.client_attestation_issuer = issuer.to_owned();
+        assert!(validate_openid4vc_trust_policy(&invalid).is_err());
+    }
+    let mut oversized_issuer = policy.clone();
+    oversized_issuer.client_attestation_issuer = format!("https://{}", "i".repeat(2048));
+    assert!(validate_openid4vc_trust_policy(&oversized_issuer).is_err());
+
+    let mut empty_jwks = policy.clone();
+    empty_jwks.client_attestation_jwks = serde_json::json!({"keys": []});
+    assert!(validate_openid4vc_trust_policy(&empty_jwks).is_err());
+
+    let mut empty_origins = policy.clone();
+    empty_origins.wallet_authorization_origins.clear();
+    assert!(validate_openid4vc_trust_policy(&empty_origins).is_err());
+
+    for origin in [
+        "http://wallet.example",
+        "https://wallet.example/",
+        "https://user@wallet.example",
+        "https://wallet.example/path",
+        "https://wallet.example?query",
+        "https://wallet.example#fragment",
+        "https://wallet.example:443",
+        "https://-wallet.example",
+        "HTTPS://wallet.example",
+    ] {
+        let mut invalid = policy.clone();
+        invalid.wallet_authorization_origins = vec![origin.to_owned()];
+        assert!(validate_openid4vc_trust_policy(&invalid).is_err());
+    }
+    let mut duplicate_origins = policy.clone();
+    duplicate_origins.wallet_authorization_origins = vec![
+        "https://wallet.example".to_owned(),
+        "https://wallet.example".to_owned(),
+    ];
+    assert!(validate_openid4vc_trust_policy(&duplicate_origins).is_err());
+
+    let mut private_jwk = policy.clone();
+    private_jwk.client_attestation_jwks["keys"][0]["d"] = serde_json::json!("secret");
+    assert!(validate_openid4vc_trust_policy(&private_jwk).is_err());
+
+    let mut unknown_jwks_member = policy.clone();
+    unknown_jwks_member.client_attestation_jwks["unexpected"] = serde_json::json!(true);
+    assert!(validate_openid4vc_trust_policy(&unknown_jwks_member).is_err());
+
+    let mut unknown_jwk_member = policy.clone();
+    unknown_jwk_member.client_attestation_jwks["keys"][0]["unexpected"] = serde_json::json!(true);
+    assert!(validate_openid4vc_trust_policy(&unknown_jwk_member).is_err());
+
+    for pem in [
+        "",
+        "public",
+        "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----\n",
+        "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----",
+        "-----BEGIN PUBLIC KEY-----\nMA==\n-----END PUBLIC KEY-----\n",
+    ] {
+        let mut invalid = policy.clone();
+        invalid.credential_trust_anchor_pem = pem.to_owned();
+        assert!(validate_openid4vc_trust_policy(&invalid).is_err());
+    }
+    let mut oversized_pem = policy.clone();
+    oversized_pem.credential_trust_anchor_pem = format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        "x".repeat(16 * 1024)
+    );
+    assert!(validate_openid4vc_trust_policy(&oversized_pem).is_err());
+
+    let mut oversized_json = policy;
+    oversized_json.client_attestation_jwks["keys"][0]["kid"] =
+        serde_json::json!("k".repeat(33 * 1024));
+    assert!(validate_openid4vc_trust_policy(&oversized_json).is_err());
+}
+
+#[test]
 fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
     let runtime_key = SigningKey::from_bytes(&[11; 32]);
     let controller_key = SigningKey::from_bytes(&[12; 32]);
@@ -2736,6 +2867,7 @@ fn tenant_resource_contract_rejects_temporal_scope_and_operation_confusion() {
         TenantResourceTaskPayload::Revoke { resources } => resources.clone(),
         _ => unreachable!(),
     };
+    revoke_receipt.resource_mappings.clear();
     validate_tenant_resource_receipt(&revoke_receipt).unwrap();
     validate_tenant_resource_receipt_binding(&revoke_receipt_task, &revoke_receipt).unwrap();
     revoke_receipt.resources[0].digest = "d".repeat(64);
@@ -2794,6 +2926,7 @@ fn tenant_resource_capability_and_receipt_fail_closed() {
         code: "apply-failed".to_owned(),
     };
     invalid.resources.clear();
+    invalid.resource_mappings.clear();
     validate_tenant_resource_receipt(&invalid).unwrap();
     let capability = tenant_resource_capability();
     let receipt = tenant_resource_receipt();
@@ -2824,6 +2957,77 @@ fn tenant_resource_capability_and_receipt_fail_closed() {
 }
 
 #[test]
+fn tenant_resource_receipt_mappings_are_apply_only_and_one_to_one() {
+    let task = tenant_resource_task();
+    let receipt = tenant_resource_receipt();
+    validate_tenant_resource_receipt(&receipt).unwrap();
+    validate_tenant_resource_receipt_binding(&task, &receipt).unwrap();
+
+    let mut user_receipt = receipt.clone();
+    user_receipt.resources = vec![TenantResourceIdentity {
+        kind: TenantResourceKind::User,
+        resource_id: "user:primary".to_owned(),
+        digest: "c".repeat(64),
+    }];
+    user_receipt.resource_mappings = vec![TenantResourceMapping {
+        kind: TenantResourceKind::User,
+        resource_id: "user:primary".to_owned(),
+        public_id: "00000000-0000-0000-0000-000000000002".to_owned(),
+    }];
+    validate_tenant_resource_receipt(&user_receipt).unwrap();
+
+    let mut invalid = receipt.clone();
+    invalid.resource_mappings.clear();
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    assert!(validate_tenant_resource_receipt_binding(&task, &invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid
+        .resource_mappings
+        .push(invalid.resource_mappings[0].clone());
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.resource_mappings[0].resource_id = "client:other".to_owned();
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.resource_mappings[0].kind = TenantResourceKind::MtlsTrustAnchor;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.resource_mappings[0].kind = TenantResourceKind::Openid4vcTrustPolicy;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = user_receipt.clone();
+    invalid.resource_mappings[0].public_id = "not-a-uuid".to_owned();
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.resource_mappings[0].public_id = "client id with spaces".to_owned();
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+
+    let mut invalid = receipt.clone();
+    invalid.operation = TenantResourceOperation::Revoke;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.outcome = TenantResourceOutcome::Failed {
+        code: "apply-failed".to_owned(),
+    };
+    invalid.revision = invalid.expected_revision;
+    invalid.resources.clear();
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+
+    let key = SigningKey::from_bytes(&[23; 32]);
+    assert!(sign_tenant_resource_receipt(&invalid, "runtime-1", &key).is_err());
+    let compact = sign_compact(
+        &invalid,
+        "runtime-1",
+        TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+        &key,
+    )
+    .unwrap();
+    assert!(
+        verify_tenant_resource_receipt(&compact, "runtime-1", &key.verifying_key(), 1_030,)
+            .is_err()
+    );
+}
+
+#[test]
 fn tenant_resource_receipt_resource_binding_is_order_independent() {
     let mut task = tenant_resource_task();
     let second = TenantResourceIdentity {
@@ -2838,6 +3042,11 @@ fn tenant_resource_receipt_resource_binding_is_order_independent() {
     }
     let mut receipt = tenant_resource_receipt();
     receipt.resources.push(second);
+    receipt.resource_mappings.push(TenantResourceMapping {
+        kind: TenantResourceKind::User,
+        resource_id: "user:secondary".to_owned(),
+        public_id: "00000000-0000-0000-0000-000000000002".to_owned(),
+    });
     receipt.resources.reverse();
 
     validate_tenant_resource_receipt_binding(&task, &receipt).unwrap();
@@ -2871,7 +3080,7 @@ fn tenant_resource_manifest_digest_is_canonical_and_rejects_invalid_sets() {
         canonical_tenant_resource_manifest_sha256(&changed).unwrap()
     );
     let mut changed_kind = resources.clone();
-    changed_kind[0].kind = TenantResourceKind::MtlsTrustAnchor;
+    changed_kind[0].kind = TenantResourceKind::Openid4vcTrustPolicy;
     assert_ne!(
         canonical_tenant_resource_manifest_sha256(&resources).unwrap(),
         canonical_tenant_resource_manifest_sha256(&changed_kind).unwrap()
@@ -2891,5 +3100,9 @@ fn tenant_resource_manifest_digest_is_canonical_and_rejects_invalid_sets() {
     assert_eq!(
         empty,
         "b5872ae433b0e5470e831afe4d88a816996f28e6bcaf409a5a333107f00789f2"
+    );
+    assert_eq!(
+        serde_json::to_value(TenantResourceKind::Openid4vcTrustPolicy).unwrap(),
+        serde_json::json!("openid4vc-trust-policy")
     );
 }

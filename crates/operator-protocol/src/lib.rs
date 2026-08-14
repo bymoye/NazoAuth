@@ -71,8 +71,9 @@ pub use signing::{
 pub use verification::{
     validate_conformance_matrix_descriptor, validate_discovery_request,
     validate_file_identifier_value, validate_openid4vc_conformance_trust,
-    validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
-    validate_tenant_resource_capability, validate_tenant_resource_capability_binding,
+    validate_openid4vc_trust_policy, validate_runtime_receipt_deployment_binding,
+    validate_task_deployment_binding, validate_tenant_resource_capability,
+    validate_tenant_resource_capability_binding,
     validate_tenant_resource_capability_request_binding, validate_tenant_resource_receipt,
     validate_tenant_resource_receipt_binding, validate_tenant_resource_receipt_capability_binding,
     validate_tenant_resource_receipt_capability_binding_at,

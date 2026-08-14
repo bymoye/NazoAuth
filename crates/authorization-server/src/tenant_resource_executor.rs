@@ -18,13 +18,16 @@ use nazo_identity::ports::RepositoryError;
 use nazo_identity::{TenantContext, TenantId};
 use nazo_key_management::validate_mtls_trust_anchor;
 use nazo_operator_protocol::{
-    TenantResourceIdentity, TenantResourceKind, TenantResourceOperation, TenantResourceTask,
-    TenantResourceTaskPayload, canonical_tenant_resource_manifest_sha256,
+    TenantResourceIdentity, TenantResourceKind, TenantResourceMapping, TenantResourceOperation,
+    TenantResourceTask, TenantResourceTaskPayload, canonical_tenant_resource_manifest_sha256,
+    validate_openid4vc_trust_policy,
 };
 use nazo_postgres::{
-    NewTenantResourceBinding, NewTenantResourceOperation, OperatorManagedTrustAnchor,
-    TenantResourceBinding, TenantResourceBindingDeactivate, TenantResourceOperationWrite,
-    TenantResourceRepository, TenantResourceStateCas, UserInsert,
+    NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, NewTenantResourceOperation,
+    Openid4vcTrustPolicyClientBind, Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke,
+    Openid4vcTrustPolicyWrite, OperatorManagedTrustAnchor, TenantResourceBinding,
+    TenantResourceBindingDeactivate, TenantResourceOperationWrite, TenantResourceRepository,
+    TenantResourceStateCas, UserInsert, active_public_client_id_on_connection,
     append_fresh_security_audit_on_connection, deactivate_client_on_connection,
     delete_operator_managed_dataset_on_connection, disable_user_on_connection,
     insert_client_on_connection, insert_operator_managed_trust_anchor_on_connection,
@@ -259,7 +262,7 @@ impl PostgresTenantResourceExecutor {
                     return Err(transaction_conflict("baseline_state"));
                 }
 
-                let result_resources = match task.operation {
+                let (result_resources, resource_mappings) = match task.operation {
                     TenantResourceOperation::Apply => {
                         apply_resources(
                             connection,
@@ -276,7 +279,7 @@ impl PostgresTenantResourceExecutor {
                         )
                         .await?
                     }
-                    TenantResourceOperation::Revoke => {
+                    TenantResourceOperation::Revoke => (
                         revoke_resources(
                             connection,
                             tenant_id,
@@ -284,11 +287,13 @@ impl PostgresTenantResourceExecutor {
                             &task,
                             &resources,
                         )
-                        .await?
-                    }
-                    TenantResourceOperation::Enumerate => {
-                        enumerate_resources(connection, tenant_id, &task).await?
-                    }
+                        .await?,
+                        Vec::new(),
+                    ),
+                    TenantResourceOperation::Enumerate => (
+                        enumerate_resources(connection, tenant_id, &task).await?,
+                        Vec::new(),
+                    ),
                 };
 
                 if task.operation == TenantResourceOperation::Enumerate {
@@ -356,6 +361,7 @@ impl PostgresTenantResourceExecutor {
                 let execution = TenantResourceExecutionResult {
                     revision: result_revision,
                     resources: result_resources,
+                    resource_mappings,
                     audit_sequence,
                     audit_previous_sha256: hex_bytes(&audit.previous_hash),
                 };
@@ -492,6 +498,7 @@ impl PostgresTenantResourceExecutor {
                         .map_err(map_preparation_error)?;
                     PreparedApplyPayload::OauthClient(Box::new(PreparedClient {
                         identity: resource.identity.clone(),
+                        trust_policy_resource_id: value.trust_policy_resource_id,
                         prepared,
                     }))
                 }
@@ -516,6 +523,14 @@ impl PostgresTenantResourceExecutor {
                         claims: value.claims,
                     }))
                 }
+                TenantResourcePayload::Openid4vcTrustPolicy(value) => {
+                    validate_openid4vc_trust_policy(&value.public_material)
+                        .map_err(|_| TenantResourceExecutorError::Rejected)?;
+                    PreparedApplyPayload::TrustPolicy(Box::new(PreparedTrustPolicy {
+                        identity: resource.identity.clone(),
+                        public_material: value.public_material,
+                    }))
+                }
             };
             prepared.push(payload);
         }
@@ -532,6 +547,7 @@ enum PreparedApplyPayload {
     OauthClient(Box<PreparedClient>),
     Mtls(Box<PreparedMtls>),
     Dataset(Box<PreparedDataset>),
+    TrustPolicy(Box<PreparedTrustPolicy>),
 }
 
 struct PreparedUser {
@@ -545,6 +561,7 @@ struct PreparedUser {
 
 struct PreparedClient {
     identity: TenantResourceIdentity,
+    trust_policy_resource_id: Option<String>,
     prepared: PreparedOAuthClient,
 }
 
@@ -565,12 +582,18 @@ struct PreparedDataset {
     claims: Value,
 }
 
+struct PreparedTrustPolicy {
+    identity: TenantResourceIdentity,
+    public_material: nazo_operator_protocol::Openid4vcTrustPolicy,
+}
+
 fn payload_sort_key(payload: &PreparedApplyPayload) -> (u8, &str) {
     match payload {
         PreparedApplyPayload::User(value) => (0, &value.identity.resource_id),
         PreparedApplyPayload::OauthClient(value) => (1, &value.identity.resource_id),
         PreparedApplyPayload::Mtls(value) => (2, &value.identity.resource_id),
         PreparedApplyPayload::Dataset(value) => (3, &value.identity.resource_id),
+        PreparedApplyPayload::TrustPolicy(value) => (4, &value.identity.resource_id),
     }
 }
 
@@ -582,25 +605,28 @@ async fn apply_resources(
     resources: &[PreparedTenantResource],
     payloads: &[PreparedApplyPayload],
     data_key: &Option<[u8; 32]>,
-) -> Result<Vec<TenantResourceIdentity>, ExecutorTransactionError> {
+) -> Result<(Vec<TenantResourceIdentity>, Vec<TenantResourceMapping>), ExecutorTransactionError> {
     let active = active_binding_map(connection, tenant_id).await?;
     let mut locators = BTreeMap::<ResourceKey, String>::new();
-    let desired_keys = resources
+    let delta_keys = resources
         .iter()
         .map(|resource| ResourceKey::from_identity(&resource.identity))
         .collect::<std::collections::BTreeSet<_>>();
-    validate_desired_dependencies(payloads, &desired_keys)?;
+    let mut available_keys = active
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    available_keys.extend(delta_keys.iter().cloned());
+    validate_desired_dependencies(payloads, &available_keys)?;
 
     // Every identity lock is acquired in one global order before either the
-    // dependency-ordered removal phase or the creation phase.  Without this
-    // pre-lock, two complete replacements of the same active set could lock
-    // removed resources in reverse dependency order and desired resources in
-    // forward order, creating a cycle before the tenant revision CAS.
+    // dependency-ordered creation phase or the revision CAS.  This keeps a
+    // delta apply from racing a revoke/apply for an existing identity.
     let mut locked_keys = active
         .keys()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    locked_keys.extend(desired_keys.iter().cloned());
+    locked_keys.extend(delta_keys.iter().cloned());
     for key in locked_keys {
         TenantResourceRepository::lock_binding_identity_on_connection(
             connection,
@@ -611,61 +637,32 @@ async fn apply_resources(
         .await
         .map_err(ExecutorTransactionError::Repository)?;
     }
-    for resource in resources {
-        let key = ResourceKey::new(resource.identity.kind, &resource.identity.resource_id);
-        if let Some(binding) = active.get(&key) {
-            if binding.resource_digest != resource.identity.digest {
-                return Err(ExecutorTransactionError::Executor(
-                    TenantResourceExecutorError::Conflict,
-                ));
-            }
-            locators.insert(key, binding.locator.clone());
-        }
-    }
-
-    // Apply is a complete desired-state replacement.  Rows that are active
-    // today but absent from the signed desired set are revoked with their
-    // persisted digest fence before new resources are bound.  Reverse kind
-    // order removes dependent datasets/anchors before their users/clients.
-    let mut removed = active
-        .iter()
-        .filter(|(key, _)| !desired_keys.contains(*key))
-        .map(|(_, binding)| binding.clone())
-        .collect::<Vec<_>>();
-    removed.sort_by(|left, right| {
-        kind_order(parse_kind(&right.resource_kind).unwrap_or(TenantResourceKind::User))
-            .cmp(&kind_order(
-                parse_kind(&left.resource_kind).unwrap_or(TenantResourceKind::User),
-            ))
-            .then_with(|| left.resource_id.cmp(&right.resource_id))
-    });
-    for binding in removed {
-        let kind = parse_kind(&binding.resource_kind).ok_or(ExecutorTransactionError::Executor(
-            TenantResourceExecutorError::Unavailable,
-        ))?;
-        if !is_operator_locator(&binding.locator, kind) {
+    // Active bindings are part of the available dependency graph.  Keep
+    // their operator-owned locators in the same map as newly-created delta
+    // rows so an mTLS anchor or dataset can refer to a parent omitted from
+    // this delta.
+    for (key, binding) in &active {
+        if !is_operator_locator(&binding.locator, key.kind) {
             return Err(ExecutorTransactionError::Executor(
                 TenantResourceExecutorError::Rejected,
             ));
         }
-        match TenantResourceRepository::deactivate_binding_on_connection(
-            connection,
-            tenant_id,
-            &binding.resource_kind,
-            &binding.resource_id,
-            &binding.resource_digest,
-        )
-        .await
-        .map_err(map_repository_error)?
+        locators.insert(key.clone(), binding.locator.clone());
+    }
+
+    // Reusing an active identity is idempotent only when its digest matches.
+    // A changed payload must be fenced through an explicit Revoke followed by
+    // a fresh Apply; this delta path never overwrites it in place.
+    for resource in resources {
+        let key = ResourceKey::new(resource.identity.kind, &resource.identity.resource_id);
+        if active
+            .get(&key)
+            .is_some_and(|binding| binding.resource_digest != resource.identity.digest)
         {
-            TenantResourceBindingDeactivate::Deactivated(_) => {}
-            TenantResourceBindingDeactivate::Conflict(_) => {
-                return Err(ExecutorTransactionError::Executor(
-                    TenantResourceExecutorError::Conflict,
-                ));
-            }
+            return Err(ExecutorTransactionError::Executor(
+                TenantResourceExecutorError::Conflict,
+            ));
         }
-        revoke_locator(connection, tenant_id, tenant, kind, &binding.locator).await?;
     }
 
     // Logical references are resolved only after users and clients exist.
@@ -832,6 +829,93 @@ async fn apply_resources(
             dataset_locator(user_id, &payload.configuration_id),
         );
     }
+    for payload in payloads.iter().filter_map(|p| match p {
+        PreparedApplyPayload::TrustPolicy(value) => Some(value),
+        _ => None,
+    }) {
+        if locators.contains_key(&ResourceKey::from_identity(&payload.identity)) {
+            continue;
+        }
+        let public_material = serde_json::to_value(&payload.public_material).map_err(|_| {
+            ExecutorTransactionError::Executor(TenantResourceExecutorError::Unavailable)
+        })?;
+        let applied = TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+            connection,
+            NewStoredOpenid4vcTrustPolicy {
+                tenant_id,
+                resource_id: &payload.identity.resource_id,
+                resource_digest: &payload.identity.digest,
+                public_material: &public_material,
+                wallet_origins: &payload.public_material.wallet_authorization_origins,
+            },
+        )
+        .await
+        .map_err(ExecutorTransactionError::Repository)?;
+        let policy_id = match applied {
+            Openid4vcTrustPolicyWrite::Applied(policy)
+            | Openid4vcTrustPolicyWrite::Replayed(policy) => policy.id,
+            Openid4vcTrustPolicyWrite::Conflict(_) => {
+                return Err(transaction_conflict("trust_policy_apply"));
+            }
+        };
+        locators.insert(
+            ResourceKey::from_identity(&payload.identity),
+            trust_policy_locator(policy_id),
+        );
+    }
+
+    // Bind OAuth clients to the policy only after all logical resources have
+    // locators.  This preserves the user/client/mTLS/dataset creation order
+    // while allowing a client and a new policy to be introduced together.
+    for payload in payloads.iter().filter_map(|p| match p {
+        PreparedApplyPayload::OauthClient(value) => Some(value),
+        _ => None,
+    }) {
+        let Some(policy_resource_id) = payload.trust_policy_resource_id.as_deref() else {
+            continue;
+        };
+        let policy_key =
+            ResourceKey::new(TenantResourceKind::Openid4vcTrustPolicy, policy_resource_id);
+        locators
+            .get(&policy_key)
+            .ok_or(ExecutorTransactionError::Executor(
+                TenantResourceExecutorError::Rejected,
+            ))?;
+        let client_locator = locators
+            .get(&ResourceKey::from_identity(&payload.identity))
+            .ok_or(ExecutorTransactionError::Executor(
+                TenantResourceExecutorError::Rejected,
+            ))?;
+        let client_id = parse_uuid_locator(client_locator, TenantResourceKind::OauthClient)?;
+        let policy_digest = resources
+            .iter()
+            .find(|resource| ResourceKey::from_identity(&resource.identity) == policy_key)
+            .map(|resource| resource.identity.digest.as_str())
+            .or_else(|| {
+                active
+                    .get(&policy_key)
+                    .map(|binding| binding.resource_digest.as_str())
+            })
+            .ok_or(ExecutorTransactionError::Executor(
+                TenantResourceExecutorError::Rejected,
+            ))?;
+        match TenantResourceRepository::bind_openid4vc_trust_policy_client_on_connection(
+            connection,
+            tenant_id,
+            policy_resource_id,
+            policy_digest,
+            client_id,
+        )
+        .await
+        .map_err(ExecutorTransactionError::Repository)?
+        {
+            Openid4vcTrustPolicyClientBind::Bound { .. }
+            | Openid4vcTrustPolicyClientBind::Replayed { .. } => {}
+            Openid4vcTrustPolicyClientBind::Conflict { .. } => {
+                return Err(transaction_conflict("trust_policy_client_bind"));
+            }
+        }
+    }
 
     for resource in resources {
         let key = ResourceKey::from_identity(&resource.identity);
@@ -875,15 +959,74 @@ async fn apply_resources(
             TenantResourceExecutorError::Conflict,
         ));
     }
-    Ok(result)
+
+    // Prepare the public mapping set for the receipt extension.  The protocol
+    // only exposes User UUIDs and OAuth public client IDs; mTLS, dataset, and
+    // trust-policy locators intentionally remain internal.
+    let resource_mappings =
+        collect_apply_resource_mappings(connection, tenant_id, resources, &locators).await?;
+    Ok((result, resource_mappings))
+}
+
+async fn collect_apply_resource_mappings(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    resources: &[PreparedTenantResource],
+    locators: &BTreeMap<ResourceKey, String>,
+) -> Result<Vec<TenantResourceMapping>, ExecutorTransactionError> {
+    let mut mappings = Vec::new();
+    for resource in resources {
+        let public_id = match resource.identity.kind {
+            TenantResourceKind::User => {
+                let locator = locators
+                    .get(&ResourceKey::from_identity(&resource.identity))
+                    .ok_or(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Rejected,
+                    ))?;
+                parse_uuid_locator(locator, TenantResourceKind::User)?.to_string()
+            }
+            TenantResourceKind::OauthClient => {
+                let locator = locators
+                    .get(&ResourceKey::from_identity(&resource.identity))
+                    .ok_or(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Rejected,
+                    ))?;
+                let client_id = parse_uuid_locator(locator, TenantResourceKind::OauthClient)?;
+                active_public_client_id_on_connection(connection, tenant_id, client_id)
+                    .await
+                    .map_err(ExecutorTransactionError::Repository)?
+                    .ok_or_else(|| transaction_conflict("apply_oauth_client_mapping"))?
+            }
+            TenantResourceKind::MtlsTrustAnchor
+            | TenantResourceKind::Openid4vcDataset
+            | TenantResourceKind::Openid4vcTrustPolicy => {
+                continue;
+            }
+        };
+        mappings.push(TenantResourceMapping {
+            kind: resource.identity.kind,
+            resource_id: resource.identity.resource_id.clone(),
+            public_id,
+        });
+    }
+    mappings.sort_by(|left, right| {
+        (kind_order(left.kind), left.resource_id.as_str())
+            .cmp(&(kind_order(right.kind), right.resource_id.as_str()))
+    });
+    Ok(mappings)
 }
 
 fn validate_desired_dependencies(
     payloads: &[PreparedApplyPayload],
-    desired_keys: &std::collections::BTreeSet<ResourceKey>,
+    available_keys: &std::collections::BTreeSet<ResourceKey>,
 ) -> Result<(), ExecutorTransactionError> {
     for payload in payloads {
         let dependency = match payload {
+            PreparedApplyPayload::OauthClient(value) => {
+                value.trust_policy_resource_id.as_ref().map(|resource_id| {
+                    ResourceKey::new(TenantResourceKind::Openid4vcTrustPolicy, resource_id)
+                })
+            }
             PreparedApplyPayload::Mtls(value) => Some(ResourceKey::new(
                 TenantResourceKind::OauthClient,
                 &value.client_resource_id,
@@ -892,9 +1035,10 @@ fn validate_desired_dependencies(
                 TenantResourceKind::User,
                 &value.user_resource_id,
             )),
-            PreparedApplyPayload::User(_) | PreparedApplyPayload::OauthClient(_) => None,
+            PreparedApplyPayload::TrustPolicy(_) => None,
+            PreparedApplyPayload::User(_) => None,
         };
-        if dependency.is_some_and(|dependency| !desired_keys.contains(&dependency)) {
+        if dependency.is_some_and(|dependency| !available_keys.contains(&dependency)) {
             return Err(ExecutorTransactionError::Executor(
                 TenantResourceExecutorError::Rejected,
             ));
@@ -959,7 +1103,16 @@ async fn revoke_resources(
                 return Err(transaction_conflict("revoke_binding_fence"));
             }
         }
-        revoke_locator(connection, tenant_id, tenant, identity.kind, locator).await?;
+        revoke_locator(
+            connection,
+            tenant_id,
+            tenant,
+            identity.kind,
+            &identity.resource_id,
+            &identity.digest,
+            locator,
+        )
+        .await?;
     }
     let revoked = targets
         .into_iter()
@@ -1023,7 +1176,39 @@ async fn validate_revoke_dependency_closure(
                 .map_err(map_diesel_error)?;
                 oauth_client_locator(parent.client_id)
             }
-            TenantResourceKind::OauthClient | TenantResourceKind::User => continue,
+            TenantResourceKind::OauthClient => {
+                let client_id =
+                    parse_uuid_locator(&child.locator, TenantResourceKind::OauthClient)?;
+                let public_client =
+                    active_public_client_id_on_connection(connection, tenant_id, client_id)
+                        .await
+                        .map_err(ExecutorTransactionError::Repository)?
+                        .ok_or_else(|| transaction_conflict("oauth_client_dependency"))?;
+                match TenantResourceRepository::openid4vc_trust_policy_for_client_on_connection(
+                    connection,
+                    tenant_id,
+                    &public_client,
+                )
+                .await
+                .map_err(ExecutorTransactionError::Repository)?
+                {
+                    Openid4vcTrustPolicyForClient::Active(policy)
+                        if targets.contains(&ResourceKey::new(
+                            TenantResourceKind::Openid4vcTrustPolicy,
+                            &policy.resource_id,
+                        )) =>
+                    {
+                        return Err(ExecutorTransactionError::Executor(
+                            TenantResourceExecutorError::Rejected,
+                        ));
+                    }
+                    Openid4vcTrustPolicyForClient::Active(_)
+                    | Openid4vcTrustPolicyForClient::BoundInactive
+                    | Openid4vcTrustPolicyForClient::Unbound => {}
+                }
+                continue;
+            }
+            TenantResourceKind::Openid4vcTrustPolicy | TenantResourceKind::User => continue,
         };
         let parent = active
             .iter()
@@ -1047,6 +1232,8 @@ async fn revoke_locator(
     tenant_id: Uuid,
     tenant: TenantContext,
     kind: TenantResourceKind,
+    resource_id: &str,
+    expected_digest: &str,
     locator: &str,
 ) -> Result<(), ExecutorTransactionError> {
     match parse_locator(locator, kind)? {
@@ -1106,6 +1293,32 @@ async fn revoke_locator(
                 return Err(ExecutorTransactionError::Executor(
                     TenantResourceExecutorError::Rejected,
                 ));
+            }
+        }
+        ResourceLocator::TrustPolicy(policy_id) => {
+            let result = TenantResourceRepository::revoke_openid4vc_trust_policy_on_connection(
+                connection,
+                tenant_id,
+                resource_id,
+                expected_digest,
+            )
+            .await
+            .map_err(ExecutorTransactionError::Repository)?;
+            match result {
+                Openid4vcTrustPolicyRevoke::Revoked(policy) if policy.id == policy_id => {}
+                Openid4vcTrustPolicyRevoke::Revoked(_) => {
+                    return Err(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Rejected,
+                    ));
+                }
+                Openid4vcTrustPolicyRevoke::Conflict(_) => {
+                    return Err(transaction_conflict("trust_policy_revoke_digest"));
+                }
+                Openid4vcTrustPolicyRevoke::AlreadyAbsent => {
+                    return Err(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Rejected,
+                    ));
+                }
             }
         }
     }
@@ -1196,6 +1409,7 @@ enum ResourceLocator {
     User(Uuid),
     OauthClient(Uuid),
     Mtls(Uuid),
+    TrustPolicy(Uuid),
     Dataset {
         subject_id: Uuid,
         configuration_id: String,
@@ -1221,6 +1435,13 @@ fn parse_locator(
         ("mtls-trust-anchor", TenantResourceKind::MtlsTrustAnchor) if parts.next().is_none() => {
             Uuid::parse_str(value).ok().map(ResourceLocator::Mtls)
         }
+        ("openid4vc-trust-policy", TenantResourceKind::Openid4vcTrustPolicy)
+            if parts.next().is_none() =>
+        {
+            Uuid::parse_str(value)
+                .ok()
+                .map(ResourceLocator::TrustPolicy)
+        }
         ("openid4vc-dataset", TenantResourceKind::Openid4vcDataset) => {
             let configuration = parts.collect::<Vec<_>>().join("/");
             Uuid::parse_str(value).ok().and_then(|subject_id| {
@@ -1244,7 +1465,8 @@ fn parse_uuid_locator(
     match parse_locator(locator, kind)? {
         ResourceLocator::User(id)
         | ResourceLocator::OauthClient(id)
-        | ResourceLocator::Mtls(id) => Ok(id),
+        | ResourceLocator::Mtls(id)
+        | ResourceLocator::TrustPolicy(id) => Ok(id),
         ResourceLocator::Dataset { .. } => Err(ExecutorTransactionError::Executor(
             TenantResourceExecutorError::Rejected,
         )),
@@ -1263,6 +1485,10 @@ fn mtls_locator(id: Uuid) -> String {
     format!("mtls-trust-anchor/{id}")
 }
 
+fn trust_policy_locator(id: Uuid) -> String {
+    format!("openid4vc-trust-policy/{id}")
+}
+
 fn dataset_locator(subject_id: Uuid, configuration_id: &str) -> String {
     format!("openid4vc-dataset/{subject_id}/{configuration_id}")
 }
@@ -1272,6 +1498,7 @@ fn kind_name(kind: TenantResourceKind) -> &'static str {
         TenantResourceKind::OauthClient => "oauth-client",
         TenantResourceKind::MtlsTrustAnchor => "mtls-trust-anchor",
         TenantResourceKind::Openid4vcDataset => "openid4vc-dataset",
+        TenantResourceKind::Openid4vcTrustPolicy => "openid4vc-trust-policy",
         TenantResourceKind::User => "user",
     }
 }
@@ -1281,6 +1508,7 @@ fn parse_kind(value: &str) -> Option<TenantResourceKind> {
         "oauth-client" => Some(TenantResourceKind::OauthClient),
         "mtls-trust-anchor" => Some(TenantResourceKind::MtlsTrustAnchor),
         "openid4vc-dataset" => Some(TenantResourceKind::Openid4vcDataset),
+        "openid4vc-trust-policy" => Some(TenantResourceKind::Openid4vcTrustPolicy),
         "user" => Some(TenantResourceKind::User),
         _ => None,
     }
@@ -1296,6 +1524,7 @@ fn kind_order(kind: TenantResourceKind) -> u8 {
         TenantResourceKind::OauthClient => 1,
         TenantResourceKind::MtlsTrustAnchor => 2,
         TenantResourceKind::Openid4vcDataset => 3,
+        TenantResourceKind::Openid4vcTrustPolicy => 4,
     }
 }
 

@@ -21,10 +21,10 @@ use ed25519_dalek::VerifyingKey;
 use futures_util::future::BoxFuture;
 use nazo_auth::CreateClientRequest;
 use nazo_operator_protocol::{
-    ActorKind, EmbeddedIdentity, ProtocolError, TenantResourceCapability, TenantResourceIdentity,
-    TenantResourceKind, TenantResourceOperation, TenantResourceOutcome, TenantResourceReceipt,
-    TenantResourceTask, TenantResourceTaskPayload, canonical_tenant_resource_manifest_sha256,
-    compact_sha256, instance_key_id, validate_discovery_request,
+    ActorKind, EmbeddedIdentity, Openid4vcTrustPolicy, ProtocolError, TenantResourceCapability,
+    TenantResourceIdentity, TenantResourceKind, TenantResourceMapping, TenantResourceOperation,
+    TenantResourceOutcome, TenantResourceReceipt, TenantResourceTask, TenantResourceTaskPayload,
+    compact_sha256, instance_key_id, validate_discovery_request, validate_openid4vc_trust_policy,
     validate_tenant_resource_capability, validate_tenant_resource_capability_binding,
     validate_tenant_resource_capability_request_binding, validate_tenant_resource_receipt_binding,
     validate_tenant_resource_receipt_capability_binding_at,
@@ -199,6 +199,7 @@ pub enum TenantResourcePayload {
     OauthClient(Box<OauthClientResourcePayload>),
     MtlsTrustAnchor(MtlsTrustAnchorResourcePayload),
     Openid4vcDataset(Openid4vcDatasetResourcePayload),
+    Openid4vcTrustPolicy(Box<Openid4vcTrustPolicyResourcePayload>),
 }
 
 #[derive(Clone)]
@@ -214,6 +215,7 @@ pub struct UserResourcePayload {
 pub struct OauthClientResourcePayload {
     pub request: CreateClientRequest,
     pub supplied_secret: Option<String>,
+    pub trust_policy_resource_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -227,6 +229,11 @@ pub struct Openid4vcDatasetResourcePayload {
     pub user_resource_id: String,
     pub configuration_id: String,
     pub claims: Value,
+}
+
+#[derive(Clone)]
+pub struct Openid4vcTrustPolicyResourcePayload {
+    pub public_material: Openid4vcTrustPolicy,
 }
 
 #[derive(Clone)]
@@ -248,6 +255,9 @@ pub struct PreparedTenantResourceTask {
 pub struct TenantResourceExecutionResult {
     pub revision: u64,
     pub resources: Vec<TenantResourceIdentity>,
+    /// Public identifiers assigned by the authoritative resource services.
+    /// Only successful Apply operations may populate this collection.
+    pub resource_mappings: Vec<TenantResourceMapping>,
     pub audit_sequence: u64,
     pub audit_previous_sha256: String,
 }
@@ -718,6 +728,7 @@ impl TenantResourceReceiptIssuer for BoundReceiptIssuer<'_> {
             revision: result.revision,
             outcome: TenantResourceOutcome::Succeeded,
             resources: result.resources,
+            resource_mappings: result.resource_mappings,
             baseline_manifest_sha256: self.task.baseline_manifest_sha256.clone(),
             resource_manifest_sha256: self.task.resource_manifest_sha256.clone(),
             started_at: self.started_at,
@@ -818,6 +829,8 @@ struct OauthClientManifestPayload {
     request: CreateClientRequest,
     #[serde(default)]
     supplied_secret: Option<String>,
+    #[serde(default)]
+    trust_policy_resource_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -888,15 +901,6 @@ fn prepare_task(
             ));
         }
         let expected = task_resource_identities(task)?;
-        let expected_manifest = expected.values().cloned().collect::<Vec<_>>();
-        if canonical_tenant_resource_manifest_sha256(&expected_manifest)
-            .map_err(|_| TenantResourceProviderError::BadRequest("invalid desired manifest"))?
-            != task.resource_manifest_sha256
-        {
-            return Err(TenantResourceProviderError::Forbidden(
-                "desired resource manifest does not match task",
-            ));
-        }
         let mut seen_ids = BTreeSet::new();
         let mut seen_kinds = BTreeSet::new();
         let mut payload_total = 0usize;
@@ -1051,6 +1055,10 @@ fn decode_payload(
                 OauthClientResourcePayload {
                     request: value.request,
                     supplied_secret: value.supplied_secret,
+                    trust_policy_resource_id: value
+                        .trust_policy_resource_id
+                        .map(|resource_id| validate_resource_id(&resource_id).map(|()| resource_id))
+                        .transpose()?,
                 },
             )))
         }
@@ -1102,6 +1110,20 @@ fn decode_payload(
                     claims: value.claims,
                 },
             ))
+        }
+        TenantResourceKind::Openid4vcTrustPolicy => {
+            let public_material: Openid4vcTrustPolicy =
+                serde_json::from_slice(payload).map_err(|_| {
+                    TenantResourceProviderError::BadRequest(
+                        "invalid OpenID4VC trust policy payload",
+                    )
+                })?;
+            validate_openid4vc_trust_policy(&public_material).map_err(|_| {
+                TenantResourceProviderError::BadRequest("invalid OpenID4VC trust policy")
+            })?;
+            Ok(TenantResourcePayload::Openid4vcTrustPolicy(Box::new(
+                Openid4vcTrustPolicyResourcePayload { public_material },
+            )))
         }
     }
 }

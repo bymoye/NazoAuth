@@ -4,7 +4,8 @@ use diesel_async::{
 };
 use nazo_identity::ports::RepositoryError;
 use nazo_postgres::{
-    NewTenantResourceBinding, NewTenantResourceOperation, TenantResourceBindingDeactivate,
+    NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, NewTenantResourceOperation,
+    Openid4vcTrustPolicyRevoke, Openid4vcTrustPolicyWrite, TenantResourceBindingDeactivate,
     TenantResourceOperationWrite, TenantResourceRepository, TenantResourceStateCas, create_pool,
     get_conn, run_pending_migrations,
 };
@@ -67,6 +68,253 @@ async fn insert_tenant(connection: &mut AsyncPgConnection, tenant_id: Uuid) -> Q
     .execute(connection)
     .await
     .map(|_| ())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openid4vc_trust_policy_is_tenant_scoped_digest_fenced_and_transactional() {
+    let database_url = database_url();
+    run_pending_migrations(&database_url)
+        .await
+        .expect("pending migrations should apply");
+    let pool = create_pool(&database_url, 2).expect("test pool should build");
+    let tenant_id = Uuid::now_v7();
+    let other_tenant_id = Uuid::now_v7();
+    let mut connection = get_conn(&pool)
+        .await
+        .expect("test connection should acquire");
+    insert_tenant(&mut connection, tenant_id)
+        .await
+        .expect("tenant should insert");
+    insert_tenant(&mut connection, other_tenant_id)
+        .await
+        .expect("other tenant should insert");
+
+    let material = json!({
+        "schema": 1,
+        "client_attestation_issuer": "https://wallet.example/",
+        "client_attestation_jwks": {"keys": [{"kty": "EC", "kid": "client"}]},
+        "key_attestation_jwks": {"keys": [{"kty": "EC", "kid": "holder"}]},
+        "credential_trust_anchor_pem": "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n"
+    });
+    let first_digest = "a".repeat(64);
+    let second_digest = "b".repeat(64);
+    let wallet_origins = vec!["https://wallet.example/".to_owned()];
+    connection
+        .transaction::<(), TestTransactionError, _>(async |connection| {
+            let applied = TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+                connection,
+                NewStoredOpenid4vcTrustPolicy {
+                    tenant_id,
+                    resource_id: "wallet-trust",
+                    resource_digest: &first_digest,
+                    public_material: &material,
+                    wallet_origins: &wallet_origins,
+                },
+            )
+            .await?;
+            assert!(matches!(applied, Openid4vcTrustPolicyWrite::Applied(_)));
+
+            let replay = TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+                connection,
+                NewStoredOpenid4vcTrustPolicy {
+                    tenant_id,
+                    resource_id: "wallet-trust",
+                    resource_digest: &first_digest,
+                    public_material: &material,
+                    wallet_origins: &wallet_origins,
+                },
+            )
+            .await?;
+            assert!(matches!(replay, Openid4vcTrustPolicyWrite::Replayed(_)));
+
+            let cross_tenant = TenantResourceRepository::get_openid4vc_trust_policy_on_connection(
+                connection,
+                other_tenant_id,
+                "wallet-trust",
+            )
+            .await?;
+            assert!(
+                cross_tenant.is_none(),
+                "tenant trust must not cross boundaries"
+            );
+
+            let drift = TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+                connection,
+                NewStoredOpenid4vcTrustPolicy {
+                    tenant_id,
+                    resource_id: "wallet-trust",
+                    resource_digest: &second_digest,
+                    public_material: &material,
+                    wallet_origins: &wallet_origins,
+                },
+            )
+            .await?;
+            match drift {
+                Openid4vcTrustPolicyWrite::Conflict(current) => {
+                    assert_eq!(current.resource_digest, first_digest);
+                }
+                other => {
+                    return Err(TestTransactionError::Assertion(format!(
+                        "digest drift returned {other:?}"
+                    )));
+                }
+            }
+
+            let stale = TenantResourceRepository::revoke_openid4vc_trust_policy_on_connection(
+                connection,
+                tenant_id,
+                "wallet-trust",
+                &second_digest,
+            )
+            .await?;
+            assert!(matches!(stale, Openid4vcTrustPolicyRevoke::Conflict(_)));
+            let revoked = TenantResourceRepository::revoke_openid4vc_trust_policy_on_connection(
+                connection,
+                tenant_id,
+                "wallet-trust",
+                &first_digest,
+            )
+            .await?;
+            let Openid4vcTrustPolicyRevoke::Revoked(revoked) = revoked else {
+                return Err(TestTransactionError::Assertion(
+                    "exact trust policy revoke did not revoke".to_owned(),
+                ));
+            };
+            assert!(
+                TenantResourceRepository::get_openid4vc_trust_policy_on_connection(
+                    connection,
+                    tenant_id,
+                    "wallet-trust",
+                )
+                .await?
+                .is_none()
+            );
+            let absent = TenantResourceRepository::revoke_openid4vc_trust_policy_on_connection(
+                connection,
+                tenant_id,
+                "wallet-trust",
+                &first_digest,
+            )
+            .await?;
+            assert_eq!(absent, Openid4vcTrustPolicyRevoke::AlreadyAbsent);
+            let reapplied = TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+                connection,
+                NewStoredOpenid4vcTrustPolicy {
+                    tenant_id,
+                    resource_id: "wallet-trust",
+                    resource_digest: &first_digest,
+                    public_material: &material,
+                    wallet_origins: &wallet_origins,
+                },
+            )
+            .await?;
+            let Openid4vcTrustPolicyWrite::Applied(reapplied) = reapplied else {
+                return Err(TestTransactionError::Assertion(
+                    "revoked trust policy did not create a new generation".to_owned(),
+                ));
+            };
+            assert_ne!(reapplied.id, revoked.id, "revoked binding IDs stay frozen");
+            assert!(
+                TenantResourceRepository::active_openid4vc_trust_policy_binding_on_connection(
+                    connection, tenant_id, revoked.id,
+                )
+                .await?
+                .is_none(),
+                "reapply must not reactivate an old frozen binding ID"
+            );
+            Ok(())
+        })
+        .await
+        .expect("trust policy transaction should commit");
+
+    let rolled_back = connection
+        .transaction::<(), TestTransactionError, _>(async |connection| {
+            TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+                connection,
+                NewStoredOpenid4vcTrustPolicy {
+                    tenant_id,
+                    resource_id: "rolled-back-trust",
+                    resource_digest: &second_digest,
+                    public_material: &material,
+                    wallet_origins: &wallet_origins,
+                },
+            )
+            .await?;
+            Err(TestTransactionError::Rollback)
+        })
+        .await;
+    assert!(matches!(rolled_back, Err(TestTransactionError::Rollback)));
+    assert!(
+        TenantResourceRepository::get_openid4vc_trust_policy_on_connection(
+            &mut connection,
+            tenant_id,
+            "rolled-back-trust",
+        )
+        .await
+        .expect("rolled-back policy lookup should succeed")
+        .is_none()
+    );
+
+    let unknown_tenant = Uuid::now_v7();
+    assert!(
+        TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+            &mut connection,
+            NewStoredOpenid4vcTrustPolicy {
+                tenant_id: unknown_tenant,
+                resource_id: "unknown-tenant",
+                resource_digest: &first_digest,
+                public_material: &material,
+                wallet_origins: &wallet_origins,
+            },
+        )
+        .await
+        .is_err(),
+        "trust policy must reference an existing tenant"
+    );
+    assert!(
+        sql_query(
+            "INSERT INTO openid4vc_trust_policies
+                (tenant_id, resource_id, resource_digest, public_material,
+                 wallet_origins, source)
+             VALUES ($1, 'wrong-source', $2, '{}', '[\"https://wallet.example/\"]',
+                     'admin-session')",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Varchar, _>(&first_digest)
+        .execute(&mut connection)
+        .await
+        .is_err(),
+        "trust policy source must remain operator-managed"
+    );
+    let oversized = json!({"value": "x".repeat(33 * 1024)});
+    assert!(
+        TenantResourceRepository::apply_openid4vc_trust_policy_on_connection(
+            &mut connection,
+            NewStoredOpenid4vcTrustPolicy {
+                tenant_id,
+                resource_id: "oversized",
+                resource_digest: &first_digest,
+                public_material: &oversized,
+                wallet_origins: &wallet_origins,
+            },
+        )
+        .await
+        .is_err(),
+        "public material must be bounded"
+    );
+
+    sql_query("DELETE FROM openid4vc_trust_policies WHERE tenant_id IN ($1, $2)")
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(other_tenant_id)
+        .execute(&mut connection)
+        .await
+        .expect("trust policy rows should clean up");
+    sql_query("DELETE FROM tenants WHERE id IN ($1, $2)")
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(other_tenant_id)
+        .execute(&mut connection)
+        .await
+        .expect("test tenants should clean up");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -574,7 +822,14 @@ async fn tenant_resource_down_refuses_machine_rows_and_receipt_evidence() {
             );
             CREATE TABLE oauth_clients (
                 id UUID PRIMARY KEY, tenant_id UUID NOT NULL,
+                client_id VARCHAR(128) NOT NULL DEFAULT 'fixture-client',
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE openid4vp_transactions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL,
+                conformance_lease_id UUID
             );
             CREATE TABLE oauth_client_mtls_trust_anchor_requests (
                 id UUID PRIMARY KEY, tenant_id UUID NOT NULL, user_id UUID NOT NULL,
@@ -626,6 +881,16 @@ async fn tenant_resource_down_refuses_machine_rows_and_receipt_evidence() {
         .execute(&mut connection)
         .await
         .expect("fixture tenant should insert");
+    sql_query(
+        "INSERT INTO openid4vc_trust_policies
+            (tenant_id, resource_id, resource_digest, public_material, wallet_origins)
+         VALUES ($1, 'down-evidence', $2, '{}', '[\"https://wallet.example/\"]')",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Varchar, _>("d".repeat(64))
+    .execute(&mut connection)
+    .await
+    .expect("trust policy rollback evidence should insert");
     let oversized_receipt_digest = "c".repeat(64);
     assert!(
         sql_query(
@@ -800,6 +1065,8 @@ async fn tenant_resource_down_refuses_machine_rows_and_receipt_evidence() {
              DROP TRIGGER trg_tenant_resource_operations_append_only
                  ON tenant_resource_operations;
              DELETE FROM tenant_resource_operations;
+             DELETE FROM openid4vc_trust_policy_clients;
+             DELETE FROM openid4vc_trust_policies;
              DELETE FROM openid4vci_credential_dataset_events;
              DELETE FROM oauth_client_mtls_trust_anchor_events;
              DELETE FROM oauth_client_mtls_trust_anchor_requests;

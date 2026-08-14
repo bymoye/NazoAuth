@@ -1,6 +1,9 @@
 //! Signature verification, receipt handling, and protocol-policy checks.
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::de::DeserializeOwned;
 
@@ -788,6 +791,7 @@ pub fn validate_tenant_resource_receipt(
         ));
     }
     validate_tenant_resource_identities(&receipt.resources, false)?;
+    validate_tenant_resource_mappings(receipt)?;
     if receipt.started_at <= 0
         || receipt.completed_at < receipt.started_at
         || receipt.exp < receipt.completed_at
@@ -822,6 +826,75 @@ pub fn validate_tenant_resource_receipt(
                 "successful tenant resource receipt revision is invalid",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_tenant_resource_mappings(receipt: &TenantResourceReceipt) -> Result<(), ProtocolError> {
+    if receipt.resource_mappings.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+        return Err(ProtocolError::Policy(
+            "tenant resource mappings are out of bounds",
+        ));
+    }
+    if !matches!(
+        (&receipt.outcome, receipt.operation),
+        (
+            TenantResourceOutcome::Succeeded,
+            TenantResourceOperation::Apply
+        )
+    ) {
+        if receipt.resource_mappings.is_empty() {
+            return Ok(());
+        }
+        return Err(ProtocolError::Policy(
+            "tenant resource mappings are only allowed for successful apply",
+        ));
+    }
+
+    let expected = receipt
+        .resources
+        .iter()
+        .filter(|resource| {
+            matches!(
+                resource.kind,
+                TenantResourceKind::User | TenantResourceKind::OauthClient
+            )
+        })
+        .map(|resource| (resource.kind, resource.resource_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    for mapping in &receipt.resource_mappings {
+        if !matches!(
+            mapping.kind,
+            TenantResourceKind::User | TenantResourceKind::OauthClient
+        ) {
+            return Err(ProtocolError::Policy(
+                "tenant resource mapping kind is not public",
+            ));
+        }
+        validate_file_identifier(&mapping.resource_id)?;
+        match mapping.kind {
+            TenantResourceKind::User => validate_uuid(&mapping.public_id)?,
+            TenantResourceKind::OauthClient => validate_identifier(&mapping.public_id)?,
+            TenantResourceKind::MtlsTrustAnchor
+            | TenantResourceKind::Openid4vcDataset
+            | TenantResourceKind::Openid4vcTrustPolicy => {
+                return Err(ProtocolError::Policy(
+                    "tenant resource mapping kind is not public",
+                ));
+            }
+        }
+        let key = (mapping.kind, mapping.resource_id.as_str());
+        if !expected.contains(&key) || !seen.insert(key) {
+            return Err(ProtocolError::Policy(
+                "tenant resource mappings must cover apply resources exactly",
+            ));
+        }
+    }
+    if seen != expected {
+        return Err(ProtocolError::Policy(
+            "tenant resource mappings must cover apply resources exactly",
+        ));
     }
     Ok(())
 }
@@ -1088,6 +1161,7 @@ pub fn validate_tenant_resource_receipt_binding(
             "tenant resource receipt request binding mismatch",
         ));
     }
+    validate_tenant_resource_receipt_task_mappings(task, receipt)?;
     if matches!(receipt.outcome, TenantResourceOutcome::Succeeded) {
         match (&task.operation, &task.payload) {
             (TenantResourceOperation::Apply, TenantResourceTaskPayload::Apply { resources })
@@ -1117,6 +1191,28 @@ pub fn validate_tenant_resource_receipt_binding(
         }
     }
     Ok(())
+}
+
+fn validate_tenant_resource_receipt_task_mappings(
+    task: &TenantResourceTask,
+    receipt: &TenantResourceReceipt,
+) -> Result<(), ProtocolError> {
+    if matches!(
+        (&task.operation, &receipt.outcome),
+        (
+            TenantResourceOperation::Apply,
+            TenantResourceOutcome::Succeeded
+        )
+    ) {
+        return validate_tenant_resource_mappings(receipt);
+    }
+    if receipt.resource_mappings.is_empty() {
+        Ok(())
+    } else {
+        Err(ProtocolError::Policy(
+            "tenant resource receipt mappings are not allowed for this operation",
+        ))
+    }
 }
 
 fn tenant_resource_identity_sets_equal(
@@ -2218,6 +2314,181 @@ pub fn validate_openid4vc_conformance_trust(
     Ok(())
 }
 
+/// Validate the public trust policy carried by the ordinary OpenID4VC
+/// provider.  The policy is deliberately separate from the conformance lease
+/// material and uses a stricter JSON boundary: only the supported public JWK
+/// members are accepted, so an unknown member cannot smuggle private or
+/// provider-specific state into the signed policy.
+pub fn validate_openid4vc_trust_policy(policy: &Openid4vcTrustPolicy) -> Result<(), ProtocolError> {
+    if policy.schema != 1 {
+        return Err(ProtocolError::Policy(
+            "invalid OpenID4VC trust policy schema",
+        ));
+    }
+    validate_openid4vc_trust_policy_issuer(&policy.client_attestation_issuer)?;
+    validate_openid4vc_wallet_authorization_origins(&policy.wallet_authorization_origins)?;
+    validate_public_certificate_bundle(
+        &policy.credential_trust_anchor_pem,
+        "invalid OpenID4VC trust policy credential anchor",
+    )?;
+    let encoded = serde_json::to_vec(policy).map_err(|_| ProtocolError::Json)?;
+    if encoded.len() > 32 * 1024 {
+        return Err(ProtocolError::Policy(
+            "OpenID4VC trust policy exceeds 32 KiB",
+        ));
+    }
+    validate_openid4vc_trust_jwks_with_options(&policy.client_attestation_jwks, true, true)?;
+    validate_openid4vc_trust_jwks_with_options(&policy.key_attestation_jwks, false, true)?;
+    Ok(())
+}
+
+fn validate_openid4vc_trust_policy_issuer(value: &str) -> Result<(), ProtocolError> {
+    let host_and_path = value.strip_prefix("https://");
+    if value.is_empty()
+        || value.len() > 2048
+        || host_and_path.is_none_or(str::is_empty)
+        || host_and_path.is_some_and(|suffix| {
+            suffix
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| matches!(*byte, b'/' | b'?' | b'#'))
+        })
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+        || value.contains('?')
+        || value.contains('#')
+    {
+        return Err(ProtocolError::Policy(
+            "invalid OpenID4VC trust policy issuer",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_openid4vc_wallet_authorization_origins(
+    origins: &[String],
+) -> Result<(), ProtocolError> {
+    const MAX_ORIGINS: usize = 16;
+    const MAX_ORIGIN_LENGTH: usize = 2048;
+
+    if origins.is_empty() || origins.len() > MAX_ORIGINS {
+        return Err(ProtocolError::Policy(
+            "OpenID4VC trust policy origins are out of bounds",
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for origin in origins {
+        if origin.is_empty()
+            || origin.len() > MAX_ORIGIN_LENGTH
+            || !origin.is_ascii()
+            || origin != &origin.to_ascii_lowercase()
+            || !origin.starts_with("https://")
+            || origin
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+        {
+            return Err(ProtocolError::Policy(
+                "invalid OpenID4VC wallet authorization origin",
+            ));
+        }
+        let authority = &origin["https://".len()..];
+        if authority.is_empty()
+            || authority.contains('/')
+            || authority.contains('?')
+            || authority.contains('#')
+            || authority.contains('@')
+            || authority.contains('%')
+            || authority.contains('\\')
+        {
+            return Err(ProtocolError::Policy(
+                "invalid OpenID4VC wallet authorization origin",
+            ));
+        }
+        let (host, port) = if authority.starts_with('[') {
+            let close = authority.find(']').ok_or(ProtocolError::Policy(
+                "invalid OpenID4VC wallet authorization origin",
+            ))?;
+            let host = &authority[1..close];
+            let suffix = &authority[close + 1..];
+            let port = if suffix.is_empty() {
+                None
+            } else {
+                Some(suffix.strip_prefix(":").ok_or(ProtocolError::Policy(
+                    "invalid OpenID4VC wallet authorization origin",
+                ))?)
+            };
+            (host, port)
+        } else {
+            let mut pieces = authority.split(':');
+            let host = pieces.next().unwrap_or_default();
+            let port = pieces.next();
+            if pieces.next().is_some() {
+                return Err(ProtocolError::Policy(
+                    "invalid OpenID4VC wallet authorization origin",
+                ));
+            }
+            (host, port)
+        };
+        if host.is_empty()
+            || host.starts_with('.')
+            || host.ends_with('.')
+            || host.contains("..")
+            || (host.starts_with('[') || host.ends_with(']'))
+        {
+            return Err(ProtocolError::Policy(
+                "invalid OpenID4VC wallet authorization origin",
+            ));
+        }
+        if authority.starts_with('[') {
+            if !host
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b':')
+            {
+                return Err(ProtocolError::Policy(
+                    "invalid OpenID4VC wallet authorization origin",
+                ));
+            }
+        } else if !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+            || host
+                .split('.')
+                .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
+        {
+            return Err(ProtocolError::Policy(
+                "invalid OpenID4VC wallet authorization origin",
+            ));
+        }
+        if let Some(port) = port {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ProtocolError::Policy(
+                    "invalid OpenID4VC wallet authorization origin",
+                ));
+            }
+            let parsed = port.parse::<u16>().map_err(|_| {
+                ProtocolError::Policy("invalid OpenID4VC wallet authorization origin")
+            })?;
+            if parsed == 0 {
+                return Err(ProtocolError::Policy(
+                    "invalid OpenID4VC wallet authorization origin",
+                ));
+            }
+            if parsed == 443 || port != parsed.to_string() {
+                return Err(ProtocolError::Policy(
+                    "invalid OpenID4VC wallet authorization origin",
+                ));
+            }
+        }
+        if !unique.insert(origin.as_str()) {
+            return Err(ProtocolError::Policy(
+                "OpenID4VC trust policy origins must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_single_public_certificate(
     value: &str,
     message: &'static str,
@@ -2236,10 +2507,87 @@ fn validate_single_public_certificate(
     Ok(())
 }
 
+fn validate_public_certificate_bundle(
+    value: &str,
+    message: &'static str,
+) -> Result<(), ProtocolError> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----\n";
+    const END: &str = "-----END CERTIFICATE-----\n";
+    const MAX_CERTIFICATES: usize = 4;
+
+    if value.is_empty()
+        || value.len() > 16 * 1024
+        || value.contains("PRIVATE KEY")
+        || value.chars().any(|character| character == '\0')
+        || !value.starts_with(BEGIN)
+        || !value.ends_with(END)
+    {
+        return Err(ProtocolError::Policy(message));
+    }
+    let certificate_count = value.matches(BEGIN).count();
+    if certificate_count == 0
+        || certificate_count > MAX_CERTIFICATES
+        || certificate_count != value.matches(END).count()
+    {
+        return Err(ProtocolError::Policy(message));
+    }
+
+    let mut remainder = value;
+    let mut encoded_certificates = std::collections::BTreeSet::new();
+    for _ in 0..certificate_count {
+        remainder = remainder.trim_start_matches(|character: char| character.is_ascii_whitespace());
+        if !remainder.starts_with(BEGIN) {
+            return Err(ProtocolError::Policy(message));
+        }
+        let body = &remainder[BEGIN.len()..];
+        let end_offset = body.find(END).ok_or(ProtocolError::Policy(message))?;
+        let certificate_body = &body[..end_offset];
+        if certificate_body.trim().is_empty()
+            || certificate_body.contains("-----BEGIN ")
+            || certificate_body.contains("-----END ")
+        {
+            return Err(ProtocolError::Policy(message));
+        }
+        let encoded_body = certificate_body.lines().map(str::trim).collect::<String>();
+        if !encoded_certificates.insert(encoded_body.clone()) {
+            return Err(ProtocolError::Policy(message));
+        }
+        let decoded = STANDARD
+            .decode(encoded_body.as_bytes())
+            .map_err(|_| ProtocolError::Policy(message))?;
+        if decoded.first() != Some(&0x30) {
+            return Err(ProtocolError::Policy(message));
+        }
+        remainder = &body[end_offset + END.len()..];
+    }
+    if !remainder.trim().is_empty() {
+        return Err(ProtocolError::Policy(message));
+    }
+    Ok(())
+}
+
 fn validate_openid4vc_trust_jwks(
     jwks: &serde_json::Value,
     client_attestation: bool,
 ) -> Result<(), ProtocolError> {
+    validate_openid4vc_trust_jwks_with_options(jwks, client_attestation, false)
+}
+
+fn validate_openid4vc_trust_jwks_with_options(
+    jwks: &serde_json::Value,
+    client_attestation: bool,
+    reject_unknown: bool,
+) -> Result<(), ProtocolError> {
+    if reject_unknown {
+        let object = jwks.as_object().ok_or(ProtocolError::Policy(
+            "OpenID4VC trust policy JWKS must be an object",
+        ))?;
+        if object.keys().any(|name| name != "keys") {
+            return Err(ProtocolError::Policy(
+                "OpenID4VC trust policy JWKS contains an unknown member",
+            ));
+        }
+    }
     let keys = jwks
         .get("keys")
         .and_then(serde_json::Value::as_array)
@@ -2258,6 +2606,15 @@ fn validate_openid4vc_trust_jwks(
         {
             return Err(ProtocolError::Policy(
                 "OpenID4VC conformance trust must contain public keys only",
+            ));
+        }
+        if reject_unknown
+            && object
+                .keys()
+                .any(|name| !matches!(name.as_str(), "alg" | "crv" | "kid" | "kty" | "x" | "y"))
+        {
+            return Err(ProtocolError::Policy(
+                "OpenID4VC trust policy contains an unknown JWK member",
             ));
         }
         let kid = object

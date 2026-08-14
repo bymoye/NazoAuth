@@ -59,6 +59,7 @@ pub enum TenantResourceKind {
     OauthClient,
     MtlsTrustAnchor,
     Openid4vcDataset,
+    Openid4vcTrustPolicy,
     User,
 }
 
@@ -71,6 +72,17 @@ pub struct TenantResourceIdentity {
     pub kind: TenantResourceKind,
     pub resource_id: String,
     pub digest: String,
+}
+
+/// Public identity mapping returned for resources that are wired into the
+/// caller's tenant.  Only User and OauthClient mappings are defined by this
+/// protocol; other resource kinds must never expose a public identifier.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceMapping {
+    pub kind: TenantResourceKind,
+    pub resource_id: String,
+    pub public_id: String,
 }
 
 /// Bounded selector used by enumerate requests.  A selector is typed so a
@@ -209,6 +221,9 @@ pub struct TenantResourceReceipt {
     pub revision: u64,
     pub outcome: TenantResourceOutcome,
     pub resources: Vec<TenantResourceIdentity>,
+    /// Apply-only public identities used by CTL applicant/client wiring.
+    /// Enumerate, Revoke, and Failed receipts must leave this empty.
+    pub resource_mappings: Vec<TenantResourceMapping>,
     /// Baseline manifest echoed from the task/capability fence.
     pub baseline_manifest_sha256: String,
     /// Canonical digest of the complete final active identity set echoed from
@@ -431,6 +446,22 @@ pub struct Openid4vcConformanceTrust {
     pub client_attestation_jwks: serde_json::Value,
     pub key_attestation_jwks: serde_json::Value,
     pub credential_trust_anchor_pem: String,
+}
+
+/// Public trust material for the ordinary OpenID4VC provider.
+///
+/// This is intentionally independent from the conformance lease payload above:
+/// it carries only the public trust policy needed by a production provider and
+/// has no suite, lease, or conformance-specific fields.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vcTrustPolicy {
+    pub schema: u32,
+    pub client_attestation_issuer: String,
+    pub client_attestation_jwks: serde_json::Value,
+    pub key_attestation_jwks: serde_json::Value,
+    pub credential_trust_anchor_pem: String,
+    pub wallet_authorization_origins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

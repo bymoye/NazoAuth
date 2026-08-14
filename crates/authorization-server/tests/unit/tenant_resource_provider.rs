@@ -150,6 +150,11 @@ fn provider() -> ProviderFixture {
         result: TenantResourceExecutionResult {
             revision: 1,
             resources: vec![identity],
+            resource_mappings: vec![TenantResourceMapping {
+                kind: TenantResourceKind::User,
+                resource_id: "user-1".to_owned(),
+                public_id: "018f0f79-5f3d-7e44-8000-000000000001".to_owned(),
+            }],
             audit_sequence: 1,
             audit_previous_sha256: "0".repeat(64),
         },
@@ -638,6 +643,37 @@ fn controller_key_loader_rejects_non_regular_and_derives_kid() {
         actix_web::http::StatusCode::FORBIDDEN
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn ordinary_trust_policy_payload_is_public_and_validator_fenced() {
+    let coordinate = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let certificate =
+        |label: &str| format!("-----BEGIN CERTIFICATE-----\n{label}\n-----END CERTIFICATE-----\n");
+    let policy = json!({
+        "schema": 1,
+        "client_attestation_issuer": "https://issuer.example/attestation",
+        "client_attestation_jwks": {"keys": [{
+            "kty": "EC", "crv": "P-256", "x": coordinate, "y": coordinate, "kid": "client"
+        }]},
+        "key_attestation_jwks": {"keys": [{
+            "kty": "EC", "crv": "P-256", "x": coordinate, "y": coordinate, "kid": "holder"
+        }]},
+        "credential_trust_anchor_pem": format!("{}{}", certificate("MA=="), certificate("MDE=")),
+        "wallet_authorization_origins": ["https://wallet.example"]
+    });
+    let payload = serde_json::to_vec(&policy).expect("policy payload");
+    let decoded = decode_payload(TenantResourceKind::Openid4vcTrustPolicy, &payload)
+        .expect("ordinary policy");
+    assert!(matches!(
+        decoded,
+        TenantResourcePayload::Openid4vcTrustPolicy(value)
+            if value.public_material.schema == 1
+    ));
+    let mut private = policy;
+    private["client_attestation_jwks"]["keys"][0]["d"] = json!("secret");
+    let private = serde_json::to_vec(&private).expect("private policy payload");
+    assert!(decode_payload(TenantResourceKind::Openid4vcTrustPolicy, &private).is_err());
 }
 
 #[actix_web::test]

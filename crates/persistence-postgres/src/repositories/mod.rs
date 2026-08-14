@@ -30,7 +30,8 @@ pub use audit_ledger::{
 pub use authorization::AuthorizationRepository;
 pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::{
-    OAuthClientRepository, deactivate_client_on_connection, insert_client_on_connection,
+    OAuthClientRepository, active_public_client_id_on_connection, deactivate_client_on_connection,
+    insert_client_on_connection,
 };
 pub use conformance_leases::{
     ConformanceApplicant, ConformanceClient, ConformanceClientMapping, ConformanceLease,
@@ -62,7 +63,9 @@ pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;
 pub use tenancy::ActiveTenantBoundaryRepository;
 pub use tenant_resources::{
-    NewTenantResourceBinding, NewTenantResourceOperation, TenantResourceBinding,
+    NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, NewTenantResourceOperation,
+    Openid4vcTrustPolicyClientBind, Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke,
+    Openid4vcTrustPolicyWrite, StoredOpenid4vcTrustPolicy, TenantResourceBinding,
     TenantResourceBindingDeactivate, TenantResourceOperationRecord, TenantResourceOperationWrite,
     TenantResourceRepository, TenantResourceState, TenantResourceStateCas,
 };

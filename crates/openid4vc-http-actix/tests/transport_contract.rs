@@ -20,6 +20,36 @@ use nazo_openid4vp::{PresentationResult, PresentationTransaction};
 use serde_json::json;
 use uuid::Uuid;
 
+#[test]
+async fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
+    let request_json = || {
+        json!({
+            "wallet_authorization_endpoint": "https://wallet.example/authorize",
+            "dcql_query": {"credentials": []},
+            "openid4vc_trust_policy_resource_id": "trust:run-1",
+            "openid4vc_trust_policy_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        })
+    };
+    let request: CreatePresentationRequest =
+        serde_json::from_value(request_json()).expect("ordinary trust policy request");
+    assert_eq!(
+        request.openid4vc_trust_policy_resource_id.as_deref(),
+        Some("trust:run-1")
+    );
+    assert_eq!(
+        request.openid4vc_trust_policy_digest.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+
+    let mut legacy = request_json();
+    legacy["conformance_lease_id"] = json!(Uuid::nil());
+    assert!(serde_json::from_value::<CreatePresentationRequest>(legacy).is_err());
+
+    let mut legacy = request_json();
+    legacy["conformance_task_jti"] = json!("request-deadbeef");
+    assert!(serde_json::from_value::<CreatePresentationRequest>(legacy).is_err());
+}
+
 #[derive(Default)]
 struct Issuer {
     credential_contexts: Mutex<Vec<CredentialRequestContext>>,

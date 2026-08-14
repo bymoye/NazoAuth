@@ -2,9 +2,15 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM tenant_resource_operations)
        OR EXISTS (SELECT 1 FROM tenant_resource_states)
-       OR EXISTS (SELECT 1 FROM tenant_resource_bindings) THEN
+       OR EXISTS (SELECT 1 FROM tenant_resource_bindings)
+       OR EXISTS (SELECT 1 FROM openid4vc_trust_policies)
+       OR EXISTS (SELECT 1 FROM openid4vc_trust_policy_clients)
+       OR EXISTS (
+           SELECT 1 FROM openid4vp_transactions
+           WHERE openid4vc_trust_policy_binding_id IS NOT NULL
+       ) THEN
         RAISE EXCEPTION
-            'cannot roll back tenant resource management while state, binding, or receipt rows remain';
+            'cannot roll back tenant resource management while state, binding, trust policy, or receipt rows remain';
     END IF;
     IF EXISTS (
         SELECT 1
@@ -97,6 +103,28 @@ DROP FUNCTION IF EXISTS nazo_tenant_resource_operations_append_only();
 DROP TRIGGER IF EXISTS trg_users_active_tenant_resource_owner ON users;
 DROP TRIGGER IF EXISTS trg_oauth_clients_active_tenant_resource_owner ON oauth_clients;
 DROP FUNCTION IF EXISTS nazo_guard_active_tenant_resource_owner();
+DROP TRIGGER IF EXISTS trg_openid4vp_transactions_trust_policy_binding
+    ON openid4vp_transactions;
+DROP FUNCTION IF EXISTS nazo_validate_openid4vp_trust_policy_binding();
+DROP FUNCTION IF EXISTS openid4vc_presentation_trust_policy_is_active(UUID, UUID, VARCHAR, VARCHAR);
+DROP INDEX IF EXISTS ix_openid4vp_transactions_openid4vc_trust_policy;
+ALTER TABLE openid4vp_transactions
+    DROP CONSTRAINT IF EXISTS fk_openid4vp_transactions_openid4vc_trust_policy,
+    DROP CONSTRAINT IF EXISTS ck_openid4vp_transactions_trust_owner,
+    DROP CONSTRAINT IF EXISTS ck_openid4vp_transactions_trust_policy_binding,
+    DROP COLUMN IF EXISTS openid4vc_trust_policy_binding_id,
+    DROP COLUMN IF EXISTS openid4vc_trust_policy_resource_id,
+    DROP COLUMN IF EXISTS openid4vc_trust_policy_digest;
+DROP TRIGGER IF EXISTS trg_openid4vc_trust_policy_client_generation
+    ON openid4vc_trust_policy_clients;
+DROP FUNCTION IF EXISTS nazo_guard_openid4vc_trust_policy_client_generation();
+DROP TABLE IF EXISTS openid4vc_trust_policy_clients;
+DROP TRIGGER IF EXISTS trg_openid4vc_trust_policy_generation
+    ON openid4vc_trust_policies;
+DROP FUNCTION IF EXISTS nazo_guard_openid4vc_trust_policy_generation();
+DROP TABLE IF EXISTS openid4vc_trust_policies;
+DROP FUNCTION IF EXISTS nazo_valid_openid4vc_wallet_origins(JSONB);
+DROP INDEX IF EXISTS uq_oauth_clients_tenant_internal_id;
 DROP TABLE IF EXISTS tenant_resource_bindings;
 DROP TABLE IF EXISTS tenant_resource_operations;
 DROP TABLE IF EXISTS tenant_resource_states;

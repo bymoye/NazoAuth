@@ -147,6 +147,7 @@ pub(super) async fn build(
         TenantResourceKind::User,
         TenantResourceKind::OauthClient,
         TenantResourceKind::MtlsTrustAnchor,
+        TenantResourceKind::Openid4vcTrustPolicy,
     ];
     if startup.settings.openid4vc.data_encryption_key.is_some() {
         resource_kinds.push(TenantResourceKind::Openid4vcDataset);

@@ -26,7 +26,7 @@ use crate::{
 
 pub(crate) struct ServerPresentationOperations {
     store: nazo_postgres::Openid4vpRepository,
-    conformance: nazo_postgres::ConformanceLeaseRepository,
+    trust_policies: nazo_postgres::TenantResourceRepository,
     service: PresentationService<nazo_postgres::Openid4vpRepository, Openid4vcCredentialCrypto>,
     crypto: Openid4vcCredentialCrypto,
     runtime: Arc<ServerRuntimeModuleRegistry>,
@@ -55,7 +55,7 @@ impl ServerPresentationOperations {
         let service = PresentationService::new(store.clone(), crypto.clone());
         Self {
             store,
-            conformance: nazo_postgres::ConformanceLeaseRepository::new(pool),
+            trust_policies: nazo_postgres::TenantResourceRepository::new(pool),
             service,
             crypto,
             runtime,
@@ -87,15 +87,7 @@ impl ServerPresentationOperations {
                 "Wallet authorization endpoint is invalid.",
             ));
         }
-        nazo_postgres::canonicalize_suite_origin(&url.origin().ascii_serialization()).map_err(
-            |_| {
-                vp_error(
-                    400,
-                    "invalid_request",
-                    "Wallet authorization endpoint is invalid.",
-                )
-            },
-        )
+        Ok(url.origin().ascii_serialization())
     }
 
     fn static_wallet_origin_allowed(&self, origin: &str) -> bool {
@@ -121,65 +113,70 @@ impl ServerPresentationOperations {
             .map_err(|_| vp_error(503, "server_error", "Presentation request signing failed."))
     }
 
-    fn validate_conformance_task_jti(task_jti: &str) -> bool {
-        let Some(suffix) = task_jti.strip_prefix("request-") else {
-            return false;
-        };
-        suffix.len() == 32
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    }
-
-    async fn conformance_lease_for_binding(
+    async fn active_trust_policy(
         &self,
+        resource_id: &str,
         wallet_origin: &str,
-        lease_id: Uuid,
-        task_jti: &str,
-    ) -> Result<Option<Uuid>, PresentationHttpError> {
-        if !Self::validate_conformance_task_jti(task_jti) {
-            return Err(vp_error(
-                400,
-                "invalid_request",
-                "Conformance lease binding is invalid.",
-            ));
-        }
-        self.conformance
-            .active_lease_for_binding(
-                self.tenant_id,
-                lease_id,
-                "nazoauth-full",
-                wallet_origin,
-                task_jti,
+        digest: &str,
+    ) -> Result<Option<nazo_postgres::StoredOpenid4vcTrustPolicy>, PresentationHttpError> {
+        let mut connection = self.trust_policies.connection().await.map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "OpenID4VC trust policy state is unavailable.",
             )
-            .await
-            .map_err(|_| {
-                vp_error(
-                    503,
-                    "server_error",
-                    "Conformance trust state is unavailable.",
-                )
-            })
+        })?;
+        let policy = nazo_postgres::TenantResourceRepository::active_openid4vc_trust_policy_for_origin_on_connection(
+            &mut connection,
+            self.tenant_id,
+            resource_id,
+            wallet_origin,
+            digest,
+        )
+        .await
+        .map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "OpenID4VC trust policy state is unavailable.",
+            )
+        })?;
+        if let Some(policy) = &policy {
+            let material: nazo_operator_protocol::Openid4vcTrustPolicy =
+                serde_json::from_value(policy.public_material.clone()).map_err(|_| {
+                    vp_error(503, "server_error", "OpenID4VC trust policy is invalid.")
+                })?;
+            nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
+                .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
+        }
+        Ok(policy)
     }
 
-    async fn conformance_credential_trust_anchors(
+    async fn credential_trust_anchors(
         &self,
-        lease_id: Option<Uuid>,
+        transaction: &PresentationTransaction,
     ) -> Result<Vec<Vec<u8>>, PresentationHttpError> {
-        let Some(lease_id) = lease_id else {
-            return Ok(Vec::new());
-        };
-        let material = self
-            .conformance
-            .active_public_material_for_lease(self.tenant_id, lease_id)
-            .await
-            .map_err(|_| {
-                vp_error(
+        let binding = match (
+            transaction.openid4vc_trust_policy_binding_id,
+            transaction.openid4vc_trust_policy_resource_id.as_deref(),
+            transaction.openid4vc_trust_policy_digest.as_deref(),
+        ) {
+            (None, None, None) => return Ok(Vec::new()),
+            (Some(binding_id), Some(resource_id), Some(digest)) => {
+                (binding_id, resource_id, digest)
+            }
+            _ => {
+                return Err(vp_error(
                     503,
                     "server_error",
-                    "Conformance trust state is unavailable.",
-                )
-            })?
+                    "Presentation trust policy binding is invalid.",
+                ));
+            }
+        };
+        let wallet_origin = Self::wallet_origin(&transaction.wallet_authorization_endpoint)?;
+        let policy = self
+            .active_trust_policy(binding.1, &wallet_origin, binding.2)
+            .await?
             .ok_or_else(|| {
                 vp_error(
                     400,
@@ -187,10 +184,18 @@ impl ServerPresentationOperations {
                     "Presentation transaction is invalid.",
                 )
             })?;
-        let material: nazo_operator_protocol::Openid4vcConformanceTrust =
-            serde_json::from_value(material).map_err(|_| {
-                vp_error(503, "server_error", "Conformance trust state is invalid.")
-            })?;
+        if policy.id != binding.0 {
+            return Err(vp_error(
+                400,
+                "invalid_request",
+                "Presentation transaction is invalid.",
+            ));
+        }
+        let material: nazo_operator_protocol::Openid4vcTrustPolicy =
+            serde_json::from_value(policy.public_material)
+                .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
+        nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
+            .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
         crate::domain::parse_conformance_credential_trust_anchors(
             &material.credential_trust_anchor_pem,
         )
@@ -198,7 +203,7 @@ impl ServerPresentationOperations {
             vp_error(
                 503,
                 "server_error",
-                "Conformance credential trust anchor is invalid.",
+                "OpenID4VC credential trust anchor is invalid.",
             )
         })
     }
@@ -220,38 +225,38 @@ impl PresentationOperations for ServerPresentationOperations {
             let wallet_origin = Self::wallet_origin(&input.wallet_authorization_endpoint)?;
             let static_wallet_allowed = self.static_wallet_origin_allowed(&wallet_origin);
             let binding = match (
-                input.conformance_lease_id,
-                input.conformance_task_jti.clone(),
+                input.openid4vc_trust_policy_resource_id.as_deref(),
+                input.openid4vc_trust_policy_digest.as_deref(),
             ) {
                 (None, None) => None,
-                (Some(lease_id), Some(task_jti)) => Some((lease_id, task_jti)),
+                (Some(resource_id), Some(digest)) => Some((resource_id, digest)),
                 _ => {
                     return Err(vp_error(
                         400,
                         "invalid_request",
-                        "Conformance lease binding is incomplete.",
+                        "OpenID4VC trust policy binding is incomplete.",
                     ));
                 }
             };
-            let conformance_lease_id = if let Some((lease_id, task_jti)) = binding {
-                let matched = self
-                    .conformance_lease_for_binding(&wallet_origin, lease_id, &task_jti)
-                    .await?;
-                if matched != Some(lease_id) {
-                    return Err(vp_error(
-                        400,
-                        "invalid_request",
-                        "Conformance lease binding is not active for this Suite origin.",
-                    ));
-                }
-                Some(lease_id)
+            let trust_policy = if let Some((resource_id, digest)) = binding {
+                Some(
+                    self.active_trust_policy(resource_id, &wallet_origin, digest)
+                        .await?
+                        .ok_or_else(|| {
+                            vp_error(
+                                400,
+                                "invalid_request",
+                                "OpenID4VC trust policy binding is not active.",
+                            )
+                        })?,
+                )
             } else if static_wallet_allowed {
                 None
             } else {
                 return Err(vp_error(
                     400,
                     "invalid_request",
-                    "Dynamic Suite origins require a conformance lease binding.",
+                    "The wallet origin is not statically trusted and no active OpenID4VC trust policy was selected.",
                 ));
             };
             input
@@ -377,7 +382,13 @@ impl PresentationOperations for ServerPresentationOperations {
                 request: request.clone(),
                 request_object,
                 request_uri: request_uri.clone(),
-                conformance_lease_id,
+                openid4vc_trust_policy_binding_id: trust_policy.as_ref().map(|policy| policy.id),
+                openid4vc_trust_policy_resource_id: trust_policy
+                    .as_ref()
+                    .map(|policy| policy.resource_id.clone()),
+                openid4vc_trust_policy_digest: trust_policy
+                    .as_ref()
+                    .map(|policy| policy.resource_digest.clone()),
                 response_encryption_private_key: response_key
                     .map(|key| key.secret_bytes().to_vec()),
                 created_at: now,
@@ -564,9 +575,7 @@ impl PresentationOperations for ServerPresentationOperations {
                     ));
                 }
             };
-            let additional_trust_anchors = self
-                .conformance_credential_trust_anchors(transaction.conformance_lease_id)
-                .await?;
+            let additional_trust_anchors = self.credential_trust_anchors(&transaction).await?;
             self.service
                 .verify_response(
                     &transaction,

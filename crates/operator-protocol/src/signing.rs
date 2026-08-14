@@ -214,6 +214,7 @@ fn tenant_resource_kind_wire_label(kind: TenantResourceKind) -> &'static str {
         TenantResourceKind::OauthClient => "oauth-client",
         TenantResourceKind::MtlsTrustAnchor => "mtls-trust-anchor",
         TenantResourceKind::Openid4vcDataset => "openid4vc-dataset",
+        TenantResourceKind::Openid4vcTrustPolicy => "openid4vc-trust-policy",
         TenantResourceKind::User => "user",
     }
 }

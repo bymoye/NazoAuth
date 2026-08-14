@@ -216,7 +216,10 @@ CREATE TABLE tenant_resource_bindings (
     CONSTRAINT uq_tenant_resource_binding_version
         UNIQUE (tenant_id, resource_kind, resource_id, change_set_id),
     CONSTRAINT ck_tenant_resource_binding_kind CHECK (
-        resource_kind IN ('oauth-client', 'mtls-trust-anchor', 'openid4vc-dataset', 'user')
+        resource_kind IN (
+            'oauth-client', 'mtls-trust-anchor', 'openid4vc-dataset',
+            'openid4vc-trust-policy', 'user'
+        )
     ),
     CONSTRAINT ck_tenant_resource_binding_id CHECK (
         char_length(btrim(resource_id)) BETWEEN 1 AND 255
@@ -241,6 +244,236 @@ CREATE UNIQUE INDEX uq_tenant_resource_binding_active
 
 CREATE INDEX ix_tenant_resource_bindings_tenant_kind
     ON tenant_resource_bindings (tenant_id, resource_kind, active, updated_at DESC);
+
+CREATE UNIQUE INDEX uq_oauth_clients_tenant_internal_id
+    ON oauth_clients (tenant_id, id);
+
+CREATE FUNCTION nazo_valid_openid4vc_wallet_origins(origins JSONB)
+RETURNS BOOLEAN
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT jsonb_typeof(origins) = 'array'
+       AND jsonb_array_length(origins) BETWEEN 1 AND 16
+       AND NOT EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(origins) AS element(value)
+           WHERE jsonb_typeof(value) <> 'string'
+              OR char_length(btrim(value #>> '{}')) NOT BETWEEN 1 AND 2048
+              OR value #>> '{}' <> btrim(value #>> '{}')
+              OR value #>> '{}' !~ '^https://'
+              OR value #>> '{}' ~ '[[:cntrl:]]'
+       )
+       AND jsonb_array_length(origins) = (
+           SELECT COUNT(DISTINCT value #>> '{}')
+           FROM jsonb_array_elements(origins) AS element(value)
+       );
+$$;
+
+CREATE TABLE openid4vc_trust_policies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    resource_id VARCHAR(255) NOT NULL,
+    resource_digest VARCHAR(64) NOT NULL,
+    public_material JSONB NOT NULL,
+    wallet_origins JSONB NOT NULL,
+    source VARCHAR(32) NOT NULL DEFAULT 'operator-managed',
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMPTZ,
+    CONSTRAINT uq_openid4vc_trust_policy_tenant_binding
+        UNIQUE (tenant_id, id),
+    CONSTRAINT ck_openid4vc_trust_policy_resource_id CHECK (
+        char_length(btrim(resource_id)) BETWEEN 1 AND 255
+        AND resource_id = btrim(resource_id)
+        AND resource_id !~ '[[:cntrl:]]'
+    ),
+    CONSTRAINT ck_openid4vc_trust_policy_digest CHECK (
+        resource_digest ~ '^[0-9a-f]{64}$'
+    ),
+    CONSTRAINT ck_openid4vc_trust_policy_material CHECK (
+        jsonb_typeof(public_material) = 'object'
+        AND octet_length(convert_to(public_material::text, 'UTF8')) <= 32768
+    ),
+    CONSTRAINT ck_openid4vc_trust_policy_wallet_origins CHECK (
+        nazo_valid_openid4vc_wallet_origins(wallet_origins)
+        AND octet_length(convert_to(wallet_origins::text, 'UTF8')) <= 32768
+    ),
+    CONSTRAINT ck_openid4vc_trust_policy_source CHECK (
+        source = 'operator-managed'
+    ),
+    CONSTRAINT ck_openid4vc_trust_policy_active_state CHECK (
+        (active AND revoked_at IS NULL)
+        OR (NOT active AND revoked_at IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX uq_openid4vc_trust_policy_active
+    ON openid4vc_trust_policies (tenant_id, resource_id)
+    WHERE active;
+
+CREATE INDEX ix_openid4vc_trust_policies_tenant_active
+    ON openid4vc_trust_policies (tenant_id, active, updated_at DESC);
+
+CREATE INDEX ix_openid4vc_trust_policies_resource_history
+    ON openid4vc_trust_policies (tenant_id, resource_id, resource_digest, created_at DESC);
+
+CREATE FUNCTION nazo_guard_openid4vc_trust_policy_generation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF (NOT OLD.active AND NEW.active)
+       OR OLD.tenant_id <> NEW.tenant_id
+       OR OLD.resource_id <> NEW.resource_id
+       OR OLD.resource_digest <> NEW.resource_digest
+       OR OLD.public_material <> NEW.public_material
+       OR OLD.wallet_origins <> NEW.wallet_origins
+       OR OLD.source <> NEW.source THEN
+        RAISE EXCEPTION 'OpenID4VC trust policy generations are immutable and cannot reactivate'
+            USING ERRCODE = '55006';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_openid4vc_trust_policy_generation
+BEFORE UPDATE ON openid4vc_trust_policies
+FOR EACH ROW
+EXECUTE FUNCTION nazo_guard_openid4vc_trust_policy_generation();
+
+CREATE TABLE openid4vc_trust_policy_clients (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    policy_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
+    oauth_client_id UUID NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_openid4vc_trust_policy_client_policy
+        FOREIGN KEY (tenant_id, policy_id)
+        REFERENCES openid4vc_trust_policies(tenant_id, id),
+    CONSTRAINT fk_openid4vc_trust_policy_client_oauth_client
+        FOREIGN KEY (tenant_id, oauth_client_id)
+        REFERENCES oauth_clients(tenant_id, id),
+    CONSTRAINT uq_openid4vc_trust_policy_client_history
+        UNIQUE (policy_id, oauth_client_id)
+);
+
+CREATE UNIQUE INDEX uq_openid4vc_trust_policy_client_active
+    ON openid4vc_trust_policy_clients (tenant_id, oauth_client_id)
+    WHERE active;
+
+CREATE INDEX ix_openid4vc_trust_policy_clients_policy
+    ON openid4vc_trust_policy_clients (tenant_id, policy_id, active);
+
+CREATE FUNCTION nazo_guard_openid4vc_trust_policy_client_generation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF (NOT OLD.active AND NEW.active)
+       OR OLD.policy_id <> NEW.policy_id
+       OR OLD.tenant_id <> NEW.tenant_id
+       OR OLD.oauth_client_id <> NEW.oauth_client_id THEN
+        RAISE EXCEPTION 'OpenID4VC trust policy client bindings are immutable and cannot reactivate'
+            USING ERRCODE = '55006';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_openid4vc_trust_policy_client_generation
+BEFORE UPDATE ON openid4vc_trust_policy_clients
+FOR EACH ROW
+EXECUTE FUNCTION nazo_guard_openid4vc_trust_policy_client_generation();
+
+ALTER TABLE openid4vp_transactions
+    ADD COLUMN openid4vc_trust_policy_binding_id UUID,
+    ADD COLUMN openid4vc_trust_policy_resource_id VARCHAR(255),
+    ADD COLUMN openid4vc_trust_policy_digest VARCHAR(64),
+    ADD CONSTRAINT fk_openid4vp_transactions_openid4vc_trust_policy
+        FOREIGN KEY (tenant_id, openid4vc_trust_policy_binding_id)
+        REFERENCES openid4vc_trust_policies(tenant_id, id),
+    ADD CONSTRAINT ck_openid4vp_transactions_trust_owner CHECK (
+        NOT (
+            conformance_lease_id IS NOT NULL
+            AND openid4vc_trust_policy_binding_id IS NOT NULL
+        )
+    ),
+    ADD CONSTRAINT ck_openid4vp_transactions_trust_policy_binding CHECK (
+        (
+            openid4vc_trust_policy_binding_id IS NULL
+            AND openid4vc_trust_policy_resource_id IS NULL
+            AND openid4vc_trust_policy_digest IS NULL
+        )
+        OR (
+            openid4vc_trust_policy_binding_id IS NOT NULL
+            AND openid4vc_trust_policy_resource_id IS NOT NULL
+            AND openid4vc_trust_policy_digest IS NOT NULL
+            AND char_length(btrim(openid4vc_trust_policy_resource_id)) BETWEEN 1 AND 255
+            AND openid4vc_trust_policy_resource_id = btrim(openid4vc_trust_policy_resource_id)
+            AND openid4vc_trust_policy_digest ~ '^[0-9a-f]{64}$'
+        )
+    );
+
+CREATE INDEX ix_openid4vp_transactions_openid4vc_trust_policy
+    ON openid4vp_transactions (tenant_id, openid4vc_trust_policy_binding_id)
+    WHERE openid4vc_trust_policy_binding_id IS NOT NULL;
+
+CREATE FUNCTION openid4vc_presentation_trust_policy_is_active(
+    requested_tenant_id UUID,
+    requested_binding_id UUID,
+    requested_resource_id VARCHAR,
+    requested_digest VARCHAR
+)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT CASE
+        WHEN requested_binding_id IS NULL
+         AND requested_resource_id IS NULL
+         AND requested_digest IS NULL THEN TRUE
+        WHEN requested_binding_id IS NULL
+          OR requested_resource_id IS NULL
+          OR requested_digest IS NULL THEN FALSE
+        ELSE EXISTS (
+            SELECT 1
+            FROM openid4vc_trust_policies policy
+            WHERE policy.tenant_id = requested_tenant_id
+              AND policy.id = requested_binding_id
+              AND policy.resource_id = requested_resource_id
+              AND policy.resource_digest = requested_digest
+              AND policy.source = 'operator-managed'
+              AND policy.active
+        )
+    END;
+$$;
+
+CREATE FUNCTION nazo_validate_openid4vp_trust_policy_binding()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT openid4vc_presentation_trust_policy_is_active(
+        NEW.tenant_id,
+        NEW.openid4vc_trust_policy_binding_id,
+        NEW.openid4vc_trust_policy_resource_id,
+        NEW.openid4vc_trust_policy_digest
+    ) THEN
+        RAISE EXCEPTION 'OpenID4VP trust policy binding is incomplete or inactive'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_openid4vp_transactions_trust_policy_binding
+BEFORE INSERT OR UPDATE ON openid4vp_transactions
+FOR EACH ROW
+EXECUTE FUNCTION nazo_validate_openid4vp_trust_policy_binding();
 
 CREATE FUNCTION nazo_guard_active_tenant_resource_owner()
 RETURNS trigger
@@ -300,3 +533,7 @@ COMMENT ON TABLE tenant_resource_operations IS
     'Append-only tenant resource task idempotency and signed receipt evidence; replay compares request_sha256.';
 COMMENT ON TABLE tenant_resource_bindings IS
     'Tenant-scoped resource identity/version bindings. Active rows are unique per typed resource identity.';
+COMMENT ON TABLE openid4vc_trust_policies IS
+    'Tenant-scoped public OpenID4VC trust material installed by the ordinary operator resource control plane.';
+COMMENT ON TABLE openid4vc_trust_policy_clients IS
+    'Explicit historical OAuth client bindings to ordinary OpenID4VC trust policy versions.';

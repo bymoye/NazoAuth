@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use jsonwebtoken::{Algorithm, Validation, decode};
 use nazo_digital_credentials::decode_compact_jwt;
-use nazo_operator_protocol::Openid4vcConformanceTrust;
+use nazo_operator_protocol::Openid4vcTrustPolicy;
 use serde_json::Value;
 
 #[derive(Clone)]
 pub(crate) struct Openid4vcClientAttestationValidator {
     static_trust: Option<(Arc<str>, Arc<Value>)>,
-    conformance: Option<(nazo_postgres::ConformanceLeaseRepository, uuid::Uuid)>,
+    trust_policies: Option<(nazo_postgres::TenantResourceRepository, uuid::Uuid)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,13 +52,13 @@ impl Openid4vcClientAttestationValidator {
         }
         Ok(Self {
             static_trust: Some((attester_issuer.into(), Arc::new(trust_jwks))),
-            conformance: None,
+            trust_policies: None,
         })
     }
 
-    pub(crate) fn with_conformance_leases(
+    pub(crate) fn with_trust_policies(
         static_trust: Option<(String, Value)>,
-        repository: nazo_postgres::ConformanceLeaseRepository,
+        repository: nazo_postgres::TenantResourceRepository,
         tenant_id: uuid::Uuid,
     ) -> anyhow::Result<Self> {
         let mut validator = if let Some((issuer, jwks)) = static_trust {
@@ -66,10 +66,10 @@ impl Openid4vcClientAttestationValidator {
         } else {
             Self {
                 static_trust: None,
-                conformance: None,
+                trust_policies: None,
             }
         };
-        validator.conformance = Some((repository, tenant_id));
+        validator.trust_policies = Some((repository, tenant_id));
         Ok(validator)
     }
 
@@ -194,17 +194,30 @@ impl Openid4vcClientAttestationValidator {
     ) -> anyhow::Result<ValidatedClientAttestation> {
         let client_id = Self::unverified_client_id(attestation)
             .ok_or_else(|| anyhow::anyhow!("client attestation subject is missing"))?;
-        if let Some((repository, tenant_id)) = &self.conformance
-            && let Some(material) = repository
-                .active_public_material_for_client(*tenant_id, &client_id)
-                .await?
-        {
-            let material: Openid4vcConformanceTrust = serde_json::from_value(material)?;
-            return Self::new(
-                material.client_attestation_issuer,
-                material.client_attestation_jwks,
-            )?
-            .validate(attestation, proof, audience, now);
+        if let Some((repository, tenant_id)) = &self.trust_policies {
+            let mut connection = repository.connection().await?;
+            match nazo_postgres::TenantResourceRepository::openid4vc_trust_policy_for_client_on_connection(
+                &mut connection,
+                *tenant_id,
+                &client_id,
+            )
+            .await?
+            {
+                nazo_postgres::Openid4vcTrustPolicyForClient::Unbound => {}
+                nazo_postgres::Openid4vcTrustPolicyForClient::BoundInactive => {
+                    anyhow::bail!("client OpenID4VC trust policy binding is inactive");
+                }
+                nazo_postgres::Openid4vcTrustPolicyForClient::Active(policy) => {
+                    let material: Openid4vcTrustPolicy =
+                        serde_json::from_value(policy.public_material)?;
+                    nazo_operator_protocol::validate_openid4vc_trust_policy(&material)?;
+                    return Self::new(
+                        material.client_attestation_issuer,
+                        material.client_attestation_jwks,
+                    )?
+                    .validate(attestation, proof, audience, now);
+                }
+            }
         }
         self.validate(attestation, proof, audience, now)
     }

@@ -72,6 +72,51 @@ pub enum TenantResourceBindingDeactivate {
     Conflict(Option<TenantResourceBinding>),
 }
 
+/// Public OpenID4VC trust policy installed through the ordinary tenant
+/// resource control plane. Private key material is rejected before storage
+/// and by the database constraint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredOpenid4vcTrustPolicy {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub resource_id: String,
+    pub resource_digest: String,
+    pub public_material: Value,
+    pub wallet_origins: Vec<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Openid4vcTrustPolicyWrite {
+    Applied(StoredOpenid4vcTrustPolicy),
+    Replayed(StoredOpenid4vcTrustPolicy),
+    Conflict(StoredOpenid4vcTrustPolicy),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Openid4vcTrustPolicyRevoke {
+    Revoked(StoredOpenid4vcTrustPolicy),
+    AlreadyAbsent,
+    Conflict(StoredOpenid4vcTrustPolicy),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Openid4vcTrustPolicyForClient {
+    Unbound,
+    BoundInactive,
+    Active(StoredOpenid4vcTrustPolicy),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Openid4vcTrustPolicyClientBind {
+    Bound { binding_id: Uuid },
+    Replayed { binding_id: Uuid },
+    Conflict { binding_id: Uuid },
+}
+
 #[derive(Clone)]
 pub struct TenantResourceRepository {
     pool: DbPool,
@@ -151,6 +196,54 @@ struct AdvisoryLockRow {
     locked: bool,
 }
 
+#[derive(QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = sql_types::BigInt)]
+    count: i64,
+}
+
+#[derive(QueryableByName)]
+struct OAuthClientStateRow {
+    #[diesel(sql_type = sql_types::Uuid)]
+    id: Uuid,
+    #[diesel(sql_type = sql_types::Bool)]
+    is_active: bool,
+}
+
+#[derive(QueryableByName)]
+struct Openid4vcTrustPolicyClientBindingRow {
+    #[diesel(sql_type = sql_types::Uuid)]
+    id: Uuid,
+    #[diesel(sql_type = sql_types::Uuid)]
+    policy_id: Uuid,
+}
+
+#[derive(QueryableByName)]
+struct Openid4vcTrustPolicyRow {
+    #[diesel(sql_type = sql_types::Uuid)]
+    id: Uuid,
+    #[diesel(sql_type = sql_types::Uuid)]
+    tenant_id: Uuid,
+    #[diesel(sql_type = sql_types::Varchar)]
+    resource_id: String,
+    #[diesel(sql_type = sql_types::Varchar)]
+    resource_digest: String,
+    #[diesel(sql_type = sql_types::Jsonb)]
+    public_material: Value,
+    #[diesel(sql_type = sql_types::Jsonb)]
+    wallet_origins: Value,
+    #[diesel(sql_type = sql_types::Varchar)]
+    source: String,
+    #[diesel(sql_type = sql_types::Bool)]
+    active: bool,
+    #[diesel(sql_type = sql_types::Timestamptz)]
+    created_at: DateTime<Utc>,
+    #[diesel(sql_type = sql_types::Timestamptz)]
+    updated_at: DateTime<Utc>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Timestamptz>)]
+    revoked_at: Option<DateTime<Utc>>,
+}
+
 impl TryFrom<StateRow> for TenantResourceState {
     type Error = RepositoryError;
 
@@ -201,6 +294,41 @@ impl From<BindingRow> for TenantResourceBinding {
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
+    }
+}
+
+impl TryFrom<Openid4vcTrustPolicyRow> for StoredOpenid4vcTrustPolicy {
+    type Error = RepositoryError;
+
+    fn try_from(row: Openid4vcTrustPolicyRow) -> Result<Self, Self::Error> {
+        if row.source != "operator-managed" {
+            return Err(RepositoryError::Consistency(
+                "OpenID4VC trust policy has an invalid source".to_owned(),
+            ));
+        }
+        validate_stored_openid4vc_trust_policy_identity(
+            &row.resource_id,
+            Some(&row.resource_digest),
+        )?;
+        validate_bounded_public_material(&row.public_material)?;
+        let wallet_origins = validate_stored_wallet_origins(&row.wallet_origins)?;
+        if row.active == row.revoked_at.is_some() {
+            return Err(RepositoryError::Consistency(
+                "OpenID4VC trust policy active state is inconsistent".to_owned(),
+            ));
+        }
+        Ok(Self {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            resource_id: row.resource_id,
+            resource_digest: row.resource_digest,
+            public_material: row.public_material,
+            wallet_origins,
+            active: row.active,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            revoked_at: row.revoked_at,
+        })
     }
 }
 
@@ -662,6 +790,431 @@ impl TenantResourceRepository {
         .map(Into::into);
         Ok(TenantResourceBindingDeactivate::Conflict(current))
     }
+
+    pub async fn get_openid4vc_trust_policy_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        resource_id: &str,
+    ) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+        validate_stored_openid4vc_trust_policy_identity(resource_id, None)?;
+        sql_query(
+            "SELECT id, tenant_id, resource_id, resource_digest, public_material,
+                    wallet_origins,
+                    source, active, created_at, updated_at, revoked_at
+             FROM openid4vc_trust_policies
+             WHERE tenant_id = $1 AND resource_id = $2 AND active",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Varchar, _>(resource_id)
+        .get_result::<Openid4vcTrustPolicyRow>(connection)
+        .await
+        .optional()
+        .map_err(map_error)?
+        .map(StoredOpenid4vcTrustPolicy::try_from)
+        .transpose()
+    }
+
+    pub async fn active_openid4vc_trust_policy_by_resource_digest_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        resource_id: &str,
+        expected_digest: &str,
+    ) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+        validate_stored_openid4vc_trust_policy_identity(resource_id, Some(expected_digest))?;
+        let policy =
+            Self::get_openid4vc_trust_policy_on_connection(connection, tenant_id, resource_id)
+                .await?;
+        Ok(policy.filter(|policy| policy.resource_digest == expected_digest))
+    }
+
+    pub async fn active_openid4vc_trust_policy_for_origin_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        resource_id: &str,
+        wallet_origin: &str,
+        expected_digest: &str,
+    ) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+        validate_wallet_origin(wallet_origin)?;
+        let policy = Self::active_openid4vc_trust_policy_by_resource_digest_on_connection(
+            connection,
+            tenant_id,
+            resource_id,
+            expected_digest,
+        )
+        .await?;
+        Ok(policy.filter(|policy| {
+            policy
+                .wallet_origins
+                .iter()
+                .any(|origin| origin == wallet_origin)
+        }))
+    }
+
+    pub async fn active_openid4vc_trust_policy_binding_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        binding_id: Uuid,
+    ) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+        sql_query(
+            "SELECT id, tenant_id, resource_id, resource_digest, public_material,
+                    wallet_origins, source, active, created_at, updated_at, revoked_at
+             FROM openid4vc_trust_policies
+             WHERE tenant_id = $1 AND id = $2 AND active",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(binding_id)
+        .get_result::<Openid4vcTrustPolicyRow>(connection)
+        .await
+        .optional()
+        .map_err(map_error)?
+        .map(StoredOpenid4vcTrustPolicy::try_from)
+        .transpose()
+    }
+
+    pub async fn openid4vc_trust_policy_for_client_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        public_client_id: &str,
+    ) -> Result<Openid4vcTrustPolicyForClient, RepositoryError> {
+        if public_client_id.is_empty()
+            || public_client_id.len() > 255
+            || public_client_id != public_client_id.trim()
+        {
+            return Err(RepositoryError::Consistency(
+                "OpenID4VC trust policy client ID is invalid".to_owned(),
+            ));
+        }
+        let client = sql_query(
+            "SELECT id, is_active
+             FROM oauth_clients
+             WHERE tenant_id = $1 AND client_id = $2",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Varchar, _>(public_client_id)
+        .get_result::<OAuthClientStateRow>(connection)
+        .await
+        .optional()
+        .map_err(map_error)?;
+        let Some(client) = client else {
+            return Ok(Openid4vcTrustPolicyForClient::Unbound);
+        };
+        let binding_count = sql_query(
+            "SELECT COUNT(*)::BIGINT AS count
+             FROM openid4vc_trust_policy_clients
+             WHERE tenant_id = $1 AND oauth_client_id = $2",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(client.id)
+        .get_result::<CountRow>(connection)
+        .await
+        .map_err(map_error)?;
+        if binding_count.count == 0 {
+            return Ok(Openid4vcTrustPolicyForClient::Unbound);
+        }
+        if !client.is_active {
+            return Ok(Openid4vcTrustPolicyForClient::BoundInactive);
+        }
+        match active_openid4vc_trust_policy_for_internal_client_on_connection(
+            connection, tenant_id, client.id,
+        )
+        .await?
+        {
+            Some(policy) => Ok(Openid4vcTrustPolicyForClient::Active(policy)),
+            None => Ok(Openid4vcTrustPolicyForClient::BoundInactive),
+        }
+    }
+
+    /// Install one validated public trust policy. The protocol/provider layer
+    /// owns the OpenID4VC schema; persistence owns bounded storage and the
+    /// active-version digest fence.
+    pub async fn apply_openid4vc_trust_policy_on_connection(
+        connection: &mut AsyncPgConnection,
+        policy: NewStoredOpenid4vcTrustPolicy<'_>,
+    ) -> Result<Openid4vcTrustPolicyWrite, RepositoryError> {
+        validate_stored_openid4vc_trust_policy_identity(
+            policy.resource_id,
+            Some(policy.resource_digest),
+        )?;
+        validate_bounded_public_material(policy.public_material)?;
+        let wallet_origins = validate_new_wallet_origins(policy.wallet_origins)?;
+        let wallet_origins_json = serde_json::to_value(&wallet_origins).map_err(|_| {
+            RepositoryError::Consistency(
+                "OpenID4VC trust policy wallet origins are not JSON".to_owned(),
+            )
+        })?;
+        lock_binding_identity_on_connection(
+            connection,
+            policy.tenant_id,
+            "openid4vc-trust-policy",
+            policy.resource_id,
+        )
+        .await?;
+
+        if let Some(current) = select_openid4vc_trust_policy_on_connection(
+            connection,
+            policy.tenant_id,
+            policy.resource_id,
+            true,
+        )
+        .await?
+        {
+            return if current.resource_digest == policy.resource_digest
+                && current.public_material == *policy.public_material
+                && current.wallet_origins == wallet_origins
+            {
+                Ok(Openid4vcTrustPolicyWrite::Replayed(current))
+            } else {
+                Ok(Openid4vcTrustPolicyWrite::Conflict(current))
+            };
+        }
+
+        let inserted = sql_query(
+            "INSERT INTO openid4vc_trust_policies
+                (id, tenant_id, resource_id, resource_digest, public_material,
+                 wallet_origins, source, active)
+             VALUES ($1, $2, $3, $4, $5, $6, 'operator-managed', TRUE)
+             RETURNING id, tenant_id, resource_id, resource_digest, public_material,
+                       wallet_origins,
+                       source, active, created_at, updated_at, revoked_at",
+        )
+        .bind::<sql_types::Uuid, _>(Uuid::now_v7())
+        .bind::<sql_types::Uuid, _>(policy.tenant_id)
+        .bind::<sql_types::Varchar, _>(policy.resource_id)
+        .bind::<sql_types::Varchar, _>(policy.resource_digest)
+        .bind::<sql_types::Jsonb, _>(policy.public_material)
+        .bind::<sql_types::Jsonb, _>(&wallet_origins_json)
+        .get_result::<Openid4vcTrustPolicyRow>(connection)
+        .await
+        .map_err(map_error)?
+        .try_into()?;
+        Ok(Openid4vcTrustPolicyWrite::Applied(inserted))
+    }
+
+    pub async fn bind_openid4vc_trust_policy_client_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        policy_resource_id: &str,
+        expected_policy_digest: &str,
+        oauth_client_id: Uuid,
+    ) -> Result<Openid4vcTrustPolicyClientBind, RepositoryError> {
+        validate_stored_openid4vc_trust_policy_identity(
+            policy_resource_id,
+            Some(expected_policy_digest),
+        )?;
+        lock_binding_identity_on_connection(
+            connection,
+            tenant_id,
+            "openid4vc-trust-policy",
+            policy_resource_id,
+        )
+        .await?;
+        lock_binding_identity_on_connection(
+            connection,
+            tenant_id,
+            "openid4vc-trust-policy-client",
+            &oauth_client_id.to_string(),
+        )
+        .await?;
+        let client = sql_query(
+            "SELECT id, is_active
+             FROM oauth_clients
+             WHERE tenant_id = $1 AND id = $2
+             FOR UPDATE",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(oauth_client_id)
+        .get_result::<OAuthClientStateRow>(connection)
+        .await
+        .optional()
+        .map_err(map_error)?
+        .filter(|client| client.is_active)
+        .ok_or(RepositoryError::NotFound)?;
+        debug_assert_eq!(client.id, oauth_client_id);
+        let policy = Self::active_openid4vc_trust_policy_by_resource_digest_on_connection(
+            connection,
+            tenant_id,
+            policy_resource_id,
+            expected_policy_digest,
+        )
+        .await?
+        .ok_or(RepositoryError::Conflict)?;
+
+        let active_binding = select_openid4vc_trust_policy_client_binding_on_connection(
+            connection,
+            tenant_id,
+            oauth_client_id,
+            true,
+            None,
+        )
+        .await?;
+        if let Some(active_binding) = active_binding {
+            return if active_binding.policy_id == policy.id {
+                Ok(Openid4vcTrustPolicyClientBind::Replayed {
+                    binding_id: active_binding.id,
+                })
+            } else {
+                Ok(Openid4vcTrustPolicyClientBind::Conflict {
+                    binding_id: active_binding.id,
+                })
+            };
+        }
+
+        let binding_id = Uuid::now_v7();
+        sql_query(
+            "INSERT INTO openid4vc_trust_policy_clients
+                (id, policy_id, tenant_id, oauth_client_id, active)
+             VALUES ($1, $2, $3, $4, TRUE)",
+        )
+        .bind::<sql_types::Uuid, _>(binding_id)
+        .bind::<sql_types::Uuid, _>(policy.id)
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(oauth_client_id)
+        .execute(connection)
+        .await
+        .map_err(map_error)?;
+        Ok(Openid4vcTrustPolicyClientBind::Bound { binding_id })
+    }
+
+    pub async fn revoke_openid4vc_trust_policy_on_connection(
+        connection: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        resource_id: &str,
+        expected_digest: &str,
+    ) -> Result<Openid4vcTrustPolicyRevoke, RepositoryError> {
+        validate_stored_openid4vc_trust_policy_identity(resource_id, Some(expected_digest))?;
+        lock_binding_identity_on_connection(
+            connection,
+            tenant_id,
+            "openid4vc-trust-policy",
+            resource_id,
+        )
+        .await?;
+        let Some(current) =
+            select_openid4vc_trust_policy_on_connection(connection, tenant_id, resource_id, true)
+                .await?
+        else {
+            return Ok(Openid4vcTrustPolicyRevoke::AlreadyAbsent);
+        };
+        if current.resource_digest != expected_digest {
+            return Ok(Openid4vcTrustPolicyRevoke::Conflict(current));
+        }
+        sql_query(
+            "UPDATE openid4vc_trust_policy_clients
+             SET active = FALSE, updated_at = CURRENT_TIMESTAMP
+             WHERE tenant_id = $1 AND policy_id = $2 AND active",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(current.id)
+        .execute(connection)
+        .await
+        .map_err(map_error)?;
+        let revoked = sql_query(
+            "UPDATE openid4vc_trust_policies
+             SET active = FALSE, revoked_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1 AND active AND resource_digest = $2
+             RETURNING id, tenant_id, resource_id, resource_digest, public_material,
+                       wallet_origins,
+                       source, active, created_at, updated_at, revoked_at",
+        )
+        .bind::<sql_types::Uuid, _>(current.id)
+        .bind::<sql_types::Varchar, _>(expected_digest)
+        .get_result::<Openid4vcTrustPolicyRow>(connection)
+        .await
+        .map_err(map_error)?
+        .try_into()?;
+        Ok(Openid4vcTrustPolicyRevoke::Revoked(revoked))
+    }
+}
+
+async fn select_openid4vc_trust_policy_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    resource_id: &str,
+    active: bool,
+) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+    sql_query(
+        "SELECT id, tenant_id, resource_id, resource_digest, public_material,
+                wallet_origins,
+                source, active, created_at, updated_at, revoked_at
+         FROM openid4vc_trust_policies
+         WHERE tenant_id = $1 AND resource_id = $2 AND active = $3
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Varchar, _>(resource_id)
+    .bind::<sql_types::Bool, _>(active)
+    .get_result::<Openid4vcTrustPolicyRow>(connection)
+    .await
+    .optional()
+    .map_err(map_error)?
+    .map(StoredOpenid4vcTrustPolicy::try_from)
+    .transpose()
+}
+
+async fn select_openid4vc_trust_policy_client_binding_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    oauth_client_id: Uuid,
+    active: bool,
+    policy_id: Option<Uuid>,
+) -> Result<Option<Openid4vcTrustPolicyClientBindingRow>, RepositoryError> {
+    sql_query(
+        "SELECT id, policy_id
+         FROM openid4vc_trust_policy_clients
+         WHERE tenant_id = $1 AND oauth_client_id = $2 AND active = $3
+           AND ($4::UUID IS NULL OR policy_id = $4)
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Uuid, _>(oauth_client_id)
+    .bind::<sql_types::Bool, _>(active)
+    .bind::<sql_types::Nullable<sql_types::Uuid>, _>(policy_id)
+    .get_result::<Openid4vcTrustPolicyClientBindingRow>(connection)
+    .await
+    .optional()
+    .map_err(map_error)
+}
+
+async fn active_openid4vc_trust_policy_for_internal_client_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    oauth_client_id: Uuid,
+) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+    let rows = sql_query(
+        "SELECT policy.id, policy.tenant_id, policy.resource_id,
+                policy.resource_digest, policy.public_material, policy.wallet_origins,
+                policy.source,
+                policy.active, policy.created_at, policy.updated_at, policy.revoked_at
+         FROM openid4vc_trust_policy_clients binding
+         JOIN openid4vc_trust_policies policy
+           ON policy.tenant_id = binding.tenant_id
+          AND policy.id = binding.policy_id
+          AND policy.active
+         WHERE binding.tenant_id = $1 AND binding.oauth_client_id = $2
+           AND binding.active
+         ORDER BY policy.id
+         LIMIT 2
+         FOR UPDATE OF binding, policy",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Uuid, _>(oauth_client_id)
+    .load::<Openid4vcTrustPolicyRow>(connection)
+    .await
+    .map_err(map_error)?;
+    if rows.len() > 1 {
+        return Err(RepositoryError::Consistency(
+            "OAuth client has multiple active OpenID4VC trust policies".to_owned(),
+        ));
+    }
+    rows.into_iter()
+        .next()
+        .map(StoredOpenid4vcTrustPolicy::try_from)
+        .transpose()
 }
 
 async fn lock_operation_jti_on_connection(
@@ -733,6 +1286,15 @@ pub struct NewTenantResourceBinding<'a> {
     pub locator: &'a str,
 }
 
+pub struct NewStoredOpenid4vcTrustPolicy<'a> {
+    pub tenant_id: Uuid,
+    pub resource_id: &'a str,
+    pub resource_digest: &'a str,
+    pub public_material: &'a Value,
+    /// Canonical wallet origins extracted and validated by the provider.
+    pub wallet_origins: &'a [String],
+}
+
 async fn lock_binding_identity_on_connection(
     connection: &mut AsyncPgConnection,
     tenant_id: Uuid,
@@ -766,6 +1328,99 @@ fn decode_revision(value: i64) -> Result<u64, RepositoryError> {
     u64::try_from(value).map_err(|_| {
         RepositoryError::Consistency("tenant resource revision is negative".to_owned())
     })
+}
+
+fn validate_stored_openid4vc_trust_policy_identity(
+    resource_id: &str,
+    resource_digest: Option<&str>,
+) -> Result<(), RepositoryError> {
+    if resource_id.is_empty()
+        || resource_id.len() > 255
+        || resource_id != resource_id.trim()
+        || resource_id.chars().any(char::is_control)
+    {
+        return Err(RepositoryError::Consistency(
+            "OpenID4VC trust policy resource ID is invalid".to_owned(),
+        ));
+    }
+    if resource_digest.is_some_and(|digest| {
+        digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err(RepositoryError::Consistency(
+            "OpenID4VC trust policy digest is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bounded_public_material(public_material: &Value) -> Result<(), RepositoryError> {
+    if !public_material.is_object()
+        || serde_json::to_vec(public_material)
+            .map_err(|_| {
+                RepositoryError::Consistency(
+                    "OpenID4VC trust policy material is not JSON".to_owned(),
+                )
+            })?
+            .len()
+            > 32 * 1024
+    {
+        return Err(RepositoryError::Consistency(
+            "OpenID4VC trust policy material is not a bounded JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_new_wallet_origins(wallet_origins: &[String]) -> Result<Vec<String>, RepositoryError> {
+    if wallet_origins.is_empty() || wallet_origins.len() > 16 {
+        return Err(RepositoryError::Consistency(
+            "OpenID4VC trust policy wallet origins are out of bounds".to_owned(),
+        ));
+    }
+    let mut normalized = wallet_origins.to_vec();
+    for origin in &normalized {
+        validate_wallet_origin(origin)?;
+    }
+    normalized.sort();
+    let original_len = normalized.len();
+    normalized.dedup();
+    if normalized.len() != original_len {
+        return Err(RepositoryError::Consistency(
+            "OpenID4VC trust policy wallet origins must be unique".to_owned(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_stored_wallet_origins(value: &Value) -> Result<Vec<String>, RepositoryError> {
+    let origins = serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| {
+        RepositoryError::Consistency(
+            "stored OpenID4VC trust policy wallet origins are invalid".to_owned(),
+        )
+    })?;
+    let normalized = validate_new_wallet_origins(&origins)?;
+    if origins != normalized {
+        return Err(RepositoryError::Consistency(
+            "stored OpenID4VC trust policy wallet origins are not canonical".to_owned(),
+        ));
+    }
+    Ok(origins)
+}
+
+fn validate_wallet_origin(origin: &str) -> Result<(), RepositoryError> {
+    if origin.len() > 2048
+        || origin != origin.trim()
+        || !origin.starts_with("https://")
+        || origin.chars().any(char::is_control)
+    {
+        return Err(RepositoryError::Consistency(
+            "OpenID4VC trust policy wallet origin is invalid".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn map_error(error: diesel::result::Error) -> RepositoryError {
