@@ -361,8 +361,23 @@ the issuer and mTLS endpoint hosts. On Unix,
 the private key must be a regular file with no group or other permission bits.
 Route the RFC 8705 mTLS endpoint aliases to `TLS_BIND`; direct mode rejects all
 proxy trust settings and derives client certificate identity only from the TLS
-session. Certificate/SNI selection and live rotation remain deployment-restart
-operations until the tenant transport snapshot work is complete.
+  session. The process revalidates the server certificate chain and private key
+  as one immutable TLS identity
+generation every `TLS_RELOAD_INTERVAL_SECONDS` (default `5`, allowed `1..=3600`).
+A candidate is published only after a non-empty parseable certificate chain,
+  leaf/private-key match, current leaf validity, endpoint names, file bounds, and key
+permissions pass. Invalid or partially installed material leaves the previous
+generation active. New handshakes use the published generation; existing
+connections keep the generation they accepted. Server-side TLS resumption is
+  disabled so a new connection cannot bypass a server identity change. The
+  client-CA bundle is validated and fixed at startup; changing client trust
+  currently requires a controlled restart so one handshake cannot combine
+  server identity and client trust from different generations.
+The deployment owner remains responsible for crash-safe staged file activation,
+public health verification, and restoring the previous files after a failed
+rollout. Multi-identity SNI selection remains part of the tenant transport
+snapshot work; an unknown DNS SNI is rejected instead of falling back to the
+single configured identity.
 
 `EMAIL_SMTP_TLS` accepts only `starttls`, `implicit`, or `none`. The `none`
 mode is rejected unless the issuer is loopback HTTP and no SMTP credentials

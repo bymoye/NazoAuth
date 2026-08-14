@@ -198,19 +198,28 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
     .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)
     .on_connect(crate::http::mtls::capture_direct_tls_client_certificate);
-    let server = if let Some(listeners) = direct_tls {
+    let (server, tls_reloader) = if let Some(listeners) = direct_tls {
         tracing::info!("nazo-oauth-server direct HTTPS listener on {addr}");
         tracing::info!(
             "nazo-oauth-server direct mTLS listener on {}",
             listeners.mtls_bind
         );
-        server
+        let snapshots = listeners.snapshots.clone();
+        let reload_interval = listeners.reload_interval;
+        let server = server
             .bind_rustls_0_23(addr, listeners.public)?
-            .bind_rustls_0_23(listeners.mtls_bind, listeners.mtls)?
+            .bind_rustls_0_23(listeners.mtls_bind, listeners.mtls)?;
+        let reloader = crate::bootstrap::spawn_direct_tls_reloader(snapshots, reload_interval);
+        (server, Some(reloader))
     } else {
-        server.bind(addr)?
+        (server.bind(addr)?, None)
     };
-    server.run().await?;
+    let result = server.run().await;
+    if let Some(reloader) = tls_reloader {
+        reloader.abort();
+        let _ = reloader.await;
+    }
+    result?;
     Ok(())
 }
 

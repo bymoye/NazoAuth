@@ -17,6 +17,7 @@ actix-multipart = "0.8.0"
 actix-web = { workspace = true, features = ["cookies", "rustls-0_23"] }
 actix-tls = { workspace = true, features = ["accept", "rustls-0_23"] }
 anyhow.workspace = true
+arc-swap.workspace = true
 argon2.workspace = true
 atomicwrites.workspace = true
 aws-lc-rs.workspace = true
