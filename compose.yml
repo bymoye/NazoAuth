@@ -41,6 +41,9 @@ services:
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
       VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
       PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      TRANSPORT_MODE: ${NAZOAUTH_TRANSPORT_MODE:-loopback-http}
+      TRUSTED_PROXY_CIDRS: ${NAZOAUTH_TRUSTED_PROXY_CIDRS:-}
+      MTLS_CERTIFICATE_SOURCE: ${NAZOAUTH_MTLS_CERTIFICATE_SOURCE:-}
     volumes:
       - keys_data:/var/lib/nazo_oauth/keys
       - avatars_data:/var/lib/nazo_oauth/avatars

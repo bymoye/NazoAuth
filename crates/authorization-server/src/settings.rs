@@ -76,7 +76,43 @@ pub(crate) struct EndpointSettings {
     pub(crate) cors_allowed_origins: Vec<String>,
     pub(crate) trusted_proxy_cidrs: Vec<IpCidr>,
     pub(crate) client_ip_header_mode: ClientIpHeaderMode,
+    pub(crate) transport_mode: TransportMode,
     pub(crate) mtls_certificate_source: MtlsCertificateSourceMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransportMode {
+    LoopbackHttp,
+    DirectTls,
+    TrustedProxy,
+}
+
+impl TransportMode {
+    fn from_config(value: Option<&str>, issuer: &str) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None if is_loopback_http_url(issuer) => Ok(Self::LoopbackHttp),
+            None => bail!(
+                "TRANSPORT_MODE is required for non-loopback issuers and must be direct-tls or trusted-proxy"
+            ),
+            Some("loopback-http") if is_loopback_http_url(issuer) => Ok(Self::LoopbackHttp),
+            Some("loopback-http") => {
+                bail!("TRANSPORT_MODE=loopback-http requires a loopback HTTP issuer")
+            }
+            Some("direct-tls") if issuer.starts_with("https://") => Ok(Self::DirectTls),
+            Some("direct-tls") => bail!("direct-tls transport requires an HTTPS issuer"),
+            Some("trusted-proxy")
+                if issuer.starts_with("https://") || is_loopback_http_url(issuer) =>
+            {
+                Ok(Self::TrustedProxy)
+            }
+            Some("trusted-proxy") => {
+                bail!("trusted-proxy transport requires an HTTPS or loopback HTTP issuer")
+            }
+            Some(value) => bail!(
+                "TRANSPORT_MODE must be loopback-http, direct-tls, or trusted-proxy; got {value}"
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]

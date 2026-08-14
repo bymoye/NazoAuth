@@ -53,7 +53,9 @@ fn dynamic_registration_config_copies_security_and_rate_limit_settings() {
         ),
         ("RATE_LIMIT_WINDOW_SECONDS", "37"),
         ("TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS", "11"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
         ("TRUSTED_PROXY_CIDRS", "203.0.113.0/24"),
+        ("MTLS_CERTIFICATE_SOURCE", "disabled"),
     ]);
     let settings = Settings::from_config(&config).expect("dynamic registration settings");
     let dynamic = DynamicRegistrationConfig::from(&settings);

@@ -101,7 +101,8 @@ use crate::http::token::dispatch::{Openid4vcTokenHandles, TokenCoreHandles, Toke
 use crate::http::token::issue::TokenIssuanceConfig;
 use crate::runtime_modules::{RuntimeModules, ServerRuntimeModuleRegistry};
 use crate::settings::{
-    Openid4vcRevocationPolicy, Settings, mfa_totp_key_ring, token_issuance_response_key_ring,
+    Openid4vcRevocationPolicy, Settings, TransportMode, mfa_totp_key_ring,
+    token_issuance_response_key_ring,
 };
 use nazo_digital_credentials::{CertificateRevocationPolicy, CertificateRevocationSnapshot};
 use nazo_http_actix::ClientIpConfig;
@@ -149,24 +150,30 @@ fn ui_static_files(root: PathBuf) -> Files {
         }))
 }
 
-fn direct_tls_listener(
+struct DirectTlsListeners {
+    public: ServerConfig,
+    mtls_bind: SocketAddr,
+    mtls: ServerConfig,
+}
+
+fn direct_tls_listeners(
     config: &ConfigSource,
     settings: &Settings,
-) -> anyhow::Result<Option<(SocketAddr, ServerConfig)>> {
-    use crate::http::mtls::MtlsCertificateSourceMode;
-
-    if settings.endpoint.mtls_certificate_source != MtlsCertificateSourceMode::DirectTls {
+) -> anyhow::Result<Option<DirectTlsListeners>> {
+    if settings.endpoint.transport_mode != TransportMode::DirectTls {
         return Ok(None);
     }
     let required = |key: &str| {
         config
             .optional_string(key)
-            .ok_or_else(|| anyhow::anyhow!("{key} is required for direct-tls mTLS"))
+            .ok_or_else(|| anyhow::anyhow!("{key} is required for direct-tls transport"))
     };
-    let bind: SocketAddr = required("TLS_BIND")?.parse()?;
+    let mtls_bind: SocketAddr = required("TLS_BIND")?.parse()?;
     let certificate = required("TLS_CERTIFICATE_FILE")?;
     let private_key = required("TLS_PRIVATE_KEY_FILE")?;
     let client_ca = required("TLS_CLIENT_CA_FILE")?;
+
+    validate_tls_private_key_file(&private_key)?;
 
     let certificates = CertificateDer::pem_file_iter(&certificate)
         .with_context(|| format!("failed to open TLS certificate chain {certificate}"))?
@@ -175,6 +182,21 @@ fn direct_tls_listener(
     if certificates.is_empty() {
         anyhow::bail!("TLS certificate chain {certificate} contains no certificates");
     }
+    let (_, leaf) =
+        x509_parser::parse_x509_certificate(certificates[0].as_ref()).map_err(|error| {
+            anyhow::anyhow!("failed to parse TLS leaf certificate {certificate}: {error}")
+        })?;
+    if !leaf.validity().is_valid() {
+        anyhow::bail!("TLS leaf certificate {certificate} is not currently valid");
+    }
+    validate_tls_server_names(
+        &certificates[0],
+        &certificate,
+        [
+            &settings.endpoint.issuer,
+            &settings.endpoint.mtls_endpoint_base_url,
+        ],
+    )?;
     let private_key = PrivateKeyDer::from_pem_file(&private_key)
         .with_context(|| format!("failed to parse TLS private key {private_key}"))?;
 
@@ -197,13 +219,73 @@ fn direct_tls_listener(
         WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), Arc::clone(&provider))
             .build()
             .context("failed to build mutual TLS client certificate verifier")?;
-    let server_config = ServerConfig::builder_with_provider(provider)
+    let public = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(rustls::DEFAULT_VERSIONS)
+        .context("failed to configure TLS protocol versions")?
+        .with_no_client_auth()
+        .with_single_cert(certificates.clone(), private_key.clone_key())
+        .context("TLS certificate chain does not match the configured private key")?;
+    let mtls = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(rustls::DEFAULT_VERSIONS)
         .context("failed to configure TLS protocol versions")?
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(certificates, private_key)
         .context("TLS certificate chain does not match the configured private key")?;
-    Ok(Some((bind, server_config)))
+    Ok(Some(DirectTlsListeners {
+        public,
+        mtls_bind,
+        mtls,
+    }))
+}
+
+fn validate_tls_server_names<'a>(
+    certificate: &'a CertificateDer<'a>,
+    certificate_path: &str,
+    urls: impl IntoIterator<Item = &'a String>,
+) -> anyhow::Result<()> {
+    let certificate = webpki::EndEntityCert::try_from(certificate).map_err(|error| {
+        anyhow::anyhow!("invalid TLS leaf certificate {certificate_path}: {error}")
+    })?;
+    for url in urls {
+        let host = url::Url::parse(url)
+            .with_context(|| format!("invalid TLS endpoint URL {url}"))?
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("TLS endpoint URL {url} has no host"))?
+            .to_owned();
+        let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+            .map_err(|error| anyhow::anyhow!("invalid TLS endpoint host {host}: {error}"))?;
+        certificate
+            .verify_is_valid_for_subject_name(&server_name)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "TLS leaf certificate {certificate_path} is not valid for endpoint host {host}: {error}"
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn validate_tls_private_key_file(path: &str) -> anyhow::Result<()> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to inspect TLS private key {path}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("TLS private key {path} is not a regular file");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            anyhow::bail!(
+                "TLS private key {path} must not be accessible by group or other users (mode {:o})",
+                mode & 0o777
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -58,9 +58,10 @@ passkey-auth.workspace = true
 p256 = { workspace = true, features = ["ecdh", "ecdsa", "pkcs8"] }
 rand.workspace = true
 rcgen.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "http2", "json", "stream"] }
 rustix.workspace = true
 rustls.workspace = true
+webpki.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 semver.workspace = true

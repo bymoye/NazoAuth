@@ -68,7 +68,7 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
 
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
-    let direct_tls = crate::bootstrap::direct_tls_listener(&config, &settings)?;
+    let direct_tls = crate::bootstrap::direct_tls_listeners(&config, &settings)?;
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
@@ -197,31 +197,18 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     })
     .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
     .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)
-    .on_connect(|io, extensions| {
-        let Some(stream) = io.downcast_ref::<
-            actix_tls::accept::rustls_0_23::TlsStream<actix_web::rt::net::TcpStream>,
-        >()
-        else {
-            return;
-        };
-        let Some(certificate) = stream
-            .get_ref()
-            .1
-            .peer_certificates()
-            .and_then(|certificates| certificates.first())
-        else {
-            return;
-        };
-        if let Some(identity) = crate::http::mtls::certificate_der_identity(certificate.as_ref()) {
-            extensions.insert(identity);
-        }
-    })
-    .bind(addr)?;
-    let server = if let Some((tls_addr, acceptor)) = direct_tls {
-        tracing::info!("nazo-oauth-server direct mTLS listener on {tls_addr}");
-        server.bind_rustls_0_23(tls_addr, acceptor)?
-    } else {
+    .on_connect(crate::http::mtls::capture_direct_tls_client_certificate);
+    let server = if let Some(listeners) = direct_tls {
+        tracing::info!("nazo-oauth-server direct HTTPS listener on {addr}");
+        tracing::info!(
+            "nazo-oauth-server direct mTLS listener on {}",
+            listeners.mtls_bind
+        );
         server
+            .bind_rustls_0_23(addr, listeners.public)?
+            .bind_rustls_0_23(listeners.mtls_bind, listeners.mtls)?
+    } else {
+        server.bind(addr)?
     };
     server.run().await?;
     Ok(())

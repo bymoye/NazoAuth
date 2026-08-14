@@ -380,20 +380,56 @@ impl Settings {
             endpoint: {
                 let trusted_proxy_cidrs =
                     parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?;
-                let mtls_certificate_source = MtlsCertificateSourceMode::from_config(
-                    config.get("MTLS_CERTIFICATE_SOURCE").as_deref(),
-                    !trusted_proxy_cidrs.is_empty(),
-                )?;
-                if matches!(
-                    mtls_certificate_source,
-                    MtlsCertificateSourceMode::Rfc9440
-                        | MtlsCertificateSourceMode::LegacyVerifiedHeaders
-                ) && trusted_proxy_cidrs.is_empty()
-                {
-                    bail!(
-                        "MTLS_CERTIFICATE_SOURCE requires at least one TRUSTED_PROXY_CIDRS entry"
-                    );
-                }
+                let transport_mode =
+                    TransportMode::from_config(config.get("TRANSPORT_MODE").as_deref(), &issuer)?;
+                let configured_mtls_source = config
+                    .get("MTLS_CERTIFICATE_SOURCE")
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty());
+                let mtls_certificate_source = match transport_mode {
+                    TransportMode::LoopbackHttp => {
+                        if !trusted_proxy_cidrs.is_empty() {
+                            bail!("loopback-http transport must not configure TRUSTED_PROXY_CIDRS");
+                        }
+                        if configured_mtls_source.is_some() {
+                            bail!(
+                                "loopback-http transport must not configure MTLS_CERTIFICATE_SOURCE"
+                            );
+                        }
+                        MtlsCertificateSourceMode::Disabled
+                    }
+                    TransportMode::DirectTls => {
+                        if !trusted_proxy_cidrs.is_empty() {
+                            bail!("direct-tls transport must not configure TRUSTED_PROXY_CIDRS");
+                        }
+                        if configured_mtls_source
+                            .as_deref()
+                            .is_some_and(|value| value != "direct-tls")
+                        {
+                            bail!("direct-tls transport cannot use a proxy certificate source");
+                        }
+                        MtlsCertificateSourceMode::DirectTls
+                    }
+                    TransportMode::TrustedProxy => {
+                        if trusted_proxy_cidrs.is_empty() {
+                            bail!(
+                                "trusted-proxy transport requires at least one TRUSTED_PROXY_CIDRS entry"
+                            );
+                        }
+                        let Some(value) = configured_mtls_source.as_deref() else {
+                            bail!(
+                                "trusted-proxy transport requires an explicit MTLS_CERTIFICATE_SOURCE"
+                            );
+                        };
+                        let source = MtlsCertificateSourceMode::from_config(Some(value))?;
+                        if source == MtlsCertificateSourceMode::DirectTls {
+                            bail!(
+                                "trusted-proxy transport cannot use MTLS_CERTIFICATE_SOURCE=direct-tls"
+                            );
+                        }
+                        source
+                    }
+                };
                 EndpointSettings {
                     issuer,
                     mtls_endpoint_base_url,
@@ -403,6 +439,7 @@ impl Settings {
                     client_ip_header_mode: ClientIpHeaderMode::parse(
                         &config.string("CLIENT_IP_HEADER_MODE", "none"),
                     )?,
+                    transport_mode,
                     mtls_certificate_source,
                 }
             },

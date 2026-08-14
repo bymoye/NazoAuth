@@ -47,7 +47,7 @@ pub(crate) type ServerTokenService = nazo_auth::TokenService<
 use crate::adapters::security::constant_time_eq;
 use crate::domain::ClientRow;
 use crate::http::dpop::{DpopError, validate_dpop_proof_with_authorization_service};
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
+use crate::http::mtls::request_mtls_thumbprint;
 use nazo_auth::{PresentedSenderConstraint, apply_sender_constraint, sender_constraint_policy};
 
 use actix_web::{HttpRequest, HttpResponse, http::StatusCode};
@@ -106,9 +106,7 @@ pub(crate) async fn validate_token_sender_constraints(
     // mTLS client authentication must remain DPoP-only.
     let request_mtls_x5t_s256 = (expected_mtls_x5t_s256.is_some()
         || client.require_mtls_bound_tokens)
-        .then(|| {
-            request_mtls_thumbprint_from_trusted_proxy(req, issuance.config.trusted_proxy_cidrs())
-        })
+        .then(|| request_mtls_thumbprint(req, issuance.config.trusted_proxy_cidrs()))
         .flatten();
     let mtls_x5t_s256 = match (expected_mtls_x5t_s256, request_mtls_x5t_s256) {
         (Some(expected), Some(actual))
@@ -191,7 +189,7 @@ impl nazo_http_actix::TokenManagementRequestFactsExtractor
         &self,
         request: &HttpRequest,
     ) -> Option<nazo_http_actix::ClientCertificateFacts> {
-        crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy(
+        crate::http::mtls::request_mtls_client_certificate(
             request,
             &self.config.trusted_proxy_cidrs,
         )
@@ -204,10 +202,7 @@ pub(crate) fn client_auth_request_facts(
 ) -> ClientAuthRequestFacts {
     ClientAuthRequestFacts::new(
         request.path(),
-        crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy(
-            request,
-            trusted_proxy_cidrs,
-        ),
+        crate::http::mtls::request_mtls_client_certificate(request, trusted_proxy_cidrs),
     )
 }
 
