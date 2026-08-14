@@ -432,7 +432,7 @@ async fn application_projection_filters_mixed_scope_elements() {
     drop(connection);
 
     let applications = repository
-        .applications_for_user(user_id.as_uuid())
+        .applications_for_user(tenant.tenant_id.as_uuid(), user_id.as_uuid())
         .await
         .unwrap();
     assert_eq!(applications.len(), 1);
@@ -507,7 +507,7 @@ async fn client_secret_comparison_returns_only_salt_and_database_equality() {
 
     assert_eq!(
         repository
-            .client_secret_salt(client.id)
+            .client_secret_salt(client.tenant_id, client.id)
             .await
             .unwrap()
             .as_deref(),
@@ -515,13 +515,14 @@ async fn client_secret_comparison_returns_only_salt_and_database_equality() {
     );
     assert!(
         repository
-            .client_secret_digest_matches(client.id, stored)
+            .client_secret_digest_matches(client.tenant_id, client.id, stored)
             .await
             .unwrap()
     );
     assert!(
         !repository
             .client_secret_digest_matches(
+                client.tenant_id,
                 client.id,
                 "client-secret-v1:c2FsdA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             )

@@ -1604,10 +1604,17 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
     .await;
     assert_eq!(missing_client_response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&missing_client_response), "invalid_grant");
+    assert_eq!(
+        fixture
+            .access_token_revocation_count(&client, "access-jti-2")
+            .await,
+        0,
+        "a marker bound to another client must not revoke the authenticated client's tokens"
+    );
 }
 
 #[actix_web::test]
-async fn token_authorization_code_replay_fails_closed_when_replayed_client_lookup_errors() {
+async fn token_authorization_code_replay_fails_closed_when_token_revocation_errors() {
     let Some(fixture) = LiveAuthorizationCodeFixture::new().await else {
         return;
     };

@@ -270,7 +270,9 @@ where
         &self,
         account: &PublicAccount,
     ) -> Result<Vec<AuthorizedApplication>, RepositoryError> {
-        self.applications.applications_for_user(account.id()).await
+        self.applications
+            .applications_for_user(account.tenant().tenant_id, account.id())
+            .await
     }
 }
 

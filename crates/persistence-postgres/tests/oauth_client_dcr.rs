@@ -7,8 +7,10 @@ use nazo_auth::{
     DynamicRegistrationClientStore, DynamicRegistrationDependencyError, OAuthClient,
     PreparedClientRegistration, ValidatedClientRegistration,
 };
-use nazo_identity::{TenantContext, ports::RepositoryError};
-use nazo_postgres::{ConformanceLeaseTokenDigests, OAuthClientRepository, create_pool, get_conn};
+use nazo_identity::{OrganizationId, RealmId, TenantContext, TenantId, ports::RepositoryError};
+use nazo_postgres::{
+    ConformanceLeaseTokenDigests, DbPool, OAuthClientRepository, create_pool, get_conn,
+};
 use uuid::Uuid;
 
 fn test_repository() -> Option<OAuthClientRepository> {
@@ -18,6 +20,18 @@ fn test_repository() -> Option<OAuthClientRepository> {
     Some(OAuthClientRepository::new(
         create_pool(database_url, 4).unwrap(),
     ))
+}
+
+fn test_pool() -> Option<DbPool> {
+    let database_url =
+        std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"));
+    match database_url {
+        Ok(database_url) => Some(create_pool(database_url, 4).unwrap()),
+        Err(_) if std::env::var_os("CI").is_some() => {
+            panic!("CI requires NAZO_TEST_DATABASE_URL or DATABASE_URL")
+        }
+        Err(_) => None,
+    }
 }
 
 #[tokio::test]
@@ -582,6 +596,206 @@ fn registration_token(client: &OAuthClient, label: &str) -> String {
     format!("{label}-{}", client.id)
 }
 
+#[tokio::test]
+async fn oauth_client_reads_fail_closed_across_tenants() {
+    let Some(pool) = test_pool() else {
+        return;
+    };
+    let repository = OAuthClientRepository::new(pool.clone());
+    let default_tenant = TenantContext::default_system();
+    let other_tenant_id = Uuid::now_v7();
+    let other_realm_id = Uuid::now_v7();
+    let other_organization_id = Uuid::now_v7();
+    let other_tenant = TenantContext {
+        tenant_id: TenantId::new(other_tenant_id).unwrap(),
+        realm_id: RealmId::new(other_realm_id).unwrap(),
+        organization_id: OrganizationId::new(other_organization_id).unwrap(),
+    };
+    let user_id = Uuid::now_v7();
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "INSERT INTO tenants (id, slug, display_name) VALUES ($1, $1::text, 'Client boundary tenant')",
+    )
+    .bind::<SqlUuid, _>(other_tenant_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sql_query(
+        "INSERT INTO realms (id, tenant_id, slug, display_name) VALUES ($1, $2, $1::text, 'Client boundary realm')",
+    )
+    .bind::<SqlUuid, _>(other_realm_id)
+    .bind::<SqlUuid, _>(other_tenant_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sql_query(
+        "INSERT INTO organizations (id, tenant_id, slug, display_name) VALUES ($1, $2, $1::text, 'Client boundary organization')",
+    )
+    .bind::<SqlUuid, _>(other_organization_id)
+    .bind::<SqlUuid, _>(other_tenant_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sql_query(
+        "INSERT INTO users (id, tenant_id, realm_id, organization_id, username, email, password_hash) VALUES ($1, $2, $3, $4, $1::text, $1::text || '@example.test', 'test-only')",
+    )
+    .bind::<SqlUuid, _>(user_id)
+    .bind::<SqlUuid, _>(default_tenant.tenant_id.as_uuid())
+    .bind::<SqlUuid, _>(default_tenant.realm_id.as_uuid())
+    .bind::<SqlUuid, _>(default_tenant.organization_id.as_uuid())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    let mut default_client = client(default_tenant);
+    let mut other_client = client(other_tenant);
+    let shared_protocol_id = format!("tenant-boundary-{}", Uuid::now_v7());
+    default_client.client_id = shared_protocol_id.clone();
+    other_client.client_id = shared_protocol_id.clone();
+    let secret_hash = "client-secret-v1:tenant-salt:tenant-digest";
+    repository
+        .insert(&default_client, Some(secret_hash), None, None)
+        .await
+        .unwrap();
+    repository
+        .insert(&other_client, Some(secret_hash), None, None)
+        .await
+        .unwrap();
+
+    let default_lookup = repository
+        .by_client_id(default_client.tenant_id, &shared_protocol_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let other_lookup = repository
+        .by_client_id(other_client.tenant_id, &shared_protocol_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(default_lookup.id, default_client.id);
+    assert_eq!(other_lookup.id, other_client.id);
+    assert!(
+        repository
+            .by_id(other_client.tenant_id, default_client.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !repository
+            .has_client_secret(other_client.tenant_id, default_client.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository
+            .client_secret_salt(other_client.tenant_id, default_client.id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        !repository
+            .client_secret_digest_matches(other_client.tenant_id, default_client.id, secret_hash,)
+            .await
+            .unwrap()
+    );
+
+    let (default_page, default_total) = repository
+        .page(default_client.tenant_id, 0, 10_000)
+        .await
+        .unwrap();
+    let (other_page, other_total) = repository
+        .page(other_client.tenant_id, 0, 10_000)
+        .await
+        .unwrap();
+    assert!(default_total >= 1);
+    assert!(other_total >= 1);
+    assert!(
+        default_page
+            .iter()
+            .all(|item| item.tenant_id == default_client.tenant_id)
+    );
+    assert!(
+        other_page
+            .iter()
+            .all(|item| item.tenant_id == other_client.tenant_id)
+    );
+    assert!(default_page.iter().any(|item| item.id == default_client.id));
+    assert!(!default_page.iter().any(|item| item.id == other_client.id));
+    assert!(other_page.iter().any(|item| item.id == other_client.id));
+    assert!(!other_page.iter().any(|item| item.id == default_client.id));
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "INSERT INTO user_client_grants (tenant_id, user_id, client_id, first_authorized_at, last_authorized_at, last_scopes, last_resource_indicators, last_authorization_details, authorization_count) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '[\"openid\"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 1)",
+    )
+    .bind::<SqlUuid, _>(default_client.tenant_id)
+    .bind::<SqlUuid, _>(user_id)
+    .bind::<SqlUuid, _>(default_client.id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        repository
+            .applications_for_user(default_client.tenant_id, user_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repository
+            .applications_for_user(other_client.tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .active_for_tenant_user(other_client.tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query("DELETE FROM user_client_grants WHERE user_id = $1")
+        .bind::<SqlUuid, _>(user_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM users WHERE id = $1")
+        .bind::<SqlUuid, _>(user_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM oauth_clients WHERE id = $1 OR id = $2")
+        .bind::<SqlUuid, _>(default_client.id)
+        .bind::<SqlUuid, _>(other_client.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM organizations WHERE id = $1")
+        .bind::<SqlUuid, _>(other_organization_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM realms WHERE id = $1")
+        .bind::<SqlUuid, _>(other_realm_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM tenants WHERE id = $1")
+        .bind::<SqlUuid, _>(other_tenant_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dcr_replace_cannot_resurrect_a_concurrently_deleted_client() {
     let Ok(database_url) =
@@ -639,7 +853,7 @@ async fn dcr_replace_cannot_resurrect_a_concurrently_deleted_client() {
     assert_eq!(put.await.unwrap().unwrap_err(), RepositoryError::NotFound);
     assert!(
         !repository
-            .by_id(client.id)
+            .by_id(client.tenant_id, client.id)
             .await
             .unwrap()
             .unwrap()
@@ -681,7 +895,11 @@ async fn dynamic_profile_metadata_round_trips_through_postgres() {
         .insert(&client, None, Some(initial_token.as_str()), None)
         .await
         .unwrap();
-    let persisted = repository.by_id(client.id).await.unwrap().unwrap();
+    let persisted = repository
+        .by_id(client.tenant_id, client.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(persisted.jwks_uri, client.jwks_uri);
     assert_eq!(persisted.jwks, client.jwks);
     assert_eq!(persisted.request_uris, client.request_uris);
@@ -789,10 +1007,15 @@ async fn dynamic_registration_store_preserves_atomic_credential_semantics() {
         .unwrap()
         .expect("active registration access token should resolve its client");
     assert_eq!(registered.id, client.id);
-    assert!(!repository.has_client_secret(client.id).await.unwrap());
+    assert!(
+        !repository
+            .has_client_secret(client.tenant_id, client.id)
+            .await
+            .unwrap()
+    );
     assert!(
         repository
-            .active_for_user(Uuid::now_v7())
+            .active_for_tenant_user(client.tenant_id, Uuid::now_v7())
             .await
             .unwrap()
             .is_empty()
@@ -904,19 +1127,28 @@ async fn dynamic_registration_store_round_trips_registration_and_secret_material
         .is_some()
     );
     assert!(
-        DynamicRegistrationClientStore::has_client_secret(&repository, inserted.id)
-            .await
-            .unwrap()
+        DynamicRegistrationClientStore::has_client_secret(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(
-        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
-            .await
-            .unwrap(),
+        DynamicRegistrationClientStore::client_secret_salt(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+        )
+        .await
+        .unwrap(),
         Some("initial-salt".to_owned())
     );
     assert!(
         DynamicRegistrationClientStore::client_secret_digest_matches(
             &repository,
+            inserted.tenant_id,
             inserted.id,
             initial_secret_hash,
         )
@@ -926,6 +1158,7 @@ async fn dynamic_registration_store_round_trips_registration_and_secret_material
     assert!(
         !DynamicRegistrationClientStore::client_secret_digest_matches(
             &repository,
+            inserted.tenant_id,
             inserted.id,
             "client-secret-v1:wrong-salt:wrong-digest",
         )
@@ -968,14 +1201,19 @@ async fn dynamic_registration_store_round_trips_registration_and_secret_material
         .is_some()
     );
     assert_eq!(
-        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
-            .await
-            .unwrap(),
+        DynamicRegistrationClientStore::client_secret_salt(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+        )
+        .await
+        .unwrap(),
         Some("rotated-salt".to_owned())
     );
     assert!(
         DynamicRegistrationClientStore::client_secret_digest_matches(
             &repository,
+            inserted.tenant_id,
             inserted.id,
             rotated_secret_hash,
         )
@@ -1020,14 +1258,19 @@ async fn dynamic_registration_store_round_trips_registration_and_secret_material
         .is_some()
     );
     assert_eq!(
-        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
-            .await
-            .unwrap(),
+        DynamicRegistrationClientStore::client_secret_salt(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+        )
+        .await
+        .unwrap(),
         Some("replacement-salt".to_owned())
     );
     assert!(
         DynamicRegistrationClientStore::client_secret_digest_matches(
             &repository,
+            inserted.tenant_id,
             inserted.id,
             replacement_secret_hash,
         )
@@ -1057,19 +1300,28 @@ async fn dynamic_registration_store_round_trips_registration_and_secret_material
         .is_none()
     );
     assert!(
-        !DynamicRegistrationClientStore::has_client_secret(&repository, inserted.id)
-            .await
-            .unwrap()
+        !DynamicRegistrationClientStore::has_client_secret(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(
-        DynamicRegistrationClientStore::client_secret_salt(&repository, inserted.id)
-            .await
-            .unwrap(),
+        DynamicRegistrationClientStore::client_secret_salt(
+            &repository,
+            inserted.tenant_id,
+            inserted.id,
+        )
+        .await
+        .unwrap(),
         None
     );
     assert!(
         !DynamicRegistrationClientStore::client_secret_digest_matches(
             &repository,
+            inserted.tenant_id,
             inserted.id,
             replacement_secret_hash,
         )
@@ -1130,20 +1382,29 @@ async fn dynamic_registration_store_maps_repository_failures_to_unavailable() {
         DynamicRegistrationDependencyError::Unavailable
     );
     assert_eq!(
-        DynamicRegistrationClientStore::has_client_secret(&repository, template.id)
-            .await
-            .unwrap_err(),
+        DynamicRegistrationClientStore::has_client_secret(
+            &repository,
+            template.tenant_id,
+            template.id,
+        )
+        .await
+        .unwrap_err(),
         DynamicRegistrationDependencyError::Unavailable
     );
     assert_eq!(
-        DynamicRegistrationClientStore::client_secret_salt(&repository, template.id)
-            .await
-            .unwrap_err(),
+        DynamicRegistrationClientStore::client_secret_salt(
+            &repository,
+            template.tenant_id,
+            template.id,
+        )
+        .await
+        .unwrap_err(),
         DynamicRegistrationDependencyError::Unavailable
     );
     assert_eq!(
         DynamicRegistrationClientStore::client_secret_digest_matches(
             &repository,
+            template.tenant_id,
             template.id,
             "client-secret-v1:unavailable-salt:unavailable-digest",
         )

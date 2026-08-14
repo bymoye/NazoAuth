@@ -69,8 +69,23 @@ struct EmptyApplications;
 impl AuthorizedApplicationRepositoryPort for EmptyApplications {
     fn applications_for_user(
         &self,
+        _tenant_id: TenantId,
         _user_id: Uuid,
     ) -> RepositoryFuture<'_, Vec<AuthorizedApplication>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+#[derive(Clone)]
+struct RecordingApplications(Arc<Mutex<Vec<TenantId>>>);
+
+impl AuthorizedApplicationRepositoryPort for RecordingApplications {
+    fn applications_for_user(
+        &self,
+        tenant_id: TenantId,
+        _user_id: Uuid,
+    ) -> RepositoryFuture<'_, Vec<AuthorizedApplication>> {
+        self.0.lock().unwrap().push(tenant_id);
         Box::pin(async { Ok(Vec::new()) })
     }
 }
@@ -94,6 +109,25 @@ fn account() -> PublicAccount {
         created_at: now,
         updated_at: now,
     }
+}
+
+#[tokio::test]
+async fn applications_are_loaded_from_the_accounts_tenant() {
+    let account = account();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let service = AccountProfileService::new(
+        StoredProfileRepository {
+            account: Arc::new(Mutex::new(account.clone())),
+            writes: Arc::new(AtomicUsize::new(0)),
+        },
+        FailFirstGrantSummary {
+            calls: Arc::new(AtomicUsize::new(1)),
+        },
+        RecordingApplications(observed.clone()),
+    );
+
+    assert!(service.applications(&account).await.unwrap().is_empty());
+    assert_eq!(*observed.lock().unwrap(), vec![account.tenant().tenant_id]);
 }
 
 #[test]

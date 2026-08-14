@@ -84,23 +84,48 @@ impl DynamicRegistrationClientStore for FakeStore {
         Box::pin(async move { Ok(found) })
     }
 
-    fn has_client_secret(&self, _client_id: Uuid) -> DynamicRegistrationFuture<'_, bool> {
-        Box::pin(async { Ok(true) })
+    fn has_client_secret(
+        &self,
+        tenant_id: Uuid,
+        client_id: Uuid,
+    ) -> DynamicRegistrationFuture<'_, bool> {
+        let matches = self
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .is_some_and(|client| client.tenant_id == tenant_id && client.id == client_id);
+        Box::pin(async move { Ok(matches) })
     }
 
     fn client_secret_salt(
         &self,
-        _client_id: Uuid,
+        tenant_id: Uuid,
+        client_id: Uuid,
     ) -> DynamicRegistrationFuture<'_, Option<String>> {
-        Box::pin(async { Ok(Some("salt".to_owned())) })
+        let salt = self
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .filter(|client| client.tenant_id == tenant_id && client.id == client_id)
+            .map(|_| "salt".to_owned());
+        Box::pin(async move { Ok(salt) })
     }
 
     fn client_secret_digest_matches<'a>(
         &'a self,
-        _client_id: Uuid,
+        tenant_id: Uuid,
+        client_id: Uuid,
         candidate_digest: &'a str,
     ) -> DynamicRegistrationFuture<'a, bool> {
-        let matches = candidate_digest == "digest:current-secret:pepper:salt";
+        let matches = candidate_digest == "digest:current-secret:pepper:salt"
+            && self
+                .client
+                .lock()
+                .expect("client lock")
+                .as_ref()
+                .is_some_and(|client| client.tenant_id == tenant_id && client.id == client_id);
         Box::pin(async move { Ok(matches) })
     }
 

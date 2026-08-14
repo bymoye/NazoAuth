@@ -160,7 +160,11 @@ pub async fn client_configuration_put(
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
-    let has_secret = match endpoint.clients.has_client_secret(current.id).await {
+    let has_secret = match endpoint
+        .clients
+        .has_client_secret(current.tenant_id, current.id)
+        .await
+    {
         Ok(has_secret) => has_secret,
         Err(_error) => {
             return lookup_failed();

@@ -43,6 +43,21 @@ The migration `20260607000400_tenant_realm_organization_boundaries` adds:
 
 JWT access tokens include a private `tenant_id` claim. Resource endpoints and token introspection use that claim to scope access-token revocation checks. Malformed or mismatched tenant claims fail closed instead of falling back to the default tenant.
 
+## OAuth Client Read Boundary
+
+OAuth client lookup by protocol identifier or internal identifier, administrative
+pagination, registration-secret verification, and user-authorized application
+listing all require an explicit tenant. The persistence adapter applies that
+tenant to every participating client and grant predicate; a missing or incorrect
+tenant returns no client, secret material, or authorized application.
+
+Authorization and device-flow services use an immutable tenant-bound repository
+instance instead of accepting tenant input on every domain-port method. The
+adapter supplies its owned tenant to the same explicit client queries and rejects
+writes for any other tenant. A request-level resolver must therefore select the
+repository/service instance for the resolved tenant; it must never reuse the
+default instance as a fallback.
+
 ## Product Boundaries
 
 The runtime remains single-tenant with tenant-aware data invariants. Selecting

@@ -379,7 +379,11 @@ async fn duplicate_client_conflict_does_not_report_request_as_processed() {
         .await
         .unwrap();
     let client_repository = OAuthClientRepository::new(pool.clone());
-    let persisted = client_repository.by_id(approved.id).await.unwrap().unwrap();
+    let persisted = client_repository
+        .by_id(tenant.tenant_id.as_uuid(), approved.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(persisted.client_id, approved.client_id);
     assert!(
         persisted.require_mtls_bound_tokens,

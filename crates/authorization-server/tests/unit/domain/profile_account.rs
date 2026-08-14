@@ -106,6 +106,7 @@ struct FixedApplications(Vec<AuthorizedApplication>);
 impl AuthorizedApplicationRepositoryPort for FixedApplications {
     fn applications_for_user(
         &self,
+        _tenant_id: TenantId,
         _user_id: Uuid,
     ) -> RepositoryFuture<'_, Vec<AuthorizedApplication>> {
         let applications = self.0.clone();

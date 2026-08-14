@@ -332,8 +332,6 @@ pub trait TokenRepositoryPort: Send + Sync {
         grant_key: &'a str,
     ) -> TokenFuture<'a, Option<TokenIssuanceRecord>>;
 
-    fn client_by_id(&self, client_id: Uuid) -> TokenFuture<'_, Option<OAuthClient>>;
-
     fn client_by_protocol_id<'a>(
         &'a self,
         tenant_id: Uuid,
@@ -544,13 +542,6 @@ where
         raw_token: &str,
     ) -> Result<Option<RefreshToken>, TokenPortError> {
         self.repository.refresh_token(tenant_id, raw_token).await
-    }
-
-    pub async fn client_by_id(
-        &self,
-        client_id: Uuid,
-    ) -> Result<Option<OAuthClient>, TokenPortError> {
-        self.repository.client_by_id(client_id).await
     }
 
     pub async fn client_by_protocol_id(

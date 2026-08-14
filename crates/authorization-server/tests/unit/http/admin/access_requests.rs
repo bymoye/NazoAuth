@@ -646,7 +646,7 @@ impl LiveAdminAccessRequestFixture {
 
     async fn client_row(&self, approved_client_id: Uuid) -> ClientRow {
         nazo_postgres::OAuthClientRepository::new(self.state.diesel_db.clone())
-            .by_id(approved_client_id)
+            .by_id(DEFAULT_TENANT_ID, approved_client_id)
             .await
             .expect("client lookup should succeed")
             .expect("approved client should exist")

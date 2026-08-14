@@ -281,26 +281,12 @@ async fn begin_authorization_code_consumption_with_service(
 
 async fn revoke_replayed_authorization_code(
     service: &ServerTokenService,
+    client: &ClientRow,
     marker: ConsumedAuthorizationCode,
 ) -> Result<bool, HttpResponse> {
-    let client = match service.client_by_id(marker.client_id).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return Ok(false);
-        }
-        Err(error) => {
-            tracing::warn!(?error, "failed to load replayed authorization code client");
-            return Err(oauth_token_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "授权码重放撤销失败.",
-                false,
-            ));
-        }
-    };
     if let Err(error) = revoke_issued_authorization_code_tokens(
         service,
-        &client,
+        client,
         &marker.access_token_jti,
         marker.access_token_expires_at,
         marker.refresh_token_family_id,
@@ -414,7 +400,7 @@ pub(crate) async fn token_authorization_code_with_service(
                         false,
                     );
                 }
-                match revoke_replayed_authorization_code(token_service, marker).await {
+                match revoke_replayed_authorization_code(token_service, client, marker).await {
                     Ok(true) => {
                         return oauth_token_error(
                             StatusCode::BAD_REQUEST,
