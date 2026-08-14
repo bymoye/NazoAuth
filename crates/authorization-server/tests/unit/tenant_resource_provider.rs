@@ -677,6 +677,150 @@ fn ordinary_trust_policy_payload_is_public_and_validator_fenced() {
 }
 
 #[test]
+fn ordinary_resource_payloads_are_typed_bounded_and_dependency_fenced() {
+    let user = serde_json::to_vec(&json!({
+        "username": "ordinary-user",
+        "email": "ordinary-user@example.test",
+        "password": "correct horse battery staple",
+        "email_verified": true,
+        "profile": {"display_name": "Ordinary User"}
+    }))
+    .unwrap();
+    assert!(matches!(
+        decode_payload(TenantResourceKind::User, &user).unwrap(),
+        TenantResourcePayload::User(value)
+            if value.username == "ordinary-user"
+                && value.email_verified
+                && value.profile == Some(json!({"display_name": "Ordinary User"}))
+    ));
+    for invalid in [
+        json!({
+            "username": "",
+            "email": "ordinary-user@example.test",
+            "password": "secret",
+            "email_verified": false
+        }),
+        json!({
+            "username": "ordinary-user",
+            "email": "ordinary-user@example.test",
+            "password": "x".repeat(MAX_PASSWORD_BYTES + 1),
+            "email_verified": false
+        }),
+        json!({
+            "username": "ordinary-user",
+            "email": "ordinary-user@example.test",
+            "password": "secret",
+            "email_verified": false,
+            "profile": {"large": "x".repeat(MAX_PROFILE_BYTES + 1)}
+        }),
+    ] {
+        assert!(
+            decode_payload(
+                TenantResourceKind::User,
+                &serde_json::to_vec(&invalid).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    let oauth = serde_json::to_vec(&json!({
+        "request": {
+            "client_name": "ordinary-client",
+            "client_type": "confidential",
+            "redirect_uris": ["https://client.example/callback"],
+            "scopes": ["openid"],
+            "allowed_audiences": ["resource://default"],
+            "grant_types": ["authorization_code"],
+            "token_endpoint_auth_method": "client_secret_basic",
+            "jwks": null
+        },
+        "supplied_secret": "0123456789abcdef0123456789abcdef",
+        "trust_policy_resource_id": "wallet-policy"
+    }))
+    .unwrap();
+    assert!(matches!(
+        decode_payload(TenantResourceKind::OauthClient, &oauth).unwrap(),
+        TenantResourcePayload::OauthClient(value)
+            if value.request.client_name == "ordinary-client"
+                && value.supplied_secret.as_deref()
+                    == Some("0123456789abcdef0123456789abcdef")
+                && value.trust_policy_resource_id.as_deref() == Some("wallet-policy")
+    ));
+    let invalid_oauth = serde_json::to_vec(&json!({
+        "request": {
+            "client_name": "ordinary-client",
+            "client_type": "public",
+            "redirect_uris": [],
+            "scopes": [],
+            "allowed_audiences": [],
+            "grant_types": [],
+            "token_endpoint_auth_method": "none",
+            "jwks": null
+        },
+        "supplied_secret": "x".repeat(MAX_CLIENT_SECRET_BYTES + 1),
+        "trust_policy_resource_id": "wallet-policy"
+    }))
+    .unwrap();
+    assert!(decode_payload(TenantResourceKind::OauthClient, &invalid_oauth).is_err());
+
+    let mtls = serde_json::to_vec(&json!({
+        "client_resource_id": "ordinary-client",
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\ncHVibGlj\n-----END CERTIFICATE-----\n"
+    }))
+    .unwrap();
+    assert!(matches!(
+        decode_payload(TenantResourceKind::MtlsTrustAnchor, &mtls).unwrap(),
+        TenantResourcePayload::MtlsTrustAnchor(value)
+            if value.client_resource_id == "ordinary-client"
+    ));
+    assert!(
+        decode_payload(
+            TenantResourceKind::MtlsTrustAnchor,
+            &serde_json::to_vec(&json!({
+                "client_resource_id": "ordinary-client",
+                "certificate_pem": "not-a-certificate"
+            }))
+            .unwrap(),
+        )
+        .is_err()
+    );
+
+    let dataset = serde_json::to_vec(&json!({
+        "user_resource_id": "ordinary-user",
+        "configuration_id": "pid-sd-jwt",
+        "claims": {"given_name": "Nazo"}
+    }))
+    .unwrap();
+    assert!(matches!(
+        decode_payload(TenantResourceKind::Openid4vcDataset, &dataset).unwrap(),
+        TenantResourcePayload::Openid4vcDataset(value)
+            if value.user_resource_id == "ordinary-user"
+                && value.configuration_id == "pid-sd-jwt"
+                && value.claims == json!({"given_name": "Nazo"})
+    ));
+    for invalid in [
+        json!({
+            "user_resource_id": "ordinary-user",
+            "configuration_id": "pid-sd-jwt",
+            "claims": ["not", "an", "object"]
+        }),
+        json!({
+            "user_resource_id": "ordinary-user",
+            "configuration_id": "pid-sd-jwt",
+            "claims": {"large": "x".repeat(MAX_DATASET_CLAIMS_BYTES + 1)}
+        }),
+    ] {
+        assert!(
+            decode_payload(
+                TenantResourceKind::Openid4vcDataset,
+                &serde_json::to_vec(&invalid).unwrap(),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn ciba_decision_binding_payload_is_schema_and_lifetime_fenced() {
     let expires_at = Utc::now().timestamp() + 60;
     let payload = serde_json::to_vec(&json!({
