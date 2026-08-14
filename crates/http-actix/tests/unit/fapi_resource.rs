@@ -172,6 +172,7 @@ impl FapiResponseSignature for TestResponseSigner {
 struct EnabledSignatures {
     verification: Result<(), FapiSignatureVerificationError>,
     verify_calls: Arc<AtomicUsize>,
+    verified_tenants: Arc<Mutex<Vec<String>>>,
     signer: Arc<TestResponseSigner>,
 }
 
@@ -182,11 +183,15 @@ impl FapiHttpMessageSignatures for EnabledSignatures {
 
     fn verify_and_consume<'a>(
         &'a self,
-        _tenant_id: &'a str,
+        tenant_id: &'a str,
         _client_id: &'a str,
         _input: &'a VerifiedInput,
     ) -> FapiFuture<'a, Result<(), FapiSignatureVerificationError>> {
         self.verify_calls.fetch_add(1, Ordering::Relaxed);
+        self.verified_tenants
+            .lock()
+            .unwrap()
+            .push(tenant_id.to_owned());
         let result = self.verification;
         Box::pin(async move { result })
     }
@@ -203,6 +208,7 @@ struct SignatureTestState {
     authorizer_calls: Arc<AtomicUsize>,
     targets: Arc<Mutex<Vec<Vec<String>>>>,
     verify_calls: Arc<AtomicUsize>,
+    verified_tenants: Arc<Mutex<Vec<String>>>,
     bases: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
@@ -214,6 +220,7 @@ fn signature_endpoint(
     let authorizer_calls = Arc::new(AtomicUsize::new(0));
     let targets = Arc::new(Mutex::new(Vec::new()));
     let verify_calls = Arc::new(AtomicUsize::new(0));
+    let verified_tenants = Arc::new(Mutex::new(Vec::new()));
     let bases = Arc::new(Mutex::new(Vec::new()));
     let endpoint = Data::new(FapiResourceEndpoint::new(
         "https://auth.example",
@@ -228,6 +235,7 @@ fn signature_endpoint(
         Arc::new(EnabledSignatures {
             verification,
             verify_calls: verify_calls.clone(),
+            verified_tenants: verified_tenants.clone(),
             signer: Arc::new(TestResponseSigner {
                 fail: signer_fails,
                 bases: bases.clone(),
@@ -239,6 +247,7 @@ fn signature_endpoint(
         authorizer_calls,
         targets,
         verify_calls,
+        verified_tenants,
         bases,
     }
 }
@@ -408,6 +417,10 @@ async fn signed_get_uses_one_authorization_call_and_signs_the_success_response()
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.authorizer_calls.load(Ordering::Relaxed), 1);
     assert_eq!(state.verify_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        *state.verified_tenants.lock().unwrap(),
+        vec!["01900000-0000-7000-8000-000000000001".to_owned()]
+    );
     assert!(response.headers().contains_key("signature-input"));
     assert!(response.headers().contains_key("signature"));
     let digest = response

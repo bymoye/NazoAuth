@@ -243,16 +243,21 @@ mod production {
             input: &'a VerifiedInput,
         ) -> FapiFuture<'a, Result<(), FapiSignatureVerificationError>> {
             Box::pin(async move {
-                let tenant_id = uuid::Uuid::parse_str(tenant_id)
-                    .map_err(|_| FapiSignatureVerificationError::Invalid)?;
+                let requested_tenant_id = nazo_identity::TenantId::new(
+                    uuid::Uuid::parse_str(tenant_id)
+                        .map_err(|_| FapiSignatureVerificationError::Invalid)?,
+                )
+                .map_err(|_| FapiSignatureVerificationError::Invalid)?;
                 let client = self
                     .clients
-                    .by_client_id(tenant_id, client_id)
+                    .by_client_id(requested_tenant_id.as_uuid(), client_id)
                     .await
                     .map_err(|_| FapiSignatureVerificationError::LookupUnavailable)?
                     .filter(|client| client.is_active)
                     .ok_or(FapiSignatureVerificationError::Invalid)?;
-                if client.tenant_id != tenant_id || client.client_id != client_id {
+                let client_tenant_id = nazo_identity::TenantId::new(client.tenant_id)
+                    .map_err(|_| FapiSignatureVerificationError::Invalid)?;
+                if client_tenant_id != requested_tenant_id || client.client_id != client_id {
                     return Err(FapiSignatureVerificationError::Invalid);
                 }
                 let jwks = client
@@ -269,7 +274,11 @@ mod production {
                 .map_err(|_| FapiSignatureVerificationError::Invalid)?;
                 match self
                     .replay
-                    .consume_fapi_http_signature(input.replay_fingerprint(), self.max_age_seconds)
+                    .consume_fapi_http_signature(
+                        client_tenant_id,
+                        input.replay_fingerprint(),
+                        self.max_age_seconds,
+                    )
                     .await
                 {
                     Ok(true) => Ok(()),

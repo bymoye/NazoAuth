@@ -4,6 +4,7 @@ use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
 use futures_util::future::join_all;
 use nazo_auth::AuthorizationStateStorePort;
+use nazo_identity::TenantId;
 use nazo_resource_server::{DpopNonceStorage, DpopNonceValidationResult};
 use nazo_valkey::{AuthorizationStateAdapter, ErrorKind, ReplayStore, ValkeyConnection};
 
@@ -22,6 +23,10 @@ async fn inspection_client(url: &str) -> fred::prelude::Client {
     client
 }
 
+fn tenant(value: u128) -> TenantId {
+    TenantId::new(uuid::Uuid::from_u128(value)).expect("test tenant must be non-nil")
+}
+
 #[tokio::test]
 async fn fapi_http_signature_replay_preserves_exact_key_value_and_ttl_contract() {
     let Some(url) = explicit_valkey_url() else {
@@ -32,16 +37,18 @@ async fn fapi_http_signature_replay_preserves_exact_key_value_and_ttl_contract()
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
     let inspector = inspection_client(&url).await;
+    let tenant_id = tenant(10);
     let fingerprint = [0xa5; 32];
     let key = format!(
-        "fapi_http_signature_replay:{}",
+        "fapi_http_signature_replay:{}:{}",
+        tenant_id.as_uuid(),
         blake3::Hash::from_bytes(fingerprint).to_hex()
     );
     let _: i64 = inspector.del(&key).await.unwrap();
 
     assert!(
         store
-            .consume_fapi_http_signature(&fingerprint, 10)
+            .consume_fapi_http_signature(tenant_id, &fingerprint, 10)
             .await
             .unwrap()
     );
@@ -50,10 +57,62 @@ async fn fapi_http_signature_replay_preserves_exact_key_value_and_ttl_contract()
     assert!(ttl > 0 && ttl <= 15, "expected max-age + 5s TTL, got {ttl}");
     assert!(
         !store
-            .consume_fapi_http_signature(&fingerprint, 10)
+            .consume_fapi_http_signature(tenant_id, &fingerprint, 10)
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn fapi_http_signature_replay_isolated_by_tenant_after_cutover() {
+    let Some(url) = explicit_valkey_url() else {
+        return;
+    };
+    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+        .await
+        .expect("an explicitly configured Valkey must be available");
+    let store = ReplayStore::new(&connection);
+    let inspector = inspection_client(&url).await;
+    let first_tenant = tenant(101);
+    let second_tenant = tenant(202);
+    let fingerprint = *blake3::hash(uuid::Uuid::now_v7().as_bytes()).as_bytes();
+    let digest = blake3::Hash::from_bytes(fingerprint).to_hex();
+    let first_key = format!(
+        "fapi_http_signature_replay:{}:{digest}",
+        first_tenant.as_uuid()
+    );
+    let second_key = format!(
+        "fapi_http_signature_replay:{}:{digest}",
+        second_tenant.as_uuid()
+    );
+    let _: i64 = inspector
+        .del(vec![first_key.clone(), second_key.clone()])
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .consume_fapi_http_signature(first_tenant, &fingerprint, 10)
+            .await
+            .unwrap(),
+        "the first reservation in a tenant must succeed"
+    );
+    assert!(
+        store
+            .consume_fapi_http_signature(second_tenant, &fingerprint, 10)
+            .await
+            .unwrap(),
+        "the same fingerprint in another tenant must have an independent replay boundary"
+    );
+    assert!(
+        !store
+            .consume_fapi_http_signature(first_tenant, &fingerprint, 10)
+            .await
+            .unwrap(),
+        "a replay in the same tenant must still fail closed"
+    );
+    assert_eq!(inspector.get::<String, _>(&first_key).await.unwrap(), "1");
+    assert_eq!(inspector.get::<String, _>(&second_key).await.unwrap(), "1");
 }
 
 #[tokio::test]
@@ -79,7 +138,7 @@ async fn replay_ttl_overflow_fails_before_storage() {
     let store = ReplayStore::new(&connection);
 
     let error = store
-        .consume_fapi_http_signature(&[0x5a; 32], i64::MAX)
+        .consume_fapi_http_signature(tenant(10), &[0x5a; 32], i64::MAX)
         .await
         .expect_err("max-age + future skew overflow must fail closed");
     assert_eq!(error.kind(), ErrorKind::UnexpectedResult);
