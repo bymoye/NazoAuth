@@ -2,30 +2,37 @@ use std::time::Duration;
 
 use nazo_identity::{DEFAULT_TENANT_ID, TenantId};
 use nazo_valkey::{ErrorKind, ValkeyConnection};
+use url::Url;
 use uuid::Uuid;
 
-async fn connect(variable: &str) -> Option<ValkeyConnection> {
-    let url = std::env::var(variable).ok()?;
-    ValkeyConnection::connect(&url, Duration::from_secs(1))
+fn isolated_database_url(database: u8) -> Option<String> {
+    let mut url = Url::parse(&std::env::var("VALKEY_URL").ok()?).ok()?;
+    url.set_path(&format!("/{database}"));
+    Some(url.into())
+}
+
+async fn connect(url: &str) -> Option<ValkeyConnection> {
+    ValkeyConnection::connect(url, Duration::from_secs(1))
         .await
         .ok()
 }
 
-async fn raw_client(variable: &str) -> Option<nazo_valkey::test_support::Client> {
-    let url = std::env::var(variable).ok()?;
-    nazo_valkey::test_support::connect(&url, Duration::from_secs(1))
+async fn raw_client(url: &str) -> Option<nazo_valkey::test_support::Client> {
+    nazo_valkey::test_support::connect(url, Duration::from_secs(1))
         .await
         .ok()
 }
 
 #[tokio::test]
-#[ignore = "requires an empty disposable VALKEY_URL logical database"]
 async fn non_default_tenant_claims_empty_database_and_rejects_other_tenants() {
-    let Some(connection) = connect("VALKEY_URL").await else {
+    let Some(url) = isolated_database_url(14) else {
         return;
     };
-    let first = TenantId::new(Uuid::now_v7()).expect("tenant id");
-    let other = TenantId::new(Uuid::now_v7()).expect("tenant id");
+    let Some(connection) = connect(&url).await else {
+        return;
+    };
+    let first = TenantId::new(Uuid::from_u128(0x100)).expect("tenant id");
+    let other = TenantId::new(Uuid::from_u128(0x101)).expect("tenant id");
     let (first_result, other_result) = tokio::join!(
         connection.bind_tenant_owner(first),
         connection.bind_tenant_owner(other)
@@ -40,7 +47,7 @@ async fn non_default_tenant_claims_empty_database_and_rejects_other_tenants() {
         .bind_tenant_owner(owner)
         .await
         .expect("same tenant claim should be idempotent");
-    let reconnected = connect("VALKEY_URL")
+    let reconnected = connect(&url)
         .await
         .expect("new connection to disposable Valkey");
     reconnected
@@ -56,19 +63,19 @@ async fn non_default_tenant_claims_empty_database_and_rejects_other_tenants() {
 }
 
 #[tokio::test]
-#[ignore = "requires an empty disposable VALKEY_LEGACY_URL logical database"]
 async fn default_tenant_adopts_legacy_state_without_weakening_owner_binding() {
     use nazo_valkey::test_support::KeysInterface;
 
-    let Some(connection) = connect("VALKEY_LEGACY_URL").await else {
+    let Some(url) = isolated_database_url(15) else {
         return;
     };
-    let raw = raw_client("VALKEY_LEGACY_URL")
-        .await
-        .expect("raw Valkey client");
+    let Some(connection) = connect(&url).await else {
+        return;
+    };
+    let raw = raw_client(&url).await.expect("raw Valkey client");
 
-    let first = TenantId::new(Uuid::now_v7()).expect("tenant id");
-    let other = TenantId::new(Uuid::now_v7()).expect("tenant id");
+    let first = TenantId::new(Uuid::from_u128(0x200)).expect("tenant id");
+    let other = TenantId::new(Uuid::from_u128(0x201)).expect("tenant id");
     raw.set::<(), _, _>("legacy-state", "value", None, None, false)
         .await
         .expect("seed legacy state");

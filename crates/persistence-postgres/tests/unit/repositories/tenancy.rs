@@ -38,6 +38,32 @@ fn inactive_tenant_fails_closed_as_consistency_error() {
 }
 
 #[test]
+fn inactive_realm_fails_closed_as_consistency_error() {
+    let context = TenantContext::default_system();
+    let mut row = active_row(context);
+    row.realm_status = Some("suspended".to_owned());
+
+    assert!(matches!(
+        validate_active_boundary(context, row),
+        Err(RepositoryError::Consistency(message))
+            if message == "realm boundary row is not active"
+    ));
+}
+
+#[test]
+fn inactive_organization_fails_closed_as_consistency_error() {
+    let context = TenantContext::default_system();
+    let mut row = active_row(context);
+    row.organization_status = Some("suspended".to_owned());
+
+    assert!(matches!(
+        validate_active_boundary(context, row),
+        Err(RepositoryError::Consistency(message))
+            if message == "organization boundary row is not active"
+    ));
+}
+
+#[test]
 fn realm_from_another_tenant_fails_closed_as_consistency_error() {
     let context = TenantContext::default_system();
     let mut row = active_row(context);
@@ -75,4 +101,35 @@ fn missing_boundary_row_is_not_found() {
         validate_active_boundary(context, row),
         Err(RepositoryError::NotFound)
     );
+}
+
+#[test]
+fn missing_tenant_or_realm_row_is_not_found() {
+    let context = TenantContext::default_system();
+    let mut missing_tenant = active_row(context);
+    missing_tenant.tenant_id = None;
+    assert_eq!(
+        validate_active_boundary(context, missing_tenant),
+        Err(RepositoryError::NotFound)
+    );
+
+    let mut missing_realm = active_row(context);
+    missing_realm.realm_id = None;
+    missing_realm.realm_tenant_id = None;
+    assert_eq!(
+        validate_active_boundary(context, missing_realm),
+        Err(RepositoryError::NotFound)
+    );
+}
+
+#[test]
+fn query_errors_preserve_not_found_and_unexpected_semantics() {
+    assert_eq!(
+        map_query_error(diesel::result::Error::NotFound),
+        RepositoryError::NotFound
+    );
+    assert!(matches!(
+        map_query_error(diesel::result::Error::RollbackTransaction),
+        RepositoryError::Unexpected(message) if message.contains("rollback")
+    ));
 }
