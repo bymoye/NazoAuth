@@ -32,6 +32,12 @@ The migration `20260607000400_tenant_realm_organization_boundaries` adds:
 
 JWT access tokens include a private `tenant_id` claim. Resource endpoints and token introspection use that claim to scope access-token revocation checks. Malformed or mismatched tenant claims fail closed instead of falling back to the default tenant.
 
+FAPI HTTP-signature replay markers use the same validated access-token tenant.
+The replay fingerprint is stored under that tenant namespace, so an identical
+signature fingerprint in another tenant does not create a false replay, while a
+second use in the same tenant is rejected. The storage adapter does not infer or
+default this tenant.
+
 ## Product Boundaries
 
 The default runtime remains single-tenant with tenant-aware data invariants.

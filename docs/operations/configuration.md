@@ -88,6 +88,31 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `SCIM_EVENT_RETENTION_SECONDS` | `604800` | Per-receiver delivery window and outbox retention; accepted range is 3600–2592000 seconds |
 | `RUST_LOG` | `info` | Tracing filter |
 
+### FAPI HTTP-signature replay namespace cutover
+
+FAPI HTTP-signature replay keys include the validated access-token tenant. The
+previous key format did not, so old and new binaries cannot safely serve this
+capability against the same Valkey during the transition: reading the old key
+would preserve cross-tenant false replays, while ignoring it before expiry could
+accept a signature already consumed by an old instance.
+
+Use a coordinated cutover for this one-time key migration:
+
+1. Stop admitting new signed `/fapi/resource` requests on every old instance,
+   drain requests already in progress, and verify that no old instance can write
+   another replay marker.
+2. Starting only after that drain completes, wait at least 305 seconds. This is
+   the maximum configured signature age of 300 seconds plus the five-second
+   future-skew replay allowance.
+3. Replace every instance with the new binary before restoring traffic.
+
+There is no data rewrite or cleanup job; old keys expire through their existing
+TTL. Rollback is symmetric: stop this traffic, drain every request that can
+write a tenant-scoped marker, wait at least 305 seconds from completion of that
+drain, then restore the old binary on every instance.
+Do not mix old and new binaries or roll back early, because either action can
+split the authoritative replay boundary.
+
 The response key id is not the envelope format. The current format is `v1` and
 is stored separately from `response_key_id`; a format change requires an
 explicit migration. Keep the current and previous key material available for

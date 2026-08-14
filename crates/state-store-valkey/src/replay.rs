@@ -1,6 +1,7 @@
 use crate::{Error, ValkeyConnection, command, keys};
 use chrono::Utc;
 use nazo_auth::{DpopStateFuture, DpopStateStoreError, DpopStateStorePort};
+use nazo_identity::TenantId;
 use nazo_resource_server::{
     DpopNonceStorage, DpopNonceValidationResult, DpopReplayConsumption,
     DpopReplayConsumptionResult, DpopReplayKey, ProtectedResourceDependencyError,
@@ -117,6 +118,7 @@ impl ReplayStore {
     /// `true` means this caller consumed it; `false` means it was already present.
     pub async fn consume_fapi_http_signature(
         &self,
+        tenant_id: TenantId,
         fingerprint: &[u8; 32],
         max_age_seconds: i64,
     ) -> Result<bool, Error> {
@@ -126,7 +128,7 @@ impl ReplayStore {
             .ok_or_else(|| Error::unexpected("invalid FAPI HTTP-signature replay TTL"))?;
         command::set_ex_nx(
             &self.connection,
-            keys::fapi_http_signature_replay(fingerprint),
+            keys::fapi_http_signature_replay(tenant_id, fingerprint),
             "1",
             ttl_seconds,
         )
