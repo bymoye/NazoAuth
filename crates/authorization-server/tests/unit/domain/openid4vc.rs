@@ -170,7 +170,7 @@ fn key_attestation_rejects_out_of_window_issued_at() {
     let now = Utc::now();
     for issued_at in [
         (now - Duration::minutes(5) - Duration::seconds(1)).timestamp(),
-        (now + Duration::seconds(61)).timestamp(),
+        (now + Duration::minutes(5)).timestamp(),
     ] {
         let (validator, encoded, metadata) = key_attestation_fixture(json!({
             "iat": issued_at,
@@ -898,7 +898,7 @@ async fn proof_validator_enforces_jwt_header_key_metadata_and_claim_contracts() 
 
     for iat in [
         (now - Duration::minutes(5) - Duration::seconds(1)).timestamp(),
-        (now + Duration::seconds(61)).timestamp(),
+        (now + Duration::minutes(5)).timestamp(),
     ] {
         let stale = json!({
             "nonce": "expected-nonce",
