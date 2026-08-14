@@ -41,6 +41,7 @@ pub(crate) use rate_limit::RateLimitSettings;
 /// OAuth service runtime parameters.
 #[derive(Clone)]
 pub(crate) struct Settings {
+    pub(crate) tenant: TenantSettings,
     pub(crate) endpoint: EndpointSettings,
     pub(crate) protocol: ProtocolSettings,
     pub(crate) session: SessionSettings,
@@ -51,6 +52,20 @@ pub(crate) struct Settings {
     pub(crate) device: DeviceGrantSettings,
     pub(crate) ciba: CibaSettings,
     pub(crate) openid4vc: Openid4vcSettings,
+}
+
+/// The single active tenant owned by this process runtime.
+///
+/// The tenant is the process-wide security and routing boundary. The realm and
+/// organization are validated active defaults for identity placement inside
+/// that tenant; they are not independent request authorization partitions.
+/// Request-level multi-tenant routing is enabled only after transport identity,
+/// protocol keys, clients, and transient state can all be selected from the
+/// same immutable tenant snapshot. Until then every service is composed from
+/// this explicit context instead of silently falling back to the legacy IDs.
+#[derive(Clone, Copy)]
+pub(crate) struct TenantSettings {
+    pub(crate) context: nazo_identity::TenantContext,
 }
 
 #[derive(Clone)]

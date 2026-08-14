@@ -44,6 +44,7 @@ pub trait DynamicRegistrationRequestGuard: Send + Sync {
 
 #[derive(Clone)]
 pub struct DynamicRegistrationEndpointConfig {
+    pub tenant: nazo_identity::TenantContext,
     pub issuer: String,
     pub default_audience: String,
     pub pairwise_subject_secret: Option<String>,

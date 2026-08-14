@@ -63,6 +63,7 @@ struct CibaPollIssueRequest<'a, 'issuance> {
     mtls_x5t_s256: Option<String>,
     client_assertion: Option<ValidatedClientAssertion>,
     lease_expires_at: Option<i64>,
+    tenant_id: uuid::Uuid,
 }
 
 pub(crate) async fn token_ciba(
@@ -169,6 +170,7 @@ pub(crate) async fn token_ciba(
                     mtls_x5t_s256,
                     client_assertion,
                     lease_expires_at,
+                    tenant_id: config.tenant_id,
                 })
                 .await
             },
@@ -208,6 +210,7 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
         mtls_x5t_s256,
         client_assertion,
         lease_expires_at,
+        tenant_id,
     } = request;
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
         issuance.authorization,
@@ -265,7 +268,7 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
     };
     let user = match users
         .public_account_by_id(
-            nazo_identity::TenantId::new(DEFAULT_TENANT_ID).expect("default tenant ID is non-nil"),
+            nazo_identity::TenantId::new(tenant_id).expect("configured CIBA tenant ID is non-nil"),
             nazo_identity::UserId::new(ciba.user_id).expect("persisted CIBA user ID is non-nil"),
         )
         .await

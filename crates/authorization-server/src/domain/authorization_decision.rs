@@ -22,10 +22,7 @@ use crate::{
         audit::{audit_event, audit_event_required, audit_fields, ensure_audit_storage},
         security::{blake3_hex, random_urlsafe_token},
     },
-    domain::{
-        client_jwe::{JwePayloadKind, client_jwe_key, encrypt_compact_jwe},
-        tenancy::default_tenant_context,
-    },
+    domain::client_jwe::{JwePayloadKind, client_jwe_key, encrypt_compact_jwe},
     http::authorization::{AuthorizationHttpConfig, ServerAuthorizationService},
     runtime_modules::ServerRuntimeModuleRegistry,
 };
@@ -34,6 +31,7 @@ use crate::{
 pub(crate) struct ServerAuthorizationDecisionOperations {
     service: Arc<ServerAuthorizationService>,
     sessions: SessionService,
+    tenant_id: nazo_identity::TenantId,
     config: Arc<AuthorizationHttpConfig>,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
 }
@@ -42,12 +40,14 @@ impl ServerAuthorizationDecisionOperations {
     pub(crate) fn new(
         service: Arc<ServerAuthorizationService>,
         sessions: SessionService,
+        tenant_id: nazo_identity::TenantId,
         config: Arc<AuthorizationHttpConfig>,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     ) -> Self {
         Self {
             service,
             sessions,
+            tenant_id,
             config,
             runtime_modules,
         }
@@ -163,7 +163,7 @@ impl ServerAuthorizationDecisionOperations {
                 code_ttl_seconds: payload
                     .authorization_code_ttl_seconds
                     .unwrap_or(self.config.auth_code_ttl_seconds),
-                tenant_id: default_tenant_context().tenant_id,
+                tenant_id: self.tenant_id.as_uuid(),
             })
             .await
         {

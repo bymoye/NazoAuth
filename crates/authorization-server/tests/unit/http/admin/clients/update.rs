@@ -44,6 +44,7 @@ async fn prepare_client_insert_for_test(
         pairwise_subject_secret,
         crate::adapters::security::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
         issuer,
+        nazo_identity::TenantContext::default_system(),
         nazo_key_management::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await

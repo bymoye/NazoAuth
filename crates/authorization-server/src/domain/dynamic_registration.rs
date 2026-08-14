@@ -11,7 +11,6 @@ use sha2::{Digest as _, Sha256};
 use crate::adapters::audit::{audit_event, audit_fields};
 use crate::adapters::security::{blake3_hex, constant_time_eq, random_urlsafe_token};
 use crate::domain::remote_client_documents::RemoteClientDocumentResolver;
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
 use crate::http::admin::clients::ServerSectorIdentifierResolver;
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use crate::settings::Settings;
@@ -20,6 +19,7 @@ use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 #[derive(Clone)]
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) struct DynamicRegistrationConfig {
+    pub(crate) tenant: nazo_identity::TenantContext,
     pub(crate) issuer: String,
     pub(crate) default_audience: String,
     pub(crate) pairwise_subject_secret: Option<String>,
@@ -38,6 +38,7 @@ impl From<&Settings> for DynamicRegistrationConfig {
         let modules = &settings.modules;
         let protocol = &settings.protocol;
         Self {
+            tenant: settings.tenant.context,
             issuer: endpoint.issuer.clone(),
             default_audience: protocol.default_audience.to_owned(),
             pairwise_subject_secret: protocol
@@ -79,6 +80,7 @@ pub(crate) struct ServerDynamicRegistrationRequestGuard {
     rate_limits: nazo_valkey::RateLimitStore,
     window_seconds: u64,
     max_requests: u64,
+    tenant_id: uuid::Uuid,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     conformance_leases: nazo_postgres::ConformanceLeaseRepository,
 }
@@ -94,6 +96,7 @@ impl ServerDynamicRegistrationRequestGuard {
             rate_limits,
             window_seconds: config.rate_limit_window_seconds,
             max_requests: config.rate_limit_max_requests,
+            tenant_id: config.tenant.tenant_id.as_uuid(),
             runtime_modules,
             conformance_leases,
         }
@@ -143,7 +146,7 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
         Box::pin(async move {
             let token_sha256 = sha256_hex(token.as_bytes());
             self.conformance_leases
-                .active_dynamic_registration_lease_id(DEFAULT_TENANT_ID, &token_sha256)
+                .active_dynamic_registration_lease_id(self.tenant_id, &token_sha256)
                 .await
                 .map_err(|_error| {
                     tracing::warn!("dynamic registration conformance lease lookup failed");
@@ -188,6 +191,7 @@ pub(crate) fn dynamic_registration_endpoint(
     ));
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
+            tenant: config.tenant,
             issuer: config.issuer,
             default_audience: config.default_audience,
             pairwise_subject_secret: config.pairwise_subject_secret,
