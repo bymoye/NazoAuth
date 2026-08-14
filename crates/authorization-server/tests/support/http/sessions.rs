@@ -7,6 +7,7 @@ pub(crate) fn admin_session_handles(state: &TestInfrastructure) -> AdminSessionH
     AdminSessionHandles::new(
         SessionStore::new(&state.valkey_connection()),
         UserRepository::new(state.diesel_db.clone()),
+        state.settings.tenant.context.tenant_id,
         SessionHttpConfig::new(
             &session.session_cookie_name,
             &session.csrf_cookie_name,
@@ -20,6 +21,7 @@ pub(crate) fn profile_session_handles(state: &TestInfrastructure) -> SessionProf
     SessionProfileHandles::new(
         SessionStore::new(&state.valkey_connection()),
         UserRepository::new(state.diesel_db.clone()),
+        state.settings.tenant.context.tenant_id,
         SessionHttpConfig::new(
             &session.session_cookie_name,
             &session.csrf_cookie_name,

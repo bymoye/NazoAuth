@@ -9,7 +9,6 @@ use nazo_auth::{
     parse_client_configuration_update, prepare_dynamic_client_registration,
     response_types_from_client,
 };
-use nazo_identity::TenantContext;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -324,7 +323,7 @@ pub(super) async fn prepare_insert(
         request.security_policy.allow_confidential_oidc_without_pkce = true;
     }
     let policy = AdminClientPolicy {
-        tenant: TenantContext::default_system(),
+        tenant: endpoint.config.tenant,
         pairwise_subject_secret: endpoint.config.pairwise_subject_secret.clone(),
         client_secret_pepper: endpoint.config.client_secret_pepper.clone(),
     };

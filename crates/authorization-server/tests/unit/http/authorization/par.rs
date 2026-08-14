@@ -306,7 +306,7 @@ impl ParTestFixture {
             ServerAuthorizationService::new(
                 nazo_postgres::AuthorizationFlowRepository::new(
                     database.clone(),
-                    DEFAULT_TENANT_ID,
+                    settings.tenant.context.tenant_id.as_uuid(),
                 ),
                 nazo_valkey::AuthorizationStateAdapter::new(&connection),
                 keyset.clone(),
@@ -315,6 +315,7 @@ impl ParTestFixture {
             AdminSessionHandles::new(
                 nazo_valkey::SessionStore::new(&connection),
                 nazo_postgres::UserRepository::new(database.clone()),
+                settings.tenant.context.tenant_id,
                 crate::http::sessions::SessionHttpConfig::new(
                     &session.session_cookie_name,
                     &session.csrf_cookie_name,
@@ -323,6 +324,7 @@ impl ParTestFixture {
             ),
             crate::runtime_modules::inherited_enabled(&settings),
             keyset.clone(),
+            settings.tenant.context.tenant_id.as_uuid(),
         );
         Self {
             authorization,

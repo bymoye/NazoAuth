@@ -6,6 +6,7 @@ pub(crate) struct AuthorizationTestFixture {
     sessions: AdminSessionHandles,
     enabled_modules: std::collections::BTreeSet<ModuleId>,
     request_object_keys: nazo_key_management::KeyManager,
+    tenant_id: uuid::Uuid,
 }
 
 impl AuthorizationTestFixture {
@@ -15,6 +16,7 @@ impl AuthorizationTestFixture {
         sessions: AdminSessionHandles,
         enabled_modules: std::collections::BTreeSet<ModuleId>,
         request_object_keys: nazo_key_management::KeyManager,
+        tenant_id: uuid::Uuid,
     ) -> Self {
         Self {
             service,
@@ -22,6 +24,7 @@ impl AuthorizationTestFixture {
             sessions,
             enabled_modules,
             request_object_keys,
+            tenant_id,
         }
     }
 
@@ -32,6 +35,7 @@ impl AuthorizationTestFixture {
             &self.sessions,
             self.enabled_modules.clone(),
             &self.request_object_keys,
+            self.tenant_id,
         )
     }
 
@@ -48,10 +52,7 @@ impl AuthorizationTestFixture {
     ) -> Self {
         Self::new(
             ServerAuthorizationService::new(
-                nazo_postgres::AuthorizationFlowRepository::new(
-                    database.clone(),
-                    crate::domain::tenancy::DEFAULT_TENANT_ID,
-                ),
+                nazo_postgres::AuthorizationFlowRepository::new(database.clone(), self.tenant_id),
                 nazo_valkey::AuthorizationStateAdapter::new(connection),
                 keyset,
             ),
@@ -59,10 +60,12 @@ impl AuthorizationTestFixture {
             AdminSessionHandles::new(
                 nazo_valkey::SessionStore::new(connection),
                 nazo_postgres::UserRepository::new(database),
+                nazo_identity::TenantId::new(self.tenant_id).expect("fixture tenant id"),
                 self.sessions.http_config().clone(),
             ),
             self.enabled_modules.clone(),
             self.request_object_keys.clone(),
+            self.tenant_id,
         )
     }
 }
@@ -80,7 +83,7 @@ impl TestAuthorizationDependencies {
                 ServerAuthorizationService::new(
                     nazo_postgres::AuthorizationFlowRepository::new(
                         state.diesel_db.clone(),
-                        crate::domain::tenancy::DEFAULT_TENANT_ID,
+                        state.settings.tenant.context.tenant_id.as_uuid(),
                     ),
                     nazo_valkey::AuthorizationStateAdapter::new(&connection),
                     state.keyset.clone(),
@@ -89,6 +92,7 @@ impl TestAuthorizationDependencies {
                 AdminSessionHandles::new(
                     nazo_valkey::SessionStore::new(&connection),
                     nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+                    state.settings.tenant.context.tenant_id,
                     crate::http::sessions::SessionHttpConfig::new(
                         &session.session_cookie_name,
                         &session.csrf_cookie_name,
@@ -97,6 +101,7 @@ impl TestAuthorizationDependencies {
                 ),
                 crate::runtime_modules::inherited_enabled(&state.settings),
                 state.keyset.clone(),
+                state.settings.tenant.context.tenant_id.as_uuid(),
             ),
         }
     }
@@ -113,6 +118,7 @@ impl<'a> AuthorizationRequestContext<'a> {
         sessions: &'a AdminSessionHandles,
         enabled_modules: std::collections::BTreeSet<ModuleId>,
         request_object_keys: &'a nazo_key_management::KeyManager,
+        tenant_id: uuid::Uuid,
     ) -> Self {
         Self {
             service,
@@ -125,7 +131,7 @@ impl<'a> AuthorizationRequestContext<'a> {
             },
             remote_client_documents: None,
             request_object_keys,
-            tenant_id: nazo_identity::DEFAULT_TENANT_ID,
+            tenant_id,
             credential_authorization_offers: None,
         }
     }

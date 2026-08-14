@@ -29,6 +29,22 @@ fn bearer_token_requires_bearer_scheme_and_one_nonempty_token() {
 }
 
 #[test]
+fn cross_tenant_scim_credentials_are_classified_as_audited_denials() {
+    assert_eq!(
+        credential_denial_reason(&nazo_http_actix::ScimAuthorizationError::TenantMismatch),
+        Some("tenant_mismatch")
+    );
+    assert_eq!(
+        credential_denial_reason(&nazo_http_actix::ScimAuthorizationError::InvalidBearer),
+        Some("invalid_token")
+    );
+    assert_eq!(
+        credential_denial_reason(&nazo_http_actix::ScimAuthorizationError::BackendUnavailable),
+        None
+    );
+}
+
+#[test]
 fn scim_cursor_protection_round_trips_and_rejects_tampering_or_truncation() {
     let protector = ServerScimCursorProtector::new("cursor-pepper")
         .expect("cursor protector should derive a key");

@@ -134,6 +134,7 @@ fn admin_access_request_dependencies(
         admin_sessions: Data::new(AdminSessionHandles::new(
             nazo_valkey::SessionStore::new(&state.valkey_connection()),
             nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+            state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
                 &session.csrf_cookie_name,

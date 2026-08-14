@@ -48,7 +48,6 @@ use crate::adapters::security::{
     default_password_hash_queue_timeout_ms, dummy_password_hash, initialize_dummy_password_hash,
 };
 use crate::config::{ConfigSource, database_max_connections, database_url};
-use crate::domain::tenancy::{DEFAULT_TENANT_ID, default_tenant_context};
 #[cfg(not(test))]
 use crate::domain::{
     BackchannelLogoutWorker, CibaPingDeliveryWorker, ServerTokenManagementOperations,

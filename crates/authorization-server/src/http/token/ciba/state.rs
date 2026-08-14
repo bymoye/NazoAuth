@@ -52,7 +52,7 @@ impl From<&Settings> for CibaHttpConfig {
             trusted_proxy_cidrs: settings.endpoint.trusted_proxy_cidrs.clone(),
             client_ip_header_mode: settings.endpoint.client_ip_header_mode,
             default_audience: settings.protocol.default_audience.as_str().into(),
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: settings.tenant.context.tenant_id.as_uuid(),
             auth_req_id_ttl_seconds: settings.ciba.ciba_auth_req_id_ttl_seconds,
             poll_interval_seconds: settings.ciba.ciba_poll_interval_seconds,
             csrf_cookie_name: settings.session.csrf_cookie_name.as_str().into(),

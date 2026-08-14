@@ -16,6 +16,17 @@ pub(crate) fn credential_configurations_from_config(
 
 impl Settings {
     pub(crate) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
+        let tenant = nazo_identity::TenantContext {
+            tenant_id: nazo_identity::TenantId::new(
+                config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?,
+            )?,
+            realm_id: nazo_identity::RealmId::new(
+                config.parse("REALM_ID", nazo_identity::DEFAULT_REALM_ID)?,
+            )?,
+            organization_id: nazo_identity::OrganizationId::new(
+                config.parse("ORGANIZATION_ID", nazo_identity::DEFAULT_ORGANIZATION_ID)?,
+            )?,
+        };
         let public_base_url = config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000");
         validate_issuer_url(&public_base_url)?;
         let public_origin = url_origin(&public_base_url)?;
@@ -365,6 +376,7 @@ impl Settings {
         }
 
         Ok(Self {
+            tenant: TenantSettings { context: tenant },
             endpoint: {
                 let trusted_proxy_cidrs =
                     parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?;

@@ -66,7 +66,7 @@ pub(super) async fn build(
     let identity_session_service = nazo_identity::SessionService::new(
         Arc::new(nazo_valkey::SessionStore::new(&valkey_connection)),
         Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone())),
-        nazo_identity::TenantId::new(DEFAULT_TENANT_ID).expect("default tenant ID is valid"),
+        settings.tenant.context.tenant_id,
     );
     let profile_logout_endpoint = web::Data::new(SessionLogoutEndpoint::new(
         identity_session_service.clone(),
@@ -81,6 +81,7 @@ pub(super) async fn build(
     let admin_sessions = web::Data::new(AdminSessionHandles::new(
         nazo_valkey::SessionStore::new(&valkey_connection),
         nazo_postgres::UserRepository::new(diesel_db.clone()),
+        settings.tenant.context.tenant_id,
         session_http_config.clone(),
     ));
     let authorization_endpoint = web::Data::new(AuthorizationEndpoint::new(
@@ -90,7 +91,7 @@ pub(super) async fn build(
         runtime_registry.clone(),
         startup.remote_client_documents.clone(),
         keyset.clone(),
-        DEFAULT_TENANT_ID,
+        settings.tenant.context.tenant_id.as_uuid(),
         if settings.modules.enable_openid4vci_issuer {
             Some(Arc::new(nazo_postgres::Openid4vciRepository::new(
                 diesel_db.clone(),
@@ -109,12 +110,14 @@ pub(super) async fn build(
     let session_profiles = web::Data::new(SessionProfileHandles::new(
         nazo_valkey::SessionStore::new(&valkey_connection),
         nazo_postgres::UserRepository::new(diesel_db.clone()),
+        settings.tenant.context.tenant_id,
         session_http_config.clone(),
     ));
     #[cfg(test)]
     let session_profiles = web::Data::new(SessionProfileHandles::new(
         nazo_valkey::SessionStore::new(&valkey_connection),
         nazo_postgres::UserRepository::new(diesel_db.clone()),
+        settings.tenant.context.tenant_id,
         session_http_config.clone(),
     ));
     let client_repository = nazo_postgres::OAuthClientRepository::new(diesel_db.clone());
@@ -223,6 +226,7 @@ pub(super) async fn build(
         Arc::new(ServerAuthorizationDecisionOperations::new(
             core.authorization_service.clone().into_inner(),
             identity_session_service.clone(),
+            settings.tenant.context.tenant_id,
             core.authorization_config.clone().into_inner(),
             runtime_registry.clone(),
         )),
@@ -249,9 +253,7 @@ pub(super) async fn build(
         nazo_valkey::AuthenticationStore::new(&valkey_connection),
         RegistrationSecretHasher,
         email_delivery,
-        default_tenant_context()
-            .as_identity_context()
-            .expect("default tenant identifiers are valid"),
+        settings.tenant.context,
         nazo_identity::RegistrationServiceConfig {
             delivery_enabled: email_delivery_configured(&startup.settings),
             send_peer_cooldown_seconds: identity_settings.email.send_peer_cooldown_seconds,
@@ -319,8 +321,7 @@ pub(super) async fn build(
         nazo_valkey::SessionStore::new(&valkey_connection),
         TracingAuthenticationAudit,
         nazo_identity::AuthenticationServiceConfig {
-            tenant_id: nazo_identity::TenantId::new(DEFAULT_TENANT_ID)
-                .expect("default tenant ID is valid"),
+            tenant_id: settings.tenant.context.tenant_id,
             dummy_password_hash: nazo_identity::PasswordHash::new(dummy_password_hash()?)?,
             failure_window_seconds: identity_settings.rate_limit.login_failure_window_seconds,
             failure_ip_email_max_attempts: identity_settings
@@ -354,8 +355,7 @@ pub(super) async fn build(
             nazo_valkey::SessionStore::new(&valkey_connection),
             TracingPasskeyAudit,
             nazo_identity::PasskeyServiceConfig {
-                tenant_id: nazo_identity::TenantId::new(DEFAULT_TENANT_ID)
-                    .expect("default tenant ID is valid"),
+                tenant_id: settings.tenant.context.tenant_id,
                 rp_id: passkey.rp_id.to_owned(),
                 rp_name: passkey.rp_name.to_owned(),
                 origin: passkey.origin.to_owned(),
@@ -395,9 +395,7 @@ pub(super) async fn build(
         nazo_valkey::SessionStore::new(&valkey_connection),
         TracingFederationAudit,
         nazo_identity::FederationServiceConfig {
-            tenant: default_tenant_context()
-                .as_identity_context()
-                .expect("default tenant identifiers are valid"),
+            tenant: settings.tenant.context,
             state_ttl_seconds: FEDERATION_STATE_TTL_SECONDS,
             saml_replay_ttl_seconds: SAML_REPLAY_TTL_SECONDS,
             session_ttl_seconds: session.session_ttl_seconds,

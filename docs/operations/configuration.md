@@ -55,9 +55,12 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | --- | --- | --- |
 | `BIND` | `0.0.0.0:8000` | HTTP listener |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Public same-origin base URL |
+| `TENANT_ID` | `00000000-0000-0000-0000-000000000001` | Process-wide active tenant; the row must exist and have `active` status |
+| `REALM_ID` | `00000000-0000-0000-0000-000000000002` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
+| `ORGANIZATION_ID` | `00000000-0000-0000-0000-000000000003` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
 | `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/oauth` | PostgreSQL connection string |
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
-| `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string |
+| `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string; its logical database is permanently claimed by `TENANT_ID`, same-tenant replicas may share it, and a non-default tenant requires an empty database on first claim |
 | `DATA_DIR` | `runtime` | Base directory for persistent local files |
 | `UI_CACHE_DIR` | `${DATA_DIR}/ui-releases` | Writable cache for the verified frontend release selected from the embedded descriptor |
 | `UI_STATIC_DIR` | unset | Optional signed frontend directory containing `index.html`; serves files and SPA routes under `/ui/` |

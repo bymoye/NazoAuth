@@ -269,6 +269,7 @@ impl LiveOpenid4vcAdminFixture {
         Data::new(AdminSessionHandles::new(
             nazo_valkey::SessionStore::new(&self.state.valkey_connection()),
             nazo_postgres::UserRepository::new(self.state.diesel_db.clone()),
+            self.state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
                 &session.csrf_cookie_name,

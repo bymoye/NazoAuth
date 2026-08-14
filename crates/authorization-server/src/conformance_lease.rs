@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{ConfigSource, database_url},
-    domain::tenancy::DEFAULT_TENANT_ID,
+    domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID},
 };
 
 const CONFORMANCE_BUNDLE_PATH: &str = "/run/nazoauth-operator/conformance-bundle.json";
@@ -1687,7 +1687,11 @@ pub(crate) async fn operator_revoke(lease_id: &str) -> anyhow::Result<TaskResult
 }
 
 pub(crate) async fn operator_cleanup() -> anyhow::Result<TaskResult> {
-    let result = repository()?.cleanup().await?;
+    // Cleanup is a system lifecycle operation, not a request-path Suite
+    // capability. It must continue to retire historical leases from every
+    // tenant until the external controller owns and verifies that lifecycle;
+    // create/list/revoke/onboarding remain default-boundary only.
+    let result = cleanup_repository()?.cleanup().await?;
     Ok(TaskResult::ConformanceLeaseCleaned {
         cleaned_leases: u64::try_from(result.cleaned_leases)
             .context("negative conformance lease cleanup count")?,
@@ -1700,12 +1704,20 @@ pub(crate) async fn operator_cleanup() -> anyhow::Result<TaskResult> {
 
 fn repository() -> anyhow::Result<ConformanceLeaseRepository> {
     let config = ConfigSource::load_for_migrations()?;
+    ensure_default_suite_boundary(&config)?;
+    let pool = nazo_postgres::create_pool(database_url(&config), 1)?;
+    Ok(ConformanceLeaseRepository::new(pool))
+}
+
+fn cleanup_repository() -> anyhow::Result<ConformanceLeaseRepository> {
+    let config = ConfigSource::load_for_migrations()?;
     let pool = nazo_postgres::create_pool(database_url(&config), 1)?;
     Ok(ConformanceLeaseRepository::new(pool))
 }
 
 fn repository_for_onboarding() -> anyhow::Result<ConformanceLeaseRepository> {
     let config = ConfigSource::load_for_migrations()?;
+    ensure_default_suite_boundary(&config)?;
     let encoded_key = read_fixed_secret_string(
         &conformance_policy_secret_path(
             "NAZOAUTH_OPERATOR_OPENID4VC_DATA_ENCRYPTION_KEY_FILE",
@@ -1723,6 +1735,20 @@ fn repository_for_onboarding() -> anyhow::Result<ConformanceLeaseRepository> {
     Ok(ConformanceLeaseRepository::new_with_openid4vc_data_key(
         pool, data_key,
     ))
+}
+
+fn ensure_default_suite_boundary(config: &ConfigSource) -> anyhow::Result<()> {
+    let configured = nazo_identity::TenantContext {
+        tenant_id: nazo_identity::TenantId::new(config.parse("TENANT_ID", DEFAULT_TENANT_ID)?)?,
+        realm_id: nazo_identity::RealmId::new(config.parse("REALM_ID", DEFAULT_REALM_ID)?)?,
+        organization_id: nazo_identity::OrganizationId::new(
+            config.parse("ORGANIZATION_ID", DEFAULT_ORGANIZATION_ID)?,
+        )?,
+    };
+    if configured != nazo_identity::TenantContext::default_system() {
+        bail!("the legacy in-process conformance Suite supports only the default tenant boundary");
+    }
+    Ok(())
 }
 
 fn summary(lease: ConformanceLease) -> ConformanceLeaseSummary {

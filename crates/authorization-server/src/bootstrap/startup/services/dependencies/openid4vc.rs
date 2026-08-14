@@ -99,7 +99,7 @@ pub(super) async fn build(
             Openid4vcClientAttestationValidator::with_conformance_leases(
                 static_client_attestation,
                 nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
-                DEFAULT_TENANT_ID,
+                settings.tenant.context.tenant_id.as_uuid(),
             )
             .map(Arc::new)
         })
@@ -119,11 +119,11 @@ pub(super) async fn build(
             )?
             .with_conformance_leases(
                 nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
-                DEFAULT_TENANT_ID,
+                settings.tenant.context.tenant_id.as_uuid(),
             );
             let operations = Arc::new(ServerCredentialIssuerOperations::new(
                 diesel_db.clone(),
-                DEFAULT_TENANT_ID,
+                settings.tenant.context.tenant_id.as_uuid(),
                 data_key,
                 token_service.clone().into_inner(),
                 authorization_service.clone().into_inner(),
@@ -172,7 +172,7 @@ pub(super) async fn build(
         Some(web::Data::new(PresentationEndpoint::new(
             Arc::new(ServerPresentationOperations::new(
                 diesel_db.clone(),
-                DEFAULT_TENANT_ID,
+                settings.tenant.context.tenant_id.as_uuid(),
                 settings
                     .openid4vc
                     .data_encryption_key

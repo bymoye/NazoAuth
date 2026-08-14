@@ -171,9 +171,7 @@ pub(crate) fn registration_service(
         crate::adapters::email::SmtpVerificationEmailDelivery::from_delivery(
             &identity.email.delivery,
         ),
-        crate::domain::tenancy::default_tenant_context()
-            .as_identity_context()
-            .expect("default tenant identifiers are valid"),
+        state.settings.tenant.context,
         nazo_identity::RegistrationServiceConfig {
             delivery_enabled: crate::adapters::email::email_delivery_configured(&state.settings),
             send_peer_cooldown_seconds: identity.email.send_peer_cooldown_seconds,
@@ -196,8 +194,7 @@ pub(crate) fn passkey_service(
         nazo_valkey::SessionStore::new(&state.valkey_connection()),
         crate::bootstrap::TracingPasskeyAudit,
         nazo_identity::PasskeyServiceConfig {
-            tenant_id: nazo_identity::TenantId::new(crate::domain::tenancy::DEFAULT_TENANT_ID)
-                .unwrap(),
+            tenant_id: state.settings.tenant.context.tenant_id,
             rp_id: passkey.rp_id.to_owned(),
             rp_name: passkey.rp_name.to_owned(),
             origin: passkey.origin.to_owned(),
@@ -220,9 +217,7 @@ pub(crate) fn federation_service(
         nazo_valkey::SessionStore::new(&state.valkey_connection()),
         crate::bootstrap::TracingFederationAudit,
         nazo_identity::FederationServiceConfig {
-            tenant: crate::domain::tenancy::default_tenant_context()
-                .as_identity_context()
-                .unwrap(),
+            tenant: state.settings.tenant.context,
             state_ttl_seconds: crate::http::auth::federation::FEDERATION_STATE_TTL_SECONDS,
             saml_replay_ttl_seconds: crate::http::auth::federation::SAML_REPLAY_TTL_SECONDS,
             session_ttl_seconds: state.settings.session.session_ttl_seconds,

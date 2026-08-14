@@ -7,6 +7,34 @@ const KEY_ATTESTATION_JWKS: &str =
 const ATTESTATION_CREDENTIAL_CONFIGURATIONS: &str = r#"{"pid":{"format":"dc+sd-jwt","scope":"pid","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"attestation":{"proof_signing_alg_values_supported":["ES256"],"key_attestations_required":{"key_storage":["iso_18045_moderate"]}}},"vct":"https://issuer.example/credentials/pid"}}"#;
 
 #[test]
+fn active_tenant_context_is_explicit_and_rejects_nil_identifiers() {
+    let tenant_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap();
+    let realm_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap();
+    let organization_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap();
+    let configured = ConfigSource::from_pairs_for_test([
+        ("TENANT_ID", "00000000-0000-0000-0000-000000000011"),
+        ("REALM_ID", "00000000-0000-0000-0000-000000000012"),
+        ("ORGANIZATION_ID", "00000000-0000-0000-0000-000000000013"),
+    ]);
+    let settings = Settings::from_config(&configured).expect("active tenant context should load");
+    assert!(
+        settings
+            .tenant
+            .context
+            .matches_raw(tenant_id, realm_id, organization_id)
+    );
+
+    for key in ["TENANT_ID", "REALM_ID", "ORGANIZATION_ID"] {
+        let invalid =
+            ConfigSource::from_pairs_for_test([(key, "00000000-0000-0000-0000-000000000000")]);
+        assert_eq!(
+            settings_error(&invalid, "nil tenant boundary identifier must fail").to_string(),
+            "identity ID must not be nil"
+        );
+    }
+}
+
+#[test]
 fn key_attestation_policy_can_defer_trust_to_a_scoped_conformance_lease() {
     let config = ConfigSource::from_pairs_for_test([
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
