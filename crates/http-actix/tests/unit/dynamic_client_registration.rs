@@ -163,6 +163,26 @@ impl DynamicRegistrationClientStore for FakeStore {
     }
 }
 
+#[actix_web::test]
+async fn registration_access_token_lookup_fails_closed_across_tenants() {
+    let store = FakeStore::new();
+    let mut endpoint = endpoint_with_store(true, store);
+    endpoint.config.tenant = TenantContext {
+        tenant_id: nazo_identity::TenantId::new(Uuid::from_u128(11)).unwrap(),
+        realm_id: nazo_identity::RealmId::new(Uuid::from_u128(12)).unwrap(),
+        organization_id: nazo_identity::OrganizationId::new(Uuid::from_u128(13)).unwrap(),
+    };
+    let request = test::TestRequest::default()
+        .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+        .to_http_request();
+
+    let response = authenticate_registration_client(&endpoint, &request, "client-1")
+        .await
+        .expect_err("a token from the default tenant must not cross into another tenant");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[derive(Clone, Copy)]
 struct FakeSecurity;
 
@@ -277,6 +297,7 @@ fn endpoint_with_store_and_lease_lookup(
 ) -> DynamicRegistrationEndpoint {
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
+            tenant: TenantContext::default_system(),
             issuer: "https://issuer.example".to_owned(),
             default_audience: "https://api.example".to_owned(),
             pairwise_subject_secret: None,
@@ -1098,7 +1119,7 @@ async fn rate_limit_error_keeps_oauth_code_and_retry_after() {
 }
 
 fn client() -> OAuthClient {
-    let tenant = nazo_identity::TenantContext::default_system();
+    let tenant = TenantContext::default_system();
     OAuthClient {
         id: Uuid::now_v7(),
         tenant_id: tenant.tenant_id.as_uuid(),

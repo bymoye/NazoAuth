@@ -1450,3 +1450,18 @@ fn onboarding_repository_requires_the_operator_data_key_channel() {
     };
     assert!(error.to_string().contains("OPENID4VC"));
 }
+#[test]
+fn legacy_suite_rejects_non_default_active_tenant_boundary() {
+    let default =
+        ConfigSource::from_pairs_for_test([("TENANT_ID", "00000000-0000-0000-0000-000000000001")]);
+    ensure_default_suite_boundary(&default).expect("default Suite boundary should remain usable");
+
+    let alternative =
+        ConfigSource::from_pairs_for_test([("TENANT_ID", "00000000-0000-0000-0000-000000000011")]);
+    assert!(
+        ensure_default_suite_boundary(&alternative)
+            .expect_err("legacy Suite must fail closed for another active tenant")
+            .to_string()
+            .contains("supports only the default tenant boundary")
+    );
+}

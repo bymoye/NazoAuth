@@ -20,6 +20,7 @@ async fn prepare_client_insert_for_test(
         pairwise_subject_secret,
         LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
         issuer,
+        nazo_identity::TenantContext::default_system(),
         nazo_key_management::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
@@ -80,6 +81,31 @@ fn create_request() -> CreateClientRequest {
         sector_identifier_uri: None,
         security_policy: nazo_auth::ClientSecurityPolicy::default(),
     }
+}
+
+#[actix_web::test]
+async fn prepared_client_retains_the_selected_non_default_tenant_context() {
+    let tenant = nazo_identity::TenantContext {
+        tenant_id: nazo_identity::TenantId::new(uuid::Uuid::now_v7()).expect("tenant id"),
+        realm_id: nazo_identity::RealmId::new(uuid::Uuid::now_v7()).expect("realm id"),
+        organization_id: nazo_identity::OrganizationId::new(uuid::Uuid::now_v7())
+            .expect("organization id"),
+    };
+    let mut payload = create_request();
+    payload.token_endpoint_auth_method = "client_secret_basic".to_owned();
+    payload.jwks = None;
+    let prepared = prepare_client_insert_with_secret_pepper(
+        payload,
+        Some("pairwise-subject-secret"),
+        LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
+        "https://issuer.example",
+        tenant,
+        nazo_key_management::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
+    )
+    .await
+    .expect("client registration should be prepared");
+
+    assert_eq!(prepared.tenant, tenant);
 }
 
 #[actix_web::test]

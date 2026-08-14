@@ -9,11 +9,18 @@ kubectl create secret generic nazoauth-connections \
 helm upgrade --install nazoauth ./deploy/helm/nazoauth \
   --set image.repository=registry.example/nazoauth \
   --set image.tag=vX.Y.Z \
-  --set publicBaseUrl=https://auth.example.com
+  --set publicBaseUrl=https://auth.example.com \
+  --set mtls.trustedProxyCidrs=10.0.0.10/32
 ```
 
 Replace `vX.Y.Z` with an immutable published Release tag. Production GitOps
 should pin the verified platform image digest rather than follow a mutable tag.
+
+The chart defaults to `transportMode=trusted-proxy` because the Service exposes
+HTTP inside the cluster. Set `mtls.trustedProxyCidrs` to the exact ingress peer
+addresses before installation; startup fails closed when that boundary is
+missing. The current chart does not mount the server/client-CA identities needed
+for `direct-tls`.
 
 With one replica, NazoAuth generates application secrets and signing keys into
 the persistent data volume. Multiple replicas are rejected unless

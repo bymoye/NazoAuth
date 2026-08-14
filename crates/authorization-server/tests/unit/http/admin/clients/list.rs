@@ -43,6 +43,7 @@ async fn prepare_client_insert_for_test(
         pairwise_subject_secret,
         crate::adapters::security::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER,
         issuer,
+        nazo_identity::TenantContext::default_system(),
         nazo_key_management::SUPPORTED_CLIENT_JWT_SIGNING_ALGS,
     )
     .await
@@ -202,6 +203,7 @@ impl LiveAdminClientListFixture {
         let valkey_url = std::env::var("VALKEY_URL").ok()?;
         let config = ConfigSource::from_pairs_for_test([
             ("ISSUER", "https://issuer.example"),
+            ("TRANSPORT_MODE", "direct-tls"),
             (
                 "CLIENT_SECRET_PEPPER",
                 "client-secret-pepper-for-tests-000000000001",

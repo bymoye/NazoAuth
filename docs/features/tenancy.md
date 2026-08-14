@@ -3,8 +3,9 @@
 ## Scope
 
 The current runtime uses a tenant-aware schema with explicit tenant, realm, and
-organization columns for core identity and OAuth records. Runtime routing is
-single-tenant unless a deployment adds request-level tenant selection.
+organization columns for core identity and OAuth records. Each process selects
+one active tenant, realm, and organization at startup. Request-level routing is
+not enabled yet.
 
 Dynamic multi-issuer realm routing is outside this boundary.
 
@@ -14,9 +15,19 @@ Dynamic multi-issuer realm routing is outside this boundary.
 - Default realm: `00000000-0000-0000-0000-000000000002`
 - Default organization: `00000000-0000-0000-0000-000000000003`
 
-Local registration, admin-created clients, access tokens, refresh tokens,
-grants, SCIM users, federation links, and revocation records are written into
-the default boundary unless a tenant resolver selects another boundary.
+`TENANT_ID` selects the process-wide security and routing boundary.
+`REALM_ID` and `ORGANIZATION_ID` select active defaults for identity placement
+inside that tenant. They default to the identifiers above for backward
+compatibility. Startup fails closed if any row is missing or inactive, or if
+either placement belongs to another tenant. Local registration, admin-created
+clients, sessions, authorization and device flows, CIBA, OpenID4VC, SCIM, and
+federation services are composed from that same immutable context.
+
+Realm and organization are not independent request authorization partitions in
+this stage. Existing session, user, client, grant, and trust lookups enforce the
+tenant boundary; they do not filter every operation by realm or organization.
+Treating those placement defaults as stronger isolation would overstate the
+implemented runtime contract.
 
 ## Database Invariants
 
@@ -49,10 +60,32 @@ default instance as a fallback.
 
 ## Product Boundaries
 
-The default runtime remains single-tenant with tenant-aware data invariants.
-SCIM provisioning, local registration, grant lookup paths, and
-external OIDC/SAML federation still bind users and grants to the default tenant,
-realm, and organization.
+The runtime remains single-tenant with tenant-aware data invariants. Selecting
+non-default identifiers changes the entire process boundary; it does not add
+host- or request-level tenant routing. Protocol signing keys remain
+process-wide and must not be shared between processes configured for different
+tenants.
+
+Valkey transient keys are not yet individually namespaced, so startup
+permanently binds each Valkey logical database to its first active tenant.
+Same-tenant replicas may share it; a different tenant is rejected. A
+non-default tenant may claim only an empty logical database, while the legacy
+default tenant may adopt an existing unmarked database during upgrade.
+Reassigning a logical database requires an explicit destructive flush after all
+old state has expired or been retired.
+
+For a non-default tenant, an older NazoAuth binary that predates the ownership
+preflight is not a safe rollback artifact: it ignores the marker and falls back
+to the legacy default runtime context. Roll back by restoring the previous
+tenant-matched binary and its dedicated Valkey logical database snapshot, or by
+retiring and explicitly flushing the new tenant's transient state before any
+boundary change. Never point an old binary at a logical database already
+claimed by a non-default tenant.
+
+The legacy in-process OIDF conformance lease/onboarding driver remains limited
+to the default boundary and rejects an alternative active boundary. It is not a
+general management path and is scheduled to move to the external controller;
+ordinary runtime services do not inherit that restriction.
 
 A full multi-tenant deployment needs request-level tenant resolution by host,
 path, issuer, or another explicit deployment boundary. That resolver must run

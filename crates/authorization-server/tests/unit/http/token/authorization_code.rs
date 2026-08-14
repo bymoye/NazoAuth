@@ -280,15 +280,13 @@ impl LiveAuthorizationCodeFixture {
             ),
             ("MTLS_ENDPOINT_BASE_URL", "https://issuer.example"),
             ("FRONTEND_BASE_URL", "https://app.example"),
+            ("TRANSPORT_MODE", "trusted-proxy"),
+            ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+            ("MTLS_CERTIFICATE_SOURCE", "legacy-verified-headers"),
             ("COOKIE_SECURE", "true"),
             ("TOKEN_RATE_LIMIT_MAX_REQUESTS", "100000"),
         ]);
-        let mut settings = Settings::from_config(&config).expect("test settings should load");
-        settings.endpoint.trusted_proxy_cidrs = vec![
-            nazo_http_actix::IpCidr::parse("127.0.0.1/32")
-                .expect("trusted proxy CIDR should parse"),
-        ];
-        settings
+        Settings::from_config(&config).expect("test settings should load")
     }
 
     async fn new_with_settings_and_keyset(
@@ -1307,6 +1305,11 @@ async fn token_authorization_code_enforces_client_mtls_policy_before_consumption
     let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
     let verified_req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((
             header::HeaderName::from_static("x-ssl-client-verify"),
@@ -1357,6 +1360,11 @@ async fn token_authorization_code_accepts_matching_mtls_bound_code_before_issuin
         .await;
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((
             header::HeaderName::from_static("x-ssl-client-verify"),

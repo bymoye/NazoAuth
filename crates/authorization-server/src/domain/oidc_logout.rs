@@ -209,7 +209,7 @@ impl OidcLogoutOperations for OidcLogoutHandles {
             let execution = self
                 .service
                 .execute(LogoutInput {
-                    tenant_id: crate::domain::tenancy::DEFAULT_TENANT_ID,
+                    tenant_id: self.sessions.tenant_id().as_uuid(),
                     request: RpLogoutRequest {
                         id_token_hint_present: command.request.id_token_hint.is_some(),
                         client_id: command.request.client_id,

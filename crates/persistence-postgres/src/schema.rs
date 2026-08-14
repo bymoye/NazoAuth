@@ -1,4 +1,39 @@
 diesel::table! {
+    tenants (id) {
+        id -> Uuid,
+        slug -> Varchar,
+        display_name -> Varchar,
+        status -> Varchar,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    realms (id) {
+        id -> Uuid,
+        tenant_id -> Uuid,
+        slug -> Varchar,
+        display_name -> Varchar,
+        status -> Varchar,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    organizations (id) {
+        id -> Uuid,
+        tenant_id -> Uuid,
+        slug -> Varchar,
+        display_name -> Varchar,
+        status -> Varchar,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     users (id) {
         id -> Uuid, tenant_id -> Uuid, realm_id -> Uuid, organization_id -> Uuid,
         username -> Varchar, email -> Varchar, password_hash -> Varchar, is_active -> Bool,
@@ -423,6 +458,8 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(realms -> tenants (tenant_id));
+diesel::joinable!(organizations -> tenants (tenant_id));
 diesel::joinable!(client_access_requests -> users (user_id));
 diesel::joinable!(scim_audit_events -> scim_tokens (scim_token_id));
 diesel::joinable!(scim_security_event_receipts -> scim_security_events (event_id));
@@ -431,6 +468,9 @@ diesel::joinable!(user_client_grants -> oauth_clients (client_id));
 diesel::joinable!(user_client_grants -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    tenants,
+    realms,
+    organizations,
     users,
     initial_admin_bootstrap,
     user_totp_credentials,

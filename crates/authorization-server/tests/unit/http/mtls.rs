@@ -10,17 +10,6 @@ use serde_json::json;
 
 use uuid::Uuid;
 
-pub(crate) fn request_mtls_thumbprint(req: &HttpRequest, settings: &Settings) -> Option<String> {
-    request_mtls_client_certificate(req, settings)?.thumbprint
-}
-
-pub(crate) fn request_mtls_client_certificate(
-    req: &HttpRequest,
-    settings: &Settings,
-) -> Option<MtlsClientCertificate> {
-    request_mtls_client_certificate_from_trusted_proxy(req, &settings.endpoint.trusted_proxy_cidrs)
-}
-
 fn merge_sorted_unique(target: &mut Vec<String>, incoming: Vec<String>) {
     target.extend(incoming);
     target.sort();
@@ -124,30 +113,26 @@ fn rfc9440_client_cert_uses_single_der_byte_sequence() {
 #[test]
 fn mtls_certificate_source_requires_explicit_supported_mode() {
     assert_eq!(
-        MtlsCertificateSourceMode::from_config(None, false).unwrap(),
+        MtlsCertificateSourceMode::from_config(None).unwrap(),
         MtlsCertificateSourceMode::Disabled
     );
     assert_eq!(
-        MtlsCertificateSourceMode::from_config(Some("rfc9440"), true).unwrap(),
+        MtlsCertificateSourceMode::from_config(Some("rfc9440")).unwrap(),
         MtlsCertificateSourceMode::Rfc9440
     );
     assert_eq!(
-        MtlsCertificateSourceMode::from_config(Some("direct-tls"), false).unwrap(),
+        MtlsCertificateSourceMode::from_config(Some("direct-tls")).unwrap(),
         MtlsCertificateSourceMode::DirectTls
     );
     assert_eq!(
-        MtlsCertificateSourceMode::from_config(None, true).unwrap(),
-        MtlsCertificateSourceMode::LegacyVerifiedHeaders
-    );
-    assert_eq!(
-        MtlsCertificateSourceMode::from_config(Some("disabled"), true).unwrap(),
+        MtlsCertificateSourceMode::from_config(Some("disabled")).unwrap(),
         MtlsCertificateSourceMode::Disabled
     );
     assert_eq!(
-        MtlsCertificateSourceMode::from_config(Some("legacy-verified-headers"), true).unwrap(),
+        MtlsCertificateSourceMode::from_config(Some("legacy-verified-headers")).unwrap(),
         MtlsCertificateSourceMode::LegacyVerifiedHeaders
     );
-    assert!(MtlsCertificateSourceMode::from_config(Some("direct"), true).is_err());
+    assert!(MtlsCertificateSourceMode::from_config(Some("direct")).is_err());
 }
 
 #[test]
@@ -853,6 +838,9 @@ fn mtls_ipaddress_parser_rejects_invalid_san_lengths() {
 fn ignores_forwarded_certificate_headers_from_untrusted_peer() {
     let settings = trusted_proxy_settings();
     let req = TestRequest::default()
+        .app_data(Data::new(MtlsCertificateSource::new(
+            MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("198.51.100.10:443".parse().unwrap())
         .insert_header(("x-ssl-client-verify", "SUCCESS"))
         .insert_header((
@@ -861,13 +849,16 @@ fn ignores_forwarded_certificate_headers_from_untrusted_peer() {
         ))
         .to_http_request();
 
-    assert!(request_mtls_thumbprint(&req, &settings).is_none());
+    assert!(request_mtls_thumbprint(&req, &settings.endpoint.trusted_proxy_cidrs).is_none());
 }
 
 #[test]
 fn accepts_forwarded_certificate_headers_from_trusted_peer() {
     let settings = trusted_proxy_settings();
     let req = TestRequest::default()
+        .app_data(Data::new(MtlsCertificateSource::new(
+            MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+        )))
         .peer_addr("192.0.2.10:443".parse().unwrap())
         .insert_header(("x-ssl-client-verify", "SUCCESS"))
         .insert_header((
@@ -877,7 +868,7 @@ fn accepts_forwarded_certificate_headers_from_trusted_peer() {
         .to_http_request();
 
     assert_eq!(
-        request_mtls_thumbprint(&req, &settings).as_deref(),
+        request_mtls_thumbprint(&req, &settings.endpoint.trusted_proxy_cidrs).as_deref(),
         Some("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8")
     );
 }

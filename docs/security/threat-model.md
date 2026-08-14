@@ -33,6 +33,7 @@ token format, or expands discovery metadata.
 | Browser to AS | AS endpoints | Browser, user-agent plugins, network attackers before TLS | HTTPS issuer, CSRF protection, redirect URI validation, PKCE |
 | Client to AS | AS endpoints | OAuth clients, compromised clients, malicious clients | Client registration policy, client authentication, PAR/JAR validation |
 | Reverse proxy to app | Configured trusted proxy CIDRs | Direct client traffic and untrusted proxies | `TRUSTED_PROXY_CIDRS`, header stripping, trusted internal channel |
+| Direct TLS peer to app | Rustls listener and verified TLS session | Forged certificate headers and untrusted client certificates | `TRANSPORT_MODE=direct-tls`, server identity, client CA verification, TLS connection-derived certificate facts |
 | App to PostgreSQL | Application process | Database network and operators outside least privilege | credentials, network isolation, backups, migration controls |
 | App to Valkey | Application process | Cache network and cache data loss | fail-closed replay/rate/session behavior |
 | AS to resource server | Resource server verifier | Token replay and wrong-audience use | issuer/audience/cnf validation, revocation or introspection fallback |

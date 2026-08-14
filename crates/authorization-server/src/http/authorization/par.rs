@@ -13,7 +13,7 @@ use crate::http::client_attestation::client_attestation_headers;
 use crate::http::dpop::DpopError;
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
-use crate::http::mtls::request_mtls_thumbprint_from_trusted_proxy;
+use crate::http::mtls::request_mtls_thumbprint;
 use crate::http::rate_limit::rate_limited_response;
 
 use actix_web::http::StatusCode;
@@ -474,7 +474,7 @@ async fn par_after_rate_limit_inner(
     }
     let dpop_jkt = request_dpop_jkt.or(header_dpop_jkt);
     let mtls_x5t_s256 = if client.require_mtls_bound_tokens {
-        request_mtls_thumbprint_from_trusted_proxy(&req, &context.config.trusted_proxy_cidrs)
+        request_mtls_thumbprint(&req, &context.config.trusted_proxy_cidrs)
     } else {
         None
     };

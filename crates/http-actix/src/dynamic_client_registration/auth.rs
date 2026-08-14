@@ -3,7 +3,6 @@ use actix_web::{
     http::{StatusCode, header},
 };
 use nazo_auth::{DynamicRegistrationDependencyError, DynamicRegistrationSecretPort, OAuthClient};
-use nazo_identity::TenantContext;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -82,7 +81,7 @@ pub(super) async fn authenticate_registration_client(
     match endpoint
         .clients
         .by_registration_access_token(
-            TenantContext::default_system().tenant_id.as_uuid(),
+            endpoint.config.tenant.tenant_id.as_uuid(),
             client_id,
             &token_hash,
         )
