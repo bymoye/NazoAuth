@@ -64,6 +64,15 @@ writes for any other tenant. A request-level resolver must therefore select the
 repository/service instance for the resolved tenant; it must never reuse the
 default instance as a fallback.
 
+## Local Registration State
+
+The local registration service supplies its validated tenant to every email
+verification state operation. Verification codes, per-email send cooldowns,
+and per-peer send cooldowns use independent tenant namespaces in Valkey. The
+same normalized email or peer in another tenant therefore cannot load, consume,
+release, or suppress state owned by the first tenant. Email and peer subjects
+are stored as digests in key names rather than raw identifiers.
+
 ## Product Boundaries
 
 The runtime remains single-tenant with tenant-aware data invariants. Selecting

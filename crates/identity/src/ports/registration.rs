@@ -26,21 +26,29 @@ pub enum EmailVerificationConsume {
     MissingOrChanged,
 }
 
+/// Tenant-owned email verification state.
+///
+/// Callers must pass the tenant selected for the registration flow to every
+/// operation. Implementations must include it in the authoritative state key
+/// and must not fall back to deployment-global state.
 pub trait EmailVerificationStorePort: Send + Sync {
     fn reserve_peer_send<'a>(
         &'a self,
+        tenant_id: crate::TenantId,
         subject: &'a str,
         ttl_seconds: u64,
     ) -> RepositoryFuture<'a, bool>;
 
     fn reserve_email_send<'a>(
         &'a self,
+        tenant_id: crate::TenantId,
         email: &'a str,
         ttl_seconds: u64,
     ) -> RepositoryFuture<'a, bool>;
 
     fn store_code<'a>(
         &'a self,
+        tenant_id: crate::TenantId,
         email: &'a str,
         password_hash: PasswordHashInput,
         ttl_seconds: u64,
@@ -48,18 +56,32 @@ pub trait EmailVerificationStorePort: Send + Sync {
 
     fn load_code<'a>(
         &'a self,
+        tenant_id: crate::TenantId,
         email: &'a str,
     ) -> RepositoryFuture<'a, Option<EmailVerificationRecord>>;
 
     fn consume_code<'a>(
         &'a self,
+        tenant_id: crate::TenantId,
         email: &'a str,
         expected: &'a EmailVerificationRecord,
     ) -> RepositoryFuture<'a, EmailVerificationConsume>;
 
-    fn delete_code<'a>(&'a self, email: &'a str) -> RepositoryFuture<'a, ()>;
-    fn release_email_send<'a>(&'a self, email: &'a str) -> RepositoryFuture<'a, ()>;
-    fn release_peer_send<'a>(&'a self, subject: &'a str) -> RepositoryFuture<'a, ()>;
+    fn delete_code<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+    ) -> RepositoryFuture<'a, ()>;
+    fn release_email_send<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+    ) -> RepositoryFuture<'a, ()>;
+    fn release_peer_send<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        subject: &'a str,
+    ) -> RepositoryFuture<'a, ()>;
 }
 
 pub trait SecretHashPort: Send + Sync {

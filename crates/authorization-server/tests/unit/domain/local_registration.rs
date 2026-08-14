@@ -83,9 +83,15 @@ impl LiveFixture {
 
     async fn store_code(&self, email: &str, code: &str) {
         let email = normalize_email_address(email).unwrap();
+        let tenant_id = nazo_identity::TenantId::new(crate::domain::tenancy::DEFAULT_TENANT_ID)
+            .expect("default tenant must be non-nil");
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:email_verify:code:{email}"),
+            format!(
+                "oauth:email_verify:{}:code:{}",
+                tenant_id.as_uuid(),
+                blake3_hex(&email)
+            ),
             hash_password(code).unwrap(),
             300,
         )
@@ -134,7 +140,13 @@ async fn concurrent_registration_consumes_once_and_keeps_valkey_key_contract() {
     let registered = outcomes.into_iter().find_map(Result::ok).unwrap();
     assert_eq!(registered.email, email);
 
-    let code_key = format!("oauth:email_verify:code:{email}");
+    let tenant_id = nazo_identity::TenantId::new(crate::domain::tenancy::DEFAULT_TENANT_ID)
+        .expect("default tenant must be non-nil");
+    let code_key = format!(
+        "oauth:email_verify:{}:code:{}",
+        tenant_id.as_uuid(),
+        blake3_hex(&email)
+    );
     assert!(!fixture.key_exists(&code_key).await);
 
     let peer_subject = "203.0.113.77";
@@ -146,7 +158,11 @@ async fn concurrent_registration_consumes_once_and_keeps_valkey_key_contract() {
             .unwrap(),
         SendVerificationCodeOutcome::Suppressed
     );
-    let peer_key = format!("oauth:email_verify:peer_send:{}", blake3_hex(peer_subject));
+    let peer_key = format!(
+        "oauth:email_verify:{}:peer_send:{}",
+        tenant_id.as_uuid(),
+        blake3_hex(peer_subject)
+    );
     assert!(
         !fixture.key_exists(&peer_key).await,
         "existing-account suppression must not create peer cooldown state"

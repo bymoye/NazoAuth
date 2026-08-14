@@ -123,14 +123,26 @@ pub(crate) fn device_user_code(user_code: &str) -> String {
     )
 }
 
-pub(crate) fn email_send(email: &str) -> String {
-    format!("oauth:email_verify:send:{email}")
+pub(crate) fn email_send(tenant_id: TenantId, email: &str) -> String {
+    format!(
+        "oauth:email_verify:{}:send:{}",
+        tenant_id.as_uuid(),
+        blake3_hex(email)
+    )
 }
-pub(crate) fn email_peer_send(subject: &str) -> String {
-    format!("oauth:email_verify:peer_send:{}", blake3_hex(subject))
+pub(crate) fn email_peer_send(tenant_id: TenantId, subject: &str) -> String {
+    format!(
+        "oauth:email_verify:{}:peer_send:{}",
+        tenant_id.as_uuid(),
+        blake3_hex(subject)
+    )
 }
-pub(crate) fn email_code(email: &str) -> String {
-    format!("oauth:email_verify:code:{email}")
+pub(crate) fn email_code(tenant_id: TenantId, email: &str) -> String {
+    format!(
+        "oauth:email_verify:{}:code:{}",
+        tenant_id.as_uuid(),
+        blake3_hex(email)
+    )
 }
 pub(crate) fn passkey_registration(ceremony_id: &str) -> String {
     format!("oauth:passkey:registration:{ceremony_id}")
