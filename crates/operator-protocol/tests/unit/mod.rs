@@ -2622,7 +2622,13 @@ fn public_matrix_validator_rejects_structural_and_placeholder_boundaries() {
 fn tenant_resource_contract_signs_and_binds_all_request_identity() {
     let controller_key = SigningKey::from_bytes(&[17; 32]);
     let runtime_key = SigningKey::from_bytes(&[19; 32]);
-    let capability = tenant_resource_capability();
+    let raw_nonce = rand::random::<[u8; 32]>();
+    let expected_nonce = URL_SAFE_NO_PAD.encode(raw_nonce);
+    let mut mismatched_raw_nonce = raw_nonce;
+    mismatched_raw_nonce[0] ^= 1;
+    let mismatched_nonce = URL_SAFE_NO_PAD.encode(mismatched_raw_nonce);
+    let mut capability = tenant_resource_capability();
+    capability.nonce = expected_nonce.clone();
     let compact_capability =
         sign_tenant_resource_capability(&capability, "instance-1", &runtime_key).unwrap();
     let capability_sha256 = compact_sha256(&compact_capability);
@@ -2660,9 +2666,19 @@ fn tenant_resource_contract_signs_and_binds_all_request_identity() {
         "deployment-1",
         TENANT_ID,
         "tenant-resource-capability-1",
-        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        &expected_nonce,
     )
     .unwrap();
+    assert!(
+        validate_tenant_resource_capability_request_binding(
+            &capability,
+            "deployment-1",
+            TENANT_ID,
+            "tenant-resource-capability-1",
+            &mismatched_nonce,
+        )
+        .is_err()
+    );
     assert_eq!(
         verify_tenant_resource_capability(
             &compact_capability,
