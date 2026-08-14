@@ -23,25 +23,27 @@ use nazo_operator_protocol::{
     validate_openid4vc_trust_policy,
 };
 use nazo_postgres::{
-    NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, NewTenantResourceOperation,
-    Openid4vcTrustPolicyClientBind, Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke,
-    Openid4vcTrustPolicyWrite, OperatorManagedTrustAnchor, TenantResourceBinding,
-    TenantResourceBindingDeactivate, TenantResourceOperationWrite, TenantResourceRepository,
-    TenantResourceStateCas, UserInsert, active_public_client_id_on_connection,
-    append_fresh_security_audit_on_connection, deactivate_client_on_connection,
-    delete_operator_managed_dataset_on_connection, disable_user_on_connection,
-    insert_client_on_connection, insert_operator_managed_trust_anchor_on_connection,
-    insert_user_on_connection, protect_dataset_claims,
-    revoke_operator_managed_trust_anchor_on_connection,
+    CibaDecisionBindingRepository, CibaDecisionBindingRevoke, CibaDecisionBindingWrite,
+    NewCibaDecisionBinding, NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding,
+    NewTenantResourceOperation, Openid4vcTrustPolicyClientBind, Openid4vcTrustPolicyForClient,
+    Openid4vcTrustPolicyRevoke, Openid4vcTrustPolicyWrite, OperatorManagedTrustAnchor,
+    TenantResourceBinding, TenantResourceBindingDeactivate, TenantResourceOperationWrite,
+    TenantResourceRepository, TenantResourceStateCas, UserInsert,
+    active_public_client_id_on_connection, append_fresh_security_audit_on_connection,
+    deactivate_client_on_connection, delete_operator_managed_dataset_on_connection,
+    disable_user_on_connection, insert_client_on_connection,
+    insert_operator_managed_trust_anchor_on_connection, insert_user_on_connection,
+    protect_dataset_claims, revoke_operator_managed_trust_anchor_on_connection,
     upsert_operator_managed_dataset_on_connection,
 };
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::tenant_resource_provider::{
-    PreparedTenantResource, PreparedTenantResourceTask, TenantResourceExecutionResult,
-    TenantResourceExecutor, TenantResourceExecutorError, TenantResourcePayload,
-    TenantResourceReceiptIssuer, TenantResourceStateSnapshot,
+    MAX_CIBA_DECISION_BINDING_LIFETIME_SECONDS, PreparedTenantResource, PreparedTenantResourceTask,
+    TenantResourceExecutionResult, TenantResourceExecutor, TenantResourceExecutorError,
+    TenantResourcePayload, TenantResourceReceiptIssuer, TenantResourceStateSnapshot,
 };
 
 /// The result of registration-policy preparation.  The adapter constructing
@@ -515,6 +517,28 @@ impl PostgresTenantResourceExecutor {
                         not_after: parsed.not_after,
                     }))
                 }
+                TenantResourcePayload::CibaDecisionBinding(value) => {
+                    let now = Utc::now();
+                    let expires_at = DateTime::from_timestamp(value.expires_at, 0)
+                        .ok_or(TenantResourceExecutorError::Rejected)?;
+                    let latest = now
+                        .checked_add_signed(chrono::Duration::seconds(
+                            MAX_CIBA_DECISION_BINDING_LIFETIME_SECONDS,
+                        ))
+                        .ok_or(TenantResourceExecutorError::Unavailable)?;
+                    if expires_at <= now || expires_at > latest {
+                        return Err(TenantResourceExecutorError::Rejected);
+                    }
+                    PreparedApplyPayload::CibaDecisionBinding(Box::new(
+                        PreparedCibaDecisionBinding {
+                            identity: resource.identity.clone(),
+                            client_resource_id: value.client_resource_id,
+                            user_resource_id: value.user_resource_id,
+                            decision_token_sha256: sha256_hex(value.decision_token.as_bytes()),
+                            expires_at,
+                        },
+                    ))
+                }
                 TenantResourcePayload::Openid4vcDataset(value) => {
                     PreparedApplyPayload::Dataset(Box::new(PreparedDataset {
                         identity: resource.identity.clone(),
@@ -546,6 +570,7 @@ enum PreparedApplyPayload {
     User(Box<PreparedUser>),
     OauthClient(Box<PreparedClient>),
     Mtls(Box<PreparedMtls>),
+    CibaDecisionBinding(Box<PreparedCibaDecisionBinding>),
     Dataset(Box<PreparedDataset>),
     TrustPolicy(Box<PreparedTrustPolicy>),
 }
@@ -575,6 +600,14 @@ struct PreparedMtls {
     not_after: DateTime<Utc>,
 }
 
+struct PreparedCibaDecisionBinding {
+    identity: TenantResourceIdentity,
+    client_resource_id: String,
+    user_resource_id: String,
+    decision_token_sha256: String,
+    expires_at: DateTime<Utc>,
+}
+
 struct PreparedDataset {
     identity: TenantResourceIdentity,
     user_resource_id: String,
@@ -592,8 +625,9 @@ fn payload_sort_key(payload: &PreparedApplyPayload) -> (u8, &str) {
         PreparedApplyPayload::User(value) => (0, &value.identity.resource_id),
         PreparedApplyPayload::OauthClient(value) => (1, &value.identity.resource_id),
         PreparedApplyPayload::Mtls(value) => (2, &value.identity.resource_id),
-        PreparedApplyPayload::Dataset(value) => (3, &value.identity.resource_id),
-        PreparedApplyPayload::TrustPolicy(value) => (4, &value.identity.resource_id),
+        PreparedApplyPayload::CibaDecisionBinding(value) => (3, &value.identity.resource_id),
+        PreparedApplyPayload::Dataset(value) => (4, &value.identity.resource_id),
+        PreparedApplyPayload::TrustPolicy(value) => (5, &value.identity.resource_id),
     }
 }
 
@@ -739,6 +773,63 @@ async fn apply_resources(
         locators.insert(
             ResourceKey::from_identity(&payload.identity),
             oauth_client_locator(client.id),
+        );
+    }
+    for payload in payloads.iter().filter_map(|p| match p {
+        PreparedApplyPayload::CibaDecisionBinding(value) => Some(value),
+        _ => None,
+    }) {
+        if locators.contains_key(&ResourceKey::from_identity(&payload.identity)) {
+            continue;
+        }
+        let client_id = parse_uuid_locator(
+            locators
+                .get(&ResourceKey::new(
+                    TenantResourceKind::OauthClient,
+                    &payload.client_resource_id,
+                ))
+                .ok_or(ExecutorTransactionError::Executor(
+                    TenantResourceExecutorError::Rejected,
+                ))?,
+            TenantResourceKind::OauthClient,
+        )?;
+        let user_id = parse_uuid_locator(
+            locators
+                .get(&ResourceKey::new(
+                    TenantResourceKind::User,
+                    &payload.user_resource_id,
+                ))
+                .ok_or(ExecutorTransactionError::Executor(
+                    TenantResourceExecutorError::Rejected,
+                ))?,
+            TenantResourceKind::User,
+        )?;
+        let generation = Uuid::now_v7();
+        let binding = CibaDecisionBindingRepository::apply_on_connection(
+            connection,
+            NewCibaDecisionBinding {
+                generation,
+                tenant_id,
+                resource_id: &payload.identity.resource_id,
+                resource_digest: &payload.identity.digest,
+                oauth_client_id: client_id,
+                user_id,
+                token_sha256: &payload.decision_token_sha256,
+                expires_at: payload.expires_at,
+            },
+        )
+        .await
+        .map_err(ExecutorTransactionError::Repository)?;
+        let generation = match binding {
+            CibaDecisionBindingWrite::Applied(binding)
+            | CibaDecisionBindingWrite::Replayed(binding) => binding.generation,
+            CibaDecisionBindingWrite::Conflict(_) => {
+                return Err(transaction_conflict("ciba_decision_binding_apply"));
+            }
+        };
+        locators.insert(
+            ResourceKey::from_identity(&payload.identity),
+            ciba_decision_binding_locator(generation),
         );
     }
     for payload in payloads.iter().filter_map(|p| match p {
@@ -998,6 +1089,7 @@ async fn collect_apply_resource_mappings(
                     .ok_or_else(|| transaction_conflict("apply_oauth_client_mapping"))?
             }
             TenantResourceKind::MtlsTrustAnchor
+            | TenantResourceKind::CibaDecisionBinding
             | TenantResourceKind::Openid4vcDataset
             | TenantResourceKind::Openid4vcTrustPolicy => {
                 continue;
@@ -1021,24 +1113,33 @@ fn validate_desired_dependencies(
     available_keys: &std::collections::BTreeSet<ResourceKey>,
 ) -> Result<(), ExecutorTransactionError> {
     for payload in payloads {
-        let dependency = match payload {
-            PreparedApplyPayload::OauthClient(value) => {
-                value.trust_policy_resource_id.as_ref().map(|resource_id| {
+        let dependencies = match payload {
+            PreparedApplyPayload::OauthClient(value) => value
+                .trust_policy_resource_id
+                .as_ref()
+                .map(|resource_id| {
                     ResourceKey::new(TenantResourceKind::Openid4vcTrustPolicy, resource_id)
                 })
-            }
-            PreparedApplyPayload::Mtls(value) => Some(ResourceKey::new(
+                .into_iter()
+                .collect::<Vec<_>>(),
+            PreparedApplyPayload::Mtls(value) => vec![ResourceKey::new(
                 TenantResourceKind::OauthClient,
                 &value.client_resource_id,
-            )),
-            PreparedApplyPayload::Dataset(value) => Some(ResourceKey::new(
+            )],
+            PreparedApplyPayload::CibaDecisionBinding(value) => vec![
+                ResourceKey::new(TenantResourceKind::OauthClient, &value.client_resource_id),
+                ResourceKey::new(TenantResourceKind::User, &value.user_resource_id),
+            ],
+            PreparedApplyPayload::Dataset(value) => vec![ResourceKey::new(
                 TenantResourceKind::User,
                 &value.user_resource_id,
-            )),
-            PreparedApplyPayload::TrustPolicy(_) => None,
-            PreparedApplyPayload::User(_) => None,
+            )],
+            PreparedApplyPayload::TrustPolicy(_) | PreparedApplyPayload::User(_) => Vec::new(),
         };
-        if dependency.is_some_and(|dependency| !available_keys.contains(&dependency)) {
+        if dependencies
+            .iter()
+            .any(|dependency| !available_keys.contains(dependency))
+        {
             return Err(ExecutorTransactionError::Executor(
                 TenantResourceExecutorError::Rejected,
             ));
@@ -1208,6 +1309,45 @@ async fn validate_revoke_dependency_closure(
                 }
                 continue;
             }
+            TenantResourceKind::CibaDecisionBinding => {
+                let generation =
+                    parse_uuid_locator(&child.locator, TenantResourceKind::CibaDecisionBinding)?;
+                let binding = CibaDecisionBindingRepository::by_generation_on_connection(
+                    connection, tenant_id, generation,
+                )
+                .await
+                .map_err(ExecutorTransactionError::Repository)?
+                .ok_or(ExecutorTransactionError::Executor(
+                    TenantResourceExecutorError::Unavailable,
+                ))?;
+                if !binding.active
+                    || binding.resource_id != child.resource_id
+                    || binding.resource_digest != child.resource_digest
+                {
+                    return Err(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Unavailable,
+                    ));
+                }
+                for parent_locator in [
+                    oauth_client_locator(binding.oauth_client_id),
+                    user_locator(binding.user_id),
+                ] {
+                    let parent = active.iter().find_map(|(key, candidate)| {
+                        (candidate.locator == parent_locator).then_some(key)
+                    });
+                    let Some(parent) = parent else {
+                        return Err(ExecutorTransactionError::Executor(
+                            TenantResourceExecutorError::Unavailable,
+                        ));
+                    };
+                    if targets.contains(parent) {
+                        return Err(ExecutorTransactionError::Executor(
+                            TenantResourceExecutorError::Rejected,
+                        ));
+                    }
+                }
+                continue;
+            }
             TenantResourceKind::Openid4vcTrustPolicy | TenantResourceKind::User => continue,
         };
         let parent = active
@@ -1275,6 +1415,38 @@ async fn revoke_locator(
                 return Err(ExecutorTransactionError::Executor(
                     TenantResourceExecutorError::Rejected,
                 ));
+            }
+        }
+        ResourceLocator::CibaDecisionBinding(generation) => {
+            let revoked = CibaDecisionBindingRepository::revoke_on_connection(
+                connection,
+                tenant_id,
+                generation,
+                resource_id,
+                expected_digest,
+                Utc::now(),
+            )
+            .await
+            .map_err(ExecutorTransactionError::Repository)?;
+            match revoked {
+                CibaDecisionBindingRevoke::Revoked(binding) if binding.generation == generation => {
+                }
+                CibaDecisionBindingRevoke::Revoked(_) => {
+                    return Err(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Unavailable,
+                    ));
+                }
+                CibaDecisionBindingRevoke::Conflict(_) => {
+                    return Err(transaction_conflict("ciba_decision_binding_revoke"));
+                }
+                CibaDecisionBindingRevoke::AlreadyAbsent => {
+                    return Err(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Rejected,
+                    ));
+                }
+                CibaDecisionBindingRevoke::Busy { .. } => {
+                    return Err(transaction_conflict("ciba_decision_binding_busy"));
+                }
             }
         }
         ResourceLocator::Dataset {
@@ -1409,6 +1581,7 @@ enum ResourceLocator {
     User(Uuid),
     OauthClient(Uuid),
     Mtls(Uuid),
+    CibaDecisionBinding(Uuid),
     TrustPolicy(Uuid),
     Dataset {
         subject_id: Uuid,
@@ -1434,6 +1607,13 @@ fn parse_locator(
         }
         ("mtls-trust-anchor", TenantResourceKind::MtlsTrustAnchor) if parts.next().is_none() => {
             Uuid::parse_str(value).ok().map(ResourceLocator::Mtls)
+        }
+        ("ciba-decision-binding", TenantResourceKind::CibaDecisionBinding)
+            if parts.next().is_none() =>
+        {
+            Uuid::parse_str(value)
+                .ok()
+                .map(ResourceLocator::CibaDecisionBinding)
         }
         ("openid4vc-trust-policy", TenantResourceKind::Openid4vcTrustPolicy)
             if parts.next().is_none() =>
@@ -1466,6 +1646,7 @@ fn parse_uuid_locator(
         ResourceLocator::User(id)
         | ResourceLocator::OauthClient(id)
         | ResourceLocator::Mtls(id)
+        | ResourceLocator::CibaDecisionBinding(id)
         | ResourceLocator::TrustPolicy(id) => Ok(id),
         ResourceLocator::Dataset { .. } => Err(ExecutorTransactionError::Executor(
             TenantResourceExecutorError::Rejected,
@@ -1485,6 +1666,10 @@ fn mtls_locator(id: Uuid) -> String {
     format!("mtls-trust-anchor/{id}")
 }
 
+fn ciba_decision_binding_locator(generation: Uuid) -> String {
+    format!("ciba-decision-binding/{generation}")
+}
+
 fn trust_policy_locator(id: Uuid) -> String {
     format!("openid4vc-trust-policy/{id}")
 }
@@ -1497,6 +1682,7 @@ fn kind_name(kind: TenantResourceKind) -> &'static str {
     match kind {
         TenantResourceKind::OauthClient => "oauth-client",
         TenantResourceKind::MtlsTrustAnchor => "mtls-trust-anchor",
+        TenantResourceKind::CibaDecisionBinding => "ciba-decision-binding",
         TenantResourceKind::Openid4vcDataset => "openid4vc-dataset",
         TenantResourceKind::Openid4vcTrustPolicy => "openid4vc-trust-policy",
         TenantResourceKind::User => "user",
@@ -1507,6 +1693,7 @@ fn parse_kind(value: &str) -> Option<TenantResourceKind> {
     match value {
         "oauth-client" => Some(TenantResourceKind::OauthClient),
         "mtls-trust-anchor" => Some(TenantResourceKind::MtlsTrustAnchor),
+        "ciba-decision-binding" => Some(TenantResourceKind::CibaDecisionBinding),
         "openid4vc-dataset" => Some(TenantResourceKind::Openid4vcDataset),
         "openid4vc-trust-policy" => Some(TenantResourceKind::Openid4vcTrustPolicy),
         "user" => Some(TenantResourceKind::User),
@@ -1523,8 +1710,9 @@ fn kind_order(kind: TenantResourceKind) -> u8 {
         TenantResourceKind::User => 0,
         TenantResourceKind::OauthClient => 1,
         TenantResourceKind::MtlsTrustAnchor => 2,
-        TenantResourceKind::Openid4vcDataset => 3,
-        TenantResourceKind::Openid4vcTrustPolicy => 4,
+        TenantResourceKind::CibaDecisionBinding => 3,
+        TenantResourceKind::Openid4vcDataset => 4,
+        TenantResourceKind::Openid4vcTrustPolicy => 5,
     }
 }
 
@@ -1764,6 +1952,10 @@ fn map_preparation_error(error: TenantResourcePreparationError) -> TenantResourc
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_bytes(&Sha256::digest(bytes))
 }
 
 fn is_lower_sha256(value: &str) -> bool {

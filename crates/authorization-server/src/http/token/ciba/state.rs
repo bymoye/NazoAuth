@@ -1,7 +1,6 @@
 use super::*;
 
 pub(crate) const CIBA_GRANT_TYPE: &str = "urn:openid:params:grant-type:ciba";
-pub(crate) const CIBA_AUTOMATED_DECISION_PROFILE: &str = "oidc-fapi-ciba";
 pub(crate) const CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS: i64 = 300;
 pub(crate) const CIBA_REQUEST_OBJECT_CLOCK_SKEW_SECONDS: i64 = 30;
 pub(crate) const CIBA_BINDING_MESSAGE_MAX_CHARS: usize = 64;
@@ -36,7 +35,6 @@ pub(crate) struct CibaHttpConfig {
     pub(crate) auth_req_id_ttl_seconds: u64,
     pub(crate) poll_interval_seconds: u64,
     pub(crate) csrf_cookie_name: Box<str>,
-    pub(crate) automated_decision_token: Option<Box<str>>,
     pub(crate) automated_decision_mode: CibaAutomatedDecisionMode,
     pub(crate) ciba_fapi_profile: bool,
     pub(crate) ciba_fapi2_hardening: bool,
@@ -56,11 +54,6 @@ impl From<&Settings> for CibaHttpConfig {
             auth_req_id_ttl_seconds: settings.ciba.ciba_auth_req_id_ttl_seconds,
             poll_interval_seconds: settings.ciba.ciba_poll_interval_seconds,
             csrf_cookie_name: settings.session.csrf_cookie_name.as_str().into(),
-            automated_decision_token: settings
-                .ciba
-                .ciba_automated_decision_token
-                .as_deref()
-                .map(Into::into),
             automated_decision_mode: settings.ciba.ciba_automated_decision_mode,
             ciba_fapi_profile: settings.protocol.ciba_security_profile.requires_fapi_ciba(),
             ciba_fapi2_hardening: settings

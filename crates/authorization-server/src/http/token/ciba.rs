@@ -80,7 +80,7 @@ pub(super) use request::{
     validate_and_apply_ciba_request_object_claims_with_config, validate_ciba_binding_message,
 };
 pub(super) use state::{
-    BackchannelAuthenticationForm, CIBA_AUTOMATED_DECISION_PROFILE, CIBA_BINDING_MESSAGE_MAX_CHARS,
+    BackchannelAuthenticationForm, CIBA_BINDING_MESSAGE_MAX_CHARS,
     CIBA_REQUEST_OBJECT_CLOCK_SKEW_SECONDS, CIBA_REQUEST_OBJECT_MAX_TTL_SECONDS,
     CibaAuthenticationRequestClaims, CibaAuthorizationRequestView, CibaDecisionSource,
     CibaRequestObjectReplay, CibaVerificationView, UnverifiedCibaAuthenticationRequestClaims,

@@ -56,6 +56,7 @@ pub enum TenantResourceOperation {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TenantResourceKind {
+    CibaDecisionBinding,
     OauthClient,
     MtlsTrustAnchor,
     Openid4vcDataset,

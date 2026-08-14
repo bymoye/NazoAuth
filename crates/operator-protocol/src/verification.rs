@@ -876,7 +876,8 @@ fn validate_tenant_resource_mappings(receipt: &TenantResourceReceipt) -> Result<
         match mapping.kind {
             TenantResourceKind::User => validate_uuid(&mapping.public_id)?,
             TenantResourceKind::OauthClient => validate_identifier(&mapping.public_id)?,
-            TenantResourceKind::MtlsTrustAnchor
+            TenantResourceKind::CibaDecisionBinding
+            | TenantResourceKind::MtlsTrustAnchor
             | TenantResourceKind::Openid4vcDataset
             | TenantResourceKind::Openid4vcTrustPolicy => {
                 return Err(ProtocolError::Policy(
@@ -2512,27 +2513,29 @@ fn validate_public_certificate_bundle(
     message: &'static str,
 ) -> Result<(), ProtocolError> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----\n";
-    const END: &str = "-----END CERTIFICATE-----\n";
+    const END: &str = "-----END CERTIFICATE-----";
     const MAX_CERTIFICATES: usize = 4;
 
     if value.is_empty()
         || value.len() > 16 * 1024
         || value.contains("PRIVATE KEY")
         || value.chars().any(|character| character == '\0')
-        || !value.starts_with(BEGIN)
-        || !value.ends_with(END)
     {
         return Err(ProtocolError::Policy(message));
     }
-    let certificate_count = value.matches(BEGIN).count();
+    let normalized = value.replace("\r\n", "\n");
+    if normalized.contains('\r') || !normalized.starts_with(BEGIN) {
+        return Err(ProtocolError::Policy(message));
+    }
+    let certificate_count = normalized.matches(BEGIN).count();
     if certificate_count == 0
         || certificate_count > MAX_CERTIFICATES
-        || certificate_count != value.matches(END).count()
+        || certificate_count != normalized.matches(END).count()
     {
         return Err(ProtocolError::Policy(message));
     }
 
-    let mut remainder = value;
+    let mut remainder = normalized.as_str();
     let mut encoded_certificates = std::collections::BTreeSet::new();
     for _ in 0..certificate_count {
         remainder = remainder.trim_start_matches(|character: char| character.is_ascii_whitespace());

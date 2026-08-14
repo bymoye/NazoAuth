@@ -51,10 +51,6 @@ const NON_CONFIG_NAZOAUTH_ENV_KEYS: &[&str] = &[
 ];
 const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
     ("CLIENT_SECRET_PEPPER", "CLIENT_SECRET_PEPPER_FILE"),
-    (
-        "CIBA_AUTOMATED_DECISION_TOKEN",
-        "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
-    ),
     ("DATABASE_URL", "DATABASE_URL_FILE"),
     (
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
@@ -115,8 +111,6 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "CLIENT_IP_HEADER_MODE",
     "CLIENT_SECRET_PEPPER",
     "CLIENT_SECRET_PEPPER_FILE",
-    "CIBA_AUTOMATED_DECISION_TOKEN",
-    "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
     "CIBA_AUTOMATED_DECISION_MODE",
     "CIBA_AUTH_REQ_ID_TTL_SECONDS",
     "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
@@ -622,18 +616,6 @@ impl ConfigSource {
         // These values are service-owned key material. Generate them once in
         // the persistent data directory when the corresponding capability is
         // configured, while preserving an explicitly supplied value/file.
-        if matches!(
-            self.string("CIBA_AUTOMATED_DECISION_MODE", "disabled")
-                .as_str(),
-            "header" | "query"
-        ) {
-            self.generate_secret_if_absent(
-                "CIBA_AUTOMATED_DECISION_TOKEN",
-                "ciba-automated-decision-token",
-                GENERATED_SECRET_BYTES,
-                &secrets_dir,
-            )?;
-        }
         self.generate_secret_if_absent(
             "MFA_TOTP_ENCRYPTION_KEY",
             "mfa-totp-encryption-key",

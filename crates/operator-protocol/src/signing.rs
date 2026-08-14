@@ -211,6 +211,7 @@ pub fn canonical_tenant_resource_manifest_sha256(
 
 fn tenant_resource_kind_wire_label(kind: TenantResourceKind) -> &'static str {
     match kind {
+        TenantResourceKind::CibaDecisionBinding => "ciba-decision-binding",
         TenantResourceKind::OauthClient => "oauth-client",
         TenantResourceKind::MtlsTrustAnchor => "mtls-trust-anchor",
         TenantResourceKind::Openid4vcDataset => "openid4vc-dataset",

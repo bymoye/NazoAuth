@@ -441,7 +441,7 @@ async fn ciba_creation_passes_lease_deadline_to_atomic_store() {
 }
 
 #[actix_web::test]
-async fn ciba_decision_lease_expiry_blocks_cas_without_mutating_pending_state() {
+async fn ciba_decision_authorization_deadline_blocks_cas_without_mutating_pending_state() {
     let store = RecordingCibaStore::new(false);
     let state = pending_state(1_000);
     let auth_req_id = "lease-decision-expired";
@@ -450,7 +450,7 @@ async fn ciba_decision_lease_expiry_blocks_cas_without_mutating_pending_state() 
     let service = CibaService::new(store.clone());
 
     let result = service
-        .decide_with_authentication_context_and_lease_deadline(
+        .decide_with_authentication_context_and_deadline(
             auth_req_id,
             CibaDecision::Approve,
             Some(state.user_id),
@@ -469,7 +469,7 @@ async fn ciba_decision_lease_expiry_blocks_cas_without_mutating_pending_state() 
 }
 
 #[actix_web::test]
-async fn expired_ciba_decision_uses_lease_guarded_cleanup_delete() {
+async fn expired_ciba_decision_uses_deadline_guarded_cleanup_delete() {
     let store = RecordingCibaStore::new(false);
     let mut state = pending_state(1_000);
     state.expires_at = 1_000;
@@ -480,7 +480,7 @@ async fn expired_ciba_decision_uses_lease_guarded_cleanup_delete() {
     let service = CibaService::new(store.clone());
 
     let result = service
-        .decide_with_authentication_context_and_lease_deadline(
+        .decide_with_authentication_context_and_deadline(
             auth_req_id,
             CibaDecision::Approve,
             Some(state.user_id),
@@ -560,7 +560,7 @@ async fn concurrent_ciba_decisions_retry_stale_cas_and_commit_one_terminal_state
     let service = CibaService::new(store.clone());
 
     let (approve, deny) = tokio::join!(
-        service.decide_with_authentication_context_and_lease_deadline(
+        service.decide_with_authentication_context_and_deadline(
             auth_req_id,
             CibaDecision::Approve,
             Some(state.user_id),
@@ -568,7 +568,7 @@ async fn concurrent_ciba_decisions_retry_stale_cas_and_commit_one_terminal_state
             Some(2_000),
             || 1_001,
         ),
-        service.decide_with_authentication_context_and_lease_deadline(
+        service.decide_with_authentication_context_and_deadline(
             auth_req_id,
             CibaDecision::Deny,
             Some(state.user_id),

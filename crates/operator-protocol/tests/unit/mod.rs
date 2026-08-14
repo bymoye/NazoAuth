@@ -99,6 +99,7 @@ fn tenant_resource_capability() -> TenantResourceCapability {
         revision: 7,
         resource_manifest_sha256: "e".repeat(64),
         resource_kinds: vec![
+            TenantResourceKind::CibaDecisionBinding,
             TenantResourceKind::OauthClient,
             TenantResourceKind::MtlsTrustAnchor,
             TenantResourceKind::Openid4vcDataset,
@@ -1673,6 +1674,12 @@ fn openid4vc_trust_policy_accepts_bounded_public_bundle_and_rejects_unknowns() {
         wallet_authorization_origins: vec!["https://wallet.example".to_owned()],
     };
     validate_openid4vc_trust_policy(&policy).unwrap();
+    let mut no_trailing_newline = policy.clone();
+    no_trailing_newline.credential_trust_anchor_pem = certificate("MA==").trim_end().to_owned();
+    validate_openid4vc_trust_policy(&no_trailing_newline).unwrap();
+    let mut crlf_bundle = policy.clone();
+    crlf_bundle.credential_trust_anchor_pem = certificate("MA==").replace('\n', "\r\n");
+    validate_openid4vc_trust_policy(&crlf_bundle).unwrap();
 
     let mut unknown_wire = serde_json::to_value(&policy).unwrap();
     unknown_wire["unexpected_wire_field"] = serde_json::json!(true);
@@ -1742,8 +1749,8 @@ fn openid4vc_trust_policy_accepts_bounded_public_bundle_and_rejects_unknowns() {
         "",
         "public",
         "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----\n",
-        "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----",
         "-----BEGIN PUBLIC KEY-----\nMA==\n-----END PUBLIC KEY-----\n",
+        "-----BEGIN CERTIFICATE-----\rMA==\r-----END CERTIFICATE-----",
     ] {
         let mut invalid = policy.clone();
         invalid.credential_trust_anchor_pem = pem.to_owned();
@@ -3008,6 +3015,9 @@ fn tenant_resource_receipt_mappings_are_apply_only_and_one_to_one() {
     invalid.resource_mappings[0].kind = TenantResourceKind::MtlsTrustAnchor;
     assert!(validate_tenant_resource_receipt(&invalid).is_err());
     let mut invalid = receipt.clone();
+    invalid.resource_mappings[0].kind = TenantResourceKind::CibaDecisionBinding;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
     invalid.resource_mappings[0].kind = TenantResourceKind::Openid4vcTrustPolicy;
     assert!(validate_tenant_resource_receipt(&invalid).is_err());
     let mut invalid = user_receipt.clone();
@@ -3118,7 +3128,48 @@ fn tenant_resource_manifest_digest_is_canonical_and_rejects_invalid_sets() {
         "b5872ae433b0e5470e831afe4d88a816996f28e6bcaf409a5a333107f00789f2"
     );
     assert_eq!(
+        serde_json::to_value(TenantResourceKind::CibaDecisionBinding).unwrap(),
+        serde_json::json!("ciba-decision-binding")
+    );
+    assert_eq!(
         serde_json::to_value(TenantResourceKind::Openid4vcTrustPolicy).unwrap(),
         serde_json::json!("openid4vc-trust-policy")
     );
+}
+
+#[test]
+fn ciba_decision_binding_is_an_ordinary_non_public_tenant_resource() {
+    let identity = TenantResourceIdentity {
+        kind: TenantResourceKind::CibaDecisionBinding,
+        resource_id: "ciba-decision:primary".to_owned(),
+        digest: "6".repeat(64),
+    };
+    assert_eq!(
+        canonical_tenant_resource_manifest_sha256(std::slice::from_ref(&identity)).unwrap(),
+        "3dc06f49f7488730643c05fbb3a6f3375b1e045499b9c09d2c266b540d7db0a8"
+    );
+    let mut task = tenant_resource_task();
+    task.payload = TenantResourceTaskPayload::Apply {
+        resources: vec![identity.clone()],
+    };
+    validate_tenant_resource_task(&task).unwrap();
+
+    let mut capability = tenant_resource_capability();
+    capability.resource_kinds = vec![TenantResourceKind::CibaDecisionBinding];
+    validate_tenant_resource_capability(&capability, 1_030).unwrap();
+    validate_tenant_resource_task_capability_binding(&task, &capability).unwrap();
+
+    let mut receipt = tenant_resource_receipt();
+    receipt.resources = vec![identity];
+    receipt.resource_mappings.clear();
+    validate_tenant_resource_receipt(&receipt).unwrap();
+    validate_tenant_resource_receipt_binding(&task, &receipt).unwrap();
+    validate_tenant_resource_receipt_capability_binding(&receipt, &capability).unwrap();
+
+    receipt.resource_mappings.push(TenantResourceMapping {
+        kind: TenantResourceKind::CibaDecisionBinding,
+        resource_id: "ciba-decision:primary".to_owned(),
+        public_id: "must-not-be-exposed".to_owned(),
+    });
+    assert!(validate_tenant_resource_receipt(&receipt).is_err());
 }

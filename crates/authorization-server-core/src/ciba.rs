@@ -361,7 +361,7 @@ where
     where
         F: FnMut() -> i64,
     {
-        self.decide_with_authentication_context_and_lease_deadline(
+        self.decide_with_authentication_context_and_deadline(
             auth_req_id,
             decision,
             expected_user_id,
@@ -372,13 +372,16 @@ where
         .await
     }
 
-    pub async fn decide_with_authentication_context_and_lease_deadline<F>(
+    /// Commits a CIBA decision only while the caller-owned authorization is
+    /// still valid. The deadline is responsibility-neutral so independent
+    /// authorization mechanisms can share the same atomic state fence.
+    pub async fn decide_with_authentication_context_and_deadline<F>(
         &self,
         auth_req_id: &str,
         decision: CibaDecision,
         expected_user_id: Option<Uuid>,
         authentication_context: Option<CibaAuthenticationContext>,
-        lease_expires_at: Option<i64>,
+        authorization_deadline: Option<i64>,
         mut current_time: F,
     ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
     where
@@ -406,7 +409,11 @@ where
                 CibaDecisionEvaluation::Expired => {
                     match self
                         .store
-                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
+                        .delete_with_lease_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            authorization_deadline,
+                        )
                         .await
                     {
                         Ok(CibaAtomicResult::Applied | CibaAtomicResult::DeadlineElapsed) => {
@@ -423,7 +430,7 @@ where
                             auth_req_id,
                             &stored.version,
                             &next,
-                            lease_expires_at,
+                            authorization_deadline,
                         )
                         .await
                     {
@@ -443,6 +450,31 @@ where
             }
         }
         Err(CibaDecisionFailure::Contended)
+    }
+
+    /// Compatibility wrapper for callers whose authorization is still
+    /// represented as a lease.
+    pub async fn decide_with_authentication_context_and_lease_deadline<F>(
+        &self,
+        auth_req_id: &str,
+        decision: CibaDecision,
+        expected_user_id: Option<Uuid>,
+        authentication_context: Option<CibaAuthenticationContext>,
+        lease_expires_at: Option<i64>,
+        current_time: F,
+    ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
+    where
+        F: FnMut() -> i64,
+    {
+        self.decide_with_authentication_context_and_deadline(
+            auth_req_id,
+            decision,
+            expected_user_id,
+            authentication_context,
+            lease_expires_at,
+            current_time,
+        )
+        .await
     }
 
     pub async fn poll<F>(

@@ -507,32 +507,9 @@ fn invalid_ciba_security_profile_is_rejected() {
 }
 
 #[test]
-fn ciba_automated_decision_requires_explicit_transport_and_secret() {
-    let token_only = ConfigSource::from_pairs_for_test([(
-        "CIBA_AUTOMATED_DECISION_TOKEN",
-        "test-ciba-automated-decision-token-32",
-    )]);
-    let lease_gated = Settings::from_config(&token_only).unwrap();
-    assert_eq!(
-        lease_gated.ciba.ciba_automated_decision_mode,
-        CibaAutomatedDecisionMode::Disabled
-    );
-    assert_eq!(
-        lease_gated.ciba.ciba_automated_decision_token.as_deref(),
-        Some("test-ciba-automated-decision-token-32")
-    );
-
+fn ciba_automated_decision_transport_does_not_own_a_global_secret() {
     let mode_only = ConfigSource::from_pairs_for_test([("CIBA_AUTOMATED_DECISION_MODE", "header")]);
-    assert!(Settings::from_config(&mode_only).is_err());
-
-    let configured = ConfigSource::from_pairs_for_test([
-        ("CIBA_AUTOMATED_DECISION_MODE", "header"),
-        (
-            "CIBA_AUTOMATED_DECISION_TOKEN",
-            "test-ciba-automated-decision-token-32",
-        ),
-    ]);
-    let settings = Settings::from_config(&configured).unwrap();
+    let settings = Settings::from_config(&mode_only).unwrap();
     assert_eq!(
         settings.ciba.ciba_automated_decision_mode,
         CibaAutomatedDecisionMode::Header

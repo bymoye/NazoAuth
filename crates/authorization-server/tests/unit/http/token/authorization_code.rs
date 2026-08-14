@@ -308,10 +308,12 @@ impl LiveAuthorizationCodeFixture {
         });
         let valkey = valkey_builder.build().expect("valkey client should build");
         valkey.init().await.expect("valkey should connect");
+        let diesel_db = create_pool(database_url, 4).expect("database pool should build");
+        crate::test_support::initialize_audit_dependencies(&diesel_db);
 
         Some(Self {
             state: Data::new(TestInfrastructure {
-                diesel_db: create_pool(database_url, 4).expect("database pool should build"),
+                diesel_db,
                 valkey,
                 settings: Arc::new(settings),
                 keyset,
@@ -1272,12 +1274,15 @@ async fn token_authorization_code_enforces_client_mtls_policy_before_consumption
     let mut client = live_client(&format!("client-mtls-policy-{}", Uuid::now_v7()));
     client.require_mtls_bound_tokens = true;
     fixture.insert_client(&client).await;
+    let user = fixture.insert_user().await;
+    let mut unbound_payload = payload_for_client(&client);
+    unbound_payload.user_id = user.id;
     let code = format!("code-{}", Uuid::now_v7());
     fixture
         .store_code_state(
             &code,
             &AuthorizationCodeState::Pending {
-                payload: payload_for_client(&client),
+                payload: unbound_payload,
             },
         )
         .await;
@@ -1294,11 +1299,13 @@ async fn token_authorization_code_enforces_client_mtls_policy_before_consumption
     ));
 
     let bound_code = format!("code-{}", Uuid::now_v7());
+    let mut bound_payload = payload_for_client(&client);
+    bound_payload.user_id = user.id;
     fixture
         .store_code_state(
             &bound_code,
             &AuthorizationCodeState::Pending {
-                payload: payload_for_client(&client),
+                payload: bound_payload,
             },
         )
         .await;
@@ -1350,8 +1357,10 @@ async fn token_authorization_code_accepts_matching_mtls_bound_code_before_issuin
     };
     let client = live_client(&format!("client-mtls-bound-{}", Uuid::now_v7()));
     fixture.insert_client(&client).await;
+    let user = fixture.insert_user().await;
     let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
     let mut payload = payload_for_client(&client);
+    payload.user_id = user.id;
     payload.mtls_x5t_s256 = Some(thumbprint.to_owned());
     payload.scopes = vec!["accounts".to_owned()];
     let code = format!("code-{}", Uuid::now_v7());

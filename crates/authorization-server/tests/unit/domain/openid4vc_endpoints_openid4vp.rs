@@ -201,15 +201,17 @@ fn ordinary_trust_policy_material() -> serde_json::Value {
             "kid": kid
         })
     };
-    serde_json::to_value(nazo_operator_protocol::Openid4vcTrustPolicy {
+    let policy = nazo_operator_protocol::Openid4vcTrustPolicy {
         schema: 1,
         client_attestation_issuer: "https://attester.example".to_owned(),
         client_attestation_jwks: json!({"keys": [key("client")]}),
         key_attestation_jwks: json!({"keys": [key("holder")]}),
         credential_trust_anchor_pem: anchor,
         wallet_authorization_origins: vec!["https://dynamic-wallet.example".to_owned()],
-    })
-    .expect("ordinary trust policy should serialize")
+    };
+    nazo_operator_protocol::validate_openid4vc_trust_policy(&policy)
+        .expect("ordinary trust policy fixture should be valid");
+    serde_json::to_value(policy).expect("ordinary trust policy should serialize")
 }
 
 #[tokio::test]

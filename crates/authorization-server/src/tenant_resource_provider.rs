@@ -57,6 +57,9 @@ const MAX_USERNAME_BYTES: usize = 150;
 const MAX_EMAIL_BYTES: usize = 254;
 const MAX_PASSWORD_BYTES: usize = 512;
 const MAX_CLIENT_SECRET_BYTES: usize = 512;
+const MIN_CIBA_DECISION_TOKEN_BYTES: usize = 32;
+const MAX_CIBA_DECISION_TOKEN_BYTES: usize = 512;
+pub(crate) const MAX_CIBA_DECISION_BINDING_LIFETIME_SECONDS: i64 = 24 * 60 * 60;
 const MAX_CONFIGURATION_ID_BYTES: usize = 255;
 const MAX_PROFILE_BYTES: usize = 128 * 1024;
 const MAX_CERTIFICATE_BYTES: usize = 256 * 1024;
@@ -198,6 +201,7 @@ pub enum TenantResourcePayload {
     User(UserResourcePayload),
     OauthClient(Box<OauthClientResourcePayload>),
     MtlsTrustAnchor(MtlsTrustAnchorResourcePayload),
+    CibaDecisionBinding(CibaDecisionBindingResourcePayload),
     Openid4vcDataset(Openid4vcDatasetResourcePayload),
     Openid4vcTrustPolicy(Box<Openid4vcTrustPolicyResourcePayload>),
 }
@@ -222,6 +226,18 @@ pub struct OauthClientResourcePayload {
 pub struct MtlsTrustAnchorResourcePayload {
     pub client_resource_id: String,
     pub certificate_pem: String,
+}
+
+/// One short-lived ordinary authorization for an automated CIBA decision.
+///
+/// Deliberately does not implement `Debug`: the plaintext decision token must
+/// never enter a trace, panic message, receipt, mapping, or audit record.
+#[derive(Clone)]
+pub struct CibaDecisionBindingResourcePayload {
+    pub client_resource_id: String,
+    pub user_resource_id: String,
+    pub decision_token: String,
+    pub expires_at: i64,
 }
 
 #[derive(Clone)]
@@ -842,6 +858,16 @@ struct MtlsTrustAnchorManifestPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CibaDecisionBindingManifestPayload {
+    schema: u8,
+    client_resource_id: String,
+    user_resource_id: String,
+    decision_token: String,
+    expires_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Openid4vcDatasetManifestPayload {
     user_resource_id: String,
     configuration_id: String,
@@ -1082,6 +1108,44 @@ fn decode_payload(
                 MtlsTrustAnchorResourcePayload {
                     client_resource_id: value.client_resource_id,
                     certificate_pem: value.certificate_pem,
+                },
+            ))
+        }
+        TenantResourceKind::CibaDecisionBinding => {
+            let value: CibaDecisionBindingManifestPayload = serde_json::from_slice(payload)
+                .map_err(|_| {
+                    TenantResourceProviderError::BadRequest("invalid CIBA decision binding payload")
+                })?;
+            if value.schema != 1 {
+                return Err(TenantResourceProviderError::BadRequest(
+                    "unsupported CIBA decision binding schema",
+                ));
+            }
+            validate_resource_id(&value.client_resource_id)?;
+            validate_resource_id(&value.user_resource_id)?;
+            if value.decision_token.len() < MIN_CIBA_DECISION_TOKEN_BYTES
+                || value.decision_token.len() > MAX_CIBA_DECISION_TOKEN_BYTES
+                || value.decision_token.chars().any(char::is_control)
+            {
+                return Err(TenantResourceProviderError::BadRequest(
+                    "invalid CIBA decision token",
+                ));
+            }
+            let now = Utc::now().timestamp();
+            let latest = now
+                .checked_add(MAX_CIBA_DECISION_BINDING_LIFETIME_SECONDS)
+                .ok_or(TenantResourceProviderError::Unavailable("clock overflow"))?;
+            if value.expires_at <= now || value.expires_at > latest {
+                return Err(TenantResourceProviderError::BadRequest(
+                    "invalid CIBA decision binding expiry",
+                ));
+            }
+            Ok(TenantResourcePayload::CibaDecisionBinding(
+                CibaDecisionBindingResourcePayload {
+                    client_resource_id: value.client_resource_id,
+                    user_resource_id: value.user_resource_id,
+                    decision_token: value.decision_token,
+                    expires_at: value.expires_at,
                 },
             ))
         }

@@ -431,8 +431,10 @@ fn issue_state_with_live_database_pool_size(max_size: usize) -> Option<TestInfra
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let valkey = live_valkey_client()?;
     let _key_material = client_signing_fixture(jsonwebtoken::Algorithm::EdDSA);
+    let diesel_db = create_pool(database_url, max_size).expect("database pool should build");
+    crate::test_support::initialize_audit_dependencies(&diesel_db);
     Some(TestInfrastructure {
-        diesel_db: create_pool(database_url, max_size).expect("database pool should build"),
+        diesel_db,
         valkey,
         settings: Arc::new(
             Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
@@ -451,8 +453,10 @@ fn issue_state_with_live_database_pool_size(max_size: usize) -> Option<TestInfra
 fn issue_state_with_live_database_and_disconnected_valkey() -> Option<TestInfrastructure> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let _key_material = client_signing_fixture(jsonwebtoken::Algorithm::EdDSA);
+    let diesel_db = create_pool(database_url, 1).expect("database pool should build");
+    crate::test_support::initialize_audit_dependencies(&diesel_db);
     Some(TestInfrastructure {
-        diesel_db: create_pool(database_url, 1).expect("database pool should build"),
+        diesel_db,
         valkey: disconnected_valkey_client(),
         settings: Arc::new(
             Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
@@ -935,12 +939,12 @@ async fn openid_issue_without_user_subject_fails_before_token_signing() {
 
     let response = issue_token_response(&state, &client, issue).await;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(oauth_error_code(&response), "invalid_grant");
+    let status = response.status();
     let body = actix_web::body::to_bytes(response.into_body())
         .await
         .expect("response body should collect");
     let value: Value = serde_json::from_slice(&body).expect("OAuth error body should be JSON");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
     assert_eq!(value.get("error"), Some(&json!("invalid_grant")));
     assert!(value.get("access_token").is_none());
     assert!(value.get("refresh_token").is_none());
@@ -1168,7 +1172,9 @@ async fn missing_id_token_subject_fails_closed_without_returning_credentials() {
     let Some(state) = issue_state_with_live_database() else {
         return;
     };
-    let client = client_with_grants(&["authorization_code"]);
+    let mut client = client_with_grants(&["authorization_code"]);
+    client.client_id = format!("missing-subject-client-{}", Uuid::now_v7());
+    insert_issue_client(&state, &client).await;
     let mut issue = token_issue_with_sid(vec!["sid".to_owned()]);
     let missing_user_id = Uuid::now_v7();
     issue.user_id = Some(missing_user_id);
@@ -1177,12 +1183,12 @@ async fn missing_id_token_subject_fails_closed_without_returning_credentials() {
 
     let response = issue_token_response(&state, &client, issue).await;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(oauth_error_code(&response), "invalid_grant");
+    let status = response.status();
     let body = actix_web::body::to_bytes(response.into_body())
         .await
         .expect("response body should collect");
     let value: Value = serde_json::from_slice(&body).expect("OAuth error body should be JSON");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
     assert_eq!(value.get("error"), Some(&json!("invalid_grant")));
     assert!(value.get("access_token").is_none());
     assert!(value.get("refresh_token").is_none());
@@ -1898,10 +1904,14 @@ async fn access_token_subject_mapping_failure_fails_closed_before_response_assem
     let Some(state) = issue_state_with_live_database_and_disconnected_valkey() else {
         return;
     };
-    let client = client_with_grants(&["client_credentials"]);
+    let mut client = client_with_grants(&["client_credentials"]);
+    client.client_id = format!("subject-map-client-{}", Uuid::now_v7());
+    insert_issue_client(&state, &client).await;
+    let user_id = Uuid::now_v7();
+    insert_issue_user(&state, user_id).await;
     let grant_key = format!("subject-map-error-{}", Uuid::now_v7());
     let mut issue = token_issue_without_openid();
-    issue.user_id = Some(Uuid::now_v7());
+    issue.user_id = Some(user_id);
     issue.subject = "pairwise-subject".to_owned();
     issue.scopes = vec!["accounts".to_owned()];
     issue.include_refresh = false;

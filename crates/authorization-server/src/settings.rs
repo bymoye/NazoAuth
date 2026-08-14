@@ -212,7 +212,6 @@ pub(crate) struct DeviceGrantSettings {
 pub(crate) struct CibaSettings {
     pub(crate) ciba_auth_req_id_ttl_seconds: u64,
     pub(crate) ciba_poll_interval_seconds: u64,
-    pub(crate) ciba_automated_decision_token: Option<String>,
     pub(crate) ciba_automated_decision_mode: CibaAutomatedDecisionMode,
     pub(crate) ciba_notification_private_origins: Vec<String>,
 }
