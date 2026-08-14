@@ -44,6 +44,108 @@ fn task() -> TaskEnvelope {
     }
 }
 
+const TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+fn tenant_resource_task() -> TenantResourceTask {
+    TenantResourceTask {
+        ver: PROTOCOL_VERSION,
+        iss: "controller:deployment-1".to_owned(),
+        aud: "runtime:deployment-1".to_owned(),
+        jti: "tenant-resource-task-1".to_owned(),
+        iat: 1_000,
+        nbf: 1_000,
+        exp: 1_060,
+        deployment_id: "deployment-1".to_owned(),
+        tenant_id: TENANT_ID.to_owned(),
+        capability_jti: "tenant-resource-capability-1".to_owned(),
+        capability_sha256: "9".repeat(64),
+        actor: Actor {
+            kind: ActorKind::Automation,
+            id: "ctl:resource-manager".to_owned(),
+        },
+        expected_revision: 7,
+        change_set_id: "change-set-1".to_owned(),
+        change_set_sha256: "a".repeat(64),
+        operation: TenantResourceOperation::Apply,
+        payload: TenantResourceTaskPayload::Apply {
+            resources: vec![TenantResourceIdentity {
+                kind: TenantResourceKind::OauthClient,
+                resource_id: "client:primary".to_owned(),
+                digest: "b".repeat(64),
+            }],
+        },
+        resource_manifest_sha256: "c".repeat(64),
+    }
+}
+
+fn tenant_resource_capability() -> TenantResourceCapability {
+    TenantResourceCapability {
+        ver: PROTOCOL_VERSION,
+        capability_version: TENANT_RESOURCE_CAPABILITY_VERSION,
+        jti: "tenant-resource-capability-1".to_owned(),
+        nonce: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8".to_owned(),
+        deployment_id: "deployment-1".to_owned(),
+        tenant_id: TENANT_ID.to_owned(),
+        runtime_instance_id: "runtime-1".to_owned(),
+        issuer: "runtime:deployment-1".to_owned(),
+        instance_key_id: "instance-1".to_owned(),
+        embedded: EmbeddedIdentity {
+            release: "v1.0.0".to_owned(),
+            revision: "d".repeat(40),
+            protocol: PROTOCOL_VERSION,
+            build_id: "github:resource-1".to_owned(),
+        },
+        revision: 7,
+        resource_manifest_sha256: "e".repeat(64),
+        resource_kinds: vec![
+            TenantResourceKind::OauthClient,
+            TenantResourceKind::MtlsTrustAnchor,
+            TenantResourceKind::Openid4vcDataset,
+            TenantResourceKind::User,
+        ],
+        actions: vec![
+            TenantResourceOperation::Apply,
+            TenantResourceOperation::Enumerate,
+            TenantResourceOperation::Revoke,
+        ],
+        issued_at: 1_000,
+        expires_at: 1_060,
+    }
+}
+
+fn tenant_resource_receipt() -> TenantResourceReceipt {
+    let task = tenant_resource_task();
+    TenantResourceReceipt {
+        ver: PROTOCOL_VERSION,
+        iss: "runtime:deployment-1".to_owned(),
+        aud: "controller:deployment-1".to_owned(),
+        jti: task.jti,
+        request_sha256: "f".repeat(64),
+        deployment_id: task.deployment_id,
+        tenant_id: task.tenant_id,
+        capability_jti: task.capability_jti,
+        capability_sha256: task.capability_sha256,
+        actor: task.actor,
+        change_set_id: task.change_set_id,
+        change_set_sha256: task.change_set_sha256,
+        operation: task.operation,
+        expected_revision: task.expected_revision,
+        revision: 8,
+        outcome: TenantResourceOutcome::Succeeded,
+        resources: vec![TenantResourceIdentity {
+            kind: TenantResourceKind::OauthClient,
+            resource_id: "client:primary".to_owned(),
+            digest: "b".repeat(64),
+        }],
+        resource_manifest_sha256: task.resource_manifest_sha256,
+        started_at: 1_001,
+        completed_at: 1_010,
+        exp: 1_060,
+        audit_sequence: 7,
+        audit_previous_sha256: "0".repeat(64),
+    }
+}
+
 fn discovery_statement() -> DiscoveryStatement {
     DiscoveryStatement {
         schema: CONTROL_DISCOVERY_SCHEMA,
@@ -180,6 +282,23 @@ fn security_sensitive_wire_models_reject_unknown_fields() {
         id: "uid:0".to_owned(),
     });
     assert_wire_rejects_unknown_field(task());
+    assert_wire_rejects_unknown_field(tenant_resource_task());
+    assert_wire_rejects_unknown_field(TenantResourceTaskPayload::Apply {
+        resources: vec![TenantResourceIdentity {
+            kind: TenantResourceKind::OauthClient,
+            resource_id: "client:primary".to_owned(),
+            digest: "a".repeat(64),
+        }],
+    });
+    assert_wire_rejects_unknown_field(TenantResourceSelector {
+        kind: TenantResourceKind::OauthClient,
+        resource_id: "client:primary".to_owned(),
+    });
+    assert_wire_rejects_unknown_field(tenant_resource_capability());
+    assert_wire_rejects_unknown_field(tenant_resource_receipt());
+    assert_wire_rejects_unknown_field(TenantResourceOutcome::Failed {
+        code: "failed".to_owned(),
+    });
     assert_wire_rejects_unknown_field(EmbeddedIdentity {
         release: "v1.0.0".to_owned(),
         revision: "a".repeat(40),
@@ -2364,4 +2483,328 @@ fn public_matrix_validator_rejects_structural_and_placeholder_boundaries() {
         .insert("cycle".to_owned(), "{{secret.cycle}}".to_owned());
     invalid.groups[0].plans[0].config_template["cycle"] = serde_json::json!("{{cycle}}");
     assert!(validate_conformance_matrix_descriptor(&invalid).is_err());
+}
+
+#[test]
+fn tenant_resource_contract_signs_and_binds_all_request_identity() {
+    let controller_key = SigningKey::from_bytes(&[17; 32]);
+    let runtime_key = SigningKey::from_bytes(&[19; 32]);
+    let capability = tenant_resource_capability();
+    let compact_capability =
+        sign_tenant_resource_capability(&capability, "instance-1", &runtime_key).unwrap();
+    let capability_sha256 = compact_sha256(&compact_capability);
+    let mut task = tenant_resource_task();
+    task.capability_sha256 = capability_sha256.clone();
+    let compact_task = sign_tenant_resource_task(&task, "controller-1", &controller_key).unwrap();
+    assert_eq!(
+        verify_tenant_resource_task(
+            &compact_task,
+            "controller-1",
+            &controller_key.verifying_key(),
+            1_030,
+        )
+        .unwrap(),
+        task
+    );
+    validate_tenant_resource_task_deployment_binding(&task, "deployment-1", TENANT_ID).unwrap();
+
+    validate_tenant_resource_task_capability_binding(&task, &capability).unwrap();
+    validate_tenant_resource_task_capability_binding_with_digest(
+        &task,
+        &capability,
+        &capability_sha256,
+    )
+    .unwrap();
+    validate_tenant_resource_task_capability_binding_at(
+        &task,
+        &capability,
+        &capability_sha256,
+        1_030,
+    )
+    .unwrap();
+    validate_tenant_resource_capability_request_binding(
+        &capability,
+        "deployment-1",
+        TENANT_ID,
+        "tenant-resource-capability-1",
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    )
+    .unwrap();
+    assert_eq!(
+        verify_tenant_resource_capability(
+            &compact_capability,
+            "instance-1",
+            &runtime_key.verifying_key(),
+            1_030,
+        )
+        .unwrap(),
+        capability
+    );
+    validate_tenant_resource_capability_binding(&capability, "deployment-1", TENANT_ID).unwrap();
+
+    let mut receipt = tenant_resource_receipt();
+    receipt.capability_sha256 = capability_sha256.clone();
+    validate_tenant_resource_receipt(&receipt).unwrap();
+    validate_tenant_resource_receipt_binding(&task, &receipt).unwrap();
+    validate_tenant_resource_receipt_capability_binding(&receipt, &capability).unwrap();
+    validate_tenant_resource_receipt_capability_binding_with_digest(
+        &receipt,
+        &capability,
+        &capability_sha256,
+    )
+    .unwrap();
+    validate_tenant_resource_receipt_capability_binding_at(
+        &receipt,
+        &capability,
+        &capability_sha256,
+        1_030,
+    )
+    .unwrap();
+    validate_tenant_resource_receipt_request_binding(&receipt, &"f".repeat(64)).unwrap();
+    let mut late_receipt = receipt.clone();
+    late_receipt.started_at = 1_050;
+    late_receipt.completed_at = 1_061;
+    late_receipt.exp = 1_110;
+    validate_tenant_resource_receipt(&late_receipt).unwrap();
+    validate_tenant_resource_receipt_binding(&task, &late_receipt).unwrap();
+    let compact_receipt =
+        sign_tenant_resource_receipt(&receipt, "runtime-1", &runtime_key).unwrap();
+    assert_eq!(
+        verify_tenant_resource_receipt(
+            &compact_receipt,
+            "runtime-1",
+            &runtime_key.verifying_key(),
+            1_030,
+        )
+        .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        verify_tenant_resource_receipt_signature(
+            &compact_receipt,
+            "runtime-1",
+            &runtime_key.verifying_key(),
+        )
+        .unwrap(),
+        receipt
+    );
+    assert!(
+        verify_tenant_resource_receipt(
+            &compact_receipt,
+            "runtime-1",
+            &runtime_key.verifying_key(),
+            2_000,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn tenant_resource_contract_rejects_temporal_scope_and_operation_confusion() {
+    let valid = tenant_resource_task();
+    validate_tenant_resource_task(&valid).unwrap();
+
+    let mut invalid = valid.clone();
+    invalid.tenant_id = "not-a-uuid".to_owned();
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.tenant_id = "00000000-0000-0000-0000-00000000000A".to_owned();
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.nbf = invalid.iat - 1;
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.exp = invalid.nbf - 1;
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.exp = invalid.iat + MAX_TASK_LIFETIME_SECONDS + 1;
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.operation = TenantResourceOperation::Revoke;
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.iss = "controller:deployment-2".to_owned();
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    if let TenantResourceTaskPayload::Apply { resources } = &mut invalid.payload {
+        resources.push(resources[0].clone());
+    }
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid.resource_manifest_sha256 = "A".repeat(64);
+    assert!(validate_tenant_resource_task(&invalid).is_err());
+
+    let mut max_revision_task = valid.clone();
+    max_revision_task.expected_revision = u64::MAX;
+    validate_tenant_resource_task(&max_revision_task).unwrap();
+    let mut max_revision_capability = tenant_resource_capability();
+    max_revision_capability.revision = u64::MAX;
+    validate_tenant_resource_task_capability_binding(&max_revision_task, &max_revision_capability)
+        .unwrap();
+
+    let capability = tenant_resource_capability();
+    let mut invalid_capability = capability.clone();
+    invalid_capability.revision = 8;
+    assert!(validate_tenant_resource_task_capability_binding(&valid, &invalid_capability).is_err());
+    let mut invalid_capability = capability.clone();
+    invalid_capability
+        .actions
+        .retain(|action| *action != TenantResourceOperation::Apply);
+    assert!(validate_tenant_resource_task_capability_binding(&valid, &invalid_capability).is_err());
+    let mut invalid_task = valid.clone();
+    invalid_task.capability_sha256 = "8".repeat(64);
+    assert!(
+        validate_tenant_resource_task_capability_binding_with_digest(
+            &invalid_task,
+            &capability,
+            &"9".repeat(64),
+        )
+        .is_err()
+    );
+    let mut invalid_capability = capability.clone();
+    invalid_capability.jti = "tenant-resource-capability-2".to_owned();
+    assert!(validate_tenant_resource_task_capability_binding(&valid, &invalid_capability).is_err());
+    let mut invalid_task = valid.clone();
+    if let TenantResourceTaskPayload::Apply { resources } = &mut invalid_task.payload {
+        resources[0].kind = TenantResourceKind::User;
+    }
+    let mut limited_capability = capability.clone();
+    limited_capability.resource_kinds = vec![TenantResourceKind::OauthClient];
+    assert!(
+        validate_tenant_resource_task_capability_binding(&invalid_task, &limited_capability)
+            .is_err()
+    );
+
+    let enumerate = TenantResourceTask {
+        operation: TenantResourceOperation::Enumerate,
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: Vec::new(),
+        },
+        ..valid.clone()
+    };
+    validate_tenant_resource_task(&enumerate).unwrap();
+    validate_tenant_resource_task_capability_binding(&enumerate, &capability).unwrap_err();
+    let enumerate = TenantResourceTask {
+        resource_manifest_sha256: capability.resource_manifest_sha256.clone(),
+        ..enumerate
+    };
+    validate_tenant_resource_task_capability_binding(&enumerate, &capability).unwrap();
+    let enumerate = TenantResourceTask {
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: vec![TenantResourceSelector {
+                kind: TenantResourceKind::User,
+                resource_id: "user:1".to_owned(),
+            }],
+        },
+        ..enumerate
+    };
+    assert!(
+        validate_tenant_resource_task_capability_binding(&enumerate, &limited_capability).is_err()
+    );
+    let revoke = TenantResourceTask {
+        operation: TenantResourceOperation::Revoke,
+        payload: TenantResourceTaskPayload::Revoke {
+            resources: vec![TenantResourceIdentity {
+                kind: TenantResourceKind::OauthClient,
+                resource_id: "client:primary".to_owned(),
+                digest: "b".repeat(64),
+            }],
+        },
+        ..valid
+    };
+    validate_tenant_resource_task(&revoke).unwrap();
+    let revoke_receipt_task = revoke.clone();
+    let mut revoke_receipt = tenant_resource_receipt();
+    revoke_receipt.operation = TenantResourceOperation::Revoke;
+    revoke_receipt.resources = match &revoke_receipt_task.payload {
+        TenantResourceTaskPayload::Revoke { resources } => resources.clone(),
+        _ => unreachable!(),
+    };
+    validate_tenant_resource_receipt(&revoke_receipt).unwrap();
+    validate_tenant_resource_receipt_binding(&revoke_receipt_task, &revoke_receipt).unwrap();
+    revoke_receipt.resources[0].digest = "d".repeat(64);
+    assert!(
+        validate_tenant_resource_receipt_binding(&revoke_receipt_task, &revoke_receipt).is_err()
+    );
+    assert!(
+        serde_json::from_value::<TenantResourceOperation>(serde_json::json!("delete")).is_err()
+    );
+}
+
+#[test]
+fn tenant_resource_capability_and_receipt_fail_closed() {
+    let capability = tenant_resource_capability();
+    validate_tenant_resource_capability(&capability, 1_030).unwrap();
+
+    let mut invalid = capability.clone();
+    invalid.capability_version += 1;
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    let mut invalid = capability.clone();
+    invalid.expires_at = invalid.issued_at + MAX_TASK_LIFETIME_SECONDS + 1;
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    let mut invalid = capability.clone();
+    invalid.resource_kinds.push(TenantResourceKind::OauthClient);
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    let mut invalid = capability.clone();
+    invalid.actions.push(TenantResourceOperation::Apply);
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    let mut invalid = capability.clone();
+    invalid.issuer = "runtime:deployment-2".to_owned();
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    let mut invalid = capability.clone();
+    invalid.jti = "capability/1".to_owned();
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    let mut invalid = capability.clone();
+    invalid.nonce = "short".to_owned();
+    assert!(validate_tenant_resource_capability(&invalid, 1_030).is_err());
+    assert!(validate_tenant_resource_capability(&capability, 2_000).is_err());
+
+    let receipt = tenant_resource_receipt();
+    validate_tenant_resource_receipt(&receipt).unwrap();
+    let mut invalid = receipt.clone();
+    invalid.completed_at = invalid.exp + 1;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.aud = "controller:deployment-2".to_owned();
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.outcome = TenantResourceOutcome::Failed {
+        code: "apply-failed".to_owned(),
+    };
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt.clone();
+    invalid.revision = invalid.expected_revision;
+    invalid.outcome = TenantResourceOutcome::Failed {
+        code: "apply-failed".to_owned(),
+    };
+    invalid.resources.clear();
+    validate_tenant_resource_receipt(&invalid).unwrap();
+    let capability = tenant_resource_capability();
+    let receipt = tenant_resource_receipt();
+    let mut invalid = receipt.clone();
+    invalid.resources[0].kind = TenantResourceKind::User;
+    let mut client_only_capability = capability.clone();
+    client_only_capability.resource_kinds = vec![TenantResourceKind::OauthClient];
+    assert!(
+        validate_tenant_resource_receipt_capability_binding(&invalid, &client_only_capability)
+            .is_err()
+    );
+    let mut invalid = receipt.clone();
+    invalid.capability_jti = "tenant-resource-capability-2".to_owned();
+    assert!(validate_tenant_resource_receipt_capability_binding(&invalid, &capability).is_err());
+    let mut invalid = receipt.clone();
+    invalid.started_at = invalid.exp + 1;
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    let mut invalid = receipt;
+    invalid.resources.push(invalid.resources[0].clone());
+    assert!(validate_tenant_resource_receipt(&invalid).is_err());
+    assert!(serde_json::from_value::<TenantResourceKind>(serde_json::json!("bucket")).is_err());
 }

@@ -8,19 +8,23 @@ use sha2::{Digest as _, Sha256};
 use crate::verification::{
     validate_adoption_receipt, validate_deployment_statement, validate_discovery_statement,
     validate_file_identifier, validate_final_receipt, validate_identifier,
-    validate_management_event, validate_runtime_receipt, validate_task, validate_transition,
-    verify_task_window,
+    validate_management_event, validate_runtime_receipt, validate_task,
+    validate_tenant_resource_capability, validate_tenant_resource_receipt,
+    validate_tenant_resource_task, validate_transition, verify_task_window,
+    verify_tenant_resource_task_window,
 };
 use crate::wire::{
     AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
     DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent, ProtectedHeader,
-    RuntimeReceipt, TaskEnvelope,
+    RuntimeReceipt, TaskEnvelope, TenantResourceCapability, TenantResourceReceipt,
+    TenantResourceTask,
 };
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
     DEPLOYMENT_STATEMENT_JWS_TYPE, FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE,
     MAX_COMPACT_JWS_BYTES, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE,
-    TRUST_TRANSITION_JWS_TYPE,
+    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+    TENANT_RESOURCE_TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
 };
 
 pub fn sign_discovery_statement(
@@ -123,6 +127,39 @@ pub fn sign_management_event(
 ) -> Result<String, ProtocolError> {
     validate_management_event(event)?;
     sign_compact(event, key_id, MANAGEMENT_EVENT_JWS_TYPE, key)
+}
+
+pub fn sign_tenant_resource_capability(
+    capability: &TenantResourceCapability,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_capability(capability, capability.issued_at)?;
+    if capability.instance_key_id != key_id {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability key id does not match signer",
+        ));
+    }
+    sign_compact(capability, key_id, TENANT_RESOURCE_CAPABILITY_JWS_TYPE, key)
+}
+
+pub fn sign_tenant_resource_task(
+    task: &TenantResourceTask,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_task(task)?;
+    verify_tenant_resource_task_window(task, task.iat)?;
+    sign_compact(task, key_id, TENANT_RESOURCE_TASK_JWS_TYPE, key)
+}
+
+pub fn sign_tenant_resource_receipt(
+    receipt: &TenantResourceReceipt,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_receipt(receipt)?;
+    sign_compact(receipt, key_id, TENANT_RESOURCE_RECEIPT_JWS_TYPE, key)
 }
 
 pub fn canonical_config_sha256(

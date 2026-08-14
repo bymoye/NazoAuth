@@ -35,6 +35,182 @@ pub struct TaskEnvelope {
     pub operation: TaskOperation,
 }
 
+/// Closed operation names for the tenant resource management contract.
+///
+/// This is deliberately separate from [`TaskOperation`].  The existing
+/// operator task protocol is consumed by older controllers; adding variants
+/// there would make those consumers silently accept a capability they do not
+/// understand.  Tenant resource management therefore has its own signed
+/// envelope and a closed operation set.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TenantResourceOperation {
+    Apply,
+    Enumerate,
+    Revoke,
+}
+
+/// Closed kinds understood by the tenant resource provider.  Adding a kind is
+/// a protocol change: older runtimes must reject it rather than treating an
+/// unknown resource as an opaque object.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TenantResourceKind {
+    OauthClient,
+    MtlsTrustAnchor,
+    Openid4vcDataset,
+    User,
+}
+
+/// Resource identity and its public manifest digest.  The digest is the
+/// provider's canonical resource representation digest; no resource payload
+/// or endpoint is carried in this protocol.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceIdentity {
+    pub kind: TenantResourceKind,
+    pub resource_id: String,
+    pub digest: String,
+}
+
+/// Bounded selector used by enumerate requests.  A selector is typed so a
+/// client resource ID cannot be interpreted as a different provider kind.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceSelector {
+    pub kind: TenantResourceKind,
+    pub resource_id: String,
+}
+
+/// Operation-specific payload for a tenant resource task.
+///
+/// `Apply` carries the desired resource identities and digests.  `Enumerate`
+/// may carry an empty selector (list all resources) or a bounded set of typed
+/// selectors.  `Revoke` requires at least one version-fenced resource identity
+/// (including its digest).  Validation
+/// rejects a payload whose variant does not match the top-level operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TenantResourceTaskPayload {
+    Apply {
+        resources: Vec<TenantResourceIdentity>,
+    },
+    Enumerate {
+        selectors: Vec<TenantResourceSelector>,
+    },
+    Revoke {
+        resources: Vec<TenantResourceIdentity>,
+    },
+}
+
+/// Signed, deployment- and tenant-bound machine contract for resource
+/// management.  It intentionally contains no OIDF/Suite, lease, endpoint, or
+/// database semantics.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceTask {
+    pub ver: u32,
+    pub iss: String,
+    pub aud: String,
+    pub jti: String,
+    pub iat: i64,
+    pub nbf: i64,
+    pub exp: i64,
+    pub deployment_id: String,
+    /// Canonical UUID string for the tenant scope.
+    pub tenant_id: String,
+    /// JTI and compact-JWS digest of the freshness-verified capability used
+    /// to authorize this task.
+    pub capability_jti: String,
+    pub capability_sha256: String,
+    pub actor: Actor,
+    /// CAS revision expected by the provider.  Zero is the initial state.
+    pub expected_revision: u64,
+    pub change_set_id: String,
+    pub change_set_sha256: String,
+    pub operation: TenantResourceOperation,
+    pub payload: TenantResourceTaskPayload,
+    /// SHA-256 of the external canonical resource manifest.  The manifest
+    /// bytes are intentionally outside this wire contract; this digest binds
+    /// the provider's desired/baseline document without carrying endpoints or
+    /// resource configuration in a signed task.
+    pub resource_manifest_sha256: String,
+}
+
+/// Signed capability discovery for the tenant resource contract.
+///
+/// `embedded` and `runtime_instance_id` bind the capability to the runtime
+/// build that emitted it.  `issued_at`/`expires_at` make discovery replay
+/// bounded, independently of task freshness.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceCapability {
+    pub ver: u32,
+    pub capability_version: u32,
+    /// Per-discovery operation identifier and challenge nonce; these values
+    /// prevent a valid capability from being replayed across discovery calls.
+    pub jti: String,
+    pub nonce: String,
+    pub deployment_id: String,
+    pub tenant_id: String,
+    pub runtime_instance_id: String,
+    pub issuer: String,
+    pub instance_key_id: String,
+    pub embedded: EmbeddedIdentity,
+    /// Current provider revision at capability discovery; zero is the
+    /// initial state.
+    pub revision: u64,
+    /// SHA-256 of the runtime's external canonical resource manifest at
+    /// `revision`; the manifest itself is not part of discovery.
+    pub resource_manifest_sha256: String,
+    pub resource_kinds: Vec<TenantResourceKind>,
+    pub actions: Vec<TenantResourceOperation>,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+/// Compatibility spelling for callers that use the discovery terminology.
+pub type TenantResourceCapabilityStatement = TenantResourceCapability;
+
+/// Closed receipt outcome.  A failed outcome never carries resource
+/// identities and must retain the expected revision, so it cannot be read as
+/// evidence that a mutation succeeded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TenantResourceOutcome {
+    Succeeded,
+    Failed { code: String },
+}
+
+/// Signed receipt for a tenant resource task.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceReceipt {
+    pub ver: u32,
+    pub iss: String,
+    pub aud: String,
+    pub jti: String,
+    pub request_sha256: String,
+    pub deployment_id: String,
+    pub tenant_id: String,
+    pub capability_jti: String,
+    pub capability_sha256: String,
+    pub actor: Actor,
+    pub change_set_id: String,
+    pub change_set_sha256: String,
+    pub operation: TenantResourceOperation,
+    pub expected_revision: u64,
+    pub revision: u64,
+    pub outcome: TenantResourceOutcome,
+    pub resources: Vec<TenantResourceIdentity>,
+    pub resource_manifest_sha256: String,
+    pub started_at: i64,
+    pub completed_at: i64,
+    pub exp: i64,
+    pub audit_sequence: u64,
+    pub audit_previous_sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Actor {

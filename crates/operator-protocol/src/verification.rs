@@ -14,8 +14,10 @@ use crate::{
     MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES,
     MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES,
     MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS, MAX_DISCOVERY_LIFETIME_SECONDS,
-    MAX_TASK_LIFETIME_SECONDS, PROTOCOL_VERSION, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE,
-    TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
+    MAX_TASK_LIFETIME_SECONDS, MAX_TENANT_RESOURCE_IDENTITIES, MAX_TENANT_RESOURCE_KINDS,
+    PROTOCOL_VERSION, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE,
+    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_CAPABILITY_VERSION,
+    TENANT_RESOURCE_RECEIPT_JWS_TYPE, TENANT_RESOURCE_TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
 };
 
 pub fn validate_discovery_request(request: &DiscoveryRequest) -> Result<(), ProtocolError> {
@@ -70,6 +72,116 @@ pub fn verify_adoption_receipt(
     let receipt = verify_compact(compact, expected_key_id, ADOPTION_RECEIPT_JWS_TYPE, key)?;
     validate_adoption_receipt(&receipt)?;
     Ok(receipt)
+}
+
+/// Verify a signed tenant resource capability and its bounded discovery
+/// window.  The signer key is still selected by the caller; no key URL or
+/// endpoint is accepted from the wire payload.
+pub fn verify_tenant_resource_capability(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: i64,
+) -> Result<TenantResourceCapability, ProtocolError> {
+    let capability: TenantResourceCapability = verify_compact(
+        compact,
+        expected_key_id,
+        TENANT_RESOURCE_CAPABILITY_JWS_TYPE,
+        key,
+    )?;
+    if capability.instance_key_id != expected_key_id {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability key id does not match signer",
+        ));
+    }
+    validate_tenant_resource_capability(&capability, now)?;
+    Ok(capability)
+}
+
+/// Verify a capability signature and schema without applying its freshness
+/// window.  This is useful when a caller first authenticates evidence and
+/// then evaluates the clock at a separate policy boundary.
+pub fn verify_tenant_resource_capability_signature(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+) -> Result<TenantResourceCapability, ProtocolError> {
+    let capability: TenantResourceCapability = verify_compact(
+        compact,
+        expected_key_id,
+        TENANT_RESOURCE_CAPABILITY_JWS_TYPE,
+        key,
+    )?;
+    if capability.instance_key_id != expected_key_id {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability key id does not match signer",
+        ));
+    }
+    validate_tenant_resource_capability_shape(&capability)?;
+    Ok(capability)
+}
+
+pub fn verify_tenant_resource_task(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: i64,
+) -> Result<TenantResourceTask, ProtocolError> {
+    let task = verify_tenant_resource_task_signature(compact, expected_key_id, key)?;
+    verify_tenant_resource_task_window(&task, now)?;
+    Ok(task)
+}
+
+pub fn verify_tenant_resource_task_signature(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+) -> Result<TenantResourceTask, ProtocolError> {
+    let task: TenantResourceTask =
+        verify_compact(compact, expected_key_id, TENANT_RESOURCE_TASK_JWS_TYPE, key)?;
+    validate_tenant_resource_task(&task)?;
+    Ok(task)
+}
+
+pub fn verify_tenant_resource_receipt(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: i64,
+) -> Result<TenantResourceReceipt, ProtocolError> {
+    let receipt = verify_tenant_resource_receipt_signature(compact, expected_key_id, key)?;
+    verify_tenant_resource_receipt_window(&receipt, now)?;
+    Ok(receipt)
+}
+
+/// Verify a receipt signature and wire shape without evaluating expiry.  This
+/// archival path is intentionally explicit; callers processing a live result
+/// should use [`verify_tenant_resource_receipt`] instead.
+pub fn verify_tenant_resource_receipt_signature(
+    compact: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+) -> Result<TenantResourceReceipt, ProtocolError> {
+    let receipt: TenantResourceReceipt = verify_compact(
+        compact,
+        expected_key_id,
+        TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+        key,
+    )?;
+    validate_tenant_resource_receipt(&receipt)?;
+    Ok(receipt)
+}
+
+pub fn verify_tenant_resource_receipt_window(
+    receipt: &TenantResourceReceipt,
+    now: i64,
+) -> Result<(), ProtocolError> {
+    if now < receipt.completed_at || now > receipt.exp {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt is outside its validity window",
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_file_identifier_value(value: &str) -> Result<(), ProtocolError> {
@@ -470,6 +582,561 @@ pub(crate) fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {
         }
     }
     validate_operation(&task.operation)?;
+    Ok(())
+}
+
+/// Validate a tenant resource task without evaluating its current clock
+/// window.
+pub fn validate_tenant_resource_task(task: &TenantResourceTask) -> Result<(), ProtocolError> {
+    if task.ver != PROTOCOL_VERSION {
+        return Err(ProtocolError::Policy(
+            "unsupported tenant resource task version",
+        ));
+    }
+    for value in [&task.iss, &task.aud, &task.actor.id] {
+        validate_identifier(value)?;
+    }
+    validate_file_identifier(&task.jti)?;
+    validate_file_identifier(&task.deployment_id)?;
+    validate_uuid(&task.tenant_id)?;
+    validate_file_identifier(&task.capability_jti)?;
+    validate_lower_hex(&task.capability_sha256, 64)?;
+    if task.iss != format!("controller:{}", task.deployment_id)
+        || task.aud != format!("runtime:{}", task.deployment_id)
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource task issuer or audience is not deployment-bound",
+        ));
+    }
+    if task.iat <= 0
+        || task.nbf <= 0
+        || task.exp <= 0
+        || task.nbf < task.iat
+        || task.exp < task.nbf
+        || task
+            .exp
+            .checked_sub(task.iat)
+            .is_none_or(|lifetime| lifetime > MAX_TASK_LIFETIME_SECONDS)
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource task validity window is invalid",
+        ));
+    }
+    validate_file_identifier(&task.change_set_id)?;
+    validate_lower_hex(&task.change_set_sha256, 64)?;
+    validate_lower_hex(&task.resource_manifest_sha256, 64)?;
+    validate_tenant_resource_task_payload(&task.operation, &task.payload)?;
+    Ok(())
+}
+
+pub fn verify_tenant_resource_task_window(
+    task: &TenantResourceTask,
+    now: i64,
+) -> Result<(), ProtocolError> {
+    if now < task.nbf || now > task.exp {
+        return Err(ProtocolError::Policy(
+            "tenant resource task is outside its validity window",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tenant_resource_task_payload(
+    operation: &TenantResourceOperation,
+    payload: &TenantResourceTaskPayload,
+) -> Result<(), ProtocolError> {
+    match (operation, payload) {
+        (TenantResourceOperation::Apply, TenantResourceTaskPayload::Apply { resources }) => {
+            validate_tenant_resource_identities(resources, true)
+        }
+        (
+            TenantResourceOperation::Enumerate,
+            TenantResourceTaskPayload::Enumerate { selectors },
+        ) => validate_tenant_resource_selectors(selectors),
+        (TenantResourceOperation::Revoke, TenantResourceTaskPayload::Revoke { resources }) => {
+            validate_tenant_resource_identities(resources, true)
+        }
+        _ => Err(ProtocolError::Policy(
+            "tenant resource operation and payload do not match",
+        )),
+    }
+}
+
+pub fn validate_tenant_resource_capability(
+    capability: &TenantResourceCapability,
+    now: i64,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_capability_shape(capability)?;
+    if now < capability.issued_at || now > capability.expires_at {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability is outside its validity window",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_tenant_resource_capability_shape(
+    capability: &TenantResourceCapability,
+) -> Result<(), ProtocolError> {
+    if capability.ver != PROTOCOL_VERSION {
+        return Err(ProtocolError::Policy(
+            "unsupported tenant resource capability protocol version",
+        ));
+    }
+    if capability.capability_version != TENANT_RESOURCE_CAPABILITY_VERSION {
+        return Err(ProtocolError::Policy(
+            "unsupported tenant resource capability version",
+        ));
+    }
+    validate_file_identifier(&capability.jti)?;
+    validate_discovery_nonce(&capability.nonce)?;
+    validate_file_identifier(&capability.deployment_id)?;
+    validate_uuid(&capability.tenant_id)?;
+    validate_file_identifier(&capability.runtime_instance_id)?;
+    validate_identifier(&capability.issuer)?;
+    if capability.issuer != format!("runtime:{}", capability.deployment_id) {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability issuer is not deployment-bound",
+        ));
+    }
+    validate_file_identifier(&capability.instance_key_id)?;
+    validate_embedded_identity(&capability.embedded)?;
+    validate_lower_hex(&capability.resource_manifest_sha256, 64)?;
+    if capability.resource_kinds.is_empty()
+        || capability.resource_kinds.len() > MAX_TENANT_RESOURCE_KINDS
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability kinds are out of bounds",
+        ));
+    }
+    let mut kinds = std::collections::BTreeSet::new();
+    for kind in &capability.resource_kinds {
+        if !kinds.insert(*kind) {
+            return Err(ProtocolError::Policy(
+                "tenant resource capability kinds must be unique",
+            ));
+        }
+    }
+    if capability.actions.is_empty() || capability.actions.len() > 3 {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability actions are out of bounds",
+        ));
+    }
+    let mut actions = std::collections::BTreeSet::new();
+    for action in &capability.actions {
+        if !actions.insert(*action) {
+            return Err(ProtocolError::Policy(
+                "tenant resource capability actions must be unique",
+            ));
+        }
+    }
+    if capability.issued_at <= 0
+        || capability.expires_at < capability.issued_at
+        || capability
+            .expires_at
+            .checked_sub(capability.issued_at)
+            .is_none_or(|lifetime| lifetime > MAX_TASK_LIFETIME_SECONDS)
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability validity window is invalid",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_tenant_resource_receipt(
+    receipt: &TenantResourceReceipt,
+) -> Result<(), ProtocolError> {
+    if receipt.ver != PROTOCOL_VERSION {
+        return Err(ProtocolError::Policy(
+            "unsupported tenant resource receipt version",
+        ));
+    }
+    for value in [&receipt.iss, &receipt.aud, &receipt.actor.id] {
+        validate_identifier(value)?;
+    }
+    validate_file_identifier(&receipt.jti)?;
+    validate_file_identifier(&receipt.deployment_id)?;
+    validate_uuid(&receipt.tenant_id)?;
+    validate_file_identifier(&receipt.capability_jti)?;
+    validate_lower_hex(&receipt.capability_sha256, 64)?;
+    if receipt.iss != format!("runtime:{}", receipt.deployment_id)
+        || receipt.aud != format!("controller:{}", receipt.deployment_id)
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt issuer or audience is not deployment-bound",
+        ));
+    }
+    validate_lower_hex(&receipt.request_sha256, 64)?;
+    validate_file_identifier(&receipt.change_set_id)?;
+    validate_lower_hex(&receipt.change_set_sha256, 64)?;
+    validate_lower_hex(&receipt.resource_manifest_sha256, 64)?;
+    validate_tenant_resource_identities(&receipt.resources, false)?;
+    if receipt.started_at <= 0
+        || receipt.completed_at < receipt.started_at
+        || receipt.exp < receipt.completed_at
+        || receipt
+            .exp
+            .checked_sub(receipt.started_at)
+            .is_none_or(|lifetime| lifetime > MAX_TASK_LIFETIME_SECONDS)
+        || receipt.audit_sequence == 0
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt time or audit sequence is invalid",
+        ));
+    }
+    validate_lower_hex(&receipt.audit_previous_sha256, 64)?;
+    if let TenantResourceOutcome::Failed { code } = &receipt.outcome {
+        validate_identifier(code)?;
+        if !receipt.resources.is_empty() || receipt.revision != receipt.expected_revision {
+            return Err(ProtocolError::Policy(
+                "failed tenant resource receipt claims a resource change",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_tenant_resource_identities(
+    resources: &[TenantResourceIdentity],
+    require_nonempty: bool,
+) -> Result<(), ProtocolError> {
+    if resources.len() > MAX_TENANT_RESOURCE_IDENTITIES
+        || (require_nonempty && resources.is_empty())
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource identities are out of bounds",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    for resource in resources {
+        validate_identifier(&resource.resource_id)?;
+        validate_lower_hex(&resource.digest, 64)?;
+        if !identities.insert(resource.resource_id.as_str()) {
+            return Err(ProtocolError::Policy(
+                "tenant resource identities must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_tenant_resource_selectors(
+    selectors: &[TenantResourceSelector],
+) -> Result<(), ProtocolError> {
+    if selectors.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+        return Err(ProtocolError::Policy(
+            "tenant resource selectors are out of bounds",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    for selector in selectors {
+        validate_identifier(&selector.resource_id)?;
+        if !identities.insert((selector.kind, selector.resource_id.as_str())) {
+            return Err(ProtocolError::Policy(
+                "tenant resource selectors must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Bind a task to the locally trusted deployment and tenant identity.
+pub fn validate_tenant_resource_task_deployment_binding(
+    task: &TenantResourceTask,
+    expected_deployment_id: &str,
+    expected_tenant_id: &str,
+) -> Result<(), ProtocolError> {
+    validate_file_identifier(expected_deployment_id)?;
+    validate_uuid(expected_tenant_id)?;
+    if task.deployment_id != expected_deployment_id
+        || task.tenant_id != expected_tenant_id
+        || task.iss != format!("controller:{expected_deployment_id}")
+        || task.aud != format!("runtime:{expected_deployment_id}")
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource task deployment or tenant binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
+/// Bind a task to a freshly discovered capability.
+///
+/// The task's expected revision must equal the capability's current revision.
+/// For read/revoke operations the task manifest is a baseline commitment and
+/// must equal the capability manifest.  Apply carries a desired external
+/// manifest, so its digest may intentionally differ while its resource kinds
+/// must all be advertised by the capability.  No manifest bytes are inferred
+/// from the task payload.
+pub fn validate_tenant_resource_task_capability_binding(
+    task: &TenantResourceTask,
+    capability: &TenantResourceCapability,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_task(task)?;
+    validate_tenant_resource_capability_shape(capability)?;
+    if task.deployment_id != capability.deployment_id
+        || task.tenant_id != capability.tenant_id
+        || task.capability_jti != capability.jti
+        || task.expected_revision != capability.revision
+        || !capability.actions.contains(&task.operation)
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource task capability binding mismatch",
+        ));
+    }
+    if matches!(
+        task.operation,
+        TenantResourceOperation::Enumerate | TenantResourceOperation::Revoke
+    ) && task.resource_manifest_sha256 != capability.resource_manifest_sha256
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource task baseline manifest does not match capability",
+        ));
+    }
+    match &task.payload {
+        TenantResourceTaskPayload::Apply { resources }
+        | TenantResourceTaskPayload::Revoke { resources } => {
+            for resource in resources {
+                if !capability.resource_kinds.contains(&resource.kind) {
+                    return Err(ProtocolError::Policy(
+                        "tenant resource task requests an unsupported resource kind",
+                    ));
+                }
+            }
+        }
+        TenantResourceTaskPayload::Enumerate { selectors } => {
+            for selector in selectors {
+                if !capability.resource_kinds.contains(&selector.kind) {
+                    return Err(ProtocolError::Policy(
+                        "tenant resource task requests an unsupported resource kind",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bind a task to the exact compact capability bytes that were verified by
+/// the caller.  This is the non-time-aware form for code that already applied
+/// the capability freshness check.
+pub fn validate_tenant_resource_task_capability_binding_with_digest(
+    task: &TenantResourceTask,
+    capability: &TenantResourceCapability,
+    expected_capability_sha256: &str,
+) -> Result<(), ProtocolError> {
+    validate_lower_hex(expected_capability_sha256, 64)?;
+    validate_tenant_resource_task_capability_binding(task, capability)?;
+    if task.capability_sha256 != expected_capability_sha256 {
+        return Err(ProtocolError::Policy(
+            "tenant resource task capability digest mismatch",
+        ));
+    }
+    Ok(())
+}
+
+/// Bind a task to a freshness-verified capability and its exact compact JWS
+/// digest in one operation.
+pub fn validate_tenant_resource_task_capability_binding_at(
+    task: &TenantResourceTask,
+    capability: &TenantResourceCapability,
+    expected_capability_sha256: &str,
+    now: i64,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_capability(capability, now)?;
+    validate_tenant_resource_task_capability_binding_with_digest(
+        task,
+        capability,
+        expected_capability_sha256,
+    )
+}
+
+/// Bind receipt evidence to the capability that authorized the operation.
+/// Apply may report a new desired manifest/revision; enumerate and revoke
+/// retain the capability's baseline manifest.  Every returned resource kind
+/// must be advertised by the capability.
+pub fn validate_tenant_resource_receipt_capability_binding(
+    receipt: &TenantResourceReceipt,
+    capability: &TenantResourceCapability,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_receipt(receipt)?;
+    validate_tenant_resource_capability_shape(capability)?;
+    if receipt.deployment_id != capability.deployment_id
+        || receipt.tenant_id != capability.tenant_id
+        || receipt.capability_jti != capability.jti
+        || receipt.expected_revision != capability.revision
+        || !capability.actions.contains(&receipt.operation)
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt capability binding mismatch",
+        ));
+    }
+    if matches!(
+        receipt.operation,
+        TenantResourceOperation::Enumerate | TenantResourceOperation::Revoke
+    ) && receipt.resource_manifest_sha256 != capability.resource_manifest_sha256
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt baseline manifest does not match capability",
+        ));
+    }
+    if receipt
+        .resources
+        .iter()
+        .any(|resource| !capability.resource_kinds.contains(&resource.kind))
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt contains an unsupported resource kind",
+        ));
+    }
+    Ok(())
+}
+
+/// Bind a receipt to the exact compact capability bytes used by the task.
+pub fn validate_tenant_resource_receipt_capability_binding_with_digest(
+    receipt: &TenantResourceReceipt,
+    capability: &TenantResourceCapability,
+    expected_capability_sha256: &str,
+) -> Result<(), ProtocolError> {
+    validate_lower_hex(expected_capability_sha256, 64)?;
+    validate_tenant_resource_receipt_capability_binding(receipt, capability)?;
+    if receipt.capability_sha256 != expected_capability_sha256 {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt capability digest mismatch",
+        ));
+    }
+    Ok(())
+}
+
+/// Bind a receipt to a freshness-verified capability and exact compact JWS
+/// digest in one operation.
+pub fn validate_tenant_resource_receipt_capability_binding_at(
+    receipt: &TenantResourceReceipt,
+    capability: &TenantResourceCapability,
+    expected_capability_sha256: &str,
+    now: i64,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_capability(capability, now)?;
+    validate_tenant_resource_receipt_capability_binding_with_digest(
+        receipt,
+        capability,
+        expected_capability_sha256,
+    )
+}
+
+/// Ensure that a receipt repeats every request-bound identity and intent.
+/// `request_sha256` is checked separately because the compact request bytes
+/// are not present in a decoded task value.
+pub fn validate_tenant_resource_receipt_binding(
+    task: &TenantResourceTask,
+    receipt: &TenantResourceReceipt,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_task(task)?;
+    validate_tenant_resource_receipt(receipt)?;
+    if receipt.deployment_id != task.deployment_id
+        || receipt.tenant_id != task.tenant_id
+        || receipt.jti != task.jti
+        || receipt.capability_jti != task.capability_jti
+        || receipt.capability_sha256 != task.capability_sha256
+        || receipt.actor != task.actor
+        || receipt.expected_revision != task.expected_revision
+        || receipt.change_set_id != task.change_set_id
+        || receipt.change_set_sha256 != task.change_set_sha256
+        || receipt.operation != task.operation
+        || receipt.resource_manifest_sha256 != task.resource_manifest_sha256
+        || receipt.iss != format!("runtime:{}", task.deployment_id)
+        || receipt.aud != format!("controller:{}", task.deployment_id)
+        || receipt.started_at < task.nbf
+        || receipt.started_at > task.exp
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt request binding mismatch",
+        ));
+    }
+    if matches!(receipt.outcome, TenantResourceOutcome::Succeeded) {
+        match (&task.operation, &task.payload) {
+            (TenantResourceOperation::Apply, TenantResourceTaskPayload::Apply { resources })
+            | (TenantResourceOperation::Revoke, TenantResourceTaskPayload::Revoke { resources })
+                if receipt.resources.as_slice() != resources.as_slice() =>
+            {
+                return Err(ProtocolError::Policy(
+                    "tenant resource receipt resources do not match request",
+                ));
+            }
+            (
+                TenantResourceOperation::Enumerate,
+                TenantResourceTaskPayload::Enumerate { selectors },
+            ) if !selectors.is_empty()
+                && receipt.resources.iter().any(|resource| {
+                    !selectors.iter().any(|selector| {
+                        selector.kind == resource.kind
+                            && selector.resource_id == resource.resource_id
+                    })
+                }) =>
+            {
+                return Err(ProtocolError::Policy(
+                    "tenant resource enumeration result is outside selectors",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_tenant_resource_receipt_request_binding(
+    receipt: &TenantResourceReceipt,
+    expected_request_sha256: &str,
+) -> Result<(), ProtocolError> {
+    validate_lower_hex(expected_request_sha256, 64)?;
+    if receipt.request_sha256 != expected_request_sha256 {
+        return Err(ProtocolError::Policy(
+            "tenant resource receipt request digest mismatch",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_tenant_resource_capability_binding(
+    capability: &TenantResourceCapability,
+    expected_deployment_id: &str,
+    expected_tenant_id: &str,
+) -> Result<(), ProtocolError> {
+    validate_file_identifier(expected_deployment_id)?;
+    validate_uuid(expected_tenant_id)?;
+    if capability.deployment_id != expected_deployment_id
+        || capability.tenant_id != expected_tenant_id
+    {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability deployment or tenant binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
+/// Bind discovery evidence to the operation request that caused it.  The
+/// caller must still maintain replay state for the JTI/nonce pair; this wire
+/// crate only enforces exact shape and equality.
+pub fn validate_tenant_resource_capability_request_binding(
+    capability: &TenantResourceCapability,
+    expected_deployment_id: &str,
+    expected_tenant_id: &str,
+    expected_jti: &str,
+    expected_nonce: &str,
+) -> Result<(), ProtocolError> {
+    validate_tenant_resource_capability_binding(
+        capability,
+        expected_deployment_id,
+        expected_tenant_id,
+    )?;
+    validate_file_identifier(expected_jti)?;
+    validate_discovery_nonce(expected_nonce)?;
+    if capability.jti != expected_jti || capability.nonce != expected_nonce {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability discovery binding mismatch",
+        ));
+    }
     Ok(())
 }
 
@@ -1698,6 +2365,23 @@ pub(crate) fn validate_file_identifier(value: &str) -> Result<(), ProtocolError>
             .all(|character| character.is_ascii_alphanumeric() || ".:_+-".contains(character))
     {
         return Err(ProtocolError::Policy("invalid file identifier"));
+    }
+    Ok(())
+}
+
+/// Validate a canonical UUID string without pulling UUID parsing and its
+/// feature surface into this deliberately small wire crate.
+fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
+    if value.len() != 36
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+    {
+        return Err(ProtocolError::Policy("invalid UUID"));
     }
     Ok(())
 }
