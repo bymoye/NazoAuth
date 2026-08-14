@@ -10,8 +10,7 @@ fn test_operations(
         SessionService::new(
             std::sync::Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
             std::sync::Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
-            nazo_identity::TenantId::new(crate::domain::tenancy::DEFAULT_TENANT_ID)
-                .expect("default tenant ID is valid"),
+            state.settings.tenant.context.tenant_id,
         ),
     ))
 }

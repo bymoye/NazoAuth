@@ -68,6 +68,7 @@ fn authorization_decision_endpoint(
         Arc::new(ServerAuthorizationDecisionOperations::new(
             service,
             sessions,
+            nazo_identity::TenantId::new(DEFAULT_TENANT_ID).expect("default tenant ID is valid"),
             Arc::new(AuthorizationHttpConfig::from(state.settings.as_ref())),
             runtime_modules,
         )),

@@ -3,29 +3,17 @@ use crate::test_support::DatabaseUserFixture;
 
 use chrono::Utc;
 
-use nazo_identity::PublicAccount;
+use nazo_identity::{PublicAccount, TenantContext};
 
 use serde_json::json;
+use uuid::Uuid;
 
-impl TenantContext {
-    pub(crate) fn includes_user(&self, user: &PublicAccount) -> bool {
-        self.as_identity_context().is_some_and(|context| {
-            context.matches_raw(user.tenant_id(), user.realm_id(), user.organization_id())
-        })
-    }
+fn includes_user(context: TenantContext, user: &PublicAccount) -> bool {
+    context.matches_raw(user.tenant_id(), user.realm_id(), user.organization_id())
+}
 
-    pub(crate) fn includes_client(&self, client: &ClientRow) -> bool {
-        self.as_identity_context().is_some_and(|context| {
-            context.matches_raw(client.tenant_id, client.realm_id, client.organization_id)
-        })
-    }
-
-    pub(crate) fn same_tenant(&self, tenant_id: Uuid) -> bool {
-        self.as_identity_context().is_some_and(|context| {
-            nazo_identity::TenantId::new(tenant_id)
-                .is_ok_and(|tenant_id| context.same_tenant(tenant_id))
-        })
-    }
+fn includes_client(context: TenantContext, client: &ClientRow) -> bool {
+    context.matches_raw(client.tenant_id, client.realm_id, client.organization_id)
 }
 
 use super::*;
@@ -33,9 +21,9 @@ use super::*;
 fn user_in_context(context: TenantContext) -> PublicAccount {
     DatabaseUserFixture {
         id: Uuid::now_v7(),
-        tenant_id: context.tenant_id,
-        realm_id: context.realm_id,
-        organization_id: context.organization_id,
+        tenant_id: context.tenant_id.as_uuid(),
+        realm_id: context.realm_id.as_uuid(),
+        organization_id: context.organization_id.as_uuid(),
         username: "user".to_owned(),
         email: "user@example.com".to_owned(),
         display_name: None,
@@ -73,9 +61,9 @@ fn user_in_context(context: TenantContext) -> PublicAccount {
 fn client_in_context(context: TenantContext) -> ClientRow {
     client_row! {
         id: Uuid::now_v7(),
-        tenant_id: context.tenant_id,
-        realm_id: context.realm_id,
-        organization_id: context.organization_id,
+        tenant_id: context.tenant_id.as_uuid(),
+        realm_id: context.realm_id.as_uuid(),
+        organization_id: context.organization_id.as_uuid(),
         client_id: "client-1".to_owned(),
         client_name: "Client".to_owned(),
         client_type: "public".to_owned(),
@@ -119,16 +107,16 @@ fn client_in_context(context: TenantContext) -> ClientRow {
 
 #[test]
 fn tenant_context_rejects_cross_tenant_entities() {
-    let context = default_tenant_context();
+    let context = TenantContext::default_system();
     let other = TenantContext {
-        tenant_id: Uuid::now_v7(),
+        tenant_id: nazo_identity::TenantId::new(Uuid::now_v7()).unwrap(),
         ..context
     };
 
-    assert!(context.includes_user(&user_in_context(context)));
-    assert!(!context.includes_user(&user_in_context(other)));
-    assert!(context.includes_client(&client_in_context(context)));
-    assert!(!context.includes_client(&client_in_context(other)));
-    assert!(context.same_tenant(DEFAULT_TENANT_ID));
+    assert!(includes_user(context, &user_in_context(context)));
+    assert!(!includes_user(context, &user_in_context(other)));
+    assert!(includes_client(context, &client_in_context(context)));
+    assert!(!includes_client(context, &client_in_context(other)));
+    assert!(context.same_tenant(nazo_identity::TenantId::new(DEFAULT_TENANT_ID).unwrap()));
     assert!(!context.same_tenant(other.tenant_id));
 }

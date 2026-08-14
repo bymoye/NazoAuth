@@ -40,6 +40,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     initialize_dummy_password_hash()?;
 
     // 配置只在启动阶段读取；运行期只向 handler 注入其所需的 focused handles。
+    let settings = Arc::new(Settings::from_config(&config)?);
     let database_url = database_url(&config);
     let audit_anchor_data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
@@ -57,6 +58,10 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
 
     // 数据库和 Valkey 客户端在 server factory 外创建，避免每个 worker 重复初始化。
     let diesel_db = create_pool(database_url.clone(), database_max_connections(&config)?)?;
+    nazo_postgres::ActiveTenantBoundaryRepository::new(diesel_db.clone())
+        .preflight(settings.tenant.context)
+        .await
+        .map_err(|error| anyhow::anyhow!("active tenant boundary preflight failed: {error}"))?;
     let require_audit_least_privilege =
         config.bool("SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE", true)?;
     let audit_repository = nazo_postgres::AuditLedgerRepository::new(diesel_db.clone());
@@ -79,8 +84,11 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     let valkey_connection = valkey;
     #[cfg(test)]
     let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
+    valkey_connection
+        .bind_tenant_owner(settings.tenant.context.tenant_id)
+        .await
+        .map_err(|error| anyhow::anyhow!("Valkey tenant ownership preflight failed: {error}"))?;
 
-    let settings = Arc::new(Settings::from_config(&config)?);
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
     let instance_identity_dir = config
         .optional_string("INSTANCE_IDENTITY_DIR")
@@ -110,7 +118,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
             diesel_db.clone(),
             &settings.storage.data_dir,
             &settings.endpoint.issuer,
-            nazo_identity::TenantContext::default_system(),
+            settings.tenant.context,
         )
         .await?,
     );

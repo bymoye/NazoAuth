@@ -159,11 +159,19 @@ Configuration is intentionally small for new deployments:
 ```yaml
 BIND: "0.0.0.0:8000"
 PUBLIC_BASE_URL: "https://auth.example.com"
+TRANSPORT_MODE: "trusted-proxy"
+TRUSTED_PROXY_CIDRS: "127.0.0.1/32"
+MTLS_CERTIFICATE_SOURCE: "disabled"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
 RUST_LOG: "info"
 ```
+
+For standalone HTTPS without a reverse proxy, select `TRANSPORT_MODE:
+"direct-tls"` and configure the server certificate, private key, mTLS client CA,
+and dedicated mTLS listener described in
+[`docs/operations/configuration.md`](docs/operations/configuration.md).
 
 `CLIENT_SECRET_PEPPER`, the DCR initial-access token, and a pairwise-subject
 secret when required are generated under `DATA_DIR/secrets` if absent.

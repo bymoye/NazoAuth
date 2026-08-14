@@ -412,7 +412,12 @@ fn matrix_suite_mdoc_anchor_policy_requires_exact_membership() {
 struct UnusedClientRepository;
 
 impl AdminClientRepositoryPort for UnusedClientRepository {
-    fn page(&self, _offset: i64, _limit: i64) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
+    fn page(
+        &self,
+        _tenant_id: Uuid,
+        _offset: i64,
+        _limit: i64,
+    ) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
         Box::pin(async { Err(AdminClientPortError::Unexpected) })
     }
 
@@ -1444,4 +1449,19 @@ fn onboarding_repository_requires_the_operator_data_key_channel() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("OPENID4VC"));
+}
+#[test]
+fn legacy_suite_rejects_non_default_active_tenant_boundary() {
+    let default =
+        ConfigSource::from_pairs_for_test([("TENANT_ID", "00000000-0000-0000-0000-000000000001")]);
+    ensure_default_suite_boundary(&default).expect("default Suite boundary should remain usable");
+
+    let alternative =
+        ConfigSource::from_pairs_for_test([("TENANT_ID", "00000000-0000-0000-0000-000000000011")]);
+    assert!(
+        ensure_default_suite_boundary(&alternative)
+            .expect_err("legacy Suite must fail closed for another active tenant")
+            .to_string()
+            .contains("supports only the default tenant boundary")
+    );
 }

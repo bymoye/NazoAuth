@@ -23,12 +23,12 @@ pub use pool::{
     db_pool_metrics, get_conn, health_check, run_pending_migrations,
 };
 pub use repositories::{
-    AccessRequestRepository, AuditLedgerRepository, AuditRepository, AuthorizationFlowRepository,
-    AuthorizationRepository, ConformanceApplicant, ConformanceClient, ConformanceClientMapping,
-    ConformanceLease, ConformanceLeaseCleanup, ConformanceLeasePublicMaterial,
-    ConformanceLeaseRepository, ConformanceLeaseTokenDigests, ConformanceMtlsTrustAnchor,
-    ConformanceOnboardingRequest, ConformanceOnboardingResult, FederationRepository,
-    GrantAuthorization, GrantRepository, InitialAdminBootstrapRepository,
+    AccessRequestRepository, ActiveTenantBoundaryRepository, AuditLedgerRepository,
+    AuditRepository, AuthorizationFlowRepository, AuthorizationRepository, ConformanceApplicant,
+    ConformanceClient, ConformanceClientMapping, ConformanceLease, ConformanceLeaseCleanup,
+    ConformanceLeasePublicMaterial, ConformanceLeaseRepository, ConformanceLeaseTokenDigests,
+    ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest, ConformanceOnboardingResult,
+    FederationRepository, GrantAuthorization, GrantRepository, InitialAdminBootstrapRepository,
     InitialAdminBootstrapState, InitialAdminClaimOutcome, MAX_CONFORMANCE_LEASE_SECONDS,
     MAX_SECURITY_AUDIT_PAYLOAD_BYTES, MIN_CONFORMANCE_LEASE_SECONDS, ManagedCredentialDataset,
     ManagedCredentialDatasetWrite, MfaRepository, MtlsTrustAnchorRepository, OAuthClientRepository,

@@ -8,6 +8,7 @@ data:
   .env.yaml: |
     BIND: "0.0.0.0:8000"
     PUBLIC_BASE_URL: {{ .Values.publicBaseUrl | quote }}
+    TRANSPORT_MODE: {{ .Values.transportMode | quote }}
     DATA_DIR: "/var/lib/nazoauth"
     RUST_LOG: "info"
     {{- if .Values.signing.externalCommand }}

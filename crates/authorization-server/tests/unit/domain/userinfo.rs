@@ -1181,6 +1181,11 @@ async fn userinfo_rejects_mtls_bound_token_with_mismatched_verified_certificate(
     .await;
     let req = actix_web::test::TestRequest::get()
         .uri("/userinfo")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header((header::AUTHORIZATION, format!("Bearer {}", token.token)))
         .insert_header((

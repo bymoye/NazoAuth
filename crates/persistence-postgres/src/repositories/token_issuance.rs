@@ -720,15 +720,6 @@ impl TokenRepositoryPort for TokenIssuanceRepository {
         })
     }
 
-    fn client_by_id(&self, client_id: Uuid) -> TokenFuture<'_, Option<OAuthClient>> {
-        Box::pin(async move {
-            self.clients
-                .by_id(client_id)
-                .await
-                .map_err(map_repository_error)
-        })
-    }
-
     fn client_by_protocol_id<'a>(
         &'a self,
         tenant_id: Uuid,

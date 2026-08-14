@@ -121,6 +121,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
             scim_service.clone(),
             Arc::new(ServerScimRequestAuthorizer::new(
                 scim_service,
+                settings.tenant.context,
                 scim_client_ip,
                 runtime_registry.clone(),
             )),
@@ -136,7 +137,10 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         ))),
     );
     let authorization_service = web::Data::new(ServerAuthorizationService::new(
-        nazo_postgres::AuthorizationFlowRepository::new(diesel_db.clone(), DEFAULT_TENANT_ID),
+        nazo_postgres::AuthorizationFlowRepository::new(
+            diesel_db.clone(),
+            settings.tenant.context.tenant_id.as_uuid(),
+        ),
         nazo_valkey::AuthorizationStateAdapter::new(&valkey_connection),
         keyset.clone(),
     ));
@@ -176,7 +180,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     ));
     let device_grants = web::Data::new(nazo_postgres::AuthorizationFlowRepository::new(
         diesel_db.clone(),
-        DEFAULT_TENANT_ID,
+        settings.tenant.context.tenant_id.as_uuid(),
     ));
     let device_config = web::Data::new(DeviceHttpConfig::from(settings));
     let userinfo_handles = UserinfoHandles::new(

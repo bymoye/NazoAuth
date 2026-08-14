@@ -25,6 +25,7 @@ pub(crate) fn admin_session_handles(
     actix_web::web::Data::new(crate::http::sessions::AdminSessionHandles::new(
         nazo_valkey::SessionStore::new(&valkey),
         nazo_postgres::UserRepository::new(database),
+        settings.tenant.context.tenant_id,
         crate::http::sessions::SessionHttpConfig::new(
             &session.session_cookie_name,
             &session.csrf_cookie_name,
@@ -55,6 +56,7 @@ pub(crate) async fn prepare_client_insert_with_secret_pepper(
     pairwise_subject_secret: Option<&str>,
     client_secret_pepper: &str,
     _issuer: &str,
+    tenant: nazo_identity::TenantContext,
     response_signing_algorithms: &[&'static str],
 ) -> Result<PreparedClientRegistration, InsertClientError> {
     let crypto = TestAdminClientCrypto {
@@ -63,7 +65,7 @@ pub(crate) async fn prepare_client_insert_with_secret_pepper(
     nazo_auth::prepare_client_registration(
         payload,
         &nazo_auth::AdminClientPolicy {
-            tenant: nazo_identity::TenantContext::default_system(),
+            tenant,
             pairwise_subject_secret: pairwise_subject_secret.map(ToOwned::to_owned),
             client_secret_pepper: client_secret_pepper.to_owned(),
         },

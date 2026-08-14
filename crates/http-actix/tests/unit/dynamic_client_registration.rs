@@ -71,7 +71,7 @@ impl DynamicRegistrationClientStore for FakeStore {
 
     fn by_registration_access_token<'a>(
         &'a self,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         client_id: &'a str,
         _token_hash: &'a str,
     ) -> DynamicRegistrationFuture<'a, Option<OAuthClient>> {
@@ -80,27 +80,52 @@ impl DynamicRegistrationClientStore for FakeStore {
             .lock()
             .expect("client lock")
             .clone()
-            .filter(|client| client.client_id == client_id);
+            .filter(|client| client.tenant_id == tenant_id && client.client_id == client_id);
         Box::pin(async move { Ok(found) })
     }
 
-    fn has_client_secret(&self, _client_id: Uuid) -> DynamicRegistrationFuture<'_, bool> {
-        Box::pin(async { Ok(true) })
+    fn has_client_secret(
+        &self,
+        tenant_id: Uuid,
+        client_id: Uuid,
+    ) -> DynamicRegistrationFuture<'_, bool> {
+        let matches = self
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .is_some_and(|client| client.tenant_id == tenant_id && client.id == client_id);
+        Box::pin(async move { Ok(matches) })
     }
 
     fn client_secret_salt(
         &self,
-        _client_id: Uuid,
+        tenant_id: Uuid,
+        client_id: Uuid,
     ) -> DynamicRegistrationFuture<'_, Option<String>> {
-        Box::pin(async { Ok(Some("salt".to_owned())) })
+        let salt = self
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .filter(|client| client.tenant_id == tenant_id && client.id == client_id)
+            .map(|_| "salt".to_owned());
+        Box::pin(async move { Ok(salt) })
     }
 
     fn client_secret_digest_matches<'a>(
         &'a self,
-        _client_id: Uuid,
+        tenant_id: Uuid,
+        client_id: Uuid,
         candidate_digest: &'a str,
     ) -> DynamicRegistrationFuture<'a, bool> {
-        let matches = candidate_digest == "digest:current-secret:pepper:salt";
+        let matches = candidate_digest == "digest:current-secret:pepper:salt"
+            && self
+                .client
+                .lock()
+                .expect("client lock")
+                .as_ref()
+                .is_some_and(|client| client.tenant_id == tenant_id && client.id == client_id);
         Box::pin(async move { Ok(matches) })
     }
 
@@ -136,6 +161,26 @@ impl DynamicRegistrationClientStore for FakeStore {
         *self.client.lock().expect("client lock") = None;
         Box::pin(async { Ok(true) })
     }
+}
+
+#[actix_web::test]
+async fn registration_access_token_lookup_fails_closed_across_tenants() {
+    let store = FakeStore::new();
+    let mut endpoint = endpoint_with_store(true, store);
+    endpoint.config.tenant = TenantContext {
+        tenant_id: nazo_identity::TenantId::new(Uuid::from_u128(11)).unwrap(),
+        realm_id: nazo_identity::RealmId::new(Uuid::from_u128(12)).unwrap(),
+        organization_id: nazo_identity::OrganizationId::new(Uuid::from_u128(13)).unwrap(),
+    };
+    let request = test::TestRequest::default()
+        .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
+        .to_http_request();
+
+    let response = authenticate_registration_client(&endpoint, &request, "client-1")
+        .await
+        .expect_err("a token from the default tenant must not cross into another tenant");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[derive(Clone, Copy)]
@@ -252,6 +297,7 @@ fn endpoint_with_store_and_lease_lookup(
 ) -> DynamicRegistrationEndpoint {
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
+            tenant: TenantContext::default_system(),
             issuer: "https://issuer.example".to_owned(),
             default_audience: "https://api.example".to_owned(),
             pairwise_subject_secret: None,
@@ -1073,11 +1119,12 @@ async fn rate_limit_error_keeps_oauth_code_and_retry_after() {
 }
 
 fn client() -> OAuthClient {
+    let tenant = TenantContext::default_system();
     OAuthClient {
         id: Uuid::now_v7(),
-        tenant_id: Uuid::nil(),
-        realm_id: Uuid::nil(),
-        organization_id: Uuid::nil(),
+        tenant_id: tenant.tenant_id.as_uuid(),
+        realm_id: tenant.realm_id.as_uuid(),
+        organization_id: tenant.organization_id.as_uuid(),
         registration: ValidatedClientRegistration {
             client_id: "client-test".to_owned(),
             client_name: "Client".to_owned(),

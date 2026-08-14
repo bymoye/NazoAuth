@@ -33,6 +33,9 @@ TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID=response-2026-08
 ```yaml
 BIND: "0.0.0.0:8000"
 PUBLIC_BASE_URL: "https://auth.example.com"
+TRANSPORT_MODE: "trusted-proxy"
+TRUSTED_PROXY_CIDRS: "127.0.0.1/32"
+MTLS_CERTIFICATE_SOURCE: "disabled"
 DATABASE_URL: "postgresql://nazo_oauth:<password>@postgres:5432/oauth"
 VALKEY_URL: "redis://valkey:6379/0"
 DATA_DIR: "/var/lib/nazo_oauth"
@@ -53,11 +56,15 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `BIND` | `0.0.0.0:8000` | HTTP listener |
+| `BIND` | `0.0.0.0:8000` | Public listener; HTTPS in `direct-tls`, HTTP otherwise |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Public same-origin base URL |
+| `TRANSPORT_MODE` | implicit only for loopback HTTP | `loopback-http`, `direct-tls`, or `trusted-proxy`; required for non-loopback issuers |
+| `TENANT_ID` | `00000000-0000-0000-0000-000000000001` | Process-wide active tenant; the row must exist and have `active` status |
+| `REALM_ID` | `00000000-0000-0000-0000-000000000002` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
+| `ORGANIZATION_ID` | `00000000-0000-0000-0000-000000000003` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
 | `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/oauth` | PostgreSQL connection string |
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
-| `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string |
+| `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string; its logical database is permanently claimed by `TENANT_ID`, same-tenant replicas may share it, and a non-default tenant requires an empty database on first claim |
 | `DATA_DIR` | `runtime` | Base directory for persistent local files |
 | `UI_CACHE_DIR` | `${DATA_DIR}/ui-releases` | Writable cache for the verified frontend release selected from the embedded descriptor |
 | `UI_STATIC_DIR` | unset | Optional signed frontend directory containing `index.html`; serves files and SPA routes under `/ui/` |
@@ -196,9 +203,9 @@ unsigned success. See the [dated draft audit](../protocol/fapi-http-signatures-d
 
 ## Public OP/AS security boundary
 
-Production deployments must expose the issuer through HTTPS. Nazo Auth Server
-normally listens on HTTP behind a TLS-terminating reverse proxy; the proxy is
-responsible for public TLS policy and browser HSTS. Public listeners should use
+Production deployments must expose the issuer through HTTPS. Select exactly one
+transport owner with `TRANSPORT_MODE`: NazoAuth terminates TLS in `direct-tls`,
+or a reverse proxy terminates TLS in `trusted-proxy`. Public listeners should use
 TLS 1.3 where available, allow only modern TLS 1.2 suites when TLS 1.2 is
 required, reject TLS 1.0/1.1, and set `Strict-Transport-Security` for
 browser-facing issuer hosts. `ISSUER`, `PUBLIC_BASE_URL`, and
@@ -301,15 +308,21 @@ loopback endpoints.
 `legacy-verified-headers`. `rfc9440` consumes the singleton RFC 9440
 `Client-Cert` DER byte sequence. `legacy-verified-headers` requires
 `X-SSL-Client-Verify: SUCCESS` and the existing forwarded certificate fields.
-Both proxy modes require `TRUSTED_PROXY_CIDRS`; without a trusted proxy the
-default is `disabled`. When trusted proxy CIDRs are present and the source is
-omitted, the compatibility mode remains the default for existing deployments.
+`trusted-proxy` requires both `TRUSTED_PROXY_CIDRS` and an explicit certificate
+source; use `disabled` when that proxy does not authenticate client certificates.
+`loopback-http` rejects proxy and certificate-source settings. No public mode is
+inferred from the presence of proxy CIDRs or certificate headers.
 
-`direct-tls` creates a separate client-certificate-required TLS listener. It
-requires `TLS_BIND`, `TLS_CERTIFICATE_FILE`, `TLS_PRIVATE_KEY_FILE`, and
-`TLS_CLIENT_CA_FILE`. The ordinary `BIND` listener remains available for the
-browser/public route behind a normal TLS terminator; route the RFC 8705 mTLS
-endpoint aliases to `TLS_BIND`.
+`direct-tls` serves normal HTTPS on `BIND` and client-certificate-required HTTPS
+on `TLS_BIND`, using the same server identity. It requires
+`TLS_CERTIFICATE_FILE`, `TLS_PRIVATE_KEY_FILE`, and `TLS_CLIENT_CA_FILE`.
+The leaf certificate must be currently valid, match the private key, and cover
+the issuer and mTLS endpoint hosts. On Unix,
+the private key must be a regular file with no group or other permission bits.
+Route the RFC 8705 mTLS endpoint aliases to `TLS_BIND`; direct mode rejects all
+proxy trust settings and derives client certificate identity only from the TLS
+session. Certificate/SNI selection and live rotation remain deployment-restart
+operations until the tenant transport snapshot work is complete.
 
 `EMAIL_SMTP_TLS` accepts only `starttls`, `implicit`, or `none`. The `none`
 mode is rejected unless the issuer is loopback HTTP and no SMTP credentials
