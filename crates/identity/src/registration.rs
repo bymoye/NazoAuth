@@ -124,7 +124,11 @@ where
         }
         if !self
             .verification
-            .reserve_peer_send(peer_subject, self.config.send_peer_cooldown_seconds)
+            .reserve_peer_send(
+                self.tenant.tenant_id,
+                peer_subject,
+                self.config.send_peer_cooldown_seconds,
+            )
             .await
             .map_err(SendVerificationCodeError::Reservation)?
         {
@@ -132,17 +136,27 @@ where
         }
         let email_reserved = match self
             .verification
-            .reserve_email_send(normalized_email, self.config.send_cooldown_seconds)
+            .reserve_email_send(
+                self.tenant.tenant_id,
+                normalized_email,
+                self.config.send_cooldown_seconds,
+            )
             .await
         {
             Ok(reserved) => reserved,
             Err(error) => {
-                let _ = self.verification.release_peer_send(peer_subject).await;
+                let _ = self
+                    .verification
+                    .release_peer_send(self.tenant.tenant_id, peer_subject)
+                    .await;
                 return Err(SendVerificationCodeError::Reservation(error));
             }
         };
         if !email_reserved {
-            let _ = self.verification.release_peer_send(peer_subject).await;
+            let _ = self
+                .verification
+                .release_peer_send(self.tenant.tenant_id, peer_subject)
+                .await;
             return Ok(SendVerificationCodeOutcome::Suppressed);
         }
 
@@ -158,6 +172,7 @@ where
         if let Err(error) = self
             .verification
             .store_code(
+                self.tenant.tenant_id,
                 normalized_email,
                 password_hash,
                 self.config.code_ttl_seconds,
@@ -173,7 +188,10 @@ where
             .deliver(normalized_email, &code, self.config.code_ttl_seconds)
             .await
         {
-            let _ = self.verification.delete_code(normalized_email).await;
+            let _ = self
+                .verification
+                .delete_code(self.tenant.tenant_id, normalized_email)
+                .await;
             self.release_send_reservations(normalized_email, peer_subject)
                 .await;
             return Err(SendVerificationCodeError::Delivery(error));
@@ -187,7 +205,7 @@ where
     ) -> Result<PublicAccount, RegisterLocalAccountError> {
         let record = self
             .verification
-            .load_code(&input.email)
+            .load_code(self.tenant.tenant_id, &input.email)
             .await
             .map_err(RegisterLocalAccountError::VerificationUnavailable)?
             .ok_or(RegisterLocalAccountError::InvalidVerificationCode)?;
@@ -214,7 +232,7 @@ where
         }
         match self
             .verification
-            .consume_code(&input.email, &record)
+            .consume_code(self.tenant.tenant_id, &input.email, &record)
             .await
             .map_err(RegisterLocalAccountError::VerificationUnavailable)?
         {
@@ -249,8 +267,14 @@ where
     }
 
     async fn release_send_reservations(&self, email: &str, peer_subject: &str) {
-        let _ = self.verification.release_peer_send(peer_subject).await;
-        let _ = self.verification.release_email_send(email).await;
+        let _ = self
+            .verification
+            .release_peer_send(self.tenant.tenant_id, peer_subject)
+            .await;
+        let _ = self
+            .verification
+            .release_email_send(self.tenant.tenant_id, email)
+            .await;
     }
 }
 

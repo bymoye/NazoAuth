@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
+use nazo_identity::TenantId;
 use nazo_identity::ports::{
     EmailVerificationConsume, EmailVerificationStorePort, FederationStatePort, LoginSessionCreate,
     LoginSessionPort, MfaAttemptThrottleDecision, MfaAttemptThrottlePort, PasskeyCeremonyPort,
@@ -28,6 +29,10 @@ async fn setup() -> Option<(ValkeyConnection, fred::prelude::Client)> {
     Some((connection, inspector))
 }
 
+fn tenant(value: u128) -> TenantId {
+    TenantId::new(uuid::Uuid::from_u128(value)).expect("test tenant must be non-nil")
+}
+
 #[tokio::test]
 async fn authentication_short_state_preserves_exact_keys_and_one_time_semantics() {
     let Some((connection, inspector)) = setup().await else {
@@ -36,19 +41,37 @@ async fn authentication_short_state_preserves_exact_keys_and_one_time_semantics(
     let store = AuthenticationStore::new(&connection);
     let suffix = uuid::Uuid::now_v7().to_string();
     let email = format!("{suffix}@example.com");
+    let tenant_id = tenant(10);
     let ceremony = format!("ceremony-{suffix}");
-    assert!(store.reserve_email_send(&email, 30).await.unwrap());
-    assert!(!store.reserve_email_send(&email, 30).await.unwrap());
-    assert_eq!(
-        inspector
-            .get::<String, _>(format!("oauth:email_verify:send:{email}"))
+    assert!(
+        store
+            .reserve_email_send(tenant_id, &email, 30)
             .await
-            .unwrap(),
-        "1"
+            .unwrap()
     );
-    store.store_email_code(&email, "123456", 30).await.unwrap();
+    assert!(
+        !store
+            .reserve_email_send(tenant_id, &email, 30)
+            .await
+            .unwrap()
+    );
+    let email_digest = blake3::hash(email.as_bytes()).to_hex();
+    let send_key = format!(
+        "oauth:email_verify:{}:send:{email_digest}",
+        tenant_id.as_uuid()
+    );
+    assert_eq!(inspector.get::<String, _>(&send_key).await.unwrap(), "1");
+    assert!(!send_key.contains(&email));
+    store
+        .store_email_code(tenant_id, &email, "123456", 30)
+        .await
+        .unwrap();
     assert_eq!(
-        store.load_email_code(&email).await.unwrap().as_deref(),
+        store
+            .load_email_code(tenant_id, &email)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("123456")
     );
     let payload = json!({"challenge":"opaque", "user_id": suffix});
@@ -163,46 +186,211 @@ async fn email_code_compare_delete_never_removes_a_newer_value() {
     };
     let store = AuthenticationStore::new(&connection);
     let email = format!("cas-{}@example.com", uuid::Uuid::now_v7());
+    let tenant_id = tenant(20);
     EmailVerificationStorePort::store_code(
         &store,
+        tenant_id,
         &email,
         PasswordHashInput::new("first-code-hash").unwrap(),
         30,
     )
     .await
     .unwrap();
-    let stale = EmailVerificationStorePort::load_code(&store, &email)
+    let stale = EmailVerificationStorePort::load_code(&store, tenant_id, &email)
         .await
         .unwrap()
         .unwrap();
     store
-        .store_email_code(&email, "newer-code-hash", 30)
+        .store_email_code(tenant_id, &email, "newer-code-hash", 30)
         .await
         .unwrap();
 
     assert_eq!(
-        EmailVerificationStorePort::consume_code(&store, &email, &stale)
+        EmailVerificationStorePort::consume_code(&store, tenant_id, &email, &stale)
             .await
             .unwrap(),
         EmailVerificationConsume::MissingOrChanged
     );
     assert_eq!(
-        store.load_email_code(&email).await.unwrap().as_deref(),
+        store
+            .load_email_code(tenant_id, &email)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("newer-code-hash"),
         "a stale consumer must not delete a newer verification code"
     );
 
-    let current = EmailVerificationStorePort::load_code(&store, &email)
+    let current = EmailVerificationStorePort::load_code(&store, tenant_id, &email)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        EmailVerificationStorePort::consume_code(&store, &email, &current)
+        EmailVerificationStorePort::consume_code(&store, tenant_id, &email, &current)
             .await
             .unwrap(),
         EmailVerificationConsume::Consumed
     );
-    assert!(store.load_email_code(&email).await.unwrap().is_none());
+    assert!(
+        store
+            .load_email_code(tenant_id, &email)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn email_verification_state_isolated_by_tenant() {
+    let Some((connection, _inspector)) = setup().await else {
+        return;
+    };
+    let store = AuthenticationStore::new(&connection);
+    let first_tenant = tenant(101);
+    let second_tenant = tenant(202);
+    let email = format!("shared-{}@example.com", uuid::Uuid::now_v7());
+    let peer = format!("peer-{}", uuid::Uuid::now_v7());
+
+    assert!(
+        store
+            .reserve_email_send(first_tenant, &email, 30)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .reserve_email_send(second_tenant, &email, 30)
+            .await
+            .unwrap(),
+        "the same email must have an independent tenant cooldown"
+    );
+    assert!(
+        !store
+            .reserve_email_send(first_tenant, &email, 30)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .reserve_email_peer_send(first_tenant, &peer, 30)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .reserve_email_peer_send(second_tenant, &peer, 30)
+            .await
+            .unwrap(),
+        "the same peer must have an independent tenant cooldown"
+    );
+    assert!(
+        !store
+            .reserve_email_peer_send(first_tenant, &peer, 30)
+            .await
+            .unwrap()
+    );
+
+    EmailVerificationStorePort::store_code(
+        &store,
+        first_tenant,
+        &email,
+        PasswordHashInput::new("first-tenant-code-hash").unwrap(),
+        30,
+    )
+    .await
+    .unwrap();
+    assert!(
+        EmailVerificationStorePort::load_code(&store, second_tenant, &email)
+            .await
+            .unwrap()
+            .is_none(),
+        "another tenant must not load the first tenant's code"
+    );
+    let first_before_foreign_delete =
+        EmailVerificationStorePort::load_code(&store, first_tenant, &email)
+            .await
+            .unwrap()
+            .unwrap();
+    EmailVerificationStorePort::delete_code(&store, second_tenant, &email)
+        .await
+        .unwrap();
+    assert_eq!(
+        EmailVerificationStorePort::load_code(&store, first_tenant, &email)
+            .await
+            .unwrap(),
+        Some(first_before_foreign_delete),
+        "deleting a tenant's absent code must not remove another tenant's code"
+    );
+    EmailVerificationStorePort::store_code(
+        &store,
+        second_tenant,
+        &email,
+        PasswordHashInput::new("second-tenant-code-hash").unwrap(),
+        30,
+    )
+    .await
+    .unwrap();
+    let first = EmailVerificationStorePort::load_code(&store, first_tenant, &email)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = EmailVerificationStorePort::load_code(&store, second_tenant, &email)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        EmailVerificationStorePort::consume_code(&store, first_tenant, &email, &first)
+            .await
+            .unwrap(),
+        EmailVerificationConsume::Consumed
+    );
+    assert!(
+        EmailVerificationStorePort::load_code(&store, first_tenant, &email)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        EmailVerificationStorePort::load_code(&store, second_tenant, &email)
+            .await
+            .unwrap(),
+        Some(second),
+        "consuming one tenant's code must not change another tenant's code"
+    );
+    store.delete_email_send(first_tenant, &email).await.unwrap();
+    assert!(
+        store
+            .reserve_email_send(first_tenant, &email, 30)
+            .await
+            .unwrap(),
+        "releasing one tenant's email cooldown must affect only that tenant"
+    );
+    assert!(
+        !store
+            .reserve_email_send(second_tenant, &email, 30)
+            .await
+            .unwrap(),
+        "another tenant's email cooldown must remain reserved"
+    );
+    store
+        .delete_email_peer_send(first_tenant, &peer)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .reserve_email_peer_send(first_tenant, &peer, 30)
+            .await
+            .unwrap(),
+        "releasing one tenant's peer cooldown must affect only that tenant"
+    );
+    assert!(
+        !store
+            .reserve_email_peer_send(second_tenant, &peer, 30)
+            .await
+            .unwrap(),
+        "another tenant's peer cooldown must remain reserved"
+    );
 }
 
 #[tokio::test]

@@ -49,6 +49,43 @@ JWK_KEYS_DIR = DATA_DIR + "/keys"
 AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 ```
 
+### Email verification namespace cutover
+
+Email verification codes and their per-email and per-peer cooldowns include the
+registration service tenant. The previous key format was deployment-global and
+included the normalized email directly. Old and new binaries cannot safely
+serve local registration against the same Valkey during this transition:
+legacy reads can cross tenant boundaries, while ignoring a live legacy code or
+cooldown can admit a duplicate send or make an issued code unreachable.
+
+Define the drain interval as the largest value deployed on the old instances:
+
+```text
+T_email = max(
+  EMAIL_CODE_TTL_SECONDS,
+  EMAIL_CODE_SEND_COOLDOWN_SECONDS,
+  EMAIL_CODE_PEER_COOLDOWN_SECONDS
+)
+```
+
+The default `T_email` is 900 seconds, but these settings accept larger positive
+values. Use the actual deployed maximum rather than assuming the default.
+
+Perform a coordinated cutover:
+
+1. Stop admitting both email-code issuance and local-account registration on
+   every old instance, drain requests already in progress, and verify that no
+   old instance can read or write email verification state.
+2. Starting only after that drain completes, wait at least the old deployment's
+   `T_email`.
+3. Replace every instance with the new binary before restoring registration.
+
+There is no database rewrite or Valkey cleanup job; legacy state expires by its
+existing TTL. Rollback is symmetric: stop and drain registration on all new
+instances, wait at least the new deployment's `T_email`, then restore every old
+instance before resuming traffic. Do not mix old and new binaries or use a
+legacy dual-read.
+
 ## Startup settings
 
 | Setting | Default | Notes |
@@ -68,6 +105,9 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `AUTH_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling for authentication endpoints; this is not the failed-login throttle |
 | `TOKEN_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling for token issuance, sized to tolerate shared client egress |
 | `TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS` | `100000` | Broad source-IP admission ceiling shared by token-management, PAR, and dynamic-registration paths |
+| `EMAIL_CODE_TTL_SECONDS` | `900` | Lifetime of a local-registration email verification code |
+| `EMAIL_CODE_SEND_COOLDOWN_SECONDS` | `60` | Per-tenant, per-normalized-email send cooldown |
+| `EMAIL_CODE_PEER_COOLDOWN_SECONDS` | `5` | Per-tenant, per-peer send cooldown; the broader authentication rate limiter remains a separate deployment-wide admission control |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |

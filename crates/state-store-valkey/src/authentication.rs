@@ -1,4 +1,5 @@
 use crate::{Error, ValkeyConnection, command, keys};
+use nazo_identity::TenantId;
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
@@ -11,32 +12,68 @@ impl AuthenticationStore {
             connection: connection.clone(),
         }
     }
-    pub async fn reserve_email_send(&self, email: &str, ttl: u64) -> Result<bool, Error> {
-        command::set_ex_nx(&self.connection, keys::email_send(email), "1", ttl).await
+    pub async fn reserve_email_send(
+        &self,
+        tenant_id: TenantId,
+        email: &str,
+        ttl: u64,
+    ) -> Result<bool, Error> {
+        command::set_ex_nx(
+            &self.connection,
+            keys::email_send(tenant_id, email),
+            "1",
+            ttl,
+        )
+        .await
     }
-    pub async fn reserve_email_peer_send(&self, subject: &str, ttl: u64) -> Result<bool, Error> {
-        command::set_ex_nx(&self.connection, keys::email_peer_send(subject), "1", ttl).await
+    pub async fn reserve_email_peer_send(
+        &self,
+        tenant_id: TenantId,
+        subject: &str,
+        ttl: u64,
+    ) -> Result<bool, Error> {
+        command::set_ex_nx(
+            &self.connection,
+            keys::email_peer_send(tenant_id, subject),
+            "1",
+            ttl,
+        )
+        .await
     }
-    pub async fn store_email_code(&self, email: &str, code: &str, ttl: u64) -> Result<(), Error> {
+    pub async fn store_email_code(
+        &self,
+        tenant_id: TenantId,
+        email: &str,
+        code: &str,
+        ttl: u64,
+    ) -> Result<(), Error> {
         command::set_ex_string(
             &self.connection,
-            keys::email_code(email),
+            keys::email_code(tenant_id, email),
             code.to_owned(),
             ttl,
         )
         .await
     }
-    pub async fn load_email_code(&self, email: &str) -> Result<Option<String>, Error> {
-        command::get(&self.connection, keys::email_code(email)).await
+    pub async fn load_email_code(
+        &self,
+        tenant_id: TenantId,
+        email: &str,
+    ) -> Result<Option<String>, Error> {
+        command::get(&self.connection, keys::email_code(tenant_id, email)).await
     }
-    pub async fn delete_email_code(&self, email: &str) -> Result<i64, Error> {
-        command::delete(&self.connection, keys::email_code(email)).await
+    pub async fn delete_email_code(&self, tenant_id: TenantId, email: &str) -> Result<i64, Error> {
+        command::delete(&self.connection, keys::email_code(tenant_id, email)).await
     }
-    pub async fn delete_email_send(&self, email: &str) -> Result<i64, Error> {
-        command::delete(&self.connection, keys::email_send(email)).await
+    pub async fn delete_email_send(&self, tenant_id: TenantId, email: &str) -> Result<i64, Error> {
+        command::delete(&self.connection, keys::email_send(tenant_id, email)).await
     }
-    pub async fn delete_email_peer_send(&self, subject: &str) -> Result<i64, Error> {
-        command::delete(&self.connection, keys::email_peer_send(subject)).await
+    pub async fn delete_email_peer_send(
+        &self,
+        tenant_id: TenantId,
+        subject: &str,
+    ) -> Result<i64, Error> {
+        command::delete(&self.connection, keys::email_peer_send(tenant_id, subject)).await
     }
     pub async fn store_passkey_registration(
         &self,
@@ -120,11 +157,12 @@ impl AuthenticationStore {
 impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
     fn reserve_peer_send<'a>(
         &'a self,
+        tenant_id: TenantId,
         subject: &'a str,
         ttl_seconds: u64,
     ) -> nazo_identity::ports::RepositoryFuture<'a, bool> {
         Box::pin(async move {
-            self.reserve_email_peer_send(subject, ttl_seconds)
+            self.reserve_email_peer_send(tenant_id, subject, ttl_seconds)
                 .await
                 .map_err(crate::identity_repository_error)
         })
@@ -132,11 +170,12 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
 
     fn reserve_email_send<'a>(
         &'a self,
+        tenant_id: TenantId,
         email: &'a str,
         ttl_seconds: u64,
     ) -> nazo_identity::ports::RepositoryFuture<'a, bool> {
         Box::pin(async move {
-            AuthenticationStore::reserve_email_send(self, email, ttl_seconds)
+            AuthenticationStore::reserve_email_send(self, tenant_id, email, ttl_seconds)
                 .await
                 .map_err(crate::identity_repository_error)
         })
@@ -144,19 +183,26 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
 
     fn store_code<'a>(
         &'a self,
+        tenant_id: TenantId,
         email: &'a str,
         password_hash: nazo_identity::ports::PasswordHashInput,
         ttl_seconds: u64,
     ) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
         Box::pin(async move {
-            self.store_email_code(email, &password_hash.into_persistence_value(), ttl_seconds)
-                .await
-                .map_err(crate::identity_repository_error)
+            self.store_email_code(
+                tenant_id,
+                email,
+                &password_hash.into_persistence_value(),
+                ttl_seconds,
+            )
+            .await
+            .map_err(crate::identity_repository_error)
         })
     }
 
     fn load_code<'a>(
         &'a self,
+        tenant_id: TenantId,
         email: &'a str,
     ) -> nazo_identity::ports::RepositoryFuture<
         'a,
@@ -164,7 +210,7 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
     > {
         Box::pin(async move {
             let raw = self
-                .load_email_code(email)
+                .load_email_code(tenant_id, email)
                 .await
                 .map_err(crate::identity_repository_error)?;
             raw.map(|raw| {
@@ -183,6 +229,7 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
 
     fn consume_code<'a>(
         &'a self,
+        tenant_id: TenantId,
         email: &'a str,
         expected: &'a nazo_identity::ports::EmailVerificationRecord,
     ) -> nazo_identity::ports::RepositoryFuture<'a, nazo_identity::ports::EmailVerificationConsume>
@@ -190,7 +237,7 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
         Box::pin(async move {
             command::compare_delete(
                 &self.connection,
-                keys::email_code(email),
+                keys::email_code(tenant_id, email),
                 &expected.opaque_version,
             )
             .await
@@ -206,9 +253,13 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
         })
     }
 
-    fn delete_code<'a>(&'a self, email: &'a str) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
+    fn delete_code<'a>(
+        &'a self,
+        tenant_id: TenantId,
+        email: &'a str,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
         Box::pin(async move {
-            self.delete_email_code(email)
+            self.delete_email_code(tenant_id, email)
                 .await
                 .map(|_| ())
                 .map_err(crate::identity_repository_error)
@@ -217,10 +268,11 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
 
     fn release_email_send<'a>(
         &'a self,
+        tenant_id: TenantId,
         email: &'a str,
     ) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
         Box::pin(async move {
-            self.delete_email_send(email)
+            self.delete_email_send(tenant_id, email)
                 .await
                 .map(|_| ())
                 .map_err(crate::identity_repository_error)
@@ -229,10 +281,11 @@ impl nazo_identity::ports::EmailVerificationStorePort for AuthenticationStore {
 
     fn release_peer_send<'a>(
         &'a self,
+        tenant_id: TenantId,
         subject: &'a str,
     ) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
         Box::pin(async move {
-            self.delete_email_peer_send(subject)
+            self.delete_email_peer_send(tenant_id, subject)
                 .await
                 .map(|_| ())
                 .map_err(crate::identity_repository_error)

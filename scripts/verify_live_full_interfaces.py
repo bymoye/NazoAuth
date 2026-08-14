@@ -23,6 +23,8 @@ PASSWORD = secrets.token_urlsafe(32)
 CSRF_COOKIE = "nazo_oauth_csrf"
 DEFAULT_AUDIENCE = "resource://default"
 OPENID_SCOPES = "openid profile email address phone offline_access"
+DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+CREATED_VALKEY_KEYS: set[str] = set()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -36,10 +38,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def load_runtime_dependencies() -> None:
-    global Jsonb, MultipartEncoder, PasswordHasher
+    global Jsonb, MultipartEncoder, PasswordHasher, blake3
     global ec, ed25519, jwt, psycopg, redis, requests, rsa
 
     import jwt as jwt_module
+    import blake3 as blake3_module
     import psycopg as psycopg_module
     import redis as redis_module
     import requests as requests_module
@@ -51,6 +54,7 @@ def load_runtime_dependencies() -> None:
     from requests_toolbelt import MultipartEncoder as multipart_encoder
 
     jwt = jwt_module
+    blake3 = blake3_module
     psycopg = psycopg_module
     redis = redis_module
     requests = requests_module
@@ -358,8 +362,21 @@ def login(email: str, password: str) -> requests.Session:
     return session
 
 
-def create_email_code(redis_client, email: str, code: str):
-    redis_client.set(f"oauth:email_verify:code:{email}", PasswordHasher().hash(code), ex=300)
+def email_verification_code_key(normalized_email: str) -> str:
+    email_hash = blake3.blake3(normalized_email.encode("utf-8")).hexdigest()
+    return f"oauth:email_verify:{DEFAULT_TENANT_ID}:code:{email_hash}"
+
+
+def create_email_code(redis_client, normalized_email: str, code: str) -> None:
+    key = email_verification_code_key(normalized_email)
+    redis_client.set(key, PasswordHasher().hash(code), ex=300)
+    CREATED_VALKEY_KEYS.add(key)
+
+
+def cleanup_created_valkey_keys(redis_client) -> None:
+    for key in tuple(CREATED_VALKEY_KEYS):
+        redis_client.delete(key)
+        CREATED_VALKEY_KEYS.discard(key)
 
 
 def create_client(admin_session, payload: dict, name: str) -> dict:
@@ -584,14 +601,15 @@ def run():
     try:
         run_verification()
     finally:
-        secrets_doc = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
-        with psycopg.connect(db_url(secrets_doc), autocommit=True) as conn:
-            cleanup_rows(conn)
-        redis_client = redis.Redis(
-            host="10.101.0.11", port=6379, db=0, decode_responses=True
-        )
-        for key in redis_client.scan_iter("oauth:email_verify:*live-full-*"):
-            redis_client.delete(key)
+        try:
+            secrets_doc = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
+            with psycopg.connect(db_url(secrets_doc), autocommit=True) as conn:
+                cleanup_rows(conn)
+        finally:
+            redis_client = redis.Redis(
+                host="10.101.0.11", port=6379, db=0, decode_responses=True
+            )
+            cleanup_created_valkey_keys(redis_client)
 
 
 def run_verification():

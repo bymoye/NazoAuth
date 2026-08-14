@@ -32,6 +32,15 @@ The migration `20260607000400_tenant_realm_organization_boundaries` adds:
 
 JWT access tokens include a private `tenant_id` claim. Resource endpoints and token introspection use that claim to scope access-token revocation checks. Malformed or mismatched tenant claims fail closed instead of falling back to the default tenant.
 
+## Local Registration State
+
+The local registration service supplies its validated tenant to every email
+verification state operation. Verification codes, per-email send cooldowns,
+and per-peer send cooldowns use independent tenant namespaces in Valkey. The
+same normalized email or peer in another tenant therefore cannot load, consume,
+release, or suppress state owned by the first tenant. Email and peer subjects
+are stored as digests in key names rather than raw identifiers.
+
 ## Product Boundaries
 
 The default runtime remains single-tenant with tenant-aware data invariants.
