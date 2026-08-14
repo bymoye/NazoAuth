@@ -1599,7 +1599,7 @@ async fn token_authorization_code_replay_revokes_previous_tokens_and_rejects_reu
 }
 
 #[actix_web::test]
-async fn token_authorization_code_replay_fails_closed_when_replayed_client_lookup_errors() {
+async fn token_authorization_code_replay_fails_closed_when_token_revocation_errors() {
     let Some(fixture) = LiveAuthorizationCodeFixture::new().await else {
         return;
     };

@@ -34,10 +34,15 @@ impl OAuthClientRepository {
             .transpose()
     }
 
-    pub async fn by_id(&self, id: Uuid) -> Result<Option<OAuthClient>, RepositoryError> {
+    pub async fn by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<OAuthClient>, RepositoryError> {
         let mut connection = self.connection().await?;
         oauth_clients::table
             .find(id)
+            .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
@@ -75,16 +80,19 @@ impl OAuthClientRepository {
 
     pub async fn page(
         &self,
+        tenant_id: Uuid,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<OAuthClient>, i64), RepositoryError> {
         let mut connection = self.connection().await?;
         let total = oauth_clients::table
+            .filter(oauth_clients::tenant_id.eq(tenant_id))
             .count()
             .get_result::<i64>(&mut connection)
             .await
             .map_err(map_error)?;
         let clients = oauth_clients::table
+            .filter(oauth_clients::tenant_id.eq(tenant_id))
             .select(OAuthClientRecord::as_select())
             .order(oauth_clients::created_at.desc())
             .limit(limit)
@@ -120,11 +128,16 @@ impl OAuthClientRepository {
             .transpose()
     }
 
-    pub async fn has_client_secret(&self, id: Uuid) -> Result<bool, RepositoryError> {
+    pub async fn has_client_secret(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> Result<bool, RepositoryError> {
         let mut connection = self.connection().await?;
         diesel::select(diesel::dsl::exists(
             oauth_clients::table
                 .filter(oauth_clients::id.eq(id))
+                .filter(oauth_clients::tenant_id.eq(tenant_id))
                 .filter(oauth_clients::is_active.eq(true))
                 .filter(conformance_lease_is_effective())
                 .filter(oauth_clients::client_secret_hash.is_not_null()),
@@ -132,27 +145,6 @@ impl OAuthClientRepository {
         .get_result(&mut connection)
         .await
         .map_err(map_error)
-    }
-
-    pub async fn active_for_user(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<OAuthClient>, RepositoryError> {
-        let mut connection = self.connection().await?;
-        user_client_grants::table
-            .inner_join(
-                oauth_clients::table.on(oauth_clients::id.eq(user_client_grants::client_id)),
-            )
-            .filter(user_client_grants::user_id.eq(user_id))
-            .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
-            .select(OAuthClientRecord::as_select())
-            .load::<OAuthClientRecord>(&mut connection)
-            .await
-            .map_err(map_error)?
-            .into_iter()
-            .map(OAuthClientRecord::into_domain)
-            .collect()
     }
 
     pub async fn active_for_tenant_user(
@@ -181,6 +173,7 @@ impl OAuthClientRepository {
 
     pub async fn applications_for_user(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Vec<nazo_identity::ports::AuthorizedApplication>, RepositoryError> {
         let mut connection = self.connection().await?;
@@ -188,7 +181,9 @@ impl OAuthClientRepository {
             .inner_join(
                 oauth_clients::table.on(oauth_clients::id.eq(user_client_grants::client_id)),
             )
+            .filter(user_client_grants::tenant_id.eq(tenant_id))
             .filter(user_client_grants::user_id.eq(user_id))
+            .filter(oauth_clients::tenant_id.eq(tenant_id))
             .select((
                 oauth_clients::client_id,
                 oauth_clients::client_name,
@@ -217,25 +212,7 @@ impl OAuthClientRepository {
     }
 
     /// Returns only the non-secret salt needed to derive a candidate digest.
-    pub async fn client_secret_salt(&self, id: Uuid) -> Result<Option<String>, RepositoryError> {
-        let mut connection = self.connection().await?;
-        oauth_clients::table
-            .find(id)
-            .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
-            .filter(oauth_clients::client_secret_hash.like("client-secret-v1:%:%"))
-            .select(diesel::dsl::sql::<diesel::sql_types::Text>(
-                "split_part(client_secret_hash, ':', 2)",
-            ))
-            .first::<String>(&mut connection)
-            .await
-            .optional()
-            .map_err(map_error)
-    }
-
-    /// Tenant-scoped variant used by authorization flows whose adapter owns a
-    /// fixed tenant boundary.
-    pub async fn client_secret_salt_for_tenant(
+    pub async fn client_secret_salt(
         &self,
         tenant_id: Uuid,
         id: Uuid,
@@ -259,25 +236,6 @@ impl OAuthClientRepository {
     /// Compares an already-derived candidate digest without loading the stored digest.
     pub async fn client_secret_digest_matches(
         &self,
-        id: Uuid,
-        candidate_digest: &str,
-    ) -> Result<bool, RepositoryError> {
-        let mut connection = self.connection().await?;
-        diesel::select(diesel::dsl::exists(
-            oauth_clients::table
-                .find(id)
-                .filter(oauth_clients::is_active.eq(true))
-                .filter(conformance_lease_is_effective())
-                .filter(oauth_clients::client_secret_hash.eq(candidate_digest)),
-        ))
-        .get_result(&mut connection)
-        .await
-        .map_err(map_error)
-    }
-
-    /// Tenant-scoped digest comparison for fixed-tenant authorization flows.
-    pub async fn client_secret_digest_matches_for_tenant(
-        &self,
         tenant_id: Uuid,
         id: Uuid,
         candidate_digest: &str,
@@ -300,9 +258,12 @@ impl OAuthClientRepository {
 impl nazo_identity::ports::AuthorizedApplicationRepositoryPort for OAuthClientRepository {
     fn applications_for_user(
         &self,
+        tenant_id: nazo_identity::TenantId,
         user_id: Uuid,
     ) -> nazo_identity::ports::RepositoryFuture<'_, Vec<nazo_identity::ports::AuthorizedApplication>>
     {
-        Box::pin(async move { OAuthClientRepository::applications_for_user(self, user_id).await })
+        Box::pin(async move {
+            OAuthClientRepository::applications_for_user(self, tenant_id.as_uuid(), user_id).await
+        })
     }
 }

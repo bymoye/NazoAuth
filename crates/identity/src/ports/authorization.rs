@@ -26,6 +26,7 @@ pub struct AuthorizedApplication {
 pub trait AuthorizedApplicationRepositoryPort: Send + Sync {
     fn applications_for_user(
         &self,
+        tenant_id: TenantId,
         user_id: Uuid,
     ) -> RepositoryFuture<'_, Vec<AuthorizedApplication>>;
 }

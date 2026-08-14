@@ -102,7 +102,11 @@ pub(super) async fn submitted_secret_matches(
     let Some(secret) = payload.get("client_secret").and_then(Value::as_str) else {
         return Ok(false);
     };
-    let Some(salt) = endpoint.clients.client_secret_salt(current.id).await? else {
+    let Some(salt) = endpoint
+        .clients
+        .client_secret_salt(current.tenant_id, current.id)
+        .await?
+    else {
         return Ok(false);
     };
     let candidate = endpoint.security.secret_digester.client_secret_digest(
@@ -112,7 +116,7 @@ pub(super) async fn submitted_secret_matches(
     );
     endpoint
         .clients
-        .client_secret_digest_matches(current.id, &candidate)
+        .client_secret_digest_matches(current.tenant_id, current.id, &candidate)
         .await
 }
 

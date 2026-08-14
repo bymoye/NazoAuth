@@ -412,7 +412,12 @@ fn matrix_suite_mdoc_anchor_policy_requires_exact_membership() {
 struct UnusedClientRepository;
 
 impl AdminClientRepositoryPort for UnusedClientRepository {
-    fn page(&self, _offset: i64, _limit: i64) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
+    fn page(
+        &self,
+        _tenant_id: Uuid,
+        _offset: i64,
+        _limit: i64,
+    ) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
         Box::pin(async { Err(AdminClientPortError::Unexpected) })
     }
 

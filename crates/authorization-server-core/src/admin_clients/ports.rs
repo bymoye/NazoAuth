@@ -33,7 +33,12 @@ impl std::error::Error for AdminClientPortError {}
 
 /// Persistence boundary used by administrative client use cases.
 pub trait AdminClientRepositoryPort: Send + Sync {
-    fn page(&self, offset: i64, limit: i64) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)>;
+    fn page(
+        &self,
+        tenant_id: Uuid,
+        offset: i64,
+        limit: i64,
+    ) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)>;
 
     fn by_client_id<'a>(
         &'a self,

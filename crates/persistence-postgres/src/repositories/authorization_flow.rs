@@ -100,7 +100,7 @@ impl AuthorizationRepositoryPort for AuthorizationFlowRepository {
     ) -> AuthorizationFuture<'a, Option<String>> {
         Box::pin(async move {
             self.clients
-                .client_secret_salt_for_tenant(self.tenant_id, client_id)
+                .client_secret_salt(self.tenant_id, client_id)
                 .await
                 .map_err(map_repository_error)
         })
@@ -113,11 +113,7 @@ impl AuthorizationRepositoryPort for AuthorizationFlowRepository {
     ) -> AuthorizationFuture<'a, bool> {
         Box::pin(async move {
             self.clients
-                .client_secret_digest_matches_for_tenant(
-                    self.tenant_id,
-                    client_id,
-                    candidate_digest,
-                )
+                .client_secret_digest_matches(self.tenant_id, client_id, candidate_digest)
                 .await
                 .map_err(map_repository_error)
         })

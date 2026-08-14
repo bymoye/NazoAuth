@@ -31,9 +31,13 @@ impl nazo_auth::DynamicRegistrationClientStore for OAuthClientRepository {
         })
     }
 
-    fn has_client_secret(&self, client_id: Uuid) -> nazo_auth::DynamicRegistrationFuture<'_, bool> {
+    fn has_client_secret(
+        &self,
+        tenant_id: Uuid,
+        client_id: Uuid,
+    ) -> nazo_auth::DynamicRegistrationFuture<'_, bool> {
         Box::pin(async move {
-            OAuthClientRepository::has_client_secret(self, client_id)
+            OAuthClientRepository::has_client_secret(self, tenant_id, client_id)
                 .await
                 .map_err(|_| nazo_auth::DynamicRegistrationDependencyError::Unavailable)
         })
@@ -41,10 +45,11 @@ impl nazo_auth::DynamicRegistrationClientStore for OAuthClientRepository {
 
     fn client_secret_salt(
         &self,
+        tenant_id: Uuid,
         client_id: Uuid,
     ) -> nazo_auth::DynamicRegistrationFuture<'_, Option<String>> {
         Box::pin(async move {
-            OAuthClientRepository::client_secret_salt(self, client_id)
+            OAuthClientRepository::client_secret_salt(self, tenant_id, client_id)
                 .await
                 .map_err(|_| nazo_auth::DynamicRegistrationDependencyError::Unavailable)
         })
@@ -52,13 +57,19 @@ impl nazo_auth::DynamicRegistrationClientStore for OAuthClientRepository {
 
     fn client_secret_digest_matches<'a>(
         &'a self,
+        tenant_id: Uuid,
         client_id: Uuid,
         candidate_digest: &'a str,
     ) -> nazo_auth::DynamicRegistrationFuture<'a, bool> {
         Box::pin(async move {
-            OAuthClientRepository::client_secret_digest_matches(self, client_id, candidate_digest)
-                .await
-                .map_err(|_| nazo_auth::DynamicRegistrationDependencyError::Unavailable)
+            OAuthClientRepository::client_secret_digest_matches(
+                self,
+                tenant_id,
+                client_id,
+                candidate_digest,
+            )
+            .await
+            .map_err(|_| nazo_auth::DynamicRegistrationDependencyError::Unavailable)
         })
     }
 
