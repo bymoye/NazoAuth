@@ -492,6 +492,11 @@ async fn mtls_client_auth_accepts_matching_certificate_from_trusted_proxy() {
     let state = token_management_state_with_trusted_proxy();
     let thumbprint = fixture_mtls_thumbprint("trusted-proxy");
     let req = TestRequest::default()
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:443".parse().unwrap())
         .insert_header(("x-ssl-client-verify", "SUCCESS"))
         .insert_header(("x-forwarded-tls-client-cert-sha256", thumbprint.as_str()))

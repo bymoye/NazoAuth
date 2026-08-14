@@ -39,7 +39,7 @@ impl AdminClientConfig {
 
 pub(crate) fn admin_client_policy(settings: &Settings) -> AdminClientPolicy {
     AdminClientPolicy {
-        tenant: nazo_identity::TenantContext::default_system(),
+        tenant: settings.tenant.context,
         pairwise_subject_secret: settings.protocol.pairwise_subject_secret.clone(),
         client_secret_pepper: settings.protocol.client_secret_pepper.clone(),
     }

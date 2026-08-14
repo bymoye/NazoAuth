@@ -8,7 +8,7 @@
 use crate::adapters::security::constant_time_eq;
 use crate::domain::ClientRow;
 
-use actix_web::{HttpRequest, web::Data};
+use actix_web::{HttpRequest, dev::Extensions, web::Data};
 
 use actix_web::http::header::HeaderMap;
 
@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use sha2::Digest;
 use sha2::Sha256;
+use std::any::Any;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use x509_parser::{
     certificate::X509Certificate,
@@ -64,6 +65,25 @@ const RFC9440_CLIENT_CERT_HEADER: &str = "client-cert";
 
 pub(crate) use nazo_http_actix::ClientCertificateFacts as MtlsClientCertificate;
 
+pub(crate) fn capture_direct_tls_client_certificate(io: &dyn Any, extensions: &mut Extensions) {
+    let Some(stream) = io
+        .downcast_ref::<actix_tls::accept::rustls_0_23::TlsStream<actix_web::rt::net::TcpStream>>()
+    else {
+        return;
+    };
+    let Some(certificate) = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+    else {
+        return;
+    };
+    if let Some(identity) = certificate_der_identity(certificate.as_ref()) {
+        extensions.insert(identity);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MtlsCertificateSourceMode {
     Disabled,
@@ -73,9 +93,8 @@ pub(crate) enum MtlsCertificateSourceMode {
 }
 
 impl MtlsCertificateSourceMode {
-    pub(crate) fn from_config(value: Option<&str>, proxy_configured: bool) -> anyhow::Result<Self> {
+    pub(crate) fn from_config(value: Option<&str>) -> anyhow::Result<Self> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
-            None if proxy_configured => Ok(Self::LegacyVerifiedHeaders),
             None => Ok(Self::Disabled),
             Some("disabled") => Ok(Self::Disabled),
             Some("direct-tls") => Ok(Self::DirectTls),
@@ -99,14 +118,14 @@ impl MtlsCertificateSource {
     }
 }
 
-pub(crate) fn request_mtls_thumbprint_from_trusted_proxy(
+pub(crate) fn request_mtls_thumbprint(
     req: &HttpRequest,
     trusted_proxy_cidrs: &[IpCidr],
 ) -> Option<String> {
     request_mtls_client_certificate_from_configured_source(req, trusted_proxy_cidrs)?.thumbprint
 }
 
-pub(crate) fn request_mtls_client_certificate_from_trusted_proxy(
+pub(crate) fn request_mtls_client_certificate(
     req: &HttpRequest,
     trusted_proxy_cidrs: &[IpCidr],
 ) -> Option<MtlsClientCertificate> {
@@ -120,9 +139,7 @@ fn request_mtls_client_certificate_from_configured_source(
     let mode = req
         .app_data::<Data<MtlsCertificateSource>>()
         .map(|source| source.mode)
-        // Focused unit tests without production app data retain the historical
-        // compatibility contract.
-        .unwrap_or(MtlsCertificateSourceMode::LegacyVerifiedHeaders);
+        .unwrap_or(MtlsCertificateSourceMode::Disabled);
     match mode {
         MtlsCertificateSourceMode::Disabled => None,
         MtlsCertificateSourceMode::DirectTls => req.conn_data::<MtlsClientCertificate>().cloned(),

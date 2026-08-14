@@ -42,7 +42,7 @@ where
         limit: i64,
     ) -> Result<(Vec<OAuthClient>, i64), AdminClientError> {
         self.repository
-            .page(offset, limit)
+            .page(self.policy.tenant.tenant_id.as_uuid(), offset, limit)
             .await
             .map_err(AdminClientError::Repository)
     }
@@ -138,6 +138,10 @@ pub async fn insert_prepared_client<R: AdminClientRepositoryPort>(
     }
     Ok(inserted)
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/admin_clients/service.rs"]
+mod tests;
 
 impl<R, S, C> AdminClientService<R, S, C>
 where

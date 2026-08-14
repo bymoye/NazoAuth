@@ -3,7 +3,7 @@
 use super::audit::{audit_event, audit_fields};
 use crate::domain::ClientRow;
 
-use crate::http::mtls::request_mtls_client_certificate_from_trusted_proxy;
+use crate::http::mtls::request_mtls_client_certificate;
 
 use actix_web::HttpRequest;
 use actix_web::http::header;
@@ -299,10 +299,7 @@ pub(crate) fn extract_client_credentials_with_trusted_proxies(
         && form_secret.is_none()
     {
         form_client_id
-            .filter(|_| {
-                request_mtls_client_certificate_from_trusted_proxy(req, trusted_proxy_cidrs)
-                    .is_some()
-            })
+            .filter(|_| request_mtls_client_certificate(req, trusted_proxy_cidrs).is_some())
             .map(str::to_owned)
     } else {
         None

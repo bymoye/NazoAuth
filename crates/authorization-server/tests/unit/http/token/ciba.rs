@@ -291,6 +291,11 @@ async fn call_ciba_token_with_mtls_for_test(
 ) -> HttpResponse {
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
+        .app_data(actix_web::web::Data::new(
+            crate::http::mtls::MtlsCertificateSource::new(
+                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            ),
+        ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
         .insert_header(("x-ssl-client-verify", "SUCCESS"))
         .insert_header(("x-ssl-client-cert-sha256", CIBA_TEST_MTLS_THUMBPRINT))

@@ -10,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 // 只处理从请求 Cookie 到当前用户/管理员身份的解析。
 
-use crate::domain::tenancy::DEFAULT_TENANT_ID;
-
 use nazo_http_actix::{
     authorization_error_response, clear_cookie, cookie_value, has_valid_csrf_token_for_cookies,
     with_cookie_headers,
@@ -53,6 +51,7 @@ const AUTH_TIME_CLOCK_SKEW_SECONDS: i64 = 30;
 pub(crate) struct AdminSessionHandles {
     sessions: SessionStore,
     users: UserRepository,
+    tenant_id: nazo_identity::TenantId,
     http: SessionHttpConfig,
 }
 
@@ -65,6 +64,7 @@ pub(crate) struct AdminSessionHandles {
 pub(crate) struct SessionProfileHandles {
     sessions: SessionStore,
     users: UserRepository,
+    tenant_id: nazo_identity::TenantId,
     http: SessionHttpConfig,
 }
 
@@ -105,11 +105,13 @@ impl AdminSessionHandles {
     pub(crate) fn new(
         sessions: SessionStore,
         users: UserRepository,
+        tenant_id: nazo_identity::TenantId,
         http: SessionHttpConfig,
     ) -> Self {
         Self {
             sessions,
             users,
+            tenant_id,
             http,
         }
     }
@@ -125,6 +127,7 @@ impl AdminSessionHandles {
         current_session_from_handles(
             &self.sessions,
             &self.users,
+            self.tenant_id,
             self.http.session_cookie_name(),
             req,
         )
@@ -151,13 +154,19 @@ impl SessionProfileHandles {
     pub(crate) fn new(
         sessions: SessionStore,
         users: UserRepository,
+        tenant_id: nazo_identity::TenantId,
         http: SessionHttpConfig,
     ) -> Self {
         Self {
             sessions,
             users,
+            tenant_id,
             http,
         }
+    }
+
+    pub(crate) fn tenant_id(&self) -> nazo_identity::TenantId {
+        self.tenant_id
     }
 
     pub(crate) fn http_config(&self) -> &SessionHttpConfig {
@@ -221,7 +230,8 @@ impl SessionProfileHandles {
         &self,
         session_id: &str,
     ) -> anyhow::Result<Option<CurrentSession>> {
-        current_session_by_id_from_handles(&self.sessions, &self.users, session_id).await
+        current_session_by_id_from_handles(&self.sessions, &self.users, self.tenant_id, session_id)
+            .await
     }
 
     pub(crate) async fn current_session(
@@ -250,18 +260,20 @@ impl SessionPayload {
 pub(crate) async fn current_session_from_handles(
     sessions: &SessionStore,
     users: &UserRepository,
+    tenant_id: nazo_identity::TenantId,
     session_cookie_name: &str,
     req: &HttpRequest,
 ) -> anyhow::Result<Option<CurrentSession>> {
     let Some(sid) = cookie_value(req, session_cookie_name) else {
         return Ok(None);
     };
-    current_session_by_id_from_handles(sessions, users, &sid).await
+    current_session_by_id_from_handles(sessions, users, tenant_id, &sid).await
 }
 
 async fn current_session_by_id_from_handles(
     sessions: &SessionStore,
     users: &UserRepository,
+    tenant_id: nazo_identity::TenantId,
     session_id: &str,
 ) -> anyhow::Result<Option<CurrentSession>> {
     let stored = match sessions.load(session_id).await {
@@ -289,17 +301,25 @@ async fn current_session_by_id_from_handles(
     if payload.pending_mfa {
         return Ok(None);
     }
-    session_from_payload(sessions, users, session_id, payload, logged_in_client_ids).await
+    session_from_payload(
+        sessions,
+        users,
+        tenant_id,
+        session_id,
+        payload,
+        logged_in_client_ids,
+    )
+    .await
 }
 
 async fn session_from_payload(
     sessions: &SessionStore,
     users: &UserRepository,
+    tenant_id: nazo_identity::TenantId,
     session_id: &str,
     payload: SessionPayload,
     logged_in_client_ids: Vec<String>,
 ) -> anyhow::Result<Option<CurrentSession>> {
-    let tenant_id = nazo_identity::TenantId::new(DEFAULT_TENANT_ID)?;
     let user_id = nazo_identity::UserId::new(payload.user_id)?;
     let Some(user) = users
         .public_account_by_id(tenant_id, user_id)

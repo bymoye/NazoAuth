@@ -18,6 +18,7 @@ const UNSUPPORTED_DOTENV_FILE: &str = ".env";
 const INITIAL_CONFIG: &str = r#"# Generated local NazoAuth configuration.
 BIND: "0.0.0.0:8000"
 PUBLIC_BASE_URL: "http://127.0.0.1:8000"
+TRANSPORT_MODE: "loopback-http"
 DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:5432/oauth"
 DATABASE_MAX_CONNECTIONS: 32
 VALKEY_URL: "redis://127.0.0.1:6379/0"
@@ -35,6 +36,9 @@ const PERSISTENT_PATH_CONFIG_KEYS: &[&str] = &[
     "DATA_DIR",
     "INSTANCE_IDENTITY_DIR",
     "JWK_KEYS_DIR",
+    "TLS_CERTIFICATE_FILE",
+    "TLS_CLIENT_CA_FILE",
+    "TLS_PRIVATE_KEY_FILE",
     "UI_CACHE_DIR",
     "UI_STATIC_DIR",
 ];
@@ -235,6 +239,7 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "TLS_CERTIFICATE_FILE",
     "TLS_CLIENT_CA_FILE",
     "TLS_PRIVATE_KEY_FILE",
+    "TRANSPORT_MODE",
     "TRUSTED_PROXY_CIDRS",
     "UI_CACHE_DIR",
     "UI_STATIC_DIR",

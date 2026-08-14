@@ -175,7 +175,8 @@ pub(crate) async fn backchannel_authentication(
     };
     let user = match users
         .public_account_by_email(
-            nazo_identity::TenantId::new(DEFAULT_TENANT_ID).expect("default tenant ID is non-nil"),
+            nazo_identity::TenantId::new(config.tenant_id)
+                .expect("configured CIBA tenant ID is non-nil"),
             login_hint,
         )
         .await

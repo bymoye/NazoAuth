@@ -1,10 +1,9 @@
 use nazo_identity::TenantId;
 
-const FAPI_HTTP_SIGNATURE_REPLAY_PREFIX: &str = "fapi_http_signature_replay:";
-
-pub(crate) fn fapi_http_signature_replay(fingerprint: &[u8; 32]) -> String {
+pub(crate) fn fapi_http_signature_replay(tenant_id: TenantId, fingerprint: &[u8; 32]) -> String {
     format!(
-        "{FAPI_HTTP_SIGNATURE_REPLAY_PREFIX}{}",
+        "fapi_http_signature_replay:{}:{}",
+        tenant_id.as_uuid(),
         blake3::Hash::from_bytes(*fingerprint).to_hex()
     )
 }

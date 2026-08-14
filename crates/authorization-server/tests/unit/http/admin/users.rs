@@ -114,6 +114,7 @@ fn admin_user_dependencies(
         Data::new(AdminSessionHandles::new(
             nazo_valkey::SessionStore::new(&state.valkey_connection()),
             UserRepository::new(state.diesel_db.clone()),
+            state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
                 &session.csrf_cookie_name,
@@ -177,6 +178,7 @@ impl LiveAdminUsersFixture {
         let valkey_url = std::env::var("VALKEY_URL").ok()?;
         let config = ConfigSource::from_pairs_for_test([
             ("ISSUER", "https://issuer.example"),
+            ("TRANSPORT_MODE", "direct-tls"),
             (
                 "CLIENT_SECRET_PEPPER",
                 "client-secret-pepper-for-tests-000000000001",

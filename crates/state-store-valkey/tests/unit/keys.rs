@@ -1,7 +1,10 @@
 use nazo_identity::TenantId;
 use uuid::Uuid;
 
-use super::{email_code, email_peer_send, email_send, oidc_federation, private_key_jwt_replay};
+use super::{
+    email_code, email_peer_send, email_send, fapi_http_signature_replay, oidc_federation,
+    private_key_jwt_replay,
+};
 
 fn tenant(value: u128) -> TenantId {
     TenantId::new(Uuid::from_u128(value)).expect("test tenant must be non-nil")
@@ -34,6 +37,22 @@ fn email_verification_keys_are_tenant_scoped_and_hide_subjects() {
     assert_ne!(send, email_send(tenant(11), email));
     assert_ne!(code, email_code(tenant(11), email));
     assert_ne!(peer_send, email_peer_send(tenant(11), peer));
+}
+
+#[test]
+fn fapi_http_signature_replay_key_is_tenant_scoped_and_stable() {
+    let fingerprint = [0xa5; 32];
+    let first_tenant = tenant(10);
+    let first = fapi_http_signature_replay(first_tenant, &fingerprint);
+    let same = fapi_http_signature_replay(first_tenant, &fingerprint);
+    let other_tenant = fapi_http_signature_replay(tenant(11), &fingerprint);
+
+    assert_eq!(first, same);
+    assert!(first.starts_with(&format!(
+        "fapi_http_signature_replay:{}:",
+        first_tenant.as_uuid()
+    )));
+    assert_ne!(first, other_tenant);
 }
 
 #[test]

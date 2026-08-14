@@ -29,12 +29,21 @@ pub trait DynamicRegistrationClientStore: Send + Sync {
         token_hash: &'a str,
     ) -> DynamicRegistrationFuture<'a, Option<OAuthClient>>;
 
-    fn has_client_secret(&self, client_id: Uuid) -> DynamicRegistrationFuture<'_, bool>;
+    fn has_client_secret(
+        &self,
+        tenant_id: Uuid,
+        client_id: Uuid,
+    ) -> DynamicRegistrationFuture<'_, bool>;
 
-    fn client_secret_salt(&self, client_id: Uuid) -> DynamicRegistrationFuture<'_, Option<String>>;
+    fn client_secret_salt(
+        &self,
+        tenant_id: Uuid,
+        client_id: Uuid,
+    ) -> DynamicRegistrationFuture<'_, Option<String>>;
 
     fn client_secret_digest_matches<'a>(
         &'a self,
+        tenant_id: Uuid,
         client_id: Uuid,
         candidate_digest: &'a str,
     ) -> DynamicRegistrationFuture<'a, bool>;

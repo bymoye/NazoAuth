@@ -134,6 +134,7 @@ fn admin_access_request_dependencies(
         admin_sessions: Data::new(AdminSessionHandles::new(
             nazo_valkey::SessionStore::new(&state.valkey_connection()),
             nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+            state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
                 &session.csrf_cookie_name,
@@ -343,6 +344,7 @@ impl LiveAdminAccessRequestFixture {
         let valkey_url = std::env::var("VALKEY_URL").ok()?;
         let config = ConfigSource::from_pairs_for_test([
             ("ISSUER", "https://issuer.example"),
+            ("TRANSPORT_MODE", "direct-tls"),
             (
                 "CLIENT_SECRET_PEPPER",
                 "client-secret-pepper-for-tests-000000000001",
@@ -644,7 +646,7 @@ impl LiveAdminAccessRequestFixture {
 
     async fn client_row(&self, approved_client_id: Uuid) -> ClientRow {
         nazo_postgres::OAuthClientRepository::new(self.state.diesel_db.clone())
-            .by_id(approved_client_id)
+            .by_id(DEFAULT_TENANT_ID, approved_client_id)
             .await
             .expect("client lookup should succeed")
             .expect("approved client should exist")

@@ -33,6 +33,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 pub(crate) struct ServerScimRequestAuthorizer {
     service: ScimService,
+    tenant: TenantContext,
     client_ip: ClientIpConfig,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
 }
@@ -40,11 +41,13 @@ pub(crate) struct ServerScimRequestAuthorizer {
 impl ServerScimRequestAuthorizer {
     pub(crate) fn new(
         service: ScimService,
+        tenant: TenantContext,
         client_ip: ClientIpConfig,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     ) -> Self {
         Self {
             service,
+            tenant,
             client_ip,
             runtime_modules,
         }
@@ -64,16 +67,14 @@ impl ServerScimRequestAuthorizer {
     ) -> Result<AuthorizedCredential, ScimAuthorizationError> {
         match self.service.active_credential(&blake3_hex(token)).await {
             Ok(Some(credential)) => {
-                let defaults = TenantContext::default_system();
                 let tenant_id = TenantId::new(credential.tenant_id)
                     .map_err(|_| ScimAuthorizationError::TenantMismatch)?;
+                if tenant_id != self.tenant.tenant_id {
+                    return Err(ScimAuthorizationError::TenantMismatch);
+                }
                 Ok(AuthorizedCredential {
                     token_id: Some(credential.id),
-                    tenant: TenantContext {
-                        tenant_id,
-                        realm_id: defaults.realm_id,
-                        organization_id: defaults.organization_id,
-                    },
+                    tenant: self.tenant,
                     scopes: credential.scopes,
                     event_audience: credential.event_audience,
                     source: "database",
@@ -171,6 +172,10 @@ impl ScimRequestAuthorizer for ServerScimRequestAuthorizer {
                     self.audit_denied(&ip_hash, required_scope, "invalid_token", None);
                     return Err(ScimAuthorizationError::InvalidBearer);
                 }
+                Err(ScimAuthorizationError::TenantMismatch) => {
+                    self.audit_denied(&ip_hash, required_scope, "tenant_mismatch", None);
+                    return Err(ScimAuthorizationError::TenantMismatch);
+                }
                 Err(error) => return Err(error),
             };
             if !scim_credential_allows(&credential.scopes, required_scope) {
@@ -182,7 +187,7 @@ impl ScimRequestAuthorizer for ServerScimRequestAuthorizer {
                 );
                 return Err(ScimAuthorizationError::InsufficientScope);
             }
-            if credential.tenant != TenantContext::default_system() {
+            if credential.tenant != self.tenant {
                 self.audit_denied(
                     &ip_hash,
                     required_scope,

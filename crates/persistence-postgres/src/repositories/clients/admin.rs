@@ -5,9 +5,14 @@ use uuid::Uuid;
 use super::base::OAuthClientRepository;
 
 impl AdminClientRepositoryPort for OAuthClientRepository {
-    fn page(&self, offset: i64, limit: i64) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
+    fn page(
+        &self,
+        tenant_id: Uuid,
+        offset: i64,
+        limit: i64,
+    ) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
         Box::pin(async move {
-            OAuthClientRepository::page(self, offset, limit)
+            OAuthClientRepository::page(self, tenant_id, offset, limit)
                 .await
                 .map_err(|error: RepositoryError| map_admin_client_error(error))
         })

@@ -78,7 +78,7 @@ impl SessionManagementOperations for ServerSessionManagementOperations {
         Box::pin(async move {
             let client = self
                 .clients
-                .by_client_id(crate::domain::tenancy::DEFAULT_TENANT_ID, client_id)
+                .by_client_id(self.sessions.tenant_id().as_uuid(), client_id)
                 .await
                 .map_err(|error| {
                     tracing::warn!(%error, "failed to resolve oidc session-management client");

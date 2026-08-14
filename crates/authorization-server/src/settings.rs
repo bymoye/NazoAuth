@@ -41,6 +41,7 @@ pub(crate) use rate_limit::RateLimitSettings;
 /// OAuth service runtime parameters.
 #[derive(Clone)]
 pub(crate) struct Settings {
+    pub(crate) tenant: TenantSettings,
     pub(crate) endpoint: EndpointSettings,
     pub(crate) protocol: ProtocolSettings,
     pub(crate) session: SessionSettings,
@@ -53,6 +54,20 @@ pub(crate) struct Settings {
     pub(crate) openid4vc: Openid4vcSettings,
 }
 
+/// The single active tenant owned by this process runtime.
+///
+/// The tenant is the process-wide security and routing boundary. The realm and
+/// organization are validated active defaults for identity placement inside
+/// that tenant; they are not independent request authorization partitions.
+/// Request-level multi-tenant routing is enabled only after transport identity,
+/// protocol keys, clients, and transient state can all be selected from the
+/// same immutable tenant snapshot. Until then every service is composed from
+/// this explicit context instead of silently falling back to the legacy IDs.
+#[derive(Clone, Copy)]
+pub(crate) struct TenantSettings {
+    pub(crate) context: nazo_identity::TenantContext,
+}
+
 #[derive(Clone)]
 pub(crate) struct EndpointSettings {
     pub(crate) issuer: String,
@@ -61,7 +76,43 @@ pub(crate) struct EndpointSettings {
     pub(crate) cors_allowed_origins: Vec<String>,
     pub(crate) trusted_proxy_cidrs: Vec<IpCidr>,
     pub(crate) client_ip_header_mode: ClientIpHeaderMode,
+    pub(crate) transport_mode: TransportMode,
     pub(crate) mtls_certificate_source: MtlsCertificateSourceMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransportMode {
+    LoopbackHttp,
+    DirectTls,
+    TrustedProxy,
+}
+
+impl TransportMode {
+    fn from_config(value: Option<&str>, issuer: &str) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None if is_loopback_http_url(issuer) => Ok(Self::LoopbackHttp),
+            None => bail!(
+                "TRANSPORT_MODE is required for non-loopback issuers and must be direct-tls or trusted-proxy"
+            ),
+            Some("loopback-http") if is_loopback_http_url(issuer) => Ok(Self::LoopbackHttp),
+            Some("loopback-http") => {
+                bail!("TRANSPORT_MODE=loopback-http requires a loopback HTTP issuer")
+            }
+            Some("direct-tls") if issuer.starts_with("https://") => Ok(Self::DirectTls),
+            Some("direct-tls") => bail!("direct-tls transport requires an HTTPS issuer"),
+            Some("trusted-proxy")
+                if issuer.starts_with("https://") || is_loopback_http_url(issuer) =>
+            {
+                Ok(Self::TrustedProxy)
+            }
+            Some("trusted-proxy") => {
+                bail!("trusted-proxy transport requires an HTTPS or loopback HTTP issuer")
+            }
+            Some(value) => bail!(
+                "TRANSPORT_MODE must be loopback-http, direct-tls, or trusted-proxy; got {value}"
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]

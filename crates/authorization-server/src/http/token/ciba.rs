@@ -16,6 +16,7 @@ use crate::adapters::security::random_urlsafe_token;
 use crate::domain::client_policy::client_supports_grant;
 use crate::domain::client_policy::is_subset;
 use crate::domain::client_policy::parse_scope;
+#[cfg(test)]
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
