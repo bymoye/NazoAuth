@@ -358,7 +358,9 @@ async fn email_verification_state_isolated_by_tenant() {
         Some(second),
         "consuming one tenant's code must not change another tenant's code"
     );
-    store.delete_email_send(first_tenant, &email).await.unwrap();
+    EmailVerificationStorePort::release_email_send(&store, first_tenant, &email)
+        .await
+        .unwrap();
     assert!(
         store
             .reserve_email_send(first_tenant, &email, 30)
@@ -373,8 +375,7 @@ async fn email_verification_state_isolated_by_tenant() {
             .unwrap(),
         "another tenant's email cooldown must remain reserved"
     );
-    store
-        .delete_email_peer_send(first_tenant, &peer)
+    EmailVerificationStorePort::release_peer_send(&store, first_tenant, &peer)
         .await
         .unwrap();
     assert!(

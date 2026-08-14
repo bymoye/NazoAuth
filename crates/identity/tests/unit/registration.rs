@@ -41,6 +41,7 @@ struct VerificationCalls {
     code_stores: AtomicUsize,
     code_loads: AtomicUsize,
     code_consumes: AtomicUsize,
+    code_deletes: AtomicUsize,
     tenant_ids: Mutex<Vec<crate::TenantId>>,
 }
 
@@ -127,10 +128,15 @@ impl EmailVerificationStorePort for RecordingVerificationStore {
 
     fn delete_code<'a>(
         &'a self,
-        _tenant_id: crate::TenantId,
+        tenant_id: crate::TenantId,
         _email: &'a str,
     ) -> RepositoryFuture<'a, ()> {
-        unsupported()
+        let calls = Arc::clone(&self.calls);
+        Box::pin(async move {
+            calls.code_deletes.fetch_add(1, Ordering::Relaxed);
+            calls.tenant_ids.lock().unwrap().push(tenant_id);
+            Ok(())
+        })
     }
 
     fn release_email_send<'a>(
@@ -210,6 +216,7 @@ impl SecretHashPort for RecordingSecretHashes {
 #[derive(Clone)]
 struct RecordingDelivery {
     calls: Arc<AtomicUsize>,
+    result: Result<(), RepositoryError>,
 }
 
 impl VerificationEmailDeliveryPort for RecordingDelivery {
@@ -220,9 +227,10 @@ impl VerificationEmailDeliveryPort for RecordingDelivery {
         _code_ttl_seconds: u64,
     ) -> RepositoryFuture<'a, ()> {
         let calls = Arc::clone(&self.calls);
+        let result = self.result.clone();
         Box::pin(async move {
             calls.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+            result
         })
     }
 }
@@ -248,6 +256,7 @@ async fn assert_email_reservation_short_circuit(
         },
         RecordingDelivery {
             calls: Arc::clone(&delivery_calls),
+            result: Ok(()),
         },
         TenantContext::default(),
         RegistrationServiceConfig {
@@ -337,6 +346,7 @@ async fn successful_send_scopes_code_and_cooldowns_to_service_tenant() {
         },
         RecordingDelivery {
             calls: Arc::clone(&delivery_calls),
+            result: Ok(()),
         },
         tenant,
         RegistrationServiceConfig {
@@ -374,6 +384,55 @@ async fn successful_send_scopes_code_and_cooldowns_to_service_tenant() {
 }
 
 #[tokio::test]
+async fn failed_delivery_deletes_code_and_releases_tenant_scoped_reservations() {
+    let tenant = TenantContext {
+        tenant_id: crate::TenantId::new(uuid::Uuid::from_u128(301)).unwrap(),
+        realm_id: crate::RealmId::new(uuid::Uuid::from_u128(302)).unwrap(),
+        organization_id: crate::OrganizationId::new(uuid::Uuid::from_u128(303)).unwrap(),
+    };
+    let verification_calls = Arc::new(VerificationCalls::default());
+    let service = RegistrationService::new(
+        NoExistingAccount,
+        RecordingVerificationStore {
+            email_reservation: Ok(true),
+            calls: Arc::clone(&verification_calls),
+        },
+        RecordingSecretHashes {
+            hash_calls: Arc::new(AtomicUsize::new(0)),
+            verify_calls: Arc::new(AtomicUsize::new(0)),
+            verify_result: false,
+        },
+        RecordingDelivery {
+            calls: Arc::new(AtomicUsize::new(0)),
+            result: Err(RepositoryError::Unavailable),
+        },
+        tenant,
+        RegistrationServiceConfig {
+            delivery_enabled: true,
+            send_peer_cooldown_seconds: 5,
+            send_cooldown_seconds: 60,
+            code_ttl_seconds: 900,
+        },
+    );
+
+    assert_eq!(
+        service
+            .send_verification_code("shared@example.test", "peer-1")
+            .await,
+        Err(SendVerificationCodeError::Delivery(
+            RepositoryError::Unavailable
+        ))
+    );
+    assert_eq!(verification_calls.code_deletes.load(Ordering::Relaxed), 1);
+    assert_eq!(verification_calls.peer_releases.load(Ordering::Relaxed), 1);
+    assert_eq!(verification_calls.email_releases.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        *verification_calls.tenant_ids.lock().unwrap(),
+        vec![tenant.tenant_id; 6]
+    );
+}
+
+#[tokio::test]
 async fn registration_scopes_code_load_and_consumption_to_service_tenant() {
     let tenant = TenantContext {
         tenant_id: crate::TenantId::new(uuid::Uuid::from_u128(201)).unwrap(),
@@ -394,6 +453,7 @@ async fn registration_scopes_code_load_and_consumption_to_service_tenant() {
         },
         RecordingDelivery {
             calls: Arc::new(AtomicUsize::new(0)),
+            result: Ok(()),
         },
         tenant,
         RegistrationServiceConfig {
