@@ -464,7 +464,7 @@ async fn registration_authentication_error_keeps_bearer_and_no_store_contract() 
 }
 
 #[actix_web::test]
-async fn configured_initial_access_token_keeps_secure_unleased_policy() {
+async fn configured_initial_access_token_keeps_oauth_only_client_pkce_policy() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
@@ -483,7 +483,9 @@ async fn configured_initial_access_token_keeps_secure_unleased_policy() {
             .uri("/register")
             .insert_header((header::AUTHORIZATION, "Bearer initial-token"))
             .set_json(json!({
-                "redirect_uris": ["https://client.example/callback"]
+                "grant_types": ["authorization_code"],
+                "redirect_uris": ["https://client.example/callback"],
+                "scope": "profile"
             }))
             .to_request(),
     )
@@ -512,7 +514,54 @@ async fn configured_initial_access_token_keeps_secure_unleased_policy() {
 }
 
 #[actix_web::test]
-async fn configured_token_that_is_bound_to_an_active_lease_uses_the_lease_policy() {
+async fn configured_initial_access_token_applies_baseline_confidential_oidc_policy() {
+    let store = FakeStore::new();
+    let service = test::init_service(
+        App::new()
+            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
+                true,
+                store.clone(),
+                Ok(None),
+            )))
+            .configure(configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &service,
+        test::TestRequest::post()
+            .uri("/register")
+            .insert_header((header::AUTHORIZATION, "Bearer initial-token"))
+            .set_json(json!({
+                "grant_types": ["authorization_code"],
+                "redirect_uris": ["https://client.example/callback"],
+                "scope": "openid profile"
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        *store
+            .conformance_lease_id
+            .lock()
+            .expect("conformance lease lock"),
+        None
+    );
+    assert!(
+        store
+            .client
+            .lock()
+            .expect("client lock")
+            .as_ref()
+            .and_then(|client| client.security_policy.as_ref())
+            .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
+    );
+}
+
+#[actix_web::test]
+async fn configured_token_bound_to_an_active_lease_preserves_oidc_policy_and_ownership() {
     let lease_id = Uuid::now_v7();
     let store = FakeStore::new();
     let service = test::init_service(
@@ -532,7 +581,9 @@ async fn configured_token_that_is_bound_to_an_active_lease_uses_the_lease_policy
             .uri("/register")
             .insert_header((header::AUTHORIZATION, "Bearer initial-token"))
             .set_json(json!({
-                "redirect_uris": ["https://client.example/callback"]
+                "grant_types": ["authorization_code"],
+                "redirect_uris": ["https://client.example/callback"],
+                "scope": "openid profile"
             }))
             .to_request(),
     )
@@ -578,7 +629,9 @@ async fn leased_initial_access_token_binds_exception_and_update_preserves_both()
             .uri("/register")
             .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
             .set_json(json!({
-                "redirect_uris": ["https://client.example/callback"]
+                "grant_types": ["authorization_code"],
+                "redirect_uris": ["https://client.example/callback"],
+                "scope": "openid profile"
             }))
             .to_request(),
     )

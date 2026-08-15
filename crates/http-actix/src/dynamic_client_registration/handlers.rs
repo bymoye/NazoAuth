@@ -323,7 +323,18 @@ pub(super) async fn prepare_insert(
     if let Some(security_policy) = security_policy_override {
         request.security_policy = security_policy.clone();
     }
-    if conformance_lease_id.is_some() && request.client_type == "confidential" {
+    // A confidential OIDC authorization-code client can authenticate the
+    // code exchange and the baseline OIDC profile permits it to operate
+    // without PKCE.  Apply that ordinary protocol policy independently of
+    // how the RFC 7591 initial-access token was provisioned; public clients
+    // and OAuth-only registrations retain the stricter default.
+    if request.client_type == "confidential"
+        && request.scopes.iter().any(|scope| scope == "openid")
+        && request
+            .grant_types
+            .iter()
+            .any(|grant_type| grant_type == "authorization_code")
+    {
         request.security_policy.allow_confidential_oidc_without_pkce = true;
     }
     let policy = AdminClientPolicy {
