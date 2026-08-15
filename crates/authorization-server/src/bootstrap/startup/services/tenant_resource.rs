@@ -114,6 +114,20 @@ fn map_admin_client_error(error: AdminClientError) -> TenantResourcePreparationE
     }
 }
 
+fn supported_resource_kinds(openid4vc_dataset_enabled: bool) -> Vec<TenantResourceKind> {
+    let mut resource_kinds = vec![
+        TenantResourceKind::User,
+        TenantResourceKind::OauthClient,
+        TenantResourceKind::MtlsTrustAnchor,
+        TenantResourceKind::CibaDecisionBinding,
+        TenantResourceKind::Openid4vcTrustPolicy,
+    ];
+    if openid4vc_dataset_enabled {
+        resource_kinds.push(TenantResourceKind::Openid4vcDataset);
+    }
+    resource_kinds
+}
+
 pub(super) async fn build(
     startup: &StartupConfiguration,
     admin_clients: web::Data<ServerAdminClientService>,
@@ -143,15 +157,8 @@ pub(super) async fn build(
         startup.settings.openid4vc.data_encryption_key,
         preparation,
     ));
-    let mut resource_kinds = vec![
-        TenantResourceKind::User,
-        TenantResourceKind::OauthClient,
-        TenantResourceKind::MtlsTrustAnchor,
-        TenantResourceKind::Openid4vcTrustPolicy,
-    ];
-    if startup.settings.openid4vc.data_encryption_key.is_some() {
-        resource_kinds.push(TenantResourceKind::Openid4vcDataset);
-    }
+    let resource_kinds =
+        supported_resource_kinds(startup.settings.openid4vc.data_encryption_key.is_some());
     let signer = startup.control_discovery.clone().into_inner();
     let provider = TenantResourceProvider::new(
         controller,

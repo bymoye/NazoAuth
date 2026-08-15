@@ -172,6 +172,31 @@ fn machine_management_never_exposes_loopback_http_on_a_non_loopback_bind() {
 }
 
 #[test]
+fn capability_advertises_every_executable_resource_kind() {
+    assert_eq!(
+        supported_resource_kinds(false),
+        vec![
+            TenantResourceKind::User,
+            TenantResourceKind::OauthClient,
+            TenantResourceKind::MtlsTrustAnchor,
+            TenantResourceKind::CibaDecisionBinding,
+            TenantResourceKind::Openid4vcTrustPolicy,
+        ]
+    );
+    assert_eq!(
+        supported_resource_kinds(true),
+        vec![
+            TenantResourceKind::User,
+            TenantResourceKind::OauthClient,
+            TenantResourceKind::MtlsTrustAnchor,
+            TenantResourceKind::CibaDecisionBinding,
+            TenantResourceKind::Openid4vcTrustPolicy,
+            TenantResourceKind::Openid4vcDataset,
+        ]
+    );
+}
+
+#[test]
 fn admin_client_failures_preserve_rejected_vs_unavailable_boundary() {
     for error in [
         AdminClientError::InvalidRequest("invalid".to_owned()),
