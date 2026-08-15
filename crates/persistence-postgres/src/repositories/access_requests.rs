@@ -14,7 +14,6 @@ use uuid::Uuid;
 
 use crate::{
     DbPool,
-    repositories::clients::conformance_lease_is_effective,
     schema::{client_access_requests, oauth_clients, users},
 };
 
@@ -275,7 +274,6 @@ impl AccessRequestRepository {
             .filter(oauth_clients::id.eq(approved_client_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
             .select(diesel::dsl::count_star())
             .first::<i64>(&mut connection)
             .await

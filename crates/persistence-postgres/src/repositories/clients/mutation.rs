@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::schema::{oauth_clients, oauth_tokens, user_client_grants};
 
 use super::base::OAuthClientRepository;
-use super::{OAuthClientRecord, conformance_lease_is_effective, map_error};
+use super::{OAuthClientRecord, map_error};
 
 impl OAuthClientRepository {
     pub async fn insert(
@@ -450,9 +450,6 @@ impl OAuthClientRepository {
                 security_policy = NULLIF($3->'security_policy', 'null'::jsonb),
                 updated_at = CURRENT_TIMESTAMP
             WHERE tenant_id = $1 AND id = $2 AND is_active = TRUE
-              AND nazo_oauth_conformance_lease_is_active(
-                  tenant_id, conformance_lease_id
-              )
               AND registration_access_token_blake3 = $6
             "#,
                 )
@@ -499,7 +496,6 @@ impl OAuthClientRepository {
                 .filter(oauth_clients::tenant_id.eq(tenant_id))
                 .filter(oauth_clients::id.eq(id))
                 .filter(oauth_clients::is_active.eq(true))
-                .filter(conformance_lease_is_effective())
                 .filter(
                     oauth_clients::registration_access_token_blake3
                         .eq(expected_registration_access_token_blake3),
@@ -532,7 +528,6 @@ impl OAuthClientRepository {
                         .filter(oauth_clients::tenant_id.eq(tenant_id))
                         .filter(oauth_clients::id.eq(id))
                         .filter(oauth_clients::is_active.eq(true))
-                        .filter(conformance_lease_is_effective())
                         .filter(
                             oauth_clients::registration_access_token_blake3
                                 .eq(expected_registration_access_token_blake3),

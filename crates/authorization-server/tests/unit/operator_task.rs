@@ -647,31 +647,6 @@ fn completed_lifecycle_without_its_receipt_is_also_non_replayable() {
 fn embedded_identity_and_operation_names_are_closed() {
     for (operation, expected) in [
         (TaskOperation::MigrateApply, "migrate-apply"),
-        (
-            TaskOperation::ConformanceLeaseCreate {
-                profile: "oidf-full".to_owned(),
-                material_sha256: "a".repeat(64),
-                dynamic_registration_initial_access_token_sha256: None,
-                ciba_automated_decision_token_sha256: None,
-                public_material: None,
-                ttl_seconds: 3_600,
-            },
-            "legacy-conformance-disabled",
-        ),
-        (
-            TaskOperation::ConformanceLeaseList,
-            "legacy-conformance-disabled",
-        ),
-        (
-            TaskOperation::ConformanceLeaseRevoke {
-                lease_id: "018f3f2a-7b55-7a25-8f20-6d526f8f44e1".to_owned(),
-            },
-            "legacy-conformance-disabled",
-        ),
-        (
-            TaskOperation::ConformanceLeaseCleanup,
-            "legacy-conformance-disabled",
-        ),
         (TaskOperation::KeysList, "keys-list"),
         (TaskOperation::KeysValidate, "keys-validate"),
         (
@@ -861,39 +836,6 @@ fn mounted_public_material_and_operator_keys_are_digest_bound() {
 }
 
 #[tokio::test]
-async fn legacy_conformance_operations_are_permanently_disabled() {
-    for operation in [
-        TaskOperation::ConformanceMatrixDescribe,
-        TaskOperation::ConformanceOnboardingApply {
-            profile: "legacy".to_owned(),
-            bundle_schema: 1,
-            bundle_sha256: "a".repeat(64),
-            matrix_sha256: "b".repeat(64),
-            client_count: 1,
-            ttl_seconds: 60,
-        },
-        TaskOperation::ConformanceLeaseCreate {
-            profile: "legacy".to_owned(),
-            material_sha256: "a".repeat(64),
-            dynamic_registration_initial_access_token_sha256: None,
-            ciba_automated_decision_token_sha256: None,
-            public_material: None,
-            ttl_seconds: 60,
-        },
-        TaskOperation::ConformanceLeaseList,
-        TaskOperation::ConformanceLeaseRevoke {
-            lease_id: uuid::Uuid::now_v7().to_string(),
-        },
-        TaskOperation::ConformanceLeaseCleanup,
-    ] {
-        assert!(matches!(
-            execute(&operation).await,
-            TaskOutcome::Failed { .. }
-        ));
-    }
-}
-
-#[tokio::test]
 async fn external_key_dispatch_rejects_unmounted_public_material() {
     let outcome = execute(&TaskOperation::KeysRegisterExternal {
         kid: "external-1".to_owned(),
@@ -907,17 +849,6 @@ async fn external_key_dispatch_rejects_unmounted_public_material() {
 
 #[tokio::test]
 async fn operator_dispatch_maps_deterministic_precondition_errors() {
-    let onboarding = execute(&TaskOperation::ConformanceOnboardingApply {
-        profile: "nazoauth-full".to_owned(),
-        bundle_schema: 3,
-        bundle_sha256: String::new(),
-        matrix_sha256: "a".repeat(64),
-        client_count: 1,
-        ttl_seconds: 60,
-    })
-    .await;
-    assert!(matches!(onboarding, TaskOutcome::Failed { .. }));
-
     let generated = execute(&TaskOperation::KeysGenerateLocal {
         alg: "unsupported-algorithm".to_owned(),
         purposes: vec!["credential".to_owned()],
@@ -933,17 +864,6 @@ async fn operator_dispatch_maps_deterministic_precondition_errors() {
     })
     .await;
     assert!(matches!(external, TaskOutcome::Failed { .. }));
-
-    let lease = execute(&TaskOperation::ConformanceLeaseCreate {
-        profile: "oidf-full".to_owned(),
-        material_sha256: "a".repeat(64),
-        dynamic_registration_initial_access_token_sha256: Some("b".repeat(64)),
-        ciba_automated_decision_token_sha256: None,
-        public_material: None,
-        ttl_seconds: 60,
-    })
-    .await;
-    assert!(matches!(lease, TaskOutcome::Failed { .. }));
 
     // These list/validate paths are local key-management dispatches; they
     // must always map their typed operation error into a receipt-safe outcome

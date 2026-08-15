@@ -136,7 +136,6 @@ impl PresentationStorePort for Openid4vpRepository {
             let changed = sql_query(
                 "UPDATE openid4vp_transactions SET request = $4 \
                  WHERE id = $1 AND tenant_id = $2 AND completed_at IS NULL AND expires_at > $3 \
-                   AND conformance_lease_id IS NULL \
                    AND openid4vc_presentation_trust_policy_is_active( \
                        tenant_id, openid4vc_trust_policy_binding_id, \
                        openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest)",
@@ -176,7 +175,6 @@ impl PresentationStorePort for Openid4vpRepository {
                 "UPDATE openid4vp_transactions SET result_ciphertext = $5, completed_at = $4 \
                  WHERE id = $1 AND tenant_id = $2 AND state_hash = $3 \
                    AND completed_at IS NULL AND expires_at > $4 \
-                   AND conformance_lease_id IS NULL \
                    AND openid4vc_presentation_trust_policy_is_active( \
                        tenant_id, openid4vc_trust_policy_binding_id, \
                        openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest)",
@@ -329,7 +327,6 @@ async fn load_presentation(
          openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest, \
          ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
          FROM openid4vp_transactions WHERE id = $1 AND tenant_id = $2 AND expires_at > $3 \
-           AND conformance_lease_id IS NULL \
            AND openid4vc_presentation_trust_policy_is_active( \
                tenant_id, openid4vc_trust_policy_binding_id, \
                openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest)",

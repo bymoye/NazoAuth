@@ -559,9 +559,6 @@ pub enum TaskResult {
     Migration {
         applied: bool,
     },
-    ConformanceMatrix {
-        summary: ConformanceMatrixSummary,
-    },
     KeyList {
         keyset_revision: String,
     },
@@ -576,19 +573,28 @@ pub enum TaskResult {
         kid: String,
         keyset_revision: String,
     },
+    /// Legacy receipt compatibility only. New runtimes never emit it.
+    ConformanceMatrix {
+        summary: ConformanceMatrixSummary,
+    },
+    /// Legacy receipt compatibility only. New runtimes never emit it.
     ConformanceLeaseCreated {
         lease: ConformanceLeaseSummary,
     },
+    /// Legacy receipt compatibility only. New runtimes never emit it.
     ConformanceOnboardingApplied {
         onboarding: ConformanceOnboardingSummary,
     },
+    /// Legacy receipt compatibility only. New runtimes never emit it.
     ConformanceLeaseList {
         leases: Vec<ConformanceLeaseSummary>,
     },
+    /// Legacy receipt compatibility only. New runtimes never emit it.
     ConformanceLeaseRevoked {
         lease_id: String,
         deactivated_clients: u64,
     },
+    /// Legacy receipt compatibility only. New runtimes never emit it.
     ConformanceLeaseCleaned {
         cleaned_leases: u64,
         deleted_clients: u64,

@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::schema::{oauth_clients, user_client_grants};
 
 use super::base::OAuthClientRepository;
-use super::{OAuthClientRecord, conformance_lease_is_effective, map_error};
+use super::{OAuthClientRecord, map_error};
 
 impl OAuthClientRepository {
     pub async fn by_client_id(
@@ -24,7 +24,6 @@ impl OAuthClientRepository {
         oauth_clients::table
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::client_id.eq(client_id))
-            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
             .await
@@ -43,7 +42,6 @@ impl OAuthClientRepository {
         oauth_clients::table
             .find(id)
             .filter(oauth_clients::tenant_id.eq(tenant_id))
-            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
             .await
@@ -67,7 +65,6 @@ impl OAuthClientRepository {
             )
             .filter(oauth_clients::client_type.eq("confidential"))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .limit(limit)
             .load::<OAuthClientRecord>(&mut connection)
@@ -117,7 +114,6 @@ impl OAuthClientRepository {
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::client_id.eq(client_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
             .filter(oauth_clients::registration_access_token_blake3.eq(access_token_hash))
             .select(OAuthClientRecord::as_select())
             .first::<OAuthClientRecord>(&mut connection)
@@ -139,7 +135,6 @@ impl OAuthClientRepository {
                 .filter(oauth_clients::id.eq(id))
                 .filter(oauth_clients::tenant_id.eq(tenant_id))
                 .filter(oauth_clients::is_active.eq(true))
-                .filter(conformance_lease_is_effective())
                 .filter(oauth_clients::client_secret_hash.is_not_null()),
         ))
         .get_result(&mut connection)
@@ -161,7 +156,6 @@ impl OAuthClientRepository {
             .filter(user_client_grants::user_id.eq(user_id))
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
             .select(OAuthClientRecord::as_select())
             .load::<OAuthClientRecord>(&mut connection)
             .await
@@ -222,7 +216,6 @@ impl OAuthClientRepository {
             .find(id)
             .filter(oauth_clients::tenant_id.eq(tenant_id))
             .filter(oauth_clients::is_active.eq(true))
-            .filter(conformance_lease_is_effective())
             .filter(oauth_clients::client_secret_hash.like("client-secret-v1:%:%"))
             .select(diesel::dsl::sql::<diesel::sql_types::Text>(
                 "split_part(client_secret_hash, ':', 2)",
@@ -246,7 +239,6 @@ impl OAuthClientRepository {
                 .find(id)
                 .filter(oauth_clients::tenant_id.eq(tenant_id))
                 .filter(oauth_clients::is_active.eq(true))
-                .filter(conformance_lease_is_effective())
                 .filter(oauth_clients::client_secret_hash.eq(candidate_digest)),
         ))
         .get_result(&mut connection)
@@ -266,7 +258,6 @@ pub async fn active_public_client_id_on_connection(
         .find(id)
         .filter(oauth_clients::tenant_id.eq(tenant_id))
         .filter(oauth_clients::is_active.eq(true))
-        .filter(conformance_lease_is_effective())
         .select(oauth_clients::client_id)
         .first::<String>(connection)
         .await
