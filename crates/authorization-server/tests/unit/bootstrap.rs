@@ -225,6 +225,25 @@ fn direct_tls_listener_is_disabled_by_default_and_requires_complete_identity() {
         error.to_string(),
         "TLS_BIND is required for direct-tls transport"
     );
+
+    let colliding = ConfigSource::from_pairs_for_test([
+        ("BIND", "127.0.0.1:8443"),
+        ("PUBLIC_BASE_URL", "https://localhost"),
+        (
+            "CLIENT_SECRET_PEPPER",
+            "test-client-secret-pepper-that-is-long-enough",
+        ),
+        ("TRANSPORT_MODE", "direct-tls"),
+        ("TLS_BIND", "127.0.0.1:8443"),
+    ]);
+    let colliding_settings = Settings::from_config(&colliding).unwrap();
+    assert_eq!(
+        direct_tls_listeners(&colliding, &colliding_settings)
+            .err()
+            .unwrap()
+            .to_string(),
+        "BIND and TLS_BIND must use different listener addresses"
+    );
 }
 
 #[test]
@@ -247,6 +266,52 @@ fn direct_tls_listener_loads_a_complete_mutual_tls_identity() {
     let settings = Settings::from_config(&config).unwrap();
     let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
     assert_eq!(listeners.mtls_bind, "127.0.0.1:0".parse().unwrap());
+    let debug = format!("{:?}", listeners.snapshots);
+    assert!(debug.contains("DirectTlsSnapshotStore"));
+    assert!(debug.contains("material_sha256"));
+    assert!(
+        listeners
+            .snapshots
+            .server_key_for(Some("localhost"))
+            .is_some()
+    );
+    assert!(
+        listeners
+            .snapshots
+            .server_key_for(Some("unknown.test"))
+            .is_none()
+    );
+    assert!(listeners.snapshots.server_key_for(None).is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn direct_tls_reloader_ticks_and_stops_without_publishing_unchanged_material() {
+    let root = std::env::temp_dir().join(format!("nazoauth-tls-reloader-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let (certificate, private_key, client_ca) = write_test_tls_identity(&root);
+    let config = ConfigSource::from_owned_pairs_for_test([
+        ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "test-client-secret-pepper-that-is-long-enough".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        ("TLS_BIND".to_owned(), "127.0.0.1:0".to_owned()),
+        ("TLS_CERTIFICATE_FILE".to_owned(), certificate),
+        ("TLS_PRIVATE_KEY_FILE".to_owned(), private_key),
+        ("TLS_CLIENT_CA_FILE".to_owned(), client_ca),
+    ]);
+    let settings = Settings::from_config(&config).unwrap();
+    let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
+    let reloader = spawn_direct_tls_reloader(
+        Arc::clone(&listeners.snapshots),
+        std::time::Duration::from_millis(5),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(18)).await;
+    assert_eq!(listeners.snapshots.revision(), 1);
+    reloader.abort();
+    assert!(reloader.await.unwrap_err().is_cancelled());
     std::fs::remove_dir_all(root).unwrap();
 }
 

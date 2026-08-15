@@ -470,6 +470,16 @@ fn instance_identity_signs_and_exposes_tenant_resource_contracts() {
         .unwrap(),
         capability
     );
+    let mut invalid_capability = capability.clone();
+    invalid_capability.resource_manifest_sha256 = "g".repeat(64);
+    assert!(matches!(
+        endpoint.sign_capability(&invalid_capability),
+        Err(
+            crate::tenant_resource_provider::TenantResourceProviderError::Unavailable(
+                "runtime capability signing failed"
+            )
+        )
+    ));
 
     let receipt = TenantResourceReceipt {
         ver: PROTOCOL_VERSION,
@@ -516,6 +526,16 @@ fn instance_identity_signs_and_exposes_tenant_resource_contracts() {
         .unwrap(),
         receipt
     );
+    let mut invalid_receipt = receipt.clone();
+    invalid_receipt.resource_manifest_sha256 = "g".repeat(64);
+    assert!(matches!(
+        endpoint.sign_receipt(&invalid_receipt),
+        Err(
+            crate::tenant_resource_provider::TenantResourceProviderError::Unavailable(
+                "runtime receipt signing failed"
+            )
+        )
+    ));
     fs::remove_dir_all(root).unwrap();
 }
 

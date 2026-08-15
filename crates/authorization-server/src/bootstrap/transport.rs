@@ -131,7 +131,7 @@ impl DirectTlsSnapshotStore {
         }
     }
 
-    fn server_key_for(&self, server_name: Option<&str>) -> Option<Arc<CertifiedKey>> {
+    pub(super) fn server_key_for(&self, server_name: Option<&str>) -> Option<Arc<CertifiedKey>> {
         let accepted = match server_name {
             Some(server_name) => self
                 .endpoint_names

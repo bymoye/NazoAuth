@@ -1,9 +1,9 @@
 use futures_executor::block_on;
 use nazo_auth::{
     CibaAtomicResult, CibaAuthenticationContext, CibaCreateFailure, CibaDecision,
-    CibaDecisionEvaluation, CibaPingNotification, CibaPingNotificationStatus, CibaRequestState,
-    CibaService, CibaStateFuture, CibaStateStorePort, CibaStatus, CibaStoredRequest,
-    evaluate_ciba_decision_with_authentication_context,
+    CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification, CibaPingNotificationStatus,
+    CibaRequestState, CibaService, CibaStateFuture, CibaStateStorePort, CibaStatus,
+    CibaStoredRequest, evaluate_ciba_decision_with_authentication_context,
 };
 use uuid::Uuid;
 
@@ -53,6 +53,25 @@ impl CibaStateStorePort for CreateStore {
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         Box::pin(async { Ok(CibaAtomicResult::Applied) })
     }
+}
+
+#[test]
+fn legacy_lease_named_decision_wrapper_preserves_the_neutral_deadline_contract() {
+    let result = block_on(
+        CibaService::new(CreateStore).decide_with_authentication_context_and_lease_deadline(
+            "missing-auth-request",
+            CibaDecision::Approve,
+            Some(Uuid::from_u128(7)),
+            Some(CibaAuthenticationContext {
+                auth_time: 100,
+                amr: vec!["pwd".to_owned()],
+                oidc_sid: None,
+            }),
+            Some(180),
+            || 150,
+        ),
+    );
+    assert_eq!(result, Err(CibaDecisionFailure::Missing));
 }
 
 #[test]
