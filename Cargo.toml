@@ -72,7 +72,7 @@ nazo-resource-server = { version = "0.1.4", path = "crates/resource-server" }
 nazo-runtime-modules = { version = "0.1.4", path = "crates/runtime-capabilities" }
 nazo-scim-events = { version = "0.1.4", path = "crates/scim-events" }
 nazo-valkey = { version = "0.1.4", path = "crates/state-store-valkey" }
-pem = "3.0.6"
+pem = "4.0.0"
 pkcs8 = { version = "0.11.0", features = ["alloc"] }
 p256 = "0.14.0"
 passkey-auth = "0.1.3"
