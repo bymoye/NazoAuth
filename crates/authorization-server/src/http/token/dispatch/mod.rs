@@ -471,6 +471,9 @@ pub(crate) async fn token_with_service(
                 issuance_config.issuer(),
                 issuance_config.client_secret_pepper(),
             )
+            .with_endpoint_audience_aliases(std::slice::from_ref(
+                &issuance_config.mtls_endpoint_base_url(),
+            ))
             .with_remote_jwks(&handles.remote_client_documents),
             &auth_request,
             &client,

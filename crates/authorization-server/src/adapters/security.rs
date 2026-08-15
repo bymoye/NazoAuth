@@ -317,21 +317,30 @@ pub(crate) enum ClientAssertionError {
 pub(crate) fn verify_private_key_jwt_claims_for_issuer(
     issuer: &str,
     endpoint_path: &str,
+    endpoint_audience_aliases: &[&str],
     client: &ClientRow,
     assertion: &str,
 ) -> Result<ValidatedClientAssertion, ClientAssertionError> {
-    verify_private_key_jwt_claims_with_issuer(issuer, endpoint_path, client, assertion)
+    verify_private_key_jwt_claims_with_issuer(
+        issuer,
+        endpoint_path,
+        endpoint_audience_aliases,
+        client,
+        assertion,
+    )
 }
 
 fn verify_private_key_jwt_claims_with_issuer(
     issuer: &str,
     endpoint_path: &str,
+    endpoint_audience_aliases: &[&str],
     client: &ClientRow,
     assertion: &str,
 ) -> Result<ValidatedClientAssertion, ClientAssertionError> {
     verify_private_key_jwt(ClientAssertionVerificationInput {
         issuer,
         endpoint_path,
+        endpoint_audience_aliases,
         client,
         assertion,
         now: Utc::now().timestamp(),

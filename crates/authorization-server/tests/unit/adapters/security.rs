@@ -40,6 +40,7 @@ fn verify_private_key_jwt_claims_with_settings(
     verify_private_key_jwt_claims_with_issuer(
         &settings.endpoint.issuer,
         req.uri().path(),
+        std::slice::from_ref(&settings.endpoint.mtls_endpoint_base_url.as_str()),
         client,
         assertion,
     )

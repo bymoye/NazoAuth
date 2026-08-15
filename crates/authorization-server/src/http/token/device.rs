@@ -668,7 +668,10 @@ async fn authenticate_device_authorization_client(
     let auth_request = client_auth_request_facts(req, &config.trusted_proxy_cidrs);
     let assertion = authenticate_client_with_dependencies(
         authorization_service,
-        ClientAuthConfig::new(&config.issuer, &config.client_secret_pepper),
+        ClientAuthConfig::new(&config.issuer, &config.client_secret_pepper)
+            .with_endpoint_audience_aliases(std::slice::from_ref(
+                &config.mtls_endpoint_base_url.as_ref(),
+            )),
         &auth_request,
         client,
         credentials,

@@ -47,6 +47,7 @@ impl ClientAuthRequestFacts {
 pub(crate) struct ClientAuthConfig<'a> {
     issuer: &'a str,
     client_secret_pepper: &'a str,
+    endpoint_audience_aliases: &'a [&'a str],
     remote_jwks: Option<&'a crate::domain::remote_client_documents::RemoteClientDocumentResolver>,
 }
 
@@ -55,8 +56,14 @@ impl<'a> ClientAuthConfig<'a> {
         Self {
             issuer,
             client_secret_pepper,
+            endpoint_audience_aliases: &[],
             remote_jwks: None,
         }
+    }
+
+    pub(crate) fn with_endpoint_audience_aliases(mut self, aliases: &'a [&'a str]) -> Self {
+        self.endpoint_audience_aliases = aliases;
+        self
     }
 
     pub(crate) fn with_remote_jwks(
@@ -192,6 +199,7 @@ pub(crate) async fn authenticate_client_with_dependencies(
             verify_private_key_jwt_claims_for_issuer(
                 config.issuer,
                 request.endpoint_path(),
+                config.endpoint_audience_aliases,
                 verification_client,
                 assertion,
             )

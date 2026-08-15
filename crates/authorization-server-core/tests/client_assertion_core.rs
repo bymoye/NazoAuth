@@ -142,6 +142,7 @@ fn verify_at(
     verify_private_key_jwt(ClientAssertionVerificationInput {
         issuer: "https://issuer.example",
         endpoint_path,
+        endpoint_audience_aliases: &[],
         client,
         assertion,
         now: NOW,
@@ -176,6 +177,7 @@ fn registered_client_assertion_algorithm_is_enforced_before_key_selection() {
         verify_private_key_jwt(ClientAssertionVerificationInput {
             issuer: "https://issuer.example",
             endpoint_path: "/token",
+            endpoint_audience_aliases: &[],
             client: &client,
             assertion: &assertion,
             now: NOW,
@@ -239,6 +241,43 @@ fn endpoint_audiences_and_arrays_follow_exact_client_policy() {
     assert_eq!(
         verify(&client, &nested).unwrap_err(),
         ClientAssertionValidationError::Audience
+    );
+}
+
+#[test]
+fn configured_mtls_endpoint_alias_is_only_accepted_for_opted_in_endpoint_audiences() {
+    let mut client = client(json!({"keys": [public_jwk(Some("kid"))]}));
+    let assertion = assertion(
+        json!({"aud": "https://mtls.issuer.example:8443/token"}),
+        Some("kid"),
+    );
+    let aliases = ["https://mtls.issuer.example:8443"];
+
+    assert!(matches!(
+        verify_private_key_jwt(ClientAssertionVerificationInput {
+            issuer: "https://issuer.example",
+            endpoint_path: "/token",
+            endpoint_audience_aliases: &aliases,
+            client: &client,
+            assertion: &assertion,
+            now: NOW,
+            expected_signing_algorithm: None,
+        }),
+        Err(ClientAssertionValidationError::Audience)
+    ));
+
+    client.allow_client_assertion_endpoint_audience = true;
+    assert!(
+        verify_private_key_jwt(ClientAssertionVerificationInput {
+            issuer: "https://issuer.example",
+            endpoint_path: "/token",
+            endpoint_audience_aliases: &aliases,
+            client: &client,
+            assertion: &assertion,
+            now: NOW,
+            expected_signing_algorithm: None,
+        })
+        .is_ok()
     );
 }
 

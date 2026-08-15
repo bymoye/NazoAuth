@@ -5,6 +5,7 @@ use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 #[derive(Clone)]
 pub(crate) struct DeviceHttpConfig {
     pub(crate) issuer: Box<str>,
+    pub(crate) mtls_endpoint_base_url: Box<str>,
     pub(crate) frontend_base_url: Box<str>,
     pub(crate) client_secret_pepper: Box<str>,
     pub(crate) trusted_proxy_cidrs: Box<[IpCidr]>,
@@ -20,6 +21,7 @@ impl From<&Settings> for DeviceHttpConfig {
     fn from(settings: &Settings) -> Self {
         Self {
             issuer: settings.endpoint.issuer.as_str().into(),
+            mtls_endpoint_base_url: settings.endpoint.mtls_endpoint_base_url.as_str().into(),
             frontend_base_url: settings.endpoint.frontend_base_url.as_str().into(),
             client_secret_pepper: settings.protocol.client_secret_pepper.as_str().into(),
             trusted_proxy_cidrs: settings.endpoint.trusted_proxy_cidrs.clone().into(),

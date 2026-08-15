@@ -16,6 +16,10 @@ const MAX_CLIENT_ASSERTION_JTI_BYTES: usize = 128;
 pub struct ClientAssertionVerificationInput<'a> {
     pub issuer: &'a str,
     pub endpoint_path: &'a str,
+    /// Additional configured endpoint origins that may be accepted only for a
+    /// client that explicitly permits endpoint audiences. These are not issuer
+    /// aliases: the issuer itself remains the sole issuer-audience candidate.
+    pub endpoint_audience_aliases: &'a [&'a str],
     pub client: &'a OAuthClient,
     pub assertion: &'a str,
     pub now: i64,
@@ -158,6 +162,7 @@ pub fn verify_private_key_jwt(
             input.issuer,
             input.endpoint_path,
             input.client.allow_client_assertion_endpoint_audience,
+            input.endpoint_audience_aliases,
         ),
         input.client.allow_client_assertion_audience_array,
     ) {
@@ -182,15 +187,19 @@ fn client_assertion_audience_candidates(
     issuer: &str,
     endpoint_path: &str,
     allow_endpoint_audience: bool,
+    endpoint_audience_aliases: &[&str],
 ) -> Vec<String> {
     let mut candidates = vec![issuer.to_owned()];
     if !allow_endpoint_audience {
         return candidates;
     }
 
-    candidates.push(format!("{issuer}{endpoint_path}"));
-    if matches!(endpoint_path, "/par" | "/bc-authorize") {
-        candidates.push(format!("{issuer}/token"));
+    for endpoint_origin in std::iter::once(issuer).chain(endpoint_audience_aliases.iter().copied())
+    {
+        candidates.push(format!("{endpoint_origin}{endpoint_path}"));
+        if matches!(endpoint_path, "/par" | "/bc-authorize") {
+            candidates.push(format!("{endpoint_origin}/token"));
+        }
     }
     candidates
 }
