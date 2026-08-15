@@ -56,9 +56,9 @@ impl CibaStateStorePort for CreateStore {
 }
 
 #[test]
-fn legacy_lease_named_decision_wrapper_preserves_the_neutral_deadline_contract() {
+fn decision_deadline_preserves_the_neutral_atomic_contract() {
     let result = block_on(
-        CibaService::new(CreateStore).decide_with_authentication_context_and_lease_deadline(
+        CibaService::new(CreateStore).decide_with_authentication_context_and_deadline(
             "missing-auth-request",
             CibaDecision::Approve,
             Some(Uuid::from_u128(7)),
@@ -75,9 +75,9 @@ fn legacy_lease_named_decision_wrapper_preserves_the_neutral_deadline_contract()
 }
 
 #[test]
-fn lease_deadline_defaults_delegate_to_the_atomic_store_operations() {
+fn authorization_deadline_defaults_delegate_to_the_atomic_store_operations() {
     let state = CibaRequestState {
-        client_id: "lease-client".to_owned(),
+        client_id: "deadline-client".to_owned(),
         user_id: Uuid::from_u128(7),
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
@@ -101,16 +101,21 @@ fn lease_deadline_defaults_delegate_to_the_atomic_store_operations() {
     };
     let store = CreateStore;
     assert_eq!(
-        block_on(store.create_with_lease_deadline("generated-auth-req-id", &state, Some(150),))
+        block_on(store.create_with_authorization_deadline(
+            "generated-auth-req-id",
+            &state,
+            Some(150),
+        ))
+        .unwrap(),
+        CibaAtomicResult::Applied
+    );
+    assert_eq!(
+        block_on(store.replace_with_authorization_deadline("auth-req-id", &(), &state, Some(150),))
             .unwrap(),
         CibaAtomicResult::Applied
     );
     assert_eq!(
-        block_on(store.replace_with_lease_deadline("auth-req-id", &(), &state, Some(150))).unwrap(),
-        CibaAtomicResult::Applied
-    );
-    assert_eq!(
-        block_on(store.delete_with_lease_deadline("auth-req-id", &(), Some(150))).unwrap(),
+        block_on(store.delete_with_authorization_deadline("auth-req-id", &(), Some(150),)).unwrap(),
         CibaAtomicResult::Applied
     );
 }

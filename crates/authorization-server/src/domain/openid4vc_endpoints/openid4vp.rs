@@ -196,16 +196,14 @@ impl ServerPresentationOperations {
                 .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
         nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
             .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
-        crate::domain::parse_conformance_credential_trust_anchors(
-            &material.credential_trust_anchor_pem,
-        )
-        .map_err(|_| {
-            vp_error(
-                503,
-                "server_error",
-                "OpenID4VC credential trust anchor is invalid.",
-            )
-        })
+        crate::domain::parse_scoped_credential_trust_anchors(&material.credential_trust_anchor_pem)
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "OpenID4VC credential trust anchor is invalid.",
+                )
+            })
     }
 }
 

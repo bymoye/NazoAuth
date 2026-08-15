@@ -8,10 +8,9 @@ use crate::http::token::{
 use actix_web::body::MessageBody;
 use nazo_http_actix::OAuthJsonErrorFields;
 
-/// `HttpResponse<BoxBody>` is intentionally not `Send`, while the database
-/// lease transaction must return a `Send` value.  Materialize the small JSON
-/// response while the lease lock is held and rebuild the Actix response after
-/// the transaction commits.
+/// `HttpResponse<BoxBody>` is intentionally not `Send`. Materialize the small
+/// JSON response before crossing async service boundaries and rebuild the
+/// Actix response at the endpoint boundary.
 struct SendCibaResponse {
     status: StatusCode,
     headers: HeaderMap,
@@ -62,7 +61,6 @@ struct CibaPollIssueRequest<'a, 'issuance> {
     dpop_jkt: Option<String>,
     mtls_x5t_s256: Option<String>,
     client_assertion: Option<ValidatedClientAssertion>,
-    lease_expires_at: Option<i64>,
     tenant_id: uuid::Uuid,
 }
 
@@ -146,54 +144,23 @@ pub(crate) async fn token_ciba(
             false,
         );
     };
-    // The assertion replay marker is a mutation too.  Move it into the same
-    // lease guard as the CIBA CAS and token issuance so revocation cannot
-    // linearize between authentication consumption and the grant transition.
     let client_assertion = client_assertion.cloned();
-    match handles
-        .conformance_leases
-        .with_active_ciba_decision(
-            config.tenant_id,
-            &client.client_id,
-            None,
-            |lease_expires_at| async move {
-                poll_and_issue_ciba(CibaPollIssueRequest {
-                    ciba_service,
-                    users,
-                    token_service,
-                    issuance,
-                    client,
-                    auth_req_id,
-                    initial,
-                    ciba_grant_key,
-                    dpop_jkt,
-                    mtls_x5t_s256,
-                    client_assertion,
-                    lease_expires_at,
-                    tenant_id: config.tenant_id,
-                })
-                .await
-            },
-        )
-        .await
-    {
-        Ok(Some(response)) => response.into_http_response(),
-        Ok(None) => oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "CIBA client or conformance lease is no longer active.",
-            false,
-        ),
-        Err(error) => {
-            tracing::warn!(%error, "failed to acquire CIBA token lease guard");
-            oauth_token_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "CIBA failed.",
-                false,
-            )
-        }
-    }
+    poll_and_issue_ciba(CibaPollIssueRequest {
+        ciba_service,
+        users,
+        token_service,
+        issuance,
+        client,
+        auth_req_id,
+        initial,
+        ciba_grant_key,
+        dpop_jkt,
+        mtls_x5t_s256,
+        client_assertion,
+        tenant_id: config.tenant_id,
+    })
+    .await
+    .into_http_response()
 }
 
 async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaResponse {
@@ -209,7 +176,6 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
         dpop_jkt,
         mtls_x5t_s256,
         client_assertion,
-        lease_expires_at,
         tenant_id,
     } = request;
     if let Err(error) = consume_token_client_assertion_with_authorization_service(
@@ -222,13 +188,9 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
         return materialize_ciba_response(super::super::token_client_assertion_error(error));
     }
     let ciba = match ciba_service
-        .poll_with_lease_deadline(
-            auth_req_id,
-            &client.client_id,
-            initial,
-            lease_expires_at,
-            || Utc::now().timestamp(),
-        )
+        .poll(auth_req_id, &client.client_id, initial, || {
+            Utc::now().timestamp()
+        })
         .await
     {
         Ok(CibaPollCommit::AuthorizationPending) => {
@@ -304,14 +266,6 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
             ));
         }
     };
-    if lease_expires_at.is_some_and(|deadline| Utc::now().timestamp() >= deadline) {
-        return materialize_ciba_response(oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "expired_token",
-            "CIBA conformance lease is expired.",
-            false,
-        ));
-    }
     let issue = ciba_token_issue(user.id(), subject, *ciba, dpop_jkt, mtls_x5t_s256);
     let response = issue_token_response_with_service_and_grant(
         issuance,

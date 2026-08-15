@@ -254,7 +254,6 @@ impl ClientSecretDigesterPort for FakeSecurity {
 struct FakeGuard {
     enabled: bool,
     rate_limit: Option<DynamicRegistrationRateLimitError>,
-    initial_access_lease: Result<Option<Uuid>, DynamicRegistrationDependencyError>,
 }
 
 impl DynamicRegistrationRequestGuard for FakeGuard {
@@ -271,14 +270,6 @@ impl DynamicRegistrationRequestGuard for FakeGuard {
         Box::pin(async move { result })
     }
 
-    fn conformance_lease_for_initial_access_token<'a>(
-        &'a self,
-        _token: &'a str,
-    ) -> DynamicRegistrationFuture<'a, Option<Uuid>> {
-        let result = self.initial_access_lease;
-        Box::pin(async move { result })
-    }
-
     fn audit(&self, _event: &'static str, _client: &OAuthClient, _source_ip: &str) {}
 }
 
@@ -287,14 +278,6 @@ fn endpoint(enabled: bool) -> DynamicRegistrationEndpoint {
 }
 
 fn endpoint_with_store(enabled: bool, store: FakeStore) -> DynamicRegistrationEndpoint {
-    endpoint_with_store_and_lease_lookup(enabled, store, Ok(None))
-}
-
-fn endpoint_with_store_and_lease_lookup(
-    enabled: bool,
-    store: FakeStore,
-    initial_access_lease: Result<Option<Uuid>, DynamicRegistrationDependencyError>,
-) -> DynamicRegistrationEndpoint {
     DynamicRegistrationEndpoint::new(
         DynamicRegistrationEndpointConfig {
             tenant: TenantContext::default_system(),
@@ -321,7 +304,6 @@ fn endpoint_with_store_and_lease_lookup(
         Arc::new(FakeGuard {
             enabled,
             rate_limit: None,
-            initial_access_lease,
         }),
     )
 }
@@ -468,11 +450,7 @@ async fn configured_initial_access_token_keeps_oauth_only_client_pkce_policy() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
-            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
-                true,
-                store.clone(),
-                Ok(None),
-            )))
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
             .configure(configure),
     )
     .await;
@@ -518,11 +496,7 @@ async fn configured_initial_access_token_applies_baseline_confidential_oidc_poli
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
-            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
-                true,
-                store.clone(),
-                Ok(None),
-            )))
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
             .configure(configure),
     )
     .await;
@@ -561,16 +535,11 @@ async fn configured_initial_access_token_applies_baseline_confidential_oidc_poli
 }
 
 #[actix_web::test]
-async fn configured_token_bound_to_an_active_lease_preserves_oidc_policy_and_ownership() {
-    let lease_id = Uuid::now_v7();
+async fn configured_token_preserves_oidc_policy_without_legacy_ownership() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
-            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
-                true,
-                store.clone(),
-                Ok(Some(lease_id)),
-            )))
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
             .configure(configure),
     )
     .await;
@@ -595,7 +564,7 @@ async fn configured_token_bound_to_an_active_lease_preserves_oidc_policy_and_own
             .conformance_lease_id
             .lock()
             .expect("conformance lease lock"),
-        Some(lease_id)
+        None
     );
     assert!(
         store
@@ -609,16 +578,11 @@ async fn configured_token_bound_to_an_active_lease_preserves_oidc_policy_and_own
 }
 
 #[actix_web::test]
-async fn leased_initial_access_token_binds_exception_and_update_preserves_both() {
-    let lease_id = Uuid::now_v7();
+async fn configured_initial_access_update_preserves_security_policy() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
-            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
-                true,
-                store.clone(),
-                Ok(Some(lease_id)),
-            )))
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
             .configure(configure),
     )
     .await;
@@ -627,7 +591,7 @@ async fn leased_initial_access_token_binds_exception_and_update_preserves_both()
         &service,
         test::TestRequest::post()
             .uri("/register")
-            .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
+            .insert_header((header::AUTHORIZATION, "Bearer initial-token"))
             .set_json(json!({
                 "grant_types": ["authorization_code"],
                 "redirect_uris": ["https://client.example/callback"],
@@ -644,7 +608,7 @@ async fn leased_initial_access_token_binds_exception_and_update_preserves_both()
             .conformance_lease_id
             .lock()
             .expect("conformance lease lock"),
-        Some(lease_id)
+        None
     );
     assert!(
         store
@@ -676,7 +640,7 @@ async fn leased_initial_access_token_binds_exception_and_update_preserves_both()
             .conformance_lease_id
             .lock()
             .expect("conformance lease lock"),
-        Some(lease_id)
+        None
     );
     assert!(
         store
@@ -690,16 +654,11 @@ async fn leased_initial_access_token_binds_exception_and_update_preserves_both()
 }
 
 #[actix_web::test]
-async fn leased_public_client_is_bound_without_confidential_pkce_exception() {
-    let lease_id = Uuid::now_v7();
+async fn configured_public_client_keeps_strict_pkce_policy_without_legacy_ownership() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
-            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
-                true,
-                store.clone(),
-                Ok(Some(lease_id)),
-            )))
+            .app_data(Data::new(endpoint_with_store(true, store.clone())))
             .configure(configure),
     )
     .await;
@@ -708,7 +667,7 @@ async fn leased_public_client_is_bound_without_confidential_pkce_exception() {
         &service,
         test::TestRequest::post()
             .uri("/register")
-            .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
+            .insert_header((header::AUTHORIZATION, "Bearer initial-token"))
             .set_json(json!({
                 "token_endpoint_auth_method": "none",
                 "redirect_uris": ["https://client.example/callback"]
@@ -723,7 +682,7 @@ async fn leased_public_client_is_bound_without_confidential_pkce_exception() {
             .conformance_lease_id
             .lock()
             .expect("conformance lease lock"),
-        Some(lease_id)
+        None
     );
     assert!(
         store
@@ -759,14 +718,10 @@ async fn unknown_leased_initial_access_token_remains_invalid() {
 }
 
 #[actix_web::test]
-async fn leased_initial_access_lookup_failure_fails_closed() {
+async fn non_configured_initial_access_token_is_rejected_without_dependency_lookup() {
     let service = test::init_service(
         App::new()
-            .app_data(Data::new(endpoint_with_store_and_lease_lookup(
-                true,
-                FakeStore::new(),
-                Err(DynamicRegistrationDependencyError::Unavailable),
-            )))
+            .app_data(Data::new(endpoint(true)))
             .configure(configure),
     )
     .await;
@@ -779,9 +734,9 @@ async fn leased_initial_access_lookup_failure_fails_closed() {
             .to_request(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body: Value = test::read_body_json(response).await;
-    assert_eq!(body["error"], "server_error");
+    assert_eq!(body["error"], "invalid_token");
 }
 
 #[actix_web::test]
@@ -1148,7 +1103,6 @@ async fn rate_limit_error_keeps_oauth_code_and_retry_after() {
         rate_limit: Some(DynamicRegistrationRateLimitError::Limited {
             retry_after_seconds: 30,
         }),
-        initial_access_lease: Ok(None),
     });
     let service = test::init_service(
         App::new()

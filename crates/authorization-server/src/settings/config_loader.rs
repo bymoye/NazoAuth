@@ -290,9 +290,9 @@ impl Settings {
         if enable_openid4vci_issuer && openid4vci_issuer_management_token.is_none() {
             bail!("OPENID4VCI_ISSUER_MANAGEMENT_TOKEN is required when the VCI issuer is enabled");
         }
-        // A standards-full installation may leave attestation trust empty at rest.
-        // Active conformance leases can supply public verification keys scoped to
-        // their own temporary clients; ordinary clients never inherit that trust.
+        // A standards-full installation may leave static attestation trust empty.
+        // Ordinary tenant resources can bind client-scoped trust policies at runtime;
+        // unbound clients never inherit another client's policy.
         if openid4vc_client_attestation_issuer.is_some()
             && openid4vc_client_attestation_jwks.is_none()
         {

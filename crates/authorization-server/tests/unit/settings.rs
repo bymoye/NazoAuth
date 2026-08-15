@@ -35,7 +35,7 @@ fn active_tenant_context_is_explicit_and_rejects_nil_identifiers() {
 }
 
 #[test]
-fn key_attestation_policy_can_defer_trust_to_a_scoped_conformance_lease() {
+fn key_attestation_policy_can_defer_trust_to_scoped_runtime_policy() {
     let config = ConfigSource::from_pairs_for_test([
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
         (

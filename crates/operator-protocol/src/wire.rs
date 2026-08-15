@@ -382,36 +382,21 @@ pub enum SecretBinding {
 #[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TaskOperation {
     MigrateApply,
-    /// Read the deployment-owned, machine-readable OIDF matrix descriptor.
-    ///
-    /// The descriptor is public capability metadata.  It must never contain
-    /// credentials, private keys, or generated client material.
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceMatrixDescribe,
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseCreate {
         profile: String,
         material_sha256: String,
-        /// SHA-256 of the per-run dynamic-registration initial-access token.
-        ///
-        /// The token itself is deliberately never part of the operator
-        /// protocol.  This digest is only used to bind a short-lived
-        /// conformance lease to the registration guard.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_registration_initial_access_token_sha256: Option<String>,
-        /// SHA-256 of the per-run CIBA automated-decision token.
-        ///
-        /// The token itself never crosses the operator protocol boundary.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ciba_automated_decision_token_sha256: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_material: Option<Openid4vcConformanceTrust>,
         ttl_seconds: u64,
     },
-    /// Atomically provisions a short-lived OIDF conformance environment.
-    ///
-    /// The signed task contains only non-secret onboarding commitments.  The
-    /// runtime reads the matching bundle from its fixed, privileged material
-    /// channel; bundle bytes (including applicant credentials) never cross
-    /// this protocol boundary.
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceOnboardingApply {
         profile: String,
         bundle_schema: u32,
@@ -420,10 +405,13 @@ pub enum TaskOperation {
         client_count: u32,
         ttl_seconds: u64,
     },
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseList,
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseRevoke {
         lease_id: String,
     },
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseCleanup,
     KeysList,
     KeysValidate,
@@ -621,7 +609,6 @@ pub struct ConformanceLeaseSummary {
     pub cleaned_at: Option<i64>,
 }
 
-/// Non-secret output of an atomic conformance onboarding transaction.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConformanceOnboardingSummary {

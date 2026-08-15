@@ -21,7 +21,6 @@ pub(super) struct CoreServices {
     pub(super) ciba_users: web::Data<nazo_postgres::UserRepository>,
     pub(super) ciba_config: web::Data<CibaHttpConfig>,
     pub(super) ciba_decision_bindings: web::Data<nazo_postgres::CibaDecisionBindingRepository>,
-    pub(super) conformance_leases: web::Data<nazo_postgres::ConformanceLeaseRepository>,
     pub(super) token_issuance_config: web::Data<TokenIssuanceConfig>,
     pub(super) device_service: web::Data<ServerDeviceGrantService>,
     pub(super) device_grants: web::Data<nazo_postgres::AuthorizationFlowRepository>,
@@ -92,7 +91,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let dynamic_registration_handles = web::Data::new(dynamic_registration_endpoint(
         dynamic_registration_config,
         nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
-        nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
         nazo_valkey::RateLimitStore::new(&valkey_connection),
         keyset.clone(),
         runtime_registry.clone(),
@@ -179,9 +177,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let ciba_decision_bindings = web::Data::new(nazo_postgres::CibaDecisionBindingRepository::new(
         diesel_db.clone(),
     ));
-    let conformance_leases = web::Data::new(nazo_postgres::ConformanceLeaseRepository::new(
-        diesel_db.clone(),
-    ));
     let token_issuance_config = web::Data::new(TokenIssuanceConfig::from(settings));
     let device_service = web::Data::new(ServerDeviceGrantService::new(
         nazo_valkey::DeviceStore::new(&valkey_connection),
@@ -242,7 +237,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         CibaTokenHandles::new(
             ciba_service.clone(),
             ciba_users.clone(),
-            conformance_leases.clone(),
             ciba_config.clone(),
         ),
         token_issuance_config.clone(),
@@ -268,7 +262,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         ciba_users,
         ciba_config,
         ciba_decision_bindings,
-        conformance_leases,
         token_issuance_config,
         device_service,
         device_grants,

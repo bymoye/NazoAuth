@@ -111,14 +111,12 @@ pub(super) fn verify(
         .issuer_trust_policy
         .validate(issuer, &leaf_der)
         .map_err(|_| CredentialTrustError::UntrustedIssuer)?;
-    crypto
-        .revocation_policy
-        .check_chain_with_conformance_trust(
-            Some(issuer),
-            &certificates,
-            Utc::now(),
-            &presentation.additional_trust_anchors,
-        )?;
+    crypto.revocation_policy.check_chain_with_scoped_trust(
+        Some(issuer),
+        &certificates,
+        Utc::now(),
+        &presentation.additional_trust_anchors,
+    )?;
     if credential
         .get("_sd_alg")
         .and_then(Value::as_str)

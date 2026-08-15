@@ -9,7 +9,6 @@ mod adapters;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
-mod conformance_lease;
 mod control_discovery;
 mod crypto;
 mod domain;

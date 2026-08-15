@@ -24,7 +24,6 @@ mod passkey;
 mod profile;
 mod rate_limit;
 
-pub(crate) use config_loader::credential_configurations_from_config;
 pub(crate) use email::{EmailDelivery, EmailSettings, SmtpEmailSettings, SmtpTlsMode};
 pub(crate) use federation::{
     ExternalLoginProvider, ExternalLoginProviderAdapter, FederationProviderRegistry,

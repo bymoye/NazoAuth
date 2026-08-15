@@ -29,8 +29,7 @@ pub(crate) struct CibaHttpConfig {
     pub(crate) client_ip_header_mode: ClientIpHeaderMode,
     pub(crate) default_audience: Box<str>,
     // CIBA currently composes a single default-tenant authorization flow.
-    // Keep this tenant explicit when checking conformance ownership so an
-    // active lease in another tenant can never open automated decisions.
+    // Keep the tenant explicit for ordinary decision-binding isolation.
     pub(crate) tenant_id: Uuid,
     pub(crate) auth_req_id_ttl_seconds: u64,
     pub(crate) poll_interval_seconds: u64,
@@ -68,7 +67,6 @@ impl From<&Settings> for CibaHttpConfig {
 pub(crate) struct CibaTokenHandles {
     pub(crate) service: Data<ServerCibaService>,
     pub(crate) users: Data<nazo_postgres::UserRepository>,
-    pub(crate) conformance_leases: Data<nazo_postgres::ConformanceLeaseRepository>,
     pub(crate) config: Data<CibaHttpConfig>,
 }
 
@@ -76,13 +74,11 @@ impl CibaTokenHandles {
     pub(crate) fn new(
         service: Data<ServerCibaService>,
         users: Data<nazo_postgres::UserRepository>,
-        conformance_leases: Data<nazo_postgres::ConformanceLeaseRepository>,
         config: Data<CibaHttpConfig>,
     ) -> Self {
         Self {
             service,
             users,
-            conformance_leases,
             config,
         }
     }

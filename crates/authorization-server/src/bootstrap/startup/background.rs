@@ -90,10 +90,6 @@ fn spawn_revocation_snapshot_reloader(
 /// Start tasks whose ownership is the process lifetime rather than an HTTP
 /// worker.  Keeping these calls here prevents the server factory from
 /// accidentally starting one copy per Actix worker.
-pub(super) fn spawn_database_cleanup(database: nazo_postgres::DbPool) {
-    crate::conformance_lease::spawn_cleanup(database);
-}
-
 pub(super) fn spawn_runtime_reconciler(runtime_modules: web::Data<RuntimeModules>) {
     RuntimeModules::spawn_reconciler(runtime_modules);
 }

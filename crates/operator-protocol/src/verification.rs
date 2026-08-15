@@ -2274,9 +2274,7 @@ fn is_conformance_sensitive_key(key: &str) -> bool {
     )
 }
 
-/// Validate the public trust material carried by an OpenID4VC conformance
-/// lease.  This is deliberately closed here, at the protocol boundary, so
-/// the runtime and controller cannot silently accept a different key shape.
+/// Validate legacy public trust material while old signed receipts remain readable.
 pub fn validate_openid4vc_conformance_trust(
     material: &Openid4vcConformanceTrust,
 ) -> Result<(), ProtocolError> {

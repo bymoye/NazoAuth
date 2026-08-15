@@ -139,11 +139,11 @@ pub trait CibaStateStorePort: Send + Sync {
 
     /// Creates a request while optionally enforcing an external capability
     /// deadline in the state-store atomic operation itself.
-    fn create_with_lease_deadline<'a>(
+    fn create_with_authorization_deadline<'a>(
         &'a self,
         auth_req_id: &'a str,
         state: &'a CibaRequestState,
-        _lease_expires_at: Option<i64>,
+        _authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         self.create(auth_req_id, state)
     }
@@ -158,14 +158,13 @@ pub trait CibaStateStorePort: Send + Sync {
     /// Replaces a request while optionally enforcing an external capability
     /// deadline in the state-store CAS itself. Implementations that do not
     /// have an external deadline-aware CAS can safely fall back to the normal
-    /// state transition; the PostgreSQL lease guard still serializes explicit
-    /// revocation with the transition.
-    fn replace_with_lease_deadline<'a>(
+    /// state transition.
+    fn replace_with_authorization_deadline<'a>(
         &'a self,
         auth_req_id: &'a str,
         version: &'a Self::Version,
         state: &'a CibaRequestState,
-        _lease_expires_at: Option<i64>,
+        _authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         self.replace(auth_req_id, version, state)
     }
@@ -178,11 +177,11 @@ pub trait CibaStateStorePort: Send + Sync {
 
     /// Deletes a request while optionally enforcing an external capability
     /// deadline in the state-store CAS itself.
-    fn delete_with_lease_deadline<'a>(
+    fn delete_with_authorization_deadline<'a>(
         &'a self,
         auth_req_id: &'a str,
         version: &'a Self::Version,
-        _lease_expires_at: Option<i64>,
+        _authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         self.delete(auth_req_id, version)
     }
@@ -298,14 +297,14 @@ where
     where
         F: FnMut() -> String,
     {
-        self.create_unique_with_lease_deadline(state, None, generate_id)
+        self.create_unique_with_authorization_deadline(state, None, generate_id)
             .await
     }
 
-    pub async fn create_unique_with_lease_deadline<F>(
+    pub async fn create_unique_with_authorization_deadline<F>(
         &self,
         state: &CibaRequestState,
-        lease_expires_at: Option<i64>,
+        authorization_deadline: Option<i64>,
         mut generate_id: F,
     ) -> Result<String, CibaCreateFailure>
     where
@@ -316,7 +315,7 @@ where
             let auth_req_id = generate_id();
             match self
                 .store
-                .create_with_lease_deadline(&auth_req_id, state, lease_expires_at)
+                .create_with_authorization_deadline(&auth_req_id, state, authorization_deadline)
                 .await
             {
                 Ok(CibaAtomicResult::Applied) => return Ok(auth_req_id),
@@ -409,7 +408,7 @@ where
                 CibaDecisionEvaluation::Expired => {
                     match self
                         .store
-                        .delete_with_lease_deadline(
+                        .delete_with_authorization_deadline(
                             auth_req_id,
                             &stored.version,
                             authorization_deadline,
@@ -426,7 +425,7 @@ where
                 CibaDecisionEvaluation::Commit(next) => {
                     match self
                         .store
-                        .replace_with_lease_deadline(
+                        .replace_with_authorization_deadline(
                             auth_req_id,
                             &stored.version,
                             &next,
@@ -452,31 +451,6 @@ where
         Err(CibaDecisionFailure::Contended)
     }
 
-    /// Compatibility wrapper for callers whose authorization is still
-    /// represented as a lease.
-    pub async fn decide_with_authentication_context_and_lease_deadline<F>(
-        &self,
-        auth_req_id: &str,
-        decision: CibaDecision,
-        expected_user_id: Option<Uuid>,
-        authentication_context: Option<CibaAuthenticationContext>,
-        lease_expires_at: Option<i64>,
-        current_time: F,
-    ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
-    where
-        F: FnMut() -> i64,
-    {
-        self.decide_with_authentication_context_and_deadline(
-            auth_req_id,
-            decision,
-            expected_user_id,
-            authentication_context,
-            lease_expires_at,
-            current_time,
-        )
-        .await
-    }
-
     pub async fn poll<F>(
         &self,
         auth_req_id: &str,
@@ -487,16 +461,22 @@ where
     where
         F: FnMut() -> i64,
     {
-        self.poll_with_lease_deadline(auth_req_id, expected_client_id, stored, None, current_time)
-            .await
+        self.poll_with_authorization_deadline(
+            auth_req_id,
+            expected_client_id,
+            stored,
+            None,
+            current_time,
+        )
+        .await
     }
 
-    pub async fn poll_with_lease_deadline<F>(
+    pub async fn poll_with_authorization_deadline<F>(
         &self,
         auth_req_id: &str,
         expected_client_id: &str,
         mut stored: CibaStoredRequest<S::Version>,
-        lease_expires_at: Option<i64>,
+        authorization_deadline: Option<i64>,
         mut current_time: F,
     ) -> Result<CibaPollCommit, CibaPollFailure>
     where
@@ -510,11 +490,11 @@ where
                 CibaPollTransition::AuthorizationPending(next) => {
                     match self
                         .store
-                        .replace_with_lease_deadline(
+                        .replace_with_authorization_deadline(
                             auth_req_id,
                             &stored.version,
                             &next,
-                            lease_expires_at,
+                            authorization_deadline,
                         )
                         .await
                         .map_err(CibaPollFailure::Storage)?
@@ -528,11 +508,11 @@ where
                 CibaPollTransition::SlowDown(next) => {
                     match self
                         .store
-                        .replace_with_lease_deadline(
+                        .replace_with_authorization_deadline(
                             auth_req_id,
                             &stored.version,
                             &next,
-                            lease_expires_at,
+                            authorization_deadline,
                         )
                         .await
                         .map_err(CibaPollFailure::Storage)?
@@ -544,7 +524,11 @@ where
                 CibaPollTransition::Approved => {
                     match self
                         .store
-                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
+                        .delete_with_authorization_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            authorization_deadline,
+                        )
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -557,7 +541,11 @@ where
                 CibaPollTransition::Denied => {
                     match self
                         .store
-                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
+                        .delete_with_authorization_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            authorization_deadline,
+                        )
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {
@@ -568,7 +556,11 @@ where
                 CibaPollTransition::Expired => {
                     match self
                         .store
-                        .delete_with_lease_deadline(auth_req_id, &stored.version, lease_expires_at)
+                        .delete_with_authorization_deadline(
+                            auth_req_id,
+                            &stored.version,
+                            authorization_deadline,
+                        )
                         .await
                         .map_err(CibaPollFailure::Storage)?
                     {

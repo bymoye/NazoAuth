@@ -96,7 +96,7 @@ struct RecordedCibaRequest {
 
 /// A deterministic state-store double for protocol tests that must not depend
 /// on a live Valkey server.  Its version check models the compare-and-set
-/// linearization point, while the outcome queue can inject a lease expiry or
+/// linearization point, while the outcome queue can inject an authorization expiry or
 /// one stale-version conflict at that point.
 #[derive(Clone)]
 struct RecordingCibaStore {
@@ -183,14 +183,14 @@ impl CibaStateStorePort for RecordingCibaStore {
         auth_req_id: &'a str,
         state: &'a CibaRequestState,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
-        self.create_with_lease_deadline(auth_req_id, state, None)
+        self.create_with_authorization_deadline(auth_req_id, state, None)
     }
 
-    fn create_with_lease_deadline<'a>(
+    fn create_with_authorization_deadline<'a>(
         &'a self,
         auth_req_id: &'a str,
         state: &'a CibaRequestState,
-        lease_expires_at: Option<i64>,
+        authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         let requests = Arc::clone(&self.requests);
         let calls = Arc::clone(&self.calls);
@@ -201,7 +201,7 @@ impl CibaStateStorePort for RecordingCibaStore {
             calls
                 .lock()
                 .unwrap()
-                .push(CibaStoreCall::Create(lease_expires_at));
+                .push(CibaStoreCall::Create(authorization_deadline));
             let outcome = outcomes
                 .lock()
                 .unwrap()
@@ -225,15 +225,15 @@ impl CibaStateStorePort for RecordingCibaStore {
         version: &'a Self::Version,
         state: &'a CibaRequestState,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
-        self.replace_with_lease_deadline(auth_req_id, version, state, None)
+        self.replace_with_authorization_deadline(auth_req_id, version, state, None)
     }
 
-    fn replace_with_lease_deadline<'a>(
+    fn replace_with_authorization_deadline<'a>(
         &'a self,
         auth_req_id: &'a str,
         version: &'a Self::Version,
         state: &'a CibaRequestState,
-        lease_expires_at: Option<i64>,
+        authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         let requests = Arc::clone(&self.requests);
         let calls = Arc::clone(&self.calls);
@@ -245,7 +245,7 @@ impl CibaStateStorePort for RecordingCibaStore {
             calls
                 .lock()
                 .unwrap()
-                .push(CibaStoreCall::Replace(lease_expires_at));
+                .push(CibaStoreCall::Replace(authorization_deadline));
             let mut requests = requests.lock().unwrap();
             let Some(stored) = requests.get_mut(&auth_req_id) else {
                 return Ok(CibaAtomicResult::Conflict);
@@ -272,14 +272,14 @@ impl CibaStateStorePort for RecordingCibaStore {
         auth_req_id: &'a str,
         version: &'a Self::Version,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
-        self.delete_with_lease_deadline(auth_req_id, version, None)
+        self.delete_with_authorization_deadline(auth_req_id, version, None)
     }
 
-    fn delete_with_lease_deadline<'a>(
+    fn delete_with_authorization_deadline<'a>(
         &'a self,
         auth_req_id: &'a str,
         version: &'a Self::Version,
-        lease_expires_at: Option<i64>,
+        authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         let requests = Arc::clone(&self.requests);
         let calls = Arc::clone(&self.calls);
@@ -290,7 +290,7 @@ impl CibaStateStorePort for RecordingCibaStore {
             calls
                 .lock()
                 .unwrap()
-                .push(CibaStoreCall::Delete(lease_expires_at));
+                .push(CibaStoreCall::Delete(authorization_deadline));
             let mut requests = requests.lock().unwrap();
             let Some(stored) = requests.get(&auth_req_id) else {
                 return Ok(CibaAtomicResult::Conflict);
@@ -425,26 +425,28 @@ fn approved_ciba_state_preserves_the_authenticated_session_context() {
 }
 
 #[actix_web::test]
-async fn ciba_creation_passes_lease_deadline_to_atomic_store() {
+async fn ciba_creation_passes_authorization_deadline_to_atomic_store() {
     let store = RecordingCibaStore::new(false);
     store.push_outcome(CibaAtomicResult::DeadlineElapsed);
     let state = pending_state(1_000);
     let service = CibaService::new(store.clone());
 
     let result = service
-        .create_unique_with_lease_deadline(&state, Some(900), || "lease-bound".to_owned())
+        .create_unique_with_authorization_deadline(&state, Some(900), || {
+            "deadline-bound".to_owned()
+        })
         .await;
 
     assert_eq!(result, Err(CibaCreateFailure::DeadlineElapsed));
     assert_eq!(store.calls(), vec![CibaStoreCall::Create(Some(900))]);
-    assert!(service.load("lease-bound").await.unwrap().is_none());
+    assert!(service.load("deadline-bound").await.unwrap().is_none());
 }
 
 #[actix_web::test]
 async fn ciba_decision_authorization_deadline_blocks_cas_without_mutating_pending_state() {
     let store = RecordingCibaStore::new(false);
     let state = pending_state(1_000);
-    let auth_req_id = "lease-decision-expired";
+    let auth_req_id = "authorization-decision-expired";
     store.seed(auth_req_id, state.clone());
     store.push_outcome(CibaAtomicResult::DeadlineElapsed);
     let service = CibaService::new(store.clone());
@@ -474,7 +476,7 @@ async fn expired_ciba_decision_uses_deadline_guarded_cleanup_delete() {
     let mut state = pending_state(1_000);
     state.expires_at = 1_000;
     state.retention_expires_at = 1_200;
-    let auth_req_id = "lease-decision-cleanup";
+    let auth_req_id = "authorization-decision-cleanup";
     store.seed(auth_req_id, state.clone());
     store.push_outcome(CibaAtomicResult::DeadlineElapsed);
     let service = CibaService::new(store.clone());
@@ -499,10 +501,10 @@ async fn expired_ciba_decision_uses_deadline_guarded_cleanup_delete() {
 }
 
 #[actix_web::test]
-async fn ciba_poll_lease_expiry_returns_expired_without_advancing_poll_state() {
+async fn ciba_poll_authorization_expiry_returns_expired_without_advancing_poll_state() {
     let store = RecordingCibaStore::new(false);
     let state = pending_state(1_000);
-    let auth_req_id = "lease-poll-expired";
+    let auth_req_id = "authorization-poll-expired";
     store.seed(auth_req_id, state.clone());
     let initial = CibaService::new(store.clone())
         .load(auth_req_id)
@@ -513,7 +515,9 @@ async fn ciba_poll_lease_expiry_returns_expired_without_advancing_poll_state() {
     let service = CibaService::new(store.clone());
 
     let result = service
-        .poll_with_lease_deadline(auth_req_id, &state.client_id, initial, Some(900), || 1_001)
+        .poll_with_authorization_deadline(auth_req_id, &state.client_id, initial, Some(900), || {
+            1_001
+        })
         .await;
 
     assert_eq!(result, Ok(CibaPollCommit::Expired));
@@ -525,11 +529,11 @@ async fn ciba_poll_lease_expiry_returns_expired_without_advancing_poll_state() {
 }
 
 #[actix_web::test]
-async fn approved_ciba_poll_lease_expiry_does_not_redeem_terminal_state() {
+async fn approved_ciba_poll_authorization_expiry_does_not_redeem_terminal_state() {
     let store = RecordingCibaStore::new(false);
     let mut state = pending_state(1_000);
     state.status = CibaStatus::Approved;
-    let auth_req_id = "lease-poll-terminal-expired";
+    let auth_req_id = "authorization-poll-terminal-expired";
     store.seed(auth_req_id, state.clone());
     let initial = CibaService::new(store.clone())
         .load(auth_req_id)
@@ -540,7 +544,9 @@ async fn approved_ciba_poll_lease_expiry_does_not_redeem_terminal_state() {
     let service = CibaService::new(store.clone());
 
     let result = service
-        .poll_with_lease_deadline(auth_req_id, &state.client_id, initial, Some(900), || 1_001)
+        .poll_with_authorization_deadline(auth_req_id, &state.client_id, initial, Some(900), || {
+            1_001
+        })
         .await;
 
     assert_eq!(result, Ok(CibaPollCommit::Expired));
@@ -555,7 +561,7 @@ async fn approved_ciba_poll_lease_expiry_does_not_redeem_terminal_state() {
 async fn concurrent_ciba_decisions_retry_stale_cas_and_commit_one_terminal_state() {
     let store = RecordingCibaStore::with_load_barrier();
     let state = pending_state(1_000);
-    let auth_req_id = "decision-lease-race";
+    let auth_req_id = "decision-authorization-race";
     store.seed(auth_req_id, state.clone());
     let service = CibaService::new(store.clone());
 
@@ -603,7 +609,7 @@ async fn concurrent_ciba_decisions_retry_stale_cas_and_commit_one_terminal_state
 }
 
 #[actix_web::test]
-async fn ciba_poll_client_mismatch_rejects_before_lease_cas() {
+async fn ciba_poll_client_mismatch_rejects_before_authorization_cas() {
     let store = RecordingCibaStore::new(false);
     let state = pending_state(1_000);
     let auth_req_id = "poll-client-mismatch";
@@ -616,7 +622,7 @@ async fn ciba_poll_client_mismatch_rejects_before_lease_cas() {
     let service = CibaService::new(store.clone());
 
     let result = service
-        .poll_with_lease_deadline(
+        .poll_with_authorization_deadline(
             auth_req_id,
             "different-client",
             initial,

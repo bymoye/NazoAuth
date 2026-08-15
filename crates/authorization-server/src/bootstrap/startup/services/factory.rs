@@ -125,7 +125,6 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
             .app_data(core.ciba_users.clone())
             .app_data(core.ciba_config.clone())
             .app_data(core.ciba_decision_bindings.clone())
-            .app_data(core.conformance_leases.clone())
             .app_data(core.token_issuance_config.clone())
             .app_data(core.device_service.clone())
             .app_data(core.device_grants.clone())
