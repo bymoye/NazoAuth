@@ -864,14 +864,6 @@ fn validate_tenant_resource_mappings(receipt: &TenantResourceReceipt) -> Result<
         .collect::<std::collections::BTreeSet<_>>();
     let mut seen = std::collections::BTreeSet::new();
     for mapping in &receipt.resource_mappings {
-        if !matches!(
-            mapping.kind,
-            TenantResourceKind::User | TenantResourceKind::OauthClient
-        ) {
-            return Err(ProtocolError::Policy(
-                "tenant resource mapping kind is not public",
-            ));
-        }
         validate_file_identifier(&mapping.resource_id)?;
         match mapping.kind {
             TenantResourceKind::User => validate_uuid(&mapping.public_id)?,

@@ -2636,6 +2636,7 @@ fn tenant_resource_contract_signs_and_binds_all_request_identity() {
     let mismatched_nonce = URL_SAFE_NO_PAD.encode(mismatched_raw_nonce);
     let mut capability = tenant_resource_capability();
     capability.nonce = expected_nonce.clone();
+    assert!(sign_tenant_resource_capability(&capability, "wrong-instance", &runtime_key).is_err());
     let compact_capability =
         sign_tenant_resource_capability(&capability, "instance-1", &runtime_key).unwrap();
     let capability_sha256 = compact_sha256(&compact_capability);
