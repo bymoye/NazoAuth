@@ -13,6 +13,10 @@ const MIGRATION_UP: &str =
     include_str!("../../../migrations/20260815000100_ciba_decision_bindings/up.sql");
 const MIGRATION_DOWN: &str =
     include_str!("../../../migrations/20260815000100_ciba_decision_bindings/down.sql");
+const SHARED_RUN_TOKEN_MIGRATION_UP: &str =
+    include_str!("../../../migrations/20260815000200_ciba_shared_run_token/up.sql");
+const SHARED_RUN_TOKEN_MIGRATION_DOWN: &str =
+    include_str!("../../../migrations/20260815000200_ciba_shared_run_token/down.sql");
 const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_REALM: &str = "00000000-0000-0000-0000-000000000002";
 const DEFAULT_ORGANIZATION: &str = "00000000-0000-0000-0000-000000000003";
@@ -489,6 +493,10 @@ async fn ciba_binding_down_refuses_persisted_resource_state() {
         .batch_execute(MIGRATION_UP)
         .await
         .expect("CIBA binding up migration should apply");
+    connection
+        .batch_execute(SHARED_RUN_TOKEN_MIGRATION_UP)
+        .await
+        .expect("shared run token migration should upgrade an existing binding schema");
     let tenant_id = Uuid::now_v7();
     let user_id = Uuid::now_v7();
     let client_id = Uuid::now_v7();
@@ -538,6 +546,10 @@ async fn ciba_binding_down_refuses_persisted_resource_state() {
         )
         .await
         .expect("explicit fixture cleanup should succeed");
+    connection
+        .batch_execute(SHARED_RUN_TOKEN_MIGRATION_DOWN)
+        .await
+        .expect("shared run token migration should roll back after explicit state cleanup");
     connection
         .batch_execute(MIGRATION_DOWN)
         .await
