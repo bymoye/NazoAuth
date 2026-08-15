@@ -182,7 +182,62 @@ async fn ordinary_ciba_binding_is_digest_fenced_claimed_and_revoked_linearly() {
             Err(error)
                 if error.downcast_ref::<RepositoryError>() == Some(&RepositoryError::Conflict)
         ),
-        "one tenant cannot have two active bindings for a token digest"
+        "one client cannot have two active bindings for a token digest"
+    );
+
+    let (second_user_id, second_oauth_client_id, second_public_client_id) =
+        insert_subject_and_client(&mut connection).await;
+    let second_generation = Uuid::now_v7();
+    let shared_token = connection
+        .transaction::<_, anyhow::Error, _>(async |connection| {
+            CibaDecisionBindingRepository::apply_on_connection(
+                connection,
+                NewCibaDecisionBinding {
+                    generation: second_generation,
+                    tenant_id,
+                    resource_id: "ciba-decision:second-client",
+                    resource_digest: &"d".repeat(64),
+                    oauth_client_id: second_oauth_client_id,
+                    user_id: second_user_id,
+                    token_sha256: &token_sha256,
+                    expires_at,
+                },
+            )
+            .await
+            .map_err(anyhow::Error::from)
+        })
+        .await
+        .expect("one run token may bind a second independently fenced client");
+    assert!(matches!(
+        shared_token,
+        CibaDecisionBindingWrite::Applied(binding)
+            if binding.generation == second_generation
+    ));
+    assert!(
+        CibaDecisionBindingRepository::lookup_active_on_connection(
+            &mut connection,
+            tenant_id,
+            &token_sha256,
+            &second_public_client_id,
+            second_user_id,
+            now,
+        )
+        .await
+        .expect("shared token lookup for the second client should succeed")
+        .is_some()
+    );
+    assert!(
+        CibaDecisionBindingRepository::lookup_active_on_connection(
+            &mut connection,
+            tenant_id,
+            &token_sha256,
+            &public_client_id,
+            second_user_id,
+            now,
+        )
+        .await
+        .expect("cross-client lookup should remain opaque")
+        .is_none()
     );
 
     let repository = CibaDecisionBindingRepository::new(pool.clone());
