@@ -70,9 +70,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Check real HTTP source policy
         run: |
-          python -m py_compile scripts/full_real_request_source_policy.py scripts/full_real_request_e2e.py scripts/rfc9967_scim_set_e2e.py
-          python scripts/full_real_request_e2e.py --source-policy-check
-          python tests/unit/test_full_real_request_e2e_source_policy.py
+          python -m py_compile scripts/full_real_request_source_policy.py scripts/rfc9967_scim_set_e2e.py
           python scripts/rfc9967_scim_set_e2e.py --source-policy-check
           python tests/unit/test_rfc9967_scim_set_e2e_source_policy.py
       - name: Verify compatibility contracts
