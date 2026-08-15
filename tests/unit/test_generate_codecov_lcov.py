@@ -29,9 +29,9 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
         self.assertIn('export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"', self.source)
         self.assertIn('export NAZO_TEST_DATABASE_URL="$WORKSPACE_DATABASE_URL"', self.source)
 
-    def test_workspace_state_switch_follows_e2e_and_precedes_workspace_tests(self) -> None:
-        e2e = self.source.index('"$PYTHON_BIN" scripts/full_real_request_e2e.py')
-        stop_server = self.source.index('SERVER_PID=""', e2e)
+    def test_workspace_state_switch_follows_server_shutdown_and_precedes_workspace_tests(self) -> None:
+        server_start = self.source.index('SERVER_PID=$!')
+        stop_server = self.source.index('SERVER_PID=""', server_start)
         switch_database = self.source.index(
             'export DATABASE_URL="$WORKSPACE_DATABASE_URL"', stop_server
         )
@@ -43,7 +43,7 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
             migrate_workspace,
         )
 
-        self.assertLess(e2e, stop_server)
+        self.assertLess(server_start, stop_server)
         self.assertLess(stop_server, switch_database)
         self.assertLess(switch_database, migrate_workspace)
         self.assertLess(migrate_workspace, run_workspace)
