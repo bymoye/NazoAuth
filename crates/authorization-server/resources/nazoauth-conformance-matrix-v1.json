@@ -973,7 +973,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -1020,7 +1019,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -1067,7 +1065,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -2956,7 +2953,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -3003,7 +2999,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -3050,7 +3045,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -4284,7 +4278,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -4540,7 +4533,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": true,
@@ -4808,7 +4800,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -5076,7 +5067,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "backchannel_logout_session_required": false,
@@ -5395,7 +5385,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -5446,7 +5435,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -5756,7 +5744,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -5815,7 +5802,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -6135,7 +6121,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -6186,7 +6171,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -6498,7 +6482,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -6557,7 +6540,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -7781,7 +7763,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -7832,7 +7813,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -9037,7 +9017,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -9086,7 +9065,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -10289,7 +10267,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -10340,7 +10317,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -11545,7 +11521,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -11594,7 +11569,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -12797,7 +12771,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -12856,7 +12829,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -14069,7 +14041,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -14126,7 +14097,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -15337,7 +15307,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -15396,7 +15365,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -16609,7 +16577,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -16666,7 +16633,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -17893,7 +17859,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -17944,7 +17909,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -19155,7 +19119,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": "PS256",
@@ -19206,7 +19169,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": "PS256",
@@ -20421,7 +20383,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -20468,7 +20429,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -21668,7 +21628,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -21715,7 +21674,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -22915,7 +22873,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -22970,7 +22927,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -24178,7 +24134,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,
@@ -24233,7 +24188,6 @@
                 "allowed_audiences": [
                   "{{target.url./fapi/resource}}",
                   "{{target.url./userinfo}}",
-                  "{{target.url./fapi/resource}}",
                   "resource://default"
                 ],
                 "authorization_signed_response_alg": null,

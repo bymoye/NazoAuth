@@ -119,8 +119,7 @@ legacy dual-read.
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
-| `CIBA_AUTOMATED_DECISION_MODE` | `disabled` | Automated decisions are closed by default. `nazoauthctl conformance lease create` can temporarily admit the OIDF GET/query endpoint for clients owned by that exact `oidc-fapi-ciba` lease and its independently generated token digest; lease expiry or revocation closes it immediately. Explicit `header` (POST + `Authorization: Bearer`) and `query` (legacy GET/query) modes retain their static transport behavior and are intended only for isolated conformance deployments. |
-| `CIBA_AUTOMATED_DECISION_TOKEN` | generated only for explicit static mode | 32+ byte static secret required only by explicit `header`/`query` modes. The default lease-gated OIDF path does not read it. Prefer `CIBA_AUTOMATED_DECISION_TOKEN_FILE` when an isolated deployment explicitly selects a static mode. |
+| `CIBA_AUTOMATED_DECISION_MODE` | `disabled` | Selects only the automated-decision HTTP transport: `disabled` keeps the POST/query compatibility endpoint, `header` accepts POST plus `Authorization: Bearer`, and `query` retains the GET/query compatibility endpoint. Every mode authorizes requests through an active tenant-scoped `CibaDecisionBinding`; no global decision token is configured on the server. |
 | `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | generated under `DATA_DIR/secrets` | Current 32-byte base64url key and derived version id for TOTP seed envelope encryption. Prefer `MFA_TOTP_ENCRYPTION_KEY_FILE` when importing a controlled existing key. |
 | `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional previous key pair accepted only while rotating TOTP envelopes; startup re-wraps legacy/previous rows before serving traffic, so retain it until that startup succeeds. |
 | `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` | Independent current 32-byte base64url key and derived id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`; file injection remains available for controlled rotation. Missing or malformed pairs fail startup. |
@@ -361,8 +360,46 @@ the issuer and mTLS endpoint hosts. On Unix,
 the private key must be a regular file with no group or other permission bits.
 Route the RFC 8705 mTLS endpoint aliases to `TLS_BIND`; direct mode rejects all
 proxy trust settings and derives client certificate identity only from the TLS
-session. Certificate/SNI selection and live rotation remain deployment-restart
-operations until the tenant transport snapshot work is complete.
+  session. The process revalidates the server certificate chain and private key
+  as one immutable TLS identity
+generation every `TLS_RELOAD_INTERVAL_SECONDS` (default `5`, allowed `1..=3600`).
+A candidate is published only after a non-empty parseable certificate chain,
+  leaf/private-key match, current leaf validity, endpoint names, file bounds, and key
+permissions pass. Invalid or partially installed material leaves the previous
+generation active. New handshakes use the published generation; existing
+connections keep the generation they accepted. Server-side TLS resumption is
+  disabled so a new connection cannot bypass a server identity change. The
+  client-CA bundle is validated and fixed at startup; changing client trust
+  currently requires a controlled restart so one handshake cannot combine
+  server identity and client trust from different generations.
+The deployment owner remains responsible for crash-safe staged file activation,
+public health verification, and restoring the previous files after a failed
+rollout. Multi-identity SNI selection remains part of the tenant transport
+snapshot work; an unknown DNS SNI is rejected instead of falling back to the
+single configured identity.
+
+Tenant resource management is an optional machine control-plane surface,
+independent from browser `/admin`, SCIM bearer authentication, and any OIDF
+Suite integration. Set `TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE` to a
+privileged regular file containing the controller Ed25519 public key as
+unpadded base64url. When it is absent, the machine resource routes are not
+registered. When it is present but unreadable or invalid, startup fails
+closed. The instance identity signs short-lived capability and operation
+receipt JWS values; the pinned controller key verifies short-lived tasks.
+Resource mutations, audit-chain append, revision CAS, and receipt persistence
+commit in one PostgreSQL transaction. Rotate the controller trust anchor with
+a controlled restart; this initial boundary deliberately has no remote key
+rotation endpoint.
+
+An active machine-resource binding is the sole authority for its managed user,
+OAuth client, mTLS anchor, or OpenID4VC dataset. Ordinary admin/SCIM writes may
+not change an actively bound user or client; the database rejects such drift.
+Resource identities are immutable version fences: changing payload content
+requires an explicit digest-fenced Revoke followed by Apply (normally with a
+new resource identity), and clearing the desired set uses explicit Revoke.
+Successful user/client revocation disables the resource, removes grants and
+refresh credentials, and blacklists every still-live OAuth and OpenID4VC access
+token owned by the resource in the same transaction.
 
 `EMAIL_SMTP_TLS` accepts only `starttls`, `implicit`, or `none`. The `none`
 mode is rejected unless the issuer is loopback HTTP and no SMTP credentials

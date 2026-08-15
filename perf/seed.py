@@ -34,7 +34,7 @@ MTLS_THUMBPRINT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 REDIRECT_URI = "https://client.example/callback"
 CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 CIBA_GRANT_TYPE = "urn:openid:params:grant-type:ciba"
-CIBA_AUTOMATED_DECISION_TOKEN = "perf-ciba-automated-decision-token-2026"
+CIBA_DECISION_BINDING_TOKEN = "perf-ciba-automated-decision-token-2026"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))
 
 
@@ -519,7 +519,7 @@ def seed() -> None:
             "mtls": "perf-mtls-client",
             "ciba": "perf-ciba-private-jwt-dpop-client",
         },
-        "ciba_automated_decision_token": CIBA_AUTOMATED_DECISION_TOKEN,
+        "ciba_automated_decision_token": CIBA_DECISION_BINDING_TOKEN,
         "dpop_jkt": dpop_jkt,
         "private_jwk": rsa_private_jwk(rsa_key, rsa_kid),
         "ps256_private_jwk": rsa_private_jwk(rsa_key, ps256_kid, "PS256"),

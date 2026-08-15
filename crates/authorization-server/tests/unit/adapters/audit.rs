@@ -262,7 +262,7 @@ fn high_impact_state_changes_are_guarded_by_required_audit_intent() {
     let ciba_intent = source_body(
         ciba,
         "async fn prepare_ciba_decision_intent(",
-        "async fn set_ciba_request_decision_with_lease(",
+        "async fn set_ciba_request_decision(",
     );
     assert_source_order(
         ciba_intent,
@@ -275,8 +275,13 @@ fn high_impact_state_changes_are_guarded_by_required_audit_intent() {
         "pub(super) fn ciba_automated_decision_auth_req_id(",
     );
     assert!(
-        ciba_automated.contains("set_ciba_request_decision_with_lease("),
-        "automated CIBA decisions must use the lease-guarded mutation path"
+        ciba_automated.contains("set_ciba_request_decision_with_binding("),
+        "automated CIBA decisions must use the resource-binding mutation path"
+    );
+    assert_source_order(
+        ciba_automated,
+        ".claim_active(",
+        "set_ciba_request_decision_with_binding(",
     );
     let ciba_browser = source_body(
         ciba,
@@ -284,18 +289,23 @@ fn high_impact_state_changes_are_guarded_by_required_audit_intent() {
         "async fn prepare_ciba_decision_intent(",
     );
     assert!(
-        ciba_browser.contains("set_ciba_request_decision_with_lease("),
-        "browser CIBA decisions must use the lease-guarded mutation path"
+        ciba_browser.contains("set_ciba_request_decision("),
+        "browser CIBA decisions must use the ordinary user mutation path"
     );
-    let ciba_lease = source_body(
+    let ciba_binding = source_body(
         ciba,
-        "async fn set_ciba_request_decision_with_lease(",
+        "async fn set_ciba_request_decision_with_binding(",
         "pub(super) fn complete_ciba_decision(",
     );
     assert_source_order(
-        ciba_lease,
+        ciba_binding,
         "prepare_ciba_decision_intent(",
-        ".with_active_ciba_decision(",
+        ".decide_with_authentication_context_and_deadline(",
+    );
+    assert_source_order(
+        ciba_binding,
+        ".decide_with_authentication_context_and_deadline(",
+        ".release_claim(",
     );
     assert!(ciba.contains("CIBA decision audit could not be persisted."));
 

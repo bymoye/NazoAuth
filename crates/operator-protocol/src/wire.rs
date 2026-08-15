@@ -35,6 +35,209 @@ pub struct TaskEnvelope {
     pub operation: TaskOperation,
 }
 
+/// Closed operation names for the tenant resource management contract.
+///
+/// This is deliberately separate from [`TaskOperation`].  The existing
+/// operator task protocol is consumed by older controllers; adding variants
+/// there would make those consumers silently accept a capability they do not
+/// understand.  Tenant resource management therefore has its own signed
+/// envelope and a closed operation set.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TenantResourceOperation {
+    Apply,
+    Enumerate,
+    Revoke,
+}
+
+/// Closed kinds understood by the tenant resource provider.  Adding a kind is
+/// a protocol change: older runtimes must reject it rather than treating an
+/// unknown resource as an opaque object.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TenantResourceKind {
+    CibaDecisionBinding,
+    OauthClient,
+    MtlsTrustAnchor,
+    Openid4vcDataset,
+    Openid4vcTrustPolicy,
+    User,
+}
+
+/// Resource identity and its public manifest digest.  The digest is the
+/// provider's canonical resource representation digest; no resource payload
+/// or endpoint is carried in this protocol.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceIdentity {
+    pub kind: TenantResourceKind,
+    pub resource_id: String,
+    pub digest: String,
+}
+
+/// Public identity mapping returned for resources that are wired into the
+/// caller's tenant.  Only User and OauthClient mappings are defined by this
+/// protocol; other resource kinds must never expose a public identifier.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceMapping {
+    pub kind: TenantResourceKind,
+    pub resource_id: String,
+    pub public_id: String,
+}
+
+/// Bounded selector used by enumerate requests.  A selector is typed so a
+/// client resource ID cannot be interpreted as a different provider kind.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceSelector {
+    pub kind: TenantResourceKind,
+    pub resource_id: String,
+}
+
+/// Operation-specific payload for a tenant resource task.
+///
+/// `Apply` carries the desired resource identities and digests.  `Enumerate`
+/// may carry an empty selector (list all resources) or a bounded set of typed
+/// selectors.  `Revoke` requires at least one version-fenced resource identity
+/// (including its digest).  Validation
+/// rejects a payload whose variant does not match the top-level operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TenantResourceTaskPayload {
+    Apply {
+        resources: Vec<TenantResourceIdentity>,
+    },
+    Enumerate {
+        selectors: Vec<TenantResourceSelector>,
+    },
+    Revoke {
+        resources: Vec<TenantResourceIdentity>,
+    },
+}
+
+/// Signed, deployment- and tenant-bound machine contract for resource
+/// management.  It intentionally contains no OIDF/Suite, lease, endpoint, or
+/// database semantics.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceTask {
+    pub ver: u32,
+    pub iss: String,
+    pub aud: String,
+    pub jti: String,
+    pub iat: i64,
+    pub nbf: i64,
+    pub exp: i64,
+    pub deployment_id: String,
+    /// Canonical UUID string for the tenant scope.
+    pub tenant_id: String,
+    /// JTI and compact-JWS digest of the freshness-verified capability used
+    /// to authorize this task.
+    pub capability_jti: String,
+    pub capability_sha256: String,
+    pub actor: Actor,
+    /// CAS revision expected by the provider.  Zero is the initial state.
+    pub expected_revision: u64,
+    pub change_set_id: String,
+    /// SHA-256 of the external raw Apply-manifest bytes.  Those bytes are
+    /// intentionally not carried in this wire contract.
+    pub change_set_sha256: String,
+    pub operation: TenantResourceOperation,
+    pub payload: TenantResourceTaskPayload,
+    /// SHA-256 of the capability's current external canonical resource
+    /// manifest.  Every operation is fenced against this baseline.
+    pub baseline_manifest_sha256: String,
+    /// SHA-256 of the canonical digest computed from the complete final active
+    /// `TenantResourceIdentity` set expected after the operation.  Apply and
+    /// Revoke may change it; Enumerate must retain the baseline.  Manifest
+    /// bytes remain outside this wire contract.
+    pub resource_manifest_sha256: String,
+}
+
+/// Signed capability discovery for the tenant resource contract.
+///
+/// `embedded` and `runtime_instance_id` bind the capability to the runtime
+/// build that emitted it.  `issued_at`/`expires_at` make discovery replay
+/// bounded, independently of task freshness.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceCapability {
+    pub ver: u32,
+    pub capability_version: u32,
+    /// Per-discovery operation identifier and challenge nonce; these values
+    /// prevent a valid capability from being replayed across discovery calls.
+    pub jti: String,
+    pub nonce: String,
+    pub deployment_id: String,
+    pub tenant_id: String,
+    pub runtime_instance_id: String,
+    pub issuer: String,
+    pub instance_key_id: String,
+    pub embedded: EmbeddedIdentity,
+    /// Current provider revision at capability discovery; zero is the
+    /// initial state.
+    pub revision: u64,
+    /// SHA-256 of the runtime's external canonical resource manifest at
+    /// `revision`; the manifest itself is not part of discovery.
+    pub resource_manifest_sha256: String,
+    pub resource_kinds: Vec<TenantResourceKind>,
+    pub actions: Vec<TenantResourceOperation>,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+/// Compatibility spelling for callers that use the discovery terminology.
+pub type TenantResourceCapabilityStatement = TenantResourceCapability;
+
+/// Closed receipt outcome.  A failed outcome never carries resource
+/// identities and must retain the expected revision, so it cannot be read as
+/// evidence that a mutation succeeded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TenantResourceOutcome {
+    Succeeded,
+    Failed { code: String },
+}
+
+/// Signed receipt for a tenant resource task.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantResourceReceipt {
+    pub ver: u32,
+    pub iss: String,
+    pub aud: String,
+    pub jti: String,
+    pub request_sha256: String,
+    pub deployment_id: String,
+    pub tenant_id: String,
+    pub capability_jti: String,
+    pub capability_sha256: String,
+    pub actor: Actor,
+    pub change_set_id: String,
+    /// SHA-256 of the external raw Apply-manifest bytes echoed from the task.
+    pub change_set_sha256: String,
+    pub operation: TenantResourceOperation,
+    pub expected_revision: u64,
+    pub revision: u64,
+    pub outcome: TenantResourceOutcome,
+    pub resources: Vec<TenantResourceIdentity>,
+    /// Apply-only public identities used by CTL applicant/client wiring.
+    /// Enumerate, Revoke, and Failed receipts must leave this empty.
+    pub resource_mappings: Vec<TenantResourceMapping>,
+    /// Baseline manifest echoed from the task/capability fence.
+    pub baseline_manifest_sha256: String,
+    /// Canonical digest of the complete final active identity set echoed from
+    /// the task.  Apply and Revoke may differ from the baseline; Enumerate must
+    /// equal it.
+    pub resource_manifest_sha256: String,
+    pub started_at: i64,
+    pub completed_at: i64,
+    pub exp: i64,
+    pub audit_sequence: u64,
+    pub audit_previous_sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Actor {
@@ -179,36 +382,21 @@ pub enum SecretBinding {
 #[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TaskOperation {
     MigrateApply,
-    /// Read the deployment-owned, machine-readable OIDF matrix descriptor.
-    ///
-    /// The descriptor is public capability metadata.  It must never contain
-    /// credentials, private keys, or generated client material.
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceMatrixDescribe,
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseCreate {
         profile: String,
         material_sha256: String,
-        /// SHA-256 of the per-run dynamic-registration initial-access token.
-        ///
-        /// The token itself is deliberately never part of the operator
-        /// protocol.  This digest is only used to bind a short-lived
-        /// conformance lease to the registration guard.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_registration_initial_access_token_sha256: Option<String>,
-        /// SHA-256 of the per-run CIBA automated-decision token.
-        ///
-        /// The token itself never crosses the operator protocol boundary.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ciba_automated_decision_token_sha256: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         public_material: Option<Openid4vcConformanceTrust>,
         ttl_seconds: u64,
     },
-    /// Atomically provisions a short-lived OIDF conformance environment.
-    ///
-    /// The signed task contains only non-secret onboarding commitments.  The
-    /// runtime reads the matching bundle from its fixed, privileged material
-    /// channel; bundle bytes (including applicant credentials) never cross
-    /// this protocol boundary.
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceOnboardingApply {
         profile: String,
         bundle_schema: u32,
@@ -217,10 +405,13 @@ pub enum TaskOperation {
         client_count: u32,
         ttl_seconds: u64,
     },
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseList,
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseRevoke {
         lease_id: String,
     },
+    /// Legacy wire compatibility only. Runtimes reject this operation.
     ConformanceLeaseCleanup,
     KeysList,
     KeysValidate,
@@ -244,6 +435,22 @@ pub struct Openid4vcConformanceTrust {
     pub client_attestation_jwks: serde_json::Value,
     pub key_attestation_jwks: serde_json::Value,
     pub credential_trust_anchor_pem: String,
+}
+
+/// Public trust material for the ordinary OpenID4VC provider.
+///
+/// This is intentionally independent from the conformance lease payload above:
+/// it carries only the public trust policy needed by a production provider and
+/// has no suite, lease, or conformance-specific fields.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vcTrustPolicy {
+    pub schema: u32,
+    pub client_attestation_issuer: String,
+    pub client_attestation_jwks: serde_json::Value,
+    pub key_attestation_jwks: serde_json::Value,
+    pub credential_trust_anchor_pem: String,
+    pub wallet_authorization_origins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -402,7 +609,6 @@ pub struct ConformanceLeaseSummary {
     pub cleaned_at: Option<i64>,
 }
 
-/// Non-secret output of an atomic conformance onboarding transaction.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConformanceOnboardingSummary {

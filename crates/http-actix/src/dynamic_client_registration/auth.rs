@@ -4,7 +4,6 @@ use actix_web::{
 };
 use nazo_auth::{DynamicRegistrationDependencyError, DynamicRegistrationSecretPort, OAuthClient};
 use serde_json::Value;
-use uuid::Uuid;
 
 use super::{
     ip::client_ip_with_config,
@@ -13,59 +12,25 @@ use super::{
 };
 use crate::{authorization_error_response, oauth_error};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DynamicRegistrationInitialAccessGrant {
-    Configured,
-    ConformanceLease(Uuid),
-}
-
-impl DynamicRegistrationInitialAccessGrant {
-    pub(super) fn conformance_lease_id(self) -> Option<Uuid> {
-        match self {
-            Self::Configured => None,
-            Self::ConformanceLease(lease_id) => Some(lease_id),
-        }
-    }
-}
-
 pub(super) async fn authorize_initial_access(
     endpoint: &DynamicRegistrationEndpoint,
     request: &HttpRequest,
-) -> Result<DynamicRegistrationInitialAccessGrant, HttpResponse> {
+) -> Result<(), HttpResponse> {
     let authorization_header = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let Some(actual) = bearer_token(request) else {
+    let Some(_actual) = bearer_token(request) else {
         return Err(initial_access_denied());
     };
-    // A deployment token can also be activated as a lease-bound conformance
-    // token. Resolve that narrower ownership first so clients remain tied to
-    // lease cleanup and policy; falling through to the configured grant would
-    // silently create durable, unowned clients.
-    match endpoint
-        .request_guard
-        .conformance_lease_for_initial_access_token(actual)
-        .await
-    {
-        Ok(Some(lease_id)) => Ok(DynamicRegistrationInitialAccessGrant::ConformanceLease(
-            lease_id,
-        )),
-        Ok(None)
-            if initial_access_token_authorized(
-                endpoint.security.registration_tokens.as_ref(),
-                authorization_header,
-                endpoint.config.initial_access_token.as_deref(),
-            ) =>
-        {
-            Ok(DynamicRegistrationInitialAccessGrant::Configured)
-        }
-        Ok(None) => Err(initial_access_denied()),
-        Err(_) => Err(oauth_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server_error",
-            "Dynamic client registration authentication failed.",
-        )),
+    if initial_access_token_authorized(
+        endpoint.security.registration_tokens.as_ref(),
+        authorization_header,
+        endpoint.config.initial_access_token.as_deref(),
+    ) {
+        Ok(())
+    } else {
+        Err(initial_access_denied())
     }
 }
 

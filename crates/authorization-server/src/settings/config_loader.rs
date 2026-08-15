@@ -149,25 +149,7 @@ impl Settings {
         if ciba_poll_interval_seconds >= ciba_auth_req_id_ttl_seconds {
             bail!("CIBA_POLL_INTERVAL_SECONDS must be less than CIBA_AUTH_REQ_ID_TTL_SECONDS");
         }
-        let ciba_automated_decision_token = config.optional_string("CIBA_AUTOMATED_DECISION_TOKEN");
-        if let Some(token) = &ciba_automated_decision_token
-            && token.len() < 32
-        {
-            bail!("CIBA_AUTOMATED_DECISION_TOKEN must be at least 32 bytes when set");
-        }
         let ciba_automated_decision_mode = CibaAutomatedDecisionMode::from_config(config)?;
-        // In the default mode the token is the second factor for the
-        // request-scoped conformance-lease gate. It remains optional so
-        // ordinary deployments can leave the endpoint fully closed.
-        if matches!(
-            ciba_automated_decision_mode,
-            CibaAutomatedDecisionMode::Header | CibaAutomatedDecisionMode::QueryParameter
-        ) && ciba_automated_decision_token.is_none()
-        {
-            bail!(
-                "CIBA_AUTOMATED_DECISION_TOKEN is required when CIBA_AUTOMATED_DECISION_MODE is enabled"
-            )
-        }
         let ciba_notification_private_origins = config
             .optional_string("CIBA_NOTIFICATION_PRIVATE_ORIGINS")
             .map(|value| {
@@ -308,9 +290,9 @@ impl Settings {
         if enable_openid4vci_issuer && openid4vci_issuer_management_token.is_none() {
             bail!("OPENID4VCI_ISSUER_MANAGEMENT_TOKEN is required when the VCI issuer is enabled");
         }
-        // A standards-full installation may leave attestation trust empty at rest.
-        // Active conformance leases can supply public verification keys scoped to
-        // their own temporary clients; ordinary clients never inherit that trust.
+        // A standards-full installation may leave static attestation trust empty.
+        // Ordinary tenant resources can bind client-scoped trust policies at runtime;
+        // unbound clients never inherit another client's policy.
         if openid4vc_client_attestation_issuer.is_some()
             && openid4vc_client_attestation_jwks.is_none()
         {
@@ -558,7 +540,6 @@ impl Settings {
             ciba: CibaSettings {
                 ciba_auth_req_id_ttl_seconds,
                 ciba_poll_interval_seconds,
-                ciba_automated_decision_token,
                 ciba_automated_decision_mode,
                 ciba_notification_private_origins,
             },

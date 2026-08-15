@@ -2,11 +2,9 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use nazo_auth::{
     AdminClientCryptoPort, ClientSecretDigesterPort, DynamicRegistrationClientStore,
-    DynamicRegistrationFuture, DynamicRegistrationSecretPort, OAuthClient,
-    SectorIdentifierResolverPort,
+    DynamicRegistrationSecretPort, OAuthClient, SectorIdentifierResolverPort,
 };
 use serde_json::Value;
-use uuid::Uuid;
 
 use super::ip::{ClientIpConfig, ClientIpHeaderMode, IpCidr};
 
@@ -30,14 +28,6 @@ pub trait DynamicRegistrationRequestGuard: Send + Sync {
         &'a self,
         source_ip: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), DynamicRegistrationRateLimitError>> + Send + 'a>>;
-
-    /// Resolves a non-configured initial access token to one effective
-    /// conformance lease. Implementations must derive and compare a
-    /// non-reversible digest rather than persist or log the bearer token.
-    fn conformance_lease_for_initial_access_token<'a>(
-        &'a self,
-        token: &'a str,
-    ) -> DynamicRegistrationFuture<'a, Option<Uuid>>;
 
     fn audit(&self, event: &'static str, client: &OAuthClient, source_ip: &str);
 }

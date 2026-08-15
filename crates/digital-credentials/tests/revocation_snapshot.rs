@@ -94,7 +94,7 @@ fn required_policy_rejects_an_unknown_issuer_or_certificate() {
 }
 
 #[test]
-fn required_policy_accepts_unknown_certificate_only_for_lease_scoped_conformance_trust() {
+fn required_policy_accepts_unknown_certificate_only_for_explicit_scoped_trust() {
     let certificate = certificate_der();
     let snapshot = Arc::new(snapshot(
         &certificate_der(),
@@ -102,7 +102,7 @@ fn required_policy_accepts_unknown_certificate_only_for_lease_scoped_conformance
     ));
 
     CertificateRevocationPolicy::required(snapshot)
-        .check_chain_with_conformance_trust(
+        .check_chain_with_scoped_trust(
             Some(ISSUER),
             &[certificate],
             Utc::now(),

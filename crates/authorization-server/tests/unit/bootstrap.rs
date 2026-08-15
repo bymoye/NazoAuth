@@ -90,6 +90,30 @@ fn write_test_tls_identity(root: &std::path::Path) -> (String, String, String) {
     )
 }
 
+fn direct_tls_config(material: &TestTlsMaterial) -> ConfigSource {
+    ConfigSource::from_owned_pairs_for_test([
+        ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "test-client-secret-pepper-that-is-long-enough".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        ("TLS_BIND".to_owned(), "127.0.0.1:0".to_owned()),
+        (
+            "TLS_CERTIFICATE_FILE".to_owned(),
+            material.certificate_path.clone(),
+        ),
+        (
+            "TLS_PRIVATE_KEY_FILE".to_owned(),
+            material.private_key_path.clone(),
+        ),
+        (
+            "TLS_CLIENT_CA_FILE".to_owned(),
+            material.client_ca_path.clone(),
+        ),
+    ])
+}
+
 #[test]
 fn production_bootstrap_only_publishes_focused_application_data() {
     let source = include_str!("../../src/bootstrap/mod.rs");
@@ -225,6 +249,25 @@ fn direct_tls_listener_is_disabled_by_default_and_requires_complete_identity() {
         error.to_string(),
         "TLS_BIND is required for direct-tls transport"
     );
+
+    let colliding = ConfigSource::from_pairs_for_test([
+        ("BIND", "127.0.0.1:8443"),
+        ("PUBLIC_BASE_URL", "https://localhost"),
+        (
+            "CLIENT_SECRET_PEPPER",
+            "test-client-secret-pepper-that-is-long-enough",
+        ),
+        ("TRANSPORT_MODE", "direct-tls"),
+        ("TLS_BIND", "127.0.0.1:8443"),
+    ]);
+    let colliding_settings = Settings::from_config(&colliding).unwrap();
+    assert_eq!(
+        direct_tls_listeners(&colliding, &colliding_settings)
+            .err()
+            .unwrap()
+            .to_string(),
+        "BIND and TLS_BIND must use different listener addresses"
+    );
 }
 
 #[test]
@@ -247,6 +290,197 @@ fn direct_tls_listener_loads_a_complete_mutual_tls_identity() {
     let settings = Settings::from_config(&config).unwrap();
     let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
     assert_eq!(listeners.mtls_bind, "127.0.0.1:0".parse().unwrap());
+    let debug = format!("{:?}", listeners.snapshots);
+    assert!(debug.contains("DirectTlsSnapshotStore"));
+    assert!(debug.contains("material_sha256"));
+    assert!(
+        listeners
+            .snapshots
+            .server_key_for(Some("localhost"))
+            .is_some()
+    );
+    assert!(
+        listeners
+            .snapshots
+            .server_key_for(Some("unknown.test"))
+            .is_none()
+    );
+    assert!(listeners.snapshots.server_key_for(None).is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn direct_tls_listener_rejects_malformed_or_unsafe_material_and_reload_intervals() {
+    let malformed_key_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-invalid-key-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&malformed_key_root).unwrap();
+    let malformed_key = write_test_tls_material(&malformed_key_root);
+    std::fs::write(&malformed_key.private_key_path, "not a PEM private key").unwrap();
+    let config = direct_tls_config(&malformed_key);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("failed to parse TLS private key")
+    );
+
+    let malformed_ca_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-invalid-ca-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&malformed_ca_root).unwrap();
+    let malformed_ca = write_test_tls_material(&malformed_ca_root);
+    std::fs::write(
+        &malformed_ca.client_ca_path,
+        "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let config = direct_tls_config(&malformed_ca);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("failed to parse TLS client CA bundle")
+    );
+
+    let empty_ca_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-empty-ca-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&empty_ca_root).unwrap();
+    let empty_ca = write_test_tls_material(&empty_ca_root);
+    std::fs::write(&empty_ca.client_ca_path, "").unwrap();
+    let config = direct_tls_config(&empty_ca);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("contains no certificates")
+    );
+
+    let oversized_ca_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-large-ca-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&oversized_ca_root).unwrap();
+    let oversized_ca = write_test_tls_material(&oversized_ca_root);
+    std::fs::File::create(&oversized_ca.client_ca_path)
+        .unwrap()
+        .set_len(4 * 1024 * 1024 + 1)
+        .unwrap();
+    let config = direct_tls_config(&oversized_ca);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exceeds 4194304 bytes")
+    );
+
+    let empty_chain_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-empty-chain-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&empty_chain_root).unwrap();
+    let empty_chain = write_test_tls_material(&empty_chain_root);
+    std::fs::write(&empty_chain.certificate_path, "").unwrap();
+    let config = direct_tls_config(&empty_chain);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("contains no certificates")
+    );
+
+    let directory_key_root = std::env::temp_dir().join(format!(
+        "nazoauth-tls-directory-key-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir(&directory_key_root).unwrap();
+    let directory_key = write_test_tls_material(&directory_key_root);
+    std::fs::remove_file(&directory_key.private_key_path).unwrap();
+    std::fs::create_dir(&directory_key.private_key_path).unwrap();
+    let config = direct_tls_config(&directory_key);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(direct_tls_listeners(&config, &settings).is_err());
+
+    let interval_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-interval-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&interval_root).unwrap();
+    let interval_material = write_test_tls_material(&interval_root);
+    let mut pairs = vec![
+        ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "test-client-secret-pepper-that-is-long-enough".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        ("TLS_BIND".to_owned(), "127.0.0.1:0".to_owned()),
+        (
+            "TLS_CERTIFICATE_FILE".to_owned(),
+            interval_material.certificate_path.clone(),
+        ),
+        (
+            "TLS_PRIVATE_KEY_FILE".to_owned(),
+            interval_material.private_key_path.clone(),
+        ),
+        (
+            "TLS_CLIENT_CA_FILE".to_owned(),
+            interval_material.client_ca_path.clone(),
+        ),
+    ];
+    pairs.push(("TLS_RELOAD_INTERVAL_SECONDS".to_owned(), "0".to_owned()));
+    let config = ConfigSource::from_owned_pairs_for_test(pairs);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("TLS_RELOAD_INTERVAL_SECONDS must be between 1 and 3600")
+    );
+
+    for root in [
+        malformed_key_root,
+        malformed_ca_root,
+        empty_ca_root,
+        oversized_ca_root,
+        empty_chain_root,
+        directory_key_root,
+        interval_root,
+    ] {
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[actix_web::test]
+async fn direct_tls_reloader_ticks_and_stops_without_publishing_unchanged_material() {
+    let root = std::env::temp_dir().join(format!("nazoauth-tls-reloader-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let (certificate, private_key, client_ca) = write_test_tls_identity(&root);
+    let config = ConfigSource::from_owned_pairs_for_test([
+        ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "test-client-secret-pepper-that-is-long-enough".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        ("TLS_BIND".to_owned(), "127.0.0.1:0".to_owned()),
+        ("TLS_CERTIFICATE_FILE".to_owned(), certificate),
+        ("TLS_PRIVATE_KEY_FILE".to_owned(), private_key),
+        ("TLS_CLIENT_CA_FILE".to_owned(), client_ca),
+    ]);
+    let settings = Settings::from_config(&config).unwrap();
+    let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
+    let reloader = spawn_direct_tls_reloader(
+        Arc::clone(&listeners.snapshots),
+        std::time::Duration::from_millis(5),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(18)).await;
+    assert_eq!(listeners.snapshots.revision(), 1);
+    reloader.abort();
+    assert!(reloader.await.unwrap_err().is_cancelled());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -336,6 +570,226 @@ fn direct_tls_listener_rejects_a_mismatched_private_key() {
     let error = direct_tls_listeners(&config, &settings).err().unwrap();
     assert!(error.to_string().contains("does not match"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn direct_tls_generation_rejects_partial_material_and_retains_last_known_good() {
+    let root = std::env::temp_dir().join(format!("nazoauth-tls-reload-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let material = write_test_tls_material(&root);
+    let config = ConfigSource::from_owned_pairs_for_test([
+        ("BIND".to_owned(), "127.0.0.1:0".to_owned()),
+        ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "test-client-secret-pepper-that-is-long-enough".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        ("TLS_BIND".to_owned(), "127.0.0.1:1".to_owned()),
+        (
+            "TLS_CERTIFICATE_FILE".to_owned(),
+            material.certificate_path.clone(),
+        ),
+        (
+            "TLS_PRIVATE_KEY_FILE".to_owned(),
+            material.private_key_path.clone(),
+        ),
+        (
+            "TLS_CLIENT_CA_FILE".to_owned(),
+            material.client_ca_path.clone(),
+        ),
+    ]);
+    let settings = Settings::from_config(&config).unwrap();
+    let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
+    let initial_digest = listeners.snapshots.material_sha256();
+
+    let unrelated_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    std::fs::write(&material.private_key_path, unrelated_key.serialize_pem()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(
+            &material.private_key_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    let error = listeners.snapshots.reload().unwrap_err();
+    assert!(error.to_string().contains("does not match"));
+    assert_eq!(listeners.snapshots.revision(), 1);
+    assert_eq!(listeners.snapshots.material_sha256(), initial_digest);
+
+    let replacement = write_test_tls_material(&root);
+    assert_eq!(replacement.certificate_path, material.certificate_path);
+    assert_eq!(
+        listeners.snapshots.reload().unwrap(),
+        DirectTlsReload::Published {
+            previous: 1,
+            current: 2
+        }
+    );
+    assert_ne!(listeners.snapshots.material_sha256(), initial_digest);
+    assert_eq!(
+        listeners.snapshots.reload().unwrap(),
+        DirectTlsReload::Unchanged { revision: 2 }
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[actix_web::test]
+async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_client_ca() {
+    let active_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-active-{}", uuid::Uuid::now_v7()));
+    let next_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-next-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&active_root).unwrap();
+    std::fs::create_dir(&next_root).unwrap();
+    let active = write_test_tls_material(&active_root);
+    let next = write_test_tls_material(&next_root);
+    let config = ConfigSource::from_owned_pairs_for_test([
+        ("BIND".to_owned(), "127.0.0.1:0".to_owned()),
+        ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "test-client-secret-pepper-that-is-long-enough".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        ("TLS_BIND".to_owned(), "127.0.0.1:1".to_owned()),
+        (
+            "TLS_CERTIFICATE_FILE".to_owned(),
+            active.certificate_path.clone(),
+        ),
+        (
+            "TLS_PRIVATE_KEY_FILE".to_owned(),
+            active.private_key_path.clone(),
+        ),
+        (
+            "TLS_CLIENT_CA_FILE".to_owned(),
+            active.client_ca_path.clone(),
+        ),
+    ]);
+    let settings = Settings::from_config(&config).unwrap();
+    let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
+    let snapshots = listeners.snapshots.clone();
+
+    let probe = || App::new().route("/probe", web::get().to(|| async { "ok" }));
+    let public_builder = HttpServer::new(probe)
+        .bind_rustls_0_23(("127.0.0.1", 0), listeners.public)
+        .unwrap();
+    let public_address = public_builder.addrs()[0];
+    let public_server = public_builder.run();
+    let public_handle = public_server.handle();
+    actix_web::rt::spawn(public_server);
+    let mtls_builder = HttpServer::new(probe)
+        .bind_rustls_0_23(("127.0.0.1", 0), listeners.mtls)
+        .unwrap();
+    let mtls_address = mtls_builder.addrs()[0];
+    let mtls_server = mtls_builder.run();
+    let mtls_handle = mtls_server.handle();
+    actix_web::rt::spawn(mtls_server);
+
+    let active_root_certificate =
+        reqwest::Certificate::from_pem(active.client_ca_pem.as_bytes()).unwrap();
+    let next_root_certificate =
+        reqwest::Certificate::from_pem(next.client_ca_pem.as_bytes()).unwrap();
+    let active_client = reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .https_only(true)
+        .tls_backend_rustls()
+        .tls_certs_only([
+            active_root_certificate.clone(),
+            next_root_certificate.clone(),
+        ])
+        .identity(reqwest::Identity::from_pem(active.client_identity_pem.as_bytes()).unwrap())
+        .build()
+        .unwrap();
+    let next_client = reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .https_only(true)
+        .tls_backend_rustls()
+        .tls_certs_only([
+            active_root_certificate.clone(),
+            next_root_certificate.clone(),
+        ])
+        .identity(reqwest::Identity::from_pem(next.client_identity_pem.as_bytes()).unwrap())
+        .build()
+        .unwrap();
+    let active_public = reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .https_only(true)
+        .tls_backend_rustls()
+        .tls_certs_only([active_root_certificate])
+        .build()
+        .unwrap();
+    let next_public = reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .https_only(true)
+        .tls_backend_rustls()
+        .tls_certs_only([next_root_certificate])
+        .build()
+        .unwrap();
+
+    let public_url = format!("https://localhost:{}/probe", public_address.port());
+    let mtls_url = format!("https://localhost:{}/probe", mtls_address.port());
+    assert_eq!(
+        active_public
+            .get(&public_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert!(next_public.get(&public_url).send().await.is_err());
+    assert!(active_client.get(&mtls_url).send().await.is_ok());
+    assert!(next_client.get(&mtls_url).send().await.is_err());
+
+    std::fs::copy(&next.certificate_path, &active.certificate_path).unwrap();
+    std::fs::copy(&next.private_key_path, &active.private_key_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(
+            &active.private_key_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        snapshots.reload().unwrap(),
+        DirectTlsReload::Published {
+            previous: 1,
+            current: 2
+        }
+    );
+
+    assert!(active_public.get(&public_url).send().await.is_err());
+    assert_eq!(
+        next_public
+            .get(&public_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert!(active_client.get(&mtls_url).send().await.is_ok());
+    assert!(next_client.get(&mtls_url).send().await.is_err());
+
+    public_handle.stop(true).await;
+    mtls_handle.stop(true).await;
+    std::fs::remove_dir_all(active_root).unwrap();
+    std::fs::remove_dir_all(next_root).unwrap();
 }
 
 #[actix_web::test]

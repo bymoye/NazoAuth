@@ -270,12 +270,12 @@ pub(super) fn yaml_mapping_scalar(
 pub(super) fn operation_name(operation: &TaskOperation) -> &'static str {
     match operation {
         TaskOperation::MigrateApply => "migrate-apply",
-        TaskOperation::ConformanceMatrixDescribe => "conformance-matrix-describe",
-        TaskOperation::ConformanceLeaseCreate { .. } => "conformance-lease-create",
-        TaskOperation::ConformanceOnboardingApply { .. } => "conformance-onboarding-apply",
-        TaskOperation::ConformanceLeaseList => "conformance-lease-list",
-        TaskOperation::ConformanceLeaseRevoke { .. } => "conformance-lease-revoke",
-        TaskOperation::ConformanceLeaseCleanup => "conformance-lease-cleanup",
+        TaskOperation::ConformanceMatrixDescribe
+        | TaskOperation::ConformanceLeaseCreate { .. }
+        | TaskOperation::ConformanceOnboardingApply { .. }
+        | TaskOperation::ConformanceLeaseList
+        | TaskOperation::ConformanceLeaseRevoke { .. }
+        | TaskOperation::ConformanceLeaseCleanup => "legacy-conformance-disabled",
         TaskOperation::KeysList => "keys-list",
         TaskOperation::KeysValidate => "keys-validate",
         TaskOperation::KeysGenerateLocal { .. } => "keys-generate-local",

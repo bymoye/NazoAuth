@@ -197,6 +197,41 @@ fn built_in_conformance_matrix_is_the_authoritative_44_plan_descriptor() {
         17
     );
     assert_eq!(descriptor.openid4vc_credential_datasets.len(), 2);
+    for group in &descriptor.groups {
+        for plan in &group.plans {
+            for role in &plan.required_roles {
+                let Some(template) = &role.registration_template else {
+                    continue;
+                };
+                for field in [
+                    "scopes",
+                    "allowed_audiences",
+                    "grant_types",
+                    "post_logout_redirect_uris",
+                ] {
+                    let Some(values) = template.get(field).and_then(serde_json::Value::as_array)
+                    else {
+                        continue;
+                    };
+                    let unique = values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .expect("registration set must contain strings")
+                        })
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(
+                        unique.len(),
+                        values.len(),
+                        "registration set {field} contains duplicate values in {}/{}",
+                        group.id,
+                        plan.id
+                    );
+                }
+            }
+        }
+    }
     assert!(
         descriptor
             .openid4vc_credential_datasets

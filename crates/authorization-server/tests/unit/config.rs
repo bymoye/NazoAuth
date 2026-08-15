@@ -353,7 +353,6 @@ fn configured_capabilities_receive_durable_service_owned_secrets() {
         path.join(CONFIG_FILE),
         concat!(
             "DATA_DIR: state\n",
-            "CIBA_AUTOMATED_DECISION_MODE: header\n",
             "ENABLE_OPENID4VCI_ISSUER: true\n",
             "ENABLE_OPENID4VP_VERIFIER: true\n",
         ),
@@ -362,7 +361,6 @@ fn configured_capabilities_receive_durable_service_owned_secrets() {
 
     let source = ConfigSource::load_from_dir(&path).unwrap();
     for key in [
-        "CIBA_AUTOMATED_DECISION_TOKEN",
         "OPENID4VC_DATA_ENCRYPTION_KEY",
         "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
         "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
@@ -371,7 +369,6 @@ fn configured_capabilities_receive_durable_service_owned_secrets() {
     }
     let second = ConfigSource::load_from_dir(&path).unwrap();
     for key in [
-        "CIBA_AUTOMATED_DECISION_TOKEN",
         "OPENID4VC_DATA_ENCRYPTION_KEY",
         "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
         "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
@@ -841,8 +838,6 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CLIENT_IP_HEADER_MODE",
             "CLIENT_SECRET_PEPPER",
             "CLIENT_SECRET_PEPPER_FILE",
-            "CIBA_AUTOMATED_DECISION_TOKEN",
-            "CIBA_AUTOMATED_DECISION_TOKEN_FILE",
             "CIBA_AUTOMATED_DECISION_MODE",
             "CIBA_AUTH_REQ_ID_TTL_SECONDS",
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
@@ -966,6 +961,8 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TLS_CERTIFICATE_FILE",
             "TLS_CLIENT_CA_FILE",
             "TLS_PRIVATE_KEY_FILE",
+            "TLS_RELOAD_INTERVAL_SECONDS",
+            "TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE",
             "TRANSPORT_MODE",
             "TRUSTED_PROXY_CIDRS",
             "UI_CACHE_DIR",

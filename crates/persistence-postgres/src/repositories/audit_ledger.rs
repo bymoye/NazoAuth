@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use diesel::{QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -29,6 +29,21 @@ pub struct SecurityAuditEvent {
 pub struct SecurityAuditReceipt {
     pub event_id: Uuid,
     pub sequence: i64,
+    pub event_hash: [u8; 32],
+}
+
+/// A newly appended audit event together with the chain edge it extended.
+///
+/// Callers that commit another durable receipt in the same database
+/// transaction need both hashes to bind that receipt to the exact audit-chain
+/// transition.  Existing/idempotent events are deliberately not represented
+/// by this type because their previous hash cannot be inferred from the
+/// current chain head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FreshSecurityAuditReceipt {
+    pub event_id: Uuid,
+    pub sequence: i64,
+    pub previous_hash: [u8; 32],
     pub event_hash: [u8; 32],
 }
 
@@ -178,76 +193,14 @@ impl AuditLedgerRepository {
         event: SecurityAuditEvent,
     ) -> Result<SecurityAuditReceipt, RepositoryError> {
         validate_event(&event)?;
-        let payload_bytes = serde_json::to_vec(&event.payload).map_err(|error| {
-            RepositoryError::Unexpected(format!("invalid audit payload: {error}"))
-        })?;
-        if payload_bytes.len() > MAX_SECURITY_AUDIT_PAYLOAD_BYTES {
-            return Err(RepositoryError::Unexpected(format!(
-                "audit payload exceeds {MAX_SECURITY_AUDIT_PAYLOAD_BYTES} bytes"
-            )));
-        }
+        validate_payload_size(&event)?;
 
         let mut connection = self.connection().await?;
         connection
             .transaction::<SecurityAuditReceipt, diesel::result::Error, _>(async |connection| {
-                let canonical_payload = sql_query("SELECT $1::jsonb::text AS payload_canonical")
-                    .bind::<diesel::sql_types::Jsonb, _>(&event.payload)
-                    .get_result::<CanonicalAuditPayloadRow>(connection)
-                    .await?;
-                let state = sql_query(
-                    "SELECT last_sequence, last_hash \
-                     FROM public.nazo_security_audit_chain_head_for_update()",
-                )
-                .get_result::<ChainStateRow>(connection)
-                .await?;
-                if state.last_hash.len() != 32 {
-                    return Err(invariant_error(
-                        "security audit chain state hash must be exactly 32 bytes",
-                    ));
-                }
-                let sequence = state
-                    .last_sequence
-                    .checked_add(1)
-                    .ok_or_else(|| invariant_error("security audit sequence overflow"))?;
-                let event_hash = hash_event(
-                    sequence,
-                    &state.last_hash,
-                    &event,
-                    canonical_payload.payload_canonical.as_bytes(),
-                );
-
-                let append = sql_query(
-                    "SELECT event_id, sequence, event_hash \
-                     FROM public.nazo_append_security_audit_event(\
-                         $1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind::<diesel::sql_types::Uuid, _>(event.event_id)
-                .bind::<diesel::sql_types::Text, _>(&event.event_type)
-                .bind::<diesel::sql_types::Text, _>(&event.event_category)
-                .bind::<diesel::sql_types::Jsonb, _>(&event.payload)
-                .bind::<diesel::sql_types::Timestamptz, _>(event.occurred_at)
-                .bind::<diesel::sql_types::Binary, _>(state.last_hash)
-                .bind::<diesel::sql_types::Binary, _>(event_hash.to_vec())
-                .get_result::<SecurityAuditAppendRow>(connection)
-                .await?;
-                let returned_hash: [u8; 32] = append
-                    .event_hash
-                    .try_into()
-                    .map_err(|_| invariant_error("security audit append returned invalid hash"))?;
-                let fresh_receipt = append.sequence == sequence && returned_hash == event_hash;
-                let idempotent_receipt =
-                    append.sequence > 0 && append.sequence <= state.last_sequence;
-                if append.event_id != event.event_id || (!fresh_receipt && !idempotent_receipt) {
-                    return Err(invariant_error(
-                        "security audit append returned an unexpected receipt",
-                    ));
-                }
-
-                Ok(SecurityAuditReceipt {
-                    event_id: append.event_id,
-                    sequence: append.sequence,
-                    event_hash: returned_hash,
-                })
+                append_on_connection(connection, &event)
+                    .await
+                    .map(AppendAuditOutcome::into_receipt)
             })
             .await
             .map_err(map_error)
@@ -322,6 +275,117 @@ impl AuditLedgerRepository {
             .await
             .map_err(|_| RepositoryError::Unavailable)
     }
+}
+
+/// Append a new audit event using the caller's transaction and return the
+/// exact chain edge extended by the event.
+///
+/// This is the transaction-safe primitive for management operations that must
+/// atomically persist their resource mutation, audit event, and signed
+/// receipt.  Reusing an existing event id is rejected: an idempotent replay
+/// must return the already persisted management receipt instead of creating a
+/// second operation around an old audit event.
+pub async fn append_fresh_security_audit_on_connection(
+    connection: &mut AsyncPgConnection,
+    event: &SecurityAuditEvent,
+) -> Result<FreshSecurityAuditReceipt, diesel::result::Error> {
+    match append_on_connection(connection, event).await? {
+        AppendAuditOutcome::Fresh(receipt) => Ok(receipt),
+        AppendAuditOutcome::Existing(_) => Err(invariant_error(
+            "security audit event already exists in the immutable ledger",
+        )),
+    }
+}
+
+enum AppendAuditOutcome {
+    Fresh(FreshSecurityAuditReceipt),
+    Existing(SecurityAuditReceipt),
+}
+
+impl AppendAuditOutcome {
+    fn into_receipt(self) -> SecurityAuditReceipt {
+        match self {
+            Self::Fresh(receipt) => SecurityAuditReceipt {
+                event_id: receipt.event_id,
+                sequence: receipt.sequence,
+                event_hash: receipt.event_hash,
+            },
+            Self::Existing(receipt) => receipt,
+        }
+    }
+}
+
+async fn append_on_connection(
+    connection: &mut AsyncPgConnection,
+    event: &SecurityAuditEvent,
+) -> Result<AppendAuditOutcome, diesel::result::Error> {
+    validate_event_for_transaction(event)?;
+    let canonical_payload = sql_query("SELECT $1::jsonb::text AS payload_canonical")
+        .bind::<diesel::sql_types::Jsonb, _>(&event.payload)
+        .get_result::<CanonicalAuditPayloadRow>(connection)
+        .await?;
+    let state = sql_query(
+        "SELECT last_sequence, last_hash \
+         FROM public.nazo_security_audit_chain_head_for_update()",
+    )
+    .get_result::<ChainStateRow>(connection)
+    .await?;
+    let previous_hash: [u8; 32] =
+        state.last_hash.as_slice().try_into().map_err(|_| {
+            invariant_error("security audit chain state hash must be exactly 32 bytes")
+        })?;
+    let sequence = state
+        .last_sequence
+        .checked_add(1)
+        .ok_or_else(|| invariant_error("security audit sequence overflow"))?;
+    let event_hash = hash_event(
+        sequence,
+        &previous_hash,
+        event,
+        canonical_payload.payload_canonical.as_bytes(),
+    );
+
+    let append = sql_query(
+        "SELECT event_id, sequence, event_hash \
+         FROM public.nazo_append_security_audit_event(\
+             $1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(event.event_id)
+    .bind::<diesel::sql_types::Text, _>(&event.event_type)
+    .bind::<diesel::sql_types::Text, _>(&event.event_category)
+    .bind::<diesel::sql_types::Jsonb, _>(&event.payload)
+    .bind::<diesel::sql_types::Timestamptz, _>(event.occurred_at)
+    .bind::<diesel::sql_types::Binary, _>(previous_hash.to_vec())
+    .bind::<diesel::sql_types::Binary, _>(event_hash.to_vec())
+    .get_result::<SecurityAuditAppendRow>(connection)
+    .await?;
+    let returned_hash: [u8; 32] = append
+        .event_hash
+        .try_into()
+        .map_err(|_| invariant_error("security audit append returned invalid hash"))?;
+    if append.event_id != event.event_id {
+        return Err(invariant_error(
+            "security audit append returned an unexpected event identity",
+        ));
+    }
+    if append.sequence == sequence && returned_hash == event_hash {
+        return Ok(AppendAuditOutcome::Fresh(FreshSecurityAuditReceipt {
+            event_id: append.event_id,
+            sequence: append.sequence,
+            previous_hash,
+            event_hash: returned_hash,
+        }));
+    }
+    if append.sequence > 0 && append.sequence <= state.last_sequence {
+        return Ok(AppendAuditOutcome::Existing(SecurityAuditReceipt {
+            event_id: append.event_id,
+            sequence: append.sequence,
+            event_hash: returned_hash,
+        }));
+    }
+    Err(invariant_error(
+        "security audit append returned an unexpected receipt",
+    ))
 }
 
 #[derive(QueryableByName)]
@@ -461,6 +525,37 @@ fn validate_event(event: &SecurityAuditEvent) -> Result<(), RepositoryError> {
     {
         return Err(RepositoryError::Unexpected(
             "security audit event has invalid identity or payload".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_payload_size(event: &SecurityAuditEvent) -> Result<(), RepositoryError> {
+    let payload_bytes = serde_json::to_vec(&event.payload)
+        .map_err(|error| RepositoryError::Unexpected(format!("invalid audit payload: {error}")))?;
+    if payload_bytes.len() > MAX_SECURITY_AUDIT_PAYLOAD_BYTES {
+        return Err(RepositoryError::Unexpected(format!(
+            "audit payload exceeds {MAX_SECURITY_AUDIT_PAYLOAD_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_event_for_transaction(event: &SecurityAuditEvent) -> Result<(), diesel::result::Error> {
+    if event.event_id.is_nil()
+        || !valid_identifier(&event.event_type)
+        || !valid_identifier(&event.event_category)
+        || !event.payload.is_object()
+    {
+        return Err(invariant_error(
+            "security audit event has invalid identity or payload",
+        ));
+    }
+    let payload_bytes = serde_json::to_vec(&event.payload)
+        .map_err(|_| invariant_error("security audit payload is not serializable"))?;
+    if payload_bytes.len() > MAX_SECURITY_AUDIT_PAYLOAD_BYTES {
+        return Err(invariant_error(
+            "security audit payload exceeds its safe bound",
         ));
     }
     Ok(())

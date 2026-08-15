@@ -74,7 +74,6 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
         require_audit_least_privilege,
         audit_anchor_preflight,
     )?;
-    background::spawn_database_cleanup(diesel_db.clone());
     #[cfg(not(test))]
     let valkey =
         nazo_valkey::ValkeyConnection::connect(&valkey_url, valkey_command_timeout).await?;

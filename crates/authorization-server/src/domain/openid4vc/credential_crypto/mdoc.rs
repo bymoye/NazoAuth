@@ -264,7 +264,7 @@ fn verify_standard_mdoc_device_signatures(
 fn verify_mdoc_issuer_certificate_chains(
     verified: &mdoc_rs::verifier::VerifiedMDoc,
     trust_anchors: &[Vec<u8>],
-    conformance_trust_anchors: &[Vec<u8>],
+    scoped_trust_anchors: &[Vec<u8>],
     revocation_policy: &nazo_digital_credentials::CertificateRevocationPolicy,
 ) -> Result<bool, CredentialTrustError> {
     // mdoc-rs fails this assessment closed without its optional TSP backend.
@@ -294,17 +294,17 @@ fn verify_mdoc_issuer_certificate_chains(
             .signed
             .timestamp();
         let direct_scoped_trust_anchor =
-            verify_direct_scoped_trust_anchor(&certificates, conformance_trust_anchors, signed_at)?;
+            verify_direct_scoped_trust_anchor(&certificates, scoped_trust_anchors, signed_at)?;
         if !direct_scoped_trust_anchor
             && !verify_certificate_chain_at(&certificates, trust_anchors, signed_at)?
         {
             return Ok(false);
         }
-        revocation_policy.check_chain_with_conformance_trust(
+        revocation_policy.check_chain_with_scoped_trust(
             None,
             &certificates,
             Utc::now(),
-            conformance_trust_anchors,
+            scoped_trust_anchors,
         )?;
     }
     Ok(true)
@@ -315,13 +315,13 @@ fn verify_mdoc_issuer_certificate_chains(
 /// continues to require a non-CA Document Signer leaf.
 pub(super) fn verify_direct_scoped_trust_anchor(
     certificates: &[Vec<u8>],
-    conformance_trust_anchors: &[Vec<u8>],
+    scoped_trust_anchors: &[Vec<u8>],
     unix_time: i64,
 ) -> Result<bool, CredentialTrustError> {
     let [certificate] = certificates else {
         return Ok(false);
     };
-    if !conformance_trust_anchors.contains(certificate) {
+    if !scoped_trust_anchors.contains(certificate) {
         return Ok(false);
     }
     let at = x509_parser::time::ASN1Time::from_timestamp(unix_time)

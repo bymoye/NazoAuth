@@ -4,7 +4,8 @@ use aes_gcm::{
 };
 use chrono::{DateTime, Utc};
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper,
+    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, QueryableByName,
+    SelectableHelper, sql_query, sql_types,
 };
 use diesel_async::RunQueryDsl;
 use nazo_auth::{
@@ -19,7 +20,10 @@ use nazo_identity::{SubjectClaims, TenantId, UserId, ports::RepositoryError};
 use rand::Rng;
 use uuid::Uuid;
 
-use crate::{DbPool, schema::oauth_token_issuances};
+use crate::{
+    DbPool,
+    schema::{access_token_revocations, oauth_token_issuances},
+};
 
 use super::{AuthorizationRepository, OAuthClientRepository, TokenRepository, UserRepository};
 
@@ -30,6 +34,154 @@ pub const TOKEN_ISSUANCE_RESPONSE_ENVELOPE_VERSION: &str = "v1";
 const TOKEN_ISSUANCE_RESPONSE_ENVELOPE_VERSION_BYTE: u8 = 1;
 const RESPONSE_NONCE_LEN: usize = 12;
 const RESPONSE_MIN_PROTECTED_LEN: usize = 1 + RESPONSE_NONCE_LEN + 16;
+
+#[derive(diesel::Insertable)]
+#[diesel(table_name = access_token_revocations)]
+struct NewAccessTokenRevocation {
+    id: Uuid,
+    access_token_jti_blake3: String,
+    client_id: Uuid,
+    tenant_id: Uuid,
+    revoked_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(QueryableByName)]
+struct OwnedAccessTokenRow {
+    #[diesel(sql_type = sql_types::Uuid)]
+    client_id: Uuid,
+    #[diesel(sql_type = sql_types::Text)]
+    access_token_jti: String,
+    #[diesel(sql_type = sql_types::Timestamptz)]
+    expires_at: DateTime<Utc>,
+}
+
+pub(crate) async fn revoke_access_tokens_for_owner_on_connection(
+    connection: &mut diesel_async::AsyncPgConnection,
+    tenant_id: Uuid,
+    client_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+) -> Result<usize, diesel::result::Error> {
+    debug_assert!(client_id.is_some() || user_id.is_some());
+    let now = Utc::now();
+    let mut query = oauth_token_issuances::table
+        .filter(oauth_token_issuances::tenant_id.eq(tenant_id))
+        .filter(oauth_token_issuances::access_token_jti.is_not_null())
+        .filter(oauth_token_issuances::access_token_expires_at.gt(now))
+        .into_boxed();
+    if let Some(client_id) = client_id {
+        query = query.filter(oauth_token_issuances::client_id.eq(client_id));
+    }
+    if let Some(user_id) = user_id {
+        query = query.filter(oauth_token_issuances::user_id.eq(user_id));
+    }
+    let issued = query
+        .select((
+            oauth_token_issuances::client_id,
+            oauth_token_issuances::access_token_jti,
+            oauth_token_issuances::access_token_expires_at,
+        ))
+        .load::<(Uuid, Option<String>, Option<DateTime<Utc>>)>(connection)
+        .await?;
+    let mut revocations = issued
+        .into_iter()
+        .filter_map(|(client_id, jti, expires_at)| {
+            Some(NewAccessTokenRevocation {
+                id: Uuid::now_v7(),
+                access_token_jti_blake3: blake3::hash(jti?.as_bytes()).to_hex().to_string(),
+                client_id,
+                tenant_id,
+                revoked_at: now,
+                expires_at: expires_at?,
+            })
+        })
+        .collect::<Vec<_>>();
+    let openid4vci = if let Some(user_id) = user_id {
+        let rows = sql_query(
+            "SELECT client.id AS client_id, grant_row.token_id::text AS access_token_jti,
+                    grant_row.expires_at
+             FROM openid4vci_access_grants grant_row
+             JOIN oauth_clients client
+               ON client.tenant_id = grant_row.tenant_id
+              AND client.client_id = grant_row.client_id
+             WHERE grant_row.tenant_id = $1 AND grant_row.subject_id = $2
+               AND grant_row.revoked_at IS NULL AND grant_row.expires_at > $3",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(user_id)
+        .bind::<sql_types::Timestamptz, _>(now)
+        .load::<OwnedAccessTokenRow>(connection)
+        .await?;
+        sql_query(
+            "UPDATE openid4vci_access_grants
+             SET revoked_at = $3
+             WHERE tenant_id = $1 AND subject_id = $2 AND revoked_at IS NULL",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(user_id)
+        .bind::<sql_types::Timestamptz, _>(now)
+        .execute(connection)
+        .await?;
+        rows
+    } else if let Some(client_id) = client_id {
+        let rows = sql_query(
+            "SELECT client.id AS client_id, grant_row.token_id::text AS access_token_jti,
+                    grant_row.expires_at
+             FROM openid4vci_access_grants grant_row
+             JOIN oauth_clients client
+               ON client.tenant_id = grant_row.tenant_id
+              AND client.client_id = grant_row.client_id
+             WHERE grant_row.tenant_id = $1 AND client.id = $2
+               AND grant_row.revoked_at IS NULL AND grant_row.expires_at > $3",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(client_id)
+        .bind::<sql_types::Timestamptz, _>(now)
+        .load::<OwnedAccessTokenRow>(connection)
+        .await?;
+        sql_query(
+            "UPDATE openid4vci_access_grants grant_row
+             SET revoked_at = $3
+             FROM oauth_clients client
+             WHERE client.tenant_id = grant_row.tenant_id
+               AND client.client_id = grant_row.client_id
+               AND grant_row.tenant_id = $1 AND client.id = $2
+               AND grant_row.revoked_at IS NULL",
+        )
+        .bind::<sql_types::Uuid, _>(tenant_id)
+        .bind::<sql_types::Uuid, _>(client_id)
+        .bind::<sql_types::Timestamptz, _>(now)
+        .execute(connection)
+        .await?;
+        rows
+    } else {
+        Vec::new()
+    };
+    revocations.extend(openid4vci.into_iter().map(|row| {
+        NewAccessTokenRevocation {
+            id: Uuid::now_v7(),
+            access_token_jti_blake3: blake3::hash(row.access_token_jti.as_bytes())
+                .to_hex()
+                .to_string(),
+            client_id: row.client_id,
+            tenant_id,
+            revoked_at: now,
+            expires_at: row.expires_at,
+        }
+    }));
+    if revocations.is_empty() {
+        return Ok(0);
+    }
+    diesel::insert_into(access_token_revocations::table)
+        .values(&revocations)
+        .on_conflict((
+            access_token_revocations::tenant_id,
+            access_token_revocations::access_token_jti_blake3,
+        ))
+        .do_nothing()
+        .execute(connection)
+        .await
+}
 
 #[derive(Clone)]
 pub struct TokenIssuanceResponseKeyRing {
@@ -245,6 +397,7 @@ struct TokenIssuanceRow {
     issuance_id: Uuid,
     tenant_id: Uuid,
     client_id: Uuid,
+    user_id: Option<Uuid>,
     grant_key_blake3: String,
     request_digest: String,
     phase: String,
@@ -330,6 +483,7 @@ impl TokenIssuanceRow {
             issuance_id: self.issuance_id,
             tenant_id: self.tenant_id,
             client_id: self.client_id,
+            user_id: self.user_id,
             grant_key: self.grant_key_blake3,
             request_digest: self.request_digest,
             phase,
@@ -488,6 +642,7 @@ impl TokenRepositoryPort for TokenIssuanceRepository {
                     oauth_token_issuances::issuance_id.eq(input.issuance_id),
                     oauth_token_issuances::tenant_id.eq(input.tenant_id),
                     oauth_token_issuances::client_id.eq(input.client_id),
+                    oauth_token_issuances::user_id.eq(input.user_id),
                     oauth_token_issuances::grant_key_blake3.eq(&grant_hash),
                     oauth_token_issuances::request_digest.eq(&input.request_digest),
                     oauth_token_issuances::phase.eq(TokenIssuancePhase::Prepared.as_str()),

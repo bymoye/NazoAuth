@@ -8,6 +8,8 @@ mod query;
 
 pub use base::OAuthClientRepository;
 pub(crate) use base::{bind_conformance_lease, conformance_lease_is_effective};
+pub use mutation::{deactivate_client_on_connection, insert_client_on_connection};
+pub use query::active_public_client_id_on_connection;
 
 // Mapping helpers are kept private to the repository module while remaining available to
 // the compatibility unit tests mounted below.

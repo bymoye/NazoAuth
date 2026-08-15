@@ -54,8 +54,9 @@ impl PresentationStorePort for Openid4vpRepository {
                 "INSERT INTO openid4vp_transactions \
                  (id, tenant_id, client_id_prefix, request_method, response_mode, \
                   wallet_authorization_endpoint, state_hash, request, request_object, request_uri, \
-                  conformance_lease_id, ephemeral_private_key_ciphertext, expires_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                  openid4vc_trust_policy_binding_id, openid4vc_trust_policy_resource_id, \
+                  openid4vc_trust_policy_digest, ephemeral_private_key_ciphertext, expires_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
             )
             .bind::<sql_types::Uuid, _>(transaction.id)
             .bind::<sql_types::Uuid, _>(self.tenant_id)
@@ -70,7 +71,15 @@ impl PresentationStorePort for Openid4vpRepository {
             )
             .bind::<sql_types::Nullable<sql_types::Text>, _>(transaction.request_object.as_deref())
             .bind::<sql_types::Nullable<sql_types::Text>, _>(transaction.request_uri.as_deref())
-            .bind::<sql_types::Nullable<sql_types::Uuid>, _>(transaction.conformance_lease_id)
+            .bind::<sql_types::Nullable<sql_types::Uuid>, _>(
+                transaction.openid4vc_trust_policy_binding_id,
+            )
+            .bind::<sql_types::Nullable<sql_types::Text>, _>(
+                transaction.openid4vc_trust_policy_resource_id.as_deref(),
+            )
+            .bind::<sql_types::Nullable<sql_types::Text>, _>(
+                transaction.openid4vc_trust_policy_digest.as_deref(),
+            )
             .bind::<sql_types::Nullable<sql_types::Binary>, _>(protected_private_key)
             .bind::<sql_types::Timestamptz, _>(transaction.expires_at)
             .execute(&mut connection)
@@ -127,8 +136,10 @@ impl PresentationStorePort for Openid4vpRepository {
             let changed = sql_query(
                 "UPDATE openid4vp_transactions SET request = $4 \
                  WHERE id = $1 AND tenant_id = $2 AND completed_at IS NULL AND expires_at > $3 \
-                   AND (conformance_lease_id IS NULL OR \
-                        nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
+                   AND conformance_lease_id IS NULL \
+                   AND openid4vc_presentation_trust_policy_is_active( \
+                       tenant_id, openid4vc_trust_policy_binding_id, \
+                       openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest)",
             )
             .bind::<sql_types::Uuid, _>(transaction_id)
             .bind::<sql_types::Uuid, _>(self.tenant_id)
@@ -165,8 +176,10 @@ impl PresentationStorePort for Openid4vpRepository {
                 "UPDATE openid4vp_transactions SET result_ciphertext = $5, completed_at = $4 \
                  WHERE id = $1 AND tenant_id = $2 AND state_hash = $3 \
                    AND completed_at IS NULL AND expires_at > $4 \
-                   AND (conformance_lease_id IS NULL OR \
-                        nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
+                   AND conformance_lease_id IS NULL \
+                   AND openid4vc_presentation_trust_policy_is_active( \
+                       tenant_id, openid4vc_trust_policy_binding_id, \
+                       openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest)",
             )
             .bind::<sql_types::Uuid, _>(transaction_id)
             .bind::<sql_types::Uuid, _>(self.tenant_id)
@@ -219,7 +232,11 @@ struct PresentationRow {
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     request_uri: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
-    conformance_lease_id: Option<Uuid>,
+    openid4vc_trust_policy_binding_id: Option<Uuid>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    openid4vc_trust_policy_resource_id: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    openid4vc_trust_policy_digest: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Binary>)]
     ephemeral_private_key_ciphertext: Option<Vec<u8>>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Binary>)]
@@ -247,7 +264,9 @@ impl PresentationRow {
                 .map_err(|_| PresentationStoreError::InvalidTransition)?,
             request_object: self.request_object.clone(),
             request_uri: self.request_uri.clone(),
-            conformance_lease_id: self.conformance_lease_id,
+            openid4vc_trust_policy_binding_id: self.openid4vc_trust_policy_binding_id,
+            openid4vc_trust_policy_resource_id: self.openid4vc_trust_policy_resource_id.clone(),
+            openid4vc_trust_policy_digest: self.openid4vc_trust_policy_digest.clone(),
             response_encryption_private_key: None,
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -306,10 +325,14 @@ async fn load_presentation(
 ) -> Result<Option<PresentationRow>, diesel::result::Error> {
     sql_query(
         "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
-         request, request_object, request_uri, conformance_lease_id, ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
+         request, request_object, request_uri, openid4vc_trust_policy_binding_id, \
+         openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest, \
+         ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
          FROM openid4vp_transactions WHERE id = $1 AND tenant_id = $2 AND expires_at > $3 \
-           AND (conformance_lease_id IS NULL OR \
-                nazo_oauth_conformance_lease_is_active(tenant_id, conformance_lease_id))",
+           AND conformance_lease_id IS NULL \
+           AND openid4vc_presentation_trust_policy_is_active( \
+               tenant_id, openid4vc_trust_policy_binding_id, \
+               openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest)",
     )
     .bind::<sql_types::Uuid, _>(id)
     .bind::<sql_types::Uuid, _>(tenant_id)

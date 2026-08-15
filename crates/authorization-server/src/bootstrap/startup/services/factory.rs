@@ -72,6 +72,8 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
+    let tenant_resource_management_enabled = core.tenant_resource_provider.is_some();
+
     let server = HttpServer::new(move || {
         let app = App::new()
             .wrap(from_fn(request_timeout))
@@ -122,7 +124,7 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
             .app_data(core.ciba_service.clone())
             .app_data(core.ciba_users.clone())
             .app_data(core.ciba_config.clone())
-            .app_data(core.conformance_leases.clone())
+            .app_data(core.ciba_decision_bindings.clone())
             .app_data(core.token_issuance_config.clone())
             .app_data(core.device_service.clone())
             .app_data(core.device_grants.clone())
@@ -186,31 +188,50 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
         } else {
             app
         };
+        let app = if let Some(provider) = core.tenant_resource_provider.clone() {
+            app.app_data(provider)
+        } else {
+            app
+        };
         let app = if let Some(path) = ui_static_dir.clone() {
             app.service(crate::bootstrap::ui_static_files(path))
         } else {
             app
         };
-        app.configure(|cfg| {
+        let app = app.configure(|cfg| {
             crate::bootstrap::routes::configure(cfg, &settings, perf_metrics_enabled)
-        })
+        });
+        if tenant_resource_management_enabled {
+            app.configure(crate::bootstrap::routes::configure_tenant_resource_management)
+        } else {
+            app
+        }
     })
     .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
     .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)
     .on_connect(crate::http::mtls::capture_direct_tls_client_certificate);
-    let server = if let Some(listeners) = direct_tls {
+    let (server, tls_reloader) = if let Some(listeners) = direct_tls {
         tracing::info!("nazo-oauth-server direct HTTPS listener on {addr}");
         tracing::info!(
             "nazo-oauth-server direct mTLS listener on {}",
             listeners.mtls_bind
         );
-        server
+        let snapshots = listeners.snapshots.clone();
+        let reload_interval = listeners.reload_interval;
+        let server = server
             .bind_rustls_0_23(addr, listeners.public)?
-            .bind_rustls_0_23(listeners.mtls_bind, listeners.mtls)?
+            .bind_rustls_0_23(listeners.mtls_bind, listeners.mtls)?;
+        let reloader = crate::bootstrap::spawn_direct_tls_reloader(snapshots, reload_interval);
+        (server, Some(reloader))
     } else {
-        server.bind(addr)?
+        (server.bind(addr)?, None)
     };
-    server.run().await?;
+    let result = server.run().await;
+    if let Some(reloader) = tls_reloader {
+        reloader.abort();
+        let _ = reloader.await;
+    }
+    result?;
     Ok(())
 }
 

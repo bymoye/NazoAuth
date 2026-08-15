@@ -34,6 +34,18 @@ pub struct ManagedCredentialDatasetWrite<'a> {
     pub valid_until: Option<DateTime<Utc>>,
 }
 
+struct DatasetWrite<'a> {
+    tenant_id: Uuid,
+    subject_id: Uuid,
+    credential_configuration_id: &'a str,
+    claims_ciphertext: Vec<u8>,
+    valid_from: Option<DateTime<Utc>>,
+    valid_until: Option<DateTime<Utc>>,
+    source: &'static str,
+    actor_user_id: Option<Uuid>,
+    replace_existing: bool,
+}
+
 /// Inserts one lease-owned dataset and its append-only audit event through a
 /// caller-owned transaction connection.  The caller supplies ciphertext so
 /// encryption happens before the SQL write while still using this repository's
@@ -46,28 +58,139 @@ pub(crate) async fn insert_operator_conformance_dataset_on_connection(
     credential_configuration_id: &str,
     claims_ciphertext: Vec<u8>,
 ) -> Result<usize, diesel::result::Error> {
-    sql_query(
-        "WITH inserted AS (
-            INSERT INTO openid4vci_credential_datasets
-                (tenant_id, subject_id, credential_configuration_id,
-                 claims_ciphertext, source, valid_from, valid_until)
-            VALUES ($1, $2, $3, $4, 'operator-conformance', NULL, NULL)
+    write_dataset_on_connection(
+        connection,
+        DatasetWrite {
+            tenant_id,
+            subject_id,
+            credential_configuration_id,
+            claims_ciphertext,
+            valid_from: None,
+            valid_until: None,
+            source: "operator-conformance",
+            actor_user_id: Some(actor_user_id),
+            replace_existing: false,
+        },
+    )
+    .await
+}
+
+/// Upserts an issuer-authoritative dataset for ordinary operator management
+/// on a caller-owned transaction connection.  The caller supplies ciphertext
+/// produced by [`protect_dataset_claims`]; this function binds the durable
+/// source and append-only audit event without inventing an admin actor.
+pub async fn upsert_operator_managed_dataset_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    subject_id: Uuid,
+    credential_configuration_id: &str,
+    claims_ciphertext: Vec<u8>,
+    valid_from: Option<DateTime<Utc>>,
+    valid_until: Option<DateTime<Utc>>,
+) -> Result<usize, diesel::result::Error> {
+    write_dataset_on_connection(
+        connection,
+        DatasetWrite {
+            tenant_id,
+            subject_id,
+            credential_configuration_id,
+            claims_ciphertext,
+            valid_from,
+            valid_until,
+            source: "operator-managed",
+            actor_user_id: None,
+            replace_existing: true,
+        },
+    )
+    .await
+}
+
+/// Deletes an operator-managed dataset and records a non-user actor audit
+/// event on the same caller-owned transaction connection.  Returning `false`
+/// is an idempotent no-op when the tenant/subject/configuration tuple is not
+/// present.
+pub async fn delete_operator_managed_dataset_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    subject_id: Uuid,
+    credential_configuration_id: &str,
+) -> Result<bool, diesel::result::Error> {
+    let affected = sql_query(
+        "WITH deleted AS (
+            DELETE FROM openid4vci_credential_datasets
+            WHERE tenant_id = $1 AND subject_id = $2
+              AND credential_configuration_id = $3
+              AND source = 'operator-managed'
             RETURNING tenant_id, subject_id, credential_configuration_id
          )
          INSERT INTO openid4vci_credential_dataset_events
             (tenant_id, subject_id, credential_configuration_id, action,
              actor_user_id, source)
-         SELECT tenant_id, subject_id, credential_configuration_id, 1, $5,
-                'operator-conformance'
-         FROM inserted",
+         SELECT tenant_id, subject_id, credential_configuration_id, 2, NULL,
+                'operator-managed'
+         FROM deleted",
     )
     .bind::<sql_types::Uuid, _>(tenant_id)
     .bind::<sql_types::Uuid, _>(subject_id)
     .bind::<sql_types::Text, _>(credential_configuration_id)
-    .bind::<sql_types::Binary, _>(claims_ciphertext)
-    .bind::<sql_types::Uuid, _>(actor_user_id)
     .execute(connection)
-    .await
+    .await?;
+    Ok(affected == 1)
+}
+
+async fn write_dataset_on_connection(
+    connection: &mut AsyncPgConnection,
+    write: DatasetWrite<'_>,
+) -> Result<usize, diesel::result::Error> {
+    // The two SQL forms intentionally differ only in conflict behavior.  The
+    // conformance path retains its historical insert-only semantics, while
+    // operator management has explicit upsert semantics.
+    let statement = if write.replace_existing {
+        "WITH upserted AS (
+            INSERT INTO openid4vci_credential_datasets
+                (tenant_id, subject_id, credential_configuration_id,
+                 claims_ciphertext, source, valid_from, valid_until)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (tenant_id, subject_id, credential_configuration_id)
+            DO UPDATE SET claims_ciphertext = EXCLUDED.claims_ciphertext,
+                          valid_from = EXCLUDED.valid_from,
+                          valid_until = EXCLUDED.valid_until,
+                          updated_at = CURRENT_TIMESTAMP
+            WHERE openid4vci_credential_datasets.source = EXCLUDED.source
+            RETURNING tenant_id, subject_id, credential_configuration_id
+         )
+         INSERT INTO openid4vci_credential_dataset_events
+            (tenant_id, subject_id, credential_configuration_id, action,
+             actor_user_id, source)
+         SELECT tenant_id, subject_id, credential_configuration_id, 1,
+                $8, $5
+         FROM upserted"
+    } else {
+        "WITH inserted AS (
+            INSERT INTO openid4vci_credential_datasets
+                (tenant_id, subject_id, credential_configuration_id,
+                 claims_ciphertext, source, valid_from, valid_until)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING tenant_id, subject_id, credential_configuration_id
+         )
+         INSERT INTO openid4vci_credential_dataset_events
+            (tenant_id, subject_id, credential_configuration_id, action,
+             actor_user_id, source)
+         SELECT tenant_id, subject_id, credential_configuration_id, 1,
+                $8, $5
+         FROM inserted"
+    };
+    sql_query(statement)
+        .bind::<sql_types::Uuid, _>(write.tenant_id)
+        .bind::<sql_types::Uuid, _>(write.subject_id)
+        .bind::<sql_types::Text, _>(write.credential_configuration_id)
+        .bind::<sql_types::Binary, _>(write.claims_ciphertext)
+        .bind::<sql_types::Text, _>(write.source)
+        .bind::<sql_types::Nullable<sql_types::Timestamptz>, _>(write.valid_from)
+        .bind::<sql_types::Nullable<sql_types::Timestamptz>, _>(write.valid_until)
+        .bind::<sql_types::Nullable<sql_types::Uuid>, _>(write.actor_user_id)
+        .execute(connection)
+        .await
 }
 
 impl Openid4vciDatasetRepository {
@@ -207,9 +330,10 @@ impl Openid4vciDatasetRepository {
                 FROM users u CROSS JOIN authorized_actor a
                 WHERE u.tenant_id = $1 AND u.id = $3 AND u.is_active = TRUE
                 ON CONFLICT (tenant_id, subject_id, credential_configuration_id) DO UPDATE SET
-                    claims_ciphertext = EXCLUDED.claims_ciphertext, source = EXCLUDED.source,
+                    claims_ciphertext = EXCLUDED.claims_ciphertext,
                     valid_from = EXCLUDED.valid_from, valid_until = EXCLUDED.valid_until,
                     updated_at = CURRENT_TIMESTAMP
+                WHERE openid4vci_credential_datasets.source = 'admin-session'
                 RETURNING tenant_id, subject_id, credential_configuration_id
              )
              INSERT INTO openid4vci_credential_dataset_events
@@ -252,6 +376,7 @@ impl Openid4vciDatasetRepository {
                 USING authorized_actor a
                 WHERE d.tenant_id = $1 AND d.subject_id = $3
                   AND d.credential_configuration_id = $4
+                  AND d.source = 'admin-session'
                 RETURNING d.tenant_id, d.subject_id, d.credential_configuration_id
              )
              INSERT INTO openid4vci_credential_dataset_events
@@ -284,7 +409,7 @@ fn dataset_aad(tenant_id: Uuid, subject_id: Uuid, credential_configuration_id: &
 /// the managed-dataset repository.  Conformance onboarding calls this helper
 /// before inserting through its own transaction connection; it must not call
 /// the pool-backed methods above because that would split the transaction.
-pub(crate) fn protect_dataset_claims(
+pub fn protect_dataset_claims(
     key: &[u8; 32],
     tenant_id: Uuid,
     subject_id: Uuid,
@@ -314,7 +439,7 @@ pub(crate) fn protect_dataset_claims(
 /// Decrypts a dataset read through a caller-owned connection.  Keeping this
 /// primitive next to the normal dataset repository prevents onboarding replay
 /// from creating a second encryption format.
-pub(crate) fn unprotect_dataset_claims(
+pub fn unprotect_dataset_claims(
     key: &[u8; 32],
     tenant_id: Uuid,
     subject_id: Uuid,

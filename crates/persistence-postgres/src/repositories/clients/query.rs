@@ -3,7 +3,7 @@ use diesel::{
     ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, SelectableHelper,
     TextExpressionMethods,
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use nazo_auth::OAuthClient;
 use nazo_identity::ports::RepositoryError;
 use serde_json::Value;
@@ -253,6 +253,25 @@ impl OAuthClientRepository {
         .await
         .map_err(map_error)
     }
+}
+
+/// Resolve the public identifier for one active tenant-owned client while the
+/// caller retains transaction ownership.
+pub async fn active_public_client_id_on_connection(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<String>, RepositoryError> {
+    oauth_clients::table
+        .find(id)
+        .filter(oauth_clients::tenant_id.eq(tenant_id))
+        .filter(oauth_clients::is_active.eq(true))
+        .filter(conformance_lease_is_effective())
+        .select(oauth_clients::client_id)
+        .first::<String>(connection)
+        .await
+        .optional()
+        .map_err(map_error)
 }
 
 impl nazo_identity::ports::AuthorizedApplicationRepositoryPort for OAuthClientRepository {

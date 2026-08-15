@@ -10,7 +10,6 @@ use nazo_auth::{
     response_types_from_client,
 };
 use serde_json::Value;
-use uuid::Uuid;
 
 use super::{
     auth::{
@@ -43,10 +42,9 @@ pub async fn dynamic_client_registration(
         Ok(source_ip) => source_ip,
         Err(response) => return response,
     };
-    let initial_access = match authorize_initial_access(&endpoint, &request).await {
-        Ok(grant) => grant,
-        Err(response) => return response,
-    };
+    if let Err(response) = authorize_initial_access(&endpoint, &request).await {
+        return response;
+    }
 
     let prepared = match prepare_dynamic_client_registration(
         payload,
@@ -64,27 +62,20 @@ pub async fn dynamic_client_registration(
     };
     let response_types = prepared.response_types.clone();
     let registration_access_token = endpoint.security.registration_tokens.random_token();
-    let prepared_insert = match prepare_insert(
-        &endpoint,
-        prepared,
-        &registration_access_token,
-        initial_access.conformance_lease_id(),
-        None,
-    )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(AdminClientError::InvalidRequest(message)) => {
-            return dynamic_registration_error_response(map_insert_error(message));
-        }
-        Err(_error) => {
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "Dynamic client registration failed.",
-            );
-        }
-    };
+    let prepared_insert =
+        match prepare_insert(&endpoint, prepared, &registration_access_token, None).await {
+            Ok(prepared) => prepared,
+            Err(AdminClientError::InvalidRequest(message)) => {
+                return dynamic_registration_error_response(map_insert_error(message));
+            }
+            Err(_error) => {
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "Dynamic client registration failed.",
+                );
+            }
+        };
     let issued_secret = prepared_insert.issued_secret.clone();
     match endpoint.clients.insert(&prepared_insert).await {
         Ok(client) => {
@@ -201,7 +192,6 @@ pub async fn client_configuration_put(
         &endpoint,
         registration,
         &registration_access_token,
-        None,
         current.security_policy.as_ref(),
     )
     .await
@@ -308,7 +298,6 @@ pub(super) async fn prepare_insert(
     endpoint: &DynamicRegistrationEndpoint,
     mut registration: nazo_auth::PreparedDynamicClientRegistration,
     registration_access_token: &str,
-    conformance_lease_id: Option<Uuid>,
     security_policy_override: Option<&nazo_auth::ClientSecurityPolicy>,
 ) -> Result<PreparedClientRegistration, AdminClientError> {
     if let Some(uri) = registration.jwks_uri.as_deref() {
@@ -319,11 +308,21 @@ pub(super) async fn prepare_insert(
         )?);
     }
     let mut request = registration.into_create_client_request();
-    request.conformance_lease_id = conformance_lease_id;
     if let Some(security_policy) = security_policy_override {
         request.security_policy = security_policy.clone();
     }
-    if conformance_lease_id.is_some() && request.client_type == "confidential" {
+    // A confidential OIDC authorization-code client can authenticate the
+    // code exchange and the baseline OIDC profile permits it to operate
+    // without PKCE.  Apply that ordinary protocol policy independently of
+    // how the RFC 7591 initial-access token was provisioned; public clients
+    // and OAuth-only registrations retain the stricter default.
+    if request.client_type == "confidential"
+        && request.scopes.iter().any(|scope| scope == "openid")
+        && request
+            .grant_types
+            .iter()
+            .any(|grant_type| grant_type == "authorization_code")
+    {
         request.security_policy.allow_confidential_oidc_without_pkce = true;
     }
     let policy = AdminClientPolicy {

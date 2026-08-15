@@ -1,9 +1,6 @@
 use super::*;
 use nazo_auth::DynamicRegistrationSecretPort;
-use nazo_http_actix::{
-    DynamicRegistrationDependencyError, DynamicRegistrationRateLimitError,
-    DynamicRegistrationRequestGuard,
-};
+use nazo_http_actix::{DynamicRegistrationRateLimitError, DynamicRegistrationRequestGuard};
 
 use crate::{
     config::ConfigSource, runtime_modules::test_support::runtime_module_registry_for_test,
@@ -13,14 +10,6 @@ use crate::{
 use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
-
-#[test]
-fn dynamic_registration_initial_access_digest_is_lowercase_sha256() {
-    assert_eq!(
-        sha256_hex(b"abc"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-}
 
 #[test]
 fn dynamic_registration_secret_port_hashes_and_compares_without_plaintext_reuse() {
@@ -103,7 +92,6 @@ fn unavailable_dynamic_registration_guard(
         nazo_valkey::RateLimitStore::new(&valkey),
         &DynamicRegistrationConfig::from(settings),
         runtime,
-        nazo_postgres::ConformanceLeaseRepository::new(pool),
     )
 }
 
@@ -120,12 +108,6 @@ async fn dynamic_registration_guard_fails_closed_for_unavailable_dependencies() 
     assert_eq!(
         guard.enforce_rate_limit("203.0.113.77").await,
         Err(DynamicRegistrationRateLimitError::Unavailable)
-    );
-    assert_eq!(
-        guard
-            .conformance_lease_for_initial_access_token("initial-token")
-            .await,
-        Err(DynamicRegistrationDependencyError::Unavailable)
     );
 }
 

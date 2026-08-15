@@ -1,8 +1,5 @@
 use super::*;
 
-const CONFORMANCE_MATERIAL_SHA256: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
 use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -180,72 +177,41 @@ fn create_input(
         request_method: request_method.map(str::to_owned),
         response_mode: response_mode.map(str::to_owned),
         transaction_data: None,
-        conformance_lease_id: None,
-        conformance_task_jti: None,
+        openid4vc_trust_policy_resource_id: None,
+        openid4vc_trust_policy_digest: None,
     }
 }
 
-fn conformance_material(issuer: &str, credential_trust_anchor_pem: &str) -> serde_json::Value {
-    serde_json::to_value(nazo_operator_protocol::Openid4vcConformanceTrust {
-        schema: 1,
-        client_attestation_issuer: issuer.to_owned(),
-        client_attestation_jwks: json!({"keys": []}),
-        key_attestation_jwks: json!({"keys": []}),
-        credential_trust_anchor_pem: credential_trust_anchor_pem.to_owned(),
-    })
-    .expect("conformance material should serialize")
-}
-
-fn valid_ca_pem() -> String {
-    let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("conformance CA key");
+fn ordinary_trust_policy_material() -> serde_json::Value {
+    let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("trust anchor key");
     let mut ca_params = CertificateParams::default();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     ca_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::minutes(1);
     ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
-    CertifiedIssuer::self_signed(ca_params, ca_key)
-        .expect("conformance CA certificate")
-        .pem()
-}
-
-async fn bind_suite_origin(
-    pool: &nazo_postgres::DbPool,
-    lease_id: Uuid,
-    origin: &str,
-    task_jti: &str,
-) {
-    let mut connection = nazo_postgres::get_conn(pool)
-        .await
-        .expect("suite-origin fixture connection should be available");
-    sql_query(
-        "UPDATE conformance_leases
-         SET profile = 'nazoauth-full', suite_origin = $1, task_jti = $2
-         WHERE tenant_id = $3 AND id = $4",
-    )
-    .bind::<diesel::sql_types::Text, _>(origin)
-    .bind::<diesel::sql_types::Text, _>(task_jti)
-    .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
-    .bind::<diesel::sql_types::Uuid, _>(lease_id)
-    .execute(&mut connection)
-    .await
-    .expect("suite-origin fixture should be bound");
-}
-
-async fn expire_lease(pool: &nazo_postgres::DbPool, lease_id: Uuid) {
-    let mut connection = nazo_postgres::get_conn(pool)
-        .await
-        .expect("expiry fixture connection should be available");
-    sql_query(
-        "UPDATE conformance_leases
-         SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes',
-             expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
-         WHERE tenant_id = $1 AND id = $2",
-    )
-    .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
-    .bind::<diesel::sql_types::Uuid, _>(lease_id)
-    .execute(&mut connection)
-    .await
-    .expect("expiry fixture should be updated");
+    let anchor = CertifiedIssuer::self_signed(ca_params, ca_key)
+        .expect("trust anchor certificate")
+        .pem();
+    let key = |kid: &str| {
+        json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "y": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "kid": kid
+        })
+    };
+    let policy = nazo_operator_protocol::Openid4vcTrustPolicy {
+        schema: 1,
+        client_attestation_issuer: "https://attester.example".to_owned(),
+        client_attestation_jwks: json!({"keys": [key("client")]}),
+        key_attestation_jwks: json!({"keys": [key("holder")]}),
+        credential_trust_anchor_pem: anchor,
+        wallet_authorization_origins: vec!["https://dynamic-wallet.example".to_owned()],
+    };
+    nazo_operator_protocol::validate_openid4vc_trust_policy(&policy)
+        .expect("ordinary trust policy fixture should be valid");
+    serde_json::to_value(policy).expect("ordinary trust policy should serialize")
 }
 
 #[tokio::test]
@@ -294,21 +260,6 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
         (500, "server_error")
     );
 
-    assert!(
-        disabled
-            .conformance_credential_trust_anchors(None)
-            .await
-            .expect("missing lease has no additional anchors")
-            .is_empty()
-    );
-    let unavailable_anchors = disabled
-        .conformance_credential_trust_anchors(Some(Uuid::now_v7()))
-        .await
-        .expect_err("conformance anchor lookup must report unavailable storage");
-    assert_eq!(
-        (unavailable_anchors.status, unavailable_anchors.error),
-        (503, "server_error")
-    );
     let unavailable_request = disabled
         .request(Uuid::now_v7(), None)
         .await
@@ -350,7 +301,6 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     };
     let root = std::env::temp_dir().join(format!("nazo-openid4vp-live-{}", Uuid::now_v7()));
     let pool = nazo_postgres::create_pool(database_url, 2).expect("live pool should build");
-    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
     let operations = operations(pool.clone(), &root, true).await;
 
     let url_query = operations
@@ -676,7 +626,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     );
     let store_error_operations = ServerPresentationOperations {
         store: broken_store.clone(),
-        conformance: operations.conformance.clone(),
+        trust_policies: operations.trust_policies.clone(),
         service: nazo_openid4vp::PresentationService::new(broken_store, operations.crypto.clone()),
         crypto: operations.crypto.clone(),
         runtime: operations.runtime.clone(),
@@ -738,120 +688,38 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         (400, "invalid_request")
     );
 
-    let conformance_origin = format!(
-        "https://wallet-conformance-{}.example",
-        Uuid::now_v7().simple()
-    );
-    let conformance_endpoint = format!("{conformance_origin}/authorize");
-    let valid_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
-    let anchor_pem = format!("{}{}", valid_ca_pem(), valid_ca_pem());
-    let valid_lease = leases
-        .create(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "nazoauth-full",
-            CONFORMANCE_MATERIAL_SHA256,
-            nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(conformance_material(&conformance_origin, &anchor_pem)),
-            60,
-        )
-        .await
-        .expect("valid OpenID4VC conformance lease should be created");
-    bind_suite_origin(&pool, valid_lease.id, &conformance_origin, &valid_task_jti).await;
-    let partial_lease_binding = operations
+    let partial_resource_binding = operations
         .create(CreatePresentationRequest {
-            conformance_lease_id: Some(valid_lease.id),
+            openid4vc_trust_policy_resource_id: Some("trust:run-1".to_owned()),
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("a partial conformance lease binding must be rejected");
+        .expect_err("a partial ordinary trust policy binding must be rejected");
     assert_eq!(
-        (partial_lease_binding.status, partial_lease_binding.error),
+        (
+            partial_resource_binding.status,
+            partial_resource_binding.error
+        ),
         (400, "invalid_request")
     );
-    let partial_task_binding = operations
+    let partial_digest_binding = operations
         .create(CreatePresentationRequest {
-            conformance_task_jti: Some(valid_task_jti.clone()),
+            openid4vc_trust_policy_digest: Some("a".repeat(64)),
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("a partial conformance task binding must be rejected");
+        .expect_err("a partial ordinary trust policy digest fence must be rejected");
     assert_eq!(
-        (partial_task_binding.status, partial_task_binding.error),
-        (400, "invalid_request")
-    );
-
-    let legacy_static_presentation = operations
-        .create(create_input(None, None, None, false))
-        .await
-        .expect("static origins without a binding should retain legacy behavior");
-    let legacy_static_transaction = operations
-        .store
-        .request(
-            legacy_static_presentation.transaction_id,
-            chrono::Utc::now(),
-        )
-        .await
-        .expect("legacy static transaction should be readable")
-        .expect("legacy static transaction should exist");
-    assert_eq!(legacy_static_transaction.conformance_lease_id, None);
-
-    let static_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
-    let static_lease = leases
-        .create(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "nazoauth-full",
-            CONFORMANCE_MATERIAL_SHA256,
-            nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(conformance_material("https://wallet.example", &anchor_pem)),
-            60,
-        )
-        .await
-        .expect("static-origin conformance lease should be created");
-    bind_suite_origin(
-        &pool,
-        static_lease.id,
-        "https://wallet.example",
-        &static_task_jti,
-    )
-    .await;
-    let static_presentation = operations
-        .create(CreatePresentationRequest {
-            conformance_lease_id: Some(static_lease.id),
-            conformance_task_jti: Some(static_task_jti.clone()),
-            ..create_input(None, None, None, false)
-        })
-        .await
-        .expect("static origins with an exact binding should be accepted");
-    let static_transaction = operations
-        .store
-        .request(static_presentation.transaction_id, chrono::Utc::now())
-        .await
-        .expect("static-bound transaction should be readable")
-        .expect("static-bound transaction should exist");
-    assert_eq!(
-        static_transaction.conformance_lease_id,
-        Some(static_lease.id),
-        "a complete binding must be stored even for a static Suite origin"
-    );
-    let static_binding = operations
-        .create(CreatePresentationRequest {
-            conformance_lease_id: Some(valid_lease.id),
-            conformance_task_jti: Some(valid_task_jti.clone()),
-            ..create_input(None, None, None, false)
-        })
-        .await
-        .expect_err("static wallet origins must reject a cross-origin lease binding");
-    assert_eq!(
-        (static_binding.status, static_binding.error),
+        (partial_digest_binding.status, partial_digest_binding.error),
         (400, "invalid_request")
     );
     let missing_dynamic_binding = operations
         .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: conformance_endpoint.clone(),
+            wallet_authorization_endpoint: "https://dynamic-wallet.example/authorize".to_owned(),
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("dynamic Suite origins must require an exact binding");
+        .expect_err("a non-static wallet must select an active ordinary trust policy");
     assert_eq!(
         (
             missing_dynamic_binding.status,
@@ -859,193 +727,126 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         ),
         (400, "invalid_request")
     );
-    let dynamic_presentation = operations
-        .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: conformance_endpoint.clone(),
-            conformance_lease_id: Some(valid_lease.id),
-            conformance_task_jti: Some(valid_task_jti.clone()),
-            ..create_input(None, None, None, false)
-        })
-        .await
-        .expect("dynamic Suite origin should be accepted");
-    let dynamic_transaction = operations
-        .store
-        .request(dynamic_presentation.transaction_id, chrono::Utc::now())
-        .await
-        .expect("dynamic presentation transaction should be readable")
-        .expect("dynamic presentation transaction should exist");
-    assert_eq!(
-        dynamic_transaction.conformance_lease_id,
-        Some(valid_lease.id),
-        "dynamic Suite origins must bind the presentation transaction to the matching lease"
-    );
-    let anchors = operations
-        .conformance_credential_trust_anchors(Some(valid_lease.id))
-        .await
-        .expect("valid conformance lease should provide a trust anchor");
-    assert_eq!(anchors.len(), 2);
-    assert!(anchors.iter().all(|anchor| !anchor.is_empty()));
 
-    let cross_origin_binding = operations
-        .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: "https://different-suite.example/authorize".to_owned(),
-            conformance_lease_id: Some(valid_lease.id),
-            conformance_task_jti: Some(valid_task_jti.clone()),
-            ..create_input(None, None, None, false)
-        })
+    let policy_id = Uuid::now_v7();
+    let policy_resource_id = format!("trust:{}", Uuid::now_v7());
+    let policy_digest = "b".repeat(64);
+    let mut connection = nazo_postgres::get_conn(&pool)
         .await
-        .expect_err("a lease binding must not cross Suite origins");
-    assert_eq!(
-        (cross_origin_binding.status, cross_origin_binding.error),
-        (400, "invalid_request")
-    );
-
-    let duplicate_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
-    let duplicate_lease = leases
-        .create(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "nazoauth-full",
-            CONFORMANCE_MATERIAL_SHA256,
-            nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(conformance_material(&conformance_origin, &anchor_pem)),
-            60,
-        )
-        .await
-        .expect("duplicate-origin conformance lease should be created");
-    bind_suite_origin(
-        &pool,
-        duplicate_lease.id,
-        &conformance_origin,
-        &duplicate_task_jti,
+        .expect("trust policy fixture connection");
+    sql_query(
+        "INSERT INTO openid4vc_trust_policies
+         (id, tenant_id, resource_id, resource_digest, public_material, wallet_origins)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
-    .await;
-    let cross_run_binding = operations
+    .bind::<diesel::sql_types::Uuid, _>(policy_id)
+    .bind::<diesel::sql_types::Uuid, _>(crate::domain::tenancy::DEFAULT_TENANT_ID)
+    .bind::<diesel::sql_types::Varchar, _>(&policy_resource_id)
+    .bind::<diesel::sql_types::Varchar, _>(&policy_digest)
+    .bind::<diesel::sql_types::Jsonb, _>(ordinary_trust_policy_material())
+    .bind::<diesel::sql_types::Jsonb, _>(json!(["https://dynamic-wallet.example"]))
+    .execute(&mut connection)
+    .await
+    .expect("ordinary trust policy should be inserted");
+
+    let dynamic = operations
         .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: conformance_endpoint.clone(),
-            conformance_lease_id: Some(valid_lease.id),
-            conformance_task_jti: Some(duplicate_task_jti.clone()),
+            wallet_authorization_endpoint: "https://dynamic-wallet.example/authorize".to_owned(),
+            openid4vc_trust_policy_resource_id: Some(policy_resource_id.clone()),
+            openid4vc_trust_policy_digest: Some(policy_digest.clone()),
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("a lease and JTI from different runs must not be mixed");
-    assert_eq!(
-        (cross_run_binding.status, cross_run_binding.error),
-        (400, "invalid_request")
-    );
-    let duplicate_presentation = operations
-        .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: conformance_endpoint.clone(),
-            conformance_lease_id: Some(duplicate_lease.id),
-            conformance_task_jti: Some(duplicate_task_jti.clone()),
-            ..create_input(None, None, None, false)
-        })
-        .await
-        .expect("exact binding must select the requested lease despite same-origin concurrency");
-    let duplicate_transaction = operations
+        .expect("an active ordinary trust policy should authorize the dynamic wallet");
+    let frozen = operations
         .store
-        .request(duplicate_presentation.transaction_id, chrono::Utc::now())
+        .request(dynamic.transaction_id, Utc::now())
         .await
-        .expect("duplicate-bound transaction should be readable")
-        .expect("duplicate-bound transaction should exist");
+        .expect("frozen transaction lookup")
+        .expect("frozen transaction");
+    assert_eq!(frozen.openid4vc_trust_policy_binding_id, Some(policy_id));
     assert_eq!(
-        duplicate_transaction.conformance_lease_id,
-        Some(duplicate_lease.id)
+        frozen.openid4vc_trust_policy_resource_id.as_deref(),
+        Some(policy_resource_id.as_str())
     );
-    leases
-        .revoke(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            duplicate_lease.id,
-        )
-        .await
-        .expect("duplicate lease should be revocable");
-    let revoked_binding = operations
+    assert_eq!(
+        frozen.openid4vc_trust_policy_digest.as_deref(),
+        Some(policy_digest.as_str())
+    );
+
+    let digest_mismatch = operations
         .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: conformance_endpoint.clone(),
-            conformance_lease_id: Some(duplicate_lease.id),
-            conformance_task_jti: Some(duplicate_task_jti),
+            wallet_authorization_endpoint: "https://dynamic-wallet.example/authorize".to_owned(),
+            openid4vc_trust_policy_resource_id: Some(policy_resource_id.clone()),
+            openid4vc_trust_policy_digest: Some("c".repeat(64)),
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("a revoked lease must not be selectable");
+        .expect_err("a mismatched policy digest must fail closed");
     assert_eq!(
-        (revoked_binding.status, revoked_binding.error),
+        (digest_mismatch.status, digest_mismatch.error),
         (400, "invalid_request")
     );
 
-    leases
-        .revoke(crate::domain::tenancy::DEFAULT_TENANT_ID, valid_lease.id)
+    let other_tenant = Uuid::now_v7();
+    sql_query("INSERT INTO tenants (id, slug, display_name) VALUES ($1, $2, $3)")
+        .bind::<diesel::sql_types::Uuid, _>(other_tenant)
+        .bind::<diesel::sql_types::Varchar, _>(format!("vp-test-{other_tenant}"))
+        .bind::<diesel::sql_types::Varchar, _>("VP cross-tenant test")
+        .execute(&mut connection)
         .await
-        .expect("valid lease should be revocable");
+        .expect("cross-tenant fixture should be inserted");
+    let cross_tenant = ServerPresentationOperations::new(
+        pool.clone(),
+        other_tenant,
+        [0x43; 32],
+        operations.crypto.clone(),
+        operations.runtime.clone(),
+        PresentationVerifierConfig {
+            issuer: operations.issuer.clone(),
+            wallet_origins: operations.wallet_origins.clone(),
+            transaction_ttl_seconds: operations.transaction_ttl_seconds,
+        },
+    )
+    .create(CreatePresentationRequest {
+        wallet_authorization_endpoint: "https://dynamic-wallet.example/authorize".to_owned(),
+        openid4vc_trust_policy_resource_id: Some(policy_resource_id.clone()),
+        openid4vc_trust_policy_digest: Some(policy_digest.clone()),
+        ..create_input(None, None, None, false)
+    })
+    .await
+    .expect_err("a trust policy must not cross tenant boundaries");
+    assert_eq!(
+        (cross_tenant.status, cross_tenant.error),
+        (400, "invalid_request")
+    );
 
-    let expired_origin = format!("https://wallet-expired-{}.example", Uuid::now_v7().simple());
-    let expired_task_jti = format!("request-{:032x}", Uuid::now_v7().as_u128());
-    let expired_lease = leases
-        .create(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "nazoauth-full",
-            CONFORMANCE_MATERIAL_SHA256,
-            nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(conformance_material(&expired_origin, &anchor_pem)),
-            60,
-        )
-        .await
-        .expect("expired-origin conformance lease should be created");
-    bind_suite_origin(&pool, expired_lease.id, &expired_origin, &expired_task_jti).await;
-    expire_lease(&pool, expired_lease.id).await;
-    let expired_binding = operations
+    sql_query(
+        "UPDATE openid4vc_trust_policies
+         SET active = FALSE, revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(policy_id)
+    .execute(&mut connection)
+    .await
+    .expect("trust policy should be revoked");
+    assert!(
+        operations
+            .store
+            .request(dynamic.transaction_id, Utc::now())
+            .await
+            .expect("revoked transaction lookup")
+            .is_none(),
+        "revocation must invalidate the frozen transaction"
+    );
+    let revoked = operations
         .create(CreatePresentationRequest {
-            wallet_authorization_endpoint: format!("{expired_origin}/authorize"),
-            conformance_lease_id: Some(expired_lease.id),
-            conformance_task_jti: Some(expired_task_jti),
+            wallet_authorization_endpoint: "https://dynamic-wallet.example/authorize".to_owned(),
+            openid4vc_trust_policy_resource_id: Some(policy_resource_id),
+            openid4vc_trust_policy_digest: Some(policy_digest),
             ..create_input(None, None, None, false)
         })
         .await
-        .expect_err("an expired lease must not be selectable");
-    assert_eq!(
-        (expired_binding.status, expired_binding.error),
-        (400, "invalid_request")
-    );
-
-    let malformed_material_lease = leases
-        .create(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "openid4vc",
-            &format!("{:064x}", Uuid::now_v7().as_u128()),
-            nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(json!({})),
-            60,
-        )
-        .await
-        .expect("malformed conformance lease should be created for the error test");
-    let malformed_material = operations
-        .conformance_credential_trust_anchors(Some(malformed_material_lease.id))
-        .await
-        .expect_err("malformed conformance material must fail closed");
-    assert_eq!(
-        (malformed_material.status, malformed_material.error),
-        (503, "server_error")
-    );
-
-    let invalid_anchor_lease = leases
-        .create(
-            crate::domain::tenancy::DEFAULT_TENANT_ID,
-            "openid4vc",
-            &format!("{:064x}", Uuid::now_v7().as_u128()),
-            nazo_postgres::ConformanceLeaseTokenDigests::default(),
-            Some(conformance_material(
-                &format!("https://wallet-invalid-anchor-{}.example", Uuid::now_v7()),
-                "not-pem",
-            )),
-            60,
-        )
-        .await
-        .expect("invalid-anchor lease should be created for the error test");
-    let invalid_anchor = operations
-        .conformance_credential_trust_anchors(Some(invalid_anchor_lease.id))
-        .await
-        .expect_err("invalid conformance trust anchor must fail closed");
-    assert_eq!(
-        (invalid_anchor.status, invalid_anchor.error),
-        (503, "server_error")
-    );
+        .expect_err("a revoked trust policy must not be selectable");
+    assert_eq!((revoked.status, revoked.error), (400, "invalid_request"));
 }

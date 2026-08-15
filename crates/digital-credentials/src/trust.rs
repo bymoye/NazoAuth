@@ -310,25 +310,18 @@ impl CertificateRevocationPolicy {
         self.check_chain_inner(issuer, certificates, now, false)
     }
 
-    /// Check a chain that has already been authenticated against an explicit
-    /// short-lived conformance trust anchor.  The normal required policy
-    /// remains fail-closed for every certificate; only the lease-scoped
-    /// conformance source may supply an out-of-band status for its ephemeral
-    /// certificates.  Callers must verify the chain against that anchor before
-    /// invoking this method.
-    pub fn check_chain_with_conformance_trust(
+    /// Check a chain already authenticated against an explicit scoped trust
+    /// anchor. The normal required policy remains fail-closed for every
+    /// certificate; a caller must verify the chain against the supplied scope
+    /// before invoking this method.
+    pub fn check_chain_with_scoped_trust(
         &self,
         issuer: Option<&str>,
         certificates: &[Vec<u8>],
         now: DateTime<Utc>,
-        conformance_trust_anchors: &[Vec<u8>],
+        scoped_trust_anchors: &[Vec<u8>],
     ) -> Result<(), CredentialTrustError> {
-        self.check_chain_inner(
-            issuer,
-            certificates,
-            now,
-            !conformance_trust_anchors.is_empty(),
-        )
+        self.check_chain_inner(issuer, certificates, now, !scoped_trust_anchors.is_empty())
     }
 
     fn check_chain_inner(
@@ -336,7 +329,7 @@ impl CertificateRevocationPolicy {
         issuer: Option<&str>,
         certificates: &[Vec<u8>],
         now: DateTime<Utc>,
-        conformance_trust_loaded: bool,
+        scoped_trust_loaded: bool,
     ) -> Result<(), CredentialTrustError> {
         if matches!(self.state.mode, CertificateRevocationMode::Disabled) {
             return Ok(());
@@ -370,7 +363,7 @@ impl CertificateRevocationPolicy {
                     return Err(CredentialTrustError::RevokedCertificate);
                 }
                 Some(CertificateRevocationStatus::Good) => {}
-                None if self.is_required() && !conformance_trust_loaded => {
+                None if self.is_required() && !scoped_trust_loaded => {
                     return Err(CredentialTrustError::RevocationStatusUnknown);
                 }
                 None => {}

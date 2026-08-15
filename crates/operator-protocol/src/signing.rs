@@ -8,19 +8,23 @@ use sha2::{Digest as _, Sha256};
 use crate::verification::{
     validate_adoption_receipt, validate_deployment_statement, validate_discovery_statement,
     validate_file_identifier, validate_final_receipt, validate_identifier,
-    validate_management_event, validate_runtime_receipt, validate_task, validate_transition,
-    verify_task_window,
+    validate_management_event, validate_runtime_receipt, validate_task,
+    validate_tenant_resource_capability, validate_tenant_resource_identities,
+    validate_tenant_resource_receipt, validate_tenant_resource_task, validate_transition,
+    verify_task_window, verify_tenant_resource_task_window,
 };
 use crate::wire::{
     AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
     DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent, ProtectedHeader,
-    RuntimeReceipt, TaskEnvelope,
+    RuntimeReceipt, TaskEnvelope, TenantResourceCapability, TenantResourceIdentity,
+    TenantResourceKind, TenantResourceReceipt, TenantResourceTask,
 };
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
     DEPLOYMENT_STATEMENT_JWS_TYPE, FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE,
     MAX_COMPACT_JWS_BYTES, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE,
-    TRUST_TRANSITION_JWS_TYPE,
+    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+    TENANT_RESOURCE_TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
 };
 
 pub fn sign_discovery_statement(
@@ -125,6 +129,39 @@ pub fn sign_management_event(
     sign_compact(event, key_id, MANAGEMENT_EVENT_JWS_TYPE, key)
 }
 
+pub fn sign_tenant_resource_capability(
+    capability: &TenantResourceCapability,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_capability(capability, capability.issued_at)?;
+    if capability.instance_key_id != key_id {
+        return Err(ProtocolError::Policy(
+            "tenant resource capability key id does not match signer",
+        ));
+    }
+    sign_compact(capability, key_id, TENANT_RESOURCE_CAPABILITY_JWS_TYPE, key)
+}
+
+pub fn sign_tenant_resource_task(
+    task: &TenantResourceTask,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_task(task)?;
+    verify_tenant_resource_task_window(task, task.iat)?;
+    sign_compact(task, key_id, TENANT_RESOURCE_TASK_JWS_TYPE, key)
+}
+
+pub fn sign_tenant_resource_receipt(
+    receipt: &TenantResourceReceipt,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_receipt(receipt)?;
+    sign_compact(receipt, key_id, TENANT_RESOURCE_RECEIPT_JWS_TYPE, key)
+}
+
 pub fn canonical_config_sha256(
     manifest: &CanonicalConfigManifest,
 ) -> Result<String, ProtocolError> {
@@ -133,6 +170,59 @@ pub fn canonical_config_sha256(
     }
     let bytes = serde_json::to_vec(manifest).map_err(|_| ProtocolError::Json)?;
     Ok(hex_sha256(&bytes))
+}
+
+/// Compute the canonical digest of an active tenant-resource identity set.
+///
+/// The manifest bytes themselves are deliberately not part of the signed wire
+/// contract.  Callers must pass the complete active set, not an Apply/Revoke
+/// delta.  The encoding is domain-separated, length-prefixed, and sorted by
+/// the fixed wire kind label, resource ID, and resource digest.  Validation is
+/// shared with the signed task/receipt validators, so malformed or duplicate
+/// identities fail closed.  An empty set is valid and has one deterministic
+/// digest.
+pub fn canonical_tenant_resource_manifest_sha256(
+    resources: &[TenantResourceIdentity],
+) -> Result<String, ProtocolError> {
+    validate_tenant_resource_identities(resources, false)?;
+
+    let mut entries: Vec<(&str, &str, &str)> = resources
+        .iter()
+        .map(|resource| {
+            (
+                tenant_resource_kind_wire_label(resource.kind),
+                resource.resource_id.as_str(),
+                resource.digest.as_str(),
+            )
+        })
+        .collect();
+    entries.sort_unstable();
+
+    let mut encoded = Vec::new();
+    append_len_prefixed(&mut encoded, b"nazoauth:tenant-resource-manifest:v1");
+    encoded.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+    for (kind, resource_id, digest) in entries {
+        append_len_prefixed(&mut encoded, kind.as_bytes());
+        append_len_prefixed(&mut encoded, resource_id.as_bytes());
+        append_len_prefixed(&mut encoded, digest.as_bytes());
+    }
+    Ok(hex_sha256(&encoded))
+}
+
+fn tenant_resource_kind_wire_label(kind: TenantResourceKind) -> &'static str {
+    match kind {
+        TenantResourceKind::CibaDecisionBinding => "ciba-decision-binding",
+        TenantResourceKind::OauthClient => "oauth-client",
+        TenantResourceKind::MtlsTrustAnchor => "mtls-trust-anchor",
+        TenantResourceKind::Openid4vcDataset => "openid4vc-dataset",
+        TenantResourceKind::Openid4vcTrustPolicy => "openid4vc-trust-policy",
+        TenantResourceKind::User => "user",
+    }
+}
+
+fn append_len_prefixed(encoded: &mut Vec<u8>, value: &[u8]) {
+    encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    encoded.extend_from_slice(value);
 }
 
 pub fn compact_sha256(compact: &str) -> String {

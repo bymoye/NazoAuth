@@ -285,6 +285,25 @@ impl ServerCredentialIssuerOperations {
                     vci_error(401, "invalid_token", "Access token subject is invalid.")
                 })?,
         };
+        if self
+            .token_service
+            .active_subject_claims(tenant_id, subject_id)
+            .await
+            .map_err(|_| {
+                vci_error(
+                    503,
+                    "invalid_token",
+                    "Access token subject state is unavailable.",
+                )
+            })?
+            .is_none()
+        {
+            return Err(vci_error(
+                401,
+                "invalid_token",
+                "Access token subject is inactive.",
+            ));
+        }
         let (dpop_jkt, mtls_x5t_s256) = claims
             .cnf
             .as_ref()

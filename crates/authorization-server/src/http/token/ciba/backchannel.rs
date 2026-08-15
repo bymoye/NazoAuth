@@ -7,7 +7,6 @@ enum GuardedCibaCreation {
     RequestObjectReplay,
     RequestObjectStore,
     State(CibaCreateFailure),
-    LeaseExpired,
 }
 
 // Actix supplies each dependency as an independent extractor at this route
@@ -17,7 +16,6 @@ enum GuardedCibaCreation {
 pub(crate) async fn backchannel_authentication(
     authorization_service: Data<ServerAuthorizationService>,
     ciba_service: Data<ServerCibaService>,
-    conformance_leases: Data<nazo_postgres::ConformanceLeaseRepository>,
     users: Data<nazo_postgres::UserRepository>,
     config: Data<CibaHttpConfig>,
     runtime: Data<ServerRuntimeModuleRegistry>,
@@ -281,100 +279,62 @@ pub(crate) async fn backchannel_authentication(
     }
     let audit_state = state_payload.clone();
     let client_id = client.client_id.clone();
-    let lease_client_id = client_id.clone();
     let client_for_creation = client.clone();
     let authorization_service_for_creation = authorization_service.clone();
     let ciba_service_for_creation = ciba_service.clone();
-    let auth_req_id = match conformance_leases
-        .with_active_ciba_decision(
-            config.tenant_id,
-            &lease_client_id,
-            None,
-            |lease_expires_at| async move {
-                if lease_expires_at.is_some_and(|deadline| Utc::now().timestamp() >= deadline) {
-                    return GuardedCibaCreation::LeaseExpired;
-                }
-                if let Err(error) =
-                    consume_token_management_client_assertion_with_authorization_service(
-                        &authorization_service_for_creation,
-                        &client_for_creation,
-                        assertion.as_ref(),
-                    )
-                    .await
-                {
-                    return GuardedCibaCreation::ClientAuthentication(error);
-                }
-                if let Some(replay) = request_object_replay {
-                    if lease_expires_at
-                        .is_some_and(|deadline| Utc::now().timestamp() >= deadline)
-                    {
-                        return GuardedCibaCreation::LeaseExpired;
-                    }
-                    match authorization_service_for_creation
-                        .consume_ciba_request_object(
-                            &client_id,
-                            &replay.jti,
-                            replay.ttl_seconds,
-                        )
-                        .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => return GuardedCibaCreation::RequestObjectReplay,
-                        Err(error) => {
-                            tracing::warn!(%error, "failed to persist CIBA request object replay state");
-                            return GuardedCibaCreation::RequestObjectStore;
-                        }
-                    }
-                }
-                if lease_expires_at.is_some_and(|deadline| Utc::now().timestamp() >= deadline) {
-                    return GuardedCibaCreation::LeaseExpired;
-                }
-                match ciba_service_for_creation
-                    .create_unique_with_lease_deadline(
-                        &state_payload,
-                        lease_expires_at,
-                        random_urlsafe_token,
-                    )
-                    .await
-                {
-                    Ok(auth_req_id) => GuardedCibaCreation::Created(auth_req_id),
-                    Err(error) => GuardedCibaCreation::State(error),
-                }
-            },
+    let creation = if let Err(error) =
+        consume_token_management_client_assertion_with_authorization_service(
+            &authorization_service_for_creation,
+            &client_for_creation,
+            assertion.as_ref(),
         )
         .await
     {
-        Ok(Some(GuardedCibaCreation::Created(auth_req_id))) => auth_req_id,
-        Ok(Some(GuardedCibaCreation::ClientAuthentication(error))) => {
+        GuardedCibaCreation::ClientAuthentication(error)
+    } else if let Some(replay) = request_object_replay {
+        match authorization_service_for_creation
+            .consume_ciba_request_object(&client_id, &replay.jti, replay.ttl_seconds)
+            .await
+        {
+            Ok(true) => match ciba_service_for_creation
+                .create_unique(&state_payload, random_urlsafe_token)
+                .await
+            {
+                Ok(auth_req_id) => GuardedCibaCreation::Created(auth_req_id),
+                Err(error) => GuardedCibaCreation::State(error),
+            },
+            Ok(false) => GuardedCibaCreation::RequestObjectReplay,
+            Err(error) => {
+                tracing::warn!(%error, "failed to persist CIBA request object replay state");
+                GuardedCibaCreation::RequestObjectStore
+            }
+        }
+    } else {
+        match ciba_service_for_creation
+            .create_unique(&state_payload, random_urlsafe_token)
+            .await
+        {
+            Ok(auth_req_id) => GuardedCibaCreation::Created(auth_req_id),
+            Err(error) => GuardedCibaCreation::State(error),
+        }
+    };
+    let auth_req_id = match creation {
+        GuardedCibaCreation::Created(auth_req_id) => auth_req_id,
+        GuardedCibaCreation::ClientAuthentication(error) => {
             return token_management_auth_error(error);
         }
-        Ok(Some(GuardedCibaCreation::RequestObjectReplay)) => {
+        GuardedCibaCreation::RequestObjectReplay => {
             return ciba_invalid_request("CIBA request object has already been used.");
         }
-        Ok(Some(GuardedCibaCreation::RequestObjectStore)) => {
+        GuardedCibaCreation::RequestObjectStore => {
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
                 "CIBA failed.",
             );
         }
-        Ok(Some(GuardedCibaCreation::LeaseExpired)) | Ok(None) => {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_client",
-                "客户端认证失败.",
-            );
-        }
-        Ok(Some(GuardedCibaCreation::State(error))) => {
+        GuardedCibaCreation::State(error) => {
             tracing::warn!(%error, "failed to create CIBA auth_req_id");
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "CIBA failed.",
-            );
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to acquire CIBA creation lease guard");
             return oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",

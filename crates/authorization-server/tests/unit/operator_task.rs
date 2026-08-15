@@ -656,21 +656,21 @@ fn embedded_identity_and_operation_names_are_closed() {
                 public_material: None,
                 ttl_seconds: 3_600,
             },
-            "conformance-lease-create",
+            "legacy-conformance-disabled",
         ),
         (
             TaskOperation::ConformanceLeaseList,
-            "conformance-lease-list",
+            "legacy-conformance-disabled",
         ),
         (
             TaskOperation::ConformanceLeaseRevoke {
                 lease_id: "018f3f2a-7b55-7a25-8f20-6d526f8f44e1".to_owned(),
             },
-            "conformance-lease-revoke",
+            "legacy-conformance-disabled",
         ),
         (
             TaskOperation::ConformanceLeaseCleanup,
-            "conformance-lease-cleanup",
+            "legacy-conformance-disabled",
         ),
         (TaskOperation::KeysList, "keys-list"),
         (TaskOperation::KeysValidate, "keys-validate"),
@@ -861,69 +861,36 @@ fn mounted_public_material_and_operator_keys_are_digest_bound() {
 }
 
 #[tokio::test]
-async fn conformance_operations_execute_through_the_closed_task_dispatch() {
-    if std::env::var_os("DATABASE_URL").is_none() {
-        if std::env::var_os("CI").is_some() {
-            panic!("CI requires DATABASE_URL for conformance task dispatch coverage");
-        }
-        return;
+async fn legacy_conformance_operations_are_permanently_disabled() {
+    for operation in [
+        TaskOperation::ConformanceMatrixDescribe,
+        TaskOperation::ConformanceOnboardingApply {
+            profile: "legacy".to_owned(),
+            bundle_schema: 1,
+            bundle_sha256: "a".repeat(64),
+            matrix_sha256: "b".repeat(64),
+            client_count: 1,
+            ttl_seconds: 60,
+        },
+        TaskOperation::ConformanceLeaseCreate {
+            profile: "legacy".to_owned(),
+            material_sha256: "a".repeat(64),
+            dynamic_registration_initial_access_token_sha256: None,
+            ciba_automated_decision_token_sha256: None,
+            public_material: None,
+            ttl_seconds: 60,
+        },
+        TaskOperation::ConformanceLeaseList,
+        TaskOperation::ConformanceLeaseRevoke {
+            lease_id: uuid::Uuid::now_v7().to_string(),
+        },
+        TaskOperation::ConformanceLeaseCleanup,
+    ] {
+        assert!(matches!(
+            execute(&operation).await,
+            TaskOutcome::Failed { .. }
+        ));
     }
-
-    let nonce = uuid::Uuid::now_v7().simple().to_string();
-    let profile = format!("task-coverage-{nonce}");
-    let material_sha256 = format!("{nonce}{nonce}");
-    let created = execute(&TaskOperation::ConformanceLeaseCreate {
-        profile: profile.clone(),
-        material_sha256: material_sha256.clone(),
-        dynamic_registration_initial_access_token_sha256: None,
-        ciba_automated_decision_token_sha256: None,
-        public_material: None,
-        ttl_seconds: 60,
-    })
-    .await;
-    let lease_id = match created {
-        TaskOutcome::Succeeded {
-            result: TaskResult::ConformanceLeaseCreated { lease },
-        } => {
-            assert_eq!(lease.profile, profile);
-            assert_eq!(lease.material_sha256, material_sha256);
-            lease.lease_id
-        }
-        other => panic!("unexpected create outcome: {other:?}"),
-    };
-
-    match execute(&TaskOperation::ConformanceLeaseList).await {
-        TaskOutcome::Succeeded {
-            result: TaskResult::ConformanceLeaseList { leases },
-        } => assert!(leases.iter().any(|lease| lease.lease_id == lease_id)),
-        other => panic!("unexpected list outcome: {other:?}"),
-    }
-
-    assert_eq!(
-        execute(&TaskOperation::ConformanceLeaseRevoke {
-            lease_id: lease_id.clone(),
-        })
-        .await,
-        TaskOutcome::Succeeded {
-            result: TaskResult::ConformanceLeaseRevoked {
-                lease_id: lease_id.clone(),
-                deactivated_clients: 0,
-            },
-        }
-    );
-    assert!(matches!(
-        execute(&TaskOperation::ConformanceLeaseCleanup).await,
-        TaskOutcome::Succeeded {
-            result: TaskResult::ConformanceLeaseCleaned { .. }
-        }
-    ));
-    assert!(matches!(
-        execute(&TaskOperation::ConformanceLeaseRevoke {
-            lease_id: "not-a-uuid".to_owned(),
-        })
-        .await,
-        TaskOutcome::Failed { .. }
-    ));
 }
 
 #[tokio::test]

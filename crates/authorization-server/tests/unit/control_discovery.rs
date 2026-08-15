@@ -1,10 +1,14 @@
 use nazo_operator_protocol::{
-    CONTROL_DISCOVERY_SCHEMA, DiscoveryRequest, decode_instance_public_key,
-    verify_deployment_statement, verify_discovery_statement,
+    Actor, ActorKind, CONTROL_DISCOVERY_SCHEMA, DiscoveryRequest,
+    TENANT_RESOURCE_CAPABILITY_VERSION, TenantResourceCapability, TenantResourceKind,
+    TenantResourceOperation, TenantResourceOutcome, TenantResourceReceipt,
+    decode_instance_public_key, verify_deployment_statement, verify_discovery_statement,
+    verify_tenant_resource_capability, verify_tenant_resource_receipt,
 };
 use std::path::PathBuf;
 
 use super::*;
+use crate::tenant_resource_provider::TenantResourceSigner as _;
 
 fn temporary_root() -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -413,6 +417,125 @@ fn changed_public_deployment_claim_preserves_the_previous_signed_statement() {
     .unwrap();
     assert_eq!(current.issuer, "https://new-auth.example");
     assert_eq!(previous.issuer, "https://old-auth.example");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn instance_identity_signs_and_exposes_tenant_resource_contracts() {
+    let root = temporary_root();
+    let endpoint = ControlDiscoveryEndpoint::initialize(
+        &root,
+        None,
+        Some("deployment-test"),
+        Some("runtime-test"),
+        "https://auth.example",
+    )
+    .unwrap();
+    let now = Utc::now().timestamp();
+    let tenant_id = "00000000-0000-7000-8000-000000000001";
+    let capability = TenantResourceCapability {
+        ver: PROTOCOL_VERSION,
+        capability_version: TENANT_RESOURCE_CAPABILITY_VERSION,
+        jti: "capability-test".to_owned(),
+        nonce: URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()),
+        deployment_id: endpoint.deployment_id().to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        runtime_instance_id: endpoint.runtime_instance_id().to_owned(),
+        issuer: format!("runtime:{}", endpoint.deployment_id()),
+        instance_key_id: endpoint.instance_key_id().to_owned(),
+        embedded: endpoint.embedded_identity(),
+        revision: 0,
+        resource_manifest_sha256: "0".repeat(64),
+        resource_kinds: vec![TenantResourceKind::User],
+        actions: vec![TenantResourceOperation::Apply],
+        issued_at: now,
+        expires_at: now + 60,
+    };
+    let direct_capability = endpoint
+        .sign_tenant_resource_capability(&capability)
+        .unwrap();
+    let trait_capability = endpoint.sign_capability(&capability).unwrap();
+    assert_eq!(direct_capability, trait_capability);
+    assert_eq!(
+        endpoint.instance_verifying_key(),
+        endpoint.identity.signing_key.verifying_key()
+    );
+    assert_eq!(
+        verify_tenant_resource_capability(
+            &direct_capability,
+            endpoint.instance_key_id(),
+            &endpoint.instance_verifying_key(),
+            now,
+        )
+        .unwrap(),
+        capability
+    );
+    let mut invalid_capability = capability.clone();
+    invalid_capability.resource_manifest_sha256 = "g".repeat(64);
+    assert!(matches!(
+        endpoint.sign_capability(&invalid_capability),
+        Err(
+            crate::tenant_resource_provider::TenantResourceProviderError::Unavailable(
+                "runtime capability signing failed"
+            )
+        )
+    ));
+
+    let receipt = TenantResourceReceipt {
+        ver: PROTOCOL_VERSION,
+        iss: format!("runtime:{}", endpoint.deployment_id()),
+        aud: format!("controller:{}", endpoint.deployment_id()),
+        jti: "request-test".to_owned(),
+        request_sha256: "1".repeat(64),
+        deployment_id: endpoint.deployment_id().to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        capability_jti: capability.jti.clone(),
+        capability_sha256: "2".repeat(64),
+        actor: Actor {
+            kind: ActorKind::Automation,
+            id: "controller-test".to_owned(),
+        },
+        change_set_id: "change-test".to_owned(),
+        change_set_sha256: "3".repeat(64),
+        operation: TenantResourceOperation::Apply,
+        expected_revision: 0,
+        revision: 0,
+        outcome: TenantResourceOutcome::Failed {
+            code: "rejected".to_owned(),
+        },
+        resources: Vec::new(),
+        resource_mappings: Vec::new(),
+        baseline_manifest_sha256: "0".repeat(64),
+        resource_manifest_sha256: "0".repeat(64),
+        started_at: now,
+        completed_at: now,
+        exp: now + 60,
+        audit_sequence: 1,
+        audit_previous_sha256: "0".repeat(64),
+    };
+    let direct_receipt = endpoint.sign_tenant_resource_receipt(&receipt).unwrap();
+    let trait_receipt = endpoint.sign_receipt(&receipt).unwrap();
+    assert_eq!(direct_receipt, trait_receipt);
+    assert_eq!(
+        verify_tenant_resource_receipt(
+            &direct_receipt,
+            endpoint.instance_key_id(),
+            &endpoint.instance_verifying_key(),
+            now,
+        )
+        .unwrap(),
+        receipt
+    );
+    let mut invalid_receipt = receipt.clone();
+    invalid_receipt.resource_manifest_sha256 = "g".repeat(64);
+    assert!(matches!(
+        endpoint.sign_receipt(&invalid_receipt),
+        Err(
+            crate::tenant_resource_provider::TenantResourceProviderError::Unavailable(
+                "runtime receipt signing failed"
+            )
+        )
+    ));
     fs::remove_dir_all(root).unwrap();
 }
 

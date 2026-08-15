@@ -106,6 +106,45 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             false,
         );
     }
+    if let Some(user_id) = issue.user_id {
+        match token_service
+            .active_subject_claims(client.tenant_id, user_id)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                mark_failed_authorization_code_if_needed(
+                    token_service,
+                    issue.authorization_code_hash.as_deref(),
+                    "token_subject_invalid",
+                    auth_code_ttl_seconds,
+                )
+                .await;
+                return oauth_token_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_grant",
+                    "授权用户不存在或已停用.",
+                    false,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(?error, "failed to validate token subject before issuance");
+                mark_failed_authorization_code_if_needed(
+                    token_service,
+                    issue.authorization_code_hash.as_deref(),
+                    "token_subject_load_failed",
+                    auth_code_ttl_seconds,
+                )
+                .await;
+                return oauth_token_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "授权用户状态加载失败.",
+                    false,
+                );
+            }
+        }
+    }
     let grant_key = stable_grant_key(grant_key);
     let request_digest = issuance_request_digest(client, &issue, &grant_key);
     if let Err(error) = ensure_audit_storage().await {
@@ -144,6 +183,7 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             issuance_id: Uuid::now_v7(),
             tenant_id: client.tenant_id,
             client_id: client.id,
+            user_id: issue.user_id,
             grant_key: grant_key.clone(),
             request_digest: request_digest.clone(),
             expires_at: Utc::now()

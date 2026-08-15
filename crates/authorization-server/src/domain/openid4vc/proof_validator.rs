@@ -6,14 +6,14 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use nazo_digital_credentials::decode_compact_jwt;
 use nazo_openid4vci::{ProofError, ProofValidatorPort, Proofs, ValidatedProof};
-use nazo_operator_protocol::Openid4vcConformanceTrust;
+use nazo_operator_protocol::Openid4vcTrustPolicy;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Clone)]
 pub(crate) struct Openid4vcProofValidator {
     pub(super) key_attestation_jwks: Arc<Value>,
-    conformance: Option<(nazo_postgres::ConformanceLeaseRepository, uuid::Uuid)>,
+    trust_policies: Option<(nazo_postgres::TenantResourceRepository, uuid::Uuid)>,
 }
 
 #[derive(Clone, Copy)]
@@ -33,16 +33,16 @@ impl Openid4vcProofValidator {
         }
         Ok(Self {
             key_attestation_jwks: Arc::new(key_attestation_jwks),
-            conformance: None,
+            trust_policies: None,
         })
     }
 
-    pub(crate) fn with_conformance_leases(
+    pub(crate) fn with_trust_policies(
         mut self,
-        repository: nazo_postgres::ConformanceLeaseRepository,
+        repository: nazo_postgres::TenantResourceRepository,
         tenant_id: uuid::Uuid,
     ) -> Self {
-        self.conformance = Some((repository, tenant_id));
+        self.trust_policies = Some((repository, tenant_id));
         self
     }
 
@@ -50,15 +50,31 @@ impl Openid4vcProofValidator {
         &self,
         client_id: &str,
     ) -> Result<Arc<Value>, ProofError> {
-        if let Some((repository, tenant_id)) = &self.conformance {
-            let material = repository
-                .active_public_material_for_client(*tenant_id, client_id)
+        if let Some((repository, tenant_id)) = &self.trust_policies {
+            let mut connection = repository
+                .connection()
                 .await
                 .map_err(|_| ProofError::InvalidKeyAttestation)?;
-            if let Some(material) = material {
-                let material: Openid4vcConformanceTrust = serde_json::from_value(material)
-                    .map_err(|_| ProofError::InvalidKeyAttestation)?;
-                return Ok(Arc::new(material.key_attestation_jwks));
+            match nazo_postgres::TenantResourceRepository::openid4vc_trust_policy_for_client_on_connection(
+                &mut connection,
+                *tenant_id,
+                client_id,
+            )
+            .await
+            .map_err(|_| ProofError::InvalidKeyAttestation)?
+            {
+                nazo_postgres::Openid4vcTrustPolicyForClient::Unbound => {}
+                nazo_postgres::Openid4vcTrustPolicyForClient::BoundInactive => {
+                    return Err(ProofError::InvalidKeyAttestation);
+                }
+                nazo_postgres::Openid4vcTrustPolicyForClient::Active(policy) => {
+                    let material: Openid4vcTrustPolicy =
+                        serde_json::from_value(policy.public_material)
+                            .map_err(|_| ProofError::InvalidKeyAttestation)?;
+                    nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
+                        .map_err(|_| ProofError::InvalidKeyAttestation)?;
+                    return Ok(Arc::new(material.key_attestation_jwks));
+                }
             }
         }
         Ok(self.key_attestation_jwks.clone())

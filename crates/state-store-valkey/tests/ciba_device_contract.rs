@@ -101,15 +101,15 @@ async fn ciba_cas_preserves_exact_key_payload_deadline_and_single_winner() {
 }
 
 #[tokio::test]
-async fn ciba_cas_rejects_an_expired_lease_without_mutating_state() {
+async fn ciba_cas_rejects_an_expired_authorization_without_mutating_state() {
     let Some((connection, inspector)) = setup().await else {
         return;
     };
     let store = CibaStore::new(&connection);
-    let auth_req_id = format!("ciba-lease-expired-{}", uuid::Uuid::now_v7());
+    let auth_req_id = format!("ciba-authorization-expired-{}", uuid::Uuid::now_v7());
     let now = server_time(&inspector).await;
     let state = CibaRequestState {
-        client_id: "leased-client".to_owned(),
+        client_id: "deadline-client".to_owned(),
         user_id: uuid::Uuid::from_u128(2),
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
@@ -133,14 +133,14 @@ async fn ciba_cas_rejects_an_expired_lease_without_mutating_state() {
     replacement.status = CibaStatus::Approved;
     assert_eq!(
         store
-            .replace_with_lease_deadline(&auth_req_id, &stored, &replacement, Some(now))
+            .replace_with_authorization_deadline(&auth_req_id, &stored, &replacement, Some(now))
             .await
             .unwrap(),
         AtomicResult::DeadlineElapsed
     );
     assert_eq!(
         store
-            .delete_with_lease_deadline(&auth_req_id, &stored, Some(now))
+            .delete_with_authorization_deadline(&auth_req_id, &stored, Some(now))
             .await
             .unwrap(),
         AtomicResult::DeadlineElapsed

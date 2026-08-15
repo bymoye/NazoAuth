@@ -368,9 +368,6 @@ async fn call_ciba_token_with_modules_for_test(
     let handles = CibaTokenHandles::new(
         Data::new(ciba_service),
         Data::new(users),
-        Data::new(nazo_postgres::ConformanceLeaseRepository::new(
-            state.diesel_db.clone(),
-        )),
         Data::new(ciba_config),
     );
     token_ciba(
@@ -1627,8 +1624,6 @@ fn ciba_poll_failures_preserve_invalid_grant_and_contention_boundaries() {
 async fn ciba_automated_decision_oidf_query_mode_rejects_post() {
     let state = ciba_test_state_with(|settings| {
         settings.modules.enable_ciba = true;
-        settings.ciba.ciba_automated_decision_token =
-            Some("test-ciba-automated-decision-token-32".to_owned());
         settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
     });
     let settings = Arc::clone(&state.settings);
@@ -1664,8 +1659,6 @@ async fn ciba_automated_decision_oidf_query_mode_rejects_post() {
 async fn ciba_automated_decision_header_mode_rejects_get_and_query_secret() {
     let state = ciba_test_state_with(|settings| {
         settings.modules.enable_ciba = true;
-        settings.ciba.ciba_automated_decision_token =
-            Some("test-ciba-automated-decision-token-32".to_owned());
         settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Header;
     });
     let settings = Arc::clone(&state.settings);
@@ -1698,11 +1691,10 @@ async fn ciba_automated_decision_header_mode_rejects_get_and_query_secret() {
 }
 
 #[actix_web::test]
-async fn disabled_ciba_automated_decision_fails_closed_without_a_lease_repository() {
+async fn ciba_automated_decision_fails_closed_without_a_binding_repository() {
     let state = ciba_test_state_with(|settings| {
         settings.modules.enable_ciba = true;
         settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
-        settings.ciba.ciba_automated_decision_token = None;
     });
     let settings = Arc::clone(&state.settings);
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
@@ -1744,8 +1736,6 @@ async fn configured_ciba_automated_decision_rejects_missing_or_mismatched_reques
     let state = ciba_test_state_with(|settings| {
         settings.modules.enable_ciba = true;
         settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
-        settings.ciba.ciba_automated_decision_token =
-            Some("query-secret-32-characters-long".to_owned());
     });
     let settings = Arc::clone(&state.settings);
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
@@ -1783,7 +1773,145 @@ async fn configured_ciba_automated_decision_rejects_missing_or_mismatched_reques
 }
 
 #[actix_web::test]
-async fn disabled_ciba_automated_decision_rejects_invalid_token_before_state_access() {
+async fn ciba_automated_decision_claims_an_ordinary_subject_binding() {
+    let database_url =
+        match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
+            Ok(database_url) => database_url,
+            Err(_) if std::env::var_os("CI").is_some() => {
+                panic!("CI requires a database URL for CIBA decision binding coverage")
+            }
+            Err(_) => return,
+        };
+    let valkey = match live_test_valkey().await {
+        Some(valkey) => valkey,
+        None if std::env::var_os("CI").is_some() => {
+            panic!("CI requires VALKEY_URL for CIBA decision binding coverage")
+        }
+        None => return,
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .expect("CIBA decision binding migrations should apply");
+    let pool = create_pool(database_url, 2).expect("test database pool should initialize");
+    crate::test_support::initialize_audit_dependencies(&pool);
+    let mut settings =
+        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
+    settings.modules.enable_ciba = true;
+    settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::QueryParameter;
+    let settings = Arc::new(settings);
+    let state = TestInfrastructure {
+        diesel_db: pool.clone(),
+        valkey,
+        settings: Arc::clone(&settings),
+        keyset: crate::test_support::test_key_manager(),
+    };
+
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("ordinary-binding-kid", &key);
+    client.client_id = format!("ordinary-binding-client-{}", Uuid::now_v7());
+    nazo_postgres::OAuthClientRepository::new(pool.clone())
+        .insert(&client, None, None, None)
+        .await
+        .expect("ordinary CIBA client should be stored");
+    let user_id = Uuid::now_v7();
+    let mut connection = get_conn(&pool)
+        .await
+        .expect("test database connection should be available");
+    sql_query(
+        "INSERT INTO users (
+             id, tenant_id, realm_id, organization_id, username, email, password_hash,
+             is_active, mfa_enabled, email_verified, role, admin_level, phone_number_verified
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'test-password-hash',
+                   TRUE, FALSE, TRUE, 'user', 0, FALSE)",
+    )
+    .bind::<SqlUuid, _>(user_id)
+    .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+    .bind::<SqlUuid, _>(DEFAULT_REALM_ID)
+    .bind::<SqlUuid, _>(DEFAULT_ORGANIZATION_ID)
+    .bind::<Text, _>(format!("ordinary-binding-{user_id}"))
+    .bind::<Text, _>(format!("ordinary-binding-{user_id}@example.test"))
+    .execute(&mut connection)
+    .await
+    .expect("ordinary CIBA subject should be stored");
+
+    let decision_token = format!("ordinary-binding-token-{}", Uuid::now_v7());
+    let token_sha256 = sha256_hex(decision_token.as_bytes());
+    let resource_id = format!("ordinary-ciba-binding-{}", Uuid::now_v7());
+    let resource_digest = sha256_hex(resource_id.as_bytes());
+    nazo_postgres::CibaDecisionBindingRepository::apply_on_connection(
+        &mut connection,
+        nazo_postgres::NewCibaDecisionBinding {
+            generation: Uuid::now_v7(),
+            tenant_id: DEFAULT_TENANT_ID,
+            resource_id: &resource_id,
+            resource_digest: &resource_digest,
+            oauth_client_id: client.id,
+            user_id,
+            token_sha256: &token_sha256,
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+        },
+    )
+    .await
+    .expect("ordinary CIBA decision binding should be stored");
+    drop(connection);
+
+    let auth_req_id = format!("ordinary-binding-request-{}", Uuid::now_v7());
+    store_ciba_state_with_user(&state, &client, &auth_req_id, user_id, CibaStatus::Pending).await;
+    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
+        pool.clone(),
+        &settings,
+    )
+    .expect("CIBA runtime registry should initialize");
+    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(CibaStore::new(
+        &state.valkey_connection(),
+    )));
+    let app = actix_web::test::init_service(
+        actix_web::App::new()
+            .app_data(ciba_service.clone())
+            .app_data(actix_web::web::Data::new(
+                nazo_postgres::CibaDecisionBindingRepository::new(pool),
+            ))
+            .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
+                settings.as_ref(),
+            )))
+            .app_data(actix_web::web::Data::from(runtime))
+            .configure(|cfg| crate::bootstrap::routes::configure(cfg, &settings, false)),
+    )
+    .await;
+
+    let wrong_token = actix_web::test::TestRequest::get()
+        .uri(&format!(
+            "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token=wrong-token"
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, wrong_token).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(actix_web::test::read_body(response).await.is_empty());
+
+    let invalid_action = actix_web::test::TestRequest::get()
+        .uri(&format!(
+            "/auth/ciba-automated-decision?token={auth_req_id}&type=invalid&decision_token={decision_token}"
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, invalid_action).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let valid = actix_web::test::TestRequest::get()
+        .uri(&format!(
+            "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token={decision_token}"
+        ))
+        .to_request();
+    let response = actix_web::test::call_service(&app, valid).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state_after = load_ciba_request_payload(&ciba_service, &auth_req_id)
+        .await
+        .expect("ordinary CIBA state should remain readable")
+        .expect("ordinary CIBA state should remain until polling");
+    assert_eq!(state_after.status, CibaStatus::Approved);
+}
+
+#[actix_web::test]
+async fn ciba_automated_decision_reports_state_storage_failure_before_binding_claim() {
     let database_url =
         match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
             Ok(database_url) => database_url,
@@ -1800,30 +1928,27 @@ async fn disabled_ciba_automated_decision_rejects_invalid_token_before_state_acc
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
     settings.modules.enable_ciba = true;
     settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
-    settings.ciba.ciba_automated_decision_token = None;
     let settings = Arc::new(settings);
-    let leases = nazo_postgres::ConformanceLeaseRepository::new(pool.clone());
-    let valid_token_sha256 = sha256_hex(b"valid-per-run-ciba-decision-token");
-    let lease = leases
-        .create(
-            DEFAULT_TENANT_ID,
-            CIBA_AUTOMATED_DECISION_PROFILE,
-            &format!("{:064x}", Uuid::now_v7().as_u128()),
-            nazo_postgres::ConformanceLeaseTokenDigests {
-                dynamic_registration_initial_access_token_sha256: None,
-                ciba_automated_decision_token_sha256: Some(&valid_token_sha256),
-            },
-            None,
-            60,
-        )
-        .await
-        .expect("leased CIBA decision credential should be stored");
+    let decision_bindings = nazo_postgres::CibaDecisionBindingRepository::new(pool.clone());
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
         pool.clone(),
         &settings,
     )
     .expect("CIBA runtime registry should initialize");
-    let disconnected_valkey = fred::prelude::Builder::default_centralized()
+    let mut disconnected_valkey_builder = fred::prelude::Builder::default_centralized();
+    disconnected_valkey_builder.with_performance_config(
+        |performance: &mut fred::prelude::PerformanceConfig| {
+            performance.default_command_timeout = StdDuration::from_millis(50);
+        },
+    );
+    disconnected_valkey_builder.with_connection_config(
+        |connection: &mut fred::prelude::ConnectionConfig| {
+            connection.connection_timeout = StdDuration::from_millis(50);
+            connection.internal_command_timeout = StdDuration::from_millis(50);
+            connection.max_command_attempts = 1;
+        },
+    );
+    let disconnected_valkey = disconnected_valkey_builder
         .build()
         .expect("disconnected test Valkey client should construct");
     let disconnected_connection =
@@ -1833,7 +1958,7 @@ async fn disabled_ciba_automated_decision_rejects_invalid_token_before_state_acc
             .app_data(actix_web::web::Data::new(ServerCibaService::new(
                 CibaStore::new(&disconnected_connection),
             )))
-            .app_data(actix_web::web::Data::new(leases.clone()))
+            .app_data(actix_web::web::Data::new(decision_bindings))
             .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
                 settings.as_ref(),
             )))
@@ -1842,24 +1967,24 @@ async fn disabled_ciba_automated_decision_rejects_invalid_token_before_state_acc
     )
     .await;
 
-    // A state lookup would hit the deliberately disconnected Valkey client and
-    // produce a service error. NOT_FOUND therefore proves the invalid digest
-    // was rejected at the lease lookup boundary before state access.
+    // The state is intentionally resolved before the binding claim so its
+    // immutable client/user subject can be part of the repository fence.
     let request = actix_web::test::TestRequest::post()
         .uri("/auth/ciba-automated-decision?token=not-stored&type=allow&decision_token=invalid-per-run-token")
         .to_request();
     let response = actix_web::test::call_service(&app, request).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(actix_web::test::read_body(response).await.is_empty());
-
-    leases
-        .revoke(DEFAULT_TENANT_ID, lease.id)
-        .await
-        .expect("leased CIBA decision credential should be revocable");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
 }
 
 #[actix_web::test]
-async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf_post() {
+async fn legacy_credentials_do_not_open_the_ordinary_ciba_binding_route() {
     let database_url =
         match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
             Ok(database_url) => database_url,
@@ -1883,7 +2008,6 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
     settings.modules.enable_ciba = true;
     settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
-    settings.ciba.ciba_automated_decision_token = None;
     let settings = Arc::new(settings);
     let state = TestInfrastructure {
         diesel_db: pool.clone(),
@@ -1900,7 +2024,7 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
     let lease_a = leases
         .create(
             DEFAULT_TENANT_ID,
-            CIBA_AUTOMATED_DECISION_PROFILE,
+            "oidc-fapi-ciba",
             &format!("{:064x}", Uuid::now_v7().as_u128()),
             nazo_postgres::ConformanceLeaseTokenDigests {
                 dynamic_registration_initial_access_token_sha256: None,
@@ -1914,7 +2038,7 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
     let lease_b = leases
         .create(
             DEFAULT_TENANT_ID,
-            CIBA_AUTOMATED_DECISION_PROFILE,
+            "oidc-fapi-ciba",
             &format!("{:064x}", Uuid::now_v7().as_u128()),
             nazo_postgres::ConformanceLeaseTokenDigests {
                 dynamic_registration_initial_access_token_sha256: None,
@@ -1981,13 +2105,13 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
         ))
         .to_request();
     let response = actix_web::test::call_service(&app, request).await;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let state_after = match load_ciba_request_payload(&ciba_service, &auth_req_id).await {
         Ok(Some(state_after)) => state_after,
-        Ok(None) => panic!("same-lease approval must retain the CIBA transaction until polling"),
-        Err(_) => panic!("same-lease approval must leave readable CIBA state"),
+        Ok(None) => panic!("legacy credential rejection must retain the CIBA transaction"),
+        Err(_) => panic!("legacy credential rejection must leave readable CIBA state"),
     };
-    assert_eq!(state_after.status, CibaStatus::Approved);
+    assert_eq!(state_after.status, CibaStatus::Pending);
 
     leases
         .revoke(DEFAULT_TENANT_ID, lease_a.id)
@@ -1998,9 +2122,8 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
         .await
         .expect("lease B should be revocable");
 
-    // Revocation is checked on every request, not only when the lease is
-    // created. The same credential must fail closed after its lease is
-    // revoked, while the already committed CIBA decision remains intact.
+    // Removing the legacy authorization cannot affect the ordinary route or
+    // the independently stored CIBA transaction.
     let request = actix_web::test::TestRequest::post()
         .uri(&format!(
             "/auth/ciba-automated-decision?token={auth_req_id}&type=allow&decision_token={token_b}"
@@ -2014,11 +2137,11 @@ async fn disabled_ciba_automated_decision_enforces_lease_client_binding_for_oidf
         Ok(None) => panic!("revocation must retain the CIBA transaction"),
         Err(_) => panic!("revocation must leave readable CIBA state"),
     };
-    assert_eq!(state_after.status, CibaStatus::Approved);
+    assert_eq!(state_after.status, CibaStatus::Pending);
 }
 
 #[actix_web::test]
-async fn disabled_ciba_automated_decision_rejects_expired_lease() {
+async fn expired_legacy_credential_does_not_open_the_ordinary_ciba_binding_route() {
     let database_url =
         match std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
             Ok(database_url) => database_url,
@@ -2042,7 +2165,6 @@ async fn disabled_ciba_automated_decision_rejects_expired_lease() {
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
     settings.modules.enable_ciba = true;
     settings.ciba.ciba_automated_decision_mode = CibaAutomatedDecisionMode::Disabled;
-    settings.ciba.ciba_automated_decision_token = None;
     let settings = Arc::new(settings);
     let state = TestInfrastructure {
         diesel_db: pool.clone(),
@@ -2057,7 +2179,7 @@ async fn disabled_ciba_automated_decision_rejects_expired_lease() {
     let lease = leases
         .create(
             DEFAULT_TENANT_ID,
-            CIBA_AUTOMATED_DECISION_PROFILE,
+            "oidc-fapi-ciba",
             &format!("{:064x}", Uuid::now_v7().as_u128()),
             nazo_postgres::ConformanceLeaseTokenDigests {
                 dynamic_registration_initial_access_token_sha256: None,

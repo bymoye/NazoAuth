@@ -10,6 +10,69 @@ diesel::table! {
 }
 
 diesel::table! {
+    tenant_resource_states (tenant_id) {
+        tenant_id -> Uuid,
+        revision -> Int8,
+        resource_manifest_sha256 -> Varchar,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    tenant_resource_operations (id) {
+        id -> Uuid,
+        deployment_id -> Varchar,
+        tenant_id -> Uuid,
+        jti -> Varchar,
+        change_set_id -> Varchar,
+        change_set_sha256 -> Varchar,
+        request_sha256 -> Varchar,
+        operation -> Varchar,
+        expected_revision -> Int8,
+        result_revision -> Int8,
+        receipt_json -> Jsonb,
+        receipt_jws -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    tenant_resource_bindings (id) {
+        id -> Uuid,
+        tenant_id -> Uuid,
+        resource_kind -> Varchar,
+        resource_id -> Varchar,
+        resource_digest -> Varchar,
+        change_set_id -> Varchar,
+        change_set_sha256 -> Varchar,
+        active -> Bool,
+        locator -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    ciba_decision_bindings (generation) {
+        generation -> Uuid,
+        tenant_id -> Uuid,
+        resource_id -> Varchar,
+        resource_digest -> Varchar,
+        oauth_client_id -> Uuid,
+        user_id -> Uuid,
+        token_sha256 -> Varchar,
+        expires_at -> Timestamptz,
+        active -> Bool,
+        decision_claim_id -> Nullable<Uuid>,
+        decision_claim_acquired_at -> Nullable<Timestamptz>,
+        decision_claim_expires_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        revoked_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     realms (id) {
         id -> Uuid,
         tenant_id -> Uuid,
@@ -145,6 +208,7 @@ diesel::table! {
         issuance_id -> Uuid,
         tenant_id -> Uuid,
         client_id -> Uuid,
+        user_id -> Nullable<Uuid>,
         grant_key_blake3 -> Varchar,
         request_digest -> Varchar,
         phase -> Varchar,
@@ -469,6 +533,10 @@ diesel::joinable!(user_client_grants -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     tenants,
+    tenant_resource_states,
+    tenant_resource_operations,
+    tenant_resource_bindings,
+    ciba_decision_bindings,
     realms,
     organizations,
     users,

@@ -199,7 +199,11 @@ pub struct PresentationTransaction {
     pub request_object: Option<String>,
     pub request_uri: Option<String>,
     #[serde(skip)]
-    pub conformance_lease_id: Option<Uuid>,
+    pub openid4vc_trust_policy_binding_id: Option<Uuid>,
+    #[serde(skip)]
+    pub openid4vc_trust_policy_resource_id: Option<String>,
+    #[serde(skip)]
+    pub openid4vc_trust_policy_digest: Option<String>,
     #[serde(skip)]
     pub response_encryption_private_key: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,

@@ -9,7 +9,6 @@ mod adapters;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
-mod conformance_lease;
 mod control_discovery;
 mod crypto;
 mod domain;
@@ -21,6 +20,8 @@ mod runtime_modules;
 #[path = "../tests/support/schema.rs"]
 mod schema;
 mod settings;
+mod tenant_resource_executor;
+mod tenant_resource_provider;
 
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]

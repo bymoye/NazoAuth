@@ -17,6 +17,7 @@ actix-multipart = "0.8.0"
 actix-web = { workspace = true, features = ["cookies", "rustls-0_23"] }
 actix-tls = { workspace = true, features = ["accept", "rustls-0_23"] }
 anyhow.workspace = true
+arc-swap.workspace = true
 argon2.workspace = true
 atomicwrites.workspace = true
 aws-lc-rs.workspace = true
@@ -24,6 +25,7 @@ base64.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "serde_json", "64-column-tables"] }
+diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 der.workspace = true
 ed25519-dalek.workspace = true
 flate2.workspace = true
@@ -80,7 +82,6 @@ uuid = { workspace = true, features = ["v7", "serde"] }
 yaml_serde = "0.10.4"
 
 [dev-dependencies]
-diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 diesel_migrations.workspace = true
 fred = { workspace = true, features = ["i-scripts"] }
 pkcs8.workspace = true

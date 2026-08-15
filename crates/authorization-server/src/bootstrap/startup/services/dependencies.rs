@@ -12,13 +12,15 @@ pub(super) struct CoreServices {
         web::Data<nazo_http_actix::DynamicRegistrationEndpoint>,
     pub(super) admin_client_config: web::Data<AdminClientConfig>,
     pub(super) admin_client_service: web::Data<ServerAdminClientService>,
+    pub(super) tenant_resource_provider:
+        Option<web::Data<crate::tenant_resource_provider::TenantResourceProvider>>,
     pub(super) scim_endpoint: web::Data<nazo_http_actix::ScimEndpoint>,
     pub(super) authorization_service: web::Data<ServerAuthorizationService>,
     pub(super) token_service: web::Data<crate::http::token::ServerTokenService>,
     pub(super) ciba_service: web::Data<ServerCibaService>,
     pub(super) ciba_users: web::Data<nazo_postgres::UserRepository>,
     pub(super) ciba_config: web::Data<CibaHttpConfig>,
-    pub(super) conformance_leases: web::Data<nazo_postgres::ConformanceLeaseRepository>,
+    pub(super) ciba_decision_bindings: web::Data<nazo_postgres::CibaDecisionBindingRepository>,
     pub(super) token_issuance_config: web::Data<TokenIssuanceConfig>,
     pub(super) device_service: web::Data<ServerDeviceGrantService>,
     pub(super) device_grants: web::Data<nazo_postgres::AuthorizationFlowRepository>,
@@ -89,7 +91,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let dynamic_registration_handles = web::Data::new(dynamic_registration_endpoint(
         dynamic_registration_config,
         nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
-        nazo_postgres::ConformanceLeaseRepository::new(diesel_db.clone()),
         nazo_valkey::RateLimitStore::new(&valkey_connection),
         keyset.clone(),
         runtime_registry.clone(),
@@ -102,6 +103,8 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         ServerAdminClientCrypto::new(keyset.clone()),
         admin_client_policy(&startup.settings),
     ));
+    let tenant_resource_provider =
+        super::tenant_resource::build(startup, admin_client_service.clone()).await?;
     let scim_endpoint_settings = &startup.settings.endpoint;
     let scim_protocol = &startup.settings.protocol;
     let scim_storage = &startup.settings.storage;
@@ -171,7 +174,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     )?;
     let ciba_users = web::Data::new(nazo_postgres::UserRepository::new(diesel_db.clone()));
     let ciba_config = web::Data::new(CibaHttpConfig::from(settings));
-    let conformance_leases = web::Data::new(nazo_postgres::ConformanceLeaseRepository::new(
+    let ciba_decision_bindings = web::Data::new(nazo_postgres::CibaDecisionBindingRepository::new(
         diesel_db.clone(),
     ));
     let token_issuance_config = web::Data::new(TokenIssuanceConfig::from(settings));
@@ -234,7 +237,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         CibaTokenHandles::new(
             ciba_service.clone(),
             ciba_users.clone(),
-            conformance_leases.clone(),
             ciba_config.clone(),
         ),
         token_issuance_config.clone(),
@@ -252,13 +254,14 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         dynamic_registration_handles,
         admin_client_config,
         admin_client_service,
+        tenant_resource_provider,
         scim_endpoint,
         authorization_service,
         token_service,
         ciba_service,
         ciba_users,
         ciba_config,
-        conformance_leases,
+        ciba_decision_bindings,
         token_issuance_config,
         device_service,
         device_grants,
