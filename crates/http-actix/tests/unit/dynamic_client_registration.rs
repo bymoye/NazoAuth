@@ -35,14 +35,12 @@ const RP_METADATA_CHOICE_FIELDS: &[&str] = &[
 #[derive(Clone)]
 struct FakeStore {
     client: Arc<Mutex<Option<OAuthClient>>>,
-    conformance_lease_id: Arc<Mutex<Option<Uuid>>>,
 }
 
 impl FakeStore {
     fn new() -> Self {
         Self {
             client: Arc::new(Mutex::new(Some(client()))),
-            conformance_lease_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -61,10 +59,6 @@ impl DynamicRegistrationClientStore for FakeStore {
             require_mtls_bound_tokens: prepared.require_mtls_bound_tokens,
             is_active: true,
         };
-        *self
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock") = prepared.conformance_lease_id;
         *self.client.lock().expect("client lock") = Some(inserted.clone());
         Box::pin(async move { Ok(inserted) })
     }
@@ -470,13 +464,6 @@ async fn configured_initial_access_token_keeps_oauth_only_client_pkce_policy() {
     .await;
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(
-        *store
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock"),
-        None
-    );
     let stored = store
         .client
         .lock()
@@ -516,13 +503,6 @@ async fn configured_initial_access_token_applies_baseline_confidential_oidc_poli
     .await;
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(
-        *store
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock"),
-        None
-    );
     assert!(
         store
             .client
@@ -535,7 +515,7 @@ async fn configured_initial_access_token_applies_baseline_confidential_oidc_poli
 }
 
 #[actix_web::test]
-async fn configured_token_preserves_oidc_policy_without_legacy_ownership() {
+async fn configured_token_preserves_oidc_policy() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
@@ -559,13 +539,6 @@ async fn configured_token_preserves_oidc_policy_without_legacy_ownership() {
     .await;
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(
-        *store
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock"),
-        None
-    );
     assert!(
         store
             .client
@@ -603,13 +576,6 @@ async fn configured_initial_access_update_preserves_security_policy() {
     assert_eq!(created.status(), StatusCode::CREATED);
     let created: Value = test::read_body_json(created).await;
     let client_id = created["client_id"].as_str().expect("client id");
-    assert_eq!(
-        *store
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock"),
-        None
-    );
     assert!(
         store
             .client
@@ -628,20 +594,13 @@ async fn configured_initial_access_update_preserves_security_policy() {
             .set_json(json!({
                 "client_id": client_id,
                 "client_secret": "current-secret",
-                "client_name": "Updated leased client",
+                "client_name": "Updated registered client",
                 "redirect_uris": ["https://client.example/callback"]
             }))
             .to_request(),
     )
     .await;
     assert_eq!(updated.status(), StatusCode::OK);
-    assert_eq!(
-        *store
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock"),
-        None
-    );
     assert!(
         store
             .client
@@ -654,7 +613,7 @@ async fn configured_initial_access_update_preserves_security_policy() {
 }
 
 #[actix_web::test]
-async fn configured_public_client_keeps_strict_pkce_policy_without_legacy_ownership() {
+async fn configured_public_client_keeps_strict_pkce_policy() {
     let store = FakeStore::new();
     let service = test::init_service(
         App::new()
@@ -677,13 +636,6 @@ async fn configured_public_client_keeps_strict_pkce_policy_without_legacy_owners
     .await;
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(
-        *store
-            .conformance_lease_id
-            .lock()
-            .expect("conformance lease lock"),
-        None
-    );
     assert!(
         store
             .client
@@ -696,7 +648,7 @@ async fn configured_public_client_keeps_strict_pkce_policy_without_legacy_owners
 }
 
 #[actix_web::test]
-async fn unknown_leased_initial_access_token_remains_invalid() {
+async fn unknown_initial_access_token_remains_invalid() {
     let service = test::init_service(
         App::new()
             .app_data(Data::new(endpoint(true)))
@@ -729,7 +681,7 @@ async fn non_configured_initial_access_token_is_rejected_without_dependency_look
         &service,
         test::TestRequest::post()
             .uri("/register")
-            .insert_header((header::AUTHORIZATION, "Bearer leased-token"))
+            .insert_header((header::AUTHORIZATION, "Bearer unknown-token"))
             .set_json(json!({}))
             .to_request(),
     )

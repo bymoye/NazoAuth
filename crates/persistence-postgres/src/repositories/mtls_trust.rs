@@ -133,9 +133,6 @@ impl MtlsTrustAnchorRepository {
                  SELECT c.id
                  FROM oauth_clients c
                  WHERE c.tenant_id = $2 AND c.client_id = $4 AND c.is_active = TRUE
-                   AND nazo_oauth_conformance_lease_is_active(
-                       c.tenant_id, c.conformance_lease_id
-                   )
                    AND (
                        (
                            c.token_endpoint_auth_method = 'tls_client_auth'
@@ -357,10 +354,6 @@ impl MtlsTrustAnchorRepository {
                        WHERE requested_client.tenant_id = $1
                          AND requested_client.id = oauth_client_mtls_trust_anchor_requests.client_id
                          AND requested_client.is_active = TRUE
-                         AND nazo_oauth_conformance_lease_is_active(
-                             requested_client.tenant_id,
-                             requested_client.conformance_lease_id
-                         )
                    )
                    AND (
                        EXISTS (
@@ -382,10 +375,6 @@ impl MtlsTrustAnchorRepository {
                              AND active.not_before <= CURRENT_TIMESTAMP
                              AND active.not_after > CURRENT_TIMESTAMP
                              AND active_client.is_active = TRUE
-                             AND nazo_oauth_conformance_lease_is_active(
-                                 active_client.tenant_id,
-                                 active_client.conformance_lease_id
-                             )
                        ) < $6
                    )
                    AND (
@@ -487,9 +476,6 @@ impl MtlsTrustAnchorRepository {
              JOIN oauth_clients c ON c.id = r.client_id AND c.tenant_id = r.tenant_id
              WHERE r.tenant_id = $1 AND r.status = 1 AND r.not_before <= CURRENT_TIMESTAMP
                AND r.not_after > CURRENT_TIMESTAMP AND c.is_active = TRUE
-               AND nazo_oauth_conformance_lease_is_active(
-                   c.tenant_id, c.conformance_lease_id
-               )
                AND (
                    c.token_endpoint_auth_method = 'tls_client_auth'
                    OR c.require_mtls_bound_tokens = TRUE
@@ -637,9 +623,8 @@ pub async fn insert_operator_managed_trust_anchor_on_connection(
     inserted.map(|row| row.id).ok_or(RepositoryError::Conflict)
 }
 
-/// Revokes only an operator-managed anchor.  Admin-session and
-/// operator-conformance rows are intentionally excluded so an ordinary
-/// resource task cannot cross provenance boundaries.
+/// Revokes only an operator-managed anchor. Admin-session rows are excluded
+/// so an ordinary resource task cannot cross provenance boundaries.
 pub async fn revoke_operator_managed_trust_anchor_on_connection(
     connection: &mut AsyncPgConnection,
     tenant_id: TenantId,

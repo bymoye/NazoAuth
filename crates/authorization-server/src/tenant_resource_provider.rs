@@ -1,7 +1,6 @@
 //! Tenant-scoped machine resource management.
 //!
-//! This module is deliberately independent from the OIDF conformance lease
-//! protocol.  It authenticates a controller, binds a task to a freshly signed
+//! This module authenticates a controller, binds a task to a freshly signed
 //! runtime capability, validates an optional resource manifest, and hands the
 //! prepared operation to a focused executor.  The executor owns persistence;
 //! this module owns only the wire and trust boundaries.

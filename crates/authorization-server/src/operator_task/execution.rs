@@ -5,14 +5,6 @@ pub(super) async fn execute_with_jti(operation: &TaskOperation, _task_jti: &str)
         TaskOperation::MigrateApply => crate::cli::run_migrations()
             .await
             .map(|applied| TaskResult::Migration { applied }),
-        TaskOperation::ConformanceMatrixDescribe
-        | TaskOperation::ConformanceLeaseCreate { .. }
-        | TaskOperation::ConformanceOnboardingApply { .. }
-        | TaskOperation::ConformanceLeaseList
-        | TaskOperation::ConformanceLeaseRevoke { .. }
-        | TaskOperation::ConformanceLeaseCleanup => {
-            Err(anyhow::anyhow!("legacy conformance management is disabled"))
-        }
         TaskOperation::KeysList => crate::keyctl::operator_list()
             .await
             .map(|keyset_revision| TaskResult::KeyList { keyset_revision }),
@@ -41,6 +33,10 @@ pub(super) async fn execute_with_jti(operation: &TaskOperation, _task_jti: &str)
                 }),
             Err(error) => Err(error),
         },
+        // Old signed envelopes remain deserializable in the shared protocol so
+        // deployed controllers can archive their receipts. The server has no
+        // Suite implementation behind any unsupported operation.
+        _ => Err(anyhow::anyhow!("unsupported operator operation")),
     };
     match result {
         Ok(result) => TaskOutcome::Succeeded { result },
