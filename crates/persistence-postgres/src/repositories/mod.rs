@@ -5,7 +5,6 @@ mod authorization;
 mod authorization_flow;
 mod ciba_decision_bindings;
 pub(crate) mod clients;
-mod conformance_leases;
 mod federation;
 mod grants;
 mod initial_admin_bootstrap;
@@ -38,13 +37,6 @@ pub use ciba_decision_bindings::{
 pub use clients::{
     OAuthClientRepository, active_public_client_id_on_connection, deactivate_client_on_connection,
     insert_client_on_connection,
-};
-pub use conformance_leases::{
-    ConformanceApplicant, ConformanceClient, ConformanceClientMapping, ConformanceLease,
-    ConformanceLeaseCleanup, ConformanceLeasePublicMaterial, ConformanceLeaseRepository,
-    ConformanceLeaseTokenDigests, ConformanceMtlsTrustAnchor, ConformanceOnboardingRequest,
-    ConformanceOnboardingResult, MAX_CONFORMANCE_LEASE_SECONDS, MIN_CONFORMANCE_LEASE_SECONDS,
-    canonicalize_suite_origin,
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};

@@ -35,7 +35,6 @@ impl AdminClientRepositoryPort for OAuthClientRepository {
         client: &'a OAuthClient,
         client_secret_hash: Option<&'a str>,
         registration_access_token_blake3: Option<&'a str>,
-        conformance_lease_id: Option<Uuid>,
     ) -> AdminClientFuture<'a, OAuthClient> {
         Box::pin(async move {
             OAuthClientRepository::insert(
@@ -43,7 +42,6 @@ impl AdminClientRepositoryPort for OAuthClientRepository {
                 client,
                 client_secret_hash,
                 registration_access_token_blake3,
-                conformance_lease_id,
             )
             .await
             .map_err(|error: RepositoryError| map_admin_client_error(error))

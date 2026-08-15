@@ -21,7 +21,6 @@ ALLOWED_HOSTS = {
     "ietf_draft": {"datatracker.ietf.org"},
     "rfc": {"www.rfc-editor.org"},
     "openid_document": {"openid.net", "openid.bitbucket.io"},
-    "oidf_suite": {"gitlab.com"},
 }
 DRAFT_PIN = re.compile(r"\b(draft-[a-z0-9-]+)-(\d{2})\b")
 RFC_REFERENCE = re.compile(r"\bRFC\s*(\d{4})\b", re.IGNORECASE)
@@ -74,21 +73,6 @@ def validate_manifest(manifest: dict, root: Path = ROOT) -> None:
                 isinstance(marker, str) and marker for marker in markers
             ):
                 raise ValueError(f"{entry_id}: markers must be non-empty strings")
-        elif kind == "oidf_suite":
-            api_url = _required_text(entry.get("api_url"), "api_url", entry_id)
-            api = urlparse(api_url)
-            if (
-                api.scheme != "https"
-                or api.hostname != "gitlab.com"
-                or not api.path.startswith(
-                    "/api/v4/projects/openid%2Fconformance-suite/releases/"
-                )
-            ):
-                raise ValueError(f"{entry_id}: api_url must use the official GitLab API")
-            _required_text(entry.get("tag"), "tag", entry_id)
-            commit = _required_text(entry.get("commit"), "commit", entry_id)
-            if not re.fullmatch(r"[0-9a-f]{40}", commit):
-                raise ValueError(f"{entry_id}: commit must be a full lowercase SHA-1")
 
     paths = manifest.get("active_document_paths", [])
     if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
@@ -304,24 +288,6 @@ def check_entry(entry: dict, opener=urllib.request.urlopen) -> str:
                     f"{entry['id']}: official page {final_url} is missing marker {marker!r}"
                 )
         return f"{entry['id']}: official markers present"
-
-    if kind == "oidf_suite":
-        request = urllib.request.Request(
-            entry["api_url"], headers={"User-Agent": "NazoAuth-spec-freshness/1"}
-        )
-        payload, _ = _open_bytes(opener, request)
-        data = json.loads(payload)
-        reported_tag = data.get("tag_name")
-        if reported_tag != entry["tag"]:
-            raise RuntimeError(
-                f"{entry['id']}: expected latest tag {entry['tag']}, official source reports {reported_tag}"
-            )
-        reported_commit = (data.get("commit") or {}).get("id")
-        if reported_commit != entry["commit"]:
-            raise RuntimeError(
-                f"{entry['id']}: expected commit {entry['commit']}, official source reports {reported_commit}"
-            )
-        return f"{entry['id']}: {reported_tag} @ {reported_commit}"
 
     raise RuntimeError(f"{entry['id']}: unsupported kind {kind}")
 

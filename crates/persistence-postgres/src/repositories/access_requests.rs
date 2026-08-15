@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     DbPool,
-    repositories::clients::{bind_conformance_lease, conformance_lease_is_effective},
+    repositories::clients::conformance_lease_is_effective,
     schema::{client_access_requests, oauth_clients, users},
 };
 
@@ -557,9 +557,6 @@ pub(crate) async fn insert_client(
         ))
         .returning((oauth_clients::id, oauth_clients::client_id))
         .get_result::<(Uuid, String)>(connection)
-        .await
-        .map_err(map_error)?;
-    bind_conformance_lease(connection, approved.0, client.conformance_lease_id)
         .await
         .map_err(map_error)?;
     Ok(ApprovedClient {

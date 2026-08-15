@@ -5,7 +5,7 @@ Last reviewed: 2026-07-11.
 > 2026-07-16 状态更新：OpenID4VCI 1.0 Final Credential Issuer 与
 > OpenID4VP 1.0 Final Verifier 已通过独立产品边界进入默认关闭模块；不实现 Wallet
 > 角色。当前能力与 alpha 回归矩阵以
-> `docs/conformance/openid4vc-final-matrix.zh-CN.md` 为准。下方 M8 文本保留原始
+> 外部 Suite 的已签名制品与执行证据由 NazoAuthCtl 管理。下方 M8 文本保留原始
 > 入场审计背景，不再表示当前实现状态。
 
 ## 文档定位
@@ -410,7 +410,7 @@ cargo test --locked well_known --lib
   - 不能影响 `oauth2-oidc-baseline`、`fapi2-security`、`fapi2-message-signing-*`、CIBA 和 external provider login 的默认安全属性。
 
 M8 的完成表示三项进入实现路线的治理门禁已经审计并形成
-[`2026-07-11-m8-watchlist-governance.md`](../conformance/2026-07-11-m8-watchlist-governance.md)
+NazoAuthCtl 的外部 Suite 证据记录
 证据，不表示所有候选协议已经实现或通过认证。后续独立设计已完成 RFC 9865
 SCIM forward cursor pagination，以及默认关闭的 RFC 9967 notice-only SET
 transmitter、事务 outbox 与 RFC 8936 poll/ack/error 投递。OpenID4VCI Credential

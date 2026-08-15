@@ -112,7 +112,6 @@ fn registration() -> ValidatedClientRegistration {
 fn prepared() -> PreparedClientRegistration {
     PreparedClientRegistration {
         tenant: TenantContext::default(),
-        conformance_lease_id: Some(Uuid::now_v7()),
         registration: registration(),
         require_mtls_bound_tokens: true,
         issued_secret: Some("issued-secret".to_owned()),

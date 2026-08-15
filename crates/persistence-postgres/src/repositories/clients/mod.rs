@@ -7,7 +7,7 @@ mod mutation;
 mod query;
 
 pub use base::OAuthClientRepository;
-pub(crate) use base::{bind_conformance_lease, conformance_lease_is_effective};
+pub(crate) use base::conformance_lease_is_effective;
 pub use mutation::{deactivate_client_on_connection, insert_client_on_connection};
 pub use query::active_public_client_id_on_connection;
 

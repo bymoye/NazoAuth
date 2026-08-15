@@ -626,49 +626,6 @@ pub async fn disable_user_on_connection(
     Ok(true)
 }
 
-/// Inserts the ordinary applicant used by an atomic conformance onboarding
-/// transaction without acquiring another database connection.  This helper
-/// delegates to the ownership-neutral primitive while preserving every
-/// existing profile fixture and role invariant.
-pub(crate) async fn insert_conformance_applicant_on_connection(
-    connection: &mut AsyncPgConnection,
-    tenant: nazo_identity::TenantContext,
-    applicant: &crate::repositories::conformance_leases::ConformanceApplicant,
-) -> Result<Uuid, diesel::result::Error> {
-    let password_hash = applicant.password_hash.clone().into_persistence_value();
-    insert_user_on_connection(
-        connection,
-        UserInsert {
-            tenant,
-            username: &applicant.username,
-            email: &applicant.email,
-            password_hash: &password_hash,
-            email_verified: applicant.email_verified,
-            display_name: Some(&applicant.display_name),
-            given_name: Some(&applicant.given_name),
-            family_name: Some(&applicant.family_name),
-            middle_name: Some(&applicant.middle_name),
-            nickname: Some(&applicant.nickname),
-            profile_url: Some(&applicant.profile_url),
-            avatar_url: Some(&applicant.avatar_url),
-            website_url: Some(&applicant.website_url),
-            gender: Some(&applicant.gender),
-            birthdate: Some(&applicant.birthdate),
-            zoneinfo: Some(&applicant.zoneinfo),
-            locale: Some(&applicant.locale),
-            address_formatted: applicant.address.formatted.as_deref(),
-            address_street_address: applicant.address.street_address.as_deref(),
-            address_locality: applicant.address.locality.as_deref(),
-            address_region: applicant.address.region.as_deref(),
-            address_postal_code: applicant.address.postal_code.as_deref(),
-            address_country: applicant.address.country.as_deref(),
-            phone_number: Some(&applicant.phone_number),
-            phone_number_verified: applicant.phone_number_verified,
-        },
-    )
-    .await
-}
-
 fn admin_event(
     tenant_id: TenantId,
     actor_id: Option<UserId>,

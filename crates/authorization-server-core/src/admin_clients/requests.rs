@@ -1,17 +1,11 @@
 use serde::Deserialize;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::{ClientPresentationMetadata, ClientSecurityPolicy};
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateClientRequest {
-    /// Optional ownership boundary for short-lived conformance clients.
-    ///
-    /// The persistence adapter validates the lease in the same database statement that creates
-    /// the client. The field contains no key material or client secret.
-    #[serde(default)]
-    pub conformance_lease_id: Option<Uuid>,
     pub client_name: String,
     pub client_type: String,
     pub redirect_uris: Vec<String>,

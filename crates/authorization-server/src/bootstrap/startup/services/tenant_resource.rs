@@ -58,9 +58,6 @@ impl TenantResourcePreparation for ServerTenantResourcePreparation {
         tenant: nazo_identity::TenantContext,
     ) -> BoxFuture<'a, Result<PreparedOAuthClient, TenantResourcePreparationError>> {
         Box::pin(async move {
-            if request.conformance_lease_id.is_some() {
-                return Err(TenantResourcePreparationError::Rejected);
-            }
             let supplied_secret_expected = supplied_secret.is_some();
             let prepared = match supplied_secret {
                 Some(secret) => {
@@ -76,7 +73,6 @@ impl TenantResourcePreparation for ServerTenantResourcePreparation {
             if prepared.tenant.tenant_id != tenant.tenant_id
                 || prepared.tenant.realm_id != tenant.realm_id
                 || prepared.tenant.organization_id != tenant.organization_id
-                || prepared.conformance_lease_id.is_some()
                 || prepared.registration_access_token_blake3.is_some()
                 // A newly generated secret cannot be returned after the
                 // transaction. A caller-supplied secret is deliberately

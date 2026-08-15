@@ -5,7 +5,6 @@ mod issuance;
 #[path = "openid4vc_presentation.rs"]
 mod presentation;
 
-pub(crate) use dataset::insert_operator_conformance_dataset_on_connection;
 pub use dataset::{
     ManagedCredentialDataset, ManagedCredentialDatasetWrite, Openid4vciDatasetRepository,
 };

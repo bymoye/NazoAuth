@@ -52,7 +52,6 @@ class SpecFreshnessTests(unittest.TestCase):
         self.assertIn("oauth-browser-based-apps", identifiers)
         self.assertIn("oauth-grant-management-working", identifiers)
         self.assertIn("oauth-grant-management-id1", identifiers)
-        self.assertIn("oidf-conformance-suite", identifiers)
         self.assertGreaterEqual(len(identifiers), 35)
 
     def test_manifest_rejects_duplicate_ids_and_unofficial_hosts(self):
@@ -174,28 +173,6 @@ class SpecFreshnessTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "unexpected redirect target"):
-            self.module.check_entry(entry, opener)
-
-    def test_oidf_latest_release_tag_and_commit_are_required(self):
-        entry = {
-            "id": "suite",
-            "title": "suite",
-            "kind": "oidf_suite",
-            "url": "https://gitlab.com/openid/conformance-suite/-/releases/release-v5.2.0",
-            "api_url": "https://gitlab.com/api/v4/projects/openid%2Fconformance-suite/releases/permalink/latest",
-            "tag": "release-v5.2.0",
-            "commit": "dee9a25160e789f0f80517674693ef7989ab9fa1",
-        }
-        opener = lambda *_args, **_kwargs: FakeResponse(
-            json.dumps(
-                {
-                    "tag_name": "release-v5.1.44",
-                    "commit": {"id": "f326"},
-                }
-            ).encode()
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "expected latest tag release-v5.2.0"):
             self.module.check_entry(entry, opener)
 
     def test_active_documents_reject_stale_draft_pins(self):
@@ -327,26 +304,6 @@ class SpecFreshnessTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "must stay within the repository"):
-            self.module.validate_manifest(manifest, ROOT)
-
-    def test_manifest_rejects_unofficial_suite_api(self):
-        manifest = {
-            "schema_version": 1,
-            "active_document_paths": [],
-            "sources": [
-                {
-                    "id": "suite",
-                    "title": "suite",
-                    "kind": "oidf_suite",
-                    "url": "https://gitlab.com/openid/conformance-suite/-/releases/release-v5.2.0",
-                    "api_url": "https://example.com/latest",
-                    "tag": "release-v5.2.0",
-                    "commit": "dee9a25160e789f0f80517674693ef7989ab9fa1",
-                }
-            ],
-        }
-
-        with self.assertRaisesRegex(ValueError, "official GitLab API"):
             self.module.validate_manifest(manifest, ROOT)
 
     def test_official_fetch_retries_transient_network_failures(self):

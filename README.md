@@ -8,7 +8,6 @@
 [![codeql](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml)
 [![dependency-review](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml)
 [![conformance-security](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml)
-[![oidf-conformance-full](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml)
 [![codecov](https://codecov.io/gh/nazozero/NazoAuth/branch/main/graph/badge.svg)](https://app.codecov.io/gh/nazozero/NazoAuth)
 
 [中文文档](README.zh-CN.md) · [Documentation](#documentation) · [Quick start](#quick-start) · [Security](SECURITY.md)
@@ -37,8 +36,7 @@ and the complete review range is
 During the submission period, Codex with GPT-5.6 helped turn the existing
 server into a modular Rust workspace, implement OpenID4VC Final issuer and
 verifier roles, add FAPI-CIBA mTLS/ping and RFC 9967 SCIM security-event
-delivery, harden the browser client and onboarding flow, and make the official
-OIDF suites exercise the public production service as a black box. Codex
+delivery, and harden the browser client and onboarding flow. Codex
 accelerated repository audits, implementation, tests, specification
 cross-checks, CI diagnosis, and deployment verification. The maintainer chose
 the product and security boundaries, required standards-first behavior instead
@@ -73,7 +71,7 @@ composite score:
 | Static security analysis | CodeQL Rust analysis with the `security-extended` query suite. |
 | Dependency policy | GitHub dependency review, `cargo audit`, and `cargo deny` over advisories, bans, licenses, and sources. |
 | Runtime security behavior | Real HTTP E2E, load/race gate, and Valkey outage injection in `conformance-security`. |
-| Protocol conformance | The release gate runs the fixed 27-plan OIDC/FAPI/CIBA/logout matrix and the fixed 17-plan OpenID4VCI/VP matrix against the same public deployment. Historical and exact-release evidence remains versioned under `docs/conformance`. |
+| External protocol conformance | NazoAuthCtl owns signed Suite artifacts, external execution, evidence, and cleanup. The server is exercised only through its public protocol and tenant-resource interfaces. |
 | Coverage trend | Codecov LCOV upload from the dedicated coverage workflow. |
 | Release provenance | CycloneDX SBOM, Trivy image scan, Sigstore signing, and GitHub artifact attestations. |
 
@@ -83,7 +81,7 @@ composite score:
 
 ## Certification
 
-🏅 [Certification and conformance evidence](docs/conformance/certification.md)
+🏅 External Suite conformance is orchestrated by NazoAuthCtl.
 
 ## Features
 

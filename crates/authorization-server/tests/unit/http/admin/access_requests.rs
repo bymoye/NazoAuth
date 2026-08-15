@@ -217,7 +217,6 @@ async fn invoke_admin_reject_access_request(
 
 fn create_client_request() -> CreateClientRequest {
     CreateClientRequest {
-        conformance_lease_id: None,
         client_name: "Access Request Client".to_owned(),
         client_type: "confidential".to_owned(),
         redirect_uris: vec!["https://client.example/callback".to_owned()],

@@ -263,7 +263,6 @@ async fn seed_upsert_is_atomic_and_preserves_unmanaged_client_state() {
             &original,
             Some("old-secret"),
             Some("keep-registration-token"),
-            None,
         )
         .await
         .unwrap();
@@ -419,7 +418,7 @@ async fn application_projection_filters_mixed_scope_elements() {
     };
     let repository = OAuthClientRepository::new(pool.clone());
     let client = oauth_client(tenant, format!("mixed-scopes-{}", Uuid::now_v7()));
-    repository.insert(&client, None, None, None).await.unwrap();
+    repository.insert(&client, None, None).await.unwrap();
     let mut connection = get_conn(&pool).await.unwrap();
     sql_query("INSERT INTO user_client_grants (tenant_id, user_id, client_id, first_authorized_at, last_authorized_at, last_scopes, last_resource_indicators, last_authorization_details, authorization_count) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $4, '[]'::jsonb, '[]'::jsonb, 1)")
         .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
@@ -501,7 +500,7 @@ async fn client_secret_comparison_returns_only_salt_and_database_equality() {
     let client = oauth_client(tenant, format!("secret-equality-{}", Uuid::now_v7()));
     let stored = "client-secret-v1:c2FsdA:6lJn3EOo_fxJByZR75cMn9RtlGGznqcVi4V4OkrfNCw";
     repository
-        .insert(&client, Some(stored), None, None)
+        .insert(&client, Some(stored), None)
         .await
         .unwrap();
 

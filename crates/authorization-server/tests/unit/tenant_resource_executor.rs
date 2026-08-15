@@ -532,7 +532,6 @@ fn profile_mapping_is_bounded_and_does_not_accept_structural_values() {
 #[test]
 fn prepared_client_debug_redacts_secret_hash() {
     let request = nazo_auth::CreateClientRequest {
-        conformance_lease_id: None,
         client_name: "client".to_owned(),
         client_type: "public".to_owned(),
         redirect_uris: Vec::new(),

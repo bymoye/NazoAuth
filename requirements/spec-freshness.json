@@ -6,12 +6,7 @@
   ],
   "active_document_paths": [
     "README.md",
-    "docs/conformance/README.md",
-    "docs/conformance/2026-07-11-m8-watchlist-governance.md",
-    "docs/conformance/2026-07-11-m8-oidf-v5.2.0-coverage.md",
-    "docs/conformance/2026-07-11-browser-based-applications-draft-27-audit.md",
-    "docs/conformance/oidf-full-matrix.md",
-    "docs/conformance/oidf-full-matrix.zh-CN.md"
+    "docs/conformance/README.md"
   ],
   "allowed_profile_draft_pins": [
     {
@@ -31,11 +26,8 @@
     "docs/protocol/oauth2-1-self-audit.md": ["draft-ietf-oauth-v2-1-15"],
     "docs/protocol/rfc-compliance-matrix.md": ["draft-ietf-oauth-v2-1-15", "draft-ietf-oauth-browser-based-apps-27", "draft-ietf-oauth-cross-device-security-16", "draft-ietf-oauth-rfc7523bis-11", "draft-ietf-oauth-status-list-21", "Not supported (planned)", "draft-aap-oauth-profile-01", "draft-parecki-oauth-global-token-revocation-06", "Watch only"],
     "docs/protocol/oauth-spec-implementation-backlog.md": ["fapi-ciba-03", "Stable ID1 compatibility", "draft-ietf-oauth-attestation-based-client-auth-10", "draft-ietf-oauth-transaction-tokens-09", "draft-ietf-oauth-client-id-metadata-document-02", "draft-ietf-oauth-security-topics-update-03", "draft-ietf-oauth-refresh-token-expiration-03", "draft-ietf-oauth-first-party-apps-04", "draft-ietf-oauth-identity-chaining-17", "draft-ietf-oauth-status-list-21", "draft-ietf-oauth-rfc8725bis-07", "draft-ietf-oauth-spiffe-client-auth-02", "draft-ietf-oauth-identity-assertion-authz-grant-04", "draft-ietf-oauth-rfc7523bis-11", "draft-ietf-oauth-cross-device-security-16", "draft-ietf-oauth-sd-jwt-vc-17", "draft-aap-oauth-profile-01", "draft-li-oauth-delegated-authorization-02", "draft-mcguinness-oauth-mission-00", "draft-parecki-oauth-global-token-revocation-06", "oauth-v2-grant-management-03", "stable ID1", "draft 07 / Second Implementer's Draft"],
-    "docs/conformance/2026-07-11-browser-based-applications-draft-27-audit.md": ["draft-ietf-oauth-browser-based-apps-27", "draft-ietf-httpbis-layered-cookies/02"],
-    "docs/conformance/2026-07-11-m8-watchlist-governance.md": ["draft-ietf-oauth-browser-based-apps-27", "draft-ietf-oauth-attestation-based-client-auth-10", "draft-ietf-oauth-transaction-tokens-09", "oauth-v2-grant-management-03", "release `v5.2.0`"],
     "docs/protocol/spec-freshness.md": ["draft-ietf-oauth-v2-1-15", "draft-ietf-oauth-browser-based-apps-27", "draft-ietf-oauth-attestation-based-client-auth-10", "draft-ietf-oauth-transaction-tokens-09", "draft-ietf-oauth-client-id-metadata-document-02", "draft-ietf-oauth-security-topics-update-03", "draft-ietf-oauth-refresh-token-expiration-03", "draft-ietf-oauth-first-party-apps-04", "draft-ietf-oauth-identity-chaining-17", "draft-ietf-oauth-status-list-21", "draft-ietf-oauth-rfc8725bis-07", "draft-ietf-oauth-spiffe-client-auth-02", "draft-ietf-oauth-identity-assertion-authz-grant-04", "draft-ietf-oauth-rfc7523bis-11", "draft-ietf-oauth-cross-device-security-16", "draft-ietf-oauth-sd-jwt-vc-17", "draft-aap-oauth-profile-01", "draft-li-oauth-delegated-authorization-02", "draft-mcguinness-oauth-client-instance-assertion-01", "draft-parecki-oauth-global-token-revocation-06", "draft-ietf-httpbis-layered-cookies-02", "fapi-ciba-03", "oauth-v2-grant-management-03", "Second Implementer's Draft", "release-v5.2.0"],
-    ".github/workflows/oidf-conformance.yml": ["dee9a25160e789f0f80517674693ef7989ab9fa1"],
-    ".github/workflows/oidf-conformance-full.yml": ["dee9a25160e789f0f80517674693ef7989ab9fa1"]
+    "docs/conformance/README.md": ["External OpenID Foundation Suite"]
   },
   "forbidden_active_markers": {
     "fapi-grant-management-01": "oauth-v2-grant-management-03",
@@ -143,8 +135,6 @@
     {"id":"openid4vci","title":"OpenID for Verifiable Credential Issuance 1.0","kind":"openid_document","url":"https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-final.html","markers":["OpenID for Verifiable Credential Issuance 1.0","Final"]},
     {"id":"openid4vp","title":"OpenID for Verifiable Presentations 1.0","kind":"openid_document","url":"https://openid.net/specs/openid-4-verifiable-presentations-1_0.html","markers":["OpenID for Verifiable Presentations 1.0","Final"]},
     {"id":"openid-federation","title":"OpenID Federation 1.1","kind":"openid_document","url":"https://openid.net/specs/openid-federation-1_1.html","markers":["OpenID Federation 1.1","Final"]},
-    {"id":"openid-federation-connect","title":"OpenID Federation for OpenID Connect 1.1","kind":"openid_document","url":"https://openid.net/specs/openid-federation-connect-1_1.html","markers":["OpenID Federation for OpenID Connect 1.1","Final"]},
-
-    {"id":"oidf-conformance-suite","title":"OpenID Foundation Conformance Suite","kind":"oidf_suite","url":"https://gitlab.com/openid/conformance-suite/-/releases/release-v5.2.0","api_url":"https://gitlab.com/api/v4/projects/openid%2Fconformance-suite/releases/permalink/latest","tag":"release-v5.2.0","commit":"dee9a25160e789f0f80517674693ef7989ab9fa1"}
+    {"id":"openid-federation-connect","title":"OpenID Federation for OpenID Connect 1.1","kind":"openid_document","url":"https://openid.net/specs/openid-federation-connect-1_1.html","markers":["OpenID Federation for OpenID Connect 1.1","Final"]}
   ]
 }

@@ -53,7 +53,7 @@ References:
 
 | Profile | Status | Notes |
 | --- | --- | --- |
-| OIDC Basic OP | Implemented and OIDF-tested | Latest durable official record is `docs/conformance/2026-06-27-pr15-official-oidf-full-matrix.md`; implementation-affecting commits must be retested. |
+| OIDC Basic OP | Implemented | External Suite coverage and retesting are owned by NazoAuthCtl; this server repository retains product-owned regression contracts only. |
 | OIDC Config | Implemented and OIDF-tested | Discovery metadata is generated from runtime profile/config. |
 | FAPI2 Security | Implemented and OIDF-tested | PAR, PKCE S256, confidential clients, sender-constrained tokens, and client auth policy are separated from Message Signing. |
 | FAPI2 Message Signing authz request | Implemented and OIDF-tested | Signed request objects at PAR with `aud`, `nbf`, and bounded `exp`. |
@@ -92,7 +92,7 @@ Implementation and workflow evidence:
 
 The latest retained official OIDF full matrix passed on runtime implementation
 commit `be7ef9f6a9197520235a59d42866a0918a293014`, and the durable result index
-is `docs/conformance/2026-06-27-pr15-official-oidf-full-matrix.md`.
+is owned by NazoAuthCtl as an external black-box artifact.
 Documentation-only commits can differ from the implementation commit under
 test; implementation-affecting commits must rerun the official matrix and add a
 fresh durable record.

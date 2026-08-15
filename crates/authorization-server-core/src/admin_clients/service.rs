@@ -124,7 +124,6 @@ pub async fn insert_prepared_client<R: AdminClientRepositoryPort>(
             &client,
             prepared.client_secret_hash.as_deref(),
             prepared.registration_access_token_blake3.as_deref(),
-            prepared.conformance_lease_id,
         )
         .await
         .map_err(AdminClientError::Write)?;

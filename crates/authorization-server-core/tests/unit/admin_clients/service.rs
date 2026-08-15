@@ -37,7 +37,6 @@ impl AdminClientRepositoryPort for CapturingRepository {
         _client: &'a OAuthClient,
         _client_secret_hash: Option<&'a str>,
         _registration_access_token_blake3: Option<&'a str>,
-        _conformance_lease_id: Option<Uuid>,
     ) -> AdminClientFuture<'a, OAuthClient> {
         Box::pin(async { Err(AdminClientPortError::Unexpected) })
     }

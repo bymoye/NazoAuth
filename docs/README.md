@@ -28,8 +28,7 @@ set can be scanned from one place.
 | Chinese OpenID Connect integration | [integration/openid-connect.zh-CN.md](integration/openid-connect.zh-CN.md) |
 | Protocol and profile status | [protocol/profile-matrix.md](protocol/profile-matrix.md) |
 | Composable capability policy | [protocol/composable-capability-policy.md](protocol/composable-capability-policy.md) |
-| Certification and conformance evidence | [conformance/certification.md](conformance/certification.md) |
-| OIDF conformance evidence | [conformance/README.md](conformance/README.md) |
+| Product-owned SCIM regression contract | [conformance/README.md](conformance/README.md) |
 | Performance benchmark overview | [performance/performance-capacity-curve.md](performance/performance-capacity-curve.md) |
 
 ## Categories
@@ -41,7 +40,7 @@ set can be scanned from one place.
 | Protocol | [protocol](protocol) | OAuth/OIDC/FAPI profile matrices, RFC coverage, protocol self-audits, and implementation backlog. |
 | Features | [features](features) | Feature design and integration notes for ecosystem onboarding, tenancy, SCIM, federation, MFA, passkeys, and resource-server verification. |
 | Security | [security](security) | Threat model, security policy links, and runtime security event taxonomy. |
-| Conformance | [conformance](conformance) | OIDF and protocol conformance matrices, run records, and negative fixture notes. |
+| Conformance | [conformance](conformance) | Product-owned black-box regression contracts. External Suite artifacts and orchestration live in NazoAuthCtl. |
 | Coverage | [coverage](coverage) | Coverage runbooks and evidence. |
 | Performance | [performance](performance) | NazoAuth-only capacity, stress, and benchmark reports. |
 | Project | [project](project) | Product scope, roadmap, and project-level decision records. |
@@ -68,10 +67,6 @@ set can be scanned from one place.
 | [operations/deployment.zh-CN.md](operations/deployment.zh-CN.md) | Chinese deployment guide. |
 | [operations/one-click-update.md](operations/one-click-update.md) | Signed one-click Podman, Docker, and host installation and updates. |
 | [operations/one-click-update.zh-CN.md](operations/one-click-update.zh-CN.md) | Chinese signed one-click installation and update guide. |
-| [operations/fresh-production-activation.md](operations/fresh-production-activation.md) | Clean-data deployment and OIDF-gated production activation. |
-| [operations/fresh-production-activation.zh-CN.md](operations/fresh-production-activation.zh-CN.md) | Chinese clean-data deployment and OIDF-gated production activation. |
-| [operations/2026-07-23-fresh-production-activation.zh-CN.md](operations/2026-07-23-fresh-production-activation.zh-CN.md) | Evidence record for the 2026-07-23 clean-data production activation. |
-| [operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md](operations/2026-07-24-oidf-concurrency-tuning.zh-CN.md) | Evidence and scheduling decision for bounded parallel OIDC/FAPI and OpenID4VC matrices. |
 | [operations/ha-operations.md](operations/ha-operations.md) | PostgreSQL and Valkey operational guidance. |
 | [operations/release-security.md](operations/release-security.md) | Release security checks, provenance, and supply-chain controls. |
 | [operations/platform-support.md](operations/platform-support.md) | Native binary targets, OCI architectures, dependency boundaries, and binary-only Release assets. |
@@ -95,7 +90,7 @@ set can be scanned from one place.
 | [protocol/profile-matrix.md](protocol/profile-matrix.md) | Runtime profile capability matrix. |
 | [protocol/rfc-compliance-matrix.md](protocol/rfc-compliance-matrix.md) | OAuth, OAuth 2.1, OIDC, and FAPI best-practice matrix. |
 | [protocol/oauth2-1-self-audit.md](protocol/oauth2-1-self-audit.md) | OAuth 2.1 and best-practice self-audit. |
-| [protocol/spec-freshness.md](protocol/spec-freshness.md) | Machine-checked current specification and OIDF suite baseline. |
+| [protocol/spec-freshness.md](protocol/spec-freshness.md) | Machine-checked current specification inventory. |
 | [protocol/oauth-spec-implementation-backlog.md](protocol/oauth-spec-implementation-backlog.md) | Protocol implementation backlog. |
 | [protocol/oauth-best-practice-implementation-plan.zh-CN.md](protocol/oauth-best-practice-implementation-plan.zh-CN.md) | Chinese future roadmap for OAuth/OIDC/FAPI best practices. |
 | [protocol/refresh-token-rotation.md](protocol/refresh-token-rotation.md) | Refresh-token rotation behavior and boundaries. |
@@ -126,27 +121,7 @@ set can be scanned from one place.
 
 | Document | Role |
 | --- | --- |
-| [conformance/README.md](conformance/README.md) | English conformance record index and update rules. |
-| [conformance/README.zh-CN.md](conformance/README.zh-CN.md) | Chinese conformance record index. |
-| [conformance/certification.md](conformance/certification.md) | Certification and current public black-box evidence entry point. |
-| [conformance/certification.zh-CN.md](conformance/certification.zh-CN.md) | Chinese certification and current public black-box evidence entry point. |
-| [conformance/oidf-full-matrix.md](conformance/oidf-full-matrix.md) | OIDF full-matrix scope. |
-| [conformance/oidf-full-matrix.zh-CN.md](conformance/oidf-full-matrix.zh-CN.md) | Chinese OIDF full-matrix scope. |
-| [conformance/negative-fixtures.md](conformance/negative-fixtures.md) | Negative conformance fixture notes. |
-| [conformance/2026-06-09-oidf-full-matrix.md](conformance/2026-06-09-oidf-full-matrix.md) | Certification baseline full-matrix evidence. |
-| [conformance/2026-06-26-security-findings-full-matrix.md](conformance/2026-06-26-security-findings-full-matrix.md) | Security-finding full-matrix evidence. |
-| [conformance/2026-06-27-pr15-official-oidf-full-matrix.md](conformance/2026-06-27-pr15-official-oidf-full-matrix.md) | PR 15 official OIDF full-matrix evidence. |
-| [conformance/2026-07-01-ni-002-oidf-coverage.md](conformance/2026-07-01-ni-002-oidf-coverage.md) | NI-002 RFC 8628 coverage check. |
-| [conformance/2026-07-01-ni-004-oidf-coverage.md](conformance/2026-07-01-ni-004-oidf-coverage.md) | NI-004 RFC 7591 coverage check. |
-| [conformance/2026-07-01-tp-ps-full-matrix.md](conformance/2026-07-01-tp-ps-full-matrix.md) | TP/PS private full-matrix regression. |
-| [conformance/2026-07-02-ni-004-official-oidf-full-matrix.md](conformance/2026-07-02-ni-004-official-oidf-full-matrix.md) | NI-004 official OIDF full-matrix evidence. |
-| [conformance/2026-07-02-ni-005-oidf-coverage.md](conformance/2026-07-02-ni-005-oidf-coverage.md) | NI-005 RFC 7592 coverage check. |
-| [conformance/2026-07-02-ni-006-011-private-oidf-results.md](conformance/2026-07-02-ni-006-011-private-oidf-results.md) | NI-006 through NI-011 private targeted results. |
-| [conformance/2026-07-03-ni-006-011-official-parallel-isolated-oidf-results.md](conformance/2026-07-03-ni-006-011-official-parallel-isolated-oidf-results.md) | NI-006 through NI-011 official parallel-isolated results. |
-| [conformance/2026-07-03-ni-007-public-ciba-oidf-results.md](conformance/2026-07-03-ni-007-public-ciba-oidf-results.md) | NI-007 public FAPI-CIBA results. |
-| [conformance/2026-07-08-m2-official-parallel-isolated-oidf-results.md](conformance/2026-07-08-m2-official-parallel-isolated-oidf-results.md) | M2 official parallel-isolated OIDF results. |
-| [conformance/2026-07-11-m8-watchlist-governance.md](conformance/2026-07-11-m8-watchlist-governance.md) | M8 product, standards/conformance, and security-entry decisions; no candidate runtime-support claim. |
-| [conformance/2026-07-11-m8-oidf-v5.2.0-coverage.md](conformance/2026-07-11-m8-oidf-v5.2.0-coverage.md) | M8 candidate coverage recheck against official conformance-suite v5.2.0. |
+| [conformance/README.md](conformance/README.md) | Product-owned SCIM regression contract. |
 
 ### Coverage
 
@@ -188,7 +163,6 @@ These files are text artifacts but are not general reader documentation.
 | File | Role |
 | --- | --- |
 | [../requirements/codecov.txt](../requirements/codecov.txt) | Generated Python dependency lock input for Codecov tooling. |
-| [../requirements/oidf-conformance.txt](../requirements/oidf-conformance.txt) | Generated Python dependency lock input for OIDF conformance tooling. |
 | [../proptest-regressions/support/responses.txt](../proptest-regressions/support/responses.txt) | Proptest regression seed corpus. |
 | [../proptest-regressions/support/uri_policy.txt](../proptest-regressions/support/uri_policy.txt) | Proptest URI policy regression seed corpus. |
 
@@ -202,8 +176,7 @@ These files are text artifacts but are not general reader documentation.
 - Keep benchmark runner instructions in `perf/README.md`; performance entry
   points and summaries belong under `docs/performance/`, while scenario
   reports belong under `docs/performance/reports/`.
-- Keep conformance run records under `docs/conformance/` and update
-  [conformance/README.md](conformance/README.md) when adding new official or
-  private suite evidence.
+- Keep product-owned black-box regression contracts under `docs/conformance/`.
+  External Suite evidence is owned by NazoAuthCtl.
 - Keep generated lock files and regression seed corpora out of the reader-facing
   documentation flow; index them only as support artifacts.

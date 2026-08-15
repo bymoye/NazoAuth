@@ -1,10 +1,9 @@
 use nazo_identity::TenantContext;
-use uuid::Uuid;
 
 use crate::{OAuthClient, ValidatedClientRegistration};
 
-/// Caller-supplied client secret used only by the privileged conformance
-/// onboarding path. It is deliberately not serializable and its debug output
+/// Caller-supplied client secret used only by privileged management. It is
+/// deliberately not serializable and its debug output
 /// is redacted. The backing bytes are wiped when the value is dropped.
 pub struct SuppliedClientSecret(Vec<u8>);
 
@@ -51,7 +50,6 @@ impl Drop for SuppliedClientSecret {
 #[derive(Clone)]
 pub struct PreparedClientRegistration {
     pub tenant: TenantContext,
-    pub conformance_lease_id: Option<Uuid>,
     pub registration: ValidatedClientRegistration,
     pub require_mtls_bound_tokens: bool,
     pub issued_secret: Option<String>,
@@ -64,7 +62,6 @@ impl std::fmt::Debug for PreparedClientRegistration {
         formatter
             .debug_struct("PreparedClientRegistration")
             .field("tenant", &self.tenant)
-            .field("conformance_lease_id", &self.conformance_lease_id)
             .field("registration", &self.registration)
             .field("require_mtls_bound_tokens", &self.require_mtls_bound_tokens)
             .field(

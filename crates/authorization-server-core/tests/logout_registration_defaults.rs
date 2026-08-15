@@ -40,3 +40,20 @@ fn explicit_logout_session_requirements_are_preserved() {
     assert!(request.frontchannel_logout_session_required);
     assert!(request.backchannel_logout_session_required);
 }
+
+#[test]
+fn legacy_conformance_lease_input_is_rejected() {
+    let error = serde_json::from_value::<CreateClientRequest>(json!({
+        "client_name": "legacy lease input",
+        "client_type": "confidential",
+        "redirect_uris": ["https://client.example/callback"],
+        "scopes": ["openid"],
+        "allowed_audiences": ["resource://default"],
+        "grant_types": ["authorization_code"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "conformance_lease_id": "018f3f2a-7b55-7a25-8f20-6d526f8f44e1"
+    }))
+    .expect_err("legacy Suite ownership input must not enter the product API");
+
+    assert!(error.to_string().contains("conformance_lease_id"));
+}

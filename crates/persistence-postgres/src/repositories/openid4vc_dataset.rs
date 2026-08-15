@@ -46,35 +46,6 @@ struct DatasetWrite<'a> {
     replace_existing: bool,
 }
 
-/// Inserts one lease-owned dataset and its append-only audit event through a
-/// caller-owned transaction connection.  The caller supplies ciphertext so
-/// encryption happens before the SQL write while still using this repository's
-/// canonical AAD/envelope format.
-pub(crate) async fn insert_operator_conformance_dataset_on_connection(
-    connection: &mut AsyncPgConnection,
-    tenant_id: Uuid,
-    subject_id: Uuid,
-    actor_user_id: Uuid,
-    credential_configuration_id: &str,
-    claims_ciphertext: Vec<u8>,
-) -> Result<usize, diesel::result::Error> {
-    write_dataset_on_connection(
-        connection,
-        DatasetWrite {
-            tenant_id,
-            subject_id,
-            credential_configuration_id,
-            claims_ciphertext,
-            valid_from: None,
-            valid_until: None,
-            source: "operator-conformance",
-            actor_user_id: Some(actor_user_id),
-            replace_existing: false,
-        },
-    )
-    .await
-}
-
 /// Upserts an issuer-authoritative dataset for ordinary operator management
 /// on a caller-owned transaction connection.  The caller supplies ciphertext
 /// produced by [`protect_dataset_claims`]; this function binds the durable

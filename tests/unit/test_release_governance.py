@@ -124,8 +124,6 @@ class ReleaseGovernanceTests(unittest.TestCase):
             ROOT / "README.zh-CN.md",
             ROOT / "docs" / "operations" / "deployment.md",
             ROOT / "docs" / "operations" / "deployment.zh-CN.md",
-            ROOT / "docs" / "operations" / "fresh-production-activation.md",
-            ROOT / "docs" / "operations" / "fresh-production-activation.zh-CN.md",
         ]
         forbidden = re.compile(
             r"(?i)(?:\.ps1\b|\bpwsh\b|\bpowershell\b|[a-z]:\\|/home/nazoauth\b)"

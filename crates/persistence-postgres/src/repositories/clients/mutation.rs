@@ -1,4 +1,4 @@
-use diesel::{ExpressionMethods, QueryDsl, QueryableByName, SelectableHelper, sql_query};
+use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_auth::OAuthClient;
 use nazo_identity::ports::RepositoryError;
@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::schema::{oauth_clients, oauth_tokens, user_client_grants};
 
 use super::base::OAuthClientRepository;
-use super::{OAuthClientRecord, bind_conformance_lease, conformance_lease_is_effective, map_error};
+use super::{OAuthClientRecord, conformance_lease_is_effective, map_error};
 
 impl OAuthClientRepository {
     pub async fn insert(
@@ -15,7 +15,6 @@ impl OAuthClientRepository {
         client: &OAuthClient,
         client_secret_hash: Option<&str>,
         registration_access_token_blake3: Option<&str>,
-        conformance_lease_id: Option<Uuid>,
     ) -> Result<OAuthClient, RepositoryError> {
         let mut connection = self.connection().await?;
         let record = connection
@@ -25,7 +24,6 @@ impl OAuthClientRepository {
                     client,
                     client_secret_hash,
                     registration_access_token_blake3,
-                    conformance_lease_id,
                 )
                 .await
             })
@@ -36,36 +34,14 @@ impl OAuthClientRepository {
 
     /// Inserts one client on a caller-owned transaction connection.
     ///
-    /// `conformance_lease_id` is intentionally optional.  A `None` value is
-    /// the ordinary operator-managed path and never consults or creates a
-    /// conformance binding.  A `Some` value retains the lease row lock and
-    /// binding checks used by the legacy conformance onboarding path.
+    /// This ordinary management path never creates a legacy conformance
+    /// binding.
     pub(super) async fn insert_client_on_connection(
         connection: &mut AsyncPgConnection,
         client: &OAuthClient,
         client_secret_hash: Option<&str>,
         registration_access_token_blake3: Option<&str>,
-        conformance_lease_id: Option<Uuid>,
     ) -> Result<OAuthClientRecord, diesel::result::Error> {
-        if let Some(conformance_lease_id) = conformance_lease_id {
-            // DCR is a lease-owned mutation.  Lock the lease row for the
-            // entire insert transaction so revocation and registration have
-            // one database linearization point.  The operator path passes
-            // `None`, so it cannot accidentally acquire a Suite lease.
-            let locked = sql_query(
-                "SELECT id FROM conformance_leases \
-                 WHERE tenant_id = $1 AND id = $2 \
-                   AND expires_at > CURRENT_TIMESTAMP \
-                   AND revoked_at IS NULL AND cleaned_at IS NULL \
-                 FOR UPDATE",
-            )
-            .bind::<diesel::sql_types::Uuid, _>(client.tenant_id)
-            .bind::<diesel::sql_types::Uuid, _>(conformance_lease_id)
-            .get_result::<ActiveConformanceLease>(connection)
-            .await?;
-            debug_assert_eq!(locked.id, conformance_lease_id);
-        }
-
         let record = diesel::insert_into(oauth_clients::table)
             .values((
                 oauth_clients::id.eq(client.id),
@@ -166,7 +142,6 @@ impl OAuthClientRepository {
             .returning(OAuthClientRecord::as_returning())
             .get_result::<OAuthClientRecord>(connection)
             .await?;
-        bind_conformance_lease(connection, client.id, conformance_lease_id).await?;
         Ok(record)
     }
 
@@ -589,14 +564,12 @@ pub async fn insert_client_on_connection(
     client: &OAuthClient,
     client_secret_hash: Option<&str>,
     registration_access_token_blake3: Option<&str>,
-    conformance_lease_id: Option<Uuid>,
 ) -> Result<(), diesel::result::Error> {
     OAuthClientRepository::insert_client_on_connection(
         connection,
         client,
         client_secret_hash,
         registration_access_token_blake3,
-        conformance_lease_id,
     )
     .await
     .map(|_| ())
@@ -670,12 +643,6 @@ async fn revoke_client_dependents_on_connection(
     .execute(connection)
     .await?;
     Ok(())
-}
-
-#[derive(QueryableByName)]
-struct ActiveConformanceLease {
-    #[diesel(sql_type = diesel::sql_types::Uuid)]
-    id: Uuid,
 }
 
 pub(crate) async fn upsert_client_on_connection(

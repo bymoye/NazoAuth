@@ -51,7 +51,6 @@ pub trait AdminClientRepositoryPort: Send + Sync {
         client: &'a OAuthClient,
         client_secret_hash: Option<&'a str>,
         registration_access_token_blake3: Option<&'a str>,
-        conformance_lease_id: Option<Uuid>,
     ) -> AdminClientFuture<'a, OAuthClient>;
 
     fn update<'a>(&'a self, client: &'a OAuthClient) -> AdminClientFuture<'a, OAuthClient>;

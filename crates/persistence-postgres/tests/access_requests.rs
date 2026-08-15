@@ -120,7 +120,6 @@ fn prepared_client(
 ) -> PreparedClientRegistration {
     PreparedClientRegistration {
         tenant,
-        conformance_lease_id: None,
         registration,
         require_mtls_bound_tokens,
         issued_secret: None,

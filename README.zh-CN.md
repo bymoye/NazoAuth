@@ -8,7 +8,6 @@
 [![codeql](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/codeql.yml)
 [![dependency-review](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/dependency-review.yml)
 [![conformance-security](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/conformance-security.yml)
-[![oidf-conformance-full](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml/badge.svg?branch=main)](https://github.com/nazozero/NazoAuth/actions/workflows/oidf-conformance-full.yml)
 [![codecov](https://codecov.io/gh/nazozero/NazoAuth/branch/main/graph/badge.svg)](https://app.codecov.io/gh/nazozero/NazoAuth)
 
 [English](README.md) · [文档](#文档) · [快速启动](#快速启动) · [安全策略](SECURITY.md)
@@ -39,7 +38,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 | 静态安全分析 | CodeQL Rust analysis，启用 `security-extended` 和 `security-and-quality` queries。 |
 | 依赖策略 | GitHub dependency review、`cargo audit`、`cargo deny`，覆盖 advisories、bans、licenses 和 sources。 |
 | 运行时安全行为 | `conformance-security` 中的真实 HTTP E2E、load/race gate、Valkey outage injection。 |
-| 协议一致性 | Release 门禁会针对同一公网部署运行固定的 27-plan OIDC/FAPI/CIBA/logout 矩阵和固定的 17-plan OpenID4VCI/VP 矩阵；历史证据与精确 Release 证据按版本保存在 `docs/conformance`。 |
+| 外部协议一致性 | NazoAuthCtl 负责已签名 Suite 制品、外部执行、证据与清理；服务端只通过公开协议和 tenant-resource 接口接受黑盒验证。 |
 | 覆盖率趋势 | 专用 coverage workflow 上传 Codecov LCOV。 |
 | 发布来源证明 | CycloneDX SBOM、Trivy image scan、Sigstore signing、GitHub artifact attestations。 |
 
@@ -49,7 +48,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 
 ## 认证
 
-🏅 [认证与一致性证据](docs/conformance/certification.zh-CN.md)
+🏅 一致性套件由 NazoAuthCtl 作为外部黑盒控制器执行。
 
 ## 功能
 

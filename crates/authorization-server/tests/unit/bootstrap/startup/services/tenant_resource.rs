@@ -2,7 +2,6 @@ use super::*;
 
 fn client_request() -> CreateClientRequest {
     CreateClientRequest {
-        conformance_lease_id: None,
         client_name: "ordinary managed client".to_owned(),
         client_type: "public".to_owned(),
         redirect_uris: vec!["https://client.example/callback".to_owned()],
@@ -126,16 +125,9 @@ async fn server_preparation_hashes_passwords_and_prepares_both_client_secret_mod
 }
 
 #[actix_web::test]
-async fn server_preparation_rejects_lease_payload_invalid_secret_and_tenant_drift() {
+async fn server_preparation_rejects_invalid_secret_and_tenant_drift() {
     let preparation = preparation();
     let tenant = nazo_identity::TenantContext::default_system();
-
-    let mut leased = client_request();
-    leased.conformance_lease_id = Some(Uuid::now_v7());
-    assert!(matches!(
-        preparation.prepare_oauth_client(leased, None, tenant).await,
-        Err(TenantResourcePreparationError::Rejected)
-    ));
 
     let mut confidential = client_request();
     confidential.client_type = "confidential".to_owned();

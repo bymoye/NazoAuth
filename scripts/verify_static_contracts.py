@@ -608,37 +608,6 @@ def check_fapi_ciba_boundaries() -> None:
     if not delivery_policy_test.is_file():
         raise SystemExit("CIBA ping delivery policy tests must remain outside production source")
 
-    workflow = (ROOT / ".github" / "workflows" / "oidf-conformance-full.yml").read_text(
-        encoding="utf-8"
-    )
-    expected_variants = (
-        "[client_auth_type=private_key_jwt][fapi_ciba_profile=plain_fapi][ciba_mode=poll]",
-        "[client_auth_type=mtls][fapi_ciba_profile=plain_fapi][ciba_mode=poll]",
-        "[client_auth_type=private_key_jwt][fapi_ciba_profile=plain_fapi][ciba_mode=ping]",
-        "[client_auth_type=mtls][fapi_ciba_profile=plain_fapi][ciba_mode=ping]",
-    )
-    missing = [variant for variant in expected_variants if variant not in workflow]
-    if missing:
-        raise SystemExit(f"OIDF workflow lacks FAPI-CIBA combinations: {missing}")
-    if "[ciba_mode=push]" in workflow:
-        raise SystemExit("FAPI-CIBA push must not enter the supported matrix")
-    materializer = (ROOT / "scripts" / "materialize_oidf_plan_config.py").read_text(
-        encoding="utf-8"
-    )
-    for marker in (
-        "derive_fapi_ciba_matrix_configs",
-        "--derive-fapi-ciba-matrix-configs",
-        "backchannel_client_notification_endpoint",
-    ):
-        if marker not in materializer:
-            raise SystemExit(f"official FAPI-CIBA config materialization lacks {marker}")
-    for marker in (
-        "--derive-fapi-ciba-matrix-configs",
-        '--ciba-notification-base-url "$CONFORMANCE_SERVER"',
-    ):
-        if marker not in workflow:
-            raise SystemExit(f"official FAPI-CIBA workflow lacks {marker}")
-
     migration = (
         ROOT / "migrations" / "20260715000400_ciba_delivery_modes" / "up.sql"
     ).read_text(encoding="utf-8")
@@ -681,33 +650,6 @@ def check_openid4vc_boundaries() -> None:
     if missing_tests:
         raise SystemExit(f"OpenID4VC separated test contracts are missing: {missing_tests}")
 
-    registry_path = ROOT / "tests" / "contracts" / "openid4vc-oidf-matrix.json"
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    expected_plans = {
-        "oid4vci-1_0-issuer-test-plan",
-        "oid4vci-1_0-issuer-haip-test-plan",
-        "oid4vp-1final-verifier-test-plan",
-        "oid4vp-1final-verifier-haip-test-plan",
-    }
-    actual_plans = {item.get("plan") for item in registry.get("plans", [])}
-    if actual_plans != expected_plans:
-        raise SystemExit(
-            f"OpenID4VC OIDF registry must contain the exact four upstream plans: {actual_plans}"
-        )
-    if registry.get("suite_commit") != "dee9a25160e789f0f80517674693ef7989ab9fa1":
-        raise SystemExit("OpenID4VC OIDF matrix must remain pinned to the audited v5.2.0 commit")
-    if registry.get("status") != "alpha-regression-not-certification":
-        raise SystemExit("OpenID4VC OIDF evidence must not be described as certification")
-
-    workflow = (ROOT / ".github" / "workflows" / "openid4vc-conformance.yml").read_text(
-        encoding="utf-8"
-    )
-    materializer = (
-        ROOT / "scripts" / "materialize_openid4vc_oidf_config.py"
-    ).read_text(encoding="utf-8")
-    driver = (ROOT / "scripts" / "run_openid4vc_conformance.py").read_text(
-        encoding="utf-8"
-    )
     server_settings = read_rust_module_tree(
         ROOT / "crates" / "authorization-server" / "src" / "settings.rs"
     )
@@ -726,54 +668,11 @@ def check_openid4vc_boundaries() -> None:
     openid4vc_server_domain = read_rust_module_tree(
         ROOT / "crates" / "authorization-server" / "src" / "domain" / "openid4vc_endpoints.rs"
     )
-    for plan in expected_plans:
-        if plan not in materializer:
-            raise SystemExit(f"OpenID4VC materializer lacks upstream plan: {plan}")
-    for marker in (
-        "nazo-openid4vc-oidf-private-key-jwt",
-        "nazo-openid4vc-oidf-client-attestation",
-    ):
-        if marker not in materializer:
-            raise SystemExit(f"OpenID4VC materializer lacks bounded client identity: {marker}")
-    for marker in (
-        "dee9a25160e789f0f80517674693ef7989ab9fa1",
-        "run_openid4vc_conformance.py",
-        "target_origin",
-        "TARGET_ORIGIN: ${{ inputs.target_origin }}",
-        "openid4vc-plan-set.json",
-        "openid4vc-expected-skips.json",
-        "openid4vc-expected-problems.json",
-        "--expected-failures-file",
-        "--expected-skips-file",
-        "openid4vc-driver.json",
-    ):
-        if marker not in workflow:
-            raise SystemExit(f"OpenID4VC workflow lacks hard boundary: {marker}")
-    for marker in (
-        "TRUSTED_TARGET_ORIGIN: ${{ vars.OPENID4VC_TARGET_ORIGIN }}",
-        'test "$TARGET_ORIGIN" = "$TRUSTED_TARGET_ORIGIN"',
-    ):
-        if marker not in workflow:
-            raise SystemExit(
-                f"OpenID4VC workflow does not bind target_origin to the trusted repository origin: {marker}"
-            )
-    for marker in (
-        "VCI_UNSUPPORTED_ENCRYPTION_MODULE",
-        "expected_problems_for_cases",
-        "expected_skips_for_cases",
-        "vci_credential_encryption",
-        "request_object_trust_anchor_pem",
-    ):
-        if marker not in materializer:
-            raise SystemExit(f"OpenID4VC materializer lacks expected-skip boundary: {marker}")
-    for forbidden in ("openid4vci_offers", "openid4vp_transactions", "result_ciphertext"):
-        if forbidden in driver:
-            raise SystemExit(f"OpenID4VC black-box driver accesses persistence: {forbidden}")
     for forbidden in (
         "OPENID4VCI_CREDENTIAL_DATASET_MANAGEMENT_TOKEN",
         "/openid4vci/management/credential-datasets",
     ):
-        if forbidden in server_settings or forbidden in server_routes or forbidden in driver:
+        if forbidden in server_settings or forbidden in server_routes:
             raise SystemExit(f"OpenID4VC dataset control plane exposes retired bearer surface: {forbidden}")
     for marker in (
         "OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON",
@@ -811,32 +710,6 @@ def check_openid4vc_boundaries() -> None:
     ):
         if marker not in openid4vc_server_domain:
             raise SystemExit(f"OpenID4VC internal control-plane boundary is missing: {marker}")
-    for marker in (
-        "--operator-credentials-file",
-        "read_secret_document",
-        "/admin/openid4vci/credential-datasets/",
-        "dedicated_conformance_subject",
-        "ControlPlaneSession",
-        "NoRedirectHandler",
-    ):
-        if marker not in driver:
-            raise SystemExit(f"OpenID4VC driver lacks production admin boundary: {marker}")
-    required_fields = re.search(
-        r"required_fields\s*=\s*\((?P<body>.*?)\)", driver, flags=re.DOTALL
-    )
-    if required_fields is None or any(
-        f'"{field}"' not in required_fields.group("body")
-        for field in ("admin_email", "admin_password", "admin_mfa_totp_secret")
-    ):
-        raise SystemExit(
-            "OpenID4VC driver lacks production admin boundary: "
-            "required_fields must include admin_email, admin_password, and admin_mfa_totp_secret"
-        )
-    for forbidden in ("OIDF_ADMIN_EMAIL", "OIDF_ADMIN_PASSWORD"):
-        if forbidden in driver:
-            raise SystemExit(
-                f"OpenID4VC driver restored a forbidden administrator environment secret: {forbidden}"
-            )
     containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
     runtime_start = containerfile.index("FROM runtime-base AS runtime")
     runtime_body = containerfile[runtime_start:]
@@ -860,14 +733,6 @@ def check_openid4vc_boundaries() -> None:
     for marker in ('entry.get("purposes").is_some()', "key_entry_purposes"):
         if marker not in key_store:
             raise SystemExit(f"OpenID4VC purpose-scoped rotation boundary is missing: {marker}")
-    for doc_name in ("openid4vc-final-matrix.md", "openid4vc-final-matrix.zh-CN.md"):
-        doc = (ROOT / "docs" / "conformance" / doc_name).read_text(encoding="utf-8")
-        if "nazoauthctl keys generate-local --alg ES256" not in doc:
-            raise SystemExit(f"OpenID4VC purpose-scoped key procedure missing from {doc_name}")
-        for statement in ("alpha", "not an OpenID Foundation certification claim") if doc_name.endswith(".md") and not doc_name.endswith("zh-CN.md") else ("alpha", "不能称为 OpenID Foundation 正式认证"):
-            if statement not in doc:
-                raise SystemExit(f"OpenID4VC evidence boundary missing from {doc_name}: {statement}")
-
     migration = (
         ROOT / "migrations" / "20260716000100_openid4vc_final" / "up.sql"
     ).read_text(encoding="utf-8")
@@ -890,365 +755,28 @@ def check_openid4vc_boundaries() -> None:
 
 
 def check_conformance_provisioning_boundaries() -> None:
-    """Conformance onboarding must use the public production control plane only."""
+    """Keep external Suite orchestration out of the server repository."""
 
-    if (ROOT / "compose.oidf.local.yml").exists():
-        raise SystemExit("private OIDF product stack must not coexist with public black-box testing")
-    black_box_materializer = (
-        ROOT / "scripts" / "prepare_oidf_black_box.py"
-    ).read_text(encoding="utf-8")
-    for forbidden in (
-        "write_nginx",
-        "write_env_yaml",
-        "write_ui",
-        "ensure_server_oidf_keyset",
-        "listen 9443",
-    ):
-        if forbidden in black_box_materializer:
-            raise SystemExit(
-                f"black-box materializer contains private product environment: {forbidden}"
-            )
-
-    forbidden_runtime_markers = (
-        "oidcc-",
-        "fapi-ciba-id1-test-plan",
-        "www.certification.openid.net",
-        "/test/a/",
-        "oidf-fapi-ciba",
-        "fapi-ciba-id1-plain-private-key-jwt-poll",
-        "OpenID4VC OIDF Test Issuer",
-        "openid4vc-oidf-placeholder",
+    retired_assets = (
+        ROOT / "compose.oidf.yml",
+        ROOT / "deploy" / "oidf-suite",
+        ROOT / "deploy" / "oidf-proxy",
+        ROOT / "requirements" / "oidf-conformance.in",
+        ROOT / "requirements" / "oidf-conformance.txt",
     )
-    for source_file in (ROOT / "crates").glob("*/src/**/*.rs"):
-        source = source_file.read_text(encoding="utf-8")
-        for marker in forbidden_runtime_markers:
-            if marker in source:
-                raise SystemExit(
-                    f"product runtime contains conformance-runner marker {marker}: {source_file}"
-                )
+    present = [
+        str(path.relative_to(ROOT))
+        for path in retired_assets
+        if path.is_file() or (path.is_dir() and any(child.is_file() for child in path.rglob("*")))
+    ]
+    if present:
+        raise SystemExit(f"external Suite assets remain in NazoAuth: {present}")
 
-    server_manifest = (
-        ROOT / "crates" / "authorization-server" / "Cargo.toml"
-    ).read_text(encoding="utf-8")
-    server_library = (
-        ROOT / "crates" / "authorization-server" / "src" / "lib.rs"
-    ).read_text(encoding="utf-8")
-    if "conformance-provisioning" in server_manifest or "oidf_seed" in server_library:
-        raise SystemExit(
-            "production server must not compile or expose conformance provisioning"
-        )
-
-    deploy = (ROOT / "scripts" / "deploy_live.ps1").read_text(encoding="utf-8")
-    release = (
-        ROOT / ".github" / "workflows" / "release-security.yml"
-    ).read_text(encoding="utf-8")
     containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-    workspace_manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-    retired = (
-        "conformance-provisioning",
-        "nazo_conformance_provision",
-        "nazo-conformance-provisioner",
-        "nazo_oauth_seed_oidf",
-        "nazo_openid4vc_seed_oidf",
-        "OidfPublicSeedArtifact",
-        "OidfSuiteBaseUrl",
-        "RemoteOidfMtlsCaPath",
-    )
-    for marker in retired:
-        for name, source in (
-            ("workspace", workspace_manifest),
-            ("release workflow", release),
-            ("container image", containerfile),
-            ("deployment", deploy),
-        ):
-            if marker in source:
-                raise SystemExit(f"retired direct conformance provisioner remains in {name}: {marker}")
-
-    onboarding = (
-        ROOT / "scripts" / "apply_public_conformance_onboarding.py"
-    ).read_text(encoding="utf-8")
-    openid4vc_onboarding = (
-        ROOT / "scripts" / "prepare_openid4vc_public_onboarding.py"
-    ).read_text(encoding="utf-8")
-    official_onboarding = (
-        ROOT / "scripts" / "prepare_official_oidf_public_onboarding.py"
-    ).read_text(encoding="utf-8")
-    delivered_material = (
-        ROOT / "scripts" / "apply_oidf_delivered_client_material.py"
-    ).read_text(encoding="utf-8")
-    for marker in (
-        "/auth/me/access-requests",
-        "/admin/access-requests/",
-        "/auth/me/mtls-trust-requests",
-        "/admin/mtls-trust-requests/",
-        "canonical_https_origin",
-        "NoRedirectHandler",
-    ):
-        if marker not in onboarding:
-            raise SystemExit(f"public conformance onboarding lacks production boundary: {marker}")
-    for forbidden in (
-        "DATABASE_URL",
-        "psycopg",
-        "sqlx",
-        "nazo_postgres",
-        "INSERT INTO",
-        "UPDATE oauth_clients",
-        "auth.nazo.run",
-        "nginx:8443",
-    ):
-        if (
-            forbidden in onboarding
-            or forbidden in black_box_materializer
-            or forbidden in openid4vc_onboarding
-            or forbidden in official_onboarding
-            or forbidden in delivered_material
-        ):
-            raise SystemExit(f"public conformance tooling contains a forbidden deployment coupling: {forbidden}")
-
-    public_black_box_sources = [
-        onboarding,
-        black_box_materializer,
-        openid4vc_onboarding,
-        official_onboarding,
-        delivered_material,
-        (ROOT / "scripts" / "run_oidf_conformance.py").read_text(encoding="utf-8"),
-        (ROOT / "scripts" / "run_openid4vc_conformance.py").read_text(encoding="utf-8"),
-        (ROOT / ".github" / "workflows" / "oidf-conformance-full.yml").read_text(encoding="utf-8"),
-        (ROOT / ".github" / "workflows" / "openid4vc-conformance.yml").read_text(encoding="utf-8"),
-    ]
-    for forbidden in ("https://nginx:8443", "https://localhost:8443", "https://auth.nazo.run"):
-        if any(forbidden in source for source in public_black_box_sources):
-            raise SystemExit(f"public black-box conformance tooling hard-codes an operator endpoint: {forbidden}")
-
-    for marker in (
-        '"token_endpoint_auth_method": auth_method',
-        '"require_dpop_bound_tokens": True',
-        '"require_par_request_object": False',
-        'PRIVATE_JWK_MEMBERS',
-        'output / "oidf-onboarding-manifest.json"',
-        'output / "openid4vc-plan-set-manifest.json"',
-    ):
-        if marker not in openid4vc_onboarding:
-            raise SystemExit(
-                f"OpenID4VC public onboarding boundary is missing: {marker}"
-            )
-
-    for marker in (
-        "validate_artifact_directory",
-        "prepare_oidc_clients",
-        "prepare_openid4vc_clients",
-        "applicant email does not match the official artifact commitment",
-        "55 unique clients",
-    ):
-        if marker not in official_onboarding:
-            raise SystemExit(
-                f"official public onboarding conversion lacks hard boundary: {marker}"
-            )
-
-    delivery_handler = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "http"
-        / "profile"
-        / "delivery.rs"
-    ).read_text(encoding="utf-8")
-    delivery_routes = (
-        ROOT / "crates" / "authorization-server" / "src" / "bootstrap" / "routes.rs"
-    ).read_text(encoding="utf-8")
-    access_request_handler = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "http"
-        / "profile"
-        / "access_requests.rs"
-    ).read_text(encoding="utf-8")
-    delivery_sources = [
-        delivery_handler,
-        delivery_routes,
-        (ROOT / "crates" / "identity" / "src" / "profile.rs").read_text(encoding="utf-8"),
-        (ROOT / "scripts" / "apply_public_conformance_onboarding.py").read_text(encoding="utf-8"),
-        (ROOT / "scripts" / "full_real_request_e2e.py").read_text(encoding="utf-8"),
-        (ROOT / "scripts" / "verify_live_full_interfaces.py").read_text(encoding="utf-8"),
-    ]
-    for forbidden in (
-        "access-delivery?token=",
-        "delivery_url",
-        'web::get().to(access_delivery)',
-        'Query<HashMap<String, String>>',
-    ):
-        if any(forbidden in source for source in delivery_sources):
-            raise SystemExit(f"one-time credential delivery exposes a retired transport: {forbidden}")
-    for marker in (
-        "has_valid_csrf_token",
-        "Json<AccessDeliveryRequest>",
-        "request_id: Uuid",
-        "json_response_no_store",
-    ):
-        if marker not in delivery_handler:
-            raise SystemExit(f"one-time credential delivery lacks hard boundary: {marker}")
-    if '.route("/access-delivery", web::post().to(access_delivery))' not in delivery_routes:
-        raise SystemExit("one-time credential delivery must remain POST-only")
-    if "delivery_token" in access_request_handler or "delivery_available" not in access_request_handler:
-        raise SystemExit("application list must expose availability, never a delivery capability")
-    for marker in (
-        "target issuer does not match this run",
-        "suite base URL does not match this run",
-        "delivered client material does not match any runner client",
-    ):
-        if marker not in delivered_material:
-            raise SystemExit(
-                f"OIDF delivered-client material lacks hard boundary: {marker}"
-            )
-
-    retired_owner = "bymoye" + "/NazoAuth"
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or any(
-            part in {".git", ".worktrees", "target", "runtime"} for part in path.parts
-        ):
-            continue
-        if path.suffix.lower() not in {".md", ".toml", ".yml", ".yaml", ".json", ".py", ".rs", ".ps1", ".sh"}:
-            continue
-        if retired_owner in path.read_text(encoding="utf-8", errors="ignore"):
-            raise SystemExit(f"retired repository owner remains referenced: {path}")
-
-    mtls_migration = (
-        ROOT / "migrations" / "20260718000200_mtls_trust_anchor_lifecycle" / "up.sql"
-    ).read_text(encoding="utf-8")
-    mtls_repository = (
-        ROOT / "crates" / "persistence-postgres" / "src" / "repositories" / "mtls_trust.rs"
-    ).read_text(encoding="utf-8")
-    for marker in (
-        "oauth_client_mtls_trust_anchor_events",
-        "role = 'admin' AND admin_level > 0",
-        "user_id <> $3",
-        "require_mtls_bound_tokens = TRUE",
-        "c.tls_client_auth_cert_sha256 IS NOT NULL",
-        "pg_advisory_xact_lock",
-        "MAX_ACTIVE_TRUST_ANCHORS_PER_CLIENT",
-        "MAX_ACTIVE_TRUST_ANCHORS_PER_TENANT",
-        "MAX_PENDING_TRUST_REQUESTS_PER_CLIENT",
-        "MAX_PENDING_TRUST_REQUESTS_PER_USER",
-    ):
-        if marker not in mtls_migration and marker not in mtls_repository:
-            raise SystemExit(f"mTLS trust control plane lacks hard boundary: {marker}")
-
-    mtls_runtime = (
-        ROOT / "crates" / "authorization-server" / "src" / "http" / "mtls.rs"
-    ).read_text(encoding="utf-8")
-    mtls_key_management = (
-        ROOT / "crates" / "key-management" / "src" / "client_registration.rs"
-    ).read_text(encoding="utf-8")
-    for marker in (
-        "rfc4514_dn_matches",
-        "registered_ip_values_match",
-        "registered_dns_values_match",
-        "registered_email_values_match",
-    ):
-        if marker not in mtls_runtime:
-            raise SystemExit(f"RFC 8705 certificate selector boundary is missing: {marker}")
-    for marker in (
-        "x509_cert::name::Name::from_str",
-        "name.to_string().to_lowercase()",
-        "registered == certificate_subject",
-    ):
-        if marker not in mtls_key_management:
-            raise SystemExit(f"RFC 4514 distinguished-name boundary is missing: {marker}")
-
-    public_onboarding_workflow = (
-        ROOT / ".github" / "workflows" / "oidf-public-onboarding-material.yml"
-    ).read_text(encoding="utf-8")
-    full_oidf_workflow = (
-        ROOT / ".github" / "workflows" / "oidf-conformance-full.yml"
-    ).read_text(encoding="utf-8")
-    oidf_template = (
-        ROOT / "docs" / "conformance" / "oidf-plan-config-template.json"
-    ).read_text(encoding="utf-8")
-    if "-----BEGIN CERTIFICATE-----" in oidf_template or "PRIVATE KEY" in oidf_template:
-        raise SystemExit("OIDF public plan template must not embed environment mTLS material")
-    for workflow_name, workflow in (
-        ("public onboarding", public_onboarding_workflow),
-        ("full conformance", full_oidf_workflow),
-    ):
-        for marker in (
-            "OIDF_MTLS_MATERIAL_AGE_IDENTITY",
-            "docs/conformance/oidf-mtls-material.json.age",
-            "--mtls-material-file oidf-mtls-material.json",
-        ):
-            if marker not in workflow:
-                raise SystemExit(f"{workflow_name} workflow omits managed OIDF mTLS material: {marker}")
-    for marker in (
-        "materialize_openid4vc_oidf_config.py",
-        "openid4vc-plan-configs.json",
-        "openid4vc-conformance-datasets.json",
-    ):
-        if marker not in public_onboarding_workflow:
-            raise SystemExit(
-                f"public conformance onboarding artifact omits OpenID4VC material: {marker}"
-            )
-
-    openid4vc_runtime = read_rust_module_tree(
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "domain"
-        / "openid4vc_endpoints.rs"
-    )
-    if "Openid4vciDatasetRepository" not in openid4vc_runtime:
-        raise SystemExit("OpenID4VC runtime lacks an issuer-authoritative dataset repository")
-    openid4vc_repository = read_rust_source_family(
-        ROOT
-        / "crates"
-        / "persistence-postgres"
-        / "src"
-        / "repositories",
-        "openid4vc",
-    )
-    openid4vc_admin = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "http"
-        / "admin"
-        / "openid4vc.rs"
-    ).read_text(encoding="utf-8")
-    for marker in ("Aes256Gcm", "dataset_aad", "claims_ciphertext"):
-        if marker not in openid4vc_repository:
-            raise SystemExit(f"OpenID4VC dataset encryption boundary is missing: {marker}")
-    for marker in (
-        "admin.principal.tenant.tenant_id.as_uuid()",
-        "require_configured_tenant",
-    ):
-        if marker not in openid4vc_admin and marker not in openid4vc_runtime:
-            raise SystemExit(f"OpenID4VC dataset tenant boundary is missing: {marker}")
-    for forbidden in (
-        "active_subject_claims_by_tenant_id",
-        "issuing_authority\".to_owned()",
-        "driving_privileges\".to_owned()",
-        "document_number\".to_owned()",
-    ):
-        if forbidden in openid4vc_runtime:
-            raise SystemExit(
-                f"OpenID4VC runtime still synthesizes credential evidence: {forbidden}"
-            )
-
-    setup = (ROOT / "scripts" / "prepare_oidf_black_box.py").read_text(
-        encoding="utf-8"
-    )
-    for marker in (
-        '"onboarding_profile": "operator-black-box"',
-        '"run_namespace": RUN_NAMESPACE',
-        'RUNTIME / "oidf-onboarding-contract.json"',
-        'RUNTIME / "oidf-onboarding-manifest.json"',
-        '"clients": onboarding_clients(configs)',
-    ):
-        if marker not in setup:
-            raise SystemExit(f"operator black-box onboarding contract is missing: {marker}")
+    runtime_start = containerfile.index("FROM runtime-base AS runtime")
+    runtime_body = containerfile[runtime_start:].lower()
+    if "oidf" in runtime_body or "conformance" in runtime_body:
+        raise SystemExit("production runtime image must not contain Suite provisioning")
 
 
 def check_bootstrap_secret_log_boundary() -> None:

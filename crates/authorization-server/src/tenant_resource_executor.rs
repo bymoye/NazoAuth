@@ -490,9 +490,6 @@ impl PostgresTenantResourceExecutor {
                     }))
                 }
                 TenantResourcePayload::OauthClient(value) => {
-                    if value.request.conformance_lease_id.is_some() {
-                        return Err(TenantResourceExecutorError::Rejected);
-                    }
                     let prepared = self
                         .preparation
                         .prepare_oauth_client(value.request, value.supplied_secret, self.tenant)
@@ -765,7 +762,6 @@ async fn apply_resources(
             connection,
             client,
             payload.prepared.client_secret_hash.as_deref(),
-            None,
             None,
         )
         .await

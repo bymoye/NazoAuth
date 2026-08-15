@@ -88,7 +88,6 @@ where
     .await?;
     Ok(PreparedClientRegistration {
         tenant: policy.tenant,
-        conformance_lease_id: request.conformance_lease_id,
         registration: ValidatedClientRegistration {
             client_id: format!("client-{}", Uuid::now_v7()),
             client_name: request.client_name,
