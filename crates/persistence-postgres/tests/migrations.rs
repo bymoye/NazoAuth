@@ -2,6 +2,23 @@ use diesel::{QueryableByName, sql_query, sql_types::Text};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
 use uuid::Uuid;
 
+#[test]
+fn embedded_migration_head_tracks_latest_directory() {
+    let migrations = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let latest = std::fs::read_dir(&migrations)
+        .expect("migration directory should be readable")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name())
+        .max()
+        .expect("at least one migration directory should exist");
+    assert_eq!(
+        include_str!("../migration-head.txt").trim(),
+        latest.to_string_lossy(),
+        "append-only migrations must advance migration-head.txt so cached builds re-embed them"
+    );
+}
+
 const SOCIAL_UP: &str =
     include_str!("../../../migrations/20260712000050_social_federation_provider_type/up.sql");
 const SOCIAL_DOWN: &str =

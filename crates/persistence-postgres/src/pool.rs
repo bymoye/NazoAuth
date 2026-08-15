@@ -16,6 +16,11 @@ use std::{
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../../migrations");
 
+// Cargo cannot discover newly added directories through `embed_migrations!`.
+// The tested head marker changes with every appended migration and therefore
+// invalidates this crate in cached deployment builds.
+const _: &str = include_str!("../migration-head.txt");
+
 const MIGRATION_ADVISORY_LOCK: i64 = 564196923451771041;
 const MIGRATION_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
 const MIGRATION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
