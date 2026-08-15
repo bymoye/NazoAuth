@@ -3173,3 +3173,678 @@ fn ciba_decision_binding_is_an_ordinary_non_public_tenant_resource() {
     });
     assert!(validate_tenant_resource_receipt(&receipt).is_err());
 }
+
+#[test]
+fn tenant_resource_validation_rejects_every_state_machine_boundary() {
+    let valid_task = tenant_resource_task();
+    let assert_invalid_task = |task: TenantResourceTask| {
+        assert!(validate_tenant_resource_task(&task).is_err());
+    };
+    assert_invalid_task(TenantResourceTask {
+        ver: PROTOCOL_VERSION + 1,
+        ..valid_task.clone()
+    });
+    for actor_id in ["", "bad actor", &"x".repeat(257)] {
+        let mut task = valid_task.clone();
+        task.actor.id = actor_id.to_owned();
+        assert_invalid_task(task);
+    }
+    for (field, value) in [
+        ("jti", "bad/jti"),
+        ("deployment", "bad/deployment"),
+        ("capability", "bad/capability"),
+        ("change-set", "bad/change-set"),
+    ] {
+        let mut task = valid_task.clone();
+        match field {
+            "jti" => task.jti = value.to_owned(),
+            "deployment" => task.deployment_id = value.to_owned(),
+            "capability" => task.capability_jti = value.to_owned(),
+            "change-set" => task.change_set_id = value.to_owned(),
+            _ => unreachable!(),
+        }
+        assert_invalid_task(task);
+    }
+    let mut task = valid_task.clone();
+    task.tenant_id = "00000000-0000-0000-0000-00000000000A".to_owned();
+    assert_invalid_task(task);
+    for field in ["capability", "change-set", "baseline", "manifest"] {
+        let mut task = valid_task.clone();
+        match field {
+            "capability" => task.capability_sha256 = "A".repeat(64),
+            "change-set" => task.change_set_sha256 = "A".repeat(64),
+            "baseline" => task.baseline_manifest_sha256 = "A".repeat(64),
+            "manifest" => task.resource_manifest_sha256 = "A".repeat(64),
+            _ => unreachable!(),
+        }
+        assert_invalid_task(task);
+    }
+    let mut task = valid_task.clone();
+    task.iss = "controller:other".to_owned();
+    assert_invalid_task(task);
+    for (iat, nbf, exp) in [
+        (0, 1_000, 1_060),
+        (1_000, 0, 1_060),
+        (1_000, 1_000, 0),
+        (1_000, 999, 1_060),
+        (1_000, 1_001, 1_000),
+        (1_000, 1_000, 1_061),
+    ] {
+        assert_invalid_task(TenantResourceTask {
+            iat,
+            nbf,
+            exp,
+            ..valid_task.clone()
+        });
+    }
+    assert!(verify_tenant_resource_task_window(&valid_task, 999).is_err());
+    assert!(verify_tenant_resource_task_window(&valid_task, 1_061).is_err());
+
+    let enumerate = TenantResourceTask {
+        operation: TenantResourceOperation::Enumerate,
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: Vec::new(),
+        },
+        resource_manifest_sha256: valid_task.baseline_manifest_sha256.clone(),
+        ..valid_task.clone()
+    };
+    validate_tenant_resource_task(&enumerate).unwrap();
+    assert_invalid_task(TenantResourceTask {
+        resource_manifest_sha256: "d".repeat(64),
+        ..enumerate.clone()
+    });
+    assert_invalid_task(TenantResourceTask {
+        payload: TenantResourceTaskPayload::Apply {
+            resources: Vec::new(),
+        },
+        ..enumerate.clone()
+    });
+    let duplicate_selector = TenantResourceSelector {
+        kind: TenantResourceKind::User,
+        resource_id: "user:one".to_owned(),
+    };
+    assert_invalid_task(TenantResourceTask {
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: vec![duplicate_selector.clone(), duplicate_selector],
+        },
+        ..enumerate.clone()
+    });
+    assert_invalid_task(TenantResourceTask {
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: vec![TenantResourceSelector {
+                kind: TenantResourceKind::User,
+                resource_id: "bad/selector".to_owned(),
+            }],
+        },
+        ..enumerate
+    });
+
+    let valid_capability = tenant_resource_capability();
+    let assert_invalid_capability = |capability: TenantResourceCapability| {
+        assert!(validate_tenant_resource_capability(&capability, 1_030).is_err());
+    };
+    assert_invalid_capability(TenantResourceCapability {
+        ver: PROTOCOL_VERSION + 1,
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        capability_version: TENANT_RESOURCE_CAPABILITY_VERSION + 1,
+        ..valid_capability.clone()
+    });
+    for field in [
+        "jti",
+        "nonce",
+        "deployment",
+        "tenant",
+        "runtime",
+        "issuer",
+        "key",
+    ] {
+        let mut capability = valid_capability.clone();
+        match field {
+            "jti" => capability.jti = "bad/jti".to_owned(),
+            "nonce" => capability.nonce = "short".to_owned(),
+            "deployment" => capability.deployment_id = "bad/deployment".to_owned(),
+            "tenant" => capability.tenant_id = "not-a-uuid".to_owned(),
+            "runtime" => capability.runtime_instance_id = "bad/runtime".to_owned(),
+            "issuer" => capability.issuer = "runtime:other".to_owned(),
+            "key" => capability.instance_key_id = "bad/key".to_owned(),
+            _ => unreachable!(),
+        }
+        assert_invalid_capability(capability);
+    }
+    assert_invalid_capability(TenantResourceCapability {
+        resource_manifest_sha256: "A".repeat(64),
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        resource_kinds: Vec::new(),
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        resource_kinds: vec![TenantResourceKind::User; MAX_TENANT_RESOURCE_KINDS + 1],
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        resource_kinds: vec![TenantResourceKind::User, TenantResourceKind::User],
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        actions: Vec::new(),
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        actions: vec![TenantResourceOperation::Apply; 4],
+        ..valid_capability.clone()
+    });
+    assert_invalid_capability(TenantResourceCapability {
+        actions: vec![
+            TenantResourceOperation::Apply,
+            TenantResourceOperation::Apply,
+        ],
+        ..valid_capability.clone()
+    });
+    for (issued_at, expires_at) in [(0, 1_060), (1_060, 1_000), (1_000, 1_061)] {
+        assert_invalid_capability(TenantResourceCapability {
+            issued_at,
+            expires_at,
+            ..valid_capability.clone()
+        });
+    }
+    assert_invalid_capability(TenantResourceCapability {
+        embedded: EmbeddedIdentity {
+            protocol: PROTOCOL_VERSION + 1,
+            ..valid_capability.embedded.clone()
+        },
+        ..valid_capability.clone()
+    });
+
+    assert!(
+        validate_tenant_resource_task_deployment_binding(&valid_task, "bad/deployment", TENANT_ID)
+            .is_err()
+    );
+    assert!(
+        validate_tenant_resource_task_deployment_binding(&valid_task, "deployment-1", "not-a-uuid")
+            .is_err()
+    );
+    assert!(
+        validate_tenant_resource_task_deployment_binding(&valid_task, "deployment-2", TENANT_ID)
+            .is_err()
+    );
+    assert!(
+        validate_tenant_resource_capability_binding(&valid_capability, "deployment-2", TENANT_ID)
+            .is_err()
+    );
+    assert!(
+        validate_tenant_resource_capability_request_binding(
+            &valid_capability,
+            "deployment-1",
+            TENANT_ID,
+            "bad/jti",
+            &valid_capability.nonce,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_tenant_resource_capability_request_binding(
+            &valid_capability,
+            "deployment-1",
+            TENANT_ID,
+            &valid_capability.jti,
+            "short",
+        )
+        .is_err()
+    );
+    assert!(
+        validate_tenant_resource_capability_request_binding(
+            &valid_capability,
+            "deployment-1",
+            TENANT_ID,
+            "other-jti",
+            &valid_capability.nonce,
+        )
+        .is_err()
+    );
+
+    let valid_receipt = tenant_resource_receipt();
+    let assert_invalid_receipt = |receipt: TenantResourceReceipt| {
+        assert!(validate_tenant_resource_receipt(&receipt).is_err());
+    };
+    assert_invalid_receipt(TenantResourceReceipt {
+        ver: PROTOCOL_VERSION + 1,
+        ..valid_receipt.clone()
+    });
+    for field in [
+        "jti",
+        "deployment",
+        "tenant",
+        "capability-jti",
+        "capability-digest",
+        "request",
+        "change-set",
+        "change-digest",
+        "baseline",
+        "manifest",
+        "audit",
+    ] {
+        let mut receipt = valid_receipt.clone();
+        match field {
+            "jti" => receipt.jti = "bad/jti".to_owned(),
+            "deployment" => receipt.deployment_id = "bad/deployment".to_owned(),
+            "tenant" => receipt.tenant_id = "not-a-uuid".to_owned(),
+            "capability-jti" => receipt.capability_jti = "bad/jti".to_owned(),
+            "capability-digest" => receipt.capability_sha256 = "A".repeat(64),
+            "request" => receipt.request_sha256 = "A".repeat(64),
+            "change-set" => receipt.change_set_id = "bad/change-set".to_owned(),
+            "change-digest" => receipt.change_set_sha256 = "A".repeat(64),
+            "baseline" => receipt.baseline_manifest_sha256 = "A".repeat(64),
+            "manifest" => receipt.resource_manifest_sha256 = "A".repeat(64),
+            "audit" => receipt.audit_previous_sha256 = "A".repeat(64),
+            _ => unreachable!(),
+        }
+        assert_invalid_receipt(receipt);
+    }
+    assert_invalid_receipt(TenantResourceReceipt {
+        iss: "runtime:other".to_owned(),
+        ..valid_receipt.clone()
+    });
+    for (started_at, completed_at, exp, audit_sequence) in [
+        (0, 1_010, 1_060, 7),
+        (1_011, 1_010, 1_060, 7),
+        (1_001, 1_010, 1_009, 7),
+        (1_001, 1_010, 1_071, 7),
+        (1_001, 1_010, 1_060, 0),
+    ] {
+        assert_invalid_receipt(TenantResourceReceipt {
+            started_at,
+            completed_at,
+            exp,
+            audit_sequence,
+            ..valid_receipt.clone()
+        });
+    }
+    assert_invalid_receipt(TenantResourceReceipt {
+        revision: valid_receipt.expected_revision,
+        ..valid_receipt.clone()
+    });
+    let failed = TenantResourceReceipt {
+        revision: valid_receipt.expected_revision,
+        outcome: TenantResourceOutcome::Failed {
+            code: "failed".to_owned(),
+        },
+        resources: Vec::new(),
+        resource_mappings: Vec::new(),
+        ..valid_receipt.clone()
+    };
+    validate_tenant_resource_receipt(&failed).unwrap();
+    assert_invalid_receipt(TenantResourceReceipt {
+        outcome: TenantResourceOutcome::Failed {
+            code: "bad code".to_owned(),
+        },
+        ..failed.clone()
+    });
+    assert_invalid_receipt(TenantResourceReceipt {
+        resources: valid_receipt.resources.clone(),
+        ..failed.clone()
+    });
+    assert_invalid_receipt(TenantResourceReceipt {
+        revision: failed.expected_revision + 1,
+        ..failed
+    });
+
+    let enumerate_receipt = TenantResourceReceipt {
+        operation: TenantResourceOperation::Enumerate,
+        revision: valid_receipt.expected_revision,
+        resources: Vec::new(),
+        resource_mappings: Vec::new(),
+        resource_manifest_sha256: valid_receipt.baseline_manifest_sha256.clone(),
+        ..valid_receipt.clone()
+    };
+    validate_tenant_resource_receipt(&enumerate_receipt).unwrap();
+    assert_invalid_receipt(TenantResourceReceipt {
+        revision: enumerate_receipt.expected_revision + 1,
+        ..enumerate_receipt.clone()
+    });
+    assert_invalid_receipt(TenantResourceReceipt {
+        resource_manifest_sha256: "d".repeat(64),
+        ..enumerate_receipt
+    });
+    let revoke_receipt = TenantResourceReceipt {
+        operation: TenantResourceOperation::Revoke,
+        resource_mappings: Vec::new(),
+        ..valid_receipt.clone()
+    };
+    validate_tenant_resource_receipt(&revoke_receipt).unwrap();
+    assert_invalid_receipt(TenantResourceReceipt {
+        revision: revoke_receipt.expected_revision,
+        ..revoke_receipt
+    });
+
+    assert!(validate_tenant_resource_receipt_request_binding(&valid_receipt, "A").is_err());
+    assert!(
+        validate_tenant_resource_receipt_request_binding(&valid_receipt, &"a".repeat(64)).is_err()
+    );
+    let mut wrong_binding = valid_receipt.clone();
+    wrong_binding.actor.id = "other-actor".to_owned();
+    assert!(validate_tenant_resource_receipt_binding(&valid_task, &wrong_binding).is_err());
+    let mut wrong_resources = valid_receipt.clone();
+    wrong_resources.resources[0].digest = "d".repeat(64);
+    assert!(validate_tenant_resource_receipt_binding(&valid_task, &wrong_resources).is_err());
+
+    let selective_task = TenantResourceTask {
+        operation: TenantResourceOperation::Enumerate,
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: vec![TenantResourceSelector {
+                kind: TenantResourceKind::OauthClient,
+                resource_id: "client:selected".to_owned(),
+            }],
+        },
+        resource_manifest_sha256: valid_task.baseline_manifest_sha256.clone(),
+        ..valid_task
+    };
+    let selective_receipt = TenantResourceReceipt {
+        operation: TenantResourceOperation::Enumerate,
+        revision: selective_task.expected_revision,
+        resources: vec![TenantResourceIdentity {
+            kind: TenantResourceKind::OauthClient,
+            resource_id: "client:outside".to_owned(),
+            digest: "b".repeat(64),
+        }],
+        resource_mappings: Vec::new(),
+        resource_manifest_sha256: selective_task.baseline_manifest_sha256.clone(),
+        ..valid_receipt
+    };
+    assert!(validate_tenant_resource_receipt_binding(&selective_task, &selective_receipt).is_err());
+}
+
+#[test]
+fn openid4vc_trust_policy_rejects_ambiguous_origins_certificates_and_jwks() {
+    let coordinate = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let key = |kid: &str| {
+        serde_json::json!({
+            "kty": "EC", "crv": "P-256", "x": coordinate, "y": coordinate, "kid": kid
+        })
+    };
+    let certificate =
+        |body: &str| format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n");
+    let policy = Openid4vcTrustPolicy {
+        schema: 1,
+        client_attestation_issuer: "https://issuer.example/attestation".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [key("client")]}),
+        key_attestation_jwks: serde_json::json!({"keys": [key("holder")]}),
+        credential_trust_anchor_pem: certificate("MA=="),
+        wallet_authorization_origins: vec!["https://wallet.example".to_owned()],
+    };
+    validate_openid4vc_trust_policy(&policy).unwrap();
+
+    for issuer in [
+        "https:///missing-host",
+        "https://?query",
+        "https://#fragment",
+        "https://issuer.example/white space",
+        "https://issuer.example\0",
+    ] {
+        let mut invalid = policy.clone();
+        invalid.client_attestation_issuer = issuer.to_owned();
+        assert!(validate_openid4vc_trust_policy(&invalid).is_err());
+    }
+    let invalid_origins = [
+        "",
+        "https://wallet.exämple",
+        "https://wallet.example ",
+        "https://wallet.example%25",
+        "https://wallet.example\\bad",
+        "https://",
+        "https://.wallet.example",
+        "https://wallet.example.",
+        "https://wallet..example",
+        "https://wallet_example",
+        "https://wallet-.example",
+        "https://[not-ipv6]",
+        "https://[::1",
+        "https://[::1]extra",
+        "https://wallet.example:",
+        "https://wallet.example:abc",
+        "https://wallet.example:0",
+        "https://wallet.example:0443",
+        "https://wallet.example:65536",
+    ];
+    for origin in invalid_origins {
+        let mut invalid = policy.clone();
+        invalid.wallet_authorization_origins = vec![origin.to_owned()];
+        assert!(
+            validate_openid4vc_trust_policy(&invalid).is_err(),
+            "{origin}"
+        );
+    }
+    let mut too_many_origins = policy.clone();
+    too_many_origins.wallet_authorization_origins = (0..17)
+        .map(|index| format!("https://wallet-{index}.example"))
+        .collect();
+    assert!(validate_openid4vc_trust_policy(&too_many_origins).is_err());
+    let mut long_origin = policy.clone();
+    long_origin.wallet_authorization_origins = vec![format!("https://{}", "a".repeat(2048))];
+    assert!(validate_openid4vc_trust_policy(&long_origin).is_err());
+    for origin in ["https://wallet.example:8443", "https://[::1]:8443"] {
+        let mut valid = policy.clone();
+        valid.wallet_authorization_origins = vec![origin.to_owned()];
+        validate_openid4vc_trust_policy(&valid).unwrap();
+    }
+
+    let five_certificates = (0..5)
+        .map(|index| {
+            certificate(&base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [0x30, index],
+            ))
+        })
+        .collect::<String>();
+    let invalid_certificates = [
+        "-----BEGIN CERTIFICATE-----\n\n-----END CERTIFICATE-----\n".to_owned(),
+        "-----BEGIN CERTIFICATE-----\nMA==\n".to_owned(),
+        "-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n".to_owned(),
+        certificate("AA=="),
+        format!("{}trailing", certificate("MA==")),
+        format!("{}{}", certificate("MA=="), certificate("MA==")),
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            "-----BEGIN PUBLIC KEY-----"
+        ),
+        five_certificates,
+    ];
+    for pem in invalid_certificates {
+        let mut invalid = policy.clone();
+        invalid.credential_trust_anchor_pem = pem;
+        assert!(validate_openid4vc_trust_policy(&invalid).is_err());
+    }
+
+    let invalid_jwks = [
+        serde_json::json!([]),
+        serde_json::json!({"keys": ["not-an-object"]}),
+        serde_json::json!({"keys": [{"kty": "oct", "k": "secret", "kid": "s"}]}),
+        serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": coordinate, "y": coordinate}]}),
+        serde_json::json!({"keys": [key("duplicate"), key("duplicate")]}),
+        serde_json::json!({"keys": [{"kty": "EC", "crv": "P-384", "x": coordinate, "y": coordinate, "kid": "bad"}]}),
+        serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "short", "y": coordinate, "kid": "bad"}]}),
+    ];
+    for jwks in invalid_jwks {
+        let mut invalid = policy.clone();
+        invalid.key_attestation_jwks = jwks;
+        assert!(validate_openid4vc_trust_policy(&invalid).is_err());
+    }
+    let mut ed25519 = policy;
+    ed25519.key_attestation_jwks = serde_json::json!({"keys": [{
+        "kty": "OKP", "crv": "Ed25519", "x": coordinate, "kid": "holder"
+    }]});
+    validate_openid4vc_trust_policy(&ed25519).unwrap();
+}
+
+#[test]
+fn tenant_resource_signed_evidence_and_collection_limits_fail_closed() {
+    let runtime_key = SigningKey::from_bytes(&[31; 32]);
+    let mut capability = tenant_resource_capability();
+    capability.instance_key_id = "payload-key".to_owned();
+    let compact = sign_compact(
+        &capability,
+        "signer-key",
+        TENANT_RESOURCE_CAPABILITY_JWS_TYPE,
+        &runtime_key,
+    )
+    .unwrap();
+    assert!(
+        verify_tenant_resource_capability(
+            &compact,
+            "signer-key",
+            &runtime_key.verifying_key(),
+            1_030,
+        )
+        .is_err()
+    );
+    assert!(
+        verify_tenant_resource_capability_signature(
+            &compact,
+            "signer-key",
+            &runtime_key.verifying_key(),
+        )
+        .is_err()
+    );
+    assert!(
+        verify_tenant_resource_capability(
+            "not-a-compact-jws",
+            "signer-key",
+            &runtime_key.verifying_key(),
+            1_030,
+        )
+        .is_err()
+    );
+    assert!(
+        verify_tenant_resource_capability_signature(
+            "not-a-compact-jws",
+            "signer-key",
+            &runtime_key.verifying_key(),
+        )
+        .is_err()
+    );
+    assert!(
+        verify_tenant_resource_receipt_signature(
+            "not-a-compact-jws",
+            "runtime-key",
+            &runtime_key.verifying_key(),
+        )
+        .is_err()
+    );
+
+    let identity = TenantResourceIdentity {
+        kind: TenantResourceKind::User,
+        resource_id: "user:one".to_owned(),
+        digest: "a".repeat(64),
+    };
+    let oversized_identities = vec![identity.clone(); MAX_TENANT_RESOURCE_IDENTITIES + 1];
+    let oversized_task = TenantResourceTask {
+        payload: TenantResourceTaskPayload::Apply {
+            resources: oversized_identities,
+        },
+        ..tenant_resource_task()
+    };
+    assert!(validate_tenant_resource_task(&oversized_task).is_err());
+
+    let selector = TenantResourceSelector {
+        kind: TenantResourceKind::User,
+        resource_id: "user:one".to_owned(),
+    };
+    let oversized_selectors = vec![selector; MAX_TENANT_RESOURCE_IDENTITIES + 1];
+    let oversized_enumerate = TenantResourceTask {
+        operation: TenantResourceOperation::Enumerate,
+        payload: TenantResourceTaskPayload::Enumerate {
+            selectors: oversized_selectors,
+        },
+        resource_manifest_sha256: tenant_resource_task().baseline_manifest_sha256,
+        ..tenant_resource_task()
+    };
+    assert!(validate_tenant_resource_task(&oversized_enumerate).is_err());
+
+    let mut oversized_mappings = tenant_resource_receipt();
+    oversized_mappings.resource_mappings = vec![
+        TenantResourceMapping {
+            kind: TenantResourceKind::User,
+            resource_id: "user:one".to_owned(),
+            public_id: TENANT_ID.to_owned(),
+        };
+        MAX_TENANT_RESOURCE_IDENTITIES + 1
+    ];
+    assert!(validate_tenant_resource_receipt(&oversized_mappings).is_err());
+
+    let capability = tenant_resource_capability();
+    let revoke = TenantResourceTask {
+        operation: TenantResourceOperation::Revoke,
+        payload: TenantResourceTaskPayload::Revoke {
+            resources: vec![TenantResourceIdentity {
+                kind: TenantResourceKind::User,
+                resource_id: "user:one".to_owned(),
+                digest: "a".repeat(64),
+            }],
+        },
+        ..tenant_resource_task()
+    };
+    let mut client_only = capability.clone();
+    client_only.resource_kinds = vec![TenantResourceKind::OauthClient];
+    assert!(validate_tenant_resource_task_capability_binding(&revoke, &client_only).is_err());
+
+    let mut receipt = tenant_resource_receipt();
+    receipt.resources = vec![identity.clone()];
+    receipt.resource_mappings = vec![TenantResourceMapping {
+        kind: TenantResourceKind::User,
+        resource_id: identity.resource_id.clone(),
+        public_id: TENANT_ID.to_owned(),
+    }];
+    assert!(validate_tenant_resource_receipt_capability_binding(&receipt, &client_only).is_err());
+    receipt.capability_sha256 = "8".repeat(64);
+    assert!(
+        validate_tenant_resource_receipt_capability_binding_with_digest(
+            &receipt,
+            &capability,
+            &"9".repeat(64),
+        )
+        .is_err()
+    );
+
+    let mut two_resource_task = tenant_resource_task();
+    if let TenantResourceTaskPayload::Apply { resources } = &mut two_resource_task.payload {
+        resources.push(identity);
+    }
+    assert!(
+        validate_tenant_resource_receipt_binding(&two_resource_task, &tenant_resource_receipt())
+            .is_err()
+    );
+}
+
+#[test]
+fn trust_policy_parser_rejects_multi_authority_and_inter_certificate_junk() {
+    let coordinate = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let policy = Openid4vcTrustPolicy {
+        schema: 1,
+        client_attestation_issuer: "https://issuer.example".to_owned(),
+        client_attestation_jwks: serde_json::json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "x": coordinate, "y": coordinate, "kid": "client"
+        }]}),
+        key_attestation_jwks: serde_json::json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "x": coordinate, "y": coordinate, "kid": "holder"
+        }]}),
+        credential_trust_anchor_pem:
+            "-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n".to_owned(),
+        wallet_authorization_origins: vec!["https://wallet.example".to_owned()],
+    };
+    let mut multiple_ports = policy.clone();
+    multiple_ports.wallet_authorization_origins =
+        vec!["https://wallet.example:8443:9443".to_owned()];
+    assert!(validate_openid4vc_trust_policy(&multiple_ports).is_err());
+
+    let mut junk_between_certificates = policy;
+    junk_between_certificates.credential_trust_anchor_pem = concat!(
+        "-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n",
+        "junk\n",
+        "-----BEGIN CERTIFICATE-----\nMDE=\n-----END CERTIFICATE-----\n"
+    )
+    .to_owned();
+    assert!(validate_openid4vc_trust_policy(&junk_between_certificates).is_err());
+}
