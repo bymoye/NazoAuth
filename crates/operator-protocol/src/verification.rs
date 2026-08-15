@@ -868,8 +868,7 @@ fn validate_tenant_resource_mappings(receipt: &TenantResourceReceipt) -> Result<
         match mapping.kind {
             TenantResourceKind::User => validate_uuid(&mapping.public_id)?,
             TenantResourceKind::OauthClient => validate_identifier(&mapping.public_id)?,
-            TenantResourceKind::CibaDecisionBinding
-            | TenantResourceKind::MtlsTrustAnchor
+            TenantResourceKind::MtlsTrustAnchor
             | TenantResourceKind::Openid4vcDataset
             | TenantResourceKind::Openid4vcTrustPolicy => {
                 return Err(ProtocolError::Policy(

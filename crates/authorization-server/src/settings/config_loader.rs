@@ -149,7 +149,6 @@ impl Settings {
         if ciba_poll_interval_seconds >= ciba_auth_req_id_ttl_seconds {
             bail!("CIBA_POLL_INTERVAL_SECONDS must be less than CIBA_AUTH_REQ_ID_TTL_SECONDS");
         }
-        let ciba_automated_decision_mode = CibaAutomatedDecisionMode::from_config(config)?;
         let ciba_notification_private_origins = config
             .optional_string("CIBA_NOTIFICATION_PRIVATE_ORIGINS")
             .map(|value| {
@@ -540,7 +539,6 @@ impl Settings {
             ciba: CibaSettings {
                 ciba_auth_req_id_ttl_seconds,
                 ciba_poll_interval_seconds,
-                ciba_automated_decision_mode,
                 ciba_notification_private_origins,
             },
             openid4vc: Openid4vcSettings {

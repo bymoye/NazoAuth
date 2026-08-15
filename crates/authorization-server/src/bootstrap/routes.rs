@@ -63,17 +63,14 @@ use crate::http::profile::{
     mtls_trust::{create_mtls_trust_request, my_mtls_trust_requests},
 };
 use crate::http::token::{
-    ciba::{
-        backchannel_authentication, ciba_automated_decision, ciba_decision, ciba_verification,
-        ciba_verification_page,
-    },
+    ciba::{backchannel_authentication, ciba_decision, ciba_verification, ciba_verification_page},
     device::{
         device_authorization, device_decision, device_verification, device_verification_page,
     },
     dispatch::token,
 };
 use crate::http::well_known::{captcha_config, live, ready, startup};
-use crate::settings::{CibaAutomatedDecisionMode, Settings};
+use crate::settings::Settings;
 use crate::tenant_resource_provider::{
     MAX_TENANT_RESOURCE_EXECUTE_BODY_BYTES, tenant_resource_capability_endpoint,
     tenant_resource_execute_endpoint,
@@ -91,7 +88,6 @@ pub(crate) fn configure(
     settings: &Settings,
     perf_metrics_enabled: bool,
 ) {
-    let ciba_automated_decision_mode = settings.ciba.ciba_automated_decision_mode;
     let enable_openid4vci_issuer = settings.modules.enable_openid4vci_issuer;
     // Actix scopes consume every request under their prefix, including paths
     // that are not registered inside the scope. Keep all /.well-known routes
@@ -285,9 +281,6 @@ pub(crate) fn configure(
                         )
                         .route("/access-delivery", web::post().to(access_delivery)),
                 )
-                .configure(move |cfg| {
-                    configure_ciba_automated_decision_routes(cfg, ciba_automated_decision_mode);
-                })
                 .route("/ciba/{auth_req_id}", web::get().to(ciba_verification))
                 .route("/ciba/{auth_req_id}", web::post().to(ciba_decision))
                 .route("/logout", web::post().to(profile_logout)),
@@ -433,36 +426,4 @@ pub(crate) fn configure_tenant_resource_management(cfg: &mut web::ServiceConfig)
                     .route(web::post().to(tenant_resource_execute_endpoint)),
             ),
     );
-}
-
-fn configure_ciba_automated_decision_routes(
-    cfg: &mut web::ServiceConfig,
-    mode: CibaAutomatedDecisionMode,
-) {
-    match mode {
-        // The default transport is still fail-closed in the handler: this
-        // POST is only useful when a request-scoped oidc-fapi-ciba lease, its
-        // per-run token digest, and the lease-owned client all validate.
-        CibaAutomatedDecisionMode::Disabled => {
-            cfg.route(
-                "/ciba-automated-decision",
-                web::post().to(ciba_automated_decision),
-            )
-            .route("/ciba/automated", web::post().to(ciba_automated_decision));
-        }
-        CibaAutomatedDecisionMode::Header => {
-            cfg.route(
-                "/ciba-automated-decision",
-                web::post().to(ciba_automated_decision),
-            )
-            .route("/ciba/automated", web::post().to(ciba_automated_decision));
-        }
-        CibaAutomatedDecisionMode::QueryParameter => {
-            cfg.route(
-                "/ciba-automated-decision",
-                web::get().to(ciba_automated_decision),
-            )
-            .route("/ciba/automated", web::get().to(ciba_automated_decision));
-        }
-    }
 }

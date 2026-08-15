@@ -20,11 +20,11 @@ use crate::domain::client_policy::parse_scope;
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
-use crate::settings::{AuthorizationServerProfile, CibaAutomatedDecisionMode, Settings};
+use crate::settings::{AuthorizationServerProfile, Settings};
 use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::{HeaderMap, HeaderValue};
-use actix_web::web::{Bytes, Data, Json, Query};
+use actix_web::web::{Bytes, Data, Json};
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
@@ -40,7 +40,6 @@ use nazo_http_actix::{cookie_value, csrf_error, has_valid_csrf_token_for_cookies
 use nazo_valkey::CibaStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::client_auth::{
@@ -62,7 +61,7 @@ use actix_web::web::Payload;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_auth::ClientAuthenticationContext;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
-use std::{collections::HashSet, fmt::Write as _};
+use std::collections::HashSet;
 
 mod policy;
 mod request;
@@ -87,8 +86,8 @@ pub(super) use state::{
     ciba_grant_key, ciba_module_admissible, ciba_start_audit_fields,
 };
 pub(crate) use state::{
-    CIBA_GRANT_TYPE, CibaAutomatedDecisionQuery, CibaDecisionRequest, CibaHttpConfig,
-    CibaTokenContext, CibaTokenHandles, ServerCibaService,
+    CIBA_GRANT_TYPE, CibaDecisionRequest, CibaHttpConfig, CibaTokenContext, CibaTokenHandles,
+    ServerCibaService,
 };
 
 #[path = "ciba/backchannel.rs"]
@@ -98,16 +97,11 @@ mod decision;
 #[path = "ciba/poll.rs"]
 mod poll;
 pub(crate) use backchannel::backchannel_authentication;
-pub(crate) use decision::{
-    ciba_automated_decision, ciba_decision, ciba_verification, ciba_verification_page,
-};
+pub(crate) use decision::{ciba_decision, ciba_verification, ciba_verification_page};
 pub(crate) use poll::token_ciba;
 
 #[cfg(test)]
-use decision::{
-    ciba_automated_decision_auth_req_id, ciba_automated_decision_request_token,
-    ciba_poll_failure_response, complete_ciba_decision, sha256_hex,
-};
+use decision::{ciba_poll_failure_response, complete_ciba_decision};
 #[cfg(test)]
 use poll::{ciba_auth_req_id_client_error, ciba_token_issue, load_ciba_request_payload};
 

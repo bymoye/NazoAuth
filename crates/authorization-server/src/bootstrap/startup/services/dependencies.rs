@@ -20,7 +20,6 @@ pub(super) struct CoreServices {
     pub(super) ciba_service: web::Data<ServerCibaService>,
     pub(super) ciba_users: web::Data<nazo_postgres::UserRepository>,
     pub(super) ciba_config: web::Data<CibaHttpConfig>,
-    pub(super) ciba_decision_bindings: web::Data<nazo_postgres::CibaDecisionBindingRepository>,
     pub(super) token_issuance_config: web::Data<TokenIssuanceConfig>,
     pub(super) device_service: web::Data<ServerDeviceGrantService>,
     pub(super) device_grants: web::Data<nazo_postgres::AuthorizationFlowRepository>,
@@ -174,9 +173,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     )?;
     let ciba_users = web::Data::new(nazo_postgres::UserRepository::new(diesel_db.clone()));
     let ciba_config = web::Data::new(CibaHttpConfig::from(settings));
-    let ciba_decision_bindings = web::Data::new(nazo_postgres::CibaDecisionBindingRepository::new(
-        diesel_db.clone(),
-    ));
     let token_issuance_config = web::Data::new(TokenIssuanceConfig::from(settings));
     let device_service = web::Data::new(ServerDeviceGrantService::new(
         nazo_valkey::DeviceStore::new(&valkey_connection),
@@ -261,7 +257,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         ciba_service,
         ciba_users,
         ciba_config,
-        ciba_decision_bindings,
         token_issuance_config,
         device_service,
         device_grants,

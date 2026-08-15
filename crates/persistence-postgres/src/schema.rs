@@ -53,26 +53,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    ciba_decision_bindings (generation) {
-        generation -> Uuid,
-        tenant_id -> Uuid,
-        resource_id -> Varchar,
-        resource_digest -> Varchar,
-        oauth_client_id -> Uuid,
-        user_id -> Uuid,
-        token_sha256 -> Varchar,
-        expires_at -> Timestamptz,
-        active -> Bool,
-        decision_claim_id -> Nullable<Uuid>,
-        decision_claim_acquired_at -> Nullable<Timestamptz>,
-        decision_claim_expires_at -> Nullable<Timestamptz>,
-        created_at -> Timestamptz,
-        updated_at -> Timestamptz,
-        revoked_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
     realms (id) {
         id -> Uuid,
         tenant_id -> Uuid,
@@ -477,7 +457,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     tenant_resource_states,
     tenant_resource_operations,
     tenant_resource_bindings,
-    ciba_decision_bindings,
     realms,
     organizations,
     users,
