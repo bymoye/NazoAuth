@@ -274,6 +274,7 @@ pub(super) fn operation_name(operation: &TaskOperation) -> &'static str {
         TaskOperation::KeysValidate => "keys-validate",
         TaskOperation::KeysGenerateLocal { .. } => "keys-generate-local",
         TaskOperation::KeysRegisterExternal { .. } => "keys-register-external",
+        _ => "unsupported-operator-operation",
     }
 }
 

@@ -33,6 +33,10 @@ pub(super) async fn execute_with_jti(operation: &TaskOperation, _task_jti: &str)
                 }),
             Err(error) => Err(error),
         },
+        // Old signed envelopes remain deserializable in the shared protocol so
+        // deployed controllers can archive their receipts. The server has no
+        // Suite implementation behind any unsupported operation.
+        _ => Err(anyhow::anyhow!("unsupported operator operation")),
     };
     match result {
         Ok(result) => TaskOutcome::Succeeded { result },
