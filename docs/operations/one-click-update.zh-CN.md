@@ -7,7 +7,7 @@ Rust 二进制，由独立的
 
 ## 首次安装
 
-控制器仓库中的 bootstrap 脚本使用 GitHub CLI 下载精确 Release，验证其 GitHub
+控制器仓库中的 bootstrap 脚本使用 GitHub CLI 下载精确公开非草稿 Release，验证其 GitHub
 build-provenance attestation 与精确 tag、控制器 Release 工作流和托管 runner 的绑定，
 执行 help 冒烟测试，之后才原子安装为普通非符号链接文件。正式文档不提供
 `curl | sh` 信任路径。
