@@ -805,21 +805,9 @@ fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
 }
 
 #[test]
-fn historic_conformance_receipts_and_tasks_remain_readable() {
+fn historic_conformance_receipt_remains_readable() {
     let controller_key = SigningKey::from_bytes(&[36; 32]);
-    let mut source = task();
-    source.operation = TaskOperation::ConformanceLeaseList;
-    let compact_task = sign_task(&source, "controller-1", &controller_key).unwrap();
-    assert_eq!(
-        verify_task_signature(
-            &compact_task,
-            "controller-1",
-            &controller_key.verifying_key()
-        )
-        .unwrap(),
-        source
-    );
-
+    let source = task();
     let receipt = FinalReceipt {
         ver: PROTOCOL_VERSION,
         iss: source.iss.clone(),
@@ -836,8 +824,8 @@ fn historic_conformance_receipts_and_tasks_remain_readable() {
             image_ref: "localhost/nazoauth:v1.0.0".to_owned(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
         },
-        embedded: source.embedded.clone(),
-        config: source.config.clone(),
+        embedded: source.embedded,
+        config: source.config,
         runtime_receipt_sha256: "f".repeat(64),
         outcome: TaskOutcome::Succeeded {
             result: TaskResult::ConformanceLeaseList { leases: Vec::new() },

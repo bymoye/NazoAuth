@@ -1387,87 +1387,7 @@ fn validate_config_binding(config: &ConfigBinding) -> Result<(), ProtocolError> 
 
 pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
     match operation {
-        TaskOperation::MigrateApply
-        | TaskOperation::ConformanceMatrixDescribe
-        | TaskOperation::ConformanceLeaseList
-        | TaskOperation::ConformanceLeaseCleanup
-        | TaskOperation::KeysList
-        | TaskOperation::KeysValidate => {}
-        TaskOperation::ConformanceLeaseCreate {
-            profile,
-            material_sha256,
-            dynamic_registration_initial_access_token_sha256,
-            ciba_automated_decision_token_sha256,
-            public_material,
-            ttl_seconds,
-        } => {
-            validate_identifier(profile)?;
-            if profile.len() > 64 {
-                return Err(ProtocolError::Policy(
-                    "conformance lease profile exceeds 64 bytes",
-                ));
-            }
-            validate_lower_hex(material_sha256, 64)?;
-            if (dynamic_registration_initial_access_token_sha256.is_some()
-                || ciba_automated_decision_token_sha256.is_some())
-                && profile != "oidc-fapi-ciba"
-            {
-                return Err(ProtocolError::Policy(
-                    "conformance token bindings are only allowed for the oidc-fapi-ciba profile",
-                ));
-            }
-            for digest in [
-                dynamic_registration_initial_access_token_sha256,
-                ciba_automated_decision_token_sha256,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                validate_lower_hex(digest, 64)?;
-            }
-            match (profile.as_str(), public_material) {
-                ("openid4vc", Some(material)) => validate_openid4vc_conformance_trust(material)?,
-                ("openid4vc", None) => {
-                    return Err(ProtocolError::Policy(
-                        "openid4vc conformance lease requires public trust material",
-                    ));
-                }
-                (_, Some(_)) => {
-                    return Err(ProtocolError::Policy(
-                        "public trust material is accepted only by the openid4vc profile",
-                    ));
-                }
-                (_, None) => {}
-            }
-            if !(60..=86_400).contains(ttl_seconds) {
-                return Err(ProtocolError::Policy(
-                    "conformance lease ttl must be between 60 and 86400 seconds",
-                ));
-            }
-        }
-        TaskOperation::ConformanceLeaseRevoke { lease_id } => validate_file_identifier(lease_id)?,
-        TaskOperation::ConformanceOnboardingApply {
-            profile,
-            bundle_schema,
-            bundle_sha256,
-            matrix_sha256,
-            client_count,
-            ttl_seconds,
-        } => {
-            validate_identifier(profile)?;
-            if profile != "nazoauth-full" || *bundle_schema != 3 {
-                return Err(ProtocolError::Policy(
-                    "unsupported conformance onboarding request",
-                ));
-            }
-            validate_lower_hex(bundle_sha256, 64)?;
-            validate_lower_hex(matrix_sha256, 64)?;
-            if !(1..=256).contains(client_count) || !(60..=86_400).contains(ttl_seconds) {
-                return Err(ProtocolError::Policy(
-                    "conformance onboarding request is out of bounds",
-                ));
-            }
-        }
+        TaskOperation::MigrateApply | TaskOperation::KeysList | TaskOperation::KeysValidate => {}
         TaskOperation::KeysGenerateLocal { alg, purposes } => {
             validate_identifier(alg)?;
             if purposes.is_empty() || purposes.len() > 8 {
@@ -1502,37 +1422,6 @@ pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), Protoc
         }
     }
     Ok(())
-}
-
-/// Validate historic public material only while reading signed legacy audit
-/// records. It is not a production trust-policy input.
-pub fn validate_openid4vc_conformance_trust(
-    material: &Openid4vcConformanceTrust,
-) -> Result<(), ProtocolError> {
-    if material.schema != 1
-        || material.client_attestation_issuer.len() > 2048
-        || !material.client_attestation_issuer.starts_with("https://")
-        || material.credential_trust_anchor_pem.len() > 16 * 1024
-        || !material
-            .credential_trust_anchor_pem
-            .starts_with("-----BEGIN CERTIFICATE-----\n")
-        || !material
-            .credential_trust_anchor_pem
-            .ends_with("-----END CERTIFICATE-----\n")
-        || material.credential_trust_anchor_pem.contains("PRIVATE KEY")
-    {
-        return Err(ProtocolError::Policy(
-            "invalid OpenID4VC conformance trust material",
-        ));
-    }
-    let encoded = serde_json::to_vec(material).map_err(|_| ProtocolError::Json)?;
-    if encoded.len() > 32 * 1024 {
-        return Err(ProtocolError::Policy(
-            "OpenID4VC conformance trust material exceeds 32 KiB",
-        ));
-    }
-    validate_openid4vc_trust_jwks_with_options(&material.client_attestation_jwks, true, false)?;
-    validate_openid4vc_trust_jwks_with_options(&material.key_attestation_jwks, false, false)
 }
 
 /// Validate the public trust policy carried by the ordinary OpenID4VC

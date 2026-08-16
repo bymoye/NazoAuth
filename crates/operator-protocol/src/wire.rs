@@ -381,43 +381,6 @@ pub enum SecretBinding {
 #[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TaskOperation {
     MigrateApply,
-    /// Read-only compatibility for historic signed audit records. Server
-    /// runtimes reject every legacy conformance operation.
-    ConformanceMatrixDescribe,
-    /// Read-only compatibility for historic signed audit records. Server
-    /// runtimes reject every legacy conformance operation.
-    ConformanceLeaseCreate {
-        profile: String,
-        material_sha256: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dynamic_registration_initial_access_token_sha256: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ciba_automated_decision_token_sha256: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        public_material: Option<Openid4vcConformanceTrust>,
-        ttl_seconds: u64,
-    },
-    /// Read-only compatibility for historic signed audit records. Server
-    /// runtimes reject every legacy conformance operation.
-    ConformanceOnboardingApply {
-        profile: String,
-        bundle_schema: u32,
-        bundle_sha256: String,
-        matrix_sha256: String,
-        client_count: u32,
-        ttl_seconds: u64,
-    },
-    /// Read-only compatibility for historic signed audit records. Server
-    /// runtimes reject every legacy conformance operation.
-    ConformanceLeaseList,
-    /// Read-only compatibility for historic signed audit records. Server
-    /// runtimes reject every legacy conformance operation.
-    ConformanceLeaseRevoke {
-        lease_id: String,
-    },
-    /// Read-only compatibility for historic signed audit records. Server
-    /// runtimes reject every legacy conformance operation.
-    ConformanceLeaseCleanup,
     KeysList,
     KeysValidate,
     KeysGenerateLocal {
@@ -430,18 +393,6 @@ pub enum TaskOperation {
         key_ref: String,
         public_jwk_sha256: String,
     },
-}
-
-/// Historic public material retained only to deserialize and authenticate
-/// already-signed conformance task envelopes and receipts.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vcConformanceTrust {
-    pub schema: u32,
-    pub client_attestation_issuer: String,
-    pub client_attestation_jwks: serde_json::Value,
-    pub key_attestation_jwks: serde_json::Value,
-    pub credential_trust_anchor_pem: String,
 }
 
 /// Public trust material for the ordinary OpenID4VC provider.
