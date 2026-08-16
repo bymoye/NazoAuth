@@ -58,7 +58,8 @@ pub use signing::{
     sign_tenant_resource_receipt, sign_tenant_resource_task, sign_trust_transition,
 };
 pub use verification::{
-    validate_discovery_request, validate_file_identifier_value, validate_openid4vc_trust_policy,
+    validate_discovery_request, validate_file_identifier_value,
+    validate_openid4vc_conformance_trust, validate_openid4vc_trust_policy,
     validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
     validate_tenant_resource_capability, validate_tenant_resource_capability_binding,
     validate_tenant_resource_capability_request_binding, validate_tenant_resource_receipt,

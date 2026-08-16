@@ -647,6 +647,10 @@ fn completed_lifecycle_without_its_receipt_is_also_non_replayable() {
 fn embedded_identity_and_operation_names_are_closed() {
     for (operation, expected) in [
         (TaskOperation::MigrateApply, "migrate-apply"),
+        (
+            TaskOperation::ConformanceLeaseList,
+            "legacy-conformance-disabled",
+        ),
         (TaskOperation::KeysList, "keys-list"),
         (TaskOperation::KeysValidate, "keys-validate"),
         (
@@ -870,4 +874,9 @@ async fn operator_dispatch_maps_deterministic_precondition_errors() {
     // without requiring a database connection in this unit test.
     let _ = execute(&TaskOperation::KeysList).await;
     let _ = execute(&TaskOperation::KeysValidate).await;
+
+    assert!(matches!(
+        execute(&TaskOperation::ConformanceLeaseList).await,
+        TaskOutcome::Failed { .. }
+    ));
 }

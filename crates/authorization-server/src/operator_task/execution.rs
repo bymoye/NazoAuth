@@ -5,6 +5,14 @@ pub(super) async fn execute_with_jti(operation: &TaskOperation, _task_jti: &str)
         TaskOperation::MigrateApply => crate::cli::run_migrations()
             .await
             .map(|applied| TaskResult::Migration { applied }),
+        TaskOperation::ConformanceMatrixDescribe
+        | TaskOperation::ConformanceLeaseCreate { .. }
+        | TaskOperation::ConformanceOnboardingApply { .. }
+        | TaskOperation::ConformanceLeaseList
+        | TaskOperation::ConformanceLeaseRevoke { .. }
+        | TaskOperation::ConformanceLeaseCleanup => {
+            Err(anyhow::anyhow!("legacy conformance management is disabled"))
+        }
         TaskOperation::KeysList => crate::keyctl::operator_list()
             .await
             .map(|keyset_revision| TaskResult::KeyList { keyset_revision }),
