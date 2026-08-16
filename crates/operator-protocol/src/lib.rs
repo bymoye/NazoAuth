@@ -19,17 +19,6 @@ pub const CONTROL_DISCOVERY_PRODUCT: &str = "nazoauth";
 pub const MAX_COMPACT_JWS_BYTES: usize = 64 * 1024;
 pub const MAX_TASK_LIFETIME_SECONDS: i64 = 60;
 pub const MAX_DISCOVERY_LIFETIME_SECONDS: i64 = 60;
-pub const MAX_CONFORMANCE_ONBOARDING_CLIENTS: u32 = 256;
-/// Maximum number of lease-owned OpenID4VC credential datasets accepted by
-/// the signed Matrix and secure onboarding bundle.
-pub const MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASETS: u32 = 16;
-/// Maximum encoded JSON size of one lease-owned credential dataset.
-pub const MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_BYTES: usize = 64 * 1024;
-/// Maximum encoded JSON size of all lease-owned credential datasets in one
-/// onboarding request.
-pub const MAX_CONFORMANCE_ONBOARDING_CREDENTIAL_DATASET_TOTAL_BYTES: usize = 512 * 1024;
-pub const MAX_CONFORMANCE_MATRIX_GROUPS: usize = 64;
-pub const MAX_CONFORMANCE_MATRIX_PLANS: usize = 512;
 /// Maximum number of resource identities/selectors carried by one machine
 /// contract.  This bounds both signed payload size and receipt fan-out.
 pub const MAX_TENANT_RESOURCE_IDENTITIES: usize = 256;
@@ -69,11 +58,9 @@ pub use signing::{
     sign_tenant_resource_receipt, sign_tenant_resource_task, sign_trust_transition,
 };
 pub use verification::{
-    validate_conformance_matrix_descriptor, validate_discovery_request,
-    validate_file_identifier_value, validate_openid4vc_conformance_trust,
-    validate_openid4vc_trust_policy, validate_runtime_receipt_deployment_binding,
-    validate_task_deployment_binding, validate_tenant_resource_capability,
-    validate_tenant_resource_capability_binding,
+    validate_discovery_request, validate_file_identifier_value, validate_openid4vc_trust_policy,
+    validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
+    validate_tenant_resource_capability, validate_tenant_resource_capability_binding,
     validate_tenant_resource_capability_request_binding, validate_tenant_resource_receipt,
     validate_tenant_resource_receipt_binding, validate_tenant_resource_receipt_capability_binding,
     validate_tenant_resource_receipt_capability_binding_at,

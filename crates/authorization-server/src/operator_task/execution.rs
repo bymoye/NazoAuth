@@ -33,9 +33,6 @@ pub(super) async fn execute_with_jti(operation: &TaskOperation, _task_jti: &str)
                 }),
             Err(error) => Err(error),
         },
-        // Unsupported signed envelopes fail closed. The server executes only
-        // the operations listed above.
-        _ => Err(anyhow::anyhow!("unsupported operator operation")),
     };
     match result {
         Ok(result) => TaskOutcome::Succeeded { result },
