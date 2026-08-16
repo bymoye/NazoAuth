@@ -30,7 +30,7 @@ pub(crate) struct CibaHttpConfig {
     pub(crate) client_ip_header_mode: ClientIpHeaderMode,
     pub(crate) default_audience: Box<str>,
     // CIBA state is tenant-scoped even though this process selects one active
-    // tenant at startup. This is ordinary protocol ownership, not Suite state.
+    // tenant at startup. This is ordinary protocol ownership.
     pub(crate) tenant_id: Uuid,
     pub(crate) auth_req_id_ttl_seconds: u64,
     pub(crate) poll_interval_seconds: u64,

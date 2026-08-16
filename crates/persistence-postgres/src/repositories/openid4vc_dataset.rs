@@ -113,9 +113,9 @@ async fn write_dataset_on_connection(
     connection: &mut AsyncPgConnection,
     write: DatasetWrite<'_>,
 ) -> Result<usize, diesel::result::Error> {
-    // The two SQL forms intentionally differ only in conflict behavior.  The
-    // conformance path retains its historical insert-only semantics, while
-    // operator management has explicit upsert semantics.
+    // The two SQL forms intentionally differ only in conflict behavior: the
+    // insert-only helper preserves caller-owned semantics, while operator
+    // management has explicit upsert semantics.
     let statement = if write.replace_existing {
         "WITH upserted AS (
             INSERT INTO openid4vci_credential_datasets
@@ -377,9 +377,8 @@ fn dataset_aad(tenant_id: Uuid, subject_id: Uuid, credential_configuration_id: &
 }
 
 /// Encrypts issuer-authoritative claims with the same AAD and data key used by
-/// the managed-dataset repository.  Conformance onboarding calls this helper
-/// before inserting through its own transaction connection; it must not call
-/// the pool-backed methods above because that would split the transaction.
+/// the managed-dataset repository. Caller-owned transactions use this helper
+/// before inserting so encryption cannot split the transaction.
 pub fn protect_dataset_claims(
     key: &[u8; 32],
     tenant_id: Uuid,

@@ -3,8 +3,8 @@ use anyhow::bail;
 use crate::config::ConfigSource;
 
 // These broad admission-control buckets are keyed by source IP. A high default
-// avoids treating an OIDC conformance runner, enterprise NAT, or shared proxy as
-// one abusive client. Credential guessing remains independently constrained by
+// avoids treating an enterprise NAT or shared proxy as one abusive client.
+// Credential guessing remains independently constrained by
 // the much stricter IP-and-email failed-login policy below.
 const DEFAULT_SHARED_IP_MAX_REQUESTS: u64 = 100_000;
 
