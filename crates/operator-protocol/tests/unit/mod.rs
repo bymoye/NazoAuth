@@ -804,6 +804,40 @@ fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
     ));
 }
 
+#[test]
+fn historic_conformance_receipt_remains_readable() {
+    let controller_key = SigningKey::from_bytes(&[36; 32]);
+    let source = task();
+    let receipt = FinalReceipt {
+        ver: PROTOCOL_VERSION,
+        iss: source.iss.clone(),
+        aud: "operator-audit".to_owned(),
+        jti: source.jti.clone(),
+        request_sha256: "e".repeat(64),
+        deployment_id: source.deployment_id.clone(),
+        actor: source.actor.clone(),
+        operation: "conformance-lease-list".to_owned(),
+        completed_at: 1_002,
+        audit_sequence: 1,
+        audit_previous_sha256: "0".repeat(64),
+        controller_verified_target: RuntimeTargetClaim::OciImage {
+            image_ref: "localhost/nazoauth:v1.0.0".to_owned(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+        },
+        embedded: source.embedded,
+        config: source.config,
+        runtime_receipt_sha256: "f".repeat(64),
+        outcome: TaskOutcome::Succeeded {
+            result: TaskResult::ConformanceLeaseList { leases: Vec::new() },
+        },
+    };
+    let compact = sign_final_receipt(&receipt, "controller-1", &controller_key).unwrap();
+    assert_eq!(
+        verify_final_receipt(&compact, "controller-1", &controller_key.verifying_key()).unwrap(),
+        receipt
+    );
+}
+
 proptest! {
     #[test]
     fn arbitrary_compact_input_never_panics(input in any::<Vec<u8>>()) {

@@ -516,6 +516,10 @@ pub enum TaskResult {
     Migration {
         applied: bool,
     },
+    /// Read-only compatibility for historic signed audit records.
+    ConformanceMatrix {
+        summary: ConformanceMatrixSummary,
+    },
     KeyList {
         keyset_revision: String,
     },
@@ -530,6 +534,76 @@ pub enum TaskResult {
         kid: String,
         keyset_revision: String,
     },
+    /// Read-only compatibility for historic signed audit records.
+    ConformanceLeaseCreated {
+        lease: ConformanceLeaseSummary,
+    },
+    /// Read-only compatibility for historic signed audit records.
+    ConformanceOnboardingApplied {
+        onboarding: ConformanceOnboardingSummary,
+    },
+    /// Read-only compatibility for historic signed audit records.
+    ConformanceLeaseList {
+        leases: Vec<ConformanceLeaseSummary>,
+    },
+    /// Read-only compatibility for historic signed audit records.
+    ConformanceLeaseRevoked {
+        lease_id: String,
+        deactivated_clients: u64,
+    },
+    /// Read-only compatibility for historic signed audit records.
+    ConformanceLeaseCleaned {
+        cleaned_leases: u64,
+        deleted_clients: u64,
+        #[serde(default)]
+        deleted_credential_datasets: u64,
+    },
+}
+
+/// Historic lease metadata retained only to deserialize and authenticate
+/// already-signed conformance receipts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceLeaseSummary {
+    pub lease_id: String,
+    pub profile: String,
+    pub material_sha256: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+    pub cleaned_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceOnboardingSummary {
+    pub lease_id: String,
+    pub request_jti: String,
+    pub applicant_id: String,
+    pub client_mappings: Vec<ConformanceClientIdMapping>,
+    pub client_count: u32,
+    pub matrix_sha256: String,
+    pub bundle_sha256: String,
+    pub expires_at: i64,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceClientIdMapping {
+    pub logical_client_id: String,
+    pub client_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceMatrixSummary {
+    pub schema: u32,
+    pub sha256: String,
+    pub size: u64,
+    pub group_count: u32,
+    pub plan_count: u32,
+    pub source_release: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
