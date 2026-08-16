@@ -97,11 +97,6 @@ retiring and explicitly flushing the new tenant's transient state before any
 boundary change. Never point an old binary at a logical database already
 claimed by a non-default tenant.
 
-The legacy in-process OIDF conformance lease/onboarding driver remains limited
-to the default boundary and rejects an alternative active boundary. It is not a
-general management path and is scheduled to move to the external controller;
-ordinary runtime services do not inherit that restriction.
-
 A full multi-tenant deployment needs request-level tenant resolution by host,
 path, issuer, or another explicit deployment boundary. That resolver must run
 before client lookup, authorization, token issuance, SCIM provisioning,

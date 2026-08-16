@@ -1425,8 +1425,7 @@ pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), Protoc
 }
 
 /// Validate the public trust policy carried by the ordinary OpenID4VC
-/// provider.  The policy is deliberately separate from the conformance lease
-/// material and uses a stricter JSON boundary: only the supported public JWK
+/// provider. The policy uses a stricter JSON boundary: only the supported public JWK
 /// members are accepted, so an unknown member cannot smuggle private or
 /// provider-specific state into the signed policy.
 pub fn validate_openid4vc_trust_policy(policy: &Openid4vcTrustPolicy) -> Result<(), ProtocolError> {

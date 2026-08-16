@@ -397,9 +397,8 @@ pub enum TaskOperation {
 
 /// Public trust material for the ordinary OpenID4VC provider.
 ///
-/// This is intentionally independent from the conformance lease payload above:
-/// it carries only the public trust policy needed by a production provider and
-/// has no suite, lease, or conformance-specific fields.
+/// It carries only the public trust policy needed by a production provider and
+/// has no controller-specific fields.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Openid4vcTrustPolicy {
