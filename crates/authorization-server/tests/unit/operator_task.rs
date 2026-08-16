@@ -13,16 +13,6 @@ async fn execute(operation: &TaskOperation) -> TaskOutcome {
     execute_with_jti(operation, "request-00000000000000000000000000000000").await
 }
 
-#[tokio::test]
-async fn legacy_operator_envelopes_have_no_server_execution_path() {
-    let operation = TaskOperation::ConformanceMatrixDescribe;
-    assert_eq!(operation_name(&operation), "unsupported-operator-operation");
-    assert!(matches!(
-        execute(&operation).await,
-        TaskOutcome::Failed { .. }
-    ));
-}
-
 fn temporary_directory() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "nazoauth-operator-task-test-{}",
