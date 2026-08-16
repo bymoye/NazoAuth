@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use ed25519_dalek::SigningKey;
 use proptest::prelude::*;
-use serde::{Serialize, de::DeserializeOwned};
 
 use super::*;
 use crate::verification::*;
@@ -221,22 +220,6 @@ fn adoption_receipt() -> AdoptionReceipt {
         plan_sha256: "c".repeat(64),
         adopted_at: 1_000,
     }
-}
-
-fn assert_wire_rejects_unknown_field<T>(value: T)
-where
-    T: DeserializeOwned + Serialize,
-{
-    let mut encoded = serde_json::to_value(value).expect("wire value should serialize");
-    encoded
-        .as_object_mut()
-        .expect("wire value should serialize as an object")
-        .insert("unexpected_wire_field".to_owned(), serde_json::json!(true));
-    assert!(
-        serde_json::from_value::<T>(encoded).is_err(),
-        "wire model {} accepted an unknown field",
-        std::any::type_name::<T>()
-    );
 }
 
 #[test]

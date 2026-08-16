@@ -82,8 +82,6 @@ pub use wire::*;
 
 #[cfg(test)]
 pub(crate) use signing::sign_compact;
-#[cfg(test)]
-pub(crate) use verification::validate_operation;
 
 #[cfg(test)]
 #[path = "../tests/unit/mod.rs"]
