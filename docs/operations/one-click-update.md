@@ -8,8 +8,8 @@ It is independently built, signed, and released by the
 
 ## First installation
 
-The controller repository's bootstrap script downloads the selected controller
-Release with GitHub CLI, verifies its GitHub build-provenance attestation against
+The controller repository's bootstrap script downloads the selected public non-draft Release
+with GitHub CLI, verifies its GitHub build-provenance attestation against
 the exact tag and hosted controller Release workflow, executes a help smoke test,
 and only then atomically installs a regular non-symlink file. `curl | sh` is not
 a trusted bootstrap path.
