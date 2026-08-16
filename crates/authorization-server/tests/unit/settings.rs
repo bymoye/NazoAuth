@@ -493,30 +493,6 @@ fn ciba_security_profile_rejects_conformance_and_migration_aliases() {
 }
 
 #[test]
-fn invalid_ciba_security_profile_is_rejected() {
-    let config = ConfigSource::from_pairs_for_test([("CIBA_SECURITY_PROFILE", "fapi-ciba-id2")]);
-
-    let Err(err) = Settings::from_config(&config) else {
-        panic!("unknown CIBA security profile must be rejected");
-    };
-
-    assert_eq!(
-        err.to_string(),
-        "CIBA_SECURITY_PROFILE is not supported: fapi-ciba-id2"
-    );
-}
-
-#[test]
-fn ciba_automated_decision_transport_does_not_own_a_global_secret() {
-    let mode_only = ConfigSource::from_pairs_for_test([("CIBA_AUTOMATED_DECISION_MODE", "header")]);
-    let settings = Settings::from_config(&mode_only).unwrap();
-    assert_eq!(
-        settings.ciba.ciba_automated_decision_mode,
-        CibaAutomatedDecisionMode::Header
-    );
-}
-
-#[test]
 fn secure_deployments_default_to_host_only_cookie_names() {
     let config = ConfigSource::from_pairs_for_test([
         ("PUBLIC_BASE_URL", "https://auth.example"),
@@ -547,10 +523,6 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     assert!(!defaults.modules.enable_frontchannel_logout);
     assert!(!defaults.modules.enable_session_management);
     assert!(!defaults.modules.enable_ciba);
-    assert_eq!(
-        defaults.ciba.ciba_automated_decision_mode,
-        CibaAutomatedDecisionMode::Disabled
-    );
     assert!(!defaults.modules.enable_native_sso);
     assert!(!defaults.modules.enable_scim_security_events);
     assert!(!defaults.modules.enable_openid4vci_issuer);

@@ -115,7 +115,6 @@ fn supported_resource_kinds(openid4vc_dataset_enabled: bool) -> Vec<TenantResour
         TenantResourceKind::User,
         TenantResourceKind::OauthClient,
         TenantResourceKind::MtlsTrustAnchor,
-        TenantResourceKind::CibaDecisionBinding,
         TenantResourceKind::Openid4vcTrustPolicy,
     ];
     if openid4vc_dataset_enabled {

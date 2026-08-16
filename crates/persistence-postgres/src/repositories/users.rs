@@ -490,10 +490,9 @@ impl UserRepository {
     }
 }
 
-/// Caller-owned user creation input shared by ordinary operator management and
-/// the legacy conformance onboarding transaction.  The persistence boundary
-/// owns the role invariant (`user`, level `0`); callers cannot provision an
-/// administrator through this path.
+/// Caller-owned user creation input for operator management. The persistence
+/// boundary owns the role invariant (`user`, level `0`); callers cannot
+/// provision an administrator through this path.
 pub struct UserInsert<'a> {
     pub tenant: TenantContext,
     pub username: &'a str,
@@ -523,7 +522,7 @@ pub struct UserInsert<'a> {
 }
 
 /// Inserts a user on a caller-owned transaction connection.  This is
-/// ownership-neutral: no conformance lease or suite metadata is consulted.
+/// ownership-neutral: no external lifecycle metadata is consulted.
 /// The explicit role columns preserve the tenant's ordinary-user boundary.
 pub async fn insert_user_on_connection(
     connection: &mut AsyncPgConnection,

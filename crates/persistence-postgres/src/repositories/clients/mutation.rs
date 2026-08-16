@@ -34,8 +34,7 @@ impl OAuthClientRepository {
 
     /// Inserts one client on a caller-owned transaction connection.
     ///
-    /// This ordinary management path never creates a legacy conformance
-    /// binding.
+    /// This ordinary management path inserts only the supplied client record.
     pub(super) async fn insert_client_on_connection(
         connection: &mut AsyncPgConnection,
         client: &OAuthClient,

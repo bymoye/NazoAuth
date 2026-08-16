@@ -1098,7 +1098,6 @@ fn non_apply_tasks_and_payload_decoders_enforce_operation_specific_contracts() {
         TenantResourceKind::User,
         TenantResourceKind::OauthClient,
         TenantResourceKind::MtlsTrustAnchor,
-        TenantResourceKind::CibaDecisionBinding,
         TenantResourceKind::Openid4vcDataset,
         TenantResourceKind::Openid4vcTrustPolicy,
     ] {
@@ -1817,80 +1816,6 @@ fn ordinary_resource_payloads_are_typed_bounded_and_dependency_fenced() {
             )
             .is_err()
         );
-    }
-}
-
-#[test]
-fn ciba_decision_binding_payload_is_schema_and_lifetime_fenced() {
-    let expires_at = Utc::now().timestamp() + 60;
-    let payload = serde_json::to_vec(&json!({
-        "schema": 1,
-        "client_resource_id": "ciba-client",
-        "user_resource_id": "ciba-user",
-        "decision_token": "0123456789abcdef0123456789abcdef",
-        "expires_at": expires_at,
-    }))
-    .expect("CIBA decision binding payload");
-    let decoded = decode_payload(TenantResourceKind::CibaDecisionBinding, &payload)
-        .expect("ordinary CIBA decision binding");
-    assert!(matches!(
-        decoded,
-        TenantResourcePayload::CibaDecisionBinding(value)
-            if value.client_resource_id == "ciba-client"
-                && value.user_resource_id == "ciba-user"
-                && value.decision_token.len() == MIN_CIBA_DECISION_TOKEN_BYTES
-                && value.expires_at == expires_at
-    ));
-
-    for invalid in [
-        json!({
-            "schema": 2,
-            "client_resource_id": "ciba-client",
-            "user_resource_id": "ciba-user",
-            "decision_token": "0123456789abcdef0123456789abcdef",
-            "expires_at": expires_at,
-        }),
-        json!({
-            "schema": 1,
-            "client_resource_id": "ciba-client",
-            "user_resource_id": "ciba-user",
-            "decision_token": "too-short",
-            "expires_at": expires_at,
-        }),
-        json!({
-            "schema": 1,
-            "client_resource_id": "ciba-client",
-            "user_resource_id": "ciba-user",
-            "decision_token": "0123456789abcdef0123456789abc\ndef",
-            "expires_at": expires_at,
-        }),
-        json!({
-            "schema": 1,
-            "client_resource_id": "ciba-client",
-            "user_resource_id": "ciba-user",
-            "decision_token": "0123456789abcdef0123456789abcdef",
-            "expires_at": Utc::now().timestamp(),
-        }),
-        json!({
-            "schema": 1,
-            "client_resource_id": "ciba-client",
-            "user_resource_id": "ciba-user",
-            "decision_token": "0123456789abcdef0123456789abcdef",
-            "expires_at": Utc::now().timestamp()
-                + MAX_CIBA_DECISION_BINDING_LIFETIME_SECONDS
-                + 1,
-        }),
-        json!({
-            "schema": 1,
-            "client_resource_id": "ciba-client",
-            "user_resource_id": "ciba-user",
-            "decision_token": "0123456789abcdef0123456789abcdef",
-            "expires_at": expires_at,
-            "suite_profile": "must-not-cross-the-boundary",
-        }),
-    ] {
-        let payload = serde_json::to_vec(&invalid).expect("invalid payload fixture");
-        assert!(decode_payload(TenantResourceKind::CibaDecisionBinding, &payload).is_err());
     }
 }
 

@@ -211,31 +211,7 @@ pub(crate) struct DeviceGrantSettings {
 pub(crate) struct CibaSettings {
     pub(crate) ciba_auth_req_id_ttl_seconds: u64,
     pub(crate) ciba_poll_interval_seconds: u64,
-    pub(crate) ciba_automated_decision_mode: CibaAutomatedDecisionMode,
     pub(crate) ciba_notification_private_origins: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CibaAutomatedDecisionMode {
-    Disabled,
-    Header,
-    QueryParameter,
-}
-
-impl CibaAutomatedDecisionMode {
-    fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
-        match config
-            .string("CIBA_AUTOMATED_DECISION_MODE", "disabled")
-            .as_str()
-        {
-            "disabled" => Ok(Self::Disabled),
-            "header" => Ok(Self::Header),
-            "query" => Ok(Self::QueryParameter),
-            value => bail!(
-                "CIBA_AUTOMATED_DECISION_MODE must be disabled, header, or query; got {value}"
-            ),
-        }
-    }
 }
 
 #[derive(Clone)]

@@ -148,9 +148,10 @@ where
     S: SectorIdentifierResolverPort,
     C: AdminClientCryptoPort + ClientSecretDigesterPort,
 {
-    /// Prepare a registration while binding a caller-supplied secret. This is
-    /// restricted to the privileged conformance onboarding adapter; ordinary
-    /// administrative registration continues to generate a fresh secret.
+    /// Prepare a registration while binding a caller-supplied secret. The
+    /// authenticated operator-management path uses this only when it can
+    /// deliver that secret to the client out of band; ordinary administrative
+    /// registration continues to generate a fresh secret.
     pub async fn prepare_registration_with_secret(
         &self,
         request: CreateClientRequest,

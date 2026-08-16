@@ -16,10 +16,9 @@ use uuid::Uuid;
 
 use super::*;
 use crate::tenant_resource_provider::{
-    CibaDecisionBindingResourcePayload, IssuedTenantResourceReceipt,
-    MtlsTrustAnchorResourcePayload, OauthClientResourcePayload, Openid4vcDatasetResourcePayload,
-    Openid4vcTrustPolicyResourcePayload, TenantResourceProviderError, TenantResourceStateSource,
-    UserResourcePayload,
+    IssuedTenantResourceReceipt, MtlsTrustAnchorResourcePayload, OauthClientResourcePayload,
+    Openid4vcDatasetResourcePayload, Openid4vcTrustPolicyResourcePayload,
+    TenantResourceProviderError, TenantResourceStateSource, UserResourcePayload,
 };
 
 struct TestPreparation;
@@ -231,7 +230,6 @@ fn locators_are_kind_fenced_and_round_trip() {
     let user = Uuid::now_v7();
     let client = Uuid::now_v7();
     let anchor = Uuid::now_v7();
-    let ciba_binding = Uuid::now_v7();
     let dataset = Uuid::now_v7();
     let trust_policy = Uuid::now_v7();
 
@@ -246,13 +244,6 @@ fn locators_are_kind_fenced_and_round_trip() {
     assert!(matches!(
         parse_locator(&mtls_locator(anchor), TenantResourceKind::MtlsTrustAnchor),
         Ok(ResourceLocator::Mtls(value)) if value == anchor
-    ));
-    assert!(matches!(
-        parse_locator(
-            &ciba_decision_binding_locator(ciba_binding),
-            TenantResourceKind::CibaDecisionBinding
-        ),
-        Ok(ResourceLocator::CibaDecisionBinding(value)) if value == ciba_binding
     ));
     assert!(matches!(
         parse_locator(
@@ -322,11 +313,6 @@ fn delta_dependencies_accept_existing_mtls_and_dataset_parent_resources() {
         resource_id: "dataset".to_owned(),
         digest: "b".repeat(64),
     };
-    let ciba_binding_identity = TenantResourceIdentity {
-        kind: TenantResourceKind::CibaDecisionBinding,
-        resource_id: "ciba-binding".to_owned(),
-        digest: "c".repeat(64),
-    };
     let payloads = vec![
         PreparedApplyPayload::Mtls(Box::new(PreparedMtls {
             identity: mtls_identity.clone(),
@@ -343,18 +329,10 @@ fn delta_dependencies_accept_existing_mtls_and_dataset_parent_resources() {
             configuration_id: "configuration".to_owned(),
             claims: json!({}),
         })),
-        PreparedApplyPayload::CibaDecisionBinding(Box::new(PreparedCibaDecisionBinding {
-            identity: ciba_binding_identity.clone(),
-            client_resource_id: "client".to_owned(),
-            user_resource_id: "user".to_owned(),
-            decision_token_sha256: "d".repeat(64),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
-        })),
     ];
     let delta = [
         ResourceKey::from_identity(&mtls_identity),
         ResourceKey::from_identity(&dataset_identity),
-        ResourceKey::from_identity(&ciba_binding_identity),
     ]
     .into_iter()
     .collect();
@@ -429,17 +407,6 @@ async fn apply_preparation_types_and_sorts_every_ordinary_resource_without_persi
             )),
         },
         PreparedTenantResource {
-            identity: identity(TenantResourceKind::CibaDecisionBinding, "ciba", 4),
-            payload: Some(TenantResourcePayload::CibaDecisionBinding(
-                CibaDecisionBindingResourcePayload {
-                    client_resource_id: "client".to_owned(),
-                    user_resource_id: "user".to_owned(),
-                    decision_token: "0123456789abcdef0123456789abcdef".to_owned(),
-                    expires_at: chrono::Utc::now().timestamp() + 60,
-                },
-            )),
-        },
-        PreparedTenantResource {
             identity: identity(TenantResourceKind::MtlsTrustAnchor, "mtls", 3),
             payload: Some(TenantResourcePayload::MtlsTrustAnchor(
                 MtlsTrustAnchorResourcePayload {
@@ -484,16 +451,12 @@ async fn apply_preparation_types_and_sorts_every_ordinary_resource_without_persi
         .prepare_apply_payloads(&resources)
         .await
         .expect("every ordinary resource should prepare");
-    assert_eq!(prepared.len(), 6);
+    assert_eq!(prepared.len(), 5);
     assert!(matches!(prepared[0], PreparedApplyPayload::User(_)));
     assert!(matches!(prepared[1], PreparedApplyPayload::OauthClient(_)));
     assert!(matches!(prepared[2], PreparedApplyPayload::Mtls(_)));
-    assert!(matches!(
-        prepared[3],
-        PreparedApplyPayload::CibaDecisionBinding(_)
-    ));
-    assert!(matches!(prepared[4], PreparedApplyPayload::Dataset(_)));
-    assert!(matches!(prepared[5], PreparedApplyPayload::TrustPolicy(_)));
+    assert!(matches!(prepared[3], PreparedApplyPayload::Dataset(_)));
+    assert!(matches!(prepared[4], PreparedApplyPayload::TrustPolicy(_)));
 
     let mut missing = resources;
     missing[0].payload = None;
@@ -1138,217 +1101,6 @@ async fn postgres_executor_applies_replays_and_revokes_one_owned_user_atomically
             .await
             .expect("final active bindings");
     assert!(active.is_empty());
-
-    // A CIBA decision binding is an ordinary, non-public child resource of
-    // one active managed client and user. The dedicated row and generic
-    // identity binding are created and revoked by the same caller-owned
-    // transaction; neither parent is disabled by revoking the child.
-    let ciba_user_id = insert_user_on_connection(
-        &mut connection,
-        UserInsert {
-            tenant,
-            username: &format!("ciba-user-{tenant_id}"),
-            email: &format!("ciba-user-{tenant_id}@example.test"),
-            password_hash: "test-only-password-hash",
-            email_verified: true,
-            display_name: None,
-            given_name: None,
-            family_name: None,
-            middle_name: None,
-            nickname: None,
-            profile_url: None,
-            avatar_url: None,
-            website_url: None,
-            gender: None,
-            birthdate: None,
-            zoneinfo: None,
-            locale: None,
-            address_formatted: None,
-            address_street_address: None,
-            address_locality: None,
-            address_region: None,
-            address_postal_code: None,
-            address_country: None,
-            phone_number: None,
-            phone_number_verified: false,
-        },
-    )
-    .await
-    .expect("CIBA managed user");
-    let ciba_client_id = sql_query(
-        "INSERT INTO oauth_clients (
-             tenant_id, realm_id, organization_id, client_id, client_name, client_type,
-             redirect_uris, scopes, grant_types, token_endpoint_auth_method
-         ) VALUES (
-             $1, $2, $3, $4, 'Tenant Resource CIBA', 'confidential',
-             '[]'::jsonb, '[\"openid\"]'::jsonb,
-             '[\"urn:openid:params:grant-type:ciba\"]'::jsonb, 'private_key_jwt'
-         ) RETURNING id",
-    )
-    .bind::<sql_types::Uuid, _>(tenant_id)
-    .bind::<sql_types::Uuid, _>(realm_id)
-    .bind::<sql_types::Uuid, _>(organization_id)
-    .bind::<sql_types::Varchar, _>(format!("ciba-client-{tenant_id}"))
-    .get_result::<IdRow>(&mut connection)
-    .await
-    .expect("CIBA managed client")
-    .id;
-    let ciba_user_identity = TenantResourceIdentity {
-        kind: TenantResourceKind::User,
-        resource_id: format!("ciba-user-resource-{tenant_id}"),
-        digest: "1".repeat(64),
-    };
-    let ciba_client_identity = TenantResourceIdentity {
-        kind: TenantResourceKind::OauthClient,
-        resource_id: format!("ciba-client-resource-{tenant_id}"),
-        digest: "2".repeat(64),
-    };
-    for (identity, locator) in [
-        (ciba_user_identity.clone(), user_locator(ciba_user_id)),
-        (
-            ciba_client_identity.clone(),
-            oauth_client_locator(ciba_client_id),
-        ),
-    ] {
-        TenantResourceRepository::upsert_binding_on_connection(
-            &mut connection,
-            NewTenantResourceBinding {
-                tenant_id,
-                resource_kind: kind_name(identity.kind),
-                resource_id: &identity.resource_id,
-                resource_digest: &identity.digest,
-                change_set_id: "ciba-parent-fixture",
-                change_set_sha256: &"3".repeat(64),
-                active: true,
-                locator: &locator,
-            },
-        )
-        .await
-        .expect("CIBA parent binding");
-    }
-    let ciba_binding_identity = TenantResourceIdentity {
-        kind: TenantResourceKind::CibaDecisionBinding,
-        resource_id: format!("ciba-decision-binding-{tenant_id}"),
-        digest: "4".repeat(64),
-    };
-    let ciba_manifest = canonical_tenant_resource_manifest_sha256(&[
-        ciba_user_identity.clone(),
-        ciba_client_identity.clone(),
-        ciba_binding_identity.clone(),
-    ])
-    .expect("CIBA manifest");
-    let ciba_apply_task = resource_task(
-        tenant_id,
-        "apply-ciba-binding",
-        "apply-ciba-binding-change",
-        TenantResourceOperation::Apply,
-        TenantResourceTaskPayload::Apply {
-            resources: vec![ciba_binding_identity.clone()],
-        },
-        0,
-        (empty_manifest.clone(), ciba_manifest),
-    );
-    let token = "0123456789abcdef0123456789abcdef";
-    let ciba_payload =
-        PreparedApplyPayload::CibaDecisionBinding(Box::new(PreparedCibaDecisionBinding {
-            identity: ciba_binding_identity.clone(),
-            client_resource_id: ciba_client_identity.resource_id.clone(),
-            user_resource_id: ciba_user_identity.resource_id.clone(),
-            decision_token_sha256: sha256_hex(token.as_bytes()),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-        }));
-    let (applied, mappings) = apply_resources(
-        &mut connection,
-        tenant_id,
-        tenant,
-        &ciba_apply_task,
-        &[PreparedTenantResource {
-            identity: ciba_binding_identity.clone(),
-            payload: None,
-        }],
-        &[ciba_payload],
-        &None,
-    )
-    .await
-    .expect("ordinary CIBA decision binding apply");
-    assert_eq!(applied, vec![ciba_binding_identity.clone()]);
-    assert!(
-        mappings.is_empty(),
-        "CIBA binding must not expose a mapping"
-    );
-
-    let active = active_binding_map(&mut connection, tenant_id)
-        .await
-        .expect("active CIBA bindings");
-    let ciba_generic = active
-        .get(&ResourceKey::from_identity(&ciba_binding_identity))
-        .expect("generic CIBA identity binding");
-    let generation = parse_uuid_locator(
-        &ciba_generic.locator,
-        TenantResourceKind::CibaDecisionBinding,
-    )
-    .expect("CIBA binding generation");
-    let stored = CibaDecisionBindingRepository::by_generation_on_connection(
-        &mut connection,
-        tenant_id,
-        generation,
-    )
-    .await
-    .expect("CIBA binding lookup")
-    .expect("stored CIBA binding");
-    assert_eq!(stored.token_sha256, sha256_hex(token.as_bytes()));
-    assert_ne!(stored.token_sha256, token);
-
-    for parent in [&ciba_client_identity, &ciba_user_identity] {
-        let targets = [ResourceKey::from_identity(parent)].into_iter().collect();
-        assert!(matches!(
-            validate_revoke_dependency_closure(&mut connection, tenant_id, &active, &targets).await,
-            Err(ExecutorTransactionError::Executor(
-                TenantResourceExecutorError::Rejected
-            ))
-        ));
-    }
-
-    let parent_manifest =
-        canonical_tenant_resource_manifest_sha256(&[ciba_user_identity, ciba_client_identity])
-            .expect("CIBA parent manifest");
-    let ciba_revoke_task = resource_task(
-        tenant_id,
-        "revoke-ciba-binding",
-        "revoke-ciba-binding-change",
-        TenantResourceOperation::Revoke,
-        TenantResourceTaskPayload::Revoke {
-            resources: vec![ciba_binding_identity.clone()],
-        },
-        0,
-        (empty_manifest, parent_manifest),
-    );
-    let revoked = revoke_resources(
-        &mut connection,
-        tenant_id,
-        tenant,
-        &ciba_revoke_task,
-        &[PreparedTenantResource {
-            identity: ciba_binding_identity,
-            payload: None,
-        }],
-    )
-    .await
-    .expect("ordinary CIBA decision binding revoke");
-    assert_eq!(revoked.len(), 1);
-    let client = sql_query("SELECT is_active FROM oauth_clients WHERE tenant_id = $1 AND id = $2")
-        .bind::<sql_types::Uuid, _>(tenant_id)
-        .bind::<sql_types::Uuid, _>(ciba_client_id)
-        .get_result::<ActiveRow>(&mut connection)
-        .await
-        .expect("CIBA parent client");
-    let user = sql_query("SELECT is_active FROM users WHERE tenant_id = $1 AND id = $2")
-        .bind::<sql_types::Uuid, _>(tenant_id)
-        .bind::<sql_types::Uuid, _>(ciba_user_id)
-        .get_result::<ActiveRow>(&mut connection)
-        .await
-        .expect("CIBA parent user");
-    assert!(client.is_active && user.is_active);
 }
 
 #[tokio::test]
@@ -1419,8 +1171,7 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
     );
     let client = identity(TenantResourceKind::OauthClient, "ordinary-client", 3);
     let mtls = identity(TenantResourceKind::MtlsTrustAnchor, "ordinary-mtls", 4);
-    let ciba = identity(TenantResourceKind::CibaDecisionBinding, "ordinary-ciba", 5);
-    let dataset = identity(TenantResourceKind::Openid4vcDataset, "ordinary-dataset", 6);
+    let dataset = identity(TenantResourceKind::Openid4vcDataset, "ordinary-dataset", 5);
     let resources = vec![
         PreparedTenantResource {
             identity: policy.clone(),
@@ -1437,17 +1188,6 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
                     user_resource_id: user.resource_id.clone(),
                     configuration_id: "pid-sd-jwt".to_owned(),
                     claims: json!({"given_name": "Ordinary", "family_name": "Graph"}),
-                },
-            )),
-        },
-        PreparedTenantResource {
-            identity: ciba.clone(),
-            payload: Some(TenantResourcePayload::CibaDecisionBinding(
-                CibaDecisionBindingResourcePayload {
-                    client_resource_id: client.resource_id.clone(),
-                    user_resource_id: user.resource_id.clone(),
-                    decision_token: "0123456789abcdef0123456789abcdef".to_owned(),
-                    expires_at: chrono::Utc::now().timestamp() + 300,
                 },
             )),
         },
@@ -1533,7 +1273,7 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
     )
     .await
     .expect("apply complete graph");
-    assert_eq!(applied.len(), 6);
+    assert_eq!(applied.len(), 5);
     assert_eq!(mappings.len(), 2);
     assert!(mappings.iter().any(|mapping| {
         mapping.kind == TenantResourceKind::User && mapping.resource_id == user.resource_id
@@ -1593,7 +1333,7 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
     )
     .await
     .expect("revoke complete graph");
-    assert_eq!(revoked.len(), 6);
+    assert_eq!(revoked.len(), 5);
     assert!(
         TenantResourceRepository::active_bindings_on_connection(&mut connection, tenant_id)
             .await

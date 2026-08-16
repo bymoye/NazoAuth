@@ -96,76 +96,15 @@ HTTPS origin, an existing TLS ingress must already forward that origin to the
 installation port. Installation succeeds only after public Discovery reports
 the exact issuer.
 
-The default `baseline` profile is the safe general-purpose installation. The
-declared full OIDF certification matrix uses the explicit `standards-full`
-profile. The official public onboarding workflow emits a manifest-bound,
-ready-to-use `standards-full-profile.json`, so the normal path needs no manual
-assembly:
-
-```sh
-python3 scripts/oidf_onboarding_bundle.py verify \
-  --artifact-directory /absolute/oidf-public-onboarding-material \
-  --expected-source-commit "$source_commit" \
-  --expected-target-issuer https://auth.example.com \
-  --expected-suite-base-url https://suite.example \
-  --expected-onboarding-profile official
-sudo nazoauthctl install --runtime podman \
-  --public-url https://auth.example.com --profile standards-full \
-  --profile-material \
-  /absolute/oidf-public-onboarding-material/standards-full-profile.json
-```
+NazoAuth has no conformance-specific installation profile. External
+conformance orchestration, temporary resources, and Suite credentials belong
+to `nazoauthctl` and must not be placed in the server installation contract.
 
 When an existing reverse proxy deliberately targets a fixed private container
 address, supply both `--network-subnet CIDR` and `--runtime-ip ADDRESS`. The
 installer creates the labeled managed network with that subnet and assigns the
 application container the requested address. Omit both options when the proxy
 uses the default loopback-published port.
-
-The workflow first proves that `source_commit` is the commit behind the exact
-immutable Release tag. A commit that is not yet on the default branch is
-accepted only after the public non-draft Release and its tag-specific,
-GitHub-hosted-runner attestation are verified. It then checks out that exact
-commit before rendering any material. The artifact manifest binds the source
-commit, target issuer, suite origin, and every file digest. Advanced operators
-may instead use
-`build_oidf_full_install_profile.py` in explicit-input mode when integrating a
-different standards suite.
-
-The material file is a closed, public-only trust/configuration document:
-private JWK members, private keys, non-HTTPS origins, unknown fields, symlinks,
-and relative paths are rejected. `nazoauthctl` generates the DCR, CIBA and
-OpenID4VC management/encryption secrets locally, persists them only in managed
-secret files, and creates the matching credential signing key and PKI through
-an authenticated one-shot application task before startup. The task creates an
-in-memory local CA, signs a DNS-SAN leaf for the current HTTPS issuer hostname,
-and atomically replaces one leaf-plus-CA PEM bundle. Both OpenID4VC certificate
-settings reference that same bundle; the runtime treats only its CA certificates
-as trust anchors. The CA private key is never persisted. The onboarding material
-cannot supply that request-object trust anchor. Suite public keys are never guessed.
-`standards-full` therefore requires an explicit material file; the baseline
-never silently enables it.
-
-By default, the four standards-full bearer tokens are generated locally. An
-automation operator may instead provide exact values without putting them in
-argv, ordinary environment, profile material, configuration, audit records, or
-task envelopes. The accepted JSON is closed: it contains only
-`dynamic_registration_initial_access_token`, `ciba_automated_decision_token`,
-`openid4vci_management_token`, and `openid4vp_management_token`. Every value
-must be 32–4096 bytes and contain no CR, LF, or NUL. Use a separate inherited
-descriptor when dependency URLs are also supplied; both `--secrets-stdin` and
-`--profile-secrets-stdin` cannot consume one stdin stream:
-
-```sh
-secret-provider read nazoauth/standards-full-profile | \
-  sudo nazoauthctl install --runtime podman --public-url https://auth.example.com \
-    --profile standards-full --profile-material /absolute/standards-full-profile.json \
-    --profile-secrets-stdin
-```
-
-On a retry, supplied values must match already-persisted values exactly. This
-prevents a failed installation retry from silently rotating live protocol
-credentials. When no override is supplied, the same root-only secret mount is
-populated with locally generated values.
 
 ### Existing PostgreSQL and Valkey
 
@@ -252,14 +191,6 @@ task envelope. For a host deployment, the same verified binary runs as the
 service user. The final signed receipt binds the controller-verified OCI/host
 digest to the application-verified embedded build identity; the application
 does not claim to prove its OCI digest.
-
-For a standards-full install, `keys export-openid4vc-trust` is the supported
-public handoff for a local OIDF OpenID4VP runner. It verifies the active managed
-leaf-plus-CA bundle, accepts only exactly one non-CA leaf and one `CA:TRUE`
-certificate, and atomically writes only the CA certificate to an absolute path.
-The destination parent must already be a real directory; an existing output
-must be a regular non-symlink file. The leaf and every private key are rejected,
-and the export attempt is recorded in the signed management audit chain.
 
 ## Trust and transaction boundary
 

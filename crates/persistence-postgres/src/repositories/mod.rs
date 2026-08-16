@@ -3,7 +3,6 @@ mod audit;
 mod audit_ledger;
 mod authorization;
 mod authorization_flow;
-mod ciba_decision_bindings;
 pub(crate) mod clients;
 mod federation;
 mod grants;
@@ -29,11 +28,6 @@ pub use audit_ledger::{
 };
 pub use authorization::AuthorizationRepository;
 pub use authorization_flow::AuthorizationFlowRepository;
-pub use ciba_decision_bindings::{
-    CIBA_DECISION_CLAIM_SECONDS, CibaDecisionBinding, CibaDecisionBindingRepository,
-    CibaDecisionBindingRevoke, CibaDecisionBindingWrite, CibaDecisionClaimOutcome,
-    NewCibaDecisionBinding,
-};
 pub use clients::{
     OAuthClientRepository, active_public_client_id_on_connection, deactivate_client_on_connection,
     insert_client_on_connection,

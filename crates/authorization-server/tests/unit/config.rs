@@ -838,7 +838,6 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CLIENT_IP_HEADER_MODE",
             "CLIENT_SECRET_PEPPER",
             "CLIENT_SECRET_PEPPER_FILE",
-            "CIBA_AUTOMATED_DECISION_MODE",
             "CIBA_AUTH_REQ_ID_TTL_SECONDS",
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
             "CIBA_PING_TLS_TRUST_BUNDLE",

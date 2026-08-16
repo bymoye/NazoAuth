@@ -87,56 +87,8 @@ sudo nazoauthctl install \
   --public-url https://auth.example.com
 ```
 
-默认 `baseline` 是面向通用部署的安全基线。项目正式声明的完整 OIDF 一致性矩阵必须
-显式选择 `standards-full`。正式 public onboarding workflow 会直接产出受 manifest
-绑定、可立即使用的 `standards-full-profile.json`，正常流程不需要手工拼装：
-
-```sh
-python3 scripts/oidf_onboarding_bundle.py verify \
-  --artifact-directory /absolute/oidf-public-onboarding-material \
-  --expected-source-commit "$source_commit" \
-  --expected-target-issuer https://auth.example.com \
-  --expected-suite-base-url https://suite.example \
-  --expected-onboarding-profile official
-sudo nazoauthctl install --runtime podman \
-  --public-url https://auth.example.com --profile standards-full \
-  --profile-material \
-  /absolute/oidf-public-onboarding-material/standards-full-profile.json
-```
-
-workflow 先证明 `source_commit` 是精确不可变 Release tag 指向的 commit。尚未进入默认
-分支的 commit，只有在公开非草稿 Release 及其绑定该 tag、由 GitHub-hosted runner 生成的
-attestation 验证通过后才被接受；随后 workflow 切换到该精确 commit 生成所有材料。
-artifact manifest 同时绑定源码 commit、目标 issuer、套件 origin 和每个文件摘要。接入
-其他标准套件的高级用户仍可使用 `build_oidf_full_install_profile.py` 的显式输入模式。
-
-material 是字段封闭、只含公开信息的信任/配置文档；私有 JWK 成员、私钥、非 HTTPS
-origin、未知字段、符号链接和相对路径都会被拒绝。DCR、CIBA、OpenID4VC 管理/加密
-秘密由 `nazoauthctl` 在本机生成并且只落入受管 secret file；匹配的 credential 签名
-密钥和 PKI 则在启动前通过已认证的一次性应用任务生成：任务只在内存中创建本地 CA，
-为当前 HTTPS issuer hostname 的 DNS SAN 签发叶证书，并原子替换一个“叶证书+CA”
-PEM bundle。两个 OpenID4VC certificate 配置都指向这个 bundle，运行时只将其中
-`CA:TRUE` 的证书视为 trust anchor；CA 私钥绝不落盘。onboarding material 不能提供该
-request-object trust anchor；套件公钥也不会被猜测。因此 `standards-full` 必须显式
-提供 material，baseline 也不会静默启用它。
-
-默认情况下，四个 standards-full bearer token 由本机生成。自动化运维也可以提供精确
-值，但它们不能进入 argv、普通环境、profile material、配置、审计记录或 task envelope。
-输入 JSON 是字段封闭的，只允许
-`dynamic_registration_initial_access_token`、`ciba_automated_decision_token`、
-`openid4vci_management_token`、`openid4vp_management_token`；每个值必须为
-32–4096 bytes，且不得含 CR、LF 或 NUL。当还要传外部依赖 URL 时，必须使用不同的
-已继承 FD；`--secrets-stdin` 和 `--profile-secrets-stdin` 不能同时消费同一个 stdin：
-
-```sh
-secret-provider read nazoauth/standards-full-profile | \
-  sudo nazoauthctl install --runtime podman --public-url https://auth.example.com \
-    --profile standards-full --profile-material /absolute/standards-full-profile.json \
-    --profile-secrets-stdin
-```
-
-失败安装的重试中，提供的值必须与已安全落盘的值精确一致，避免重试时静默轮换正在使用的
-协议凭据。未提供 override 时，仍由同一个 root-only secret mount 写入本机生成的值。
+NazoAuth 没有一致性套件专用安装 profile。外部一致性编排、临时资源和套件凭据属于
+`nazoauthctl`，不得进入服务端安装契约。
 
 ### 使用已有 PostgreSQL 和 Valkey
 
@@ -207,13 +159,6 @@ Podman 模式会使用当前或候选版本镜像启动一次性任务容器，�
 安全 stdin/FD、secret mount 或 secret provider，不进入 argv、普通环境、日志、审计或
 持久化 envelope。最终签名收据同时绑定 ctl 验证的 OCI/宿主机 digest 与应用验证的
 embedded build identity；应用不伪称能自行证明 OCI digest。
-
-对 `standards-full` 安装，`keys export-openid4vc-trust` 是 host-local OIDF
-OpenID4VP runner 获取公开 trust anchor 的正式入口。它会验证活动的受管“leaf+CA”
-bundle，严格只接受一个非 CA leaf 和一个 `CA:TRUE` certificate，并以原子方式只写出
-CA certificate 到绝对路径。输出父目录必须已经存在且为真实目录；已有输出必须是普通
-非符号链接文件。leaf 与任何私钥都会被拒绝，导出尝试也会进入已签名 management audit
-chain。
 
 ## 信任与事务边界
 

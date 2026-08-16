@@ -171,7 +171,6 @@ fn capability_advertises_every_executable_resource_kind() {
             TenantResourceKind::User,
             TenantResourceKind::OauthClient,
             TenantResourceKind::MtlsTrustAnchor,
-            TenantResourceKind::CibaDecisionBinding,
             TenantResourceKind::Openid4vcTrustPolicy,
         ]
     );
@@ -181,7 +180,6 @@ fn capability_advertises_every_executable_resource_kind() {
             TenantResourceKind::User,
             TenantResourceKind::OauthClient,
             TenantResourceKind::MtlsTrustAnchor,
-            TenantResourceKind::CibaDecisionBinding,
             TenantResourceKind::Openid4vcTrustPolicy,
             TenantResourceKind::Openid4vcDataset,
         ]

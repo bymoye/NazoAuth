@@ -29,13 +29,12 @@ pub(crate) struct CibaHttpConfig {
     pub(crate) trusted_proxy_cidrs: Vec<IpCidr>,
     pub(crate) client_ip_header_mode: ClientIpHeaderMode,
     pub(crate) default_audience: Box<str>,
-    // CIBA currently composes a single default-tenant authorization flow.
-    // Keep the tenant explicit for ordinary decision-binding isolation.
+    // CIBA state is tenant-scoped even though this process selects one active
+    // tenant at startup. This is ordinary protocol ownership.
     pub(crate) tenant_id: Uuid,
     pub(crate) auth_req_id_ttl_seconds: u64,
     pub(crate) poll_interval_seconds: u64,
     pub(crate) csrf_cookie_name: Box<str>,
-    pub(crate) automated_decision_mode: CibaAutomatedDecisionMode,
     pub(crate) ciba_fapi_profile: bool,
     pub(crate) ciba_fapi2_hardening: bool,
     pub(crate) authorization_server_profile: AuthorizationServerProfile,
@@ -55,7 +54,6 @@ impl From<&Settings> for CibaHttpConfig {
             auth_req_id_ttl_seconds: settings.ciba.ciba_auth_req_id_ttl_seconds,
             poll_interval_seconds: settings.ciba.ciba_poll_interval_seconds,
             csrf_cookie_name: settings.session.csrf_cookie_name.as_str().into(),
-            automated_decision_mode: settings.ciba.ciba_automated_decision_mode,
             ciba_fapi_profile: settings.protocol.ciba_security_profile.requires_fapi_ciba(),
             ciba_fapi2_hardening: settings
                 .protocol
@@ -157,15 +155,6 @@ pub(crate) struct CibaDecisionRequest {
     pub(crate) csrf_token: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub(crate) struct CibaAutomatedDecisionQuery {
-    pub(crate) token: Option<String>,
-    pub(crate) auth_req_id: Option<String>,
-    pub(crate) r#type: Option<String>,
-    pub(crate) action: Option<String>,
-    pub(crate) decision_token: Option<String>,
-}
-
 #[derive(serde::Serialize)]
 pub(crate) struct CibaVerificationView {
     pub(crate) auth_req_id: String,
@@ -188,14 +177,12 @@ pub(crate) struct CibaAuthorizationRequestView {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CibaDecisionSource {
     User,
-    Automation,
 }
 
 impl CibaDecisionSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::Automation => "automation",
         }
     }
 }
