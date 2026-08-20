@@ -451,7 +451,7 @@ fn verify_external_jwt_signature(
     }
 }
 
-fn decoding_key_from_public_jwk(
+pub(super) fn decoding_key_from_public_jwk(
     key: &Value,
     algorithm: jsonwebtoken::Algorithm,
 ) -> Option<jsonwebtoken::DecodingKey> {
@@ -475,7 +475,11 @@ fn decoding_key_from_public_jwk(
             {
                 return None;
             }
-            jsonwebtoken::DecodingKey::from_ed_components(key.get("x")?.as_str()?).ok()
+            let x = key.get("x")?.as_str()?;
+            if URL_SAFE_NO_PAD.decode(x).ok()?.len() != 32 {
+                return None;
+            }
+            jsonwebtoken::DecodingKey::from_ed_components(x).ok()
         }
         jsonwebtoken::Algorithm::RS256 | jsonwebtoken::Algorithm::PS256 => {
             if key.get("kty").and_then(Value::as_str) != Some("RSA") {
@@ -497,11 +501,14 @@ fn decoding_key_from_public_jwk(
             {
                 return None;
             }
-            jsonwebtoken::DecodingKey::from_ec_components(
-                key.get("x")?.as_str()?,
-                key.get("y")?.as_str()?,
-            )
-            .ok()
+            let x = key.get("x")?.as_str()?;
+            let y = key.get("y")?.as_str()?;
+            if URL_SAFE_NO_PAD.decode(x).ok()?.len() != 32
+                || URL_SAFE_NO_PAD.decode(y).ok()?.len() != 32
+            {
+                return None;
+            }
+            jsonwebtoken::DecodingKey::from_ec_components(x, y).ok()
         }
         _ => None,
     }

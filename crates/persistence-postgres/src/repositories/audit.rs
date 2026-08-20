@@ -25,6 +25,12 @@ use crate::{
     },
 };
 
+#[derive(diesel::QueryableByName)]
+struct BackchannelLogoutInsertRow {
+    #[diesel(sql_type = diesel::sql_types::Uuid)]
+    id: Uuid,
+}
+
 #[derive(Clone)]
 pub struct AuditRepository {
     pool: DbPool,
@@ -174,21 +180,32 @@ impl AuditRepository {
         connection
             .transaction::<(), diesel::result::Error, _>(async |connection| {
                 for delivery in deliveries {
-                    diesel::insert_into(backchannel_logout_deliveries::table)
-                        .values((
-                            backchannel_logout_deliveries::tenant_id.eq(delivery.tenant_id),
-                            backchannel_logout_deliveries::client_id.eq(delivery.client_id),
-                            backchannel_logout_deliveries::client_public_id
-                                .eq(&delivery.client_public_id),
-                            backchannel_logout_deliveries::logout_uri.eq(&delivery.logout_uri),
-                            backchannel_logout_deliveries::logout_token.eq(&delivery.logout_token),
-                            backchannel_logout_deliveries::operation_key
-                                .eq(Some(&delivery.operation_key)),
-                            backchannel_logout_deliveries::expires_at.eq(delivery.expires_at),
-                        ))
-                        .on_conflict_do_nothing()
-                        .execute(connection)
-                        .await?;
+                    let inserted = diesel::sql_query(
+                        r#"
+                        INSERT INTO backchannel_logout_deliveries (
+                            tenant_id, client_id, client_public_id, logout_uri,
+                            logout_token, operation_key, expires_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (tenant_id, operation_key, client_id)
+                            WHERE operation_key IS NOT NULL
+                        DO UPDATE SET operation_key = EXCLUDED.operation_key
+                        RETURNING id
+                        "#,
+                    )
+                    .bind::<diesel::sql_types::Uuid, _>(delivery.tenant_id)
+                    .bind::<diesel::sql_types::Uuid, _>(delivery.client_id)
+                    .bind::<diesel::sql_types::Text, _>(&delivery.client_public_id)
+                    .bind::<diesel::sql_types::Text, _>(&delivery.logout_uri)
+                    .bind::<diesel::sql_types::Text, _>(&delivery.logout_token)
+                    .bind::<diesel::sql_types::Text, _>(&delivery.operation_key)
+                    .bind::<diesel::sql_types::Timestamptz, _>(delivery.expires_at)
+                    .get_result::<BackchannelLogoutInsertRow>(connection)
+                    .await?;
+                    // A logout JWT carries a fresh jti on every orchestration
+                    // retry. Keep the first durable delivery authoritative and
+                    // perform only a no-op update so a retry can finish session
+                    // deletion without replacing an already queued payload.
+                    let _ = inserted.id;
                 }
                 Ok(())
             })
@@ -201,6 +218,16 @@ impl AuditRepository {
         limit: i64,
         lock_timeout_seconds: i32,
     ) -> Result<Vec<BackchannelLogoutDelivery>, RepositoryError> {
+        if limit <= 0 {
+            return Err(RepositoryError::Consistency(
+                "backchannel logout claim limit must be positive".to_owned(),
+            ));
+        }
+        if lock_timeout_seconds <= 0 {
+            return Err(RepositoryError::Consistency(
+                "backchannel logout lock timeout must be positive".to_owned(),
+            ));
+        }
         let mut connection = self.connection().await?;
         diesel::sql_query(
             r#"

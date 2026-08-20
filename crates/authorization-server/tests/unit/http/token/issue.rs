@@ -646,6 +646,78 @@ fn token_issue_without_openid() -> TokenIssue {
     }
 }
 
+#[test]
+fn issuance_digest_binds_every_result_affecting_grant_identity() {
+    let client = client_with_grants(&["urn:ietf:params:oauth:grant-type:token-exchange"]);
+    let grant_key = "idempotency:stable-grant";
+    let baseline = issuance_request_digest(&client, &token_issue_without_openid(), grant_key);
+
+    let mut actor_changed = token_issue_without_openid();
+    actor_changed.actor = Some(json!({
+        "sub": "delegating-actor",
+        "client_id": "actor-client",
+    }));
+    assert_ne!(
+        issuance_request_digest(&client, &actor_changed, grant_key),
+        baseline,
+        "RFC 8693 actor identity must not reuse another actor's issued response",
+    );
+
+    let mut authorization_code_changed = token_issue_without_openid();
+    authorization_code_changed.authorization_code_hash = Some("code-hash".to_owned());
+    assert_ne!(
+        issuance_request_digest(&client, &authorization_code_changed, grant_key),
+        baseline,
+        "authorization-code consumption identity must be bound to the issuance",
+    );
+
+    let mut refresh_policy_changed = token_issue_without_openid();
+    refresh_policy_changed.refresh_token_policy = RefreshTokenPolicy::Rotate {
+        family_id: Uuid::now_v7(),
+        rotated_from_id: Uuid::now_v7(),
+    };
+    assert_ne!(
+        issuance_request_digest(&client, &refresh_policy_changed, grant_key),
+        baseline,
+        "refresh rotation identity must not reuse a non-rotation response",
+    );
+
+    let mut native_sso_changed = token_issue_without_openid();
+    native_sso_changed.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: "device-secret".to_owned(),
+        ds_hash: "device-secret-hash".to_owned(),
+        sid: "native-sso-session".to_owned(),
+    });
+    assert_ne!(
+        issuance_request_digest(&client, &native_sso_changed, grant_key),
+        baseline,
+        "Native SSO device binding must not reuse an ordinary token response",
+    );
+
+    let native_sso_digest = issuance_request_digest(&client, &native_sso_changed, grant_key);
+    native_sso_changed.native_sso = Some(NativeSsoTokenBinding {
+        device_secret: "fresh-device-secret-from-retry".to_owned(),
+        ds_hash: "fresh-device-secret-hash-from-retry".to_owned(),
+        sid: "native-sso-session".to_owned(),
+    });
+    assert_eq!(
+        issuance_request_digest(&client, &native_sso_changed, grant_key),
+        native_sso_digest,
+        "server-generated Native SSO secret material must not break idempotent retries",
+    );
+
+    native_sso_changed
+        .native_sso
+        .as_mut()
+        .expect("Native SSO binding should remain present")
+        .sid = "different-native-sso-session".to_owned();
+    assert_ne!(
+        issuance_request_digest(&client, &native_sso_changed, grant_key),
+        native_sso_digest,
+        "a different Native SSO session must not reuse another session's response",
+    );
+}
+
 fn oauth_error_code(response: &HttpResponse) -> String {
     response
         .extensions()

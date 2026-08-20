@@ -5,6 +5,6 @@
   "database_restore": "backup",
   "irreversible_migration": true,
   "minimum_supported_version": "0.1.8",
-  "migration_floor": "20260816000200",
-  "rationale": "TOTP envelope encryption, tenant-resource ownership, token-issuance records, run-token fences, and retirement of legacy control state create authoritative data older releases cannot enforce. The previous application therefore cannot resume safely. Recovery requires the controller-created, verified pre-update database backup; artifact-only rollback is blocked across this barrier."
+  "migration_floor": "20260820000100",
+  "rationale": "TOTP envelope encryption, tenant-resource ownership, token-issuance records, run-token fences, retirement of legacy control state, and tenant-bound logout delivery identity create authoritative data older releases cannot enforce. The previous application therefore cannot resume safely. Recovery requires the controller-created, verified pre-update database backup; artifact-only rollback is blocked across this barrier."
 }

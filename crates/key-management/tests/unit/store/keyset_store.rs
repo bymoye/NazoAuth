@@ -763,6 +763,13 @@ async fn loader_distinguishes_same_algorithm_prepublished_from_auxiliary_active_
     write_local_key_entry(&keys_dir, "active", "EdDSA", "active.pem", now).await;
     write_local_key_entry(&keys_dir, "candidate", "EdDSA", "candidate.pem", now).await;
     write_local_key_entry(&keys_dir, "auxiliary", "RS256", "auxiliary.pem", now).await;
+    let external_material = generate_key_material(jsonwebtoken::Algorithm::ES256).unwrap();
+    let external_public_jwk = public_jwk_from_private_der(
+        "external-candidate",
+        jsonwebtoken::Algorithm::ES256,
+        &external_material.private_pkcs8_der,
+    )
+    .unwrap();
     write_json_atomic(
         &keys_dir.join("keyset.json"),
         &json!({
@@ -771,7 +778,7 @@ async fn loader_distinguishes_same_algorithm_prepublished_from_auxiliary_active_
                 {"kid":"active","alg":"EdDSA","file":"active.pem","created_at":timestamp(now),"retire_at":null},
                 {"kid":"candidate","alg":"EdDSA","file":"candidate.pem","created_at":timestamp(now),"retire_at":null},
                 {"kid":"auxiliary","alg":"RS256","file":"auxiliary.pem","created_at":timestamp(now),"retire_at":null},
-                {"kid":"external-candidate","alg":"ES256","backend":"external-command","key_ref":"kms://candidate","public_jwk":{"kty":"EC","crv":"P-256","x":"eA","y":"eQ","kid":"external-candidate","alg":"ES256","use":"sig"},"created_at":timestamp(now),"retire_at":null}
+                {"kid":"external-candidate","alg":"ES256","backend":"external-command","key_ref":"kms://candidate","public_jwk":external_public_jwk,"created_at":timestamp(now),"retire_at":null}
             ]
         }),
     )

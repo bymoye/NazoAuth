@@ -959,7 +959,7 @@ async fn audit_repository_records_scim_use_and_drives_logout_outbox() {
         .enqueue_backchannel_logout(
             tenant_id,
             fixture.client_id,
-            "audit-repository-client",
+            &fixture.client_public_id,
             "https://client.example/backchannel-logout",
             &logout_token,
             chrono::Utc::now() + chrono::Duration::minutes(2),
@@ -1090,7 +1090,7 @@ async fn stale_logout_worker_cannot_complete_or_fail_a_reclaimed_delivery() {
         .enqueue_backchannel_logout(
             tenant_id,
             fixture.client_id,
-            &format!("logout-reclaim-{}", Uuid::now_v7()),
+            &fixture.client_public_id,
             "https://client.example/backchannel-logout",
             &logout_token,
             chrono::Utc::now() + chrono::Duration::minutes(2),

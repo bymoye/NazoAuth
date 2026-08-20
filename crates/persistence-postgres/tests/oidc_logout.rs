@@ -23,6 +23,12 @@ struct CountRow {
     count: i64,
 }
 
+#[derive(QueryableByName)]
+struct LogoutTokenRow {
+    #[diesel(sql_type = Text)]
+    logout_token: String,
+}
+
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -244,6 +250,59 @@ async fn logout_fanout_is_tenant_scoped_idempotent_and_atomic() {
     .await
     .expect("idempotent logout count should load");
     assert_eq!(count.count, 1);
+
+    let mut conflicting_retry = delivery.clone();
+    conflicting_retry.logout_token = format!("different-logout-token-{suffix}");
+    conflicting_retry.expires_at += chrono::Duration::seconds(30);
+    outbox
+        .enqueue_idempotent_backchannel_logout_batch(std::slice::from_ref(&conflicting_retry))
+        .await
+        .expect("a retry with a freshly signed logout token should reuse the durable delivery");
+    let stored = sql_query(
+        "SELECT logout_token FROM backchannel_logout_deliveries WHERE operation_key = $1",
+    )
+    .bind::<Text, _>(&operation_key)
+    .get_result::<LogoutTokenRow>(&mut connection)
+    .await
+    .expect("idempotent logout payload should load");
+    assert_eq!(
+        stored.logout_token, delivery.logout_token,
+        "the first durable logout payload must remain authoritative across retries"
+    );
+
+    let mut cross_tenant_client = delivery.clone();
+    cross_tenant_client.operation_key = format!("logout-cross-tenant-{suffix}");
+    cross_tenant_client.client_id = foreign_client;
+    cross_tenant_client.client_public_id = format!("logout-client-{suffix}-foreign");
+    assert!(
+        outbox
+            .enqueue_idempotent_backchannel_logout_batch(
+                std::slice::from_ref(&cross_tenant_client,)
+            )
+            .await
+            .is_err(),
+        "a valid client from another tenant must not enter this tenant's logout outbox"
+    );
+
+    let mut wrong_public_id = delivery.clone();
+    wrong_public_id.operation_key = format!("logout-wrong-public-id-{suffix}");
+    wrong_public_id.client_public_id = "different-public-client-id".to_owned();
+    assert!(
+        outbox
+            .enqueue_idempotent_backchannel_logout_batch(std::slice::from_ref(&wrong_public_id))
+            .await
+            .is_err(),
+        "the durable client UUID and public client identifier must name the same client"
+    );
+
+    assert!(
+        outbox.claim_due_backchannel_logout(0, 30).await.is_err(),
+        "a zero claim limit must fail before touching the queue"
+    );
+    assert!(
+        outbox.claim_due_backchannel_logout(1, 0).await.is_err(),
+        "a zero lock timeout must not permit immediate lease takeover"
+    );
 
     let rollback_key = format!("logout-rollback-{suffix}");
     let mut valid = delivery;

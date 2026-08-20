@@ -25,6 +25,12 @@ export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 
 COVERAGE_DIR="${CARGO_TARGET_DIR%/}/llvm-cov-target"
 BIN_DIR="${CARGO_TARGET_DIR%/}/debug"
+RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+case "$RUST_HOST" in
+  *-windows-*) EXECUTABLE_SUFFIX=".exe" ;;
+  *) EXECUTABLE_SUFFIX="" ;;
+esac
+SERVER_BIN="$BIN_DIR/nazoauth$EXECUTABLE_SUFFIX"
 PYTHON_BIN="${PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -330,14 +336,14 @@ cargo test --locked -p nazo-postgres --test migrations \
 cargo build --locked --workspace --all-features --bin nazoauth
 
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
-  LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
+LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$SERVER_BIN" server &
 SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
   RUNTIME_INSTANCE_ID='codecov-signed' \
   INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR" \
   BIND='127.0.0.1:18001' \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
-  "$BIN_DIR/nazoauth" server &
+  "$SERVER_BIN" server &
 SIGNED_SERVER_PID=$!
 
 for _ in $(seq 1 60); do
@@ -388,23 +394,9 @@ for test_name in "${COVERAGE_LIVE_TESTS[@]}"; do
   cargo test --locked -p nazo-oauth-server --lib "$test_name" -- --ignored
 done
 
-# Let cargo-llvm-cov resolve the complete workspace object graph as an
-# independent report. `show-env` deliberately points cargo-llvm-cov at the
-# Cargo target root so it can discover every instrumented object there, while
-# this script keeps raw profiles in a dedicated child directory. Expose those
-# same profiles at the target root with hard links: this preserves one set of
-# bytes, keeps the explicit per-object export below independent, and avoids
-# silently dropping integration-test copies of library code.
-while IFS= read -r -d '' profile; do
-  link="$CARGO_TARGET_DIR/workspace-$(basename "$profile")"
-  [[ ! -e "$link" ]]
-  ln "$profile" "$link"
-done < <(find "$COVERAGE_DIR" -maxdepth 1 -type f -name '*.profraw' -print0)
-cargo llvm-cov report --locked --lcov \
-  --ignore-filename-regex "$IGNORE_REGEX" \
-  --output-path lcov-workspace-tests.info
-
-RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+# Export exactly the test executables recorded by Cargo's JSON artifact stream.
+# This is the authoritative workspace object graph on every host, including
+# Windows where inferring a binary path without Cargo's `.exe` suffix fails.
 LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$RUST_HOST/bin"
 mapfile -t SERVER_PROFRAWS < <(
   find "$COVERAGE_DIR" -type f \
@@ -445,13 +437,14 @@ for line in manifest.read_text(encoding="utf-8").splitlines():
     if executable and message.get("profile", {}).get("test") is True:
         executables.add(executable)
 
-for executable in sorted(executables):
-    print(executable)
+payload = "\n".join(sorted(executables))
+if payload:
+    sys.stdout.buffer.write(payload.encode("utf-8") + b"\n")
 PY
 )
 
-if [[ ! -x "$BIN_DIR/nazoauth" ]]; then
-  echo "Instrumented server binary was not found at $BIN_DIR/nazoauth." >&2
+if [[ ! -x "$SERVER_BIN" ]]; then
+  echo "Instrumented server binary was not found at $SERVER_BIN." >&2
   exit 1
 fi
 if [[ "${#test_objects[@]}" -eq 0 ]]; then
@@ -462,7 +455,7 @@ fi
 "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
   --instr-profile "$COVERAGE_DIR/server.profdata" \
   --ignore-filename-regex "$IGNORE_REGEX" \
-  "$BIN_DIR/nazoauth" > lcov-e2e.info
+  "$SERVER_BIN" > lcov-e2e.info
 
 # Some integration tests deliberately execute the production binary as a child
 # process. Those profiles belong to the test run, not the long-lived E2E server
@@ -471,7 +464,7 @@ fi
 "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
   --instr-profile "$COVERAGE_DIR/tests.profdata" \
   --ignore-filename-regex "$IGNORE_REGEX" \
-  "$BIN_DIR/nazoauth" > lcov-process-tests.info
+  "$SERVER_BIN" > lcov-process-tests.info
 
 test_reports=()
 test_report_index=0
@@ -487,4 +480,4 @@ done
 "$PYTHON_BIN" scripts/merge_lcov.py \
   --source-root "$PWD" \
   --output lcov.info \
-  lcov-workspace-tests.info lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"
+  lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"
