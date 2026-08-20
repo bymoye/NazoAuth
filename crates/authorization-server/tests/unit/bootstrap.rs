@@ -393,6 +393,25 @@ fn direct_tls_listener_rejects_malformed_or_unsafe_material_and_reload_intervals
             .contains("contains no certificates")
     );
 
+    let malformed_der_root =
+        std::env::temp_dir().join(format!("nazoauth-tls-invalid-der-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&malformed_der_root).unwrap();
+    let malformed_der = write_test_tls_material(&malformed_der_root);
+    std::fs::write(
+        &malformed_der.certificate_path,
+        "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let config = direct_tls_config(&malformed_der);
+    let settings = Settings::from_config(&config).unwrap();
+    assert!(
+        direct_tls_listeners(&config, &settings)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("failed to parse TLS leaf certificate")
+    );
+
     let directory_key_root = std::env::temp_dir().join(format!(
         "nazoauth-tls-directory-key-{}",
         uuid::Uuid::now_v7()
@@ -447,6 +466,7 @@ fn direct_tls_listener_rejects_malformed_or_unsafe_material_and_reload_intervals
         empty_ca_root,
         oversized_ca_root,
         empty_chain_root,
+        malformed_der_root,
         directory_key_root,
         interval_root,
     ] {
