@@ -573,6 +573,48 @@ fn direct_tls_listener_rejects_a_mismatched_private_key() {
 }
 
 #[test]
+fn direct_tls_listener_rejects_an_unrelated_issuer_chain() {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose,
+        PKCS_ECDSA_P256_SHA256,
+    };
+
+    let root = std::env::temp_dir().join(format!(
+        "nazoauth-tls-unrelated-chain-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let material = write_test_tls_material(&root);
+    let original_chain = std::fs::read_to_string(&material.certificate_path).unwrap();
+    let leaf = original_chain
+        .split_inclusive("-----END CERTIFICATE-----")
+        .next()
+        .expect("test server chain should contain a leaf certificate");
+
+    let unrelated_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let mut unrelated_params =
+        CertificateParams::new(vec!["Unrelated NazoAuth test CA".to_owned()]).unwrap();
+    unrelated_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    unrelated_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let unrelated_ca = CertifiedIssuer::self_signed(unrelated_params, unrelated_key).unwrap();
+    std::fs::write(
+        &material.certificate_path,
+        format!("{leaf}\n{}", unrelated_ca.pem()),
+    )
+    .unwrap();
+
+    let config = direct_tls_config(&material);
+    let settings = Settings::from_config(&config).unwrap();
+    let error = direct_tls_listeners(&config, &settings).err().unwrap();
+    assert!(
+        error.to_string().contains("TLS certificate chain")
+            && error.to_string().contains("is invalid"),
+        "an unrelated issuer must be rejected before the TLS identity is published: {error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn direct_tls_generation_rejects_partial_material_and_retains_last_known_good() {
     let root = std::env::temp_dir().join(format!("nazoauth-tls-reload-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir(&root).unwrap();

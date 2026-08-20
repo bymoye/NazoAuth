@@ -503,11 +503,16 @@ pub(super) fn decoding_key_from_public_jwk(
             }
             let x = key.get("x")?.as_str()?;
             let y = key.get("y")?.as_str()?;
-            if URL_SAFE_NO_PAD.decode(x).ok()?.len() != 32
-                || URL_SAFE_NO_PAD.decode(y).ok()?.len() != 32
-            {
+            let x_bytes = URL_SAFE_NO_PAD.decode(x).ok()?;
+            let y_bytes = URL_SAFE_NO_PAD.decode(y).ok()?;
+            if x_bytes.len() != 32 || y_bytes.len() != 32 {
                 return None;
             }
+            let mut point = [0_u8; 65];
+            point[0] = 4;
+            point[1..33].copy_from_slice(&x_bytes);
+            point[33..].copy_from_slice(&y_bytes);
+            p256::PublicKey::from_sec1_bytes(&point).ok()?;
             jsonwebtoken::DecodingKey::from_ec_components(x, y).ok()
         }
         _ => None,

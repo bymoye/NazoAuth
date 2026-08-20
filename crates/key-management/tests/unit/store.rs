@@ -227,6 +227,7 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
 
 #[tokio::test]
 async fn external_key_registration_rejects_unusable_algorithm_material() {
+    let off_curve_coordinate = URL_SAFE_NO_PAD.encode([0_u8; 32]);
     for (label, algorithm, public_jwk) in [
         (
             "rsa",
@@ -242,6 +243,14 @@ async fn external_key_registration_rejects_unusable_algorithm_material() {
             json!({
                 "kty":"EC","crv":"P-256","kid":"external","alg":"ES256","use":"sig",
                 "x":"AQ","y":"AQ"
+            }),
+        ),
+        (
+            "ec-off-curve",
+            jsonwebtoken::Algorithm::ES256,
+            json!({
+                "kty":"EC","crv":"P-256","kid":"external","alg":"ES256","use":"sig",
+                "x":off_curve_coordinate.clone(),"y":off_curve_coordinate
             }),
         ),
         (
