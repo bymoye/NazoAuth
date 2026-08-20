@@ -607,10 +607,25 @@ fn operator_state_paths_reject_symlink_roots_files_and_temporaries() {
     fs::create_dir(&denied).unwrap();
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
     let denied_child = denied.join("state");
-    assert!(regular_state_file_present(&denied_child, "denied state").is_err());
-    assert!(state_path_present(&denied_child).is_err());
+    let kernel_denies_traversal = matches!(
+        fs::symlink_metadata(&denied_child),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+    );
+    let regular_file_result = regular_state_file_present(&denied_child, "denied state");
+    let path_result = state_path_present(&denied_child);
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
     fs::remove_dir_all(directory).unwrap();
+
+    if kernel_denies_traversal {
+        assert!(regular_file_result.is_err());
+        assert!(path_result.is_err());
+    } else {
+        // Root and processes with DAC override capabilities can traverse a
+        // mode-000 directory. In that environment the missing child is a real
+        // NotFound result, which these helpers must preserve as absence.
+        assert!(!regular_file_result.unwrap());
+        assert!(!path_result.unwrap());
+    }
 }
 
 #[test]
