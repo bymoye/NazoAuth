@@ -64,7 +64,7 @@ jobs:
         with:
           components: llvm-tools-preview, rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: coverage
           workspaces: ". -> target/codecov-coverage"
@@ -76,9 +76,9 @@ jobs:
         run: python -m pip install --require-hashes -r requirements/codecov.txt
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@f7446eecb41674ffe9e1e12a2bc5e69a9dec09d3 # cargo-llvm-cov
+        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.0
 
       - name: Verify deterministic LCOV union
         run: python -m unittest tests.unit.test_merge_lcov tests.unit.test_check_patch_coverage
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: github.event_name != 'pull_request'
-        uses: codecov/codecov-action@a99c28d3f0da835de33ff2feb2e15691c7b9641f # v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: lcov.info
           disable_search: true

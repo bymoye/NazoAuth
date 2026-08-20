@@ -180,12 +180,10 @@ async fn security_headers_are_added_to_core_responses() {
 async fn bundled_ui_serves_assets_and_spa_routes_without_masking_missing_assets() {
     let root = std::env::temp_dir().join(format!("nazoauth-ui-test-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(root.join("assets")).unwrap();
-    std::fs::write(
-        root.join("index.html"),
-        "<!doctype html><title>NazoAuth</title>",
-    )
-    .unwrap();
-    std::fs::write(root.join("assets/app.js"), "console.log('nazoauth');").unwrap();
+    let index_body = "<!doctype html><title>NazoAuth</title>";
+    let asset_body = "console.log('nazoauth');";
+    std::fs::write(root.join("index.html"), index_body).unwrap();
+    std::fs::write(root.join("assets/app.js"), asset_body).unwrap();
 
     let app = actix_test::init_service(
         App::new()
@@ -194,7 +192,7 @@ async fn bundled_ui_serves_assets_and_spa_routes_without_masking_missing_assets(
     )
     .await;
 
-    for path in ["/ui/", "/ui/auth", "/ui/assets/app.js"] {
+    for path in ["/ui/", "/ui/auth"] {
         let response =
             actix_test::call_service(&app, actix_test::TestRequest::get().uri(path).to_request())
                 .await;
@@ -206,7 +204,82 @@ async fn bundled_ui_serves_assets_and_spa_routes_without_masking_missing_assets(
                 .unwrap(),
             "nosniff"
         );
+        assert_eq!(actix_test::read_body(response).await, index_body.as_bytes());
     }
+
+    let asset = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::get()
+            .uri("/ui/assets/app.js")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(asset.status(), actix_web::http::StatusCode::OK);
+    assert!(
+        !asset
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .is_empty()
+    );
+    let asset_etag = asset.headers().get(header::ETAG).unwrap().clone();
+    assert_eq!(actix_test::read_body(asset).await, asset_body.as_bytes());
+
+    let range = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::get()
+            .uri("/ui/assets/app.js")
+            .insert_header((header::RANGE, "bytes=0-6"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(range.status(), actix_web::http::StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        range.headers().get(header::CONTENT_RANGE).unwrap(),
+        format!("bytes 0-6/{}", asset_body.len()).as_str()
+    );
+    assert_eq!(
+        actix_test::read_body(range).await,
+        &asset_body.as_bytes()[..7]
+    );
+
+    let not_modified = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::get()
+            .uri("/ui/assets/app.js")
+            .insert_header((header::IF_NONE_MATCH, asset_etag))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        not_modified.status(),
+        actix_web::http::StatusCode::NOT_MODIFIED
+    );
+
+    let head_builder = HttpServer::new({
+        let root = root.clone();
+        move || App::new().service(ui_static_files(root.clone()))
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let head_address = head_builder.addrs()[0];
+    let head_server = head_builder.run();
+    let head_handle = head_server.handle();
+    actix_web::rt::spawn(head_server);
+    let head = reqwest::Client::new()
+        .head(format!("http://{head_address}/ui/assets/app.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        head.headers().get("content-length").unwrap(),
+        asset_body.len().to_string().as_str()
+    );
+    assert!(head.bytes().await.unwrap().is_empty());
+    head_handle.stop(true).await;
 
     let missing_asset = actix_test::call_service(
         &app,
@@ -218,6 +291,18 @@ async fn bundled_ui_serves_assets_and_spa_routes_without_masking_missing_assets(
     assert_eq!(
         missing_asset.status(),
         actix_web::http::StatusCode::NOT_FOUND
+    );
+
+    std::fs::remove_file(root.join("index.html")).unwrap();
+    let missing_index = actix_test::try_call_service(
+        &app,
+        actix_test::TestRequest::get().uri("/ui/auth").to_request(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        missing_index.as_error::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotFound
     );
 
     std::fs::remove_dir_all(root).unwrap();

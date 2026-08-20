@@ -12,7 +12,7 @@ services:
       nazo_oauth_net:
 
   runtime-init:
-    image: docker.io/library/alpine:3.22
+    image: docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
     user: "0:0"
     volumes:
       - keys_data:/state/keys
@@ -126,7 +126,7 @@ services:
           --request-sha256 /tmp/operator/request.sha256
 
   postgres:
-    image: docker.io/library/postgres:18
+    image: docker.io/library/postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
     restart: unless-stopped
     environment:
       POSTGRES_DB: oauth
@@ -147,7 +147,7 @@ services:
       nazo_oauth_net:
 
   valkey:
-    image: docker.io/valkey/valkey:8-alpine
+    image: docker.io/valkey/valkey:8-alpine@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
     restart: unless-stopped
     command:
       [

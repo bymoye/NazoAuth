@@ -32,7 +32,7 @@ flate2.workspace = true
 fs2.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 mdoc-rs.workspace = true
 coset.workspace = true
 ciborium.workspace = true

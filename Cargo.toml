@@ -29,7 +29,7 @@ repository = "https://github.com/nazozero/NazoAuth"
 
 [workspace.dependencies]
 actix-cors = "0.7.1"
-actix-files = "0.6.10"
+actix-files = "0.7.0"
 actix-web = "4.14.0"
 actix-tls = "3.4.0"
 anyhow = "1.0.103"
@@ -54,7 +54,7 @@ futures-executor = "0.3.32"
 hmac = "0.13.0"
 jsonwebtoken = { version = "11.0.0", default-features = false }
 mdoc-rs = { version = "0.2.0", default-features = false, features = ["issue"] }
-coset = "0.3.8"
+coset = "0.4.2"
 ciborium = "0.2.2"
 lettre = { version = "0.11.22", default-features = false }
 nazo-auth = { version = "0.1.4", path = "crates/authorization-server-core" }
@@ -72,7 +72,7 @@ nazo-resource-server = { version = "0.1.4", path = "crates/resource-server" }
 nazo-runtime-modules = { version = "0.1.4", path = "crates/runtime-capabilities" }
 nazo-scim-events = { version = "0.1.4", path = "crates/scim-events" }
 nazo-valkey = { version = "0.1.4", path = "crates/state-store-valkey" }
-pem = "3.0.6"
+pem = "4.0.0"
 pkcs8 = { version = "0.11.0", features = ["alloc"] }
 p256 = "0.14.0"
 passkey-auth = "0.1.3"
@@ -114,3 +114,9 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# Reviewed Actix h2 0.4 port, pinned to an immutable upstream fork revision.
+[patch.crates-io]
+actix-http = { git = "https://github.com/nazozero/actix-web", rev = "cad2a2d5fc9a994438021711460673649e27fd1d" }
+# Reviewed mdoc-rs coset 0.4 port, pinned to an immutable upstream fork revision.
+mdoc-rs = { git = "https://github.com/nazozero/mdoc-rs", rev = "8e3b529ae1be2d9b5c74baa1f7b7e7abcf958020" }

@@ -1,7 +1,7 @@
-FROM docker.io/grafana/k6:2.1.0 AS k6
-FROM docker.io/docker:27-cli AS docker-cli
+FROM docker.io/grafana/k6:2.1.0@sha256:65c920dc067d5e2e00befbf982af6ad6ad0117034e8b1c65817c7975c52d4669 AS k6
+FROM docker.io/docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS docker-cli
 
-FROM docker.io/library/rust:1-bookworm
+FROM docker.io/library/rust:1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_TERM_COLOR=always
@@ -40,7 +40,7 @@ RUN mkdir -p /run/sshd \
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
         "argon2-cffi==25.1.0" \
         "cryptography==46.0.3" \
-        "psycopg[binary]==3.3.2" \
+        "psycopg[binary]==3.3.4" \
         "redis==7.1.0"
 
 RUN mkdir -p /usr/local/cargo /usr/local/libexec/docker/cli-plugins
