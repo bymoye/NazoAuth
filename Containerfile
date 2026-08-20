@@ -9,7 +9,7 @@ WORKDIR /app
 RUN mkdir -p /usr/local/cargo \
     && printf '[registries.crates-io]\nprotocol = "sparse"\n' > /usr/local/cargo/config.toml \
     && apt-get update \
-    && apt-get install -y --no-install-recommends make perl \
+    && apt-get install -y --no-install-recommends ca-certificates git make perl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./
