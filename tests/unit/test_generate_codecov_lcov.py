@@ -76,6 +76,10 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
         self.assertIn('TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"', self.source)
         self.assertIn('sys.stdout.buffer.write(payload.encode("utf-8") + b"\\n")', self.source)
         self.assertIn('"$object" > "$test_report"', self.source)
+        self.assertIn('PRIMARY_SERVER_PORT="${CODECOV_PRIMARY_SERVER_PORT:-18000}"', self.source)
+        self.assertIn('SIGNED_SERVER_PORT="${CODECOV_SIGNED_SERVER_PORT:-18001}"', self.source)
+        self.assertIn('listener.bind(("127.0.0.1", int(raw_port)))', self.source)
+        self.assertIn('BIND="127.0.0.1:${SIGNED_SERVER_PORT}"', self.source)
         self.assertNotIn("cargo llvm-cov report", self.source)
         self.assertNotIn("lcov-workspace-tests.info", self.source)
 

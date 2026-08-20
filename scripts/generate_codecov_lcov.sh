@@ -73,6 +73,8 @@ POSTGRES_HOST="${CODECOV_POSTGRES_HOST:-127.0.0.1}"
 POSTGRES_PORT="${CODECOV_POSTGRES_PORT:-15432}"
 VALKEY_HOST="${CODECOV_VALKEY_HOST:-127.0.0.1}"
 VALKEY_PORT="${CODECOV_VALKEY_PORT:-16383}"
+PRIMARY_SERVER_PORT="${CODECOV_PRIMARY_SERVER_PORT:-18000}"
+SIGNED_SERVER_PORT="${CODECOV_SIGNED_SERVER_PORT:-18001}"
 if [[ -n "${CODECOV_DOCKER_NETWORK:-}" ]]; then
   echo "refusing CODECOV_DOCKER_NETWORK override; coverage owns its loopback ports" >&2
   exit 2
@@ -93,6 +95,51 @@ case "$VALKEY_PORT" in
   16383) ;;
   *) echo "refusing CODECOV_VALKEY_PORT outside the script-owned fixture" >&2; exit 2 ;;
 esac
+
+validate_server_port() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]{3,4}$ ]]; then
+    echo "$name must be an unprivileged TCP port between 1024 and 65535" >&2
+    exit 2
+  fi
+  local numeric_value=$((10#$value))
+  if (( numeric_value < 1024 || numeric_value > 65535 )); then
+    echo "$name must be an unprivileged TCP port between 1024 and 65535" >&2
+    exit 2
+  fi
+}
+validate_server_port CODECOV_PRIMARY_SERVER_PORT "$PRIMARY_SERVER_PORT"
+validate_server_port CODECOV_SIGNED_SERVER_PORT "$SIGNED_SERVER_PORT"
+if [[ "$PRIMARY_SERVER_PORT" == "$SIGNED_SERVER_PORT"
+  || "$PRIMARY_SERVER_PORT" == "$POSTGRES_PORT"
+  || "$PRIMARY_SERVER_PORT" == "$VALKEY_PORT"
+  || "$SIGNED_SERVER_PORT" == "$POSTGRES_PORT"
+  || "$SIGNED_SERVER_PORT" == "$VALKEY_PORT" ]]
+then
+  echo "coverage server and fixture ports must be distinct" >&2
+  exit 2
+fi
+"$PYTHON_BIN" - "$PRIMARY_SERVER_PORT" "$SIGNED_SERVER_PORT" <<'PY'
+import socket
+import sys
+
+sockets = []
+try:
+    for raw_port in sys.argv[1:]:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", int(raw_port)))
+        sockets.append(listener)
+except OSError as error:
+    raise SystemExit(f"coverage server port is unavailable: {error}") from error
+finally:
+    for listener in sockets:
+        listener.close()
+PY
+PRIMARY_SERVER_URL="http://127.0.0.1:${PRIMARY_SERVER_PORT}"
+SIGNED_SERVER_URL="http://127.0.0.1:${SIGNED_SERVER_PORT}"
 
 cleanup() {
   if [[ -n "$SIGNED_SERVER_PID" ]]; then
@@ -172,9 +219,9 @@ export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"
 WORKSPACE_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_workspace_test"
 WORKSPACE_VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/1"
 export VALKEY_COMMAND_TIMEOUT_MS='1000'
-export BIND='127.0.0.1:18000'
-export ISSUER='http://127.0.0.1:18000'
-export MTLS_ENDPOINT_BASE_URL='http://127.0.0.1:18000'
+export BIND="127.0.0.1:${PRIMARY_SERVER_PORT}"
+export ISSUER="$PRIMARY_SERVER_URL"
+export MTLS_ENDPOINT_BASE_URL="$PRIMARY_SERVER_URL"
 export FRONTEND_BASE_URL='http://127.0.0.1:3000'
 export CORS_ALLOWED_ORIGINS='http://127.0.0.1:3000'
 export COOKIE_SECURE='false'
@@ -210,9 +257,9 @@ PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"
 SIGNED_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-signed"
 export INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR"
 # 覆盖率 E2E 使用与服务端相同的 provider registry，不再维护单 provider 配置入口。
-export FEDERATION_PROVIDER_CONFIGS='[{"provider_id":"codecov-oidc","enabled":true,"display_name":"Codecov OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"codecov-oidc-client","client_secret":"codecov-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/codecov-oidc/callback","scopes":"openid email profile"}]'
+export FEDERATION_PROVIDER_CONFIGS="[{\"provider_id\":\"codecov-oidc\",\"enabled\":true,\"display_name\":\"Codecov OIDC\",\"adapter_type\":\"oidc\",\"issuer\":\"https://issuer.example\",\"authorization_endpoint\":\"https://issuer.example/authorize\",\"token_endpoint\":\"https://issuer.example/token\",\"jwks_url\":\"https://issuer.example/jwks\",\"client_id\":\"codecov-oidc-client\",\"client_secret\":\"codecov-oidc-secret\",\"redirect_uri\":\"${PRIMARY_SERVER_URL}/auth/federation/codecov-oidc/callback\",\"scopes\":\"openid email profile\"}]"
 export E2E_OIDC_PROVIDER_ID='codecov-oidc'
-export E2E_OIDC_REDIRECT_URI='http://127.0.0.1:18000/auth/federation/codecov-oidc/callback'
+export E2E_OIDC_REDIRECT_URI="${PRIMARY_SERVER_URL}/auth/federation/codecov-oidc/callback"
 export FEDERATION_SAML_GATEWAY_ENABLED='true'
 export FEDERATION_SAML_GATEWAY_ISSUER='codecov-saml-gateway'
 export FEDERATION_SAML_GATEWAY_AUDIENCE='nazo-oauth-codecov'
@@ -341,21 +388,21 @@ SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
   RUNTIME_INSTANCE_ID='codecov-signed' \
   INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR" \
-  BIND='127.0.0.1:18001' \
+  BIND="127.0.0.1:${SIGNED_SERVER_PORT}" \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
   "$SERVER_BIN" server &
 SIGNED_SERVER_PID=$!
 
 for _ in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:18000/health >/dev/null \
-    && curl -fsS http://127.0.0.1:18001/health >/dev/null
+  if curl -fsS "$PRIMARY_SERVER_URL/health" >/dev/null \
+    && curl -fsS "$SIGNED_SERVER_URL/health" >/dev/null
   then
     break
   fi
   sleep 2
 done
-curl -fsS http://127.0.0.1:18000/health >/dev/null
-curl -fsS http://127.0.0.1:18001/health >/dev/null
+curl -fsS "$PRIMARY_SERVER_URL/health" >/dev/null
+curl -fsS "$SIGNED_SERVER_URL/health" >/dev/null
 
 kill -INT "$SIGNED_SERVER_PID"
 wait "$SIGNED_SERVER_PID" || true

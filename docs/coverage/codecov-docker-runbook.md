@@ -43,6 +43,10 @@ if ($LASTEXITCODE -ne 0) { throw "Coverage generation failed" }
 - If either fixed port is already in use, stop the conflicting process or
   container before starting coverage; do not redirect the script to an external
   database or Valkey instance.
+- The two loopback HTTP ports default to 18000 and 18001. On a shared validation
+  host, set `CODECOV_PRIMARY_SERVER_PORT` and `CODECOV_SIGNED_SERVER_PORT` to two
+  distinct free unprivileged ports. The script validates both ports before it
+  creates fixtures or starts a build; it never terminates an existing listener.
 - On Linux the script auto-detects `python3`; set `PYTHON` only when the desired
   interpreter is not available under the usual `python3` or `python` names.
 - Private-unit tests live under `tests/unit`. They are compiled through a minimal
