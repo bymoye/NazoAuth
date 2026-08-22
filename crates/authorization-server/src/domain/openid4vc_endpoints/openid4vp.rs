@@ -1216,7 +1216,7 @@ impl PresentationOperations for ServerPresentationOperations {
                     if attachment.context == request.evidence_context
                         && attachment.context_sha256 == context_sha256 =>
                 {
-                    attachment
+                    *attachment
                 }
                 _ => {
                     return Err(vp_error(
@@ -1378,19 +1378,19 @@ impl PresentationOperations for ServerPresentationOperations {
                 })?;
             let evidence = self
                 .store
-                .issue_verification_evidence(
+                .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
                     transaction_id,
                     receipt_id,
-                    &request.issuance_request_jti,
-                    &capability,
-                    &capability_sha256,
-                    &receipt_jws,
-                    &prepared.intent_jws,
-                    &prepared.context_sha256,
-                    &prepared.presentation_binding,
+                    issuance_request_jti: &request.issuance_request_jti,
+                    capability: &capability,
+                    capability_sha256: &capability_sha256,
+                    receipt_jws: &receipt_jws,
+                    expected_intent_jws: &prepared.intent_jws,
+                    expected_context_sha256: &prepared.context_sha256,
+                    expected_presentation_binding: &prepared.presentation_binding,
                     issued_at,
-                    expires_at,
-                )
+                    requested_expires_at: expires_at,
+                })
                 .await
                 .map_err(|error| match error {
                     nazo_openid4vp::PresentationStoreError::InvalidTransition => vp_error(

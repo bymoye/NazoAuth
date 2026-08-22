@@ -28,6 +28,20 @@ pub struct NewOpenid4vpVerificationAttachment<'a> {
     pub presentation_request_sha256: &'a str,
 }
 
+pub struct NewOpenid4vpVerificationEvidence<'a> {
+    pub transaction_id: Uuid,
+    pub receipt_id: Uuid,
+    pub issuance_request_jti: &'a str,
+    pub capability: &'a str,
+    pub capability_sha256: &'a str,
+    pub receipt_jws: &'a str,
+    pub expected_intent_jws: &'a str,
+    pub expected_context_sha256: &'a str,
+    pub expected_presentation_binding: &'a nazo_operator_protocol::Openid4vpPresentationBinding,
+    pub issued_at: DateTime<Utc>,
+    pub requested_expires_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredOpenid4vpVerificationAttachment {
     pub transaction_id: Uuid,
@@ -46,7 +60,7 @@ pub enum Openid4vpVerificationAttachmentState {
         created_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     },
-    Attached(StoredOpenid4vpVerificationAttachment),
+    Attached(Box<StoredOpenid4vpVerificationAttachment>),
     Conflict,
 }
 
@@ -194,7 +208,7 @@ impl Openid4vpRepository {
                     && existing.presentation_binding.presentation_request_sha256
                         == evidence.presentation_request_sha256 =>
             {
-                Ok(Some(existing))
+                Ok(Some(*existing))
             }
             Some(_) => Err(PresentationStoreError::InvalidTransition),
             None => Ok(None),
@@ -211,7 +225,7 @@ impl Openid4vpRepository {
             .await?
         {
             Some(Openid4vpVerificationAttachmentState::Attached(attachment)) => {
-                Ok(Some(attachment))
+                Ok(Some(*attachment))
             }
             Some(Openid4vpVerificationAttachmentState::Pending { .. }) => Ok(None),
             Some(Openid4vpVerificationAttachmentState::Conflict) | None => {
@@ -222,18 +236,21 @@ impl Openid4vpRepository {
 
     pub async fn issue_verification_evidence(
         &self,
-        transaction_id: Uuid,
-        receipt_id: Uuid,
-        issuance_request_jti: &str,
-        capability: &str,
-        capability_sha256: &str,
-        receipt_jws: &str,
-        expected_intent_jws: &str,
-        expected_context_sha256: &str,
-        expected_presentation_binding: &nazo_operator_protocol::Openid4vpPresentationBinding,
-        issued_at: DateTime<Utc>,
-        requested_expires_at: DateTime<Utc>,
+        issuance: NewOpenid4vpVerificationEvidence<'_>,
     ) -> Result<Option<IssuedOpenid4vpVerificationEvidence>, PresentationStoreError> {
+        let NewOpenid4vpVerificationEvidence {
+            transaction_id,
+            receipt_id,
+            issuance_request_jti,
+            capability,
+            capability_sha256,
+            receipt_jws,
+            expected_intent_jws,
+            expected_context_sha256,
+            expected_presentation_binding,
+            issued_at,
+            requested_expires_at,
+        } = issuance;
         let computed_capability_sha256 =
             nazo_operator_protocol::openid4vp_verification_capability_sha256(capability)
                 .map_err(|_| PresentationStoreError::InvalidTransition)?;
@@ -263,16 +280,16 @@ impl Openid4vpRepository {
         {
             return Err(PresentationStoreError::InvalidTransition);
         }
-        let capability_ciphertext = protect_verification_capability(
-            &self.data_key,
-            self.tenant_id,
+        let capability_context = VerificationCapabilityContext {
+            tenant_id: self.tenant_id,
             transaction_id,
-            expected_context_sha256,
-            expected_intent_jws,
-            expected_presentation_binding,
+            context_sha256: expected_context_sha256,
+            intent_jws: expected_intent_jws,
+            presentation_binding: expected_presentation_binding,
             issuance_request_jti,
-            capability,
-        )?;
+        };
+        let capability_ciphertext =
+            protect_verification_capability(&self.data_key, capability_context, capability)?;
         let expected_presentation_binding = expected_presentation_binding.clone();
         let mut connection = self
             .pool
@@ -333,45 +350,45 @@ impl Openid4vpRepository {
                         issued_at,
                     )
                     .await?
+                        && existing.verification_issuance_request_jti == issuance_request_jti
                     {
-                        if existing.verification_issuance_request_jti == issuance_request_jti {
-                            let replayed_capability = unprotect_verification_capability(
-                                &data_key,
-                                self.tenant_id,
-                                transaction_id,
-                                &existing.verification_context_sha256,
-                                &existing.verification_intent_jws,
-                                &nazo_operator_protocol::Openid4vpPresentationBinding {
-                                    presentation_request_sha256: existing
-                                        .verification_presentation_request_sha256
+                        let replayed_presentation_binding =
+                            nazo_operator_protocol::Openid4vpPresentationBinding {
+                                presentation_request_sha256: existing
+                                    .verification_presentation_request_sha256
+                                    .clone(),
+                                trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
+                                    binding_id: existing
+                                        .openid4vc_trust_policy_binding_id
+                                        .map(|value| value.to_string()),
+                                    resource_id: existing
+                                        .openid4vc_trust_policy_resource_id
                                         .clone(),
-                                    trust_policy:
-                                        nazo_operator_protocol::Openid4vpTrustPolicyBinding {
-                                            binding_id: existing
-                                                .openid4vc_trust_policy_binding_id
-                                                .map(|value| value.to_string()),
-                                            resource_id: existing
-                                                .openid4vc_trust_policy_resource_id
-                                                .clone(),
-                                            resource_digest: existing
-                                                .openid4vc_trust_policy_digest
-                                                .clone(),
-                                        },
+                                    resource_digest: existing.openid4vc_trust_policy_digest.clone(),
                                 },
-                                &existing.verification_issuance_request_jti,
-                                &existing.verification_capability_ciphertext,
+                            };
+                        let replayed_capability = unprotect_verification_capability(
+                            &data_key,
+                            VerificationCapabilityContext {
+                                tenant_id: self.tenant_id,
+                                transaction_id,
+                                context_sha256: &existing.verification_context_sha256,
+                                intent_jws: &existing.verification_intent_jws,
+                                presentation_binding: &replayed_presentation_binding,
+                                issuance_request_jti: &existing.verification_issuance_request_jti,
+                            },
+                            &existing.verification_capability_ciphertext,
+                        )
+                        .map_err(|_| diesel::result::Error::RollbackTransaction)?;
+                        let replayed_sha256 =
+                            nazo_operator_protocol::openid4vp_verification_capability_sha256(
+                                &replayed_capability,
                             )
                             .map_err(|_| diesel::result::Error::RollbackTransaction)?;
-                            let replayed_sha256 =
-                                nazo_operator_protocol::openid4vp_verification_capability_sha256(
-                                    &replayed_capability,
-                                )
-                                .map_err(|_| diesel::result::Error::RollbackTransaction)?;
-                            if replayed_sha256 != existing.verification_capability_sha256 {
-                                return Err(diesel::result::Error::RollbackTransaction);
-                            }
-                            return Ok(Some((existing, replayed_capability)));
+                        if replayed_sha256 != existing.verification_capability_sha256 {
+                            return Err(diesel::result::Error::RollbackTransaction);
                         }
+                        return Ok(Some((existing, replayed_capability)));
                     }
                     sql_query(
                         "INSERT INTO openid4vp_verification_issuance_jtis \
@@ -1186,7 +1203,7 @@ impl VerificationAttachmentRow {
                     &presentation_binding,
                 )
                 .map_err(|_| PresentationStoreError::InvalidTransition)?;
-                Ok(Openid4vpVerificationAttachmentState::Attached(
+                Ok(Openid4vpVerificationAttachmentState::Attached(Box::new(
                     StoredOpenid4vpVerificationAttachment {
                         transaction_id: self.id,
                         context,
@@ -1196,7 +1213,7 @@ impl VerificationAttachmentRow {
                         created_at: self.created_at,
                         expires_at: self.expires_at,
                     },
-                ))
+                )))
             }
             _ => Err(PresentationStoreError::InvalidTransition),
         }
@@ -1204,7 +1221,7 @@ impl VerificationAttachmentRow {
 
     fn attachment(self) -> Result<StoredOpenid4vpVerificationAttachment, PresentationStoreError> {
         match self.state()? {
-            Openid4vpVerificationAttachmentState::Attached(attachment) => Ok(attachment),
+            Openid4vpVerificationAttachmentState::Attached(attachment) => Ok(*attachment),
             _ => Err(PresentationStoreError::InvalidTransition),
         }
     }
@@ -1240,7 +1257,7 @@ impl VerificationEvidenceRow {
         {
             return Err(PresentationStoreError::InvalidTransition);
         }
-        let (context, context_sha256) = validated_verification_context(
+        let (context, _) = validated_verification_context(
             nazo_operator_protocol::Openid4vpEvidenceContext {
                 run_jti: self.verification_run_jti,
                 artifact_sha256: self.verification_artifact_sha256,
@@ -1724,18 +1741,24 @@ fn protect_payload(
     Ok(protected)
 }
 
-fn protect_verification_capability(
-    key: &[u8; 32],
+#[derive(Clone, Copy)]
+struct VerificationCapabilityContext<'a> {
     tenant_id: Uuid,
     transaction_id: Uuid,
-    context_sha256: &str,
-    intent_jws: &str,
-    presentation_binding: &nazo_operator_protocol::Openid4vpPresentationBinding,
-    issuance_request_jti: &str,
+    context_sha256: &'a str,
+    intent_jws: &'a str,
+    presentation_binding: &'a nazo_operator_protocol::Openid4vpPresentationBinding,
+    issuance_request_jti: &'a str,
+}
+
+fn protect_verification_capability(
+    key: &[u8; 32],
+    context: VerificationCapabilityContext<'_>,
     capability: &str,
 ) -> Result<Vec<u8>, PresentationStoreError> {
-    let intent_sha256 = nazo_operator_protocol::compact_sha256(intent_jws);
-    let trust_policy_binding_id = presentation_binding
+    let intent_sha256 = nazo_operator_protocol::compact_sha256(context.intent_jws);
+    let trust_policy_binding_id = context
+        .presentation_binding
         .trust_policy
         .binding_id
         .as_deref()
@@ -1745,16 +1768,24 @@ fn protect_verification_capability(
     protect_payload(
         key,
         b"nazo-openid4vp-capability-v1",
-        tenant_id,
-        transaction_id,
+        context.tenant_id,
+        context.transaction_id,
         Some(PayloadVerificationBinding {
-            context_sha256,
-            presentation_request_sha256: &presentation_binding.presentation_request_sha256,
+            context_sha256: context.context_sha256,
+            presentation_request_sha256: &context.presentation_binding.presentation_request_sha256,
             intent_sha256: &intent_sha256,
             trust_policy_binding_id,
-            trust_policy_resource_id: presentation_binding.trust_policy.resource_id.as_deref(),
-            trust_policy_digest: presentation_binding.trust_policy.resource_digest.as_deref(),
-            issuance_request_jti: Some(issuance_request_jti),
+            trust_policy_resource_id: context
+                .presentation_binding
+                .trust_policy
+                .resource_id
+                .as_deref(),
+            trust_policy_digest: context
+                .presentation_binding
+                .trust_policy
+                .resource_digest
+                .as_deref(),
+            issuance_request_jti: Some(context.issuance_request_jti),
         }),
         capability.as_bytes(),
     )
@@ -1821,16 +1852,12 @@ fn unprotect_payload(
 
 fn unprotect_verification_capability(
     key: &[u8; 32],
-    tenant_id: Uuid,
-    transaction_id: Uuid,
-    context_sha256: &str,
-    intent_jws: &str,
-    presentation_binding: &nazo_operator_protocol::Openid4vpPresentationBinding,
-    issuance_request_jti: &str,
+    context: VerificationCapabilityContext<'_>,
     protected: &[u8],
 ) -> Result<String, PresentationStoreError> {
-    let intent_sha256 = nazo_operator_protocol::compact_sha256(intent_jws);
-    let trust_policy_binding_id = presentation_binding
+    let intent_sha256 = nazo_operator_protocol::compact_sha256(context.intent_jws);
+    let trust_policy_binding_id = context
+        .presentation_binding
         .trust_policy
         .binding_id
         .as_deref()
@@ -1840,16 +1867,24 @@ fn unprotect_verification_capability(
     let plaintext = unprotect_payload(
         key,
         b"nazo-openid4vp-capability-v1",
-        tenant_id,
-        transaction_id,
+        context.tenant_id,
+        context.transaction_id,
         Some(PayloadVerificationBinding {
-            context_sha256,
-            presentation_request_sha256: &presentation_binding.presentation_request_sha256,
+            context_sha256: context.context_sha256,
+            presentation_request_sha256: &context.presentation_binding.presentation_request_sha256,
             intent_sha256: &intent_sha256,
             trust_policy_binding_id,
-            trust_policy_resource_id: presentation_binding.trust_policy.resource_id.as_deref(),
-            trust_policy_digest: presentation_binding.trust_policy.resource_digest.as_deref(),
-            issuance_request_jti: Some(issuance_request_jti),
+            trust_policy_resource_id: context
+                .presentation_binding
+                .trust_policy
+                .resource_id
+                .as_deref(),
+            trust_policy_digest: context
+                .presentation_binding
+                .trust_policy
+                .resource_digest
+                .as_deref(),
+            issuance_request_jti: Some(context.issuance_request_jti),
         }),
         protected,
         false,

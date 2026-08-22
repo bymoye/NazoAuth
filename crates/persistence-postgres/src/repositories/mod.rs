@@ -45,12 +45,12 @@ pub use mtls_trust::{
 };
 pub use openid4vc::{
     IssuedOpenid4vpVerificationEvidence, ManagedCredentialDataset, ManagedCredentialDatasetWrite,
-    NewOpenid4vpVerificationAttachment, Openid4vciDatasetRepository, Openid4vciRepository,
-    Openid4vpRepository, Openid4vpVerificationAttachmentState,
-    PreparedOpenid4vpVerificationEvidence, StoredOpenid4vpVerificationAttachment,
-    StoredOpenid4vpVerificationEvidence, delete_operator_managed_dataset_on_connection,
-    protect_dataset_claims, unprotect_dataset_claims,
-    upsert_operator_managed_dataset_on_connection,
+    NewOpenid4vpVerificationAttachment, NewOpenid4vpVerificationEvidence,
+    Openid4vciDatasetRepository, Openid4vciRepository, Openid4vpRepository,
+    Openid4vpVerificationAttachmentState, PreparedOpenid4vpVerificationEvidence,
+    StoredOpenid4vpVerificationAttachment, StoredOpenid4vpVerificationEvidence,
+    delete_operator_managed_dataset_on_connection, protect_dataset_claims,
+    unprotect_dataset_claims, upsert_operator_managed_dataset_on_connection,
 };
 pub use passkeys::PasskeyRepository;
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};

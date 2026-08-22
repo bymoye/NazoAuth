@@ -1076,19 +1076,19 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let issuance_request_jti = Uuid::now_v7().to_string();
     let receipt_expires_at = completed_at + Duration::minutes(5);
     let issued = verifier
-        .issue_verification_evidence(
+        .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
             transaction_id,
             receipt_id,
-            &issuance_request_jti,
+            issuance_request_jti: &issuance_request_jti,
             capability,
-            &capability_sha256,
-            "signed.receipt.one",
-            "signed.intent.value",
-            &prepared.context_sha256,
-            &prepared.presentation_binding,
-            completed_at,
-            receipt_expires_at,
-        )
+            capability_sha256: &capability_sha256,
+            receipt_jws: "signed.receipt.one",
+            expected_intent_jws: "signed.intent.value",
+            expected_context_sha256: &prepared.context_sha256,
+            expected_presentation_binding: &prepared.presentation_binding,
+            issued_at: completed_at,
+            requested_expires_at: receipt_expires_at,
+        })
         .await
         .unwrap()
         .expect("verified transaction must atomically issue a receipt capability");
@@ -1101,19 +1101,19 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let replay_candidate_sha256 =
         nazo_operator_protocol::openid4vp_verification_capability_sha256(replay_candidate).unwrap();
     let replayed = verifier
-        .issue_verification_evidence(
+        .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
             transaction_id,
-            Uuid::now_v7(),
-            &issuance_request_jti,
-            replay_candidate,
-            &replay_candidate_sha256,
-            "signed.receipt.retry-must-not-replace",
-            "signed.intent.value",
-            &prepared.context_sha256,
-            &prepared.presentation_binding,
-            completed_at,
-            receipt_expires_at,
-        )
+            receipt_id: Uuid::now_v7(),
+            issuance_request_jti: &issuance_request_jti,
+            capability: replay_candidate,
+            capability_sha256: &replay_candidate_sha256,
+            receipt_jws: "signed.receipt.retry-must-not-replace",
+            expected_intent_jws: "signed.intent.value",
+            expected_context_sha256: &prepared.context_sha256,
+            expected_presentation_binding: &prepared.presentation_binding,
+            issued_at: completed_at,
+            requested_expires_at: receipt_expires_at,
+        })
         .await
         .unwrap()
         .expect("same issuance JTI must replay the persisted response");
@@ -1137,22 +1137,23 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert!(
         verifier
-            .issue_verification_evidence(
+            .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
                 transaction_id,
-                Uuid::now_v7(),
-                &Uuid::now_v7().to_string(),
-                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                &nazo_operator_protocol::openid4vp_verification_capability_sha256(
-                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                )
-                .unwrap(),
-                "signed.receipt.must-not-persist",
-                "signed.intent.value",
-                &"f".repeat(64),
-                &prepared.presentation_binding,
-                completed_at,
-                receipt_expires_at,
-            )
+                receipt_id: Uuid::now_v7(),
+                issuance_request_jti: &Uuid::now_v7().to_string(),
+                capability: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                capability_sha256:
+                    &nazo_operator_protocol::openid4vp_verification_capability_sha256(
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    )
+                    .unwrap(),
+                receipt_jws: "signed.receipt.must-not-persist",
+                expected_intent_jws: "signed.intent.value",
+                expected_context_sha256: &"f".repeat(64),
+                expected_presentation_binding: &prepared.presentation_binding,
+                issued_at: completed_at,
+                requested_expires_at: receipt_expires_at,
+            })
             .await
             .is_err(),
         "a context change after prepare must roll back before capability rotation"
@@ -1171,19 +1172,19 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         )
         .unwrap();
     let rotated = verifier
-        .issue_verification_evidence(
+        .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
             transaction_id,
-            Uuid::now_v7(),
-            &Uuid::now_v7().to_string(),
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            &rotated_capability_sha256,
-            "signed.receipt.two",
-            "signed.intent.value",
-            &prepared.context_sha256,
-            &prepared.presentation_binding,
-            completed_at,
-            receipt_expires_at,
-        )
+            receipt_id: Uuid::now_v7(),
+            issuance_request_jti: &Uuid::now_v7().to_string(),
+            capability: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            capability_sha256: &rotated_capability_sha256,
+            receipt_jws: "signed.receipt.two",
+            expected_intent_jws: "signed.intent.value",
+            expected_context_sha256: &prepared.context_sha256,
+            expected_presentation_binding: &prepared.presentation_binding,
+            issued_at: completed_at,
+            requested_expires_at: receipt_expires_at,
+        })
         .await
         .unwrap()
         .expect("retry must rotate the active capability");
@@ -1204,19 +1205,19 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         nazo_operator_protocol::openid4vp_verification_capability_sha256(stale_capability).unwrap();
     assert!(
         verifier
-            .issue_verification_evidence(
+            .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
                 transaction_id,
-                Uuid::now_v7(),
-                &issuance_request_jti,
-                stale_capability,
-                &stale_capability_sha256,
-                "signed.receipt.stale-jti",
-                "signed.intent.value",
-                &prepared.context_sha256,
-                &prepared.presentation_binding,
-                completed_at,
-                receipt_expires_at,
-            )
+                receipt_id: Uuid::now_v7(),
+                issuance_request_jti: &issuance_request_jti,
+                capability: stale_capability,
+                capability_sha256: &stale_capability_sha256,
+                receipt_jws: "signed.receipt.stale-jti",
+                expected_intent_jws: "signed.intent.value",
+                expected_context_sha256: &prepared.context_sha256,
+                expected_presentation_binding: &prepared.presentation_binding,
+                issued_at: completed_at,
+                requested_expires_at: receipt_expires_at,
+            })
             .await
             .is_err(),
         "a superseded A JTI must not rotate again after A -> B"
