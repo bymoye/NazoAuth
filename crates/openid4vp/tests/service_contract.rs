@@ -50,6 +50,7 @@ impl PresentationStorePort for RecordingStore {
         _transaction_id: Uuid,
         _state_hash: &'a str,
         _result: &'a PresentationResult,
+        _verification_binding: Option<nazo_openid4vp::PresentationCompletionBinding<'a>>,
         _now: chrono::DateTime<Utc>,
     ) -> PresentationStoreFuture<'a, Result<bool, PresentationStoreError>> {
         Box::pin(async { Ok(true) })
@@ -203,6 +204,7 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
                 error_description: None,
             },
             &[vec![1, 2, 3]],
+            None,
             now,
         )
         .await
@@ -258,6 +260,7 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
             error_description: None,
         },
         &[],
+        None,
         now,
     )
     .await
@@ -304,6 +307,7 @@ async fn final_mdoc_handover_binds_verifier_key_and_request_context() {
                 error_description: None,
             },
             &[],
+            None,
             now,
         )
         .await

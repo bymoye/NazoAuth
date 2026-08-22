@@ -2426,7 +2426,9 @@ fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
         deployment_id: "deployment-1".to_owned(),
         runtime_instance_id: "runtime-1".to_owned(),
         instance_key_id: "instance-key".to_owned(),
+        tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
         transaction_id: "019c8ca2-30a6-7000-8000-000000000002".to_owned(),
+        issuance_request_jti: "019c8ca2-30a6-7000-8000-000000000006".to_owned(),
         status: Openid4vpVerificationStatus::Verified,
         evidence_context: Openid4vpEvidenceContext {
             run_jti: "run-jti-1".to_owned(),
@@ -2437,6 +2439,15 @@ fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
             test_name: "openid4vp-test".to_owned(),
             variant_sha256: "c".repeat(64),
         },
+        presentation_binding: Openid4vpPresentationBinding {
+            presentation_request_sha256: "e".repeat(64),
+            trust_policy: Openid4vpTrustPolicyBinding {
+                binding_id: Some("019c8ca2-30a6-7000-8000-000000000007".to_owned()),
+                resource_id: Some("vp-policy-1".to_owned()),
+                resource_digest: Some("f".repeat(64)),
+            },
+        },
+        intent_sha256: "1".repeat(64),
         completed_at: "2026-08-22T03:00:00Z".to_owned(),
         capability_sha256: "d".repeat(64),
     }
@@ -2452,15 +2463,21 @@ fn openid4vp_verification_receipt_is_server_bound_and_time_bounded() {
         .expect("valid verification receipt should sign");
     let context_sha256 =
         canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
+    let presentation_binding_sha256 =
+        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
     let expected = Openid4vpVerificationReceiptExpectations {
         issuer: &receipt.iss,
         audience: &receipt.aud,
         deployment_id: &receipt.deployment_id,
         runtime_instance_id: &receipt.runtime_instance_id,
         instance_key_id: &key_id,
+        tenant_id: &receipt.tenant_id,
         transaction_id: &receipt.transaction_id,
         receipt_id: &receipt.jti,
+        issuance_request_jti: &receipt.issuance_request_jti,
         evidence_context_sha256: &context_sha256,
+        presentation_binding_sha256: &presentation_binding_sha256,
+        intent_sha256: &receipt.intent_sha256,
         capability_sha256: &receipt.capability_sha256,
     };
     assert_eq!(
@@ -2513,15 +2530,21 @@ fn openid4vp_verification_receipt_rejects_signed_substitution() {
     let compact = sign_openid4vp_verification_receipt(&receipt, &key_id, &key).unwrap();
     let context_sha256 =
         canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
+    let presentation_binding_sha256 =
+        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
     let expected = Openid4vpVerificationReceiptExpectations {
         issuer: &receipt.iss,
         audience: &receipt.aud,
         deployment_id: &receipt.deployment_id,
         runtime_instance_id: &receipt.runtime_instance_id,
         instance_key_id: &key_id,
+        tenant_id: &receipt.tenant_id,
         transaction_id: "019c8ca2-30a6-7000-8000-000000000099",
         receipt_id: &receipt.jti,
+        issuance_request_jti: &receipt.issuance_request_jti,
         evidence_context_sha256: &context_sha256,
+        presentation_binding_sha256: &presentation_binding_sha256,
+        intent_sha256: &receipt.intent_sha256,
         capability_sha256: &receipt.capability_sha256,
     };
     assert!(
@@ -2544,6 +2567,8 @@ fn openid4vp_verification_intent_is_immutable_and_typed() {
     let transaction_id = receipt.transaction_id.clone();
     let context_sha256 =
         canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
+    let presentation_binding_sha256 =
+        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
     let intent = Openid4vpVerificationIntent {
         schema: 1,
         iss: receipt.iss.clone(),
@@ -2557,6 +2582,7 @@ fn openid4vp_verification_intent_is_immutable_and_typed() {
         tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
         transaction_id: transaction_id.clone(),
         evidence_context: receipt.evidence_context,
+        presentation_binding: receipt.presentation_binding,
     };
     let compact = sign_openid4vp_verification_intent(&intent, &key_id, &key).unwrap();
     let expected = Openid4vpVerificationIntentExpectations {
@@ -2568,6 +2594,7 @@ fn openid4vp_verification_intent_is_immutable_and_typed() {
         tenant_id: &intent.tenant_id,
         transaction_id: &transaction_id,
         evidence_context_sha256: &context_sha256,
+        presentation_binding_sha256: &presentation_binding_sha256,
     };
     assert_eq!(
         verify_openid4vp_verification_intent(

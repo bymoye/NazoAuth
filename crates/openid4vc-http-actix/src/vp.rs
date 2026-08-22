@@ -49,8 +49,6 @@ pub struct CreatePresentationRequest {
     pub openid4vc_trust_policy_resource_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openid4vc_trust_policy_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence_context: Option<nazo_operator_protocol::Openid4vpEvidenceContext>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -67,10 +65,14 @@ pub struct PresentationVerificationProjection {
     pub deployment_id: String,
     pub runtime_instance_id: String,
     pub instance_key_id: String,
+    pub tenant_id: String,
     pub receipt_id: String,
     pub transaction_id: Uuid,
+    pub issuance_request_jti: String,
     pub status: nazo_operator_protocol::Openid4vpVerificationStatus,
     pub evidence_context: nazo_operator_protocol::Openid4vpEvidenceContext,
+    pub presentation_binding: nazo_operator_protocol::Openid4vpPresentationBinding,
+    pub intent_sha256: String,
     pub completed_at: String,
     pub expires_at: String,
     pub receipt_sha256: String,
@@ -83,7 +85,9 @@ pub struct PresentationVerificationResponse {
     pub receipt_jws: String,
     pub receipt_api_url: String,
     pub verification_ui_url: String,
-    pub verification_expires_in: u64,
+    /// Immutable lifetime measured from the receipt's signed `iat`. Consumers
+    /// must use the projection's absolute `expires_at` for remaining time.
+    pub verification_ttl_seconds: u64,
 }
 
 pub trait PresentationOperations: Send + Sync {
@@ -105,9 +109,18 @@ pub trait PresentationOperations: Send + Sync {
         &'a self,
         transaction_id: Uuid,
     ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>>;
+    fn attach_verification_evidence<'a>(
+        &'a self,
+        transaction_id: Uuid,
+        request: nazo_operator_protocol::Openid4vpAttachEvidenceRequest,
+    ) -> PresentationFuture<
+        'a,
+        Result<nazo_operator_protocol::Openid4vpAttachEvidenceResponse, PresentationHttpError>,
+    >;
     fn issue_verification_receipt<'a>(
         &'a self,
         transaction_id: Uuid,
+        request: nazo_operator_protocol::Openid4vpIssueVerificationReceiptRequest,
     ) -> PresentationFuture<'a, Result<PresentationVerificationResponse, PresentationHttpError>>;
     fn verification_receipt<'a>(
         &'a self,
@@ -136,13 +149,21 @@ impl PresentationEndpoint {
         if self.management_token.is_empty() {
             return false;
         }
-        request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .filter(|provided| !provided.is_empty())
-            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), &self.management_token))
+        let mut values = request.headers().get_all(header::AUTHORIZATION);
+        let Some(value) = values.next() else {
+            return false;
+        };
+        if values.next().is_some() {
+            return false;
+        }
+        let Some((scheme, provided)) = value.to_str().ok().and_then(|value| value.split_once(' '))
+        else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("Bearer")
+            && !provided.is_empty()
+            && !provided.chars().any(char::is_whitespace)
+            && constant_time_eq(provided.as_bytes(), &self.management_token)
     }
 }
 
@@ -290,6 +311,31 @@ pub async fn presentation_result(
     }
 }
 
+pub async fn attach_presentation_verification_evidence(
+    endpoint: web::Data<PresentationEndpoint>,
+    request: HttpRequest,
+    transaction_id: web::Path<Uuid>,
+    body: web::Bytes,
+) -> HttpResponse {
+    if !endpoint.management_authorized(&request) {
+        return management_unauthorized();
+    }
+    let body = match serde_json::from_slice::<nazo_operator_protocol::Openid4vpAttachEvidenceRequest>(
+        &body,
+    ) {
+        Ok(body) => body,
+        Err(_) => return presentation_error(invalid_response("Invalid evidence attachment body.")),
+    };
+    match endpoint
+        .operations
+        .attach_verification_evidence(*transaction_id, body)
+        .await
+    {
+        Ok(value) => json_no_store_no_referrer(value),
+        Err(error) => presentation_error(error),
+    }
+}
+
 pub async fn issue_presentation_verification_receipt(
     endpoint: web::Data<PresentationEndpoint>,
     request: HttpRequest,
@@ -299,16 +345,16 @@ pub async fn issue_presentation_verification_receipt(
     if !endpoint.management_authorized(&request) {
         return management_unauthorized();
     }
-    if !body.is_empty() {
-        return presentation_error(PresentationHttpError {
-            status: 400,
-            error: "invalid_request",
-            description: "Verification receipt issuance request body must be empty.",
-        });
-    }
+    let body = match serde_json::from_slice::<
+        nazo_operator_protocol::Openid4vpIssueVerificationReceiptRequest,
+    >(&body)
+    {
+        Ok(body) => body,
+        Err(_) => return presentation_error(invalid_response("Invalid receipt issuance body.")),
+    };
     match endpoint
         .operations
-        .issue_verification_receipt(*transaction_id)
+        .issue_verification_receipt(*transaction_id, body)
         .await
     {
         Ok(value) => json_no_store_no_referrer(value),

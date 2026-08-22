@@ -6,8 +6,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AuthorizationResponse, PresentationError, PresentationResult, PresentationStoreError,
-    PresentationStorePort, PresentationTransaction, ResponseMode,
+    AuthorizationResponse, PresentationCompletionBinding, PresentationError, PresentationResult,
+    PresentationStoreError, PresentationStorePort, PresentationTransaction, ResponseMode,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +34,7 @@ where
         transaction: &PresentationTransaction,
         response: &AuthorizationResponse,
         additional_trust_anchors: &[Vec<u8>],
+        verification_binding: Option<PresentationCompletionBinding<'_>>,
         now: DateTime<Utc>,
     ) -> Result<PresentationResult, PresentationServiceError> {
         if now >= transaction.expires_at
@@ -110,7 +111,13 @@ where
             .to_string();
         if !self
             .store
-            .complete(transaction.id, &state_hash, &result, now)
+            .complete(
+                transaction.id,
+                &state_hash,
+                &result,
+                verification_binding,
+                now,
+            )
             .await?
         {
             return Err(PresentationError::InvalidState.into());

@@ -17,9 +17,10 @@ use crate::verification::{
 use crate::wire::{
     AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
     DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent,
-    Openid4vpEvidenceContext, Openid4vpVerificationIntent, Openid4vpVerificationReceipt,
-    ProtectedHeader, RuntimeReceipt, TaskEnvelope, TenantResourceCapability,
-    TenantResourceIdentity, TenantResourceKind, TenantResourceReceipt, TenantResourceTask,
+    Openid4vpEvidenceContext, Openid4vpPresentationBinding, Openid4vpVerificationIntent,
+    Openid4vpVerificationReceipt, ProtectedHeader, RuntimeReceipt, TaskEnvelope,
+    TenantResourceCapability, TenantResourceIdentity, TenantResourceKind, TenantResourceReceipt,
+    TenantResourceTask,
 };
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
@@ -143,6 +144,14 @@ pub fn canonical_openid4vp_evidence_context_sha256(
 ) -> Result<String, ProtocolError> {
     crate::verification::validate_openid4vp_evidence_context(context)?;
     let bytes = serde_json::to_vec(context).map_err(|_| ProtocolError::Json)?;
+    Ok(hex_sha256(&bytes))
+}
+
+pub fn canonical_openid4vp_presentation_binding_sha256(
+    binding: &Openid4vpPresentationBinding,
+) -> Result<String, ProtocolError> {
+    crate::verification::validate_openid4vp_presentation_binding(binding)?;
+    let bytes = serde_json::to_vec(binding).map_err(|_| ProtocolError::Json)?;
     Ok(hex_sha256(&bytes))
 }
 

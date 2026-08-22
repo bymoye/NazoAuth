@@ -17,9 +17,8 @@ use nazo_openid4vp::{
     PresentationTransaction, RequestMethod, ResponseMode,
 };
 use nazo_postgres::{
-    CreateOpenid4vpWithEvidenceOutcome, ManagedCredentialDatasetWrite,
-    NewOpenid4vpVerificationEvidence, Openid4vciDatasetRepository, Openid4vciRepository,
-    Openid4vpRepository, create_pool, get_conn,
+    ManagedCredentialDatasetWrite, NewOpenid4vpVerificationAttachment, Openid4vciDatasetRepository,
+    Openid4vciRepository, Openid4vpRepository, create_pool, get_conn,
 };
 use uuid::Uuid;
 
@@ -709,25 +708,38 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let context_sha256 =
         nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&evidence_context)
             .unwrap();
-    let created = verifier
-        .create_with_verification_evidence(
-            &transaction,
-            NewOpenid4vpVerificationEvidence {
+    verifier.create(&transaction).await.unwrap();
+    let presentation_request_sha256 = "d".repeat(64);
+    let attachment = verifier
+        .attach_verification_evidence(
+            transaction_id,
+            NewOpenid4vpVerificationAttachment {
                 context: &evidence_context,
                 context_sha256: &context_sha256,
                 intent_jws: "signed.intent.value",
+                presentation_request_sha256: &presentation_request_sha256,
             },
+            now,
         )
         .await
-        .unwrap();
-    assert_eq!(created, CreateOpenid4vpWithEvidenceOutcome::Created);
-    assert!(matches!(
+        .unwrap()
+        .expect("pending transaction must accept an evidence attachment");
+    assert_eq!(
         verifier
-            .presentation_by_evidence_context(&evidence_context, &context_sha256, now)
+            .attach_verification_evidence(
+                transaction_id,
+                NewOpenid4vpVerificationAttachment {
+                    context: &evidence_context,
+                    context_sha256: &context_sha256,
+                    intent_jws: "signed.intent.value",
+                    presentation_request_sha256: &presentation_request_sha256,
+                },
+                now,
+            )
             .await
             .unwrap(),
-        Some(nazo_postgres::ExistingOpenid4vpEvidenceContext::Pending { .. })
-    ));
+        Some(attachment)
+    );
     let loaded = verifier
         .request(transaction_id, now)
         .await
@@ -803,7 +815,7 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert!(
         !other_verifier
-            .complete(transaction_id, &state_hash, &result, completed_at)
+            .complete(transaction_id, &state_hash, &result, None, completed_at)
             .await
             .unwrap(),
         "a cross-tenant completion must not consume the source transaction"
@@ -830,13 +842,39 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert!(
         verifier
-            .complete(transaction_id, &state_hash, &result, completed_at)
+            .complete(
+                transaction_id,
+                &state_hash,
+                &result,
+                Some(nazo_openid4vp::PresentationCompletionBinding {
+                    context_sha256: &context_sha256,
+                    intent_jws: "signed.intent.value",
+                    presentation_request_sha256: &presentation_request_sha256,
+                    trust_policy_binding_id: None,
+                    trust_policy_resource_id: None,
+                    trust_policy_digest: None,
+                }),
+                completed_at,
+            )
             .await
             .unwrap()
     );
     assert!(
         !verifier
-            .complete(transaction_id, &state_hash, &result, completed_at)
+            .complete(
+                transaction_id,
+                &state_hash,
+                &result,
+                Some(nazo_openid4vp::PresentationCompletionBinding {
+                    context_sha256: &context_sha256,
+                    intent_jws: "signed.intent.value",
+                    presentation_request_sha256: &presentation_request_sha256,
+                    trust_policy_binding_id: None,
+                    trust_policy_resource_id: None,
+                    trust_policy_digest: None,
+                }),
+                completed_at,
+            )
             .await
             .unwrap()
     );
@@ -854,23 +892,52 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     assert_eq!(prepared.context, evidence_context);
     assert_eq!(prepared.intent_jws, "signed.intent.value");
     let receipt_id = Uuid::now_v7();
-    let evidence = verifier
-        .rotate_verification_evidence(
+    let issuance_request_jti = Uuid::now_v7().to_string();
+    let receipt_expires_at = completed_at + Duration::minutes(5);
+    let issued = verifier
+        .issue_verification_evidence(
             transaction_id,
             receipt_id,
+            &issuance_request_jti,
+            capability,
             &capability_sha256,
             "signed.receipt.one",
             "signed.intent.value",
             &prepared.context_sha256,
+            &prepared.presentation_binding,
             completed_at,
-            transaction.expires_at,
+            receipt_expires_at,
         )
         .await
         .unwrap()
         .expect("verified transaction must atomically issue a receipt capability");
+    let evidence = issued.evidence;
+    assert_eq!(issued.capability, capability);
     assert_eq!(evidence.receipt_id, receipt_id);
     assert_eq!(evidence.context, evidence_context);
     assert_eq!(evidence.capability_sha256, capability_sha256);
+    let replay_candidate = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let replay_candidate_sha256 =
+        nazo_operator_protocol::openid4vp_verification_capability_sha256(replay_candidate).unwrap();
+    let replayed = verifier
+        .issue_verification_evidence(
+            transaction_id,
+            Uuid::now_v7(),
+            &issuance_request_jti,
+            replay_candidate,
+            &replay_candidate_sha256,
+            "signed.receipt.retry-must-not-replace",
+            "signed.intent.value",
+            &prepared.context_sha256,
+            &prepared.presentation_binding,
+            completed_at,
+            receipt_expires_at,
+        )
+        .await
+        .unwrap()
+        .expect("same issuance JTI must replay the persisted response");
+    assert_eq!(replayed.capability, capability);
+    assert_eq!(replayed.evidence, evidence);
     assert_eq!(
         verifier
             .verification_evidence_by_capability_sha256(&capability_sha256, now)
@@ -889,15 +956,21 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert!(
         verifier
-            .rotate_verification_evidence(
+            .issue_verification_evidence(
                 transaction_id,
                 Uuid::now_v7(),
-                &"e".repeat(64),
+                &Uuid::now_v7().to_string(),
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                &nazo_operator_protocol::openid4vp_verification_capability_sha256(
+                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                )
+                .unwrap(),
                 "signed.receipt.must-not-persist",
                 "signed.intent.value",
                 &"f".repeat(64),
+                &prepared.presentation_binding,
                 completed_at,
-                transaction.expires_at,
+                receipt_expires_at,
             )
             .await
             .is_err(),
@@ -917,15 +990,18 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         )
         .unwrap();
     let rotated = verifier
-        .rotate_verification_evidence(
+        .issue_verification_evidence(
             transaction_id,
             Uuid::now_v7(),
+            &Uuid::now_v7().to_string(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             &rotated_capability_sha256,
             "signed.receipt.two",
             "signed.intent.value",
             &prepared.context_sha256,
+            &prepared.presentation_binding,
             completed_at,
-            transaction.expires_at,
+            receipt_expires_at,
         )
         .await
         .unwrap()
@@ -938,8 +1014,41 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
             .is_none(),
         "rotation must immediately invalidate the previous capability"
     );
-    assert_eq!(rotated.capability_sha256, rotated_capability_sha256);
-    let after_expiry = transaction.expires_at + Duration::seconds(1);
+    assert_eq!(
+        rotated.evidence.capability_sha256,
+        rotated_capability_sha256
+    );
+    let stale_capability = "ccccccccccccccccccccccccccccccccccccccccccc";
+    let stale_capability_sha256 =
+        nazo_operator_protocol::openid4vp_verification_capability_sha256(stale_capability).unwrap();
+    assert!(
+        verifier
+            .issue_verification_evidence(
+                transaction_id,
+                Uuid::now_v7(),
+                &issuance_request_jti,
+                stale_capability,
+                &stale_capability_sha256,
+                "signed.receipt.stale-jti",
+                "signed.intent.value",
+                &prepared.context_sha256,
+                &prepared.presentation_binding,
+                completed_at,
+                receipt_expires_at,
+            )
+            .await
+            .is_err(),
+        "a superseded A JTI must not rotate again after A -> B"
+    );
+    assert_eq!(
+        verifier
+            .verification_evidence_by_capability_sha256(&rotated_capability_sha256, now)
+            .await
+            .unwrap()
+            .expect("stale JTI rejection must retain the B capability"),
+        rotated.evidence
+    );
+    let after_expiry = receipt_expires_at + Duration::seconds(1);
     assert!(
         verifier
             .verification_evidence_by_capability_sha256(&rotated_capability_sha256, after_expiry)
@@ -954,21 +1063,7 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     late_transaction.request.state = format!("late-state-{}", Uuid::now_v7());
     late_transaction.created_at = now - Duration::minutes(2);
     late_transaction.expires_at = now - Duration::minutes(1);
-    let mut late_context = evidence_context.clone();
-    late_context.suite_module_id = Uuid::now_v7().to_string();
-    let late_context_sha256 =
-        nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&late_context).unwrap();
-    verifier
-        .create_with_verification_evidence(
-            &late_transaction,
-            NewOpenid4vpVerificationEvidence {
-                context: &late_context,
-                context_sha256: &late_context_sha256,
-                intent_jws: "signed.late.intent",
-            },
-        )
-        .await
-        .unwrap();
+    verifier.create(&late_transaction).await.unwrap();
     let late_result = PresentationResult {
         transaction_id: late_transaction.id,
         credentials: Vec::new(),
@@ -982,6 +1077,7 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
                     .to_hex()
                     .to_string(),
                 &late_result,
+                None,
                 now,
             )
             .await

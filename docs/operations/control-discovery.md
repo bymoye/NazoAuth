@@ -56,3 +56,12 @@ The wire DTOs, JWS types, signing/verification policy, compatibility parsing,
 and fixed vectors live only in `crates/operator-protocol`. Controllers consume
 that crate at an exact version and source revision; they do not copy protocol
 code.
+
+OpenID4VP verification intents and success receipts are also signed by the
+current instance identity. Receipt issuance is available for at most 600
+seconds after successful completion, and each public receipt is valid for at
+most 600 seconds after issuance. This deployment has no historical instance
+keyring for those receipts: before replacing or removing an instance identity,
+operators must stop new evidence attachment/issuance and drain both bounded
+windows. A receipt signed by any key other than the live discovery identity
+fails closed; key rotation must not overlap an active receipt window.

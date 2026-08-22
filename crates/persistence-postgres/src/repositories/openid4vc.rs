@@ -14,7 +14,7 @@ pub use dataset::{
 };
 pub use issuance::Openid4vciRepository;
 pub use presentation::{
-    CreateOpenid4vpWithEvidenceOutcome, ExistingOpenid4vpEvidenceContext,
-    NewOpenid4vpVerificationEvidence, Openid4vpRepository, PreparedOpenid4vpVerificationEvidence,
-    StoredOpenid4vpVerificationEvidence,
+    IssuedOpenid4vpVerificationEvidence, NewOpenid4vpVerificationAttachment, Openid4vpRepository,
+    Openid4vpVerificationAttachmentState, PreparedOpenid4vpVerificationEvidence,
+    StoredOpenid4vpVerificationAttachment, StoredOpenid4vpVerificationEvidence,
 };

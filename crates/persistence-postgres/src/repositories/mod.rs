@@ -44,9 +44,10 @@ pub use mtls_trust::{
     revoke_operator_managed_trust_anchor_on_connection,
 };
 pub use openid4vc::{
-    CreateOpenid4vpWithEvidenceOutcome, ExistingOpenid4vpEvidenceContext, ManagedCredentialDataset,
-    ManagedCredentialDatasetWrite, NewOpenid4vpVerificationEvidence, Openid4vciDatasetRepository,
-    Openid4vciRepository, Openid4vpRepository, PreparedOpenid4vpVerificationEvidence,
+    IssuedOpenid4vpVerificationEvidence, ManagedCredentialDataset, ManagedCredentialDatasetWrite,
+    NewOpenid4vpVerificationAttachment, Openid4vciDatasetRepository, Openid4vciRepository,
+    Openid4vpRepository, Openid4vpVerificationAttachmentState,
+    PreparedOpenid4vpVerificationEvidence, StoredOpenid4vpVerificationAttachment,
     StoredOpenid4vpVerificationEvidence, delete_operator_managed_dataset_on_connection,
     protect_dataset_claims, unprotect_dataset_claims,
     upsert_operator_managed_dataset_on_connection,

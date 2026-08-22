@@ -80,9 +80,13 @@ pub struct Openid4vpVerificationReceiptExpectations<'a> {
     pub deployment_id: &'a str,
     pub runtime_instance_id: &'a str,
     pub instance_key_id: &'a str,
+    pub tenant_id: &'a str,
     pub transaction_id: &'a str,
     pub receipt_id: &'a str,
+    pub issuance_request_jti: &'a str,
     pub evidence_context_sha256: &'a str,
+    pub presentation_binding_sha256: &'a str,
+    pub intent_sha256: &'a str,
     pub capability_sha256: &'a str,
 }
 
@@ -95,6 +99,7 @@ pub struct Openid4vpVerificationIntentExpectations<'a> {
     pub tenant_id: &'a str,
     pub transaction_id: &'a str,
     pub evidence_context_sha256: &'a str,
+    pub presentation_binding_sha256: &'a str,
 }
 
 pub fn verify_openid4vp_verification_receipt(
@@ -112,14 +117,22 @@ pub fn verify_openid4vp_verification_receipt(
     validate_openid4vp_verification_receipt(&receipt)?;
     let context_sha256 =
         crate::signing::canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context)?;
+    let presentation_binding_sha256 =
+        crate::signing::canonical_openid4vp_presentation_binding_sha256(
+            &receipt.presentation_binding,
+        )?;
     if receipt.iss != expected.issuer
         || receipt.aud != expected.audience
         || receipt.deployment_id != expected.deployment_id
         || receipt.runtime_instance_id != expected.runtime_instance_id
         || receipt.instance_key_id != expected.instance_key_id
+        || receipt.tenant_id != expected.tenant_id
         || receipt.transaction_id != expected.transaction_id
         || receipt.jti != expected.receipt_id
+        || receipt.issuance_request_jti != expected.issuance_request_jti
         || context_sha256 != expected.evidence_context_sha256
+        || presentation_binding_sha256 != expected.presentation_binding_sha256
+        || receipt.intent_sha256 != expected.intent_sha256
         || receipt.capability_sha256 != expected.capability_sha256
     {
         return Err(ProtocolError::Policy(
@@ -149,6 +162,10 @@ pub fn verify_openid4vp_verification_intent(
     validate_openid4vp_verification_intent(&intent)?;
     let context_sha256 =
         crate::signing::canonical_openid4vp_evidence_context_sha256(&intent.evidence_context)?;
+    let presentation_binding_sha256 =
+        crate::signing::canonical_openid4vp_presentation_binding_sha256(
+            &intent.presentation_binding,
+        )?;
     if intent.iss != expected.issuer
         || intent.aud != expected.audience
         || intent.deployment_id != expected.deployment_id
@@ -158,6 +175,7 @@ pub fn verify_openid4vp_verification_intent(
         || intent.transaction_id != expected.transaction_id
         || intent.jti != expected.transaction_id
         || context_sha256 != expected.evidence_context_sha256
+        || presentation_binding_sha256 != expected.presentation_binding_sha256
         || now < intent.iat
         || now >= intent.exp
     {
@@ -180,6 +198,27 @@ pub(crate) fn validate_openid4vp_evidence_context(
     validate_lower_hex(&context.variant_sha256, 64)
 }
 
+pub(crate) fn validate_openid4vp_presentation_binding(
+    binding: &Openid4vpPresentationBinding,
+) -> Result<(), ProtocolError> {
+    validate_lower_hex(&binding.presentation_request_sha256, 64)?;
+    match (
+        binding.trust_policy.binding_id.as_deref(),
+        binding.trust_policy.resource_id.as_deref(),
+        binding.trust_policy.resource_digest.as_deref(),
+    ) {
+        (None, None, None) => Ok(()),
+        (Some(binding_id), Some(resource_id), Some(resource_digest)) => {
+            validate_uuid(binding_id)?;
+            validate_file_identifier(resource_id)?;
+            validate_lower_hex(resource_digest, 64)
+        }
+        _ => Err(ProtocolError::Policy(
+            "OpenID4VP trust policy binding must be all present or all absent",
+        )),
+    }
+}
+
 pub(crate) fn validate_openid4vp_verification_receipt(
     receipt: &Openid4vpVerificationReceipt,
 ) -> Result<(), ProtocolError> {
@@ -193,9 +232,13 @@ pub(crate) fn validate_openid4vp_verification_receipt(
     validate_file_identifier(&receipt.deployment_id)?;
     validate_file_identifier(&receipt.runtime_instance_id)?;
     validate_file_identifier(&receipt.instance_key_id)?;
+    validate_uuid(&receipt.tenant_id)?;
     validate_uuid(&receipt.jti)?;
     validate_uuid(&receipt.transaction_id)?;
+    validate_uuid(&receipt.issuance_request_jti)?;
     validate_openid4vp_evidence_context(&receipt.evidence_context)?;
+    validate_openid4vp_presentation_binding(&receipt.presentation_binding)?;
+    validate_lower_hex(&receipt.intent_sha256, 64)?;
     validate_lower_hex(&receipt.capability_sha256, 64)?;
     let completed_at = chrono::DateTime::parse_from_rfc3339(&receipt.completed_at)
         .map_err(|_| ProtocolError::Policy("invalid OpenID4VP receipt completion time"))?;
@@ -229,6 +272,7 @@ pub(crate) fn validate_openid4vp_verification_intent(
     validate_uuid(&intent.transaction_id)?;
     validate_uuid(&intent.jti)?;
     validate_openid4vp_evidence_context(&intent.evidence_context)?;
+    validate_openid4vp_presentation_binding(&intent.presentation_binding)?;
     let lifetime = intent.exp.checked_sub(intent.iat);
     if intent.jti != intent.transaction_id
         || intent.iat < 0

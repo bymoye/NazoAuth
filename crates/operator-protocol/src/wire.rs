@@ -442,6 +442,54 @@ pub struct Openid4vpEvidenceContext {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct Openid4vpAttachEvidenceRequest {
+    pub schema: u32,
+    pub evidence_context: Openid4vpEvidenceContext,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Openid4vpEvidenceAttachmentStatus {
+    Attached,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpAttachEvidenceResponse {
+    pub schema: u32,
+    pub transaction_id: String,
+    pub status: Openid4vpEvidenceAttachmentStatus,
+    pub evidence_context_sha256: String,
+    pub presentation_binding: Openid4vpPresentationBinding,
+    pub presentation_binding_sha256: String,
+    pub intent_jws: String,
+    pub intent_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpTrustPolicyBinding {
+    pub binding_id: Option<String>,
+    pub resource_id: Option<String>,
+    pub resource_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpPresentationBinding {
+    pub presentation_request_sha256: String,
+    pub trust_policy: Openid4vpTrustPolicyBinding,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpIssueVerificationReceiptRequest {
+    pub schema: u32,
+    pub issuance_request_jti: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Openid4vpVerificationReceipt {
     pub schema: u32,
     pub iss: String,
@@ -452,9 +500,13 @@ pub struct Openid4vpVerificationReceipt {
     pub deployment_id: String,
     pub runtime_instance_id: String,
     pub instance_key_id: String,
+    pub tenant_id: String,
     pub transaction_id: String,
+    pub issuance_request_jti: String,
     pub status: Openid4vpVerificationStatus,
     pub evidence_context: Openid4vpEvidenceContext,
+    pub presentation_binding: Openid4vpPresentationBinding,
+    pub intent_sha256: String,
     pub completed_at: String,
     pub capability_sha256: String,
 }
@@ -474,6 +526,7 @@ pub struct Openid4vpVerificationIntent {
     pub tenant_id: String,
     pub transaction_id: String,
     pub evidence_context: Openid4vpEvidenceContext,
+    pub presentation_binding: Openid4vpPresentationBinding,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
