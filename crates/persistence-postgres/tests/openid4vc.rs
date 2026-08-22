@@ -1242,8 +1242,8 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let mut late_transaction = transaction.clone();
     late_transaction.id = Uuid::now_v7();
     late_transaction.request.state = format!("late-state-{}", Uuid::now_v7());
-    late_transaction.created_at = now - Duration::minutes(2);
-    late_transaction.expires_at = now - Duration::minutes(1);
+    late_transaction.created_at = now;
+    late_transaction.expires_at = now + Duration::minutes(1);
     let late_create_request_jti = Uuid::now_v7().to_string();
     let (late_create_request, late_create_request_sha256) =
         nazo_operator_protocol::canonical_openid4vp_normalized_create_request(&normalized_create)
@@ -1259,10 +1259,11 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         )
         .await
         .unwrap();
+    let late_completion_at = late_transaction.expires_at + Duration::seconds(1);
     let late_result = PresentationResult {
         transaction_id: late_transaction.id,
         credentials: Vec::new(),
-        completed_at: now,
+        completed_at: late_completion_at,
     };
     assert!(
         !verifier
@@ -1273,15 +1274,29 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
                     .to_string(),
                 &late_result,
                 None,
-                now,
+                late_completion_at,
             )
             .await
             .unwrap(),
         "late completion must not create a verified result"
     );
+    let mut connection = get_conn(&pool).await.unwrap();
+    let late_row = sql_query(
+        "SELECT COUNT(*) AS count FROM openid4vp_transactions \
+         WHERE id = $1 AND completed_at IS NULL AND result_ciphertext IS NULL",
+    )
+    .bind::<SqlUuid, _>(late_transaction.id)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        late_row.count, 1,
+        "late completion must leave the persisted transaction unverified"
+    );
+    drop(connection);
     assert!(
         verifier
-            .prepare_verification_evidence(late_transaction.id, now)
+            .prepare_verification_evidence(late_transaction.id, late_completion_at)
             .await
             .unwrap()
             .is_none(),
