@@ -249,6 +249,7 @@ async fn management_attach_returns_the_signed_non_secret_binding_projection() {
 fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
     let request_json = || {
         json!({
+            "create_request_jti": Uuid::now_v7().to_string(),
             "wallet_authorization_endpoint": "https://wallet.example/authorize",
             "dcql_query": {"credentials": []},
             "openid4vc_trust_policy_resource_id": "trust:run-1",
@@ -264,6 +265,23 @@ fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
     assert_eq!(
         request.openid4vc_trust_policy_digest.as_deref(),
         Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+
+    let mut missing_jti = request_json();
+    missing_jti
+        .as_object_mut()
+        .unwrap()
+        .remove("create_request_jti");
+    assert!(serde_json::from_value::<CreatePresentationRequest>(missing_jti).is_err());
+    let mut malformed_jti = request_json();
+    malformed_jti["create_request_jti"] = json!("NOT-A-CANONICAL-UUID");
+    let malformed: CreatePresentationRequest = serde_json::from_value(malformed_jti)
+        .expect("shape parsing is separate from policy validation");
+    assert!(
+        nazo_operator_protocol::validate_openid4vp_create_request_jti(
+            &malformed.create_request_jti
+        )
+        .is_err()
     );
 
     let mut legacy = request_json();
@@ -314,7 +332,7 @@ impl CredentialIssuerOperations for Issuer {
         Result<CredentialEndpointResponse<CredentialResponseBody>, CredentialHttpError>,
     > {
         self.credential_contexts.lock().unwrap().push(context);
-        Box::pin(async {
+        Box::pin(async move {
             Err(CredentialHttpError {
                 status: 409,
                 error: "captured",
@@ -397,10 +415,14 @@ fn verification_projection() -> PresentationVerificationProjection {
 impl PresentationOperations for Verifier {
     fn create<'a>(
         &'a self,
-        _: CreatePresentationRequest,
+        request: CreatePresentationRequest,
     ) -> PresentationFuture<'a, Result<CreatePresentationResponse, PresentationHttpError>> {
-        Box::pin(async {
+        Box::pin(async move {
             Ok(CreatePresentationResponse {
+                idempotency: nazo_operator_protocol::Openid4vpCreateIdempotencyBinding {
+                    create_request_jti: request.create_request_jti,
+                    create_request_sha256: "a".repeat(64),
+                },
                 transaction_id: Uuid::now_v7(),
                 authorization_url: "https://wallet.example/authorize".to_owned(),
                 expires_in: 60,
@@ -944,7 +966,7 @@ async fn management_endpoints_fail_closed_without_exact_bearer_token() {
         ),
         (
             "/presentations",
-            serde_json::json!({"wallet_authorization_endpoint":"https://wallet.example/authorize","dcql_query":{"credentials":[]}}),
+            serde_json::json!({"create_request_jti":Uuid::now_v7(),"wallet_authorization_endpoint":"https://wallet.example/authorize","dcql_query":{"credentials":[]}}),
         ),
     ] {
         let response = test::call_service(
@@ -962,6 +984,38 @@ async fn management_endpoints_fail_closed_without_exact_bearer_token() {
             "Bearer"
         );
     }
+}
+
+#[actix_web::test]
+async fn presentation_create_echoes_the_typed_idempotency_binding() {
+    let endpoint = web::Data::new(PresentationEndpoint::new(
+        Arc::new(Verifier),
+        b"management-token".to_vec(),
+    ));
+    let app = test::init_service(
+        App::new()
+            .app_data(endpoint)
+            .route("/presentations", web::post().to(create_presentation)),
+    )
+    .await;
+    let create_request_jti = Uuid::now_v7().to_string();
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/presentations")
+            .insert_header(("authorization", "Bearer management-token"))
+            .set_json(json!({
+                "create_request_jti": create_request_jti,
+                "wallet_authorization_endpoint": "https://wallet.example/authorize",
+                "dcql_query": {"credentials": []}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(body["create_request_jti"], create_request_jti);
+    assert_eq!(body["create_request_sha256"], "a".repeat(64));
 }
 
 #[actix_web::test]
@@ -996,7 +1050,7 @@ async fn presentation_management_requires_nonempty_exact_bearer_token() {
         (
             b"management-token".to_vec(),
             Some("bearer management-token"),
-            StatusCode::UNAUTHORIZED,
+            StatusCode::OK,
         ),
         (b"management-token".to_vec(), None, StatusCode::UNAUTHORIZED),
         (
@@ -1021,6 +1075,7 @@ async fn presentation_management_requires_nonempty_exact_bearer_token() {
         let request = test::TestRequest::post()
             .uri("/presentations")
             .set_json(json!({
+                "create_request_jti": Uuid::now_v7(),
                 "wallet_authorization_endpoint": "https://wallet.example/authorize",
                 "dcql_query": {"credentials": []}
             }));

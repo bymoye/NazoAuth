@@ -22,8 +22,20 @@ impl PresentationStorePort for RecordingStore {
     fn create<'a>(
         &'a self,
         _transaction: &'a PresentationTransaction,
-    ) -> PresentationStoreFuture<'a, Result<(), PresentationStoreError>> {
-        Box::pin(async { Ok(()) })
+        _idempotency: nazo_openid4vp::PresentationCreateIdempotency<'a>,
+    ) -> PresentationStoreFuture<
+        'a,
+        Result<nazo_openid4vp::PresentationCreateOutcome, PresentationStoreError>,
+    > {
+        Box::pin(async { Ok(nazo_openid4vp::PresentationCreateOutcome::Created) })
+    }
+
+    fn find_by_create_request<'a>(
+        &'a self,
+        _idempotency: nazo_openid4vp::PresentationCreateIdempotency<'a>,
+    ) -> PresentationStoreFuture<'a, Result<Option<PresentationTransaction>, PresentationStoreError>>
+    {
+        Box::pin(async { Ok(None) })
     }
 
     fn request<'a>(

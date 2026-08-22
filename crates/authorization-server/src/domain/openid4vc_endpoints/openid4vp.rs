@@ -13,7 +13,8 @@ use nazo_openid4vc_http_actix::{
 };
 use nazo_openid4vp::{
     AuthorizationRequest, AuthorizationResponse, ClientIdPrefix, ClientMetadata,
-    PresentationService, PresentationStorePort, PresentationTransaction, RequestMethod,
+    PresentationCreateIdempotency, PresentationCreateOutcome, PresentationService,
+    PresentationStoreError, PresentationStorePort, PresentationTransaction, RequestMethod,
     ResponseMode,
 };
 use nazo_runtime_modules::ModuleId;
@@ -166,6 +167,8 @@ impl ServerPresentationOperations {
     fn create_response(
         &self,
         transaction: &PresentationTransaction,
+        create_request_jti: &str,
+        create_request_sha256: &str,
     ) -> Result<CreatePresentationResponse, PresentationHttpError> {
         let mut url =
             url::Url::parse(&transaction.wallet_authorization_endpoint).map_err(|_| {
@@ -196,6 +199,10 @@ impl ServerPresentationOperations {
             }
         }
         Ok(CreatePresentationResponse {
+            idempotency: nazo_operator_protocol::Openid4vpCreateIdempotencyBinding {
+                create_request_jti: create_request_jti.to_owned(),
+                create_request_sha256: create_request_sha256.to_owned(),
+            },
             transaction_id: transaction.id,
             authorization_url: url.into(),
             expires_in: transaction
@@ -511,7 +518,27 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation verifier is unavailable.",
                 ));
             }
+            nazo_operator_protocol::validate_openid4vp_create_request_jti(
+                &input.create_request_jti,
+            )
+            .map_err(|_| {
+                vp_error(
+                    400,
+                    "invalid_request",
+                    "create_request_jti must be a canonical lowercase UUID.",
+                )
+            })?;
             let wallet_origin = Self::wallet_origin(&input.wallet_authorization_endpoint)?;
+            let wallet_authorization_endpoint =
+                url::Url::parse(&input.wallet_authorization_endpoint)
+                    .map_err(|_| {
+                        vp_error(
+                            400,
+                            "invalid_request",
+                            "Wallet authorization endpoint is invalid.",
+                        )
+                    })?
+                    .to_string();
             let static_wallet_allowed = self.static_wallet_origin_allowed(&wallet_origin);
             let binding = match (
                 input.openid4vc_trust_policy_resource_id.as_deref(),
@@ -526,27 +553,6 @@ impl PresentationOperations for ServerPresentationOperations {
                         "OpenID4VC trust policy binding is incomplete.",
                     ));
                 }
-            };
-            let trust_policy = if let Some((resource_id, digest)) = binding {
-                Some(
-                    self.active_trust_policy(resource_id, &wallet_origin, digest)
-                        .await?
-                        .ok_or_else(|| {
-                            vp_error(
-                                400,
-                                "invalid_request",
-                                "OpenID4VC trust policy binding is not active.",
-                            )
-                        })?,
-                )
-            } else if static_wallet_allowed {
-                None
-            } else {
-                return Err(vp_error(
-                    400,
-                    "invalid_request",
-                    "The wallet origin is not statically trusted and no active OpenID4VC trust policy was selected.",
-                ));
             };
             input
                 .dcql_query
@@ -588,6 +594,84 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation security policy rejected this combination.",
                 )
             })?;
+            let normalized_request = nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
+                wallet_authorization_endpoint: wallet_authorization_endpoint.clone(),
+                dcql_query: serde_json::to_value(&input.dcql_query).map_err(|_| {
+                    vp_error(400, "invalid_request", "DCQL query is not JSON encodable.")
+                })?,
+                haip: input.haip,
+                client_id_prefix: prefix.as_str().to_owned(),
+                request_method: method.as_str().to_owned(),
+                response_mode: mode.as_str().to_owned(),
+                transaction_data: input.transaction_data.clone(),
+                openid4vc_trust_policy_resource_id: input
+                    .openid4vc_trust_policy_resource_id
+                    .clone(),
+                openid4vc_trust_policy_digest: input.openid4vc_trust_policy_digest.clone(),
+            };
+            let (canonical_request, request_sha256) =
+                nazo_operator_protocol::canonical_openid4vp_normalized_create_request(
+                    &normalized_request,
+                )
+                .map_err(|_| {
+                    vp_error(
+                        400,
+                        "invalid_request",
+                        "Presentation create request cannot be normalized.",
+                    )
+                })?;
+            let idempotency = PresentationCreateIdempotency {
+                request_jti: &input.create_request_jti,
+                request_sha256: &request_sha256,
+                canonical_request: &canonical_request,
+            };
+            match self.store.find_by_create_request(idempotency).await {
+                Ok(Some(existing)) => {
+                    return self.create_response(
+                        &existing,
+                        &input.create_request_jti,
+                        &request_sha256,
+                    );
+                }
+                Ok(None) => {}
+                Err(PresentationStoreError::IdempotencyConflict) => {
+                    return Err(vp_error(
+                        409,
+                        "conflict",
+                        "create_request_jti is already bound to a different request.",
+                    ));
+                }
+                Err(
+                    PresentationStoreError::Unavailable | PresentationStoreError::InvalidTransition,
+                ) => {
+                    return Err(vp_error(
+                        503,
+                        "server_error",
+                        "Presentation transaction state is unavailable.",
+                    ));
+                }
+            }
+            let trust_policy = if let Some((resource_id, digest)) = binding {
+                Some(
+                    self.active_trust_policy(resource_id, &wallet_origin, digest)
+                        .await?
+                        .ok_or_else(|| {
+                            vp_error(
+                                400,
+                                "invalid_request",
+                                "OpenID4VC trust policy binding is not active.",
+                            )
+                        })?,
+                )
+            } else if static_wallet_allowed {
+                None
+            } else {
+                return Err(vp_error(
+                    400,
+                    "invalid_request",
+                    "The wallet origin is not statically trusted and no active OpenID4VC trust policy was selected.",
+                ));
+            };
             let id = Uuid::now_v7();
             let response_uri = format!("{}/openid4vp/response/{id}", self.issuer);
             let client_id = match prefix {
@@ -667,7 +751,7 @@ impl PresentationOperations for ServerPresentationOperations {
                 client_id_prefix: prefix,
                 request_method: method,
                 response_mode: mode,
-                wallet_authorization_endpoint: input.wallet_authorization_endpoint.clone(),
+                wallet_authorization_endpoint,
                 request: request.clone(),
                 request_object,
                 request_uri: request_uri.clone(),
@@ -683,14 +767,26 @@ impl PresentationOperations for ServerPresentationOperations {
                 created_at: now,
                 expires_at: now + Duration::seconds(self.transaction_ttl_seconds as i64),
             };
-            self.store.create(&transaction).await.map_err(|_| {
-                vp_error(
+            match self.store.create(&transaction, idempotency).await {
+                Ok(PresentationCreateOutcome::Created) => {
+                    self.create_response(&transaction, &input.create_request_jti, &request_sha256)
+                }
+                Ok(PresentationCreateOutcome::Existing(existing)) => {
+                    self.create_response(&existing, &input.create_request_jti, &request_sha256)
+                }
+                Err(PresentationStoreError::IdempotencyConflict) => Err(vp_error(
+                    409,
+                    "conflict",
+                    "create_request_jti is already bound to a different request.",
+                )),
+                Err(
+                    PresentationStoreError::Unavailable | PresentationStoreError::InvalidTransition,
+                ) => Err(vp_error(
                     503,
                     "server_error",
                     "Presentation transaction state is unavailable.",
-                )
-            })?;
-            self.create_response(&transaction)
+                )),
+            }
         })
     }
 
@@ -1080,7 +1176,8 @@ impl PresentationOperations for ServerPresentationOperations {
                                 "conflict",
                                 "Presentation evidence context is already bound or terminal.",
                             ),
-                            nazo_openid4vp::PresentationStoreError::Unavailable => vp_error(
+                            nazo_openid4vp::PresentationStoreError::Unavailable
+                            | nazo_openid4vp::PresentationStoreError::IdempotencyConflict => vp_error(
                                 503,
                                 "server_error",
                                 "Presentation evidence attachment state is unavailable.",
@@ -1280,7 +1377,8 @@ impl PresentationOperations for ServerPresentationOperations {
                         "conflict",
                         "Presentation verification issuance request conflicts with prior state.",
                     ),
-                    nazo_openid4vp::PresentationStoreError::Unavailable => vp_error(
+                    nazo_openid4vp::PresentationStoreError::Unavailable
+                    | nazo_openid4vp::PresentationStoreError::IdempotencyConflict => vp_error(
                         503,
                         "server_error",
                         "Presentation verification receipt state is unavailable.",

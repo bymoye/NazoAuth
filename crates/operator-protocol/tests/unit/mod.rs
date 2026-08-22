@@ -2453,6 +2453,113 @@ fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
     }
 }
 
+fn openid4vp_normalized_create_request() -> Openid4vpNormalizedCreateRequest {
+    Openid4vpNormalizedCreateRequest {
+        wallet_authorization_endpoint: "https://wallet.example/authorize".to_owned(),
+        dcql_query: serde_json::from_str(
+            r#"{"credentials":[{"meta":{"z":2,"a":1},"id":"credential-1"}]}"#,
+        )
+        .unwrap(),
+        haip: true,
+        client_id_prefix: "x509_san_dns".to_owned(),
+        request_method: "request_uri_signed_get".to_owned(),
+        response_mode: "direct_post.jwt".to_owned(),
+        transaction_data: Some(vec![
+            serde_json::from_str(r#"{"type":"payment","details":{"z":2,"a":1}}"#).unwrap(),
+        ]),
+        openid4vc_trust_policy_resource_id: Some("trust-policy-1".to_owned()),
+        openid4vc_trust_policy_digest: Some("a".repeat(64)),
+    }
+}
+
+#[test]
+fn openid4vp_normalized_create_request_canonicalizes_recursive_object_order() {
+    let first = openid4vp_normalized_create_request();
+    let mut second = first.clone();
+    second.dcql_query =
+        serde_json::from_str(r#"{"credentials":[{"id":"credential-1","meta":{"a":1,"z":2}}]}"#)
+            .unwrap();
+    second.transaction_data = Some(vec![
+        serde_json::from_str(r#"{"details":{"a":1,"z":2},"type":"payment"}"#).unwrap(),
+    ]);
+
+    let (first_json, first_sha256) = canonical_openid4vp_normalized_create_request(&first).unwrap();
+    let (second_json, second_sha256) =
+        canonical_openid4vp_normalized_create_request(&second).unwrap();
+
+    assert_eq!(first_json, second_json);
+    assert_eq!(first_sha256, second_sha256);
+    assert_eq!(first_sha256.len(), 64);
+    assert!(
+        first_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert!(first_json.contains(r#""meta":{"a":1,"z":2}"#));
+    assert!(first_json.contains(r#""details":{"a":1,"z":2}"#));
+}
+
+#[test]
+fn openid4vp_normalized_create_request_hash_binds_every_field() {
+    let baseline = openid4vp_normalized_create_request();
+    let (_, baseline_sha256) = canonical_openid4vp_normalized_create_request(&baseline).unwrap();
+    let mut changed = Vec::new();
+
+    let mut request = baseline.clone();
+    request.wallet_authorization_endpoint.push_str("/changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.dcql_query = serde_json::json!({"credentials": []});
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.haip = false;
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.client_id_prefix.push_str("_changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.request_method.push_str("_changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.response_mode.push_str("_changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.transaction_data = None;
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.openid4vc_trust_policy_resource_id = None;
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.openid4vc_trust_policy_digest = None;
+    changed.push(request);
+
+    for request in changed {
+        let (_, changed_sha256) = canonical_openid4vp_normalized_create_request(&request).unwrap();
+        assert_ne!(changed_sha256, baseline_sha256);
+    }
+}
+
+#[test]
+fn openid4vp_create_request_jti_requires_canonical_versioned_uuid() {
+    for version in b'1'..=b'8' {
+        let mut valid = b"00000000-0000-7000-8000-000000000001".to_vec();
+        valid[14] = version;
+        validate_openid4vp_create_request_jti(std::str::from_utf8(&valid).unwrap()).unwrap();
+    }
+
+    for malformed in [
+        "00000000-0000-0000-8000-000000000001",
+        "00000000-0000-9000-8000-000000000001",
+        "00000000-0000-7000-7000-000000000001",
+        "00000000-0000-7000-c000-000000000001",
+        "00000000-0000-7000-8000-00000000000A",
+        "00000000000070008000000000000001",
+        "not-a-uuid",
+    ] {
+        assert!(validate_openid4vp_create_request_jti(malformed).is_err());
+    }
+}
+
 #[test]
 fn openid4vp_verification_receipt_is_server_bound_and_time_bounded() {
     let key = SigningKey::from_bytes(&[47; 32]);

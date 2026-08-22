@@ -17,8 +17,8 @@ pub use model::{
 pub use policy::{PresentationPolicy, PresentationPolicyError};
 pub use service::{PresentationService, PresentationServiceError, VerifiedPresentation};
 pub use store::{
-    PresentationCompletionBinding, PresentationStoreError, PresentationStoreFuture,
-    PresentationStorePort, StoredPresentation,
+    PresentationCompletionBinding, PresentationCreateIdempotency, PresentationCreateOutcome,
+    PresentationStoreError, PresentationStoreFuture, PresentationStorePort, StoredPresentation,
 };
 
 pub const VP_TOKEN_RESPONSE_TYPE: &str = "vp_token";

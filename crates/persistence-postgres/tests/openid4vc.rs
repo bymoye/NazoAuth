@@ -708,7 +708,141 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     let context_sha256 =
         nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&evidence_context)
             .unwrap();
-    verifier.create(&transaction).await.unwrap();
+    let create_request_jti = Uuid::now_v7().to_string();
+    let normalized_create = nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
+        wallet_authorization_endpoint: transaction.wallet_authorization_endpoint.clone(),
+        dcql_query: serde_json::to_value(&transaction.request.dcql_query).unwrap(),
+        haip: false,
+        client_id_prefix: transaction.client_id_prefix.as_str().to_owned(),
+        request_method: transaction.request_method.as_str().to_owned(),
+        response_mode: transaction.response_mode.as_str().to_owned(),
+        transaction_data: None,
+        openid4vc_trust_policy_resource_id: None,
+        openid4vc_trust_policy_digest: None,
+    };
+    let (create_request, create_request_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(&normalized_create)
+            .unwrap();
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &create_request_jti,
+                    request_sha256: &create_request_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .unwrap(),
+        nazo_openid4vp::PresentationCreateOutcome::Created
+    );
+    let replay = verifier
+        .create(
+            &transaction,
+            nazo_openid4vp::PresentationCreateIdempotency {
+                request_jti: &create_request_jti,
+                request_sha256: &create_request_sha256,
+                canonical_request: &create_request,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        nazo_openid4vp::PresentationCreateOutcome::Existing(existing)
+            if existing.id == transaction_id
+    ));
+    let mut different_normalized_create = normalized_create.clone();
+    different_normalized_create.haip = true;
+    let (different_request, different_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(
+            &different_normalized_create,
+        )
+        .unwrap();
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &create_request_jti,
+                    request_sha256: &different_sha256,
+                    canonical_request: &different_request,
+                },
+            )
+            .await
+            .expect_err("same create JTI must reject different canonical input"),
+        nazo_openid4vp::PresentationStoreError::IdempotencyConflict
+    );
+    let unrelated_jti = Uuid::now_v7().to_string();
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &unrelated_jti,
+                    request_sha256: &create_request_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .expect_err("transaction primary-key conflicts must not masquerade as replay"),
+        nazo_openid4vp::PresentationStoreError::Unavailable
+    );
+    let invalid_binding_jti = Uuid::now_v7().to_string();
+    let invalid_binding_sha256 = "f".repeat(64);
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &invalid_binding_jti,
+                    request_sha256: &invalid_binding_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .expect_err("canonical create JSON and digest must agree"),
+        nazo_openid4vp::PresentationStoreError::InvalidTransition
+    );
+    let concurrent_jti = Uuid::now_v7().to_string();
+    let mut concurrent_a = transaction.clone();
+    concurrent_a.id = Uuid::now_v7();
+    concurrent_a.request.state = format!("concurrent-a-{}", Uuid::now_v7());
+    let mut concurrent_b = transaction.clone();
+    concurrent_b.id = Uuid::now_v7();
+    concurrent_b.request.state = format!("concurrent-b-{}", Uuid::now_v7());
+    let binding = nazo_openid4vp::PresentationCreateIdempotency {
+        request_jti: &concurrent_jti,
+        request_sha256: &create_request_sha256,
+        canonical_request: &create_request,
+    };
+    let (created_a, created_b) = tokio::join!(
+        verifier.create(&concurrent_a, binding),
+        verifier.create(&concurrent_b, binding)
+    );
+    let created_a = created_a.unwrap();
+    let created_b = created_b.unwrap();
+    let winner_ids = [created_a, created_b]
+        .into_iter()
+        .map(|outcome| match outcome {
+            nazo_openid4vp::PresentationCreateOutcome::Created => None,
+            nazo_openid4vp::PresentationCreateOutcome::Existing(transaction) => {
+                Some(transaction.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        winner_ids.iter().filter(|id| id.is_none()).count(),
+        1,
+        "concurrent exact create must have exactly one insert winner"
+    );
+    let replayed_winner = winner_ids
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("the losing create must return the persisted winner");
+    assert!(replayed_winner == concurrent_a.id || replayed_winner == concurrent_b.id);
     let presentation_request_sha256 = "d".repeat(64);
     let attachment = verifier
         .attach_verification_evidence(
@@ -786,6 +920,24 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     .unwrap();
     drop(connection);
     let other_verifier = Openid4vpRepository::new(pool.clone(), tenant_b_id, data_key);
+    let mut other_tenant_transaction = transaction.clone();
+    other_tenant_transaction.id = Uuid::now_v7();
+    other_tenant_transaction.request.state = format!("other-tenant-{}", Uuid::now_v7());
+    assert_eq!(
+        other_verifier
+            .create(
+                &other_tenant_transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &create_request_jti,
+                    request_sha256: &create_request_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .unwrap(),
+        nazo_openid4vp::PresentationCreateOutcome::Created,
+        "different tenants may independently use the same create JTI"
+    );
     let capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let capability_sha256 =
         nazo_operator_protocol::openid4vp_verification_capability_sha256(capability).unwrap();
@@ -884,6 +1036,35 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         stored_result.transaction.response_encryption_private_key, None,
         "successful completion must erase the no-longer-consumed ephemeral response key"
     );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_intent_jws = 'tampered.intent' \
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(transaction_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(
+        verifier
+            .prepare_verification_evidence(transaction_id, now)
+            .await
+            .is_err(),
+        "result AEAD must bind the immutable signed intent digest"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_intent_jws = 'signed.intent.value' \
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(transaction_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
     let prepared = verifier
         .prepare_verification_evidence(transaction_id, now)
         .await
@@ -1063,7 +1244,21 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     late_transaction.request.state = format!("late-state-{}", Uuid::now_v7());
     late_transaction.created_at = now - Duration::minutes(2);
     late_transaction.expires_at = now - Duration::minutes(1);
-    verifier.create(&late_transaction).await.unwrap();
+    let late_create_request_jti = Uuid::now_v7().to_string();
+    let (late_create_request, late_create_request_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(&normalized_create)
+            .unwrap();
+    verifier
+        .create(
+            &late_transaction,
+            nazo_openid4vp::PresentationCreateIdempotency {
+                request_jti: &late_create_request_jti,
+                request_sha256: &late_create_request_sha256,
+                canonical_request: &late_create_request,
+            },
+        )
+        .await
+        .unwrap();
     let late_result = PresentationResult {
         transaction_id: late_transaction.id,
         credentials: Vec::new(),

@@ -198,6 +198,22 @@ pub(crate) fn validate_openid4vp_evidence_context(
     validate_lower_hex(&context.variant_sha256, 64)
 }
 
+/// Validate the caller-owned create idempotency JTI.
+///
+/// Only canonical lowercase RFC UUIDs with versions 1 through 8 are allowed;
+/// accepting alternative spellings would create multiple database keys for
+/// the same UUID.
+pub fn validate_openid4vp_create_request_jti(value: &str) -> Result<(), ProtocolError> {
+    validate_uuid(value)?;
+    let bytes = value.as_bytes();
+    if !matches!(bytes[14], b'1'..=b'8') || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
+        return Err(ProtocolError::Policy(
+            "invalid OpenID4VP create request JTI",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_openid4vp_presentation_binding(
     binding: &Openid4vpPresentationBinding,
 ) -> Result<(), ProtocolError> {

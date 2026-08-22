@@ -9,7 +9,7 @@ use crate::verification::{
     validate_adoption_receipt, validate_deployment_statement, validate_discovery_statement,
     validate_file_identifier, validate_final_receipt, validate_identifier,
     validate_management_event, validate_openid4vp_verification_intent,
-    validate_openid4vp_verification_receipt, validate_runtime_receipt,
+    validate_openid4vp_verification_receipt, validate_runtime_receipt, validate_task,
     validate_tenant_resource_capability, validate_tenant_resource_identities,
     validate_tenant_resource_receipt, validate_tenant_resource_task, validate_transition,
     verify_task_window, verify_tenant_resource_task_window,
@@ -17,10 +17,10 @@ use crate::verification::{
 use crate::wire::{
     AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
     DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent,
-    Openid4vpEvidenceContext, Openid4vpPresentationBinding, Openid4vpVerificationIntent,
-    Openid4vpVerificationReceipt, ProtectedHeader, RuntimeReceipt, TaskEnvelope,
-    TenantResourceCapability, TenantResourceIdentity, TenantResourceKind, TenantResourceReceipt,
-    TenantResourceTask,
+    Openid4vpEvidenceContext, Openid4vpNormalizedCreateRequest, Openid4vpPresentationBinding,
+    Openid4vpVerificationIntent, Openid4vpVerificationReceipt, ProtectedHeader, RuntimeReceipt,
+    TaskEnvelope, TenantResourceCapability, TenantResourceIdentity, TenantResourceKind,
+    TenantResourceReceipt, TenantResourceTask,
 };
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
@@ -145,6 +145,18 @@ pub fn canonical_openid4vp_evidence_context_sha256(
     crate::verification::validate_openid4vp_evidence_context(context)?;
     let bytes = serde_json::to_vec(context).map_err(|_| ProtocolError::Json)?;
     Ok(hex_sha256(&bytes))
+}
+
+/// Return the exact canonical JSON and lowercase SHA-256 used to bind an
+/// OpenID4VP create JTI to its complete, normalized request.
+pub fn canonical_openid4vp_normalized_create_request(
+    request: &Openid4vpNormalizedCreateRequest,
+) -> Result<(String, String), ProtocolError> {
+    let value = serde_json::to_value(request).map_err(|_| ProtocolError::Json)?;
+    let canonical =
+        serde_json::to_string(&canonicalize_json(value)).map_err(|_| ProtocolError::Json)?;
+    let sha256 = hex_sha256(canonical.as_bytes());
+    Ok((canonical, sha256))
 }
 
 pub fn canonical_openid4vp_presentation_binding_sha256(
@@ -290,6 +302,25 @@ fn tenant_resource_kind_wire_label(kind: TenantResourceKind) -> &'static str {
 fn append_len_prefixed(encoded: &mut Vec<u8>, value: &[u8]) {
     encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
     encoded.extend_from_slice(value);
+}
+
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(canonicalize_json)
+                .collect::<Vec<_>>(),
+        ),
+        serde_json::Value::Object(values) => {
+            let sorted = values
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        scalar => scalar,
+    }
 }
 
 pub fn compact_sha256(compact: &str) -> String {

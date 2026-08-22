@@ -6,7 +6,8 @@ use chrono::{DateTime, Utc};
 use diesel::{OptionalExtension, QueryableByName, sql_query, sql_types};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use nazo_openid4vp::{
-    PresentationResult, PresentationStoreError, PresentationStoreFuture, PresentationStorePort,
+    PresentationCreateIdempotency, PresentationCreateOutcome, PresentationResult,
+    PresentationStoreError, PresentationStoreFuture, PresentationStorePort,
     PresentationTransaction, StoredPresentation,
 };
 use rand::Rng;
@@ -130,6 +131,9 @@ impl Openid4vpRepository {
             .get()
             .await
             .map_err(|_| PresentationStoreError::Unavailable)?;
+        cleanup_expired_transactions(&mut connection)
+            .await
+            .map_err(|_| PresentationStoreError::Unavailable)?;
         let updated = sql_query(
             "UPDATE openid4vp_transactions SET \
                  verification_run_jti = $4, verification_artifact_sha256 = $5, \
@@ -138,6 +142,9 @@ impl Openid4vpRepository {
                  verification_variant_sha256 = $10, verification_context_sha256 = $11, \
                  verification_intent_jws = $12, verification_presentation_request_sha256 = $13 \
              WHERE id = $1 AND tenant_id = $2 AND completed_at IS NULL AND expires_at > $3 \
+               AND create_request_jti IS NOT NULL \
+               AND create_request_sha256 IS NOT NULL \
+               AND create_request_canonical_json IS NOT NULL \
                AND verification_context_sha256 IS NULL AND verification_intent_jws IS NULL \
                AND openid4vc_presentation_trust_policy_is_active( \
                    tenant_id, openid4vc_trust_policy_binding_id, \
@@ -261,7 +268,8 @@ impl Openid4vpRepository {
             self.tenant_id,
             transaction_id,
             expected_context_sha256,
-            &expected_presentation_binding.presentation_request_sha256,
+            expected_intent_jws,
+            expected_presentation_binding,
             issuance_request_jti,
             capability,
         )?;
@@ -269,6 +277,9 @@ impl Openid4vpRepository {
         let mut connection = self
             .pool
             .get()
+            .await
+            .map_err(|_| PresentationStoreError::Unavailable)?;
+        cleanup_expired_transactions(&mut connection)
             .await
             .map_err(|_| PresentationStoreError::Unavailable)?;
         let data_key = self.data_key;
@@ -329,7 +340,24 @@ impl Openid4vpRepository {
                                 self.tenant_id,
                                 transaction_id,
                                 &existing.verification_context_sha256,
-                                &existing.verification_presentation_request_sha256,
+                                &existing.verification_intent_jws,
+                                &nazo_operator_protocol::Openid4vpPresentationBinding {
+                                    presentation_request_sha256: existing
+                                        .verification_presentation_request_sha256
+                                        .clone(),
+                                    trust_policy:
+                                        nazo_operator_protocol::Openid4vpTrustPolicyBinding {
+                                            binding_id: existing
+                                                .openid4vc_trust_policy_binding_id
+                                                .map(|value| value.to_string()),
+                                            resource_id: existing
+                                                .openid4vc_trust_policy_resource_id
+                                                .clone(),
+                                            resource_digest: existing
+                                                .openid4vc_trust_policy_digest
+                                                .clone(),
+                                        },
+                                },
                                 &existing.verification_issuance_request_jti,
                                 &existing.verification_capability_ciphertext,
                             )
@@ -490,10 +518,23 @@ impl Openid4vpRepository {
     async fn create_inner(
         &self,
         transaction: &PresentationTransaction,
-    ) -> Result<(), PresentationStoreError> {
+        idempotency: PresentationCreateIdempotency<'_>,
+    ) -> Result<PresentationCreateOutcome, PresentationStoreError> {
+        validate_create_idempotency(idempotency)?;
         let mut connection = self
             .pool
             .get()
+            .await
+            .map_err(|_| PresentationStoreError::Unavailable)?;
+        clear_expired_create_request(
+            &mut connection,
+            self.tenant_id,
+            idempotency.request_jti,
+            Utc::now(),
+        )
+        .await
+        .map_err(|_| PresentationStoreError::Unavailable)?;
+        cleanup_expired_transactions(&mut connection)
             .await
             .map_err(|_| PresentationStoreError::Unavailable)?;
         let state_hash = blake3::hash(transaction.request.state.as_bytes())
@@ -509,8 +550,6 @@ impl Openid4vpRepository {
                     self.tenant_id,
                     transaction.id,
                     None,
-                    None,
-                    None,
                     key,
                 )
             })
@@ -520,8 +559,11 @@ impl Openid4vpRepository {
              (id, tenant_id, client_id_prefix, request_method, response_mode, \
               wallet_authorization_endpoint, state_hash, request, request_object, request_uri, \
               openid4vc_trust_policy_binding_id, openid4vc_trust_policy_resource_id, \
-              openid4vc_trust_policy_digest, ephemeral_private_key_ciphertext, expires_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+              openid4vc_trust_policy_digest, ephemeral_private_key_ciphertext, expires_at, \
+              create_request_jti, create_request_sha256, create_request_canonical_json) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) \
+             ON CONFLICT (tenant_id, create_request_jti) \
+                 WHERE create_request_jti IS NOT NULL DO NOTHING",
         )
         .bind::<sql_types::Uuid, _>(transaction.id)
         .bind::<sql_types::Uuid, _>(self.tenant_id)
@@ -547,20 +589,51 @@ impl Openid4vpRepository {
         )
         .bind::<sql_types::Nullable<sql_types::Binary>, _>(protected_private_key)
         .bind::<sql_types::Timestamptz, _>(transaction.expires_at)
+        .bind::<sql_types::Text, _>(idempotency.request_jti)
+        .bind::<sql_types::Text, _>(idempotency.request_sha256)
+        .bind::<sql_types::Text, _>(idempotency.canonical_request)
         .execute(&mut connection)
         .await
         .map_err(|error| match error {
             diesel::result::Error::DatabaseError(
                 diesel::result::DatabaseErrorKind::UniqueViolation,
                 _,
-            ) => PresentationStoreError::InvalidTransition,
+            ) => PresentationStoreError::Unavailable,
             _ => PresentationStoreError::Unavailable,
         })?;
-        if inserted == 1 {
-            Ok(())
-        } else {
-            Err(PresentationStoreError::InvalidTransition)
+        match inserted {
+            1 => Ok(PresentationCreateOutcome::Created),
+            0 => self
+                .load_idempotent_create(&mut connection, idempotency)
+                .await?
+                .map(PresentationCreateOutcome::Existing)
+                .ok_or(PresentationStoreError::InvalidTransition),
+            _ => Err(PresentationStoreError::InvalidTransition),
         }
+    }
+
+    async fn load_idempotent_create(
+        &self,
+        connection: &mut diesel_async::AsyncPgConnection,
+        idempotency: PresentationCreateIdempotency<'_>,
+    ) -> Result<Option<PresentationTransaction>, PresentationStoreError> {
+        validate_create_idempotency(idempotency)?;
+        let row = load_presentation_by_create_request(
+            connection,
+            self.tenant_id,
+            idempotency.request_jti,
+        )
+        .await
+        .map_err(|_| PresentationStoreError::Unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.create_request_sha256.as_deref() != Some(idempotency.request_sha256)
+            || row.create_request_canonical_json.as_deref() != Some(idempotency.canonical_request)
+        {
+            return Err(PresentationStoreError::IdempotencyConflict);
+        }
+        row.transaction().map(Some)
     }
 }
 
@@ -568,8 +641,37 @@ impl PresentationStorePort for Openid4vpRepository {
     fn create<'a>(
         &'a self,
         transaction: &'a PresentationTransaction,
-    ) -> PresentationStoreFuture<'a, Result<(), PresentationStoreError>> {
-        Box::pin(async move { self.create_inner(transaction).await })
+        idempotency: PresentationCreateIdempotency<'a>,
+    ) -> PresentationStoreFuture<'a, Result<PresentationCreateOutcome, PresentationStoreError>>
+    {
+        Box::pin(async move { self.create_inner(transaction, idempotency).await })
+    }
+
+    fn find_by_create_request<'a>(
+        &'a self,
+        idempotency: PresentationCreateIdempotency<'a>,
+    ) -> PresentationStoreFuture<'a, Result<Option<PresentationTransaction>, PresentationStoreError>>
+    {
+        Box::pin(async move {
+            let mut connection = self
+                .pool
+                .get()
+                .await
+                .map_err(|_| PresentationStoreError::Unavailable)?;
+            clear_expired_create_request(
+                &mut connection,
+                self.tenant_id,
+                idempotency.request_jti,
+                Utc::now(),
+            )
+            .await
+            .map_err(|_| PresentationStoreError::Unavailable)?;
+            cleanup_expired_transactions(&mut connection)
+                .await
+                .map_err(|_| PresentationStoreError::Unavailable)?;
+            self.load_idempotent_create(&mut connection, idempotency)
+                .await
+        })
     }
 
     fn request<'a>(
@@ -587,7 +689,7 @@ impl PresentationStorePort for Openid4vpRepository {
             let row = load_presentation(&mut connection, self.tenant_id, transaction_id, now)
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            row.map(|value| value.transaction_with_key(&self.data_key, self.tenant_id))
+            row.map(|value| value.transaction_with_key(&self.data_key, self.tenant_id, now))
                 .transpose()
         })
     }
@@ -634,7 +736,7 @@ impl PresentationStorePort for Openid4vpRepository {
                 return Ok(None);
             }
             row.request = encoded;
-            row.transaction_with_key(&self.data_key, self.tenant_id)
+            row.transaction_with_key(&self.data_key, self.tenant_id, now)
                 .map(Some)
         })
     }
@@ -655,14 +757,25 @@ impl PresentationStorePort for Openid4vpRepository {
                 .map_err(|_| PresentationStoreError::Unavailable)?;
             let encoded = serde_json::to_vec(result)
                 .map_err(|_| PresentationStoreError::InvalidTransition)?;
+            let intent_sha256 = verification_binding
+                .map(|binding| nazo_operator_protocol::compact_sha256(binding.intent_jws));
+            let payload_binding = verification_binding.zip(intent_sha256.as_deref()).map(
+                |(binding, intent_sha256)| PayloadVerificationBinding {
+                    context_sha256: binding.context_sha256,
+                    presentation_request_sha256: binding.presentation_request_sha256,
+                    intent_sha256,
+                    trust_policy_binding_id: binding.trust_policy_binding_id,
+                    trust_policy_resource_id: binding.trust_policy_resource_id,
+                    trust_policy_digest: binding.trust_policy_digest,
+                    issuance_request_jti: None,
+                },
+            );
             let encoded = protect_payload(
                 &self.data_key,
                 b"nazo-openid4vp-result-v2",
                 self.tenant_id,
                 transaction_id,
-                verification_binding.map(|binding| binding.context_sha256),
-                verification_binding.map(|binding| binding.presentation_request_sha256),
-                None,
+                payload_binding,
                 &encoded,
             )?;
             let changed = sql_query(
@@ -734,7 +847,7 @@ impl PresentationStorePort for Openid4vpRepository {
             let row = load_presentation(&mut connection, self.tenant_id, transaction_id, now)
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            row.map(|value| value.stored(&self.data_key, self.tenant_id))
+            row.map(|value| value.stored(&self.data_key, self.tenant_id, now))
                 .transpose()
         })
     }
@@ -752,6 +865,12 @@ struct PresentationRow {
     response_mode: String,
     #[diesel(sql_type = sql_types::Text)]
     wallet_authorization_endpoint: String,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    create_request_jti: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    create_request_sha256: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    create_request_canonical_json: Option<String>,
     #[diesel(sql_type = sql_types::Jsonb)]
     request: serde_json::Value,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
@@ -767,6 +886,8 @@ struct PresentationRow {
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     verification_context_sha256: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    verification_intent_jws: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     verification_presentation_request_sha256: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Binary>)]
     ephemeral_private_key_ciphertext: Option<Vec<u8>>,
@@ -778,6 +899,12 @@ struct PresentationRow {
     expires_at: DateTime<Utc>,
     #[diesel(sql_type = sql_types::Timestamptz)]
     created_at: DateTime<Utc>,
+}
+
+#[derive(QueryableByName)]
+struct CleanupResult {
+    #[diesel(sql_type = sql_types::Integer)]
+    deleted_transactions: i32,
 }
 
 #[derive(QueryableByName)]
@@ -877,14 +1004,21 @@ impl VerificationIntentRow {
         &self,
         data_key: &[u8; 32],
     ) -> Result<PreparedOpenid4vpVerificationEvidence, PresentationStoreError> {
+        let intent_sha256 = nazo_operator_protocol::compact_sha256(&self.verification_intent_jws);
         let result = unprotect_payload(
             data_key,
             b"nazo-openid4vp-result-v2",
             self.tenant_id,
             self.id,
-            Some(&self.verification_context_sha256),
-            Some(&self.verification_presentation_request_sha256),
-            None,
+            Some(PayloadVerificationBinding {
+                context_sha256: &self.verification_context_sha256,
+                presentation_request_sha256: &self.verification_presentation_request_sha256,
+                intent_sha256: &intent_sha256,
+                trust_policy_binding_id: self.openid4vc_trust_policy_binding_id,
+                trust_policy_resource_id: self.openid4vc_trust_policy_resource_id.as_deref(),
+                trust_policy_digest: self.openid4vc_trust_policy_digest.as_deref(),
+                issuance_request_jti: None,
+            }),
             &self.result_ciphertext,
             false,
         )?;
@@ -1071,14 +1205,21 @@ impl VerificationEvidenceRow {
         self,
         data_key: &[u8; 32],
     ) -> Result<StoredOpenid4vpVerificationEvidence, PresentationStoreError> {
+        let intent_sha256 = nazo_operator_protocol::compact_sha256(&self.verification_intent_jws);
         let result = unprotect_payload(
             data_key,
             b"nazo-openid4vp-result-v2",
             self.tenant_id,
             self.id,
-            Some(&self.verification_context_sha256),
-            Some(&self.verification_presentation_request_sha256),
-            None,
+            Some(PayloadVerificationBinding {
+                context_sha256: &self.verification_context_sha256,
+                presentation_request_sha256: &self.verification_presentation_request_sha256,
+                intent_sha256: &intent_sha256,
+                trust_policy_binding_id: self.openid4vc_trust_policy_binding_id,
+                trust_policy_resource_id: self.openid4vc_trust_policy_resource_id.as_deref(),
+                trust_policy_digest: self.openid4vc_trust_policy_digest.as_deref(),
+                issuance_request_jti: None,
+            }),
             &self.result_ciphertext,
             false,
         )?;
@@ -1137,6 +1278,40 @@ impl VerificationEvidenceRow {
 enum VerificationEvidenceLookup<'a> {
     CapabilitySha256(&'a str),
     TransactionId(Uuid),
+}
+
+async fn cleanup_expired_transactions(
+    connection: &mut diesel_async::AsyncPgConnection,
+) -> Result<(), diesel::result::Error> {
+    let result =
+        sql_query("SELECT nazo_openid4vp_cleanup_expired_transactions() AS deleted_transactions")
+            .get_result::<CleanupResult>(connection)
+            .await?;
+    debug_assert!((0..=256).contains(&result.deleted_transactions));
+    Ok(())
+}
+
+async fn clear_expired_create_request(
+    connection: &mut diesel_async::AsyncPgConnection,
+    tenant_id: Uuid,
+    request_jti: &str,
+    now: DateTime<Utc>,
+) -> Result<(), diesel::result::Error> {
+    sql_query(
+        "DELETE FROM openid4vp_transactions \
+         WHERE tenant_id = $1 AND create_request_jti = $2 \
+           AND GREATEST( \
+               expires_at, \
+               COALESCE(verification_issuance_expires_at, expires_at), \
+               COALESCE(verification_expires_at, expires_at) \
+           ) <= $3",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Text, _>(request_jti)
+    .bind::<sql_types::Timestamptz, _>(now)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn clear_expired_verification_evidence(
@@ -1262,7 +1437,9 @@ impl PresentationRow {
         &self,
         data_key: &[u8; 32],
         tenant_id: Uuid,
+        now: DateTime<Utc>,
     ) -> Result<PresentationTransaction, PresentationStoreError> {
+        let allow_legacy = self.legacy_transaction_aad_eligible(now);
         let mut transaction = self.transaction()?;
         transaction.response_encryption_private_key = self
             .ephemeral_private_key_ciphertext
@@ -1274,10 +1451,8 @@ impl PresentationRow {
                     tenant_id,
                     self.id,
                     None,
-                    None,
-                    None,
                     value,
-                    true,
+                    allow_legacy,
                 )
             })
             .transpose()?;
@@ -1287,7 +1462,32 @@ impl PresentationRow {
         self,
         data_key: &[u8; 32],
         tenant_id: Uuid,
+        now: DateTime<Utc>,
     ) -> Result<StoredPresentation, PresentationStoreError> {
+        let legacy_aad_eligible = self.legacy_transaction_aad_eligible(now);
+        let intent_sha256 = self
+            .verification_intent_jws
+            .as_deref()
+            .map(nazo_operator_protocol::compact_sha256);
+        let verification_binding = match (
+            self.verification_context_sha256.as_deref(),
+            self.verification_presentation_request_sha256.as_deref(),
+            intent_sha256.as_deref(),
+        ) {
+            (Some(context_sha256), Some(presentation_request_sha256), Some(intent_sha256)) => {
+                Some(PayloadVerificationBinding {
+                    context_sha256,
+                    presentation_request_sha256,
+                    intent_sha256,
+                    trust_policy_binding_id: self.openid4vc_trust_policy_binding_id,
+                    trust_policy_resource_id: self.openid4vc_trust_policy_resource_id.as_deref(),
+                    trust_policy_digest: self.openid4vc_trust_policy_digest.as_deref(),
+                    issuance_request_jti: None,
+                })
+            }
+            (None, None, None) => None,
+            _ => return Err(PresentationStoreError::InvalidTransition),
+        };
         let decrypted = self
             .result_ciphertext
             .as_deref()
@@ -1297,11 +1497,9 @@ impl PresentationRow {
                     b"nazo-openid4vp-result-v2",
                     tenant_id,
                     self.id,
-                    self.verification_context_sha256.as_deref(),
-                    self.verification_presentation_request_sha256.as_deref(),
-                    None,
+                    verification_binding,
                     value,
-                    true,
+                    legacy_aad_eligible,
                 )
             })
             .transpose()?;
@@ -1321,10 +1519,8 @@ impl PresentationRow {
                     tenant_id,
                     self.id,
                     None,
-                    None,
-                    None,
                     value,
-                    true,
+                    legacy_aad_eligible,
                 )
             })
             .transpose()?;
@@ -1342,6 +1538,16 @@ impl PresentationRow {
             completed,
         })
     }
+
+    fn legacy_transaction_aad_eligible(&self, now: DateTime<Utc>) -> bool {
+        self.create_request_jti.is_none()
+            && self.create_request_sha256.is_none()
+            && self.create_request_canonical_json.is_none()
+            && self.verification_context_sha256.is_none()
+            && self.verification_intent_jws.is_none()
+            && self.verification_presentation_request_sha256.is_none()
+            && self.expires_at > now
+    }
 }
 
 async fn load_presentation(
@@ -1352,9 +1558,11 @@ async fn load_presentation(
 ) -> Result<Option<PresentationRow>, diesel::result::Error> {
     sql_query(
         "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
+         create_request_jti, create_request_sha256, create_request_canonical_json, \
          request, request_object, request_uri, openid4vc_trust_policy_binding_id, \
          openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest, \
-         verification_context_sha256, verification_presentation_request_sha256, \
+         verification_context_sha256, verification_intent_jws, \
+         verification_presentation_request_sha256, \
          ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
          FROM openid4vp_transactions WHERE id = $1 AND tenant_id = $2 AND expires_at > $3 \
            AND openid4vc_presentation_trust_policy_is_active( \
@@ -1367,6 +1575,55 @@ async fn load_presentation(
     .get_result(connection)
     .await
     .optional()
+}
+
+async fn load_presentation_by_create_request(
+    connection: &mut diesel_async::AsyncPgConnection,
+    tenant_id: Uuid,
+    request_jti: &str,
+) -> Result<Option<PresentationRow>, diesel::result::Error> {
+    sql_query(
+        "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
+         create_request_jti, create_request_sha256, create_request_canonical_json, \
+         request, request_object, request_uri, openid4vc_trust_policy_binding_id, \
+         openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest, \
+         verification_context_sha256, verification_intent_jws, \
+         verification_presentation_request_sha256, \
+         ephemeral_private_key_ciphertext, result_ciphertext, completed_at, expires_at, created_at \
+         FROM openid4vp_transactions WHERE tenant_id = $1 AND create_request_jti = $2",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Text, _>(request_jti)
+    .get_result(connection)
+    .await
+    .optional()
+}
+
+fn validate_create_idempotency(
+    idempotency: PresentationCreateIdempotency<'_>,
+) -> Result<(), PresentationStoreError> {
+    nazo_operator_protocol::validate_openid4vp_create_request_jti(idempotency.request_jti)
+        .map_err(|_| PresentationStoreError::InvalidTransition)?;
+    if idempotency.request_sha256.len() != 64
+        || !idempotency
+            .request_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || idempotency.canonical_request.is_empty()
+        || idempotency.canonical_request.len() > 65_536
+    {
+        return Err(PresentationStoreError::InvalidTransition);
+    }
+    let normalized: nazo_operator_protocol::Openid4vpNormalizedCreateRequest =
+        serde_json::from_str(idempotency.canonical_request)
+            .map_err(|_| PresentationStoreError::InvalidTransition)?;
+    let (canonical, sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(&normalized)
+            .map_err(|_| PresentationStoreError::InvalidTransition)?;
+    if canonical != idempotency.canonical_request || sha256 != idempotency.request_sha256 {
+        return Err(PresentationStoreError::InvalidTransition);
+    }
+    Ok(())
 }
 
 fn parse_client_id_prefix(
@@ -1390,25 +1647,44 @@ fn parse_response_mode(
     }
 }
 
+#[derive(Clone, Copy)]
+struct PayloadVerificationBinding<'a> {
+    context_sha256: &'a str,
+    presentation_request_sha256: &'a str,
+    intent_sha256: &'a str,
+    trust_policy_binding_id: Option<Uuid>,
+    trust_policy_resource_id: Option<&'a str>,
+    trust_policy_digest: Option<&'a str>,
+    issuance_request_jti: Option<&'a str>,
+}
+
 fn payload_aad(
     domain: &[u8],
     tenant_id: Uuid,
     transaction_id: Uuid,
-    context_sha256: Option<&str>,
-    presentation_request_sha256: Option<&str>,
-    issuance_request_jti: Option<&str>,
+    verification_binding: Option<PayloadVerificationBinding<'_>>,
 ) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(256);
-    for value in [
-        domain,
-        tenant_id.as_bytes(),
-        transaction_id.as_bytes(),
-        context_sha256.unwrap_or("").as_bytes(),
-        presentation_request_sha256.unwrap_or("").as_bytes(),
-        issuance_request_jti.unwrap_or("").as_bytes(),
-    ] {
+    let mut aad = Vec::with_capacity(512);
+    let trust_policy_binding_id = verification_binding
+        .and_then(|binding| binding.trust_policy_binding_id)
+        .map(|value| value.to_string());
+    for value in [domain, tenant_id.as_bytes(), transaction_id.as_bytes()] {
         aad.extend_from_slice(&(value.len() as u64).to_be_bytes());
         aad.extend_from_slice(value);
+    }
+    if let Some(binding) = verification_binding {
+        for value in [
+            binding.context_sha256,
+            binding.presentation_request_sha256,
+            binding.intent_sha256,
+            trust_policy_binding_id.as_deref().unwrap_or(""),
+            binding.trust_policy_resource_id.unwrap_or(""),
+            binding.trust_policy_digest.unwrap_or(""),
+            binding.issuance_request_jti.unwrap_or(""),
+        ] {
+            aad.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            aad.extend_from_slice(value.as_bytes());
+        }
     }
     aad
 }
@@ -1419,9 +1695,7 @@ fn protect_payload(
     domain: &[u8],
     tenant_id: Uuid,
     transaction_id: Uuid,
-    context_sha256: Option<&str>,
-    presentation_request_sha256: Option<&str>,
-    issuance_request_jti: Option<&str>,
+    verification_binding: Option<PayloadVerificationBinding<'_>>,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, PresentationStoreError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| PresentationStoreError::Unavailable)?;
@@ -1434,14 +1708,7 @@ fn protect_payload(
                 (&nonce).into(),
                 Payload {
                     msg: plaintext,
-                    aad: &payload_aad(
-                        domain,
-                        tenant_id,
-                        transaction_id,
-                        context_sha256,
-                        presentation_request_sha256,
-                        issuance_request_jti,
-                    ),
+                    aad: &payload_aad(domain, tenant_id, transaction_id, verification_binding),
                 },
             )
             .map_err(|_| PresentationStoreError::Unavailable)?,
@@ -1454,18 +1721,33 @@ fn protect_verification_capability(
     tenant_id: Uuid,
     transaction_id: Uuid,
     context_sha256: &str,
-    presentation_request_sha256: &str,
+    intent_jws: &str,
+    presentation_binding: &nazo_operator_protocol::Openid4vpPresentationBinding,
     issuance_request_jti: &str,
     capability: &str,
 ) -> Result<Vec<u8>, PresentationStoreError> {
+    let intent_sha256 = nazo_operator_protocol::compact_sha256(intent_jws);
+    let trust_policy_binding_id = presentation_binding
+        .trust_policy
+        .binding_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|_| PresentationStoreError::InvalidTransition)?;
     protect_payload(
         key,
         b"nazo-openid4vp-capability-v1",
         tenant_id,
         transaction_id,
-        Some(context_sha256),
-        Some(presentation_request_sha256),
-        Some(issuance_request_jti),
+        Some(PayloadVerificationBinding {
+            context_sha256,
+            presentation_request_sha256: &presentation_binding.presentation_request_sha256,
+            intent_sha256: &intent_sha256,
+            trust_policy_binding_id,
+            trust_policy_resource_id: presentation_binding.trust_policy.resource_id.as_deref(),
+            trust_policy_digest: presentation_binding.trust_policy.resource_digest.as_deref(),
+            issuance_request_jti: Some(issuance_request_jti),
+        }),
         capability.as_bytes(),
     )
 }
@@ -1496,9 +1778,7 @@ fn unprotect_payload(
     domain: &[u8],
     tenant_id: Uuid,
     transaction_id: Uuid,
-    context_sha256: Option<&str>,
-    presentation_request_sha256: Option<&str>,
-    issuance_request_jti: Option<&str>,
+    verification_binding: Option<PayloadVerificationBinding<'_>>,
     protected: &[u8],
     allow_legacy_transaction_aad: bool,
 ) -> Result<Vec<u8>, PresentationStoreError> {
@@ -1509,14 +1789,7 @@ fn unprotect_payload(
         .try_into()
         .map_err(|_| PresentationStoreError::InvalidTransition)?;
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| PresentationStoreError::Unavailable)?;
-    let aad = payload_aad(
-        domain,
-        tenant_id,
-        transaction_id,
-        context_sha256,
-        presentation_request_sha256,
-        issuance_request_jti,
-    );
+    let aad = payload_aad(domain, tenant_id, transaction_id, verification_binding);
     match cipher.decrypt(
         nonce.into(),
         Payload {
@@ -1543,18 +1816,33 @@ fn unprotect_verification_capability(
     tenant_id: Uuid,
     transaction_id: Uuid,
     context_sha256: &str,
-    presentation_request_sha256: &str,
+    intent_jws: &str,
+    presentation_binding: &nazo_operator_protocol::Openid4vpPresentationBinding,
     issuance_request_jti: &str,
     protected: &[u8],
 ) -> Result<String, PresentationStoreError> {
+    let intent_sha256 = nazo_operator_protocol::compact_sha256(intent_jws);
+    let trust_policy_binding_id = presentation_binding
+        .trust_policy
+        .binding_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|_| PresentationStoreError::InvalidTransition)?;
     let plaintext = unprotect_payload(
         key,
         b"nazo-openid4vp-capability-v1",
         tenant_id,
         transaction_id,
-        Some(context_sha256),
-        Some(presentation_request_sha256),
-        Some(issuance_request_jti),
+        Some(PayloadVerificationBinding {
+            context_sha256,
+            presentation_request_sha256: &presentation_binding.presentation_request_sha256,
+            intent_sha256: &intent_sha256,
+            trust_policy_binding_id,
+            trust_policy_resource_id: presentation_binding.trust_policy.resource_id.as_deref(),
+            trust_policy_digest: presentation_binding.trust_policy.resource_digest.as_deref(),
+            issuance_request_jti: Some(issuance_request_jti),
+        }),
         protected,
         false,
     )?;

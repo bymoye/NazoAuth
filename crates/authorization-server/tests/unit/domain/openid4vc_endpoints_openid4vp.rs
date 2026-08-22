@@ -170,6 +170,7 @@ fn create_input(
     haip: bool,
 ) -> CreatePresentationRequest {
     CreatePresentationRequest {
+        create_request_jti: Uuid::now_v7().to_string(),
         wallet_authorization_endpoint: "https://wallet.example/authorize".to_owned(),
         dcql_query: valid_dcql(),
         haip,
@@ -327,15 +328,47 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .await
         .with_verification_signer(verification_signer.clone());
 
+    let url_query_input = create_input(
+        Some("url_query"),
+        Some("direct_post"),
+        Some("redirect_uri"),
+        false,
+    );
     let url_query = operations
-        .create(create_input(
-            Some("url_query"),
-            Some("direct_post"),
-            Some("redirect_uri"),
-            false,
-        ))
+        .create(url_query_input.clone())
         .await
         .expect("url query presentation should be stored");
+    let replayed_url_query = operations
+        .create(url_query_input.clone())
+        .await
+        .expect("an exact create retry must replay the stored response");
+    assert_eq!(replayed_url_query, url_query);
+    let mut conflicting_url_query = url_query_input;
+    conflicting_url_query.transaction_data = Some(vec![json!({"changed": true})]);
+    assert_eq!(
+        operations
+            .create(conflicting_url_query)
+            .await
+            .expect_err("the same create JTI must not alias a different request")
+            .status,
+        409
+    );
+    let omitted_defaults = create_input(None, None, None, false);
+    let defaulted = operations
+        .create(omitted_defaults.clone())
+        .await
+        .expect("omitted defaults create must succeed");
+    let mut explicit_defaults = omitted_defaults;
+    explicit_defaults.client_id_prefix = Some("x509_hash".to_owned());
+    explicit_defaults.request_method = Some("request_uri_signed_post".to_owned());
+    explicit_defaults.response_mode = Some("direct_post".to_owned());
+    assert_eq!(
+        operations
+            .create(explicit_defaults)
+            .await
+            .expect("explicit defaults must replay the normalized request"),
+        defaulted
+    );
     assert!(
         url_query
             .authorization_url
@@ -908,9 +941,36 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     missing_response_key.id = Uuid::now_v7();
     missing_response_key.request.state = format!("missing-response-key-{}", Uuid::now_v7());
     missing_response_key.response_encryption_private_key = None;
+    let missing_response_key_jti = Uuid::now_v7().to_string();
+    let normalized_missing_response_key =
+        nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
+            wallet_authorization_endpoint: missing_response_key
+                .wallet_authorization_endpoint
+                .clone(),
+            dcql_query: serde_json::to_value(&missing_response_key.request.dcql_query).unwrap(),
+            haip: false,
+            client_id_prefix: missing_response_key.client_id_prefix.as_str().to_owned(),
+            request_method: missing_response_key.request_method.as_str().to_owned(),
+            response_mode: missing_response_key.response_mode.as_str().to_owned(),
+            transaction_data: None,
+            openid4vc_trust_policy_resource_id: None,
+            openid4vc_trust_policy_digest: None,
+        };
+    let (missing_response_key_request, missing_response_key_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(
+            &normalized_missing_response_key,
+        )
+        .unwrap();
     operations
         .store
-        .create(&missing_response_key)
+        .create(
+            &missing_response_key,
+            nazo_openid4vp::PresentationCreateIdempotency {
+                request_jti: &missing_response_key_jti,
+                request_sha256: &missing_response_key_sha256,
+                canonical_request: &missing_response_key_request,
+            },
+        )
         .await
         .expect("transaction without response key should be insertable for the error test");
     let unavailable_response_key = operations

@@ -440,6 +440,42 @@ pub struct Openid4vpEvidenceContext {
     pub variant_sha256: String,
 }
 
+/// Caller-owned idempotency key for creating one OpenID4VP presentation.
+///
+/// The value is a canonical lowercase UUID. It is intentionally separate
+/// from the normalized request digest so a repeated JTI with different input
+/// can be rejected instead of silently replaying the first transaction.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Openid4vpCreateIdempotencyRequest {
+    pub create_request_jti: String,
+}
+
+/// Idempotency projection flattened into a successful create response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Openid4vpCreateIdempotencyBinding {
+    pub create_request_jti: String,
+    pub create_request_sha256: String,
+}
+
+/// Complete, default-expanded create input used for durable replay binding.
+///
+/// `dcql_query` and `transaction_data` remain JSON because this protocol
+/// crate must bind the HTTP contract without duplicating the DCQL domain
+/// model. Canonicalization recursively sorts every JSON object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpNormalizedCreateRequest {
+    pub wallet_authorization_endpoint: String,
+    pub dcql_query: serde_json::Value,
+    pub haip: bool,
+    pub client_id_prefix: String,
+    pub request_method: String,
+    pub response_mode: String,
+    pub transaction_data: Option<Vec<serde_json::Value>>,
+    pub openid4vc_trust_policy_resource_id: Option<String>,
+    pub openid4vc_trust_policy_digest: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Openid4vpAttachEvidenceRequest {

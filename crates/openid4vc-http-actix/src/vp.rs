@@ -30,6 +30,7 @@ pub struct PresentationHttpError {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePresentationRequest {
+    pub create_request_jti: String,
     pub wallet_authorization_endpoint: String,
     pub dcql_query: nazo_digital_credentials::DcqlQuery,
     #[serde(default)]
@@ -53,6 +54,8 @@ pub struct CreatePresentationRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CreatePresentationResponse {
+    #[serde(flatten)]
+    pub idempotency: nazo_operator_protocol::Openid4vpCreateIdempotencyBinding,
     pub transaction_id: Uuid,
     pub authorization_url: String,
     pub expires_in: u64,
