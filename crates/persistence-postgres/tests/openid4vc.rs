@@ -1393,9 +1393,9 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         !verifier
             .complete(
                 late_transaction.id,
-                &blake3::hash(late_transaction.request.state.as_bytes())
+                blake3::hash(late_transaction.request.state.as_bytes())
                     .to_hex()
-                    .to_string(),
+                    .as_ref(),
                 &late_result,
                 None,
                 late_completion_at,
