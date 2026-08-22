@@ -23,7 +23,7 @@ pub struct PresentationCreateIdempotency<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PresentationCreateOutcome {
     Created,
-    Existing(PresentationTransaction),
+    Existing(Box<PresentationTransaction>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

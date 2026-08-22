@@ -606,7 +606,7 @@ impl Openid4vpRepository {
             0 => self
                 .load_idempotent_create(&mut connection, idempotency)
                 .await?
-                .map(PresentationCreateOutcome::Existing)
+                .map(|transaction| PresentationCreateOutcome::Existing(Box::new(transaction)))
                 .ok_or(PresentationStoreError::InvalidTransition),
             _ => Err(PresentationStoreError::InvalidTransition),
         }
