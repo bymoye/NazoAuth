@@ -235,8 +235,16 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
         .await
         .expect_err("disabled verifier must fail closed");
     assert_eq!(
-        (disabled_error.status, disabled_error.error),
-        (503, "temporarily_unavailable")
+        (
+            disabled_error.status,
+            disabled_error.error,
+            disabled_error.description
+        ),
+        (
+            503,
+            "temporarily_unavailable",
+            "Presentation verifier is unavailable."
+        )
     );
 
     let enabled = operations(invalid_pool(), &root.join("enabled"), true).await;
@@ -248,8 +256,36 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
         .await
         .expect_err("non-HTTPS wallet endpoint must fail closed");
     assert_eq!(
-        (wallet_error.status, wallet_error.error),
-        (400, "invalid_request")
+        (
+            wallet_error.status,
+            wallet_error.error,
+            wallet_error.description
+        ),
+        (
+            400,
+            "invalid_request",
+            "Wallet authorization endpoint is invalid."
+        )
+    );
+
+    let untrusted_wallet_error = enabled
+        .create(CreatePresentationRequest {
+            wallet_authorization_endpoint: "https://untrusted-wallet.example/authorize".to_owned(),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("untrusted HTTPS wallet without a policy must fail before storage");
+    assert_eq!(
+        (
+            untrusted_wallet_error.status,
+            untrusted_wallet_error.error,
+            untrusted_wallet_error.description
+        ),
+        (
+            400,
+            "invalid_request",
+            "The wallet origin is not statically trusted and no OpenID4VC trust policy was selected."
+        )
     );
 
     let oversized_error = enabled
@@ -264,8 +300,16 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
         .await
         .expect_err("oversized normalized create request must fail before storage");
     assert_eq!(
-        (oversized_error.status, oversized_error.error),
-        (413, "invalid_request")
+        (
+            oversized_error.status,
+            oversized_error.error,
+            oversized_error.description
+        ),
+        (
+            413,
+            "invalid_request",
+            "Presentation create request is too large."
+        )
     );
 
     let no_dns = operations_with_crypto(
@@ -284,8 +328,16 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
         .await
         .expect_err("x509_san_dns must fail when the certificate has no DNS SAN");
     assert_eq!(
-        (no_dns_error.status, no_dns_error.error),
-        (500, "server_error")
+        (
+            no_dns_error.status,
+            no_dns_error.error,
+            no_dns_error.description
+        ),
+        (
+            400,
+            "invalid_request",
+            "x509_san_dns is unavailable for the verifier certificate."
+        )
     );
 
     let unavailable_request = disabled

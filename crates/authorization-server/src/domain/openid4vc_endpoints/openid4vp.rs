@@ -553,6 +553,13 @@ impl PresentationOperations for ServerPresentationOperations {
                     ));
                 }
             };
+            if binding.is_none() && !static_wallet_allowed {
+                return Err(vp_error(
+                    400,
+                    "invalid_request",
+                    "The wallet origin is not statically trusted and no OpenID4VC trust policy was selected.",
+                ));
+            }
             input
                 .dcql_query
                 .validate()
@@ -593,6 +600,19 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation security policy rejected this combination.",
                 )
             })?;
+            let fixed_client_id = match prefix {
+                ClientIdPrefix::RedirectUri => None,
+                ClientIdPrefix::X509Hash => Some(self.crypto.x509_hash_client_id()),
+                ClientIdPrefix::X509SanDns => {
+                    Some(self.crypto.x509_san_dns_client_id().map_err(|_| {
+                        vp_error(
+                            400,
+                            "invalid_request",
+                            "x509_san_dns is unavailable for the verifier certificate.",
+                        )
+                    })?)
+                }
+            };
             let normalized_request = nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
                 wallet_authorization_endpoint: wallet_authorization_endpoint.clone(),
                 dcql_query: serde_json::to_value(&input.dcql_query).map_err(|_| {
@@ -671,29 +691,22 @@ impl PresentationOperations for ServerPresentationOperations {
                             )
                         })?,
                 )
-            } else if static_wallet_allowed {
-                None
             } else {
-                return Err(vp_error(
-                    400,
-                    "invalid_request",
-                    "The wallet origin is not statically trusted and no active OpenID4VC trust policy was selected.",
-                ));
+                debug_assert!(static_wallet_allowed);
+                None
             };
             let id = Uuid::now_v7();
             let response_uri = format!("{}/openid4vp/response/{id}", self.issuer);
             let client_id = match prefix {
                 ClientIdPrefix::RedirectUri => format!("redirect_uri:{response_uri}"),
-                ClientIdPrefix::X509Hash => self.crypto.x509_hash_client_id(),
-                ClientIdPrefix::X509SanDns => {
-                    self.crypto.x509_san_dns_client_id().map_err(|_| {
+                ClientIdPrefix::X509Hash | ClientIdPrefix::X509SanDns => fixed_client_id
+                    .ok_or_else(|| {
                         vp_error(
-                            500,
+                            503,
                             "server_error",
-                            "Verifier certificate has no DNS identity.",
+                            "Verifier client identity is unavailable.",
                         )
-                    })?
-                }
+                    })?,
             };
             let response_key =
                 (mode == ResponseMode::DirectPostJwt).then(EphemeralEncryptionKey::generate);
