@@ -429,6 +429,60 @@ pub struct RuntimeReceipt {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpEvidenceContext {
+    pub run_jti: String,
+    pub artifact_sha256: String,
+    pub matrix_sha256: String,
+    pub suite_plan_id: String,
+    pub suite_module_id: String,
+    pub test_name: String,
+    pub variant_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpVerificationReceipt {
+    pub schema: u32,
+    pub iss: String,
+    pub aud: String,
+    pub jti: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub deployment_id: String,
+    pub runtime_instance_id: String,
+    pub instance_key_id: String,
+    pub transaction_id: String,
+    pub status: Openid4vpVerificationStatus,
+    pub evidence_context: Openid4vpEvidenceContext,
+    pub completed_at: String,
+    pub capability_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Openid4vpVerificationIntent {
+    pub schema: u32,
+    pub iss: String,
+    pub aud: String,
+    pub jti: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub deployment_id: String,
+    pub runtime_instance_id: String,
+    pub instance_key_id: String,
+    pub tenant_id: String,
+    pub transaction_id: String,
+    pub evidence_context: Openid4vpEvidenceContext,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Openid4vpVerificationStatus {
+    Verified,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RuntimeTargetClaim {
     OciImage {

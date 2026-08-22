@@ -49,6 +49,8 @@ pub struct CreatePresentationRequest {
     pub openid4vc_trust_policy_resource_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openid4vc_trust_policy_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_context: Option<nazo_operator_protocol::Openid4vpEvidenceContext>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -56,6 +58,32 @@ pub struct CreatePresentationResponse {
     pub transaction_id: Uuid,
     pub authorization_url: String,
     pub expires_in: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PresentationVerificationProjection {
+    pub schema: u32,
+    pub issuer: String,
+    pub deployment_id: String,
+    pub runtime_instance_id: String,
+    pub instance_key_id: String,
+    pub receipt_id: String,
+    pub transaction_id: Uuid,
+    pub status: nazo_operator_protocol::Openid4vpVerificationStatus,
+    pub evidence_context: nazo_operator_protocol::Openid4vpEvidenceContext,
+    pub completed_at: String,
+    pub expires_at: String,
+    pub receipt_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PresentationVerificationResponse {
+    #[serde(flatten)]
+    pub projection: PresentationVerificationProjection,
+    pub receipt_jws: String,
+    pub receipt_api_url: String,
+    pub verification_ui_url: String,
+    pub verification_expires_in: u64,
 }
 
 pub trait PresentationOperations: Send + Sync {
@@ -77,6 +105,14 @@ pub trait PresentationOperations: Send + Sync {
         &'a self,
         transaction_id: Uuid,
     ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>>;
+    fn issue_verification_receipt<'a>(
+        &'a self,
+        transaction_id: Uuid,
+    ) -> PresentationFuture<'a, Result<PresentationVerificationResponse, PresentationHttpError>>;
+    fn verification_receipt<'a>(
+        &'a self,
+        capability: &'a str,
+    ) -> PresentationFuture<'a, Result<PresentationVerificationProjection, PresentationHttpError>>;
 }
 
 #[derive(Clone)]
@@ -119,7 +155,7 @@ pub async fn create_presentation(
         return management_unauthorized();
     }
     match endpoint.operations.create(body.into_inner()).await {
-        Ok(value) => json_no_store(value),
+        Ok(value) => json_no_store_no_referrer(value),
         Err(error) => presentation_error(error),
     }
 }
@@ -254,10 +290,71 @@ pub async fn presentation_result(
     }
 }
 
+pub async fn issue_presentation_verification_receipt(
+    endpoint: web::Data<PresentationEndpoint>,
+    request: HttpRequest,
+    transaction_id: web::Path<Uuid>,
+    body: web::Bytes,
+) -> HttpResponse {
+    if !endpoint.management_authorized(&request) {
+        return management_unauthorized();
+    }
+    if !body.is_empty() {
+        return presentation_error(PresentationHttpError {
+            status: 400,
+            error: "invalid_request",
+            description: "Verification receipt issuance request body must be empty.",
+        });
+    }
+    match endpoint
+        .operations
+        .issue_verification_receipt(*transaction_id)
+        .await
+    {
+        Ok(value) => json_no_store_no_referrer(value),
+        Err(error) => presentation_error(error),
+    }
+}
+
+pub async fn presentation_verification_receipt(
+    endpoint: web::Data<PresentationEndpoint>,
+    request: HttpRequest,
+) -> HttpResponse {
+    let Some(capability) = receipt_capability(&request) else {
+        return receipt_not_found();
+    };
+    match endpoint.operations.verification_receipt(capability).await {
+        Ok(value) => json_no_store_no_referrer(value),
+        Err(error) if error.status == 404 => receipt_not_found(),
+        Err(error) => presentation_error(error),
+    }
+}
+
+fn receipt_capability(request: &HttpRequest) -> Option<&str> {
+    let mut values = request.headers().get_all(header::AUTHORIZATION);
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let (scheme, capability) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Receipt")
+        || capability.is_empty()
+        || capability.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    (capability.len() == 43
+        && capability
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(capability)
+}
+
 fn management_unauthorized() -> HttpResponse {
     HttpResponse::Unauthorized()
         .insert_header((header::WWW_AUTHENTICATE, "Bearer"))
         .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::REFERRER_POLICY, "no-referrer"))
         .json(serde_json::json!({
             "error": "invalid_token",
             "error_description": "Verifier management authentication is required."
@@ -282,11 +379,29 @@ fn json_no_store(value: impl Serialize) -> HttpResponse {
         .json(value)
 }
 
+fn json_no_store_no_referrer(value: impl Serialize) -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::REFERRER_POLICY, "no-referrer"))
+        .json(value)
+}
+
+fn receipt_not_found() -> HttpResponse {
+    HttpResponse::NotFound()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::REFERRER_POLICY, "no-referrer"))
+        .json(serde_json::json!({
+            "error": "not_found",
+            "error_description": "Verification receipt is not available."
+        }))
+}
+
 fn presentation_error(error: PresentationHttpError) -> HttpResponse {
     let status = actix_web::http::StatusCode::from_u16(error.status)
         .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
     HttpResponse::build(status)
         .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::REFERRER_POLICY, "no-referrer"))
         .json(serde_json::json!({
             "error": error.error,
             "error_description": error.description,

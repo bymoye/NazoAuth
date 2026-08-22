@@ -1,6 +1,6 @@
 use super::*;
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diesel::sql_query;
@@ -179,6 +179,19 @@ fn create_input(
         transaction_data: None,
         openid4vc_trust_policy_resource_id: None,
         openid4vc_trust_policy_digest: None,
+        evidence_context: None,
+    }
+}
+
+fn evidence_context() -> nazo_operator_protocol::Openid4vpEvidenceContext {
+    nazo_operator_protocol::Openid4vpEvidenceContext {
+        run_jti: "run-jti-1".to_owned(),
+        artifact_sha256: "a".repeat(64),
+        matrix_sha256: "b".repeat(64),
+        suite_plan_id: Uuid::now_v7().to_string(),
+        suite_module_id: Uuid::now_v7().to_string(),
+        test_name: "openid4vp-test".to_owned(),
+        variant_sha256: "c".repeat(64),
     }
 }
 
@@ -238,6 +251,30 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
     assert_eq!(
         (wallet_error.status, wallet_error.error),
         (400, "invalid_request")
+    );
+
+    let mut missing_signer = create_input(None, None, None, false);
+    missing_signer.evidence_context = Some(evidence_context());
+    assert_eq!(
+        enabled
+            .create(missing_signer)
+            .await
+            .expect_err("evidence-bound creation requires the runtime identity signer")
+            .status,
+        503
+    );
+
+    let mut invalid_evidence = create_input(None, None, None, false);
+    let mut invalid_context = evidence_context();
+    invalid_context.matrix_sha256 = "A".repeat(64);
+    invalid_evidence.evidence_context = Some(invalid_context);
+    assert_eq!(
+        enabled
+            .create(invalid_evidence)
+            .await
+            .expect_err("non-canonical evidence context must fail before storage")
+            .status,
+        400
     );
 
     let no_dns = operations_with_crypto(
@@ -301,7 +338,19 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     };
     let root = std::env::temp_dir().join(format!("nazo-openid4vp-live-{}", Uuid::now_v7()));
     let pool = nazo_postgres::create_pool(database_url, 2).expect("live pool should build");
-    let operations = operations(pool.clone(), &root, true).await;
+    let verification_signer = Arc::new(
+        crate::control_discovery::ControlDiscoveryEndpoint::initialize(
+            &root.join("control"),
+            None,
+            Some("deployment-test"),
+            Some("runtime-test"),
+            "https://issuer.example",
+        )
+        .expect("verification receipt signer should initialize"),
+    );
+    let operations = operations(pool.clone(), &root, true)
+        .await
+        .with_verification_signer(verification_signer.clone());
 
     let url_query = operations
         .create(create_input(
@@ -327,15 +376,68 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         "invalid_request_uri"
     );
 
+    let mut signed_get_input = create_input(
+        Some("request_uri_signed_get"),
+        Some("direct_post"),
+        Some("x509_san_dns"),
+        false,
+    );
+    let signed_get_context = evidence_context();
+    signed_get_input.evidence_context = Some(signed_get_context.clone());
     let signed_get = operations
-        .create(create_input(
-            Some("request_uri_signed_get"),
-            Some("direct_post"),
-            Some("x509_san_dns"),
-            false,
-        ))
+        .create(signed_get_input)
         .await
         .expect("signed GET presentation should be stored");
+    assert_eq!(
+        operations
+            .issue_verification_receipt(signed_get.transaction_id)
+            .await
+            .expect_err("receipt must remain unavailable before successful verification")
+            .status,
+        404
+    );
+    let mut duplicate = create_input(
+        Some("request_uri_signed_get"),
+        Some("direct_post"),
+        Some("x509_san_dns"),
+        false,
+    );
+    duplicate.evidence_context = Some(signed_get_context.clone());
+    let duplicate = operations
+        .create(duplicate)
+        .await
+        .expect("lost create response must be recoverable by exact context retry");
+    assert_eq!(duplicate, signed_get);
+    let mut request_mismatch = create_input(
+        Some("request_uri_signed_get"),
+        Some("direct_post"),
+        Some("x509_san_dns"),
+        false,
+    );
+    request_mismatch.evidence_context = Some(signed_get_context.clone());
+    request_mismatch.transaction_data = Some(vec![json!({"type":"changed-request"})]);
+    assert_eq!(
+        operations
+            .create(request_mismatch)
+            .await
+            .expect_err("an idempotency key must not authorize a different normalized request")
+            .status,
+        409
+    );
+    let mut conflicting = create_input(
+        Some("request_uri_signed_get"),
+        Some("direct_post"),
+        Some("x509_san_dns"),
+        false,
+    );
+    let mut conflicting_context = signed_get_context.clone();
+    conflicting_context.test_name.push_str("-changed");
+    conflicting.evidence_context = Some(conflicting_context);
+    assert_eq!(
+        operations.create(conflicting).await.unwrap_err().status,
+        409,
+        "the same run/module with altered context must fail closed"
+    );
     assert!(signed_get.authorization_url.contains("request_uri="));
     assert!(matches!(
         operations
@@ -429,6 +531,23 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .await
         .expect("signed GET transaction should be readable")
         .expect("signed GET transaction should exist");
+    let mut tampered_context = signed_get_context.clone();
+    tampered_context.matrix_sha256 = "e".repeat(64);
+    let tampered_context_sha256 =
+        nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&tampered_context)
+            .unwrap();
+    let mut connection = nazo_postgres::get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_matrix_sha256 = $2, \
+             verification_context_sha256 = $3 WHERE id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(signed_get.transaction_id)
+    .bind::<diesel::sql_types::Text, _>(&tampered_context.matrix_sha256)
+    .bind::<diesel::sql_types::Text, _>(&tampered_context_sha256)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
     let holder_signing_key = SigningKey::from_slice(&[17; 32]).expect("holder P-256 key");
     let holder_point = holder_signing_key.verifying_key().to_sec1_point(false);
     let holder_jwk = json!({
@@ -507,6 +626,163 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .expect("completed presentation result should be readable");
     assert_eq!(completed_result.transaction_id, signed_get.transaction_id);
     assert_eq!(completed_result.credentials.len(), 1);
+    assert_eq!(
+        operations
+            .issue_verification_receipt(signed_get.transaction_id)
+            .await
+            .expect_err("signed intent must reject synchronized DB context/hash tampering")
+            .status,
+        503
+    );
+    let original_context_sha256 =
+        nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&signed_get_context)
+            .unwrap();
+    let mut connection = nazo_postgres::get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_matrix_sha256 = $2, \
+             verification_context_sha256 = $3 WHERE id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(signed_get.transaction_id)
+    .bind::<diesel::sql_types::Text, _>(&signed_get_context.matrix_sha256)
+    .bind::<diesel::sql_types::Text, _>(&original_context_sha256)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    let mut terminal_duplicate = create_input(
+        Some("request_uri_signed_get"),
+        Some("direct_post"),
+        Some("x509_san_dns"),
+        false,
+    );
+    terminal_duplicate.evidence_context = Some(signed_get_context.clone());
+    assert_eq!(
+        operations
+            .create(terminal_duplicate)
+            .await
+            .expect_err("a terminal context must never recreate a presentation")
+            .status,
+        409
+    );
+    let verification = operations
+        .issue_verification_receipt(signed_get.transaction_id)
+        .await
+        .expect("successful presentation must expose its management receipt");
+    let capability = verification
+        .verification_ui_url
+        .strip_prefix("https://issuer.example/ui/verification-result#receipt=")
+        .expect("issuance must isolate the capability in the UI fragment");
+    assert_eq!(capability.len(), 43);
+    let public = operations
+        .verification_receipt(capability)
+        .await
+        .expect("matching capability must expose only the verified projection");
+    assert_eq!(verification.projection, public);
+    assert_eq!(
+        public.status,
+        nazo_operator_protocol::Openid4vpVerificationStatus::Verified
+    );
+    assert_eq!(
+        public.receipt_sha256,
+        nazo_operator_protocol::compact_sha256(&verification.receipt_jws)
+    );
+    let verified_receipt = nazo_operator_protocol::verify_openid4vp_verification_receipt(
+        &verification.receipt_jws,
+        &nazo_operator_protocol::Openid4vpVerificationReceiptExpectations {
+            issuer: "https://issuer.example",
+            audience: "https://issuer.example/openid4vp/verification-receipts",
+            deployment_id: verification_signer.deployment_id(),
+            runtime_instance_id: verification_signer.runtime_instance_id(),
+            instance_key_id: verification_signer.instance_key_id(),
+            transaction_id: &signed_get.transaction_id.to_string(),
+            receipt_id: &verification.projection.receipt_id,
+            evidence_context_sha256:
+                &nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(
+                    &signed_get_context,
+                )
+                .unwrap(),
+            capability_sha256: &nazo_operator_protocol::openid4vp_verification_capability_sha256(
+                capability,
+            )
+            .unwrap(),
+        },
+        &verification_signer.instance_verifying_key(),
+        Utc::now().timestamp(),
+    )
+    .expect("management receipt must verify against the live instance identity");
+    assert_eq!(
+        verified_receipt.transaction_id,
+        signed_get.transaction_id.to_string()
+    );
+    let public_json = serde_json::to_value(public).expect("public projection should serialize");
+    for forbidden in [
+        "credentials",
+        "nonce",
+        "receipt_jws",
+        "capability",
+        "ui_url",
+    ] {
+        assert!(
+            public_json.get(forbidden).is_none(),
+            "public projection leaked {forbidden}"
+        );
+    }
+    assert_eq!(
+        operations
+            .verification_receipt("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .await
+            .expect_err("a different capability must fail closed")
+            .status,
+        404
+    );
+    let mut connection = nazo_postgres::get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_matrix_sha256 = $2, \
+             verification_context_sha256 = $3 WHERE id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(signed_get.transaction_id)
+    .bind::<diesel::sql_types::Text, _>(&tampered_context.matrix_sha256)
+    .bind::<diesel::sql_types::Text, _>(&tampered_context_sha256)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert_eq!(
+        operations
+            .verification_receipt(capability)
+            .await
+            .expect_err("public read must use the stored signed receipt and intent as authority")
+            .status,
+        503
+    );
+    let mut connection = nazo_postgres::get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_matrix_sha256 = $2, \
+             verification_context_sha256 = $3 WHERE id = $1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(signed_get.transaction_id)
+    .bind::<diesel::sql_types::Text, _>(&signed_get_context.matrix_sha256)
+    .bind::<diesel::sql_types::Text, _>(&original_context_sha256)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    let rotated = operations
+        .issue_verification_receipt(signed_get.transaction_id)
+        .await
+        .expect("retry after a lost issuance response must rotate capability");
+    assert_ne!(
+        rotated.projection.receipt_id,
+        verification.projection.receipt_id
+    );
+    assert_eq!(
+        operations
+            .verification_receipt(capability)
+            .await
+            .expect_err("rotation must immediately invalidate the old capability")
+            .status,
+        404
+    );
 
     let missing_request = operations
         .request(Uuid::now_v7(), None)
@@ -634,6 +910,7 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         wallet_origins: operations.wallet_origins.clone(),
         transaction_ttl_seconds: operations.transaction_ttl_seconds,
         tenant_id: operations.tenant_id,
+        verification_signer: operations.verification_signer.clone(),
     };
     let store_error = store_error_operations
         .create(create_input(

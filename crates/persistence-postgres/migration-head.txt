@@ -1,1 +1,1 @@
-20260820000100_backchannel_logout_tenant_binding
+20260822000100_openid4vp_verification_receipts

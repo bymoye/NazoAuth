@@ -11,6 +11,7 @@ chrono.workspace = true
 nazo-digital-credentials.workspace = true
 nazo-openid4vci.workspace = true
 nazo-openid4vp.workspace = true
+nazo-operator-protocol.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 url.workspace = true

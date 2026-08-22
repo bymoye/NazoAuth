@@ -167,24 +167,27 @@ pub(super) async fn build(
         };
     let presentation_endpoint = if settings.modules.enable_openid4vp_verifier {
         Some(web::Data::new(PresentationEndpoint::new(
-            Arc::new(ServerPresentationOperations::new(
-                diesel_db.clone(),
-                settings.tenant.context.tenant_id.as_uuid(),
-                settings
-                    .openid4vc
-                    .data_encryption_key
-                    .expect("enabled OpenID4VP requires a data encryption key"),
-                openid4vc_crypto
-                    .as_ref()
-                    .expect("enabled OpenID4VP requires crypto")
-                    .clone(),
-                runtime_registry,
-                PresentationVerifierConfig {
-                    issuer: settings.endpoint.issuer.clone(),
-                    wallet_origins: settings.openid4vc.wallet_authorization_origins.clone(),
-                    transaction_ttl_seconds: settings.openid4vc.transaction_ttl_seconds,
-                },
-            )),
+            Arc::new(
+                ServerPresentationOperations::new(
+                    diesel_db.clone(),
+                    settings.tenant.context.tenant_id.as_uuid(),
+                    settings
+                        .openid4vc
+                        .data_encryption_key
+                        .expect("enabled OpenID4VP requires a data encryption key"),
+                    openid4vc_crypto
+                        .as_ref()
+                        .expect("enabled OpenID4VP requires crypto")
+                        .clone(),
+                    runtime_registry,
+                    PresentationVerifierConfig {
+                        issuer: settings.endpoint.issuer.clone(),
+                        wallet_origins: settings.openid4vc.wallet_authorization_origins.clone(),
+                        transaction_ttl_seconds: settings.openid4vc.transaction_ttl_seconds,
+                    },
+                )
+                .with_verification_signer(startup.control_discovery.clone().into_inner()),
+            ),
             settings
                 .openid4vc
                 .verifier_management_token

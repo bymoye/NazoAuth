@@ -8,22 +8,25 @@ use sha2::{Digest as _, Sha256};
 use crate::verification::{
     validate_adoption_receipt, validate_deployment_statement, validate_discovery_statement,
     validate_file_identifier, validate_final_receipt, validate_identifier,
-    validate_management_event, validate_runtime_receipt, validate_task,
+    validate_management_event, validate_openid4vp_verification_intent,
+    validate_openid4vp_verification_receipt, validate_runtime_receipt,
     validate_tenant_resource_capability, validate_tenant_resource_identities,
     validate_tenant_resource_receipt, validate_tenant_resource_task, validate_transition,
     verify_task_window, verify_tenant_resource_task_window,
 };
 use crate::wire::{
     AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
-    DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent, ProtectedHeader,
-    RuntimeReceipt, TaskEnvelope, TenantResourceCapability, TenantResourceIdentity,
-    TenantResourceKind, TenantResourceReceipt, TenantResourceTask,
+    DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent,
+    Openid4vpEvidenceContext, Openid4vpVerificationIntent, Openid4vpVerificationReceipt,
+    ProtectedHeader, RuntimeReceipt, TaskEnvelope, TenantResourceCapability,
+    TenantResourceIdentity, TenantResourceKind, TenantResourceReceipt, TenantResourceTask,
 };
 use crate::{
     ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
     DEPLOYMENT_STATEMENT_JWS_TYPE, FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE,
-    MAX_COMPACT_JWS_BYTES, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE,
-    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+    MAX_COMPACT_JWS_BYTES, OPENID4VP_VERIFICATION_INTENT_JWS_TYPE,
+    OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE,
+    TASK_JWS_TYPE, TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
     TENANT_RESOURCE_TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
 };
 
@@ -100,6 +103,62 @@ pub fn sign_runtime_receipt(
 ) -> Result<String, ProtocolError> {
     validate_runtime_receipt(receipt)?;
     sign_compact(receipt, key_id, RUNTIME_RECEIPT_JWS_TYPE, key)
+}
+
+pub fn sign_openid4vp_verification_receipt(
+    receipt: &Openid4vpVerificationReceipt,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_openid4vp_verification_receipt(receipt)?;
+    if receipt.instance_key_id != key_id {
+        return Err(ProtocolError::Policy(
+            "OpenID4VP verification receipt key id does not match signer",
+        ));
+    }
+    sign_compact(
+        receipt,
+        key_id,
+        OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE,
+        key,
+    )
+}
+
+pub fn sign_openid4vp_verification_intent(
+    intent: &Openid4vpVerificationIntent,
+    key_id: &str,
+    key: &SigningKey,
+) -> Result<String, ProtocolError> {
+    validate_openid4vp_verification_intent(intent)?;
+    if intent.instance_key_id != key_id {
+        return Err(ProtocolError::Policy(
+            "OpenID4VP verification intent key id does not match signer",
+        ));
+    }
+    sign_compact(intent, key_id, OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, key)
+}
+
+pub fn canonical_openid4vp_evidence_context_sha256(
+    context: &Openid4vpEvidenceContext,
+) -> Result<String, ProtocolError> {
+    crate::verification::validate_openid4vp_evidence_context(context)?;
+    let bytes = serde_json::to_vec(context).map_err(|_| ProtocolError::Json)?;
+    Ok(hex_sha256(&bytes))
+}
+
+pub fn openid4vp_verification_capability_sha256(capability: &str) -> Result<String, ProtocolError> {
+    if capability.len() != 43
+        || !capability
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ProtocolError::Policy(
+            "invalid OpenID4VP verification capability",
+        ));
+    }
+    let mut binding = b"nazoauth-openid4vp-verification-capability-v1\0".to_vec();
+    binding.extend_from_slice(capability.as_bytes());
+    Ok(hex_sha256(&binding))
 }
 
 pub fn sign_final_receipt(

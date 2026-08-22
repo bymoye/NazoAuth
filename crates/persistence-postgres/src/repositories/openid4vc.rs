@@ -13,4 +13,8 @@ pub use dataset::{
     unprotect_dataset_claims, upsert_operator_managed_dataset_on_connection,
 };
 pub use issuance::Openid4vciRepository;
-pub use presentation::Openid4vpRepository;
+pub use presentation::{
+    CreateOpenid4vpWithEvidenceOutcome, ExistingOpenid4vpEvidenceContext,
+    NewOpenid4vpVerificationEvidence, Openid4vpRepository, PreparedOpenid4vpVerificationEvidence,
+    StoredOpenid4vpVerificationEvidence,
+};

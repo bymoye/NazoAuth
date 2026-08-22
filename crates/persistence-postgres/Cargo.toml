@@ -24,6 +24,7 @@ nazo-resource-server.workspace = true
 nazo-scim-events.workspace = true
 nazo-openid4vci.workspace = true
 nazo-openid4vp.workspace = true
+nazo-operator-protocol.workspace = true
 nazo-digital-credentials.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

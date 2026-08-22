@@ -159,6 +159,28 @@ impl ControlDiscoveryEndpoint {
         sign_tenant_resource_receipt(receipt, &self.identity.key_id, &self.identity.signing_key)
     }
 
+    pub(crate) fn sign_openid4vp_verification_receipt(
+        &self,
+        receipt: &nazo_operator_protocol::Openid4vpVerificationReceipt,
+    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
+        nazo_operator_protocol::sign_openid4vp_verification_receipt(
+            receipt,
+            &self.identity.key_id,
+            &self.identity.signing_key,
+        )
+    }
+
+    pub(crate) fn sign_openid4vp_verification_intent(
+        &self,
+        intent: &nazo_operator_protocol::Openid4vpVerificationIntent,
+    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
+        nazo_operator_protocol::sign_openid4vp_verification_intent(
+            intent,
+            &self.identity.key_id,
+            &self.identity.signing_key,
+        )
+    }
+
     fn respond(&self, request: DiscoveryRequest) -> anyhow::Result<DiscoveryResponse> {
         validate_discovery_request(&request)?;
         let issued_at = Utc::now().timestamp();

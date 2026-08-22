@@ -13,6 +13,10 @@ pub const ADOPTION_RECEIPT_JWS_TYPE: &str = "nazoauth-adoption-receipt+jwt";
 pub const TENANT_RESOURCE_CAPABILITY_JWS_TYPE: &str = "nazoauth-tenant-resource-capability+jwt";
 pub const TENANT_RESOURCE_TASK_JWS_TYPE: &str = "nazoauth-tenant-resource-task+jwt";
 pub const TENANT_RESOURCE_RECEIPT_JWS_TYPE: &str = "nazoauth-tenant-resource-receipt+jwt";
+pub const OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE: &str =
+    "nazoauth-openid4vp-verification-receipt+jwt";
+pub const OPENID4VP_VERIFICATION_INTENT_JWS_TYPE: &str =
+    "nazoauth-openid4vp-verification-intent+jwt";
 pub const TENANT_RESOURCE_CAPABILITY_VERSION: u32 = 1;
 pub const CONTROL_DISCOVERY_SCHEMA: u32 = 1;
 pub const CONTROL_DISCOVERY_PRODUCT: &str = "nazoauth";
@@ -51,13 +55,17 @@ mod wire;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub use signing::{
-    canonical_config_sha256, canonical_tenant_resource_manifest_sha256, compact_sha256,
-    decode_instance_public_key, encode_instance_public_key, instance_key_id, protected_header,
-    sign_adoption_receipt, sign_deployment_statement, sign_discovery_statement, sign_final_receipt,
-    sign_management_event, sign_runtime_receipt, sign_task, sign_tenant_resource_capability,
-    sign_tenant_resource_receipt, sign_tenant_resource_task, sign_trust_transition,
+    canonical_config_sha256, canonical_openid4vp_evidence_context_sha256,
+    canonical_tenant_resource_manifest_sha256, compact_sha256, decode_instance_public_key,
+    encode_instance_public_key, instance_key_id, openid4vp_verification_capability_sha256,
+    protected_header, sign_adoption_receipt, sign_deployment_statement, sign_discovery_statement,
+    sign_final_receipt, sign_management_event, sign_openid4vp_verification_intent,
+    sign_openid4vp_verification_receipt, sign_runtime_receipt, sign_task,
+    sign_tenant_resource_capability, sign_tenant_resource_receipt, sign_tenant_resource_task,
+    sign_trust_transition,
 };
 pub use verification::{
+    Openid4vpVerificationIntentExpectations, Openid4vpVerificationReceiptExpectations,
     validate_discovery_request, validate_file_identifier_value, validate_openid4vc_trust_policy,
     validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
     validate_tenant_resource_capability, validate_tenant_resource_capability_binding,
@@ -71,8 +79,9 @@ pub use verification::{
     validate_tenant_resource_task_capability_binding_with_digest,
     validate_tenant_resource_task_deployment_binding, verify_adoption_receipt,
     verify_deployment_statement, verify_discovery_statement, verify_final_receipt,
-    verify_management_event, verify_runtime_receipt, verify_task, verify_task_signature,
-    verify_task_window, verify_tenant_resource_capability,
+    verify_management_event, verify_openid4vp_verification_intent,
+    verify_openid4vp_verification_receipt, verify_runtime_receipt, verify_task,
+    verify_task_signature, verify_task_window, verify_tenant_resource_capability,
     verify_tenant_resource_capability_signature, verify_tenant_resource_receipt,
     verify_tenant_resource_receipt_signature, verify_tenant_resource_receipt_window,
     verify_tenant_resource_task, verify_tenant_resource_task_signature,
