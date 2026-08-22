@@ -1229,6 +1229,129 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
             .expect("stale JTI rejection must retain the B capability"),
         rotated.evidence
     );
+
+    macro_rules! assert_verification_binding_tamper_fails_closed {
+        ($column:literal, $sql_type:ty, $tampered:expr, $original:expr) => {{
+            let mut connection = get_conn(&pool).await.unwrap();
+            sql_query(concat!(
+                "UPDATE openid4vp_transactions SET ",
+                $column,
+                " = $2 WHERE tenant_id = $1 AND id = $3"
+            ))
+            .bind::<SqlUuid, _>(tenant_id)
+            .bind::<$sql_type, _>($tampered)
+            .bind::<SqlUuid, _>(transaction_id)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            drop(connection);
+
+            assert!(
+                matches!(
+                    verifier
+                        .verification_evidence_by_capability_sha256(
+                            &rotated_capability_sha256,
+                            now,
+                        )
+                        .await,
+                    Err(nazo_openid4vp::PresentationStoreError::InvalidTransition)
+                ),
+                concat!($column, " tampering must fail closed on public read")
+            );
+            assert!(
+                matches!(
+                    verifier
+                        .prepare_verification_evidence(transaction_id, now)
+                        .await,
+                    Err(nazo_openid4vp::PresentationStoreError::InvalidTransition)
+                ),
+                concat!($column, " tampering must fail closed before issuance")
+            );
+
+            let mut connection = get_conn(&pool).await.unwrap();
+            sql_query(concat!(
+                "UPDATE openid4vp_transactions SET ",
+                $column,
+                " = $2 WHERE tenant_id = $1 AND id = $3"
+            ))
+            .bind::<SqlUuid, _>(tenant_id)
+            .bind::<$sql_type, _>($original)
+            .bind::<SqlUuid, _>(transaction_id)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            drop(connection);
+        }};
+    }
+
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_run_jti",
+        Text,
+        "tampered-run-jti",
+        evidence_context.run_jti.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_artifact_sha256",
+        Text,
+        "d".repeat(64),
+        evidence_context.artifact_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_matrix_sha256",
+        Text,
+        "e".repeat(64),
+        evidence_context.matrix_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_suite_plan_id",
+        SqlUuid,
+        Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+        Uuid::parse_str(&evidence_context.suite_plan_id).unwrap()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_suite_module_id",
+        SqlUuid,
+        Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+        Uuid::parse_str(&evidence_context.suite_module_id).unwrap()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_test_name",
+        Text,
+        "tampered-test-name",
+        evidence_context.test_name.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_variant_sha256",
+        Text,
+        "f".repeat(64),
+        evidence_context.variant_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_context_sha256",
+        Text,
+        "9".repeat(64),
+        context_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_intent_jws",
+        Text,
+        "tampered.intent.value",
+        "signed.intent.value"
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_presentation_request_sha256",
+        Text,
+        "0".repeat(64),
+        presentation_request_sha256.as_str()
+    );
+    assert_eq!(
+        verifier
+            .verification_evidence_by_capability_sha256(&rotated_capability_sha256, now)
+            .await
+            .unwrap()
+            .expect("restoring every context column must restore the active evidence"),
+        rotated.evidence
+    );
     let after_expiry = receipt_expires_at + Duration::seconds(1);
     assert!(
         verifier
@@ -1301,22 +1424,6 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
             .unwrap()
             .is_none(),
         "late completion must never become receipt-issuable"
-    );
-
-    let mut connection = get_conn(&pool).await.unwrap();
-    sql_query("UPDATE openid4vp_transactions SET verification_matrix_sha256 = $2 WHERE id = $1")
-        .bind::<SqlUuid, _>(transaction_id)
-        .bind::<Text, _>("e".repeat(64))
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    drop(connection);
-    assert!(
-        verifier
-            .verification_evidence_by_capability_sha256(&rotated_capability_sha256, now)
-            .await
-            .is_err(),
-        "context tampering must fail closed against the canonical context digest"
     );
 
     let mut connection = get_conn(&pool).await.unwrap();

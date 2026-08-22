@@ -999,6 +999,19 @@ struct VerificationIntentRow {
     expires_at: DateTime<Utc>,
 }
 
+fn validated_verification_context(
+    context: nazo_operator_protocol::Openid4vpEvidenceContext,
+    expected_sha256: &str,
+) -> Result<(nazo_operator_protocol::Openid4vpEvidenceContext, String), PresentationStoreError> {
+    let actual_sha256 =
+        nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&context)
+            .map_err(|_| PresentationStoreError::InvalidTransition)?;
+    if actual_sha256 != expected_sha256 {
+        return Err(PresentationStoreError::InvalidTransition);
+    }
+    Ok((context, actual_sha256))
+}
+
 impl VerificationIntentRow {
     fn prepared(
         &self,
@@ -1029,20 +1042,18 @@ impl VerificationIntentRow {
         {
             return Err(PresentationStoreError::InvalidTransition);
         }
-        let context = nazo_operator_protocol::Openid4vpEvidenceContext {
-            run_jti: self.verification_run_jti.clone(),
-            artifact_sha256: self.verification_artifact_sha256.clone(),
-            matrix_sha256: self.verification_matrix_sha256.clone(),
-            suite_plan_id: self.verification_suite_plan_id.to_string(),
-            suite_module_id: self.verification_suite_module_id.to_string(),
-            test_name: self.verification_test_name.clone(),
-            variant_sha256: self.verification_variant_sha256.clone(),
-        };
-        let digest = nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&context)
-            .map_err(|_| PresentationStoreError::InvalidTransition)?;
-        if digest != self.verification_context_sha256 {
-            return Err(PresentationStoreError::InvalidTransition);
-        }
+        let (context, digest) = validated_verification_context(
+            nazo_operator_protocol::Openid4vpEvidenceContext {
+                run_jti: self.verification_run_jti.clone(),
+                artifact_sha256: self.verification_artifact_sha256.clone(),
+                matrix_sha256: self.verification_matrix_sha256.clone(),
+                suite_plan_id: self.verification_suite_plan_id.to_string(),
+                suite_module_id: self.verification_suite_module_id.to_string(),
+                test_name: self.verification_test_name.clone(),
+                variant_sha256: self.verification_variant_sha256.clone(),
+            },
+            &self.verification_context_sha256,
+        )?;
         let presentation_binding = nazo_operator_protocol::Openid4vpPresentationBinding {
             presentation_request_sha256: self.verification_presentation_request_sha256.clone(),
             trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
@@ -1144,20 +1155,19 @@ impl VerificationAttachmentRow {
                 Some(intent_jws),
                 Some(presentation_request_sha256),
             ) => {
-                let context = nazo_operator_protocol::Openid4vpEvidenceContext {
-                    run_jti,
-                    artifact_sha256,
-                    matrix_sha256,
-                    suite_plan_id: suite_plan_id.to_string(),
-                    suite_module_id: suite_module_id.to_string(),
-                    test_name,
-                    variant_sha256,
-                };
-                let digest =
-                    nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&context)
-                        .map_err(|_| PresentationStoreError::InvalidTransition)?;
-                if digest != context_sha256
-                    || intent_jws.is_empty()
+                let (context, context_sha256) = validated_verification_context(
+                    nazo_operator_protocol::Openid4vpEvidenceContext {
+                        run_jti,
+                        artifact_sha256,
+                        matrix_sha256,
+                        suite_plan_id: suite_plan_id.to_string(),
+                        suite_module_id: suite_module_id.to_string(),
+                        test_name,
+                        variant_sha256,
+                    },
+                    &context_sha256,
+                )?;
+                if intent_jws.is_empty()
                     || intent_jws.len() > nazo_operator_protocol::MAX_COMPACT_JWS_BYTES
                 {
                     return Err(PresentationStoreError::InvalidTransition);
@@ -1230,21 +1240,18 @@ impl VerificationEvidenceRow {
         {
             return Err(PresentationStoreError::InvalidTransition);
         }
-        let context = nazo_operator_protocol::Openid4vpEvidenceContext {
-            run_jti: self.verification_run_jti,
-            artifact_sha256: self.verification_artifact_sha256,
-            matrix_sha256: self.verification_matrix_sha256,
-            suite_plan_id: self.verification_suite_plan_id.to_string(),
-            suite_module_id: self.verification_suite_module_id.to_string(),
-            test_name: self.verification_test_name,
-            variant_sha256: self.verification_variant_sha256,
-        };
-        let context_sha256 =
-            nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&context)
-                .map_err(|_| PresentationStoreError::InvalidTransition)?;
-        if context_sha256 != self.verification_context_sha256 {
-            return Err(PresentationStoreError::InvalidTransition);
-        }
+        let (context, context_sha256) = validated_verification_context(
+            nazo_operator_protocol::Openid4vpEvidenceContext {
+                run_jti: self.verification_run_jti,
+                artifact_sha256: self.verification_artifact_sha256,
+                matrix_sha256: self.verification_matrix_sha256,
+                suite_plan_id: self.verification_suite_plan_id.to_string(),
+                suite_module_id: self.verification_suite_module_id.to_string(),
+                test_name: self.verification_test_name,
+                variant_sha256: self.verification_variant_sha256,
+            },
+            &self.verification_context_sha256,
+        )?;
         let presentation_binding = nazo_operator_protocol::Openid4vpPresentationBinding {
             presentation_request_sha256: self.verification_presentation_request_sha256,
             trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
