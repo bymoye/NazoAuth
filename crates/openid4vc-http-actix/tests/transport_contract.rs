@@ -246,7 +246,7 @@ async fn management_attach_returns_the_signed_non_secret_binding_projection() {
 }
 
 #[test]
-fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
+async fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
     let request_json = || {
         json!({
             "create_request_jti": Uuid::now_v7().to_string(),
