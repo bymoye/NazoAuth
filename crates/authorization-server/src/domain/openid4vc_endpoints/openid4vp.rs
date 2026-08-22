@@ -19,7 +19,6 @@ use nazo_openid4vp::{
 };
 use nazo_runtime_modules::ModuleId;
 use serde_json::json;
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -98,7 +97,7 @@ impl ServerPresentationOperations {
             .request_object
             .as_deref()
             .map(nazo_operator_protocol::compact_sha256);
-        let encoded = serde_json::to_vec(&json!({
+        let encoded = serde_json::to_string(&json!({
             "client_id_prefix": transaction.client_id_prefix.as_str(),
             "request_method": transaction.request_method.as_str(),
             "response_mode": transaction.response_mode.as_str(),
@@ -114,7 +113,7 @@ impl ServerPresentationOperations {
                 "Presentation request binding is unavailable.",
             )
         })?;
-        let presentation_request_sha256 = format!("{:x}", Sha256::digest(encoded));
+        let presentation_request_sha256 = nazo_operator_protocol::compact_sha256(&encoded);
         let binding = nazo_operator_protocol::Openid4vpPresentationBinding {
             presentation_request_sha256,
             trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
@@ -620,6 +619,15 @@ impl PresentationOperations for ServerPresentationOperations {
                         "Presentation create request cannot be normalized.",
                     )
                 })?;
+            if canonical_request.len()
+                > nazo_operator_protocol::MAX_OPENID4VP_NORMALIZED_CREATE_REQUEST_BYTES
+            {
+                return Err(vp_error(
+                    413,
+                    "invalid_request",
+                    "Presentation create request is too large.",
+                ));
+            }
             let idempotency = PresentationCreateIdempotency {
                 request_jti: &input.create_request_jti,
                 request_sha256: &request_sha256,

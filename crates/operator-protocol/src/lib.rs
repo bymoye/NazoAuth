@@ -21,6 +21,8 @@ pub const TENANT_RESOURCE_CAPABILITY_VERSION: u32 = 1;
 pub const CONTROL_DISCOVERY_SCHEMA: u32 = 1;
 pub const CONTROL_DISCOVERY_PRODUCT: &str = "nazoauth";
 pub const MAX_COMPACT_JWS_BYTES: usize = 64 * 1024;
+/// Maximum canonical OpenID4VP create request retained for idempotent replay.
+pub const MAX_OPENID4VP_NORMALIZED_CREATE_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_TASK_LIFETIME_SECONDS: i64 = 60;
 pub const MAX_DISCOVERY_LIFETIME_SECONDS: i64 = 60;
 /// Maximum number of resource identities/selectors carried by one machine

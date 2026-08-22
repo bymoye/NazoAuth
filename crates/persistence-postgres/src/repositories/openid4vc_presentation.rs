@@ -1610,7 +1610,8 @@ fn validate_create_idempotency(
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || idempotency.canonical_request.is_empty()
-        || idempotency.canonical_request.len() > 65_536
+        || idempotency.canonical_request.len()
+            > nazo_operator_protocol::MAX_OPENID4VP_NORMALIZED_CREATE_REQUEST_BYTES
     {
         return Err(PresentationStoreError::InvalidTransition);
     }

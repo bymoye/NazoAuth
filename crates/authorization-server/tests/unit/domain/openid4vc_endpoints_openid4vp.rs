@@ -21,7 +21,6 @@ use rcgen::{
     PKCS_ECDSA_P256_SHA256,
 };
 use serde_json::json;
-use sha2::Digest as _;
 
 fn invalid_pool() -> nazo_postgres::DbPool {
     nazo_postgres::create_pool(
@@ -251,6 +250,22 @@ async fn create_rejects_disabled_verifier_and_untrusted_wallet_before_storage() 
     assert_eq!(
         (wallet_error.status, wallet_error.error),
         (400, "invalid_request")
+    );
+
+    let oversized_error = enabled
+        .create(CreatePresentationRequest {
+            transaction_data: Some(vec![json!({
+                "payload": "x".repeat(
+                    nazo_operator_protocol::MAX_OPENID4VP_NORMALIZED_CREATE_REQUEST_BYTES
+                )
+            })]),
+            ..create_input(None, None, None, false)
+        })
+        .await
+        .expect_err("oversized normalized create request must fail before storage");
+    assert_eq!(
+        (oversized_error.status, oversized_error.error),
+        (413, "invalid_request")
     );
 
     let no_dns = operations_with_crypto(
@@ -599,7 +614,9 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
     let kb_claims = json!({
         "nonce": signed_get_transaction.request.nonce.clone(),
         "iat": chrono::Utc::now().timestamp(),
-        "sd_hash": URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(sd_input.as_bytes())),
+        "sd_hash": URL_SAFE_NO_PAD.encode(<sha2::Sha256 as sha2::Digest>::digest(
+            sd_input.as_bytes(),
+        )),
         "aud": signed_get_transaction.request.client_id.clone(),
     });
     let mut kb_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
