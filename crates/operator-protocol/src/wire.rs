@@ -434,7 +434,9 @@ pub struct Openid4vpEvidenceContext {
     pub run_jti: String,
     pub artifact_sha256: String,
     pub matrix_sha256: String,
+    /// Opaque suite identifier: 1-128 file-safe ASCII bytes.
     pub suite_plan_id: String,
+    /// Opaque module identifier: 1-128 file-safe ASCII bytes.
     pub suite_module_id: String,
     pub test_name: String,
     pub variant_sha256: String,

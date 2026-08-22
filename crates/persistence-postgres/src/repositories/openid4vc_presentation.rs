@@ -136,10 +136,6 @@ impl Openid4vpRepository {
     ) -> Result<Option<StoredOpenid4vpVerificationAttachment>, PresentationStoreError> {
         validate_new_verification_attachment(&evidence)?;
         let context = evidence.context;
-        let plan_id = Uuid::parse_str(&context.suite_plan_id)
-            .map_err(|_| PresentationStoreError::InvalidTransition)?;
-        let module_id = Uuid::parse_str(&context.suite_module_id)
-            .map_err(|_| PresentationStoreError::InvalidTransition)?;
         let mut connection = self
             .pool
             .get()
@@ -177,8 +173,8 @@ impl Openid4vpRepository {
         .bind::<sql_types::Text, _>(&context.run_jti)
         .bind::<sql_types::Text, _>(&context.artifact_sha256)
         .bind::<sql_types::Text, _>(&context.matrix_sha256)
-        .bind::<sql_types::Uuid, _>(plan_id)
-        .bind::<sql_types::Uuid, _>(module_id)
+        .bind::<sql_types::Text, _>(&context.suite_plan_id)
+        .bind::<sql_types::Text, _>(&context.suite_module_id)
         .bind::<sql_types::Text, _>(&context.test_name)
         .bind::<sql_types::Text, _>(&context.variant_sha256)
         .bind::<sql_types::Text, _>(evidence.context_sha256)
@@ -938,10 +934,10 @@ struct VerificationEvidenceRow {
     verification_artifact_sha256: String,
     #[diesel(sql_type = sql_types::Text)]
     verification_matrix_sha256: String,
-    #[diesel(sql_type = sql_types::Uuid)]
-    verification_suite_plan_id: Uuid,
-    #[diesel(sql_type = sql_types::Uuid)]
-    verification_suite_module_id: Uuid,
+    #[diesel(sql_type = sql_types::Text)]
+    verification_suite_plan_id: String,
+    #[diesel(sql_type = sql_types::Text)]
+    verification_suite_module_id: String,
     #[diesel(sql_type = sql_types::Text)]
     verification_test_name: String,
     #[diesel(sql_type = sql_types::Text)]
@@ -988,10 +984,10 @@ struct VerificationIntentRow {
     verification_artifact_sha256: String,
     #[diesel(sql_type = sql_types::Text)]
     verification_matrix_sha256: String,
-    #[diesel(sql_type = sql_types::Uuid)]
-    verification_suite_plan_id: Uuid,
-    #[diesel(sql_type = sql_types::Uuid)]
-    verification_suite_module_id: Uuid,
+    #[diesel(sql_type = sql_types::Text)]
+    verification_suite_plan_id: String,
+    #[diesel(sql_type = sql_types::Text)]
+    verification_suite_module_id: String,
     #[diesel(sql_type = sql_types::Text)]
     verification_test_name: String,
     #[diesel(sql_type = sql_types::Text)]
@@ -1064,8 +1060,8 @@ impl VerificationIntentRow {
                 run_jti: self.verification_run_jti.clone(),
                 artifact_sha256: self.verification_artifact_sha256.clone(),
                 matrix_sha256: self.verification_matrix_sha256.clone(),
-                suite_plan_id: self.verification_suite_plan_id.to_string(),
-                suite_module_id: self.verification_suite_module_id.to_string(),
+                suite_plan_id: self.verification_suite_plan_id.clone(),
+                suite_module_id: self.verification_suite_module_id.clone(),
                 test_name: self.verification_test_name.clone(),
                 variant_sha256: self.verification_variant_sha256.clone(),
             },
@@ -1107,10 +1103,10 @@ struct VerificationAttachmentRow {
     verification_artifact_sha256: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     verification_matrix_sha256: Option<String>,
-    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
-    verification_suite_plan_id: Option<Uuid>,
-    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
-    verification_suite_module_id: Option<Uuid>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    verification_suite_plan_id: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    verification_suite_module_id: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     verification_test_name: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
@@ -1177,8 +1173,8 @@ impl VerificationAttachmentRow {
                         run_jti,
                         artifact_sha256,
                         matrix_sha256,
-                        suite_plan_id: suite_plan_id.to_string(),
-                        suite_module_id: suite_module_id.to_string(),
+                        suite_plan_id,
+                        suite_module_id,
                         test_name,
                         variant_sha256,
                     },
@@ -1262,8 +1258,8 @@ impl VerificationEvidenceRow {
                 run_jti: self.verification_run_jti,
                 artifact_sha256: self.verification_artifact_sha256,
                 matrix_sha256: self.verification_matrix_sha256,
-                suite_plan_id: self.verification_suite_plan_id.to_string(),
-                suite_module_id: self.verification_suite_module_id.to_string(),
+                suite_plan_id: self.verification_suite_plan_id,
+                suite_module_id: self.verification_suite_module_id,
                 test_name: self.verification_test_name,
                 variant_sha256: self.verification_variant_sha256,
             },

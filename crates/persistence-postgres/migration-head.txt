@@ -1,1 +1,1 @@
-20260822000100_openid4vp_verification_receipts
+20260822000200_openid4vp_opaque_suite_identifiers

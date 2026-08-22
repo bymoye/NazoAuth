@@ -2434,8 +2434,8 @@ fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
             run_jti: "run-jti-1".to_owned(),
             artifact_sha256: "a".repeat(64),
             matrix_sha256: "b".repeat(64),
-            suite_plan_id: "019c8ca2-30a6-7000-8000-000000000003".to_owned(),
-            suite_module_id: "019c8ca2-30a6-7000-8000-000000000004".to_owned(),
+            suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),
+            suite_module_id: "Ab3dEf5gHi7JkLm".to_owned(),
             test_name: "openid4vp-test".to_owned(),
             variant_sha256: "c".repeat(64),
         },
@@ -2451,6 +2451,21 @@ fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
         completed_at: "2026-08-22T03:00:00Z".to_owned(),
         capability_sha256: "d".repeat(64),
     }
+}
+
+#[test]
+fn openid4vp_evidence_context_accepts_opaque_suite_identifiers_with_safe_bounds() {
+    let context = openid4vp_verification_receipt().evidence_context;
+    canonical_openid4vp_evidence_context_sha256(&context)
+        .expect("official-length opaque suite identifiers must be accepted");
+
+    let mut invalid = context.clone();
+    invalid.suite_plan_id = "unsafe/plan".to_owned();
+    assert!(canonical_openid4vp_evidence_context_sha256(&invalid).is_err());
+
+    let mut oversized = context;
+    oversized.suite_module_id = "a".repeat(129);
+    assert!(canonical_openid4vp_evidence_context_sha256(&oversized).is_err());
 }
 
 fn openid4vp_normalized_create_request() -> Openid4vpNormalizedCreateRequest {

@@ -700,8 +700,8 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         run_jti: "run-jti-repository".to_owned(),
         artifact_sha256: "a".repeat(64),
         matrix_sha256: "b".repeat(64),
-        suite_plan_id: Uuid::now_v7().to_string(),
-        suite_module_id: Uuid::now_v7().to_string(),
+        suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),
+        suite_module_id: "Ab3dEf5gHi7JkLm".to_owned(),
         test_name: "openid4vp-repository-test".to_owned(),
         variant_sha256: "c".repeat(64),
     };
@@ -1305,15 +1305,15 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert_verification_binding_tamper_fails_closed!(
         "verification_suite_plan_id",
-        SqlUuid,
-        Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
-        Uuid::parse_str(&evidence_context.suite_plan_id).unwrap()
+        Text,
+        "tampered-plan",
+        evidence_context.suite_plan_id.as_str()
     );
     assert_verification_binding_tamper_fails_closed!(
         "verification_suite_module_id",
-        SqlUuid,
-        Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
-        Uuid::parse_str(&evidence_context.suite_module_id).unwrap()
+        Text,
+        "tampered-module",
+        evidence_context.suite_module_id.as_str()
     );
     assert_verification_binding_tamper_fails_closed!(
         "verification_test_name",

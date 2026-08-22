@@ -192,8 +192,8 @@ pub(crate) fn validate_openid4vp_evidence_context(
     validate_file_identifier(&context.run_jti)?;
     validate_lower_hex(&context.artifact_sha256, 64)?;
     validate_lower_hex(&context.matrix_sha256, 64)?;
-    validate_uuid(&context.suite_plan_id)?;
-    validate_uuid(&context.suite_module_id)?;
+    validate_file_identifier(&context.suite_plan_id)?;
+    validate_file_identifier(&context.suite_module_id)?;
     validate_identifier(&context.test_name)?;
     validate_lower_hex(&context.variant_sha256, 64)
 }

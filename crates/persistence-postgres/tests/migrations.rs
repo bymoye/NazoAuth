@@ -41,6 +41,10 @@ const OIDC_LOGOUT_IDEMPOTENCY_DOWN: &str =
     include_str!("../../../migrations/20260714000100_oidc_logout_idempotency/down.sql");
 const OPENID4VP_RECEIPTS_UP: &str =
     include_str!("../../../migrations/20260822000100_openid4vp_verification_receipts/up.sql");
+const OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_UP: &str =
+    include_str!("../../../migrations/20260822000200_openid4vp_opaque_suite_identifiers/up.sql");
+const OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_DOWN: &str =
+    include_str!("../../../migrations/20260822000200_openid4vp_opaque_suite_identifiers/down.sql");
 
 #[derive(QueryableByName)]
 struct ProviderType {
@@ -75,6 +79,26 @@ fn openid4vp_receipt_migration_has_bounded_indexed_cleanup_and_tenant_fences() {
             "OpenID4VP migration is missing {required}"
         );
     }
+}
+
+#[test]
+fn openid4vp_suite_identifier_migration_is_bounded_and_rollback_safe() {
+    for required in [
+        "verification_suite_plan_id TYPE VARCHAR(128)",
+        "verification_suite_module_id TYPE VARCHAR(128)",
+        "ck_openid4vp_verification_suite_identifiers",
+        "^[A-Za-z0-9._:+-]{1,128}$",
+    ] {
+        assert!(
+            OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_UP.contains(required),
+            "OpenID4VP opaque suite identifier migration is missing {required}"
+        );
+    }
+    assert!(
+        OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_DOWN
+            .contains("drain OpenID4VP verification contexts with opaque suite identifiers"),
+        "rollback must fail closed while opaque suite identifiers remain"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

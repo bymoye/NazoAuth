@@ -187,8 +187,8 @@ fn evidence_context() -> nazo_operator_protocol::Openid4vpEvidenceContext {
         run_jti: "run-jti-1".to_owned(),
         artifact_sha256: "a".repeat(64),
         matrix_sha256: "b".repeat(64),
-        suite_plan_id: Uuid::now_v7().to_string(),
-        suite_module_id: Uuid::now_v7().to_string(),
+        suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),
+        suite_module_id: "Ab3dEf5gHi7JkLm".to_owned(),
         test_name: "openid4vp-test".to_owned(),
         variant_sha256: "c".repeat(64),
     }
