@@ -20,6 +20,7 @@ fn issuer_requires_https_except_loopback_http() {
     assert!(validate_issuer_url("https://auth.example/oauth/").is_err());
     assert!(validate_issuer_url("https://auth.example?x=1").is_err());
     assert!(validate_issuer_url("https://user:pass@auth.example").is_err());
+    assert!(validate_issuer_url("https://@auth.example").is_err());
     assert!(validate_frontend_base_url("file:///tmp/app").is_err());
     assert!(validate_frontend_base_url("https://frontend.example/app?x=1").is_err());
     assert!(validate_cors_origin("file:///tmp/app").is_err());

@@ -1,7 +1,7 @@
 //! OAuth/OIDC URL policy, including the OAuth native-app exceptions.
 
 use anyhow::bail;
-use url::Url;
+use url::{Position, Url};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectUriError {
@@ -160,7 +160,8 @@ fn validate_https_or_loopback_http(name: &str, url: &Url) -> anyhow::Result<()> 
 }
 
 fn reject_url_credentials(name: &str, url: &Url) -> anyhow::Result<()> {
-    if !url.username().is_empty() || url.password().is_some() {
+    let has_explicit_userinfo = url[..Position::BeforeHost].ends_with('@');
+    if has_explicit_userinfo || !url.username().is_empty() || url.password().is_some() {
         bail!("{name} 不能包含用户名或密码");
     }
     Ok(())
