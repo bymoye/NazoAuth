@@ -16,7 +16,7 @@ base64.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 der.workspace = true
 ed25519-dalek.workspace = true
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 nazo-auth.workspace = true
 pem.workspace = true
 pkcs8.workspace = true

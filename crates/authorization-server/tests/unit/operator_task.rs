@@ -607,10 +607,37 @@ fn operator_state_paths_reject_symlink_roots_files_and_temporaries() {
     fs::create_dir(&denied).unwrap();
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
     let denied_child = denied.join("state");
-    assert!(regular_state_file_present(&denied_child, "denied state").is_err());
-    assert!(state_path_present(&denied_child).is_err());
+    let traversal_probe = fs::symlink_metadata(&denied_child);
+    let regular_file_result = regular_state_file_present(&denied_child, "denied state");
+    let path_result = state_path_present(&denied_child);
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
     fs::remove_dir_all(directory).unwrap();
+
+    match traversal_probe {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            assert!(regular_file_result.is_err());
+            assert!(path_result.is_err());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Root and processes with DAC override capabilities can traverse a
+            // mode-000 directory. In that environment the missing child is a real
+            // NotFound result, which these helpers must preserve as absence.
+            assert!(!regular_file_result.unwrap());
+            assert!(!path_result.unwrap());
+        }
+        Ok(_) => panic!("denied child unexpectedly exists"),
+        Err(error) => panic!("unexpected denied-child inspection error: {error}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_state_path_inspection_propagates_invalid_path_errors() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let invalid_path = PathBuf::from(std::ffi::OsString::from_vec(b"state\0file".to_vec()));
+    assert!(regular_state_file_present(&invalid_path, "invalid state").is_err());
+    assert!(state_path_present(&invalid_path).is_err());
 }
 
 #[test]

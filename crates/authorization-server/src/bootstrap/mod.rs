@@ -140,7 +140,7 @@ fn ui_static_files(root: PathBuf) -> Files {
                         HttpResponse::NotFound().finish(),
                     ));
                 }
-                let file = NamedFile::open_async(index).await?;
+                let file = NamedFile::open(index)?;
                 let response = file.into_response(&request);
                 Ok(ServiceResponse::new(request, response))
             }

@@ -147,6 +147,7 @@ set can be scanned from one place.
 | --- | --- |
 | [project/roadmap.md](project/roadmap.md) | Current scope, roadmap, and deferred capability record. |
 | [project/architecture.md](project/architecture.md) | Workspace boundaries, dependency direction, composition, and runtime-module lifecycle contract. |
+| [project/spec-coverage-and-responsibility-audit-2026-08-20.md](project/spec-coverage-and-responsibility-audit-2026-08-20.md) | Exact-head specification-to-test traceability, Linux coverage evidence, residual gaps, and file-responsibility decisions for the 2026-08-20 audit. |
 | [project/operator-task-protocol-implementation-task.zh-CN.md](project/operator-task-protocol-implementation-task.zh-CN.md) | Chinese ordered implementation task book for the signed operator-task protocol and ctl UX. |
 | [project/openai-build-week-2026.md](project/openai-build-week-2026.md) | English Build Week before/after boundary, Codex collaboration, evidence, and judge test path. |
 

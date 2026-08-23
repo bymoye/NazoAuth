@@ -15,9 +15,11 @@ use nazo_http_actix::{
     dynamic_client_registration, userinfo,
 };
 use nazo_openid4vc_http_actix::{
-    create_credential_offer, create_presentation, credential, credential_issuer_metadata,
-    credential_nonce, credential_offer, deferred_credential, notification, presentation_complete,
-    presentation_request, presentation_response, presentation_result,
+    attach_presentation_verification_evidence, create_credential_offer, create_presentation,
+    credential, credential_issuer_metadata, credential_nonce, credential_offer,
+    deferred_credential, issue_presentation_verification_receipt, notification,
+    presentation_complete, presentation_request, presentation_response, presentation_result,
+    presentation_verification_receipt,
 };
 
 use crate::control_discovery::control_discovery;
@@ -401,6 +403,18 @@ pub(crate) fn configure(
         .route(
             "/openid4vp/result/{transaction_id}",
             web::get().to(presentation_result),
+        )
+        .route(
+            "/openid4vp/verification/{transaction_id}/receipt-capability",
+            web::post().to(issue_presentation_verification_receipt),
+        )
+        .route(
+            "/openid4vp/verification/{transaction_id}/evidence-context",
+            web::post().to(attach_presentation_verification_evidence),
+        )
+        .route(
+            "/openid4vp/verification-receipts",
+            web::get().to(presentation_verification_receipt),
         );
     }
     if perf_metrics_enabled {

@@ -275,19 +275,14 @@ fn load_generation(
             paths.certificate.display()
         );
     }
-    let (_, leaf) =
-        x509_parser::parse_x509_certificate(certificates[0].as_ref()).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to parse TLS leaf certificate {}: {error}",
-                paths.certificate.display()
-            )
-        })?;
-    if !leaf.validity().is_valid() {
+    let leaf = parse_tls_certificate(&certificates[0], &paths.certificate, "leaf")?;
+    if leaf.is_ca() || !leaf.validity().is_valid() {
         anyhow::bail!(
-            "TLS leaf certificate {} is not currently valid",
+            "TLS leaf certificate {} is not currently valid or is not an end-entity certificate",
             paths.certificate.display()
         );
     }
+    validate_tls_server_chain(&certificates, &paths.certificate)?;
     validate_tls_server_names(
         &certificates[0],
         &paths.certificate,
@@ -314,6 +309,50 @@ fn load_generation(
         ]),
         server_key,
     })
+}
+
+fn parse_tls_certificate<'a>(
+    certificate: &'a CertificateDer<'_>,
+    path: &Path,
+    description: &str,
+) -> anyhow::Result<x509_parser::certificate::X509Certificate<'a>> {
+    let (remainder, certificate) = x509_parser::parse_x509_certificate(certificate.as_ref())
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to parse TLS {description} certificate {}: {error}",
+                path.display()
+            )
+        })?;
+    if !remainder.is_empty() {
+        anyhow::bail!(
+            "TLS {description} certificate {} contains trailing DER data",
+            path.display()
+        );
+    }
+    Ok(certificate)
+}
+
+fn validate_tls_server_chain(
+    certificates: &[CertificateDer<'_>],
+    path: &Path,
+) -> anyhow::Result<()> {
+    for (index, pair) in certificates.windows(2).enumerate() {
+        let child = parse_tls_certificate(&pair[0], path, "chain child")?;
+        let issuer = parse_tls_certificate(&pair[1], path, "chain issuer")?;
+        if !issuer.is_ca()
+            || !issuer.validity().is_valid()
+            || child.issuer() != issuer.subject()
+            || child.verify_signature(Some(issuer.public_key())).is_err()
+        {
+            anyhow::bail!(
+                "TLS certificate chain {} is invalid between certificates {} and {}",
+                path.display(),
+                index + 1,
+                index + 2
+            );
+        }
+    }
+    Ok(())
 }
 
 fn load_client_verifier(

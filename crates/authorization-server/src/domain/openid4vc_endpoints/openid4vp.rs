@@ -3,16 +3,18 @@ use super::helpers::*;
 use std::sync::Arc;
 
 use base64::Engine as _;
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use nazo_digital_credentials::EphemeralEncryptionKey;
 use nazo_openid4vc_http_actix::{
     CreatePresentationRequest, CreatePresentationResponse, PresentationFuture,
     PresentationHttpError, PresentationOperations, PresentationResponseBody,
-    PresentationResponseInput,
+    PresentationResponseInput, PresentationVerificationProjection,
+    PresentationVerificationResponse,
 };
 use nazo_openid4vp::{
     AuthorizationRequest, AuthorizationResponse, ClientIdPrefix, ClientMetadata,
-    PresentationService, PresentationStorePort, PresentationTransaction, RequestMethod,
+    PresentationCreateIdempotency, PresentationCreateOutcome, PresentationService,
+    PresentationStoreError, PresentationStorePort, PresentationTransaction, RequestMethod,
     ResponseMode,
 };
 use nazo_runtime_modules::ModuleId;
@@ -34,6 +36,7 @@ pub(crate) struct ServerPresentationOperations {
     wallet_origins: Vec<String>,
     transaction_ttl_seconds: u64,
     tenant_id: Uuid,
+    verification_signer: Option<Arc<crate::control_discovery::ControlDiscoveryEndpoint>>,
 }
 
 pub(crate) struct PresentationVerifierConfig {
@@ -43,6 +46,8 @@ pub(crate) struct PresentationVerifierConfig {
 }
 
 impl ServerPresentationOperations {
+    const VERIFICATION_RECEIPT_TTL_SECONDS: i64 = 600;
+
     pub(crate) fn new(
         pool: nazo_postgres::DbPool,
         tenant_id: Uuid,
@@ -63,7 +68,299 @@ impl ServerPresentationOperations {
             wallet_origins: config.wallet_origins,
             transaction_ttl_seconds: config.transaction_ttl_seconds.max(30),
             tenant_id,
+            verification_signer: None,
         }
+    }
+
+    pub(crate) fn with_verification_signer(
+        mut self,
+        signer: Arc<crate::control_discovery::ControlDiscoveryEndpoint>,
+    ) -> Self {
+        self.verification_signer = Some(signer);
+        self
+    }
+
+    fn verification_intent_audience(&self) -> String {
+        format!("{}/openid4vp/verification-intents", self.issuer)
+    }
+
+    fn verification_receipt_audience(&self) -> String {
+        format!("{}/openid4vp/verification-receipts", self.issuer)
+    }
+
+    fn presentation_binding(
+        transaction: &PresentationTransaction,
+    ) -> Result<nazo_operator_protocol::Openid4vpPresentationBinding, PresentationHttpError> {
+        let mut normalized_request = transaction.request.clone();
+        normalized_request.wallet_nonce = None;
+        let request_object_sha256 = transaction
+            .request_object
+            .as_deref()
+            .map(nazo_operator_protocol::compact_sha256);
+        let encoded = serde_json::to_string(&json!({
+            "client_id_prefix": transaction.client_id_prefix.as_str(),
+            "request_method": transaction.request_method.as_str(),
+            "response_mode": transaction.response_mode.as_str(),
+            "wallet_authorization_endpoint": &transaction.wallet_authorization_endpoint,
+            "authorization_request": normalized_request,
+            "request_object_sha256": request_object_sha256,
+            "request_uri": transaction.request_uri.as_deref(),
+        }))
+        .map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "Presentation request binding is unavailable.",
+            )
+        })?;
+        let presentation_request_sha256 = nazo_operator_protocol::compact_sha256(&encoded);
+        let binding = nazo_operator_protocol::Openid4vpPresentationBinding {
+            presentation_request_sha256,
+            trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
+                binding_id: transaction
+                    .openid4vc_trust_policy_binding_id
+                    .map(|value| value.to_string()),
+                resource_id: transaction.openid4vc_trust_policy_resource_id.clone(),
+                resource_digest: transaction.openid4vc_trust_policy_digest.clone(),
+            },
+        };
+        nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(&binding).map_err(
+            |_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Presentation request binding is invalid.",
+                )
+            },
+        )?;
+        Ok(binding)
+    }
+
+    fn attachment_response(
+        attachment: &nazo_postgres::StoredOpenid4vpVerificationAttachment,
+    ) -> Result<nazo_operator_protocol::Openid4vpAttachEvidenceResponse, PresentationHttpError>
+    {
+        let presentation_binding_sha256 =
+            nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(
+                &attachment.presentation_binding,
+            )
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Presentation request binding is invalid.",
+                )
+            })?;
+        Ok(nazo_operator_protocol::Openid4vpAttachEvidenceResponse {
+            schema: 1,
+            transaction_id: attachment.transaction_id.to_string(),
+            status: nazo_operator_protocol::Openid4vpEvidenceAttachmentStatus::Attached,
+            evidence_context_sha256: attachment.context_sha256.clone(),
+            presentation_binding: attachment.presentation_binding.clone(),
+            presentation_binding_sha256,
+            intent_jws: attachment.intent_jws.clone(),
+            intent_sha256: nazo_operator_protocol::compact_sha256(&attachment.intent_jws),
+        })
+    }
+
+    fn create_response(
+        &self,
+        transaction: &PresentationTransaction,
+        create_request_jti: &str,
+        create_request_sha256: &str,
+    ) -> Result<CreatePresentationResponse, PresentationHttpError> {
+        let mut url =
+            url::Url::parse(&transaction.wallet_authorization_endpoint).map_err(|_| {
+                vp_error(
+                    400,
+                    "invalid_request",
+                    "Wallet authorization endpoint is invalid.",
+                )
+            })?;
+        if let Some(request_uri) = transaction.request_uri.as_deref() {
+            url.query_pairs_mut()
+                .append_pair("client_id", &transaction.request.client_id)
+                .append_pair("request_uri", request_uri);
+            if matches!(
+                transaction.request_method,
+                RequestMethod::RequestUriSignedPost
+            ) {
+                url.query_pairs_mut()
+                    .append_pair("request_uri_method", "post");
+            }
+        } else {
+            let encoded = serde_json::to_value(&transaction.request).map_err(|_| {
+                vp_error(500, "server_error", "Presentation request encoding failed.")
+            })?;
+            for (name, value) in encoded.as_object().into_iter().flatten() {
+                url.query_pairs_mut()
+                    .append_pair(name, value.as_str().unwrap_or(&value.to_string()));
+            }
+        }
+        Ok(CreatePresentationResponse {
+            idempotency: nazo_operator_protocol::Openid4vpCreateIdempotencyBinding {
+                create_request_jti: create_request_jti.to_owned(),
+                create_request_sha256: create_request_sha256.to_owned(),
+            },
+            transaction_id: transaction.id,
+            authorization_url: url.into(),
+            expires_in: transaction
+                .expires_at
+                .signed_duration_since(transaction.created_at)
+                .num_seconds()
+                .max(0) as u64,
+        })
+    }
+
+    fn verify_intent(
+        &self,
+        compact: &str,
+        transaction_id: Uuid,
+        context_sha256: &str,
+        presentation_binding_sha256: &str,
+        now: i64,
+    ) -> Result<nazo_operator_protocol::Openid4vpVerificationIntent, PresentationHttpError> {
+        let signer = self.verification_signer.as_ref().ok_or_else(|| {
+            vp_error(
+                503,
+                "server_error",
+                "Presentation verification receipt signing is unavailable.",
+            )
+        })?;
+        let audience = self.verification_intent_audience();
+        let tenant_id = self.tenant_id.to_string();
+        let transaction_id = transaction_id.to_string();
+        nazo_operator_protocol::verify_openid4vp_verification_intent(
+            compact,
+            &nazo_operator_protocol::Openid4vpVerificationIntentExpectations {
+                issuer: &self.issuer,
+                audience: &audience,
+                deployment_id: signer.deployment_id(),
+                runtime_instance_id: signer.runtime_instance_id(),
+                instance_key_id: signer.instance_key_id(),
+                tenant_id: &tenant_id,
+                transaction_id: &transaction_id,
+                evidence_context_sha256: context_sha256,
+                presentation_binding_sha256,
+            },
+            &signer.instance_verifying_key(),
+            now,
+        )
+        .map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "Presentation verification intent is invalid.",
+            )
+        })
+    }
+
+    fn verified_projection(
+        &self,
+        evidence: &nazo_postgres::StoredOpenid4vpVerificationEvidence,
+        now: i64,
+    ) -> Result<PresentationVerificationProjection, PresentationHttpError> {
+        let signer = self.verification_signer.as_ref().ok_or_else(|| {
+            vp_error(
+                503,
+                "server_error",
+                "Presentation verification receipt signing is unavailable.",
+            )
+        })?;
+        let context_sha256 =
+            nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&evidence.context)
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification context is invalid.",
+                    )
+                })?;
+        let presentation_binding_sha256 =
+            nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(
+                &evidence.presentation_binding,
+            )
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Presentation request binding is invalid.",
+                )
+            })?;
+        let intent_sha256 = nazo_operator_protocol::compact_sha256(&evidence.intent_jws);
+        let intent = self.verify_intent(
+            &evidence.intent_jws,
+            evidence.transaction_id,
+            &context_sha256,
+            &presentation_binding_sha256,
+            evidence.completed_at.timestamp(),
+        )?;
+        let audience = self.verification_receipt_audience();
+        let transaction_id = evidence.transaction_id.to_string();
+        let receipt_id = evidence.receipt_id.to_string();
+        let receipt = nazo_operator_protocol::verify_openid4vp_verification_receipt(
+            &evidence.receipt_jws,
+            &nazo_operator_protocol::Openid4vpVerificationReceiptExpectations {
+                issuer: &self.issuer,
+                audience: &audience,
+                deployment_id: signer.deployment_id(),
+                runtime_instance_id: signer.runtime_instance_id(),
+                instance_key_id: signer.instance_key_id(),
+                tenant_id: &self.tenant_id.to_string(),
+                transaction_id: &transaction_id,
+                receipt_id: &receipt_id,
+                issuance_request_jti: &evidence.issuance_request_jti,
+                evidence_context_sha256: &context_sha256,
+                presentation_binding_sha256: &presentation_binding_sha256,
+                intent_sha256: &intent_sha256,
+                capability_sha256: &evidence.capability_sha256,
+            },
+            &signer.instance_verifying_key(),
+            now,
+        )
+        .map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "Presentation verification receipt is invalid.",
+            )
+        })?;
+        if receipt.evidence_context != intent.evidence_context
+            || receipt.presentation_binding != intent.presentation_binding
+            || receipt.presentation_binding != evidence.presentation_binding
+            || receipt.iat != evidence.issued_at.timestamp()
+            || receipt.exp != evidence.expires_at.timestamp()
+            || receipt.completed_at
+                != evidence
+                    .completed_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true)
+        {
+            return Err(vp_error(
+                503,
+                "server_error",
+                "Presentation verification receipt binding is invalid.",
+            ));
+        }
+        Ok(PresentationVerificationProjection {
+            schema: receipt.schema,
+            issuer: receipt.iss,
+            deployment_id: receipt.deployment_id,
+            runtime_instance_id: receipt.runtime_instance_id,
+            instance_key_id: receipt.instance_key_id,
+            tenant_id: receipt.tenant_id,
+            receipt_id: receipt.jti,
+            transaction_id: evidence.transaction_id,
+            issuance_request_jti: receipt.issuance_request_jti,
+            status: receipt.status,
+            evidence_context: receipt.evidence_context,
+            presentation_binding: receipt.presentation_binding,
+            intent_sha256: receipt.intent_sha256,
+            completed_at: receipt.completed_at,
+            expires_at: evidence
+                .expires_at
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            receipt_sha256: nazo_operator_protocol::compact_sha256(&evidence.receipt_jws),
+        })
     }
     fn enabled(&self, admission: nazo_auth::CapabilityAdmission) -> bool {
         nazo_auth::module_admissible(
@@ -220,7 +517,27 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation verifier is unavailable.",
                 ));
             }
+            nazo_operator_protocol::validate_openid4vp_create_request_jti(
+                &input.create_request_jti,
+            )
+            .map_err(|_| {
+                vp_error(
+                    400,
+                    "invalid_request",
+                    "create_request_jti must be a canonical lowercase UUID.",
+                )
+            })?;
             let wallet_origin = Self::wallet_origin(&input.wallet_authorization_endpoint)?;
+            let wallet_authorization_endpoint =
+                url::Url::parse(&input.wallet_authorization_endpoint)
+                    .map_err(|_| {
+                        vp_error(
+                            400,
+                            "invalid_request",
+                            "Wallet authorization endpoint is invalid.",
+                        )
+                    })?
+                    .to_string();
             let static_wallet_allowed = self.static_wallet_origin_allowed(&wallet_origin);
             let binding = match (
                 input.openid4vc_trust_policy_resource_id.as_deref(),
@@ -236,27 +553,13 @@ impl PresentationOperations for ServerPresentationOperations {
                     ));
                 }
             };
-            let trust_policy = if let Some((resource_id, digest)) = binding {
-                Some(
-                    self.active_trust_policy(resource_id, &wallet_origin, digest)
-                        .await?
-                        .ok_or_else(|| {
-                            vp_error(
-                                400,
-                                "invalid_request",
-                                "OpenID4VC trust policy binding is not active.",
-                            )
-                        })?,
-                )
-            } else if static_wallet_allowed {
-                None
-            } else {
+            if binding.is_none() && !static_wallet_allowed {
                 return Err(vp_error(
                     400,
                     "invalid_request",
-                    "The wallet origin is not statically trusted and no active OpenID4VC trust policy was selected.",
+                    "The wallet origin is not statically trusted and no OpenID4VC trust policy was selected.",
                 ));
-            };
+            }
             input
                 .dcql_query
                 .validate()
@@ -297,20 +600,113 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation security policy rejected this combination.",
                 )
             })?;
+            let fixed_client_id = match prefix {
+                ClientIdPrefix::RedirectUri => None,
+                ClientIdPrefix::X509Hash => Some(self.crypto.x509_hash_client_id()),
+                ClientIdPrefix::X509SanDns => {
+                    Some(self.crypto.x509_san_dns_client_id().map_err(|_| {
+                        vp_error(
+                            400,
+                            "invalid_request",
+                            "x509_san_dns is unavailable for the verifier certificate.",
+                        )
+                    })?)
+                }
+            };
+            let normalized_request = nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
+                wallet_authorization_endpoint: wallet_authorization_endpoint.clone(),
+                dcql_query: serde_json::to_value(&input.dcql_query).map_err(|_| {
+                    vp_error(400, "invalid_request", "DCQL query is not JSON encodable.")
+                })?,
+                haip: input.haip,
+                client_id_prefix: prefix.as_str().to_owned(),
+                request_method: method.as_str().to_owned(),
+                response_mode: mode.as_str().to_owned(),
+                transaction_data: input.transaction_data.clone(),
+                openid4vc_trust_policy_resource_id: input
+                    .openid4vc_trust_policy_resource_id
+                    .clone(),
+                openid4vc_trust_policy_digest: input.openid4vc_trust_policy_digest.clone(),
+            };
+            let (canonical_request, request_sha256) =
+                nazo_operator_protocol::canonical_openid4vp_normalized_create_request(
+                    &normalized_request,
+                )
+                .map_err(|_| {
+                    vp_error(
+                        400,
+                        "invalid_request",
+                        "Presentation create request cannot be normalized.",
+                    )
+                })?;
+            if canonical_request.len()
+                > nazo_operator_protocol::MAX_OPENID4VP_NORMALIZED_CREATE_REQUEST_BYTES
+            {
+                return Err(vp_error(
+                    413,
+                    "invalid_request",
+                    "Presentation create request is too large.",
+                ));
+            }
+            let idempotency = PresentationCreateIdempotency {
+                request_jti: &input.create_request_jti,
+                request_sha256: &request_sha256,
+                canonical_request: &canonical_request,
+            };
+            match self.store.find_by_create_request(idempotency).await {
+                Ok(Some(existing)) => {
+                    return self.create_response(
+                        &existing,
+                        &input.create_request_jti,
+                        &request_sha256,
+                    );
+                }
+                Ok(None) => {}
+                Err(PresentationStoreError::IdempotencyConflict) => {
+                    return Err(vp_error(
+                        409,
+                        "conflict",
+                        "create_request_jti is already bound to a different request.",
+                    ));
+                }
+                Err(
+                    PresentationStoreError::Unavailable | PresentationStoreError::InvalidTransition,
+                ) => {
+                    return Err(vp_error(
+                        503,
+                        "server_error",
+                        "Presentation transaction state is unavailable.",
+                    ));
+                }
+            }
+            let trust_policy = if let Some((resource_id, digest)) = binding {
+                Some(
+                    self.active_trust_policy(resource_id, &wallet_origin, digest)
+                        .await?
+                        .ok_or_else(|| {
+                            vp_error(
+                                400,
+                                "invalid_request",
+                                "OpenID4VC trust policy binding is not active.",
+                            )
+                        })?,
+                )
+            } else {
+                debug_assert!(static_wallet_allowed);
+                None
+            };
             let id = Uuid::now_v7();
             let response_uri = format!("{}/openid4vp/response/{id}", self.issuer);
             let client_id = match prefix {
                 ClientIdPrefix::RedirectUri => format!("redirect_uri:{response_uri}"),
-                ClientIdPrefix::X509Hash => self.crypto.x509_hash_client_id(),
-                ClientIdPrefix::X509SanDns => {
-                    self.crypto.x509_san_dns_client_id().map_err(|_| {
+                ClientIdPrefix::X509Hash | ClientIdPrefix::X509SanDns => fixed_client_id
+                    .ok_or_else(|| {
                         vp_error(
-                            500,
+                            503,
                             "server_error",
-                            "Verifier certificate has no DNS identity.",
+                            "Verifier client identity is unavailable.",
                         )
-                    })?
-                }
+                    })?,
             };
             let response_key =
                 (mode == ResponseMode::DirectPostJwt).then(EphemeralEncryptionKey::generate);
@@ -376,7 +772,7 @@ impl PresentationOperations for ServerPresentationOperations {
                 client_id_prefix: prefix,
                 request_method: method,
                 response_mode: mode,
-                wallet_authorization_endpoint: input.wallet_authorization_endpoint.clone(),
+                wallet_authorization_endpoint,
                 request: request.clone(),
                 request_object,
                 request_uri: request_uri.clone(),
@@ -392,42 +788,26 @@ impl PresentationOperations for ServerPresentationOperations {
                 created_at: now,
                 expires_at: now + Duration::seconds(self.transaction_ttl_seconds as i64),
             };
-            self.store.create(&transaction).await.map_err(|_| {
-                vp_error(
+            match self.store.create(&transaction, idempotency).await {
+                Ok(PresentationCreateOutcome::Created) => {
+                    self.create_response(&transaction, &input.create_request_jti, &request_sha256)
+                }
+                Ok(PresentationCreateOutcome::Existing(existing)) => {
+                    self.create_response(&existing, &input.create_request_jti, &request_sha256)
+                }
+                Err(PresentationStoreError::IdempotencyConflict) => Err(vp_error(
+                    409,
+                    "conflict",
+                    "create_request_jti is already bound to a different request.",
+                )),
+                Err(
+                    PresentationStoreError::Unavailable | PresentationStoreError::InvalidTransition,
+                ) => Err(vp_error(
                     503,
                     "server_error",
                     "Presentation transaction state is unavailable.",
-                )
-            })?;
-            let mut url = url::Url::parse(&input.wallet_authorization_endpoint).map_err(|_| {
-                vp_error(
-                    400,
-                    "invalid_request",
-                    "Wallet authorization endpoint is invalid.",
-                )
-            })?;
-            if let Some(request_uri) = request_uri {
-                url.query_pairs_mut()
-                    .append_pair("client_id", &client_id)
-                    .append_pair("request_uri", &request_uri);
-                if matches!(method, RequestMethod::RequestUriSignedPost) {
-                    url.query_pairs_mut()
-                        .append_pair("request_uri_method", "post");
-                }
-            } else {
-                let encoded = serde_json::to_value(&request).map_err(|_| {
-                    vp_error(500, "server_error", "Presentation request encoding failed.")
-                })?;
-                for (name, value) in encoded.as_object().into_iter().flatten() {
-                    url.query_pairs_mut()
-                        .append_pair(name, value.as_str().unwrap_or(&value.to_string()));
-                }
+                )),
             }
-            Ok(CreatePresentationResponse {
-                transaction_id: id,
-                authorization_url: url.into(),
-                expires_in: self.transaction_ttl_seconds,
-            })
         })
     }
 
@@ -574,12 +954,69 @@ impl PresentationOperations for ServerPresentationOperations {
                 }
             };
             let additional_trust_anchors = self.credential_trust_anchors(&transaction).await?;
+            let now = Utc::now();
+            let verification_attachment = self
+                .store
+                .verification_attachment_for_completion(transaction_id, now)
+                .await
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification intent state is unavailable.",
+                    )
+                })?;
+            let current_presentation_binding = Self::presentation_binding(&transaction)?;
+            let verification_binding = if let Some(attachment) = verification_attachment.as_ref() {
+                let presentation_binding_sha256 =
+                    nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(
+                        &current_presentation_binding,
+                    )
+                    .map_err(|_| {
+                        vp_error(
+                            503,
+                            "server_error",
+                            "Presentation request binding is invalid.",
+                        )
+                    })?;
+                let intent = self.verify_intent(
+                    &attachment.intent_jws,
+                    transaction_id,
+                    &attachment.context_sha256,
+                    &presentation_binding_sha256,
+                    now.timestamp(),
+                )?;
+                if intent.evidence_context != attachment.context
+                    || intent.presentation_binding != current_presentation_binding
+                    || attachment.presentation_binding != current_presentation_binding
+                {
+                    return Err(vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification intent binding is invalid.",
+                    ));
+                }
+                Some(nazo_openid4vp::PresentationCompletionBinding {
+                    context_sha256: &attachment.context_sha256,
+                    intent_jws: &attachment.intent_jws,
+                    presentation_request_sha256: &current_presentation_binding
+                        .presentation_request_sha256,
+                    trust_policy_binding_id: transaction.openid4vc_trust_policy_binding_id,
+                    trust_policy_resource_id: transaction
+                        .openid4vc_trust_policy_resource_id
+                        .as_deref(),
+                    trust_policy_digest: transaction.openid4vc_trust_policy_digest.as_deref(),
+                })
+            } else {
+                None
+            };
             self.service
                 .verify_response(
                     &transaction,
                     &response,
                     &additional_trust_anchors,
-                    Utc::now(),
+                    verification_binding,
+                    now,
                 )
                 .await
                 .map_err(|error| {
@@ -615,6 +1052,420 @@ impl PresentationOperations for ServerPresentationOperations {
                 })?
                 .and_then(|stored| stored.completed)
                 .ok_or_else(|| vp_error(404, "not_found", "Presentation result is not available."))
+        })
+    }
+
+    fn attach_verification_evidence<'a>(
+        &'a self,
+        transaction_id: Uuid,
+        request: nazo_operator_protocol::Openid4vpAttachEvidenceRequest,
+    ) -> PresentationFuture<
+        'a,
+        Result<nazo_operator_protocol::Openid4vpAttachEvidenceResponse, PresentationHttpError>,
+    > {
+        Box::pin(async move {
+            if request.schema != 1 {
+                return Err(vp_error(
+                    400,
+                    "invalid_request",
+                    "Unsupported presentation evidence attachment schema.",
+                ));
+            }
+            let now = Utc::now();
+            let context_sha256 =
+                nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(
+                    &request.evidence_context,
+                )
+                .map_err(|_| {
+                    vp_error(
+                        400,
+                        "invalid_request",
+                        "Presentation evidence context is invalid.",
+                    )
+                })?;
+            let transaction = self
+                .store
+                .request(transaction_id, now)
+                .await
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation transaction state is unavailable.",
+                    )
+                })?
+                .ok_or_else(|| {
+                    vp_error(
+                        404,
+                        "not_found",
+                        "Presentation transaction is not available for evidence attachment.",
+                    )
+                })?;
+            let presentation_binding = Self::presentation_binding(&transaction)?;
+            let presentation_binding_sha256 =
+                nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(
+                    &presentation_binding,
+                )
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation request binding is invalid.",
+                    )
+                })?;
+            let state = self
+                .store
+                .verification_attachment_state(transaction_id, now)
+                .await
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation evidence attachment state is unavailable.",
+                    )
+                })?
+                .ok_or_else(|| {
+                    vp_error(
+                        404,
+                        "not_found",
+                        "Presentation transaction is not available for evidence attachment.",
+                    )
+                })?;
+            let attachment = match state {
+                nazo_postgres::Openid4vpVerificationAttachmentState::Pending {
+                    expires_at, ..
+                } => {
+                    let signer = self.verification_signer.as_ref().ok_or_else(|| {
+                        vp_error(
+                            503,
+                            "server_error",
+                            "Presentation verification receipt signing is unavailable.",
+                        )
+                    })?;
+                    let intent_expires_at = std::cmp::min(
+                        expires_at,
+                        now + Duration::seconds(Self::VERIFICATION_RECEIPT_TTL_SECONDS),
+                    );
+                    if intent_expires_at <= now {
+                        return Err(vp_error(
+                            404,
+                            "not_found",
+                            "Presentation transaction is not available for evidence attachment.",
+                        ));
+                    }
+                    let intent = nazo_operator_protocol::Openid4vpVerificationIntent {
+                        schema: 1,
+                        iss: self.issuer.clone(),
+                        aud: self.verification_intent_audience(),
+                        jti: transaction_id.to_string(),
+                        iat: now.timestamp(),
+                        exp: intent_expires_at.timestamp(),
+                        deployment_id: signer.deployment_id().to_owned(),
+                        runtime_instance_id: signer.runtime_instance_id().to_owned(),
+                        instance_key_id: signer.instance_key_id().to_owned(),
+                        tenant_id: self.tenant_id.to_string(),
+                        transaction_id: transaction_id.to_string(),
+                        evidence_context: request.evidence_context.clone(),
+                        presentation_binding: presentation_binding.clone(),
+                    };
+                    let intent_jws =
+                        signer
+                            .sign_openid4vp_verification_intent(&intent)
+                            .map_err(|_| {
+                                vp_error(
+                                    503,
+                                    "server_error",
+                                    "Presentation verification intent signing failed.",
+                                )
+                            })?;
+                    self.store
+                        .attach_verification_evidence(
+                            transaction_id,
+                            nazo_postgres::NewOpenid4vpVerificationAttachment {
+                                context: &request.evidence_context,
+                                context_sha256: &context_sha256,
+                                intent_jws: &intent_jws,
+                                presentation_request_sha256: &presentation_binding
+                                    .presentation_request_sha256,
+                            },
+                            now,
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            nazo_openid4vp::PresentationStoreError::InvalidTransition => vp_error(
+                                409,
+                                "conflict",
+                                "Presentation evidence context is already bound or terminal.",
+                            ),
+                            nazo_openid4vp::PresentationStoreError::Unavailable
+                            | nazo_openid4vp::PresentationStoreError::IdempotencyConflict => vp_error(
+                                503,
+                                "server_error",
+                                "Presentation evidence attachment state is unavailable.",
+                            ),
+                        })?
+                        .ok_or_else(|| {
+                            vp_error(
+                                404,
+                                "not_found",
+                                "Presentation transaction is not available for evidence attachment.",
+                            )
+                        })?
+                }
+                nazo_postgres::Openid4vpVerificationAttachmentState::Attached(attachment)
+                    if attachment.context == request.evidence_context
+                        && attachment.context_sha256 == context_sha256 =>
+                {
+                    *attachment
+                }
+                _ => {
+                    return Err(vp_error(
+                        409,
+                        "conflict",
+                        "Presentation evidence context is already bound or terminal.",
+                    ));
+                }
+            };
+            let intent = self.verify_intent(
+                &attachment.intent_jws,
+                transaction_id,
+                &attachment.context_sha256,
+                &presentation_binding_sha256,
+                now.timestamp(),
+            )?;
+            if intent.evidence_context != attachment.context
+                || intent.presentation_binding != attachment.presentation_binding
+            {
+                return Err(vp_error(
+                    503,
+                    "server_error",
+                    "Presentation verification intent binding is invalid.",
+                ));
+            }
+            Self::attachment_response(&attachment)
+        })
+    }
+
+    fn issue_verification_receipt<'a>(
+        &'a self,
+        transaction_id: Uuid,
+        request: nazo_operator_protocol::Openid4vpIssueVerificationReceiptRequest,
+    ) -> PresentationFuture<'a, Result<PresentationVerificationResponse, PresentationHttpError>>
+    {
+        Box::pin(async move {
+            if request.schema != 1
+                || !matches!(
+                    Uuid::parse_str(&request.issuance_request_jti),
+                    Ok(value) if value.to_string() == request.issuance_request_jti
+                )
+            {
+                return Err(vp_error(
+                    400,
+                    "invalid_request",
+                    "Presentation verification issuance request is invalid.",
+                ));
+            }
+            let now = Utc::now();
+            let prepared = self
+                .store
+                .prepare_verification_evidence(transaction_id, now)
+                .await
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification receipt state is unavailable.",
+                    )
+                })?
+                .ok_or_else(|| {
+                    vp_error(
+                        404,
+                        "not_found",
+                        "Presentation verification receipt is not available.",
+                    )
+                })?;
+            let presentation_binding_sha256 =
+                nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(
+                    &prepared.presentation_binding,
+                )
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation request binding is invalid.",
+                    )
+                })?;
+            let intent = self.verify_intent(
+                &prepared.intent_jws,
+                prepared.transaction_id,
+                &prepared.context_sha256,
+                &presentation_binding_sha256,
+                prepared.completed_at.timestamp(),
+            )?;
+            if intent.evidence_context != prepared.context
+                || intent.presentation_binding != prepared.presentation_binding
+            {
+                return Err(vp_error(
+                    503,
+                    "server_error",
+                    "Presentation verification intent binding is invalid.",
+                ));
+            }
+            let issued_at = chrono::DateTime::<Utc>::from_timestamp(now.timestamp(), 0)
+                .ok_or_else(|| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification issuance time is invalid.",
+                    )
+                })?;
+            let expires_at = issued_at + Duration::seconds(Self::VERIFICATION_RECEIPT_TTL_SECONDS);
+            if expires_at <= issued_at {
+                return Err(vp_error(
+                    404,
+                    "not_found",
+                    "Presentation verification receipt is not available.",
+                ));
+            }
+            let capability = random_urlsafe_token();
+            let capability_sha256 =
+                nazo_operator_protocol::openid4vp_verification_capability_sha256(&capability)
+                    .map_err(|_| {
+                        vp_error(
+                            503,
+                            "server_error",
+                            "Presentation verification capability generation failed.",
+                        )
+                    })?;
+            let receipt_id = Uuid::now_v7();
+            let signer = self.verification_signer.as_ref().ok_or_else(|| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Presentation verification receipt signing is unavailable.",
+                )
+            })?;
+            let receipt = nazo_operator_protocol::Openid4vpVerificationReceipt {
+                schema: 1,
+                iss: self.issuer.clone(),
+                aud: self.verification_receipt_audience(),
+                jti: receipt_id.to_string(),
+                iat: issued_at.timestamp(),
+                exp: expires_at.timestamp(),
+                deployment_id: signer.deployment_id().to_owned(),
+                runtime_instance_id: signer.runtime_instance_id().to_owned(),
+                instance_key_id: signer.instance_key_id().to_owned(),
+                tenant_id: self.tenant_id.to_string(),
+                transaction_id: transaction_id.to_string(),
+                issuance_request_jti: request.issuance_request_jti.clone(),
+                status: nazo_operator_protocol::Openid4vpVerificationStatus::Verified,
+                evidence_context: intent.evidence_context,
+                presentation_binding: intent.presentation_binding,
+                intent_sha256: nazo_operator_protocol::compact_sha256(&prepared.intent_jws),
+                completed_at: prepared
+                    .completed_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+                capability_sha256: capability_sha256.clone(),
+            };
+            let receipt_jws = signer
+                .sign_openid4vp_verification_receipt(&receipt)
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification receipt signing failed.",
+                    )
+                })?;
+            let evidence = self
+                .store
+                .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+                    transaction_id,
+                    receipt_id,
+                    issuance_request_jti: &request.issuance_request_jti,
+                    capability: &capability,
+                    capability_sha256: &capability_sha256,
+                    receipt_jws: &receipt_jws,
+                    expected_intent_jws: &prepared.intent_jws,
+                    expected_context_sha256: &prepared.context_sha256,
+                    expected_presentation_binding: &prepared.presentation_binding,
+                    issued_at,
+                    requested_expires_at: expires_at,
+                })
+                .await
+                .map_err(|error| match error {
+                    nazo_openid4vp::PresentationStoreError::InvalidTransition => vp_error(
+                        409,
+                        "conflict",
+                        "Presentation verification issuance request conflicts with prior state.",
+                    ),
+                    nazo_openid4vp::PresentationStoreError::Unavailable
+                    | nazo_openid4vp::PresentationStoreError::IdempotencyConflict => vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification receipt state is unavailable.",
+                    ),
+                })?
+                .ok_or_else(|| {
+                    vp_error(
+                        404,
+                        "not_found",
+                        "Presentation verification receipt is not available.",
+                    )
+                })?;
+            let projection = self.verified_projection(&evidence.evidence, issued_at.timestamp())?;
+            Ok(PresentationVerificationResponse {
+                projection,
+                receipt_jws: evidence.evidence.receipt_jws,
+                receipt_api_url: self.verification_receipt_audience(),
+                verification_ui_url: format!(
+                    "{}/ui/verification-result#receipt={}",
+                    self.issuer, evidence.capability
+                ),
+                verification_ttl_seconds: evidence
+                    .evidence
+                    .expires_at
+                    .signed_duration_since(evidence.evidence.issued_at)
+                    .num_seconds()
+                    .max(0) as u64,
+            })
+        })
+    }
+
+    fn verification_receipt<'a>(
+        &'a self,
+        capability: &'a str,
+    ) -> PresentationFuture<'a, Result<PresentationVerificationProjection, PresentationHttpError>>
+    {
+        Box::pin(async move {
+            let now = Utc::now();
+            let capability_sha256 =
+                nazo_operator_protocol::openid4vp_verification_capability_sha256(capability)
+                    .map_err(|_| {
+                        vp_error(
+                            404,
+                            "not_found",
+                            "Presentation verification receipt is not available.",
+                        )
+                    })?;
+            let evidence = self
+                .store
+                .verification_evidence_by_capability_sha256(&capability_sha256, now)
+                .await
+                .map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Presentation verification receipt state is unavailable.",
+                    )
+                })?
+                .ok_or_else(|| {
+                    vp_error(
+                        404,
+                        "not_found",
+                        "Presentation verification receipt is not available.",
+                    )
+                })?;
+            self.verified_projection(&evidence, now.timestamp())
         })
     }
 }

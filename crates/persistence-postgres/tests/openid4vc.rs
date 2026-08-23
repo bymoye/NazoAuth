@@ -17,8 +17,8 @@ use nazo_openid4vp::{
     PresentationTransaction, RequestMethod, ResponseMode,
 };
 use nazo_postgres::{
-    ManagedCredentialDatasetWrite, Openid4vciDatasetRepository, Openid4vciRepository,
-    Openid4vpRepository, create_pool, get_conn,
+    ManagedCredentialDatasetWrite, NewOpenid4vpVerificationAttachment, Openid4vciDatasetRepository,
+    Openid4vciRepository, Openid4vpRepository, create_pool, get_conn,
 };
 use uuid::Uuid;
 
@@ -696,7 +696,184 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         created_at: now,
         expires_at: now + Duration::minutes(5),
     };
-    verifier.create(&transaction).await.unwrap();
+    let evidence_context = nazo_operator_protocol::Openid4vpEvidenceContext {
+        run_jti: "run-jti-repository".to_owned(),
+        artifact_sha256: "a".repeat(64),
+        matrix_sha256: "b".repeat(64),
+        suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),
+        suite_module_id: "Ab3dEf5gHi7JkLm".to_owned(),
+        test_name: "openid4vp-repository-test".to_owned(),
+        variant_sha256: "c".repeat(64),
+    };
+    let context_sha256 =
+        nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(&evidence_context)
+            .unwrap();
+    let create_request_jti = Uuid::now_v7().to_string();
+    let normalized_create = nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
+        wallet_authorization_endpoint: transaction.wallet_authorization_endpoint.clone(),
+        dcql_query: serde_json::to_value(&transaction.request.dcql_query).unwrap(),
+        haip: false,
+        client_id_prefix: transaction.client_id_prefix.as_str().to_owned(),
+        request_method: transaction.request_method.as_str().to_owned(),
+        response_mode: transaction.response_mode.as_str().to_owned(),
+        transaction_data: None,
+        openid4vc_trust_policy_resource_id: None,
+        openid4vc_trust_policy_digest: None,
+    };
+    let (create_request, create_request_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(&normalized_create)
+            .unwrap();
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &create_request_jti,
+                    request_sha256: &create_request_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .unwrap(),
+        nazo_openid4vp::PresentationCreateOutcome::Created
+    );
+    let replay = verifier
+        .create(
+            &transaction,
+            nazo_openid4vp::PresentationCreateIdempotency {
+                request_jti: &create_request_jti,
+                request_sha256: &create_request_sha256,
+                canonical_request: &create_request,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        nazo_openid4vp::PresentationCreateOutcome::Existing(existing)
+            if existing.id == transaction_id
+    ));
+    let mut different_normalized_create = normalized_create.clone();
+    different_normalized_create.haip = true;
+    let (different_request, different_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(
+            &different_normalized_create,
+        )
+        .unwrap();
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &create_request_jti,
+                    request_sha256: &different_sha256,
+                    canonical_request: &different_request,
+                },
+            )
+            .await
+            .expect_err("same create JTI must reject different canonical input"),
+        nazo_openid4vp::PresentationStoreError::IdempotencyConflict
+    );
+    let unrelated_jti = Uuid::now_v7().to_string();
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &unrelated_jti,
+                    request_sha256: &create_request_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .expect_err("transaction primary-key conflicts must not masquerade as replay"),
+        nazo_openid4vp::PresentationStoreError::Unavailable
+    );
+    let invalid_binding_jti = Uuid::now_v7().to_string();
+    let invalid_binding_sha256 = "f".repeat(64);
+    assert_eq!(
+        verifier
+            .create(
+                &transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &invalid_binding_jti,
+                    request_sha256: &invalid_binding_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .expect_err("canonical create JSON and digest must agree"),
+        nazo_openid4vp::PresentationStoreError::InvalidTransition
+    );
+    let concurrent_jti = Uuid::now_v7().to_string();
+    let mut concurrent_a = transaction.clone();
+    concurrent_a.id = Uuid::now_v7();
+    concurrent_a.request.state = format!("concurrent-a-{}", Uuid::now_v7());
+    let mut concurrent_b = transaction.clone();
+    concurrent_b.id = Uuid::now_v7();
+    concurrent_b.request.state = format!("concurrent-b-{}", Uuid::now_v7());
+    let binding = nazo_openid4vp::PresentationCreateIdempotency {
+        request_jti: &concurrent_jti,
+        request_sha256: &create_request_sha256,
+        canonical_request: &create_request,
+    };
+    let (created_a, created_b) = tokio::join!(
+        verifier.create(&concurrent_a, binding),
+        verifier.create(&concurrent_b, binding)
+    );
+    let created_a = created_a.unwrap();
+    let created_b = created_b.unwrap();
+    let winner_ids = [created_a, created_b]
+        .into_iter()
+        .map(|outcome| match outcome {
+            nazo_openid4vp::PresentationCreateOutcome::Created => None,
+            nazo_openid4vp::PresentationCreateOutcome::Existing(transaction) => {
+                Some(transaction.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        winner_ids.iter().filter(|id| id.is_none()).count(),
+        1,
+        "concurrent exact create must have exactly one insert winner"
+    );
+    let replayed_winner = winner_ids
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("the losing create must return the persisted winner");
+    assert!(replayed_winner == concurrent_a.id || replayed_winner == concurrent_b.id);
+    let presentation_request_sha256 = "d".repeat(64);
+    let attachment = verifier
+        .attach_verification_evidence(
+            transaction_id,
+            NewOpenid4vpVerificationAttachment {
+                context: &evidence_context,
+                context_sha256: &context_sha256,
+                intent_jws: "signed.intent.value",
+                presentation_request_sha256: &presentation_request_sha256,
+            },
+            now,
+        )
+        .await
+        .unwrap()
+        .expect("pending transaction must accept an evidence attachment");
+    assert_eq!(
+        verifier
+            .attach_verification_evidence(
+                transaction_id,
+                NewOpenid4vpVerificationAttachment {
+                    context: &evidence_context,
+                    context_sha256: &context_sha256,
+                    intent_jws: "signed.intent.value",
+                    presentation_request_sha256: &presentation_request_sha256,
+                },
+                now,
+            )
+            .await
+            .unwrap(),
+        Some(attachment)
+    );
     let loaded = verifier
         .request(transaction_id, now)
         .await
@@ -743,6 +920,27 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     .unwrap();
     drop(connection);
     let other_verifier = Openid4vpRepository::new(pool.clone(), tenant_b_id, data_key);
+    let mut other_tenant_transaction = transaction.clone();
+    other_tenant_transaction.id = Uuid::now_v7();
+    other_tenant_transaction.request.state = format!("other-tenant-{}", Uuid::now_v7());
+    assert_eq!(
+        other_verifier
+            .create(
+                &other_tenant_transaction,
+                nazo_openid4vp::PresentationCreateIdempotency {
+                    request_jti: &create_request_jti,
+                    request_sha256: &create_request_sha256,
+                    canonical_request: &create_request,
+                },
+            )
+            .await
+            .unwrap(),
+        nazo_openid4vp::PresentationCreateOutcome::Created,
+        "different tenants may independently use the same create JTI"
+    );
+    let capability = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let capability_sha256 =
+        nazo_operator_protocol::openid4vp_verification_capability_sha256(capability).unwrap();
     assert!(
         other_verifier
             .request(transaction_id, now)
@@ -750,6 +948,14 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
             .unwrap()
             .is_none(),
         "a presentation transaction must not be readable from another tenant"
+    );
+    assert!(
+        other_verifier
+            .verification_evidence_by_capability_sha256(&capability_sha256, now)
+            .await
+            .unwrap()
+            .is_none(),
+        "verification evidence capability must remain tenant-bound"
     );
     assert!(
         other_verifier
@@ -761,7 +967,7 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert!(
         !other_verifier
-            .complete(transaction_id, &state_hash, &result, completed_at)
+            .complete(transaction_id, &state_hash, &result, None, completed_at)
             .await
             .unwrap(),
         "a cross-tenant completion must not consume the source transaction"
@@ -788,24 +994,437 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
     );
     assert!(
         verifier
-            .complete(transaction_id, &state_hash, &result, completed_at)
+            .complete(
+                transaction_id,
+                &state_hash,
+                &result,
+                Some(nazo_openid4vp::PresentationCompletionBinding {
+                    context_sha256: &context_sha256,
+                    intent_jws: "signed.intent.value",
+                    presentation_request_sha256: &presentation_request_sha256,
+                    trust_policy_binding_id: None,
+                    trust_policy_resource_id: None,
+                    trust_policy_digest: None,
+                }),
+                completed_at,
+            )
             .await
             .unwrap()
     );
     assert!(
         !verifier
-            .complete(transaction_id, &state_hash, &result, completed_at)
+            .complete(
+                transaction_id,
+                &state_hash,
+                &result,
+                Some(nazo_openid4vp::PresentationCompletionBinding {
+                    context_sha256: &context_sha256,
+                    intent_jws: "signed.intent.value",
+                    presentation_request_sha256: &presentation_request_sha256,
+                    trust_policy_binding_id: None,
+                    trust_policy_resource_id: None,
+                    trust_policy_digest: None,
+                }),
+                completed_at,
+            )
             .await
             .unwrap()
     );
+    let stored_result = verifier.result(transaction_id, now).await.unwrap().unwrap();
+    assert_eq!(stored_result.completed, Some(result));
+    assert_eq!(
+        stored_result.transaction.response_encryption_private_key, None,
+        "successful completion must erase the no-longer-consumed ephemeral response key"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_intent_jws = 'tampered.intent' \
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(transaction_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    assert!(
+        verifier
+            .prepare_verification_evidence(transaction_id, now)
+            .await
+            .is_err(),
+        "result AEAD must bind the immutable signed intent digest"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE openid4vp_transactions SET verification_intent_jws = 'signed.intent.value' \
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant_id)
+    .bind::<SqlUuid, _>(transaction_id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+    let prepared = verifier
+        .prepare_verification_evidence(transaction_id, now)
+        .await
+        .unwrap()
+        .expect("completed transaction must be ready for receipt issuance");
+    assert_eq!(prepared.context, evidence_context);
+    assert_eq!(prepared.intent_jws, "signed.intent.value");
+    let receipt_id = Uuid::now_v7();
+    let issuance_request_jti = Uuid::now_v7().to_string();
+    let receipt_expires_at = completed_at + Duration::minutes(5);
+    let issued = verifier
+        .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+            transaction_id,
+            receipt_id,
+            issuance_request_jti: &issuance_request_jti,
+            capability,
+            capability_sha256: &capability_sha256,
+            receipt_jws: "signed.receipt.one",
+            expected_intent_jws: "signed.intent.value",
+            expected_context_sha256: &prepared.context_sha256,
+            expected_presentation_binding: &prepared.presentation_binding,
+            issued_at: completed_at,
+            requested_expires_at: receipt_expires_at,
+        })
+        .await
+        .unwrap()
+        .expect("verified transaction must atomically issue a receipt capability");
+    let evidence = issued.evidence;
+    assert_eq!(issued.capability, capability);
+    assert_eq!(evidence.receipt_id, receipt_id);
+    assert_eq!(evidence.context, evidence_context);
+    assert_eq!(evidence.capability_sha256, capability_sha256);
+    let replay_candidate = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let replay_candidate_sha256 =
+        nazo_operator_protocol::openid4vp_verification_capability_sha256(replay_candidate).unwrap();
+    let replayed = verifier
+        .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+            transaction_id,
+            receipt_id: Uuid::now_v7(),
+            issuance_request_jti: &issuance_request_jti,
+            capability: replay_candidate,
+            capability_sha256: &replay_candidate_sha256,
+            receipt_jws: "signed.receipt.retry-must-not-replace",
+            expected_intent_jws: "signed.intent.value",
+            expected_context_sha256: &prepared.context_sha256,
+            expected_presentation_binding: &prepared.presentation_binding,
+            issued_at: completed_at,
+            requested_expires_at: receipt_expires_at,
+        })
+        .await
+        .unwrap()
+        .expect("same issuance JTI must replay the persisted response");
+    assert_eq!(replayed.capability, capability);
+    assert_eq!(replayed.evidence, evidence);
     assert_eq!(
         verifier
-            .result(transaction_id, now)
+            .verification_evidence_by_capability_sha256(&capability_sha256, now)
             .await
             .unwrap()
+            .expect("matching capability digest must resolve after completion"),
+        evidence
+    );
+    assert!(
+        verifier
+            .verification_evidence_by_capability_sha256(&"f".repeat(64), now)
+            .await
             .unwrap()
-            .completed,
-        Some(result)
+            .is_none(),
+        "wrong capability digest must fail closed"
+    );
+    assert!(
+        verifier
+            .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+                transaction_id,
+                receipt_id: Uuid::now_v7(),
+                issuance_request_jti: &Uuid::now_v7().to_string(),
+                capability: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                capability_sha256:
+                    &nazo_operator_protocol::openid4vp_verification_capability_sha256(
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    )
+                    .unwrap(),
+                receipt_jws: "signed.receipt.must-not-persist",
+                expected_intent_jws: "signed.intent.value",
+                expected_context_sha256: &"f".repeat(64),
+                expected_presentation_binding: &prepared.presentation_binding,
+                issued_at: completed_at,
+                requested_expires_at: receipt_expires_at,
+            })
+            .await
+            .is_err(),
+        "a context change after prepare must roll back before capability rotation"
+    );
+    assert_eq!(
+        verifier
+            .verification_evidence_by_capability_sha256(&capability_sha256, now)
+            .await
+            .unwrap()
+            .expect("failed rotation must retain the prior capability"),
+        evidence
+    );
+    let rotated_capability_sha256 =
+        nazo_operator_protocol::openid4vp_verification_capability_sha256(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+    let rotated = verifier
+        .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+            transaction_id,
+            receipt_id: Uuid::now_v7(),
+            issuance_request_jti: &Uuid::now_v7().to_string(),
+            capability: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            capability_sha256: &rotated_capability_sha256,
+            receipt_jws: "signed.receipt.two",
+            expected_intent_jws: "signed.intent.value",
+            expected_context_sha256: &prepared.context_sha256,
+            expected_presentation_binding: &prepared.presentation_binding,
+            issued_at: completed_at,
+            requested_expires_at: receipt_expires_at,
+        })
+        .await
+        .unwrap()
+        .expect("retry must rotate the active capability");
+    assert!(
+        verifier
+            .verification_evidence_by_capability_sha256(&capability_sha256, now)
+            .await
+            .unwrap()
+            .is_none(),
+        "rotation must immediately invalidate the previous capability"
+    );
+    assert_eq!(
+        rotated.evidence.capability_sha256,
+        rotated_capability_sha256
+    );
+    let stale_capability = "ccccccccccccccccccccccccccccccccccccccccccc";
+    let stale_capability_sha256 =
+        nazo_operator_protocol::openid4vp_verification_capability_sha256(stale_capability).unwrap();
+    assert!(
+        verifier
+            .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+                transaction_id,
+                receipt_id: Uuid::now_v7(),
+                issuance_request_jti: &issuance_request_jti,
+                capability: stale_capability,
+                capability_sha256: &stale_capability_sha256,
+                receipt_jws: "signed.receipt.stale-jti",
+                expected_intent_jws: "signed.intent.value",
+                expected_context_sha256: &prepared.context_sha256,
+                expected_presentation_binding: &prepared.presentation_binding,
+                issued_at: completed_at,
+                requested_expires_at: receipt_expires_at,
+            })
+            .await
+            .is_err(),
+        "a superseded A JTI must not rotate again after A -> B"
+    );
+    assert_eq!(
+        verifier
+            .verification_evidence_by_capability_sha256(&rotated_capability_sha256, now)
+            .await
+            .unwrap()
+            .expect("stale JTI rejection must retain the B capability"),
+        rotated.evidence
+    );
+
+    macro_rules! assert_verification_binding_tamper_fails_closed {
+        ($column:literal, $sql_type:ty, $tampered:expr, $original:expr) => {{
+            let mut connection = get_conn(&pool).await.unwrap();
+            sql_query(concat!(
+                "UPDATE openid4vp_transactions SET ",
+                $column,
+                " = $2 WHERE tenant_id = $1 AND id = $3"
+            ))
+            .bind::<SqlUuid, _>(tenant_id)
+            .bind::<$sql_type, _>($tampered)
+            .bind::<SqlUuid, _>(transaction_id)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            drop(connection);
+
+            assert!(
+                matches!(
+                    verifier
+                        .verification_evidence_by_capability_sha256(
+                            &rotated_capability_sha256,
+                            now,
+                        )
+                        .await,
+                    Err(nazo_openid4vp::PresentationStoreError::InvalidTransition)
+                ),
+                concat!($column, " tampering must fail closed on public read")
+            );
+            assert!(
+                matches!(
+                    verifier
+                        .prepare_verification_evidence(transaction_id, now)
+                        .await,
+                    Err(nazo_openid4vp::PresentationStoreError::InvalidTransition)
+                ),
+                concat!($column, " tampering must fail closed before issuance")
+            );
+
+            let mut connection = get_conn(&pool).await.unwrap();
+            sql_query(concat!(
+                "UPDATE openid4vp_transactions SET ",
+                $column,
+                " = $2 WHERE tenant_id = $1 AND id = $3"
+            ))
+            .bind::<SqlUuid, _>(tenant_id)
+            .bind::<$sql_type, _>($original)
+            .bind::<SqlUuid, _>(transaction_id)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            drop(connection);
+        }};
+    }
+
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_run_jti",
+        Text,
+        "tampered-run-jti",
+        evidence_context.run_jti.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_artifact_sha256",
+        Text,
+        "d".repeat(64),
+        evidence_context.artifact_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_matrix_sha256",
+        Text,
+        "e".repeat(64),
+        evidence_context.matrix_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_suite_plan_id",
+        Text,
+        "tampered-plan",
+        evidence_context.suite_plan_id.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_suite_module_id",
+        Text,
+        "tampered-module",
+        evidence_context.suite_module_id.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_test_name",
+        Text,
+        "tampered-test-name",
+        evidence_context.test_name.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_variant_sha256",
+        Text,
+        "f".repeat(64),
+        evidence_context.variant_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_context_sha256",
+        Text,
+        "9".repeat(64),
+        context_sha256.as_str()
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_intent_jws",
+        Text,
+        "tampered.intent.value",
+        "signed.intent.value"
+    );
+    assert_verification_binding_tamper_fails_closed!(
+        "verification_presentation_request_sha256",
+        Text,
+        "0".repeat(64),
+        presentation_request_sha256.as_str()
+    );
+    assert_eq!(
+        verifier
+            .verification_evidence_by_capability_sha256(&rotated_capability_sha256, now)
+            .await
+            .unwrap()
+            .expect("restoring every context column must restore the active evidence"),
+        rotated.evidence
+    );
+    let after_expiry = receipt_expires_at + Duration::seconds(1);
+    assert!(
+        verifier
+            .verification_evidence_by_capability_sha256(&rotated_capability_sha256, after_expiry)
+            .await
+            .unwrap()
+            .is_none(),
+        "public capability lookup must fail closed after expiry"
+    );
+
+    let mut late_transaction = transaction.clone();
+    late_transaction.id = Uuid::now_v7();
+    late_transaction.request.state = format!("late-state-{}", Uuid::now_v7());
+    late_transaction.created_at = now;
+    late_transaction.expires_at = now + Duration::minutes(1);
+    let late_create_request_jti = Uuid::now_v7().to_string();
+    let (late_create_request, late_create_request_sha256) =
+        nazo_operator_protocol::canonical_openid4vp_normalized_create_request(&normalized_create)
+            .unwrap();
+    verifier
+        .create(
+            &late_transaction,
+            nazo_openid4vp::PresentationCreateIdempotency {
+                request_jti: &late_create_request_jti,
+                request_sha256: &late_create_request_sha256,
+                canonical_request: &late_create_request,
+            },
+        )
+        .await
+        .unwrap();
+    let late_completion_at = late_transaction.expires_at + Duration::seconds(1);
+    let late_result = PresentationResult {
+        transaction_id: late_transaction.id,
+        credentials: Vec::new(),
+        completed_at: late_completion_at,
+    };
+    assert!(
+        !verifier
+            .complete(
+                late_transaction.id,
+                blake3::hash(late_transaction.request.state.as_bytes())
+                    .to_hex()
+                    .as_ref(),
+                &late_result,
+                None,
+                late_completion_at,
+            )
+            .await
+            .unwrap(),
+        "late completion must not create a verified result"
+    );
+    let mut connection = get_conn(&pool).await.unwrap();
+    let late_row = sql_query(
+        "SELECT COUNT(*) AS count FROM openid4vp_transactions \
+         WHERE id = $1 AND completed_at IS NULL AND result_ciphertext IS NULL",
+    )
+    .bind::<SqlUuid, _>(late_transaction.id)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        late_row.count, 1,
+        "late completion must leave the persisted transaction unverified"
+    );
+    drop(connection);
+    assert!(
+        verifier
+            .prepare_verification_evidence(late_transaction.id, late_completion_at)
+            .await
+            .unwrap()
+            .is_none(),
+        "late completion must never become receipt-issuable"
     );
 
     let mut connection = get_conn(&pool).await.unwrap();
@@ -816,6 +1435,11 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         .unwrap();
     sql_query("DELETE FROM openid4vp_transactions WHERE id = $1")
         .bind::<SqlUuid, _>(transaction_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sql_query("DELETE FROM openid4vp_transactions WHERE id = $1")
+        .bind::<SqlUuid, _>(late_transaction.id)
         .execute(&mut connection)
         .await
         .unwrap();

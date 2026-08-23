@@ -107,8 +107,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("--input /image.tar", scan)
         self.assertEqual(
             scan.count(
-                "docker.io/aquasec/trivy:0.72.0@sha256:"
-                "cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+                "docker.io/aquasec/trivy:0.74.0@sha256:"
+                "62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969"
             ),
             1,
         )
@@ -481,7 +481,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1",
+            "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2",
             quality,
         )
         self.assertIn("cargo clippy --workspace --all-targets", quality)

@@ -53,7 +53,7 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
             "cargo test --locked --workspace --all-features --lib --bins --tests\n"
         )
         live_tests = self.source.index("COVERAGE_LIVE_TESTS=(", workspace_tests)
-        coverage_report = self.source.index("cargo llvm-cov report", live_tests)
+        coverage_export = self.source.index("test_objects=()", live_tests)
 
         for test_name in (
             "live_immediate_offer_pre_authorized_credential_replay_and_notification",
@@ -62,13 +62,26 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
             "live_offer_enforces_subject_dataset_lifetime_and_transaction_code_policy",
             "par_fapi2_rejects_shared_secret_client_auth_after_authentication",
         ):
-            self.assertIn(test_name, self.source[live_tests:coverage_report])
+            self.assertIn(test_name, self.source[live_tests:coverage_export])
         self.assertIn(
             'cargo test --locked -p nazo-oauth-server --lib "$test_name" -- --ignored',
-            self.source[live_tests:coverage_report],
+            self.source[live_tests:coverage_export],
         )
         self.assertLess(workspace_tests, live_tests)
-        self.assertLess(live_tests, coverage_report)
+        self.assertLess(live_tests, coverage_export)
+
+    def test_coverage_exports_cargo_artifacts_and_uses_the_host_executable_suffix(self) -> None:
+        self.assertIn('*-windows-*) EXECUTABLE_SUFFIX=".exe" ;;', self.source)
+        self.assertIn('SERVER_BIN="$BIN_DIR/nazoauth$EXECUTABLE_SUFFIX"', self.source)
+        self.assertIn('TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"', self.source)
+        self.assertIn('sys.stdout.buffer.write(payload.encode("utf-8") + b"\\n")', self.source)
+        self.assertIn('"$object" > "$test_report"', self.source)
+        self.assertIn('PRIMARY_SERVER_PORT="${CODECOV_PRIMARY_SERVER_PORT:-18000}"', self.source)
+        self.assertIn('SIGNED_SERVER_PORT="${CODECOV_SIGNED_SERVER_PORT:-18001}"', self.source)
+        self.assertIn('listener.bind(("127.0.0.1", int(raw_port)))', self.source)
+        self.assertIn('BIND="127.0.0.1:${SIGNED_SERVER_PORT}"', self.source)
+        self.assertNotIn("cargo llvm-cov report", self.source)
+        self.assertNotIn("lcov-workspace-tests.info", self.source)
 
     def test_parallel_server_instances_use_distinct_identity_directories(self) -> None:
         self.assertIn(
