@@ -72,6 +72,15 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ):
             self.assertNotIn(retired_binary, final_stage)
 
+    def test_runtime_base_applies_available_distribution_security_updates(self) -> None:
+        source = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        runtime_base = source.split(" AS runtime-base", 1)[1].split(
+            "\nFROM runtime-base AS runtime", 1
+        )[0]
+        self.assertIn("apt-get update", runtime_base)
+        self.assertIn("apt-get upgrade -y --no-install-recommends", runtime_base)
+        self.assertIn("rm -rf /var/lib/apt/lists/*", runtime_base)
+
     def test_release_oci_reuses_the_exact_native_application_binaries(self) -> None:
         workflow = (
             ROOT / ".github" / "workflows" / "release-security.yml"
