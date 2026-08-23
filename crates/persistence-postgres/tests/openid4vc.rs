@@ -748,11 +748,24 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         )
         .await
         .unwrap();
-    assert!(matches!(
-        replay,
-        nazo_openid4vp::PresentationCreateOutcome::Existing(existing)
-            if existing.id == transaction_id
-    ));
+    let nazo_openid4vp::PresentationCreateOutcome::Existing(existing) = replay else {
+        panic!("an exact create replay must return the persisted transaction");
+    };
+    assert_eq!(existing.id, transaction_id);
+    assert_eq!(
+        existing.created_at.timestamp_micros(),
+        transaction.created_at.timestamp_micros(),
+        "the persistence boundary must retain the transaction creation time"
+    );
+    assert_eq!(
+        existing
+            .expires_at
+            .signed_duration_since(existing.created_at),
+        transaction
+            .expires_at
+            .signed_duration_since(transaction.created_at),
+        "an idempotent replay must retain the original transaction lifetime"
+    );
     let mut different_normalized_create = normalized_create.clone();
     different_normalized_create.haip = true;
     let (different_request, different_sha256) =

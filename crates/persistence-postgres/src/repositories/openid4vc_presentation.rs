@@ -573,8 +573,8 @@ impl Openid4vpRepository {
               wallet_authorization_endpoint, state_hash, request, request_object, request_uri, \
               openid4vc_trust_policy_binding_id, openid4vc_trust_policy_resource_id, \
               openid4vc_trust_policy_digest, ephemeral_private_key_ciphertext, expires_at, \
-              create_request_jti, create_request_sha256, create_request_canonical_json) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) \
+              create_request_jti, create_request_sha256, create_request_canonical_json, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) \
              ON CONFLICT (tenant_id, create_request_jti) \
                  WHERE create_request_jti IS NOT NULL DO NOTHING",
         )
@@ -605,6 +605,7 @@ impl Openid4vpRepository {
         .bind::<sql_types::Text, _>(idempotency.request_jti)
         .bind::<sql_types::Text, _>(idempotency.request_sha256)
         .bind::<sql_types::Text, _>(idempotency.canonical_request)
+        .bind::<sql_types::Timestamptz, _>(transaction.created_at)
         .execute(&mut connection)
         .await
         .map_err(|error| match error {
