@@ -1,4 +1,4 @@
-FROM docker.io/grafana/k6:2.1.0 AS k6
+FROM docker.io/grafana/k6:2.2.0 AS k6
 
 FROM docker.io/library/python:3.14-alpine
 
