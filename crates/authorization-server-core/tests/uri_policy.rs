@@ -1,7 +1,7 @@
 use nazo_auth::{
     RedirectUriError, is_loopback_http_url, is_valid_pkce_value, oauth_redirect_uri_matches,
     resolve_registered_redirect_uri, validate_cors_origin, validate_frontend_base_url,
-    validate_issuer_url, validate_oauth_redirect_uri,
+    validate_issuer_url, validate_oauth_redirect_uri, validate_protected_resource_identifier,
 };
 use proptest::prelude::*;
 
@@ -21,6 +21,11 @@ fn issuer_requires_https_except_loopback_http() {
     assert!(validate_issuer_url("https://auth.example?x=1").is_err());
     assert!(validate_issuer_url("https://user:pass@auth.example").is_err());
     assert!(validate_issuer_url("https://@auth.example").is_err());
+    assert!(validate_frontend_base_url("https://@frontend.example").is_err());
+    assert!(validate_cors_origin("https://@frontend.example").is_err());
+    assert!(validate_oauth_redirect_uri("public", "https://@client.example/cb").is_err());
+    assert!(validate_protected_resource_identifier("https://@resource.example").is_err());
+    assert!(validate_oauth_redirect_uri("public", "https://client.example/@callback").is_ok());
     assert!(validate_frontend_base_url("file:///tmp/app").is_err());
     assert!(validate_frontend_base_url("https://frontend.example/app?x=1").is_err());
     assert!(validate_cors_origin("file:///tmp/app").is_err());

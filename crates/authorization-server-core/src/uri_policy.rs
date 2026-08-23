@@ -1,7 +1,7 @@
 //! OAuth/OIDC URL policy, including the OAuth native-app exceptions.
 
 use anyhow::bail;
-use url::{Position, Url};
+use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectUriError {
@@ -17,7 +17,7 @@ pub fn validate_issuer_url(value: &str) -> anyhow::Result<()> {
     if value.ends_with('/') {
         bail!("issuer 不能以 / 结尾");
     }
-    reject_url_credentials("issuer", &url)?;
+    reject_url_credentials("issuer", value, &url)?;
     if url.query().is_some() || url.fragment().is_some() {
         bail!("issuer 不能包含 query 或 fragment");
     }
@@ -29,7 +29,7 @@ pub fn validate_frontend_base_url(value: &str) -> anyhow::Result<()> {
     if !url.has_host() {
         bail!("FRONTEND_BASE_URL 必须包含 host");
     }
-    reject_url_credentials("FRONTEND_BASE_URL", &url)?;
+    reject_url_credentials("FRONTEND_BASE_URL", value, &url)?;
     if url.query().is_some() || url.fragment().is_some() {
         bail!("FRONTEND_BASE_URL 不能包含 query 或 fragment");
     }
@@ -41,7 +41,7 @@ pub fn validate_cors_origin(value: &str) -> anyhow::Result<()> {
     if !url.has_host() {
         bail!("CORS_ALLOWED_ORIGINS 必须包含 host");
     }
-    reject_url_credentials("CORS_ALLOWED_ORIGINS", &url)?;
+    reject_url_credentials("CORS_ALLOWED_ORIGINS", value, &url)?;
     if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
         bail!("CORS_ALLOWED_ORIGINS 只能配置 origin，不能包含 path、query 或 fragment");
     }
@@ -53,7 +53,7 @@ pub fn validate_protected_resource_identifier(value: &str) -> anyhow::Result<()>
     if !url.has_host() {
         bail!("PROTECTED_RESOURCE_IDENTIFIER 必须包含 host");
     }
-    reject_url_credentials("PROTECTED_RESOURCE_IDENTIFIER", &url)?;
+    reject_url_credentials("PROTECTED_RESOURCE_IDENTIFIER", value, &url)?;
     if url.fragment().is_some() {
         bail!("PROTECTED_RESOURCE_IDENTIFIER 不能包含 fragment");
     }
@@ -65,7 +65,7 @@ pub fn validate_oauth_redirect_uri(client_type: &str, value: &str) -> anyhow::Re
         bail!("redirect_uri 不支持通配符");
     }
     let uri = parse_url("redirect_uri", value)?;
-    reject_url_credentials("redirect_uri", &uri)?;
+    reject_url_credentials("redirect_uri", value, &uri)?;
     if uri.fragment().is_some() {
         bail!("redirect_uri 不能包含 fragment");
     }
@@ -159,8 +159,15 @@ fn validate_https_or_loopback_http(name: &str, url: &Url) -> anyhow::Result<()> 
     }
 }
 
-fn reject_url_credentials(name: &str, url: &Url) -> anyhow::Result<()> {
-    let has_explicit_userinfo = url[..Position::BeforeHost].ends_with('@');
+fn reject_url_credentials(name: &str, value: &str, url: &Url) -> anyhow::Result<()> {
+    // The URL parser normalizes an explicitly empty userinfo
+    // (https://@host) to the same representation as no userinfo. Preserve
+    // that security-relevant syntax fact from the original authority while
+    // relying on the parser for encoded and non-empty credentials.
+    let has_explicit_userinfo = value
+        .split_once("://")
+        .and_then(|(_, remainder)| remainder.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'));
     if has_explicit_userinfo || !url.username().is_empty() || url.password().is_some() {
         bail!("{name} 不能包含用户名或密码");
     }
