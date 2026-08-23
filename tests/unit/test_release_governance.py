@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReleaseGovernanceTests(unittest.TestCase):
+    def test_rust_toolchain_actions_use_one_immutable_reviewed_revision(self) -> None:
+        toolchain = tomllib.loads(
+            (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        )["toolchain"]["channel"]
+        actions: list[tuple[str, str]] = []
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            actions.extend(
+                (match.group("revision"), match.group("version"))
+                for match in re.finditer(
+                    r"dtolnay/rust-toolchain@(?P<revision>[0-9a-f]{40})"
+                    r"\s+#\s+(?P<version>\d+\.\d+\.\d+)",
+                    text,
+                )
+            )
+        self.assertTrue(actions)
+        self.assertEqual(len({revision for revision, _ in actions}), 1)
+        self.assertEqual({version for _, version in actions}, {toolchain})
+
     def test_production_rust_sources_do_not_contain_suite_plan_specific_behavior(self) -> None:
         forbidden = re.compile(
             r"(?i)(?:conformance-suite|certification\.openid\.net|"
