@@ -17,6 +17,7 @@ pub use model::{
 pub use policy::{PresentationPolicy, PresentationPolicyError};
 pub use service::{PresentationService, PresentationServiceError, VerifiedPresentation};
 pub use store::{
+    PresentationCompletionBinding, PresentationCreateIdempotency, PresentationCreateOutcome,
     PresentationStoreError, PresentationStoreFuture, PresentationStorePort, StoredPresentation,
 };
 

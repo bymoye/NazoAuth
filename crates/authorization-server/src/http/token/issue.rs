@@ -319,6 +319,36 @@ fn issuance_request_digest(client: &ClientRow, issue: &TokenIssue, grant_key: &s
     // raw form fields.  A retry with a different client, subject, scope,
     // resource, sender binding or OIDC contract therefore cannot reuse a
     // response belonging to another logical grant.
+    let refresh_token_policy = match issue.refresh_token_policy {
+        RefreshTokenPolicy::IssueNew => json!({ "kind": "issue_new" }),
+        RefreshTokenPolicy::Rotate {
+            family_id,
+            rotated_from_id,
+        } => json!({
+            "kind": "rotate",
+            "family_id": family_id,
+            "rotated_from_id": rotated_from_id,
+        }),
+        RefreshTokenPolicy::RotateLostResponse {
+            family_id,
+            original_id,
+            successor_id,
+            retry_started_at,
+        } => json!({
+            "kind": "rotate_lost_response",
+            "family_id": family_id,
+            "original_id": original_id,
+            "successor_id": successor_id,
+            "retry_started_at": retry_started_at,
+        }),
+        RefreshTokenPolicy::PreserveExisting => json!({ "kind": "preserve_existing" }),
+    };
+    // Native SSO device secrets are server-generated response material. A retry
+    // reconstructs the normalized issue with fresh secret bytes before looking
+    // up the durable issuance, so binding those bytes would turn a legitimate
+    // idempotent retry into a digest conflict. The session identifier is the
+    // stable flow identity and still separates Native SSO from ordinary grants.
+    let native_sso_sid = issue.native_sso.as_ref().map(|binding| &binding.sid);
     let material = json!({
         "client_id": client.id,
         "tenant_id": client.tenant_id,
@@ -339,13 +369,17 @@ fn issuance_request_digest(client: &ClientRow, issue: &TokenIssue, grant_key: &s
         "id_token_claim_requests": issue.id_token_claim_requests,
         "refresh_id_token_sid": issue.refresh_id_token_sid,
         "include_refresh": issue.include_refresh,
+        "refresh_token_policy": refresh_token_policy,
         "dpop_jkt": issue.dpop_jkt,
         "refresh_token_dpop_jkt": issue.refresh_token_dpop_jkt,
         "mtls_x5t_s256": issue.mtls_x5t_s256,
         "refresh_token_mtls_x5t_s256": issue.refresh_token_mtls_x5t_s256,
         "refresh_token_client_attestation_jkt": issue.refresh_token_client_attestation_jkt,
         "refresh_token_scopes": issue.refresh_token_scopes,
+        "authorization_code_hash": issue.authorization_code_hash,
+        "actor": issue.actor,
         "issued_token_type": issue.issued_token_type,
+        "native_sso_sid": native_sso_sid,
     });
     blake3_hex(
         &serde_json::to_string(&material)

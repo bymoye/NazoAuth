@@ -2414,3 +2414,330 @@ fn trust_policy_parser_rejects_multi_authority_and_inter_certificate_junk() {
     .to_owned();
     assert!(validate_openid4vc_trust_policy(&junk_between_certificates).is_err());
 }
+
+fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
+    Openid4vpVerificationReceipt {
+        schema: 1,
+        iss: "https://auth.example".to_owned(),
+        aud: "https://auth.example/openid4vp/verification-receipts".to_owned(),
+        jti: "019c8ca2-30a6-7000-8000-000000000001".to_owned(),
+        iat: 1_787_367_660,
+        exp: 1_787_367_960,
+        deployment_id: "deployment-1".to_owned(),
+        runtime_instance_id: "runtime-1".to_owned(),
+        instance_key_id: "instance-key".to_owned(),
+        tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
+        transaction_id: "019c8ca2-30a6-7000-8000-000000000002".to_owned(),
+        issuance_request_jti: "019c8ca2-30a6-7000-8000-000000000006".to_owned(),
+        status: Openid4vpVerificationStatus::Verified,
+        evidence_context: Openid4vpEvidenceContext {
+            run_jti: "run-jti-1".to_owned(),
+            artifact_sha256: "a".repeat(64),
+            matrix_sha256: "b".repeat(64),
+            suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),
+            suite_module_id: "Ab3dEf5gHi7JkLm".to_owned(),
+            test_name: "openid4vp-test".to_owned(),
+            variant_sha256: "c".repeat(64),
+        },
+        presentation_binding: Openid4vpPresentationBinding {
+            presentation_request_sha256: "e".repeat(64),
+            trust_policy: Openid4vpTrustPolicyBinding {
+                binding_id: Some("019c8ca2-30a6-7000-8000-000000000007".to_owned()),
+                resource_id: Some("vp-policy-1".to_owned()),
+                resource_digest: Some("f".repeat(64)),
+            },
+        },
+        intent_sha256: "1".repeat(64),
+        completed_at: "2026-08-22T03:00:00Z".to_owned(),
+        capability_sha256: "d".repeat(64),
+    }
+}
+
+#[test]
+fn openid4vp_evidence_context_accepts_opaque_suite_identifiers_with_safe_bounds() {
+    let context = openid4vp_verification_receipt().evidence_context;
+    canonical_openid4vp_evidence_context_sha256(&context)
+        .expect("official-length opaque suite identifiers must be accepted");
+
+    let mut invalid = context.clone();
+    invalid.suite_plan_id = "unsafe/plan".to_owned();
+    assert!(canonical_openid4vp_evidence_context_sha256(&invalid).is_err());
+
+    let mut oversized = context;
+    oversized.suite_module_id = "a".repeat(129);
+    assert!(canonical_openid4vp_evidence_context_sha256(&oversized).is_err());
+}
+
+fn openid4vp_normalized_create_request() -> Openid4vpNormalizedCreateRequest {
+    Openid4vpNormalizedCreateRequest {
+        wallet_authorization_endpoint: "https://wallet.example/authorize".to_owned(),
+        dcql_query: serde_json::from_str(
+            r#"{"credentials":[{"meta":{"z":2,"a":1},"id":"credential-1"}]}"#,
+        )
+        .unwrap(),
+        haip: true,
+        client_id_prefix: "x509_san_dns".to_owned(),
+        request_method: "request_uri_signed_get".to_owned(),
+        response_mode: "direct_post.jwt".to_owned(),
+        transaction_data: Some(vec![
+            serde_json::from_str(r#"{"type":"payment","details":{"z":2,"a":1}}"#).unwrap(),
+        ]),
+        openid4vc_trust_policy_resource_id: Some("trust-policy-1".to_owned()),
+        openid4vc_trust_policy_digest: Some("a".repeat(64)),
+    }
+}
+
+#[test]
+fn openid4vp_normalized_create_request_canonicalizes_recursive_object_order() {
+    let first = openid4vp_normalized_create_request();
+    let mut second = first.clone();
+    second.dcql_query =
+        serde_json::from_str(r#"{"credentials":[{"id":"credential-1","meta":{"a":1,"z":2}}]}"#)
+            .unwrap();
+    second.transaction_data = Some(vec![
+        serde_json::from_str(r#"{"details":{"a":1,"z":2},"type":"payment"}"#).unwrap(),
+    ]);
+
+    let (first_json, first_sha256) = canonical_openid4vp_normalized_create_request(&first).unwrap();
+    let (second_json, second_sha256) =
+        canonical_openid4vp_normalized_create_request(&second).unwrap();
+
+    assert_eq!(first_json, second_json);
+    assert_eq!(first_sha256, second_sha256);
+    assert_eq!(first_sha256.len(), 64);
+    assert!(
+        first_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert!(first_json.contains(r#""meta":{"a":1,"z":2}"#));
+    assert!(first_json.contains(r#""details":{"a":1,"z":2}"#));
+}
+
+#[test]
+fn openid4vp_normalized_create_request_hash_binds_every_field() {
+    let baseline = openid4vp_normalized_create_request();
+    let (_, baseline_sha256) = canonical_openid4vp_normalized_create_request(&baseline).unwrap();
+    let mut changed = Vec::new();
+
+    let mut request = baseline.clone();
+    request.wallet_authorization_endpoint.push_str("/changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.dcql_query = serde_json::json!({"credentials": []});
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.haip = false;
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.client_id_prefix.push_str("_changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.request_method.push_str("_changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.response_mode.push_str("_changed");
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.transaction_data = None;
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.openid4vc_trust_policy_resource_id = None;
+    changed.push(request);
+    let mut request = baseline.clone();
+    request.openid4vc_trust_policy_digest = None;
+    changed.push(request);
+
+    for request in changed {
+        let (_, changed_sha256) = canonical_openid4vp_normalized_create_request(&request).unwrap();
+        assert_ne!(changed_sha256, baseline_sha256);
+    }
+}
+
+#[test]
+fn openid4vp_create_request_jti_requires_canonical_versioned_uuid() {
+    for version in b'1'..=b'8' {
+        let mut valid = b"00000000-0000-7000-8000-000000000001".to_vec();
+        valid[14] = version;
+        validate_openid4vp_create_request_jti(std::str::from_utf8(&valid).unwrap()).unwrap();
+    }
+
+    for malformed in [
+        "00000000-0000-0000-8000-000000000001",
+        "00000000-0000-9000-8000-000000000001",
+        "00000000-0000-7000-7000-000000000001",
+        "00000000-0000-7000-c000-000000000001",
+        "00000000-0000-7000-8000-00000000000A",
+        "00000000000070008000000000000001",
+        "not-a-uuid",
+    ] {
+        assert!(validate_openid4vp_create_request_jti(malformed).is_err());
+    }
+}
+
+#[test]
+fn openid4vp_verification_receipt_is_server_bound_and_time_bounded() {
+    let key = SigningKey::from_bytes(&[47; 32]);
+    let key_id = instance_key_id(&key.verifying_key());
+    let mut receipt = openid4vp_verification_receipt();
+    receipt.instance_key_id.clone_from(&key_id);
+    let compact = sign_openid4vp_verification_receipt(&receipt, &key_id, &key)
+        .expect("valid verification receipt should sign");
+    let context_sha256 =
+        canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
+    let presentation_binding_sha256 =
+        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
+    let expected = Openid4vpVerificationReceiptExpectations {
+        issuer: &receipt.iss,
+        audience: &receipt.aud,
+        deployment_id: &receipt.deployment_id,
+        runtime_instance_id: &receipt.runtime_instance_id,
+        instance_key_id: &key_id,
+        tenant_id: &receipt.tenant_id,
+        transaction_id: &receipt.transaction_id,
+        receipt_id: &receipt.jti,
+        issuance_request_jti: &receipt.issuance_request_jti,
+        evidence_context_sha256: &context_sha256,
+        presentation_binding_sha256: &presentation_binding_sha256,
+        intent_sha256: &receipt.intent_sha256,
+        capability_sha256: &receipt.capability_sha256,
+    };
+    assert_eq!(
+        verify_openid4vp_verification_receipt(
+            &compact,
+            &expected,
+            &key.verifying_key(),
+            receipt.iat + 60,
+        )
+        .expect("valid verification receipt should verify"),
+        receipt
+    );
+    assert!(
+        verify_openid4vp_verification_receipt(
+            &compact,
+            &expected,
+            &key.verifying_key(),
+            receipt.exp,
+        )
+        .is_err(),
+        "receipt must expire at the exclusive expiry boundary"
+    );
+}
+
+#[test]
+fn openid4vp_verification_receipt_rejects_context_or_signer_drift() {
+    let key = SigningKey::from_bytes(&[48; 32]);
+    let key_id = instance_key_id(&key.verifying_key());
+    let mut receipt = openid4vp_verification_receipt();
+    receipt.instance_key_id.clone_from(&key_id);
+    receipt.evidence_context.matrix_sha256 = "A".repeat(64);
+    assert!(sign_openid4vp_verification_receipt(&receipt, &key_id, &key).is_err());
+
+    let mut receipt = openid4vp_verification_receipt();
+    receipt.instance_key_id = "instance-other".to_owned();
+    assert!(sign_openid4vp_verification_receipt(&receipt, &key_id, &key).is_err());
+
+    let mut receipt = openid4vp_verification_receipt();
+    receipt.instance_key_id.clone_from(&key_id);
+    receipt.exp = receipt.iat - 1;
+    assert!(sign_openid4vp_verification_receipt(&receipt, &key_id, &key).is_err());
+}
+
+#[test]
+fn openid4vp_verification_receipt_rejects_signed_substitution() {
+    let key = SigningKey::from_bytes(&[49; 32]);
+    let key_id = instance_key_id(&key.verifying_key());
+    let mut receipt = openid4vp_verification_receipt();
+    receipt.instance_key_id.clone_from(&key_id);
+    let compact = sign_openid4vp_verification_receipt(&receipt, &key_id, &key).unwrap();
+    let context_sha256 =
+        canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
+    let presentation_binding_sha256 =
+        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
+    let expected = Openid4vpVerificationReceiptExpectations {
+        issuer: &receipt.iss,
+        audience: &receipt.aud,
+        deployment_id: &receipt.deployment_id,
+        runtime_instance_id: &receipt.runtime_instance_id,
+        instance_key_id: &key_id,
+        tenant_id: &receipt.tenant_id,
+        transaction_id: "019c8ca2-30a6-7000-8000-000000000099",
+        receipt_id: &receipt.jti,
+        issuance_request_jti: &receipt.issuance_request_jti,
+        evidence_context_sha256: &context_sha256,
+        presentation_binding_sha256: &presentation_binding_sha256,
+        intent_sha256: &receipt.intent_sha256,
+        capability_sha256: &receipt.capability_sha256,
+    };
+    assert!(
+        verify_openid4vp_verification_receipt(
+            &compact,
+            &expected,
+            &key.verifying_key(),
+            receipt.iat,
+        )
+        .is_err(),
+        "a valid receipt for another transaction must not substitute"
+    );
+}
+
+#[test]
+fn openid4vp_verification_intent_is_immutable_and_typed() {
+    let key = SigningKey::from_bytes(&[50; 32]);
+    let key_id = instance_key_id(&key.verifying_key());
+    let receipt = openid4vp_verification_receipt();
+    let transaction_id = receipt.transaction_id.clone();
+    let context_sha256 =
+        canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
+    let presentation_binding_sha256 =
+        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
+    let intent = Openid4vpVerificationIntent {
+        schema: 1,
+        iss: receipt.iss.clone(),
+        aud: "https://auth.example/openid4vp/verification-intents".to_owned(),
+        jti: transaction_id.clone(),
+        iat: receipt.iat - 60,
+        exp: receipt.exp,
+        deployment_id: receipt.deployment_id.clone(),
+        runtime_instance_id: receipt.runtime_instance_id.clone(),
+        instance_key_id: key_id.clone(),
+        tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
+        transaction_id: transaction_id.clone(),
+        evidence_context: receipt.evidence_context,
+        presentation_binding: receipt.presentation_binding,
+    };
+    let compact = sign_openid4vp_verification_intent(&intent, &key_id, &key).unwrap();
+    let expected = Openid4vpVerificationIntentExpectations {
+        issuer: &intent.iss,
+        audience: &intent.aud,
+        deployment_id: &intent.deployment_id,
+        runtime_instance_id: &intent.runtime_instance_id,
+        instance_key_id: &key_id,
+        tenant_id: &intent.tenant_id,
+        transaction_id: &transaction_id,
+        evidence_context_sha256: &context_sha256,
+        presentation_binding_sha256: &presentation_binding_sha256,
+    };
+    assert_eq!(
+        verify_openid4vp_verification_intent(
+            &compact,
+            &expected,
+            &key.verifying_key(),
+            intent.iat,
+        )
+        .unwrap(),
+        intent
+    );
+    let wrong_context = "f".repeat(64);
+    let wrong = Openid4vpVerificationIntentExpectations {
+        evidence_context_sha256: &wrong_context,
+        ..expected
+    };
+    assert!(
+        verify_openid4vp_verification_intent(&compact, &wrong, &key.verifying_key(), intent.iat,)
+            .is_err()
+    );
+    let mut reversed = intent;
+    reversed.exp = reversed.iat - 1;
+    assert!(sign_openid4vp_verification_intent(&reversed, &key_id, &key).is_err());
+}

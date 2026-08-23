@@ -215,15 +215,36 @@ def check_toolchain_pins() -> None:
     workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     rust_actions = []
     for path in workflows:
+        text = path.read_text(encoding="utf-8")
         rust_actions.extend(
-            (path, match.group(1))
-            for match in re.finditer(r"dtolnay/rust-toolchain@(\d+\.\d+\.\d+)", path.read_text())
+            (path, match.group("revision"), match.group("version"))
+            for match in re.finditer(
+                r"dtolnay/rust-toolchain@(?P<revision>[0-9a-f]{40})"
+                r"\s+#\s+(?P<version>\d+\.\d+\.\d+)",
+                text,
+            )
         )
     if not rust_actions:
-        raise SystemExit("CI has no exact dtolnay/rust-toolchain pin")
-    mismatches = [path.relative_to(ROOT) for path, pin in rust_actions if pin != version]
+        raise SystemExit("CI has no immutable dtolnay/rust-toolchain revision pin")
+    referenced_workflows = {
+        path
+        for path in workflows
+        if "dtolnay/rust-toolchain@" in path.read_text(encoding="utf-8")
+    }
+    parsed_workflows = {path for path, _, _ in rust_actions}
+    if referenced_workflows != parsed_workflows:
+        missing = sorted(path.relative_to(ROOT) for path in referenced_workflows - parsed_workflows)
+        raise SystemExit(f"CI Rust toolchain actions lack an immutable revision and version: {missing}")
+    revisions = {revision for _, revision, _ in rust_actions}
+    if len(revisions) != 1:
+        raise SystemExit("CI Rust toolchain actions must share one reviewed immutable revision")
+    mismatches = [
+        path.relative_to(ROOT)
+        for path, _, declared_version in rust_actions
+        if declared_version != version
+    ]
     if mismatches:
-        raise SystemExit(f"CI Rust toolchain pins differ from {version}: {mismatches}")
+        raise SystemExit(f"CI Rust toolchain version annotations differ from {version}: {mismatches}")
 
     renovate_candidates = [
         ROOT / "renovate.json",

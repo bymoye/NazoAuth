@@ -186,7 +186,15 @@ fn validate_external_public_jwk_metadata(key: &Value, kid: &str, alg: &str) -> a
     {
         anyhow::bail!("key {kid} public_jwk use must be sig");
     }
-    reject_private_jwk_members(public_jwk)
+    reject_private_jwk_members(public_jwk)?;
+    let algorithm = signing_algorithm_from_name(alg)
+        .ok_or_else(|| anyhow!("key {kid} has unsupported alg {alg}"))?;
+    if crate::external::decoding_key_from_public_jwk(&Value::Object(public_jwk.clone()), algorithm)
+        .is_none()
+    {
+        anyhow::bail!("key {kid} public_jwk is not usable for {alg} verification");
+    }
+    Ok(())
 }
 
 pub(crate) fn keyset_active_kid(value: &Value) -> anyhow::Result<&str> {

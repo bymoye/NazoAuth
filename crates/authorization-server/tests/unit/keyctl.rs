@@ -153,8 +153,8 @@ async fn typed_operator_key_lifecycle_returns_content_revisions() {
     tokio::fs::write(
         &public_jwk,
         serde_json::to_vec(&serde_json::json!({
-            "kty":"RSA", "kid":"external", "alg":"RS256", "use":"sig",
-            "n":"modulus", "e":"AQAB"
+            "kty":"OKP", "crv":"Ed25519", "kid":"external", "alg":"EdDSA", "use":"sig",
+            "x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         }))
         .unwrap(),
     )
@@ -164,7 +164,7 @@ async fn typed_operator_key_lifecycle_returns_content_revisions() {
         &key_settings,
         nazo_key_management::ExternalKeyRegistration {
             kid: "external".to_owned(),
-            algorithm: jsonwebtoken::Algorithm::RS256,
+            algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://key/1".to_owned(),
             public_jwk_file: public_jwk,
         },

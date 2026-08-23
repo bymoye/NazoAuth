@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReleaseGovernanceTests(unittest.TestCase):
+    def test_rust_toolchain_actions_use_one_immutable_reviewed_revision(self) -> None:
+        toolchain = tomllib.loads(
+            (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        )["toolchain"]["channel"]
+        actions: list[tuple[str, str]] = []
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            actions.extend(
+                (match.group("revision"), match.group("version"))
+                for match in re.finditer(
+                    r"dtolnay/rust-toolchain@(?P<revision>[0-9a-f]{40})"
+                    r"\s+#\s+(?P<version>\d+\.\d+\.\d+)",
+                    text,
+                )
+            )
+        self.assertTrue(actions)
+        self.assertEqual(len({revision for revision, _ in actions}), 1)
+        self.assertEqual({version for _, version in actions}, {toolchain})
+
     def test_production_rust_sources_do_not_contain_suite_plan_specific_behavior(self) -> None:
         forbidden = re.compile(
             r"(?i)(?:conformance-suite|certification\.openid\.net|"
@@ -51,6 +71,15 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "nazo-oauth-keyctl",
         ):
             self.assertNotIn(retired_binary, final_stage)
+
+    def test_runtime_base_applies_available_distribution_security_updates(self) -> None:
+        source = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        runtime_base = source.split(" AS runtime-base", 1)[1].split(
+            "\nFROM runtime-base AS runtime", 1
+        )[0]
+        self.assertIn("apt-get update", runtime_base)
+        self.assertIn("apt-get upgrade -y --no-install-recommends", runtime_base)
+        self.assertIn("rm -rf /var/lib/apt/lists/*", runtime_base)
 
     def test_release_oci_reuses_the_exact_native_application_binaries(self) -> None:
         workflow = (
@@ -107,8 +136,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("--input /image.tar", scan)
         self.assertEqual(
             scan.count(
-                "docker.io/aquasec/trivy:0.72.0@sha256:"
-                "cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+                "docker.io/aquasec/trivy:0.74.0@sha256:"
+                "62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969"
             ),
             1,
         )
@@ -481,7 +510,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1",
+            "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2",
             quality,
         )
         self.assertIn("cargo clippy --workspace --all-targets", quality)

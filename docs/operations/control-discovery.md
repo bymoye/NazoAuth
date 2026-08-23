@@ -56,3 +56,41 @@ The wire DTOs, JWS types, signing/verification policy, compatibility parsing,
 and fixed vectors live only in `crates/operator-protocol`. Controllers consume
 that crate at an exact version and source revision; they do not copy protocol
 code.
+
+The management OpenID4VP create request carries a caller-generated,
+non-secret `create_request_jti` in canonical lowercase UUID form. The caller
+must reuse that JTI for automatic retries. NazoAuth binds it to the tenant and
+to canonical JSON of the fully default-expanded create request. An exact retry
+during the transaction retention window returns the same transaction,
+authorization URL, original `expires_in`, JTI, and create-request digest; the
+same JTI with different normalized input returns `409`. Once bounded cleanup
+removes the expired transaction, the JTI may be reused and creates a new
+transaction. Controllers must therefore never deliberately recycle create
+JTIs.
+
+OpenID4VP verification intents and success receipts are also signed by the
+current instance identity. Receipt issuance is available for at most 600
+seconds after successful completion, and each public receipt is valid for at
+most 600 seconds after issuance. This deployment has no historical instance
+keyring for those receipts: before replacing or removing an instance identity,
+operators must stop new evidence attachment/issuance and drain both bounded
+windows. A receipt signed by any key other than the live discovery identity
+fails closed; key rotation must not overlap an active receipt window.
+
+Result and capability AEAD associated data binds tenant, transaction, evidence
+context, presentation-request digest, exact trust-policy tuple, and signed
+intent digest; capability ciphertext additionally binds the issuance JTI.
+Legacy transaction-ID-only AEAD fallback is accepted only for an unexpired
+pre-migration transaction with none of the create/evidence columns populated.
+Such a row cannot be upgraded by attaching evidence or issuing a receipt.
+
+The database cleanup function deletes at most 256 expired transactions per
+call, uses the indexed effective expiry deadline, and is invoked before
+management create, evidence attach, and receipt issuance repository work. No
+new resident cleanup worker is introduced.
+
+The database itself does not provide an external monotonic rollback anchor. A
+whole-database rollback could therefore restore an older signed state. Normal
+APIs prevent JTI reuse and receipts expire within 600 seconds, but protection
+against storage-snapshot rollback requires an external monotonic deployment
+or backup-generation control and is outside this protocol revision.

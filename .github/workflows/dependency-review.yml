@@ -31,8 +31,8 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/dependency-review-action@v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
           vulnerability-check: true
@@ -44,12 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
 
       - name: Install pinned cargo-audit
-        uses: taiki-e/install-action@v2.83.2
+        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
         with:
           tool: cargo-audit@0.22.2
 

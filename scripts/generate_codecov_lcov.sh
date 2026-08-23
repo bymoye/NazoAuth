@@ -25,6 +25,12 @@ export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 
 COVERAGE_DIR="${CARGO_TARGET_DIR%/}/llvm-cov-target"
 BIN_DIR="${CARGO_TARGET_DIR%/}/debug"
+RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+case "$RUST_HOST" in
+  *-windows-*) EXECUTABLE_SUFFIX=".exe" ;;
+  *) EXECUTABLE_SUFFIX="" ;;
+esac
+SERVER_BIN="$BIN_DIR/nazoauth$EXECUTABLE_SUFFIX"
 PYTHON_BIN="${PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -67,6 +73,8 @@ POSTGRES_HOST="${CODECOV_POSTGRES_HOST:-127.0.0.1}"
 POSTGRES_PORT="${CODECOV_POSTGRES_PORT:-15432}"
 VALKEY_HOST="${CODECOV_VALKEY_HOST:-127.0.0.1}"
 VALKEY_PORT="${CODECOV_VALKEY_PORT:-16383}"
+PRIMARY_SERVER_PORT="${CODECOV_PRIMARY_SERVER_PORT:-18000}"
+SIGNED_SERVER_PORT="${CODECOV_SIGNED_SERVER_PORT:-18001}"
 if [[ -n "${CODECOV_DOCKER_NETWORK:-}" ]]; then
   echo "refusing CODECOV_DOCKER_NETWORK override; coverage owns its loopback ports" >&2
   exit 2
@@ -87,6 +95,51 @@ case "$VALKEY_PORT" in
   16383) ;;
   *) echo "refusing CODECOV_VALKEY_PORT outside the script-owned fixture" >&2; exit 2 ;;
 esac
+
+validate_server_port() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]{3,4}$ ]]; then
+    echo "$name must be an unprivileged TCP port between 1024 and 65535" >&2
+    exit 2
+  fi
+  local numeric_value=$((10#$value))
+  if (( numeric_value < 1024 || numeric_value > 65535 )); then
+    echo "$name must be an unprivileged TCP port between 1024 and 65535" >&2
+    exit 2
+  fi
+}
+validate_server_port CODECOV_PRIMARY_SERVER_PORT "$PRIMARY_SERVER_PORT"
+validate_server_port CODECOV_SIGNED_SERVER_PORT "$SIGNED_SERVER_PORT"
+if [[ "$PRIMARY_SERVER_PORT" == "$SIGNED_SERVER_PORT"
+  || "$PRIMARY_SERVER_PORT" == "$POSTGRES_PORT"
+  || "$PRIMARY_SERVER_PORT" == "$VALKEY_PORT"
+  || "$SIGNED_SERVER_PORT" == "$POSTGRES_PORT"
+  || "$SIGNED_SERVER_PORT" == "$VALKEY_PORT" ]]
+then
+  echo "coverage server and fixture ports must be distinct" >&2
+  exit 2
+fi
+"$PYTHON_BIN" - "$PRIMARY_SERVER_PORT" "$SIGNED_SERVER_PORT" <<'PY'
+import socket
+import sys
+
+sockets = []
+try:
+    for raw_port in sys.argv[1:]:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", int(raw_port)))
+        sockets.append(listener)
+except OSError as error:
+    raise SystemExit(f"coverage server port is unavailable: {error}") from error
+finally:
+    for listener in sockets:
+        listener.close()
+PY
+PRIMARY_SERVER_URL="http://127.0.0.1:${PRIMARY_SERVER_PORT}"
+SIGNED_SERVER_URL="http://127.0.0.1:${SIGNED_SERVER_PORT}"
 
 cleanup() {
   if [[ -n "$SIGNED_SERVER_PID" ]]; then
@@ -166,9 +219,9 @@ export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"
 WORKSPACE_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_workspace_test"
 WORKSPACE_VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/1"
 export VALKEY_COMMAND_TIMEOUT_MS='1000'
-export BIND='127.0.0.1:18000'
-export ISSUER='http://127.0.0.1:18000'
-export MTLS_ENDPOINT_BASE_URL='http://127.0.0.1:18000'
+export BIND="127.0.0.1:${PRIMARY_SERVER_PORT}"
+export ISSUER="$PRIMARY_SERVER_URL"
+export MTLS_ENDPOINT_BASE_URL="$PRIMARY_SERVER_URL"
 export FRONTEND_BASE_URL='http://127.0.0.1:3000'
 export CORS_ALLOWED_ORIGINS='http://127.0.0.1:3000'
 export COOKIE_SECURE='false'
@@ -204,9 +257,9 @@ PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"
 SIGNED_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-signed"
 export INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR"
 # 覆盖率 E2E 使用与服务端相同的 provider registry，不再维护单 provider 配置入口。
-export FEDERATION_PROVIDER_CONFIGS='[{"provider_id":"codecov-oidc","enabled":true,"display_name":"Codecov OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"codecov-oidc-client","client_secret":"codecov-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/codecov-oidc/callback","scopes":"openid email profile"}]'
+export FEDERATION_PROVIDER_CONFIGS="[{\"provider_id\":\"codecov-oidc\",\"enabled\":true,\"display_name\":\"Codecov OIDC\",\"adapter_type\":\"oidc\",\"issuer\":\"https://issuer.example\",\"authorization_endpoint\":\"https://issuer.example/authorize\",\"token_endpoint\":\"https://issuer.example/token\",\"jwks_url\":\"https://issuer.example/jwks\",\"client_id\":\"codecov-oidc-client\",\"client_secret\":\"codecov-oidc-secret\",\"redirect_uri\":\"${PRIMARY_SERVER_URL}/auth/federation/codecov-oidc/callback\",\"scopes\":\"openid email profile\"}]"
 export E2E_OIDC_PROVIDER_ID='codecov-oidc'
-export E2E_OIDC_REDIRECT_URI='http://127.0.0.1:18000/auth/federation/codecov-oidc/callback'
+export E2E_OIDC_REDIRECT_URI="${PRIMARY_SERVER_URL}/auth/federation/codecov-oidc/callback"
 export FEDERATION_SAML_GATEWAY_ENABLED='true'
 export FEDERATION_SAML_GATEWAY_ISSUER='codecov-saml-gateway'
 export FEDERATION_SAML_GATEWAY_AUDIENCE='nazo-oauth-codecov'
@@ -330,26 +383,26 @@ cargo test --locked -p nazo-postgres --test migrations \
 cargo build --locked --workspace --all-features --bin nazoauth
 
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
-  LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$BIN_DIR/nazoauth" server &
+LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$SERVER_BIN" server &
 SERVER_PID=$!
 ENABLE_FAPI_HTTP_SIGNATURES='true' \
   RUNTIME_INSTANCE_ID='codecov-signed' \
   INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR" \
-  BIND='127.0.0.1:18001' \
+  BIND="127.0.0.1:${SIGNED_SERVER_PORT}" \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
-  "$BIN_DIR/nazoauth" server &
+  "$SERVER_BIN" server &
 SIGNED_SERVER_PID=$!
 
 for _ in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:18000/health >/dev/null \
-    && curl -fsS http://127.0.0.1:18001/health >/dev/null
+  if curl -fsS "$PRIMARY_SERVER_URL/health" >/dev/null \
+    && curl -fsS "$SIGNED_SERVER_URL/health" >/dev/null
   then
     break
   fi
   sleep 2
 done
-curl -fsS http://127.0.0.1:18000/health >/dev/null
-curl -fsS http://127.0.0.1:18001/health >/dev/null
+curl -fsS "$PRIMARY_SERVER_URL/health" >/dev/null
+curl -fsS "$SIGNED_SERVER_URL/health" >/dev/null
 
 kill -INT "$SIGNED_SERVER_PID"
 wait "$SIGNED_SERVER_PID" || true
@@ -388,23 +441,9 @@ for test_name in "${COVERAGE_LIVE_TESTS[@]}"; do
   cargo test --locked -p nazo-oauth-server --lib "$test_name" -- --ignored
 done
 
-# Let cargo-llvm-cov resolve the complete workspace object graph as an
-# independent report. `show-env` deliberately points cargo-llvm-cov at the
-# Cargo target root so it can discover every instrumented object there, while
-# this script keeps raw profiles in a dedicated child directory. Expose those
-# same profiles at the target root with hard links: this preserves one set of
-# bytes, keeps the explicit per-object export below independent, and avoids
-# silently dropping integration-test copies of library code.
-while IFS= read -r -d '' profile; do
-  link="$CARGO_TARGET_DIR/workspace-$(basename "$profile")"
-  [[ ! -e "$link" ]]
-  ln "$profile" "$link"
-done < <(find "$COVERAGE_DIR" -maxdepth 1 -type f -name '*.profraw' -print0)
-cargo llvm-cov report --locked --lcov \
-  --ignore-filename-regex "$IGNORE_REGEX" \
-  --output-path lcov-workspace-tests.info
-
-RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+# Export exactly the test executables recorded by Cargo's JSON artifact stream.
+# This is the authoritative workspace object graph on every host, including
+# Windows where inferring a binary path without Cargo's `.exe` suffix fails.
 LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$RUST_HOST/bin"
 mapfile -t SERVER_PROFRAWS < <(
   find "$COVERAGE_DIR" -type f \
@@ -445,13 +484,14 @@ for line in manifest.read_text(encoding="utf-8").splitlines():
     if executable and message.get("profile", {}).get("test") is True:
         executables.add(executable)
 
-for executable in sorted(executables):
-    print(executable)
+payload = "\n".join(sorted(executables))
+if payload:
+    sys.stdout.buffer.write(payload.encode("utf-8") + b"\n")
 PY
 )
 
-if [[ ! -x "$BIN_DIR/nazoauth" ]]; then
-  echo "Instrumented server binary was not found at $BIN_DIR/nazoauth." >&2
+if [[ ! -x "$SERVER_BIN" ]]; then
+  echo "Instrumented server binary was not found at $SERVER_BIN." >&2
   exit 1
 fi
 if [[ "${#test_objects[@]}" -eq 0 ]]; then
@@ -462,7 +502,7 @@ fi
 "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
   --instr-profile "$COVERAGE_DIR/server.profdata" \
   --ignore-filename-regex "$IGNORE_REGEX" \
-  "$BIN_DIR/nazoauth" > lcov-e2e.info
+  "$SERVER_BIN" > lcov-e2e.info
 
 # Some integration tests deliberately execute the production binary as a child
 # process. Those profiles belong to the test run, not the long-lived E2E server
@@ -471,7 +511,7 @@ fi
 "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
   --instr-profile "$COVERAGE_DIR/tests.profdata" \
   --ignore-filename-regex "$IGNORE_REGEX" \
-  "$BIN_DIR/nazoauth" > lcov-process-tests.info
+  "$SERVER_BIN" > lcov-process-tests.info
 
 test_reports=()
 test_report_index=0
@@ -487,4 +527,4 @@ done
 "$PYTHON_BIN" scripts/merge_lcov.py \
   --source-root "$PWD" \
   --output lcov.info \
-  lcov-workspace-tests.info lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"
+  lcov-e2e.info lcov-process-tests.info "${test_reports[@]}"

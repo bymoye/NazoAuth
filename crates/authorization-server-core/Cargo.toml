@@ -11,7 +11,7 @@ base64.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 hmac.workspace = true
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 nazo-identity.workspace = true
 nazo-runtime-modules.workspace = true
 p256.workspace = true

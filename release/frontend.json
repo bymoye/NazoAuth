@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "repository": "nazozero/NazoAuthWeb",
-  "version": "v0.2.3",
-  "commit": "25182fd192d4aee4a0312aa1fa4649877fa73dc1",
-  "release_identity": "https://github.com/nazozero/NazoAuthWeb/.github/workflows/release.yml@refs/tags/v0.2.3",
+  "version": "v0.2.9",
+  "commit": "b7fc00847c02c3d241b615fcbd8c6f14eb6b80a0",
+  "release_identity": "https://github.com/nazozero/NazoAuthWeb/.github/workflows/release.yml@refs/tags/v0.2.9",
   "artifact": {
     "repository": "nazozero/NazoAuthWeb",
     "name": "nazoauth-web.tar.gz",
-    "sha256": "371c3236fa3ae4fd874404c7a832714603dbb6d49ac7caf71593f52ef8e15927",
-    "size": 920870
+    "sha256": "b87ed5335642317deeeaf8b35875051d5845cc2bdc3484c34097d59d31881215",
+    "size": 925931
   }
 }

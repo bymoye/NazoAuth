@@ -1,76 +1,54 @@
-# Codecov Docker Runbook
+# Docker-backed Codecov Runbook
 
-This project runs coverage in a containerized runner so the compiler,
-PostgreSQL, Valkey, and Python environment remain consistent across operators.
+This project runs the coverage compiler on the host and lets the coverage
+script own disposable PostgreSQL and Valkey containers. The script binds both
+fixtures to fixed loopback ports, labels them for ownership checks, and removes
+them on exit.
 
 ## Recommended Command
 
-Create the reusable Docker network once:
+Run this from the repository root in Bash (Git Bash is supported on Windows):
 
 ```sh
-docker network create nazo-oauth-codecov-net || true
+CARGO_BUILD_JOBS=1 \
+CARGO_TERM_COLOR=never \
+CARGO_TARGET_DIR="$PWD/target/codecov-coverage" \
+RUST_TEST_THREADS=1 \
+bash scripts/generate_codecov_lcov.sh
 ```
 
-Run coverage with cached Cargo registry/git/target volumes:
-
-```sh
-docker rm -f nazo-oauth-codecov-postgres nazo-oauth-codecov-valkey 2>/dev/null || true
-docker run --rm --name nazo-oauth-codecov-runner \
-  --network nazo-oauth-codecov-net \
-  -v "$PWD:/workspace" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v nazo-oauth-cargo-registry:/usr/local/cargo/registry \
-  -v nazo-oauth-cargo-git:/usr/local/cargo/git \
-  -v nazo-oauth-codecov-target:/docker-target \
-  -w /workspace \
-  -e CODECOV_DOCKER_NETWORK=nazo-oauth-codecov-net \
-  -e CARGO_TARGET_DIR=/docker-target/codecov \
-  -e CARGO_BUILD_JOBS=1 \
-  -e CARGO_TERM_COLOR=never \
-  -e PYTHON=python3 \
-  nazo-oauth-codecov-runner:local \
-  bash -lc '. /usr/local/cargo/env && bash scripts/generate_codecov_lcov.sh'
-```
-
-Shell equivalent:
+PowerShell 7 launcher for Git Bash:
 
 ```powershell
 $repo = git rev-parse --show-toplevel
 if ($LASTEXITCODE -ne 0) { throw "Run from a NazoAuth Git worktree" }
 Set-Location $repo
-docker network inspect nazo-oauth-codecov-net *> $null
-if ($LASTEXITCODE -ne 0) { docker network create nazo-oauth-codecov-net | Out-Null }
-docker rm -f nazo-oauth-codecov-postgres nazo-oauth-codecov-valkey 2>$null
-docker run --rm --name nazo-oauth-codecov-runner `
-  --network nazo-oauth-codecov-net `
-  -v ${PWD}:/workspace `
-  -v /var/run/docker.sock:/var/run/docker.sock `
-  -v nazo-oauth-cargo-registry:/usr/local/cargo/registry `
-  -v nazo-oauth-cargo-git:/usr/local/cargo/git `
-  -v nazo-oauth-codecov-target:/docker-target `
-  -w /workspace `
-  -e CODECOV_DOCKER_NETWORK=nazo-oauth-codecov-net `
-  -e CARGO_TARGET_DIR=/docker-target/codecov `
-  -e CARGO_BUILD_JOBS=1 `
-  -e CARGO_TERM_COLOR=never `
-  -e PYTHON=python3 `
-  nazo-oauth-codecov-runner:local `
-  bash -lc '. /usr/local/cargo/env && bash scripts/generate_codecov_lcov.sh'
+$env:CARGO_BUILD_JOBS = '1'
+$env:CARGO_TERM_COLOR = 'never'
+$env:CARGO_TARGET_DIR = "$repo/target/codecov-coverage"
+$env:RUST_TEST_THREADS = '1'
+& 'C:\Program Files\Git\bin\bash.exe' scripts/generate_codecov_lcov.sh
+if ($LASTEXITCODE -ne 0) { throw "Coverage generation failed" }
 ```
 
 ## Known Failure Modes
 
 - Run the command from the resolved NazoAuth repository root.
-  `${PWD}:/workspace` must mount the directory containing `Cargo.toml`. If in
-  doubt, set `$repo = git rev-parse --show-toplevel` and mount
-  `${repo}:/workspace`; do not commit a workstation-specific absolute path.
-- Do not run the coverage runner container with the script defaults for database
-  host access. Inside the runner, `127.0.0.1` points to the runner container, not
-  the disposable PostgreSQL container. Set `CODECOV_DOCKER_NETWORK` so the script
-  uses container DNS names and internal ports.
-- Debian-based runner images usually provide `python3`, not `python`. The script
-  now auto-detects `python3`, and the Docker command still sets `PYTHON=python3`
-  for explicitness.
+  `CARGO_TARGET_DIR` must resolve to `<repository>/target/codecov-coverage`.
+  The script rejects other target directories to prevent coverage and ordinary
+  Cargo artifacts from contaminating each other.
+- Do not set `CODECOV_DOCKER_NETWORK`, fixture host/container overrides, or
+  non-default fixture ports. The script deliberately owns loopback ports 15432
+  and 16383 and refuses to remove containers without its ownership label.
+- If either fixed port is already in use, stop the conflicting process or
+  container before starting coverage; do not redirect the script to an external
+  database or Valkey instance.
+- The two loopback HTTP ports default to 18000 and 18001. On a shared validation
+  host, set `CODECOV_PRIMARY_SERVER_PORT` and `CODECOV_SIGNED_SERVER_PORT` to two
+  distinct free unprivileged ports. The script validates both ports before it
+  creates fixtures or starts a build; it never terminates an existing listener.
+- On Linux the script auto-detects `python3`; set `PYTHON` only when the desired
+  interpreter is not available under the usual `python3` or `python` names.
 - Private-unit tests live under `tests/unit`. They are compiled through a minimal
   `#[cfg(test)] #[path = "..."]` mount from the owning `src/**` module. Reusable
   dependency composition lives under `tests/support` and is also mounted by

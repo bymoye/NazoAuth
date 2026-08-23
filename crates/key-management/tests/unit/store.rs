@@ -160,22 +160,22 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
     let settings = settings(directory.clone());
     let public_jwk_file = directory.join("external-public.jwk.json");
     tokio::fs::create_dir_all(&directory).await.unwrap();
-    tokio::fs::write(
-        &public_jwk_file,
-        serde_json::to_vec(&json!({
-            "kty":"RSA","kid":"external","alg":"RS256","use":"sig",
-            "n":"modulus","e":"AQAB"
-        }))
-        .unwrap(),
+    let material = generate_key_material(jsonwebtoken::Algorithm::EdDSA).unwrap();
+    let public_jwk = public_jwk_from_private_der(
+        "external",
+        jsonwebtoken::Algorithm::EdDSA,
+        &material.private_pkcs8_der,
     )
-    .await
     .unwrap();
+    tokio::fs::write(&public_jwk_file, serde_json::to_vec(&public_jwk).unwrap())
+        .await
+        .unwrap();
 
     crate::KeyManager::register_external(
         &settings,
         crate::ExternalKeyRegistration {
             kid: "external".to_owned(),
-            algorithm: jsonwebtoken::Algorithm::RS256,
+            algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://key/1".to_owned(),
             public_jwk_file: public_jwk_file.clone(),
         },
@@ -187,7 +187,7 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
         &settings,
         crate::ExternalKeyRegistration {
             kid: "external".to_owned(),
-            algorithm: jsonwebtoken::Algorithm::RS256,
+            algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://key/1".to_owned(),
             public_jwk_file: public_jwk_file.clone(),
         },
@@ -198,7 +198,7 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
         &settings,
         crate::ExternalKeyRegistration {
             kid: "external".to_owned(),
-            algorithm: jsonwebtoken::Algorithm::RS256,
+            algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://different-key".to_owned(),
             public_jwk_file,
         },
@@ -216,11 +216,78 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
     assert_eq!(payload["active_kid"], "external");
     let entry = &payload["keys"][0];
     assert_eq!(entry["kid"], "external");
-    assert_eq!(entry["alg"], "RS256");
+    assert_eq!(entry["alg"], "EdDSA");
     assert_eq!(entry["backend"], "external-command");
     assert_eq!(entry["key_ref"], "kms://key/1");
     assert_eq!(entry["retire_at"], Value::Null);
     assert!(entry["created_at"].as_str().is_some());
     assert_eq!(entry["public_jwk"]["kid"], "external");
     tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+#[tokio::test]
+async fn external_key_registration_rejects_unusable_algorithm_material() {
+    let off_curve_coordinate = URL_SAFE_NO_PAD.encode([0_u8; 32]);
+    for (label, algorithm, public_jwk) in [
+        (
+            "rsa",
+            jsonwebtoken::Algorithm::RS256,
+            json!({
+                "kty":"RSA","kid":"external","alg":"RS256","use":"sig",
+                "n":"not-base64url","e":"AQAB"
+            }),
+        ),
+        (
+            "ec",
+            jsonwebtoken::Algorithm::ES256,
+            json!({
+                "kty":"EC","crv":"P-256","kid":"external","alg":"ES256","use":"sig",
+                "x":"AQ","y":"AQ"
+            }),
+        ),
+        (
+            "ec-off-curve",
+            jsonwebtoken::Algorithm::ES256,
+            json!({
+                "kty":"EC","crv":"P-256","kid":"external","alg":"ES256","use":"sig",
+                "x":off_curve_coordinate.clone(),"y":off_curve_coordinate
+            }),
+        ),
+        (
+            "ed25519",
+            jsonwebtoken::Algorithm::EdDSA,
+            json!({
+                "kty":"OKP","crv":"Ed25519","kid":"external","alg":"EdDSA","use":"sig"
+            }),
+        ),
+    ] {
+        let directory = std::env::temp_dir().join(format!(
+            "nazo-key-register-invalid-{label}-{}",
+            Uuid::now_v7()
+        ));
+        let settings = settings(directory.clone());
+        let public_jwk_file = directory.join("external-public.jwk.json");
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        tokio::fs::write(&public_jwk_file, serde_json::to_vec(&public_jwk).unwrap())
+            .await
+            .unwrap();
+
+        let error = crate::KeyManager::register_external(
+            &settings,
+            crate::ExternalKeyRegistration {
+                kid: "external".to_owned(),
+                algorithm,
+                key_ref: format!("kms://invalid/{label}"),
+                public_jwk_file,
+            },
+        )
+        .await
+        .expect_err("unusable public key material must fail before keyset publication");
+        assert!(error.to_string().contains("not usable"));
+        assert!(
+            !directory.join("keyset.json").exists(),
+            "a rejected external key must not become the active keyset"
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
 }

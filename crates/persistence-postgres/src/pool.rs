@@ -222,5 +222,8 @@ pub async fn cleanup_expired_security_state(database_url: &str) -> anyhow::Resul
     diesel::sql_query("SELECT * FROM nazo_oauth_cleanup_expired_security_state()")
         .execute(&mut connection)
         .await?;
+    diesel::sql_query("SELECT nazo_openid4vp_cleanup_expired_transactions()")
+        .execute(&mut connection)
+        .await?;
     Ok(())
 }

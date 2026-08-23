@@ -8,6 +8,39 @@ use std::{
     time::Duration,
 };
 
+// Public test-only RSA fixture from jsonwebtoken 11.0.0's test corpus. It has
+// no deployment use and is retained here solely as a fixed PEM 3-era PKCS#8
+// representation for parser compatibility.
+const PEM3_HISTORICAL_PKCS8_FIXTURE: &str = r"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJETqse41HRBsc
+7cfcq3ak4oZWFCoZlcic525A3FfO4qW9BMtRO/iXiyCCHn8JhiL9y8j5JdVP2Q9Z
+IpfElcFd3/guS9w+5RqQGgCR+H56IVUyHZWtTJbKPcwWXQdNUX0rBFcsBzCRESJL
+eelOEdHIjG7LRkx5l/FUvlqsyHDVJEQsHwegZ8b8C0fz0EgT2MMEdn10t6Ur1rXz
+jMB/wvCg8vG8lvciXmedyo9xJ8oMOh0wUEgxziVDMMovmC+aJctcHUAYubwoGN8T
+yzcvnGqL7JSh36Pwy28iPzXZ2RLhAyJFU39vLaHdljwthUaupldlNyCfa6Ofy4qN
+ctlUPlN1AgMBAAECggEAdESTQjQ70O8QIp1ZSkCYXeZjuhj081CK7jhhp/4ChK7J
+GlFQZMwiBze7d6K84TwAtfQGZhQ7km25E1kOm+3hIDCoKdVSKch/oL54f/BK6sKl
+qlIzQEAenho4DuKCm3I4yAw9gEc0DV70DuMTR0LEpYyXcNJY3KNBOTjN5EYQAR9s
+2MeurpgK2MdJlIuZaIbzSGd+diiz2E6vkmcufJLtmYUT/k/ddWvEtz+1DnO6bRHh
+xuuDMeJA/lGB/EYloSLtdyCF6sII6C6slJJtgfb0bPy7l8VtL5iDyz46IKyzdyzW
+tKAn394dm7MYR1RlUBEfqFUyNK7C+pVMVoTwCC2V4QKBgQD64syfiQ2oeUlLYDm4
+CcKSP3RnES02bcTyEDFSuGyyS1jldI4A8GXHJ/lG5EYgiYa1RUivge4lJrlNfjyf
+dV230xgKms7+JiXqag1FI+3mqjAgg4mYiNjaao8N8O3/PD59wMPeWYImsWXNyeHS
+55rUKiHERtCcvdzKl4u35ZtTqQKBgQDNKnX2bVqOJ4WSqCgHRhOm386ugPHfy+8j
+m6cicmUR46ND6ggBB03bCnEG9OtGisxTo/TuYVRu3WP4KjoJs2LD5fwdwJqpgtHl
+yVsk45Y1Hfo+7M6lAuR8rzCi6kHHNb0HyBmZjysHWZsn79ZM+sQnLpgaYgQGRbKV
+DZWlbw7g7QKBgQCl1u+98UGXAP1jFutwbPsx40IVszP4y5ypCe0gqgon3UiY/G+1
+zTLp79GGe/SjI2VpQ7AlW7TI2A0bXXvDSDi3/5Dfya9ULnFXv9yfvH1QwWToySpW
+Kvd1gYSoiX84/WCtjZOr0e0HmLIb0vw0hqZA4szJSqoxQgvF22EfIWaIaQKBgQCf
+34+OmMYw8fEvSCPxDxVvOwW2i7pvV14hFEDYIeZKW2W1HWBhVMzBfFB5SE8yaCQy
+pRfOzj9aKOCm2FjjiErVNpkQoi6jGtLvScnhZAt/lr2TXTrl8OwVkPrIaN0bG/AS
+aUYxmBPCpXu3UjhfQiWqFq/mFyzlqlgvuCc9g95HPQKBgAscKP8mLxdKwOgX8yFW
+GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
+2pOhmquJQVDPDLuZHdrIiKiDM20dy9sMfHygWcZjQ4WSxf/J7T9canLZIXFhHAZT
+3wc9h4G8BBCtWN2TN/LsGZdB
+-----END PRIVATE KEY-----
+";
+
 #[tokio::test]
 async fn missing_keyset_file_allows_initial_creation() {
     let keys_dir = temp_keys_dir("missing");
@@ -70,6 +103,53 @@ async fn concurrent_upgrade_loaders_share_one_complete_request_object_recipient_
         first.request_object_encryption_jwk,
         second.request_object_encryption_jwk
     );
+}
+
+#[tokio::test]
+async fn pem3_pkcs8_request_object_key_remains_readable_without_rewrite() {
+    let legacy_keys_dir = temp_keys_dir("pem3_request_object_compatibility");
+    tokio::fs::create_dir_all(&legacy_keys_dir).await.unwrap();
+    let legacy_settings = test_settings(legacy_keys_dir.clone());
+    let legacy_path = legacy_keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    let fixture = PEM3_HISTORICAL_PKCS8_FIXTURE.as_bytes();
+    tokio::fs::write(&legacy_path, fixture).await.unwrap();
+
+    let expected_jwk = request_object_encryption_jwk(fixture).unwrap();
+    ensure_request_object_encryption_key(&legacy_settings)
+        .await
+        .unwrap();
+    let loaded = load_request_object_decryption_key(&legacy_settings)
+        .await
+        .unwrap();
+    let persisted = tokio::fs::read(&legacy_path).await.unwrap();
+    let loaded_jwk = request_object_encryption_jwk(&loaded).unwrap();
+    let _ = tokio::fs::remove_dir_all(&legacy_keys_dir).await;
+
+    assert_eq!(
+        persisted, fixture,
+        "existing historical PEM must not be rewritten"
+    );
+    assert_eq!(
+        loaded, fixture,
+        "PEM 4 must read the historical PKCS#8 bytes"
+    );
+    for field in ["n", "e", "kid"] {
+        assert_eq!(loaded_jwk[field], expected_jwk[field], "stable JWK {field}");
+    }
+
+    let generated_keys_dir = temp_keys_dir("pem4_request_object_generation");
+    let generated_settings = test_settings(generated_keys_dir.clone());
+    ensure_request_object_encryption_key(&generated_settings)
+        .await
+        .unwrap();
+    let generated = load_request_object_decryption_key(&generated_settings)
+        .await
+        .unwrap();
+    let parsed = pem::parse(&generated).unwrap();
+    let _ = tokio::fs::remove_dir_all(&generated_keys_dir).await;
+
+    assert_eq!(parsed.tag(), "PRIVATE KEY");
+    assert!(request_object_encryption_jwk(&generated).is_ok());
 }
 
 #[tokio::test]
@@ -763,6 +843,13 @@ async fn loader_distinguishes_same_algorithm_prepublished_from_auxiliary_active_
     write_local_key_entry(&keys_dir, "active", "EdDSA", "active.pem", now).await;
     write_local_key_entry(&keys_dir, "candidate", "EdDSA", "candidate.pem", now).await;
     write_local_key_entry(&keys_dir, "auxiliary", "RS256", "auxiliary.pem", now).await;
+    let external_material = generate_key_material(jsonwebtoken::Algorithm::ES256).unwrap();
+    let external_public_jwk = public_jwk_from_private_der(
+        "external-candidate",
+        jsonwebtoken::Algorithm::ES256,
+        &external_material.private_pkcs8_der,
+    )
+    .unwrap();
     write_json_atomic(
         &keys_dir.join("keyset.json"),
         &json!({
@@ -771,7 +858,7 @@ async fn loader_distinguishes_same_algorithm_prepublished_from_auxiliary_active_
                 {"kid":"active","alg":"EdDSA","file":"active.pem","created_at":timestamp(now),"retire_at":null},
                 {"kid":"candidate","alg":"EdDSA","file":"candidate.pem","created_at":timestamp(now),"retire_at":null},
                 {"kid":"auxiliary","alg":"RS256","file":"auxiliary.pem","created_at":timestamp(now),"retire_at":null},
-                {"kid":"external-candidate","alg":"ES256","backend":"external-command","key_ref":"kms://candidate","public_jwk":{"kty":"EC","crv":"P-256","x":"eA","y":"eQ","kid":"external-candidate","alg":"ES256","use":"sig"},"created_at":timestamp(now),"retire_at":null}
+                {"kid":"external-candidate","alg":"ES256","backend":"external-command","key_ref":"kms://candidate","public_jwk":external_public_jwk,"created_at":timestamp(now),"retire_at":null}
             ]
         }),
     )
