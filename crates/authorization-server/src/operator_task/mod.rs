@@ -67,6 +67,7 @@ enum RequestClaim {
 
 const REQUEST_CLAIM_PREFIX: &str = "nazoauth-operator-request-v1:";
 
+mod control_journal;
 mod execution;
 mod identity;
 mod lifecycle;
