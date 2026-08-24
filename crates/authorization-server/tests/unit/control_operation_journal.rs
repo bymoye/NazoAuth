@@ -27,6 +27,29 @@ const OPERATION_ID_B: &str = "019c8ca2-30a6-7000-8000-000000000006";
 /// D01 authoritative controller identity shape: canonical lowercase UUIDv7.
 const CONTROLLER_ID: &str = "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90";
 
+/// Checkpoint-only view over the accepted record for assertions that do not
+/// care about the authorization snapshot.  Tests are allowed to read the
+/// private storage helpers directly.
+fn status(
+    directory: &Path,
+    operation_id: &str,
+    request_hash: &str,
+) -> Result<Option<JournalCheckpoint>, JournalFlowError> {
+    ensure_file_safe_identifier(operation_id)?;
+    ensure_request_hash_shape(request_hash)?;
+    let path = record_path(&control_journal_directory(directory), operation_id);
+    recover_temporary(&path)?;
+    if !state_path_present(&path).map_err(transport)? {
+        return Ok(None);
+    }
+    regular_state_file_present(&path, "control operation journal record").map_err(transport)?;
+    let record = read_record(&path).map_err(transport)?;
+    if record.request_hash != request_hash {
+        return Err(JournalFlowError::OperationIdConflict);
+    }
+    Ok(Some(checkpoint(record)))
+}
+
 fn operation(operation_id: &str) -> ControlOperation {
     ControlOperation {
         schema: CONTROL_OPERATION_SCHEMA,

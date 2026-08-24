@@ -90,8 +90,8 @@ pub(crate) const CONTROL_JOURNAL_SCHEMA: u32 = 1;
 /// Terminal results stay recoverable for at least this long after their
 /// recorded completion time.  ctl response-loss recovery (E06) only has to
 /// outlive a controller restart, so thirty days bounds growth while never
-/// deleting anything that could plausibly still be fetched.
-#[allow(dead_code)] // Consumed by the retention job E04 wires next stream.
+/// deleting anything that could plausibly still be fetched.  The one-shot
+/// operator entry runs the bounded cleanup at its tail (E04).
 pub(crate) const CONTROL_JOURNAL_COMPLETED_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Authorization snapshot persisted at accept time (05 §5).  After
@@ -534,15 +534,19 @@ fn observe_existing(
     Ok(AcceptOutcome::Resumed(checkpoint(existing)))
 }
 
-/// Load the current checkpoint for an accepted operation.  `Ok(None)` means
-/// the id was never accepted; a stored record with a different request hash
-/// is the permanent conflict.
-#[allow(dead_code)] // E04/E06 consume the resume/recovery lookup next stream.
-pub(crate) fn status(
+/// Resume lookup for the E04 one-shot entry (05 §5): returns the persisted
+/// authorization snapshot of an already accepted operation, because a resumed
+/// [`ControlResult`] must echo the original acceptance time and identity —
+/// never the restarting process's clock or caller.  The resumed execution
+/// itself re-enters through [`run_journaled_operation`], which derives the
+/// current checkpoint from the same record.  `Ok(None)` means the id was
+/// never accepted; a stored record with a different request hash is the
+/// permanent conflict.
+pub(crate) fn accepted_snapshot(
     state_directory: &Path,
     operation_id: &str,
     request_hash: &str,
-) -> Result<Option<JournalCheckpoint>, JournalFlowError> {
+) -> Result<Option<AuthorizationSnapshot>, JournalFlowError> {
     ensure_file_safe_identifier(operation_id)?;
     ensure_request_hash_shape(request_hash)?;
     let path = record_path(&control_journal_directory(state_directory), operation_id);
@@ -555,7 +559,11 @@ pub(crate) fn status(
     if record.request_hash != request_hash {
         return Err(JournalFlowError::OperationIdConflict);
     }
-    Ok(Some(checkpoint(record)))
+    Ok(Some(AuthorizationSnapshot {
+        controller_id: record.controller_id,
+        kid: record.kid,
+        accepted_at: record.accepted_at,
+    }))
 }
 
 /// Move the durable checkpoint to `executing` (still before any side
@@ -615,7 +623,6 @@ pub(crate) fn complete(
 /// (Unix seconds).  Non-terminal records and unreadable files are never
 /// touched: deletion must never fabricate "never happened" or destroy a
 /// resumable authorization.  Returns the number of deleted records.
-#[allow(dead_code)] // Consumed by the retention job E04 wires next stream.
 pub(crate) fn cleanup_completed_before(
     state_directory: &Path,
     cutoff: i64,
@@ -672,10 +679,10 @@ pub(crate) struct JournaledOutcome {
 /// journal rules) -> persist result (durable) -> return to caller.
 ///
 /// `resume_allowed` must be true only for operation classes whose state
-/// owner proved idempotent re-entry (the migration ledger today, E05 owns
-/// the mapping).  `pause` receives every failpoint name in order; production
-/// wires the debug-gated process failpoint helper, tests record calls.
-#[allow(dead_code)] // E04 wires the one-shot binary entry next stream.
+/// owner proved idempotent re-entry (the E05 mapping table in
+/// execution.rs owns the decision).  `pause` receives every failpoint name in
+/// order; production wires the debug-gated process failpoint helper, tests
+/// record calls.
 pub(crate) async fn run_journaled_operation<F, Fut>(
     state_directory: &Path,
     operation: &ControlOperation,
@@ -742,36 +749,6 @@ where
         result,
         recovered: false,
     })
-}
-
-/// Convenience wrapper E04 will extend; uses the production debug-gated
-/// failpoint helper.
-#[cfg(debug_assertions)]
-#[allow(dead_code)] // E04 wires the one-shot binary entry next stream.
-pub(crate) async fn run_journaled_operation_with_process_failpoints<F, Fut>(
-    state_directory: &Path,
-    operation: &ControlOperation,
-    request_hash: &str,
-    snapshot: &AuthorizationSnapshot,
-    resume_allowed: bool,
-    side_effect: F,
-) -> Result<JournaledOutcome, JournalFlowError>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
-{
-    run_journaled_operation(
-        state_directory,
-        operation,
-        request_hash,
-        snapshot,
-        resume_allowed,
-        &|name| {
-            let _ = pause_at_test_failpoint(name);
-        },
-        side_effect,
-    )
-    .await
 }
 
 #[cfg(test)]
