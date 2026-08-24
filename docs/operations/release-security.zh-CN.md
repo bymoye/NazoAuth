@@ -33,11 +33,9 @@ GitHub Actions、容器/Compose 输入、锁定的 Python 输入、精确 Rust s
   `[workspace.package].version`，并且 `cargo metadata --locked` 解析出的每一个
   workspace member 都必须是同一版本。任何不一致都会在构建或发布制品之前终止
   policy 任务
-- tag commit 必须可达 `main`，并具有精确 SHA 的成功 `main` push 质量门；或者必须
-  精确等于受管发布分支 `agent/extract-nazoauthctl` 的远端 HEAD，并具有该 SHA 上手动
-  调度成功的 `code-quality` 与 `release-policy`。任意其他子分支、落后于发布分支 HEAD
-  的提交以及未经精确门禁验证的 tag 都会失败
-- 从分支执行的 `workflow_dispatch` 是不发布的原生矩阵演练：它使用
+- tag commit 必须可达 `main`，并具有精确 SHA 的成功 `main` push 质量门。任意其他
+  子分支以及未经精确门禁验证的 tag 都会失败
+- 对可达 `main` 的提交执行 `workflow_dispatch` 是不发布的原生矩阵演练：它使用
   `sha-<commit>` 作为 release identity，执行 policy、原生测试、二进制构建和 OCI
   组装，同时跳过所有仅限 tag 的证明与发布任务
 - 在原生 x86-64 和 Arm64 Linux、Windows、macOS runner 上使用固定 Rust
