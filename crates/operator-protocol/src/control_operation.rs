@@ -4,9 +4,13 @@
 //! operation, signed once with the instance Controller Key; one plain
 //! [`ControlResult`] journal entry as the durable outcome record.  There are
 //! deliberately no receipt chains, capability suites, or multi-envelope
-//! patterns here: replay protection, response-loss recovery, and crash
-//! recovery are owned by `operation_id` + request hash + the server-side
-//! operation journal (E03), not by additional signed artifacts.
+//! patterns here.  Per 05 §2 the envelope carries no `iss`, `aud`, `actor`,
+//! `iat`, `nbf`, or `exp`: replay protection, response-loss recovery, and
+//! crash recovery are owned by `operation_id` + request hash + the server-side
+//! operation journal (accept-once before any side effect, §4), and Controller
+//! Key validity is evaluated exactly once, at first accept (§5).  After
+//! acceptance the journal owns authorization; later key expiry never retracts
+//! an accepted operation.
 //!
 //! # Canonical bytes (E02)
 //!
@@ -34,9 +38,13 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, Verifying
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::verification::{validate_file_identifier, validate_identifier};
-use crate::wire::{FixedAlgorithm, ProtectedHeader};
-use crate::{MAX_COMPACT_JWS_BYTES, ProtocolError};
+use crate::verification::{
+    validate_file_identifier, validate_identifier, validate_lower_hex, validate_uuid,
+};
+use crate::wire::{
+    FixedAlgorithm, ProtectedHeader, TenantResourceIdentity, TenantResourceSelector,
+};
+use crate::{MAX_COMPACT_JWS_BYTES, MAX_TENANT_RESOURCE_IDENTITIES, ProtocolError};
 
 /// Wire schema tag for [`ControlOperation`].
 pub const CONTROL_OPERATION_SCHEMA: u32 = 1;
@@ -44,11 +52,6 @@ pub const CONTROL_OPERATION_SCHEMA: u32 = 1;
 pub const CONTROL_RESULT_SCHEMA: u32 = 1;
 /// Fixed JWS media type for signed control operations.  Not caller-chosen.
 pub const CONTROL_OPERATION_JWS_TYPE: &str = "nazoauth-control-operation+jwt";
-/// C1 admission window: a control operation must be admitted within this many
-/// seconds of issuance.  Server-enforced at admission; after acceptance the
-/// operation journal owns authorization and later key expiry does not retract
-/// it.
-pub const MAX_CONTROL_OPERATION_LIFETIME_SECONDS: i64 = 60;
 /// Maximum canonical [`ControlOperation`] payload size in bytes.
 pub const MAX_CONTROL_OPERATION_BYTES: usize = 64 * 1024;
 /// Maximum serialized [`ControlResult`] size in bytes.
@@ -56,7 +59,10 @@ pub const MAX_CONTROL_RESULT_BYTES: usize = 64 * 1024;
 /// Unpadded base64url length of a 32-byte SHA-256 digest.
 const CONTROLLER_KID_LENGTH: usize = 43;
 
-/// The single signed envelope for one top-level application-level operation.
+/// The single signed envelope for one top-level application-level operation
+/// (05 §2).  The field set is closed and exhaustive:
+/// `schema`, `operation_id`, `kid`, `deployment_id`, `target`,
+/// `config_revision`, `operation`.
 ///
 /// `operation_id` is a UUIDv7 and doubles as the journal idempotency key:
 /// same id + same request hash resumes or returns the recorded outcome; same
@@ -71,20 +77,106 @@ pub struct ControlOperation {
     pub kid: String,
     /// Audience binding: exactly one target deployment.
     pub deployment_id: String,
-    pub iat: i64,
-    pub nbf: i64,
-    /// Admission deadline; `exp - iat` must not exceed
-    /// [`MAX_CONTROL_OPERATION_LIFETIME_SECONDS`].
-    pub exp: i64,
-    /// Build identity of the artifact the operation was authorized for (J1):
-    /// the executing binary must equal these fields at admission.
-    pub embedded: ControlBuildIdentity,
-    /// Opaque secret-revision fencing token (D2): rejected unless it equals
-    /// the deployment's current revision marker via constant-time comparison.
-    pub opaque_revision: String,
+    /// Artifact identity the operation was authorized for (05 §2): the OCI or
+    /// host-binary artifact whose executing runtime must equal the embedded
+    /// build identity at admission.  This prevents "authorized for artifact A,
+    /// executed on runtime B" without duplicating a release attestation.
+    pub target: ControlTarget,
+    /// Opaque configuration revision of the deployment state this operation
+    /// was constructed against.  Carried verbatim into the operation journal;
+    /// CAS comparison semantics land with F05 — until then the only consumer
+    /// is [`config_revision_matches`], an equality check against the local
+    /// revision marker.
+    pub config_revision: String,
     /// Closed operation set with typed payloads.  Unknown operations are a
     /// protocol change and must be rejected by older consumers.
     pub operation: ControlOperationPayload,
+}
+
+/// Artifact classes a control operation can be authorized against (05 §2).
+///
+/// Deserialization is hand-written like [`ControlOperationPayload`]: serde
+/// silently ignores `deny_unknown_fields` for internally tagged enums, so a
+/// derived implementation would accept unknown members inside either variant.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ControlTarget {
+    /// Immutable OCI artifact.  The manifest digest is the image identity;
+    /// mutable tags are never carried.
+    OciImage {
+        /// Immutable image/manifest identifier: `sha256:` + 64 lowercase hex.
+        image_digest: String,
+        /// Build identity embedded in the executing runtime (J1 semantics);
+        /// equality with the running binary is enforced at admission.
+        embedded: ControlBuildIdentity,
+    },
+    /// Host binary identified by content hash.
+    HostBinary {
+        /// SHA-256 of the binary bytes: 64 lowercase hex.
+        sha256: String,
+        /// Build identity embedded in the executing runtime (J1 semantics).
+        embedded: ControlBuildIdentity,
+    },
+}
+
+impl<'de> Deserialize<'de> for ControlTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut members = match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Object(members) => members,
+            _ => return Err(serde::de::Error::custom("target must be a JSON object")),
+        };
+        let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
+        let target = match kind.as_str() {
+            "oci-image" => ControlTarget::OciImage {
+                image_digest: take_string_member(&mut members, "image_digest")
+                    .map_err(serde::de::Error::custom)?,
+                embedded: take_build_identity_member(&mut members)
+                    .map_err(serde::de::Error::custom)?,
+            },
+            "host-binary" => ControlTarget::HostBinary {
+                sha256: take_string_member(&mut members, "sha256")
+                    .map_err(serde::de::Error::custom)?,
+                embedded: take_build_identity_member(&mut members)
+                    .map_err(serde::de::Error::custom)?,
+            },
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown target kind '{other}'"
+                )));
+            }
+        };
+        if let Some(member) = members.keys().next() {
+            return Err(serde::de::Error::custom(format!(
+                "unknown target field '{member}'"
+            )));
+        }
+        Ok(target)
+    }
+}
+
+fn take_build_identity_member(
+    members: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<ControlBuildIdentity, String> {
+    let value = match members.remove("embedded") {
+        Some(value) => value,
+        None => return Err("target requires field 'embedded'".to_owned()),
+    };
+    let mut fields = match value {
+        serde_json::Value::Object(fields) => fields,
+        _ => return Err("target field 'embedded' must be an object".to_owned()),
+    };
+    let embedded = ControlBuildIdentity {
+        product: take_string_member(&mut fields, "product")?,
+        version: take_string_member(&mut fields, "version")?,
+        commit: take_string_member(&mut fields, "commit")?,
+    };
+    if let Some(member) = fields.keys().next() {
+        return Err(format!("unknown embedded field '{member}'"));
+    }
+    Ok(embedded)
 }
 
 /// Embedded build identity carried by every control operation (J1
@@ -124,6 +216,25 @@ pub enum ControlOperationPayload {
         key_ref: String,
         public_jwk_sha256: String,
     },
+    /// Apply externally described tenant resources.  Field vocabulary reuses
+    /// the existing [`TenantResourceIdentity`] wire types; capability-matrix
+    /// concepts stay deleted per A04 §2.
+    TenantResourceApply {
+        /// Canonical UUID of the tenant scope.
+        tenant_id: String,
+        resources: Vec<TenantResourceIdentity>,
+    },
+    /// Enumerate tenant resources, optionally narrowed by typed selectors.
+    /// An empty selector list lists every resource in the tenant scope.
+    TenantResourceEnumerate {
+        tenant_id: String,
+        selectors: Vec<TenantResourceSelector>,
+    },
+    /// Revoke previously applied tenant resources.
+    TenantResourceRevoke {
+        tenant_id: String,
+        resources: Vec<TenantResourceIdentity>,
+    },
 }
 
 impl<'de> Deserialize<'de> for ControlOperationPayload {
@@ -161,6 +272,33 @@ impl<'de> Deserialize<'de> for ControlOperationPayload {
                     alg,
                     key_ref,
                     public_jwk_sha256,
+                }
+            }
+            "tenant-resource-apply" | "tenant-resource-revoke" => {
+                let tenant_id = take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?;
+                let resources = take_resource_vec_member(&mut members, "resources")
+                    .map_err(serde::de::Error::custom)?;
+                if name == "tenant-resource-apply" {
+                    ControlOperationPayload::TenantResourceApply {
+                        tenant_id,
+                        resources,
+                    }
+                } else {
+                    ControlOperationPayload::TenantResourceRevoke {
+                        tenant_id,
+                        resources,
+                    }
+                }
+            }
+            "tenant-resource-enumerate" => {
+                let tenant_id = take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?;
+                let selectors = take_selector_vec_member(&mut members, "selectors")
+                    .map_err(serde::de::Error::custom)?;
+                ControlOperationPayload::TenantResourceEnumerate {
+                    tenant_id,
+                    selectors,
                 }
             }
             other => {
@@ -206,6 +344,92 @@ fn take_string_vec_member(
         }
         _ => Err(format!(
             "operation field '{key}' must be an array of strings"
+        )),
+    }
+}
+
+/// Parse a closed [`crate::wire::TenantResourceKind`] spelling.
+fn parse_tenant_resource_kind(text: &str) -> Option<crate::wire::TenantResourceKind> {
+    use crate::wire::TenantResourceKind as Kind;
+    match text {
+        "oauth-client" => Some(Kind::OauthClient),
+        "mtls-trust-anchor" => Some(Kind::MtlsTrustAnchor),
+        "openid4vc-dataset" => Some(Kind::Openid4vcDataset),
+        "openid4vc-trust-policy" => Some(Kind::Openid4vcTrustPolicy),
+        "user" => Some(Kind::User),
+        _ => None,
+    }
+}
+
+/// Strictly parse one member as an array of [`TenantResourceIdentity`]
+/// objects.  Every object must carry exactly `kind`, `resource_id`, and
+/// `digest`; unknown members are rejected instead of dropped.
+fn take_resource_vec_member(
+    members: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<Vec<TenantResourceIdentity>, String> {
+    let values = take_object_vec_member(members, key)?;
+    let mut parsed = Vec::with_capacity(values.len());
+    for mut fields in values {
+        let kind_text = take_string_member(&mut fields, "kind")?;
+        let kind = parse_tenant_resource_kind(&kind_text)
+            .ok_or_else(|| format!("operation field '{key}' carries unknown resource kind"))?;
+        let resource_id = take_string_member(&mut fields, "resource_id")?;
+        let digest = take_string_member(&mut fields, "digest")?;
+        if let Some(member) = fields.keys().next() {
+            return Err(format!(
+                "operation field '{key}' carries unknown resource field '{member}'"
+            ));
+        }
+        parsed.push(TenantResourceIdentity {
+            kind,
+            resource_id,
+            digest,
+        });
+    }
+    Ok(parsed)
+}
+
+/// Strictly parse one member as an array of [`TenantResourceSelector`]
+/// objects carrying exactly `kind` and `resource_id`.
+fn take_selector_vec_member(
+    members: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<Vec<TenantResourceSelector>, String> {
+    let values = take_object_vec_member(members, key)?;
+    let mut parsed = Vec::with_capacity(values.len());
+    for mut fields in values {
+        let kind_text = take_string_member(&mut fields, "kind")?;
+        let kind = parse_tenant_resource_kind(&kind_text)
+            .ok_or_else(|| format!("operation field '{key}' carries unknown selector kind"))?;
+        let resource_id = take_string_member(&mut fields, "resource_id")?;
+        if let Some(member) = fields.keys().next() {
+            return Err(format!(
+                "operation field '{key}' carries unknown selector field '{member}'"
+            ));
+        }
+        parsed.push(TenantResourceSelector { kind, resource_id });
+    }
+    Ok(parsed)
+}
+
+fn take_object_vec_member(
+    members: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    match members.remove(key) {
+        Some(serde_json::Value::Array(values)) => {
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    serde_json::Value::Object(fields) => parsed.push(fields),
+                    _ => return Err(format!("operation field '{key}' must contain objects")),
+                }
+            }
+            Ok(parsed)
+        }
+        _ => Err(format!(
+            "operation field '{key}' must be an array of objects"
         )),
     }
 }
@@ -266,7 +490,9 @@ pub enum ControlErrorCode {
     ExecutionFailed,
 }
 
-/// Validate envelope structure without evaluating the admission clock.
+/// Validate envelope structure.  There is deliberately no admission clock:
+/// per 05 §2 the envelope carries no time claims, key validity is evaluated
+/// once at first accept, and the operation journal owns replay defense.
 pub fn validate_control_operation(operation: &ControlOperation) -> Result<(), ProtocolError> {
     if operation.schema != CONTROL_OPERATION_SCHEMA {
         return Err(ProtocolError::Policy(
@@ -276,50 +502,37 @@ pub fn validate_control_operation(operation: &ControlOperation) -> Result<(), Pr
     validate_uuidv7(&operation.operation_id)?;
     validate_controller_kid(&operation.kid)?;
     validate_file_identifier(&operation.deployment_id)?;
-    validate_window_bounds(operation.iat, operation.nbf, operation.exp)?;
-    let ControlBuildIdentity {
-        product,
-        version,
-        commit,
-    } = &operation.embedded;
-    for value in [product, version, commit] {
-        validate_identifier(value)?;
-    }
-    validate_identifier(&operation.opaque_revision)?;
+    validate_control_target(&operation.target)?;
+    validate_identifier(&operation.config_revision)?;
     validate_control_payload(&operation.operation)
 }
 
-/// C1 short-window admission check, server-enforced.  `now` must lie in
-/// `[nbf, exp]`.
-pub fn verify_control_operation_admission(
-    operation: &ControlOperation,
-    now: i64,
-) -> Result<(), ProtocolError> {
-    if now < operation.nbf || now > operation.exp {
-        return Err(ProtocolError::Policy(
-            "control operation is outside its validity window",
-        ));
+fn validate_control_target(target: &ControlTarget) -> Result<(), ProtocolError> {
+    match target {
+        ControlTarget::OciImage { image_digest, .. } => {
+            let digest = image_digest
+                .strip_prefix("sha256:")
+                .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
+            validate_lower_hex(digest, 64)?;
+        }
+        ControlTarget::HostBinary { sha256, .. } => validate_lower_hex(sha256, 64)?,
+    }
+    let embedded = target.embedded();
+    for value in [&embedded.product, &embedded.version, &embedded.commit] {
+        validate_identifier(value)?;
     }
     Ok(())
 }
 
-fn validate_window_bounds(iat: i64, nbf: i64, exp: i64) -> Result<(), ProtocolError> {
-    if iat <= 0
-        || nbf <= 0
-        || exp <= 0
-        || exp < iat
-        || exp - iat > MAX_CONTROL_OPERATION_LIFETIME_SECONDS
-    {
-        return Err(ProtocolError::Policy(
-            "control operation lifetime exceeds the admission window",
-        ));
+impl ControlTarget {
+    /// Build identity embedded in either artifact class; the admission
+    /// boundary compares it against the executing runtime.
+    pub fn embedded(&self) -> &ControlBuildIdentity {
+        match self {
+            ControlTarget::OciImage { embedded, .. }
+            | ControlTarget::HostBinary { embedded, .. } => embedded,
+        }
     }
-    if nbf < iat {
-        return Err(ProtocolError::Policy(
-            "control operation validity starts before issuance",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), ProtocolError> {
@@ -358,6 +571,58 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
                     "external key reference must be a non-secret provider locator",
                 ));
             }
+        }
+        ControlOperationPayload::TenantResourceApply {
+            tenant_id,
+            resources,
+        }
+        | ControlOperationPayload::TenantResourceRevoke {
+            tenant_id,
+            resources,
+        } => {
+            validate_uuid(tenant_id)?;
+            validate_tenant_resource_set(resources)?;
+        }
+        ControlOperationPayload::TenantResourceEnumerate {
+            tenant_id,
+            selectors,
+        } => {
+            validate_uuid(tenant_id)?;
+            if selectors.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+                return Err(ProtocolError::Policy(
+                    "tenant resource selectors are out of bounds",
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for selector in selectors {
+                validate_file_identifier(&selector.resource_id)?;
+                if !seen.insert((selector.kind, selector.resource_id.as_str())) {
+                    return Err(ProtocolError::Policy(
+                        "tenant resource selectors must be unique",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply/Revoke payloads must carry at least one and at most
+/// [`MAX_TENANT_RESOURCE_IDENTITIES`] unique, digest-bound identities.
+fn validate_tenant_resource_set(resources: &[TenantResourceIdentity]) -> Result<(), ProtocolError> {
+    if resources.is_empty() || resources.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+        return Err(ProtocolError::Policy(
+            "tenant resource identities are out of bounds",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for resource in resources {
+        validate_file_identifier(&resource.resource_id)?;
+        validate_lower_hex(&resource.digest, 64)?;
+        if !seen.insert((resource.kind, resource.resource_id.as_str())) {
+            return Err(ProtocolError::Policy(
+                "tenant resource identities must be unique",
+            ));
         }
     }
     Ok(())
@@ -566,19 +831,7 @@ pub fn verify_control_operation_signature(
     Ok(operation)
 }
 
-/// Full verifier entry point: signature plus C1 admission at `now`.
-pub fn verify_control_operation(
-    compact: &str,
-    expected_kid: &str,
-    key: &VerifyingKey,
-    now: i64,
-) -> Result<ControlOperation, ProtocolError> {
-    let operation = verify_control_operation_signature(compact, expected_kid, key)?;
-    verify_control_operation_admission(&operation, now)?;
-    Ok(operation)
-}
-
-/// Constant-time byte-slice equality for secret-adjacent values (opaque
+/// Constant-time byte-slice equality for secret-adjacent values (config
 /// revision tokens, request-hash echoes).  Length differences return false
 /// immediately; lengths themselves are public metadata.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -592,11 +845,12 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// D2 fencing consumption: true only when the envelope's opaque revision
-/// token equals the deployment's current secret-revision marker value,
-/// compared in constant time.
-pub fn opaque_revision_matches(operation: &ControlOperation, current_revision: &[u8]) -> bool {
-    constant_time_eq(operation.opaque_revision.as_bytes(), current_revision)
+/// Revision-marker consumption: true only when the envelope's
+/// `config_revision` equals the deployment's current revision marker value,
+/// compared in constant time.  CAS comparison semantics land with F05; until
+/// then this equality check is the field's only consumer.
+pub fn config_revision_matches(operation: &ControlOperation, current_revision: &[u8]) -> bool {
+    constant_time_eq(operation.config_revision.as_bytes(), current_revision)
 }
 
 /// Validate and serialize a [`ControlResult`] for the journal or the

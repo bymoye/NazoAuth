@@ -2108,7 +2108,7 @@ pub(crate) fn validate_file_identifier(value: &str) -> Result<(), ProtocolError>
 
 /// Validate a canonical UUID string without pulling UUID parsing and its
 /// feature surface into this deliberately small wire crate.
-fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
     if value.len() != 36
         || !value.bytes().enumerate().all(|(index, byte)| {
             if matches!(index, 8 | 13 | 18 | 23) {
@@ -2123,7 +2123,7 @@ fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_lower_hex(value: &str, length: usize) -> Result<(), ProtocolError> {
+pub(crate) fn validate_lower_hex(value: &str, length: usize) -> Result<(), ProtocolError> {
     if value.len() != length
         || !value
             .chars()

@@ -1,5 +1,9 @@
-//! E01/E02 unit coverage: canonical determinism, hashing, signing, admission,
-//! closed enums, and journal-entry invariants for the control-plane contract.
+//! E01/E02 unit coverage for the refrozen control-plane contract: canonical
+//! determinism, hashing, signing, closed enums with strict unknown-field
+//! rejection everywhere, typed targets, tenant-resource payloads, and
+//! journal-entry invariants.  Per 05 §2 the envelope carries no `iss`, `aud`,
+//! `actor`, `iat`, `nbf`, or `exp`; admission-time key validity and replay
+//! defense live in E04/E03, not in this wire model.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -8,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::*;
 use crate::control_operation::canonicalize_json_value;
+use crate::wire::{TenantResourceIdentity, TenantResourceKind, TenantResourceSelector};
 
 fn controller_key() -> SigningKey {
     SigningKey::from_bytes(&[23; 32])
@@ -15,6 +20,29 @@ fn controller_key() -> SigningKey {
 
 /// UUIDv7-shaped identifier (version nibble `7`, RFC 9562 variant `8`).
 const OPERATION_ID: &str = "019c8ca2-30a6-7000-8000-000000000005";
+const TENANT_ID: &str = "019c8ca2-30a6-7000-8000-000000000001";
+
+fn build_identity() -> ControlBuildIdentity {
+    ControlBuildIdentity {
+        product: "nazauth".to_owned(),
+        version: "v0.2.0".to_owned(),
+        commit: "b".repeat(40),
+    }
+}
+
+fn host_binary_target() -> ControlTarget {
+    ControlTarget::HostBinary {
+        sha256: "a".repeat(64),
+        embedded: build_identity(),
+    }
+}
+
+fn oci_image_target() -> ControlTarget {
+    ControlTarget::OciImage {
+        image_digest: format!("sha256:{}", "e".repeat(64)),
+        embedded: build_identity(),
+    }
+}
 
 fn operation() -> ControlOperation {
     ControlOperation {
@@ -22,16 +50,17 @@ fn operation() -> ControlOperation {
         operation_id: OPERATION_ID.to_owned(),
         kid: controller_key_id(&controller_key().verifying_key()),
         deployment_id: "deployment-1".to_owned(),
-        iat: 1_000,
-        nbf: 1_000,
-        exp: 1_030,
-        embedded: ControlBuildIdentity {
-            product: "nazauth".to_owned(),
-            version: "v0.2.0".to_owned(),
-            commit: "b".repeat(40),
-        },
-        opaque_revision: "secret-revision-1".to_owned(),
+        target: host_binary_target(),
+        config_revision: "config-revision-1".to_owned(),
         operation: ControlOperationPayload::MigrateApply,
+    }
+}
+
+fn resource(kind: TenantResourceKind, id: &str) -> TenantResourceIdentity {
+    TenantResourceIdentity {
+        kind,
+        resource_id: id.to_owned(),
+        digest: "d".repeat(64),
     }
 }
 
@@ -58,17 +87,17 @@ fn golden_canonical_bytes_and_request_hash_are_stable() {
     let bytes = canonical_control_operation_bytes(&operation).unwrap();
     assert_eq!(
         std::str::from_utf8(&bytes).unwrap(),
-        "{\"deployment_id\":\"deployment-1\",\"embedded\":{\"commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"product\":\"nazauth\",\"version\":\"v0.2.0\"},\"exp\":1030,\"iat\":1000,\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"nbf\":1000,\"opaque_revision\":\"secret-revision-1\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":1}",
+        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":1,\"target\":{\"embedded\":{\"commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"product\":\"nazauth\",\"version\":\"v0.2.0\"},\"kind\":\"host-binary\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
     );
     assert_eq!(
         control_operation_request_hash(&operation).unwrap(),
-        "88710b1d7f84691dbf81634ac69b903916a6e38f5ce2f9703bf5a97fa6e995d3",
+        "1f67fb3521c42af3f9c80be4a944dec729656dfe2437da6653f7e9f7a3ae4f97",
     );
     // Ed25519 is deterministic, so the full compact JWS is reproducible too.
     let compact = crate::sign_control_operation(&operation, &controller_key()).unwrap();
     assert_eq!(
         compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJkZXBsb3ltZW50X2lkIjoiZGVwbG95bWVudC0xIiwiZW1iZWRkZWQiOnsiY29tbWl0IjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInByb2R1Y3QiOiJuYXphdXRoIiwidmVyc2lvbiI6InYwLjIuMCJ9LCJleHAiOjEwMzAsImlhdCI6MTAwMCwia2lkIjoiNDNxODE1NzlDTnVVVVlxUU9WTF82Zml2Zm90R2hMWTFrV01jNzQ2SWNjZyIsIm5iZiI6MTAwMCwib3BhcXVlX3JldmlzaW9uIjoic2VjcmV0LXJldmlzaW9uLTEiLCJvcGVyYXRpb24iOnsibmFtZSI6Im1pZ3JhdGUtYXBwbHkifSwib3BlcmF0aW9uX2lkIjoiMDE5YzhjYTItMzBhNi03MDAwLTgwMDAtMDAwMDAwMDAwMDA1Iiwic2NoZW1hIjoxfQ.8RDxk5p8o5TD6Q9BE5f87fIZYsPxP8NiveRyCDzwevAISoaLC17iNH7yMZP3yDVlsosaEKUH7BZO4mRAKK_QAw"
+        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6MSwidGFyZ2V0Ijp7ImVtYmVkZGVkIjp7ImNvbW1pdCI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJwcm9kdWN0IjoibmF6YXV0aCIsInZlcnNpb24iOiJ2MC4yLjAifSwia2luZCI6Imhvc3QtYmluYXJ5Iiwic2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9fQ.x6KWKyEno58wXONrxV_QU2rsCh82WRUsecSSmmXyI0WfswH6NsqxlIS1eJhACuREqQGXwUrFMGZBYlDNdXZBBQ"
     );
 }
 
@@ -83,19 +112,20 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
     embedded.insert("commit".to_owned(), serde_json::json!("b".repeat(40)));
     embedded.insert("version".to_owned(), serde_json::json!("v0.2.0"));
     embedded.insert("product".to_owned(), serde_json::json!("nazauth"));
+    let mut target = serde_json::Map::new();
+    target.insert("sha256".to_owned(), serde_json::json!("a".repeat(64)));
+    target.insert("kind".to_owned(), serde_json::json!("host-binary"));
+    target.insert("embedded".to_owned(), serde_json::Value::Object(embedded));
     let mut root = serde_json::Map::new();
     root.insert(
         "operation".to_owned(),
         serde_json::json!({"name": "migrate-apply"}),
     );
     root.insert(
-        "opaque_revision".to_owned(),
-        serde_json::json!("secret-revision-1"),
+        "config_revision".to_owned(),
+        serde_json::json!("config-revision-1"),
     );
-    root.insert("embedded".to_owned(), serde_json::Value::Object(embedded));
-    root.insert("exp".to_owned(), serde_json::json!(1_030));
-    root.insert("nbf".to_owned(), serde_json::json!(1_000));
-    root.insert("iat".to_owned(), serde_json::json!(1_000));
+    root.insert("target".to_owned(), serde_json::Value::Object(target));
     root.insert(
         "deployment_id".to_owned(),
         serde_json::json!("deployment-1"),
@@ -117,12 +147,12 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
             "operation_id": "{OPERATION_ID}",
             "kid": "{}",
             "deployment_id": "deployment-1",
-            "iat": 1000, "nbf": 1000, "exp": 1030,
-            "embedded": {{"product": "nazauth", "version": "v0.2.0", "commit": "{}"}},
-            "opaque_revision": "secre\u0074-revision-1",
+            "target": {{"kind": "host-binary", "sha256": "{}", "embedded": {{"product": "nazauth", "version": "v0.2.0", "commit": "{}"}}}},
+            "config_revision": "config-re\u0076ision-1",
             "operation": {{"name": "migrate-apply"}}
         }}"#,
         operation.kid,
+        "a".repeat(64),
         "b".repeat(40),
     );
     let parsed: serde_json::Value = serde_json::from_str(&pretty).unwrap();
@@ -142,16 +172,46 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
 #[test]
 fn distinct_requests_never_share_a_request_hash() {
     let baseline = control_operation_request_hash(&operation()).unwrap();
-    let mutations: [fn(&mut ControlOperation); 7] = [
+    let mutations: [fn(&mut ControlOperation); 8] = [
         |value| {
             value.operation_id = "019c8ca2-30a6-7000-8000-000000000006".to_owned();
         },
         |value| value.deployment_id = "deployment-2".to_owned(),
-        |value| value.exp += 1,
-        |value| value.embedded.commit = "c".repeat(40),
-        |value| value.embedded.version = "v0.2.1".to_owned(),
-        |value| value.opaque_revision = "secret-revision-2".to_owned(),
-        |value| value.operation = ControlOperationPayload::KeysList,
+        |value| value.target = oci_image_target(),
+        |value| {
+            let ControlTarget::HostBinary { sha256, .. } = &mut value.target else {
+                panic!("fixture target must be a host binary");
+            };
+            *sha256 = "c".repeat(64);
+        },
+        |value| {
+            value.config_revision = "config-revision-2".to_owned();
+        },
+        |value| {
+            let ControlTarget::HostBinary { sha256, .. } = &mut value.target else {
+                panic!("fixture target must be a host binary");
+            };
+            // Reuse the same digest bytes so only the embedded build identity
+            // changes the canonical request.
+            let same_digest = sha256.clone();
+            value.target = ControlTarget::HostBinary {
+                sha256: same_digest,
+                embedded: ControlBuildIdentity {
+                    product: "nazauth".to_owned(),
+                    version: "v0.2.1".to_owned(),
+                    commit: "b".repeat(40),
+                },
+            };
+        },
+        |value| {
+            value.operation = ControlOperationPayload::TenantResourceEnumerate {
+                tenant_id: TENANT_ID.to_owned(),
+                selectors: Vec::new(),
+            };
+        },
+        |value| {
+            value.operation = tenant_apply_payload(TENANT_ID);
+        },
     ];
     for mutate in mutations {
         let mut mutated = operation();
@@ -159,6 +219,13 @@ fn distinct_requests_never_share_a_request_hash() {
         let hash = control_operation_request_hash(&mutated).unwrap();
         assert_ne!(hash, baseline);
         assert_eq!(hash.len(), 64);
+    }
+}
+
+fn tenant_apply_payload(tenant_id: &str) -> ControlOperationPayload {
+    ControlOperationPayload::TenantResourceApply {
+        tenant_id: tenant_id.to_owned(),
+        resources: vec![resource(TenantResourceKind::OauthClient, "client-1")],
     }
 }
 
@@ -188,20 +255,17 @@ fn sign_verify_roundtrip_binds_header_kid_and_media_type() {
     let key = controller_key();
     let operation = operation();
     let compact = crate::sign_control_operation(&operation, &key).unwrap();
+    // There is no admission clock anywhere in verification: the same compact
+    // verifies identically whenever it is presented, and the journal owns
+    // replay defense after acceptance.
     assert_eq!(
-        verify_control_operation(&compact, &operation.kid, &key.verifying_key(), 1_015).unwrap(),
+        verify_control_operation_signature(&compact, &operation.kid, &key.verifying_key()).unwrap(),
         operation
     );
     let header = crate::protected_header(&compact).unwrap();
     assert_eq!(header.alg, FixedAlgorithm::EdDSA);
     assert_eq!(header.typ, CONTROL_OPERATION_JWS_TYPE);
     assert_eq!(header.kid, operation.kid);
-
-    // Signature verification succeeds independently of the admission clock.
-    assert_eq!(
-        verify_control_operation_signature(&compact, &operation.kid, &key.verifying_key()).unwrap(),
-        operation
-    );
 }
 
 #[test]
@@ -214,7 +278,7 @@ fn wrong_kid_and_wrong_signer_are_rejected() {
 
     // Trusted lookup expects a different controller kid than the header.
     assert!(matches!(
-        verify_control_operation(&compact, &other_kid, &key.verifying_key(), 1_015),
+        verify_control_operation_signature(&compact, &other_kid, &key.verifying_key()),
         Err(ProtocolError::Header)
     ));
 
@@ -269,30 +333,6 @@ fn tampered_compact_bytes_are_rejected() {
 }
 
 #[test]
-fn expired_and_not_yet_valid_operations_fail_admission() {
-    let key = controller_key();
-    let operation = operation();
-    let compact = crate::sign_control_operation(&operation, &key).unwrap();
-    assert!(verify_control_operation_admission(&operation, 1_000).is_ok());
-    assert!(verify_control_operation_admission(&operation, 1_030).is_ok());
-    assert!(
-        verify_control_operation(&compact, &operation.kid, &key.verifying_key(), 1_030).is_ok()
-    );
-    assert!(matches!(
-        verify_control_operation(&compact, &operation.kid, &key.verifying_key(), 1_031),
-        Err(ProtocolError::Policy(_))
-    ));
-    assert!(matches!(
-        verify_control_operation(&compact, &operation.kid, &key.verifying_key(), 999),
-        Err(ProtocolError::Policy(_))
-    ));
-    // Signature remains provable after expiry; only admission fails.
-    assert!(
-        verify_control_operation_signature(&compact, &operation.kid, &key.verifying_key()).is_ok()
-    );
-}
-
-#[test]
 fn non_canonical_payload_encoding_is_rejected_even_when_correctly_signed() {
     let key = controller_key();
     let operation = operation();
@@ -327,12 +367,22 @@ fn unknown_fields_are_denied_everywhere() {
         mutate(&mut parsed);
         serde_json::from_slice::<ControlOperation>(&serde_json::to_vec(&parsed).unwrap())
     };
+    // Deleted identity/time fields are plain unknown fields now.
     assert!(
         reject_parsed(|value| value["actor"] = serde_json::json!({"kind": "local-root"})).is_err()
     );
+    assert!(reject_parsed(|value| value["iat"] = serde_json::json!(1_000)).is_err());
+    assert!(reject_parsed(|value| value["nbf"] = serde_json::json!(1_000)).is_err());
+    assert!(reject_parsed(|value| value["exp"] = serde_json::json!(1_030)).is_err());
+    assert!(reject_parsed(|value| value["opaque_revision"] = serde_json::json!("r1")).is_err());
     assert!(
-        reject_parsed(|value| value["embedded"]["buildId"] = serde_json::json!("github:1"))
-            .is_err()
+        reject_parsed(
+            |value| value["target"]["embedded"]["buildId"] = serde_json::json!("github:1")
+        )
+        .is_err()
+    );
+    assert!(
+        reject_parsed(|value| value["target"]["path"] = serde_json::json!("/usr/bin/env")).is_err()
     );
     assert!(
         reject_parsed(|value| value["operation"]["argv"] = serde_json::json!(["sh", "-c"]))
@@ -350,12 +400,7 @@ fn unknown_fields_are_denied_everywhere() {
         compact.split('.').nth(2).unwrap(),
     );
     assert!(matches!(
-        verify_control_operation(
-            &smuggled_compact,
-            &operation.kid,
-            &key.verifying_key(),
-            1_015
-        ),
+        verify_control_operation_signature(&smuggled_compact, &operation.kid, &key.verifying_key()),
         Err(ProtocolError::Json)
     ));
 
@@ -374,6 +419,229 @@ fn unknown_fields_are_denied_everywhere() {
         verify_control_operation_signature(&forged, &operation.kid, &key.verifying_key()),
         Err(ProtocolError::Header)
     ));
+}
+
+#[test]
+fn target_variants_are_closed_strictly_parsed_and_validated() {
+    // Both classes accept their exact shape.
+    let mut host = operation();
+    validate_control_operation(&host).unwrap();
+    host.target = oci_image_target();
+    validate_control_operation(&host).unwrap();
+
+    let parse_target = |value: serde_json::Value| {
+        serde_json::from_value::<ControlTarget>(value).map_err(|error| error.to_string())
+    };
+
+    // Unknown kind.
+    let mut value = serde_json::to_value(host_binary_target()).unwrap();
+    value["kind"] = serde_json::json!("container-layer");
+    assert!(
+        parse_target(value)
+            .unwrap_err()
+            .contains("unknown target kind")
+    );
+
+    // Unknown member inside a variant.
+    let mut value = serde_json::to_value(host_binary_target()).unwrap();
+    value["argv"] = serde_json::json!(["sh"]);
+    assert!(
+        parse_target(value)
+            .unwrap_err()
+            .contains("unknown target field")
+    );
+
+    // Unknown member inside the embedded identity.
+    let mut value = serde_json::to_value(host_binary_target()).unwrap();
+    value["embedded"]["buildId"] = serde_json::json!("github:1");
+    assert!(
+        parse_target(value)
+            .unwrap_err()
+            .contains("unknown embedded field")
+    );
+
+    // Missing required member.
+    let mut value = serde_json::to_value(host_binary_target()).unwrap();
+    value.as_object_mut().unwrap().remove("sha256");
+    assert!(
+        parse_target(value)
+            .unwrap_err()
+            .contains("requires field 'sha256'")
+    );
+
+    // Wrong scalar type.
+    let mut value = serde_json::to_value(oci_image_target()).unwrap();
+    value["image_digest"] = serde_json::json!(7);
+    assert!(parse_target(value).is_err());
+
+    // Digest formats are enforced by envelope validation.
+    let mut bad_prefix = operation();
+    bad_prefix.target = ControlTarget::OciImage {
+        image_digest: "docker.io/nazoauth:v1".to_owned(),
+        embedded: build_identity(),
+    };
+    assert!(validate_control_operation(&bad_prefix).is_err());
+
+    let mut uppercase = operation();
+    uppercase.target = ControlTarget::OciImage {
+        image_digest: format!("sha256:{}", "E".repeat(64)),
+        embedded: build_identity(),
+    };
+    assert!(validate_control_operation(&uppercase).is_err());
+
+    let mut short_hash = operation();
+    short_hash.target = ControlTarget::HostBinary {
+        sha256: "a".repeat(63),
+        embedded: build_identity(),
+    };
+    assert!(validate_control_operation(&short_hash).is_err());
+
+    let mut bad_commit = operation();
+    bad_commit.target = ControlTarget::HostBinary {
+        sha256: "a".repeat(64),
+        embedded: ControlBuildIdentity {
+            product: "nazauth".to_owned(),
+            version: "v0.2.0".to_owned(),
+            commit: String::new(),
+        },
+    };
+    assert!(validate_control_operation(&bad_commit).is_err());
+}
+
+#[test]
+fn tenant_resource_payloads_are_bounded_typed_and_unique() {
+    let base = || {
+        let mut operation = operation();
+        operation.operation = tenant_apply_payload(TENANT_ID);
+        operation
+    };
+    validate_control_operation(&base()).unwrap();
+
+    // Revoke mirrors apply.
+    let mut revoke = base();
+    let ControlOperationPayload::TenantResourceApply { resources, .. } = revoke.operation.clone()
+    else {
+        panic!("fixture must be an apply payload");
+    };
+    revoke.operation = ControlOperationPayload::TenantResourceRevoke {
+        tenant_id: TENANT_ID.to_owned(),
+        resources,
+    };
+    validate_control_operation(&revoke).unwrap();
+
+    // Enumerate accepts an empty selector list (list everything).
+    let mut enumerate_all = base();
+    enumerate_all.operation = ControlOperationPayload::TenantResourceEnumerate {
+        tenant_id: TENANT_ID.to_owned(),
+        selectors: Vec::new(),
+    };
+    validate_control_operation(&enumerate_all).unwrap();
+
+    // Enumerate accepts typed selectors.
+    let mut enumerate = base();
+    enumerate.operation = ControlOperationPayload::TenantResourceEnumerate {
+        tenant_id: TENANT_ID.to_owned(),
+        selectors: vec![TenantResourceSelector {
+            kind: TenantResourceKind::User,
+            resource_id: "user-1".to_owned(),
+        }],
+    };
+    validate_control_operation(&enumerate).unwrap();
+
+    let expect_policy_error = |payload: ControlOperationPayload| {
+        let mut operation = operation();
+        operation.operation = payload;
+        let error = validate_control_operation(&operation)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("protocol policy"), "{error}");
+    };
+
+    // Empty apply/revoke sets are meaningless.
+    expect_policy_error(ControlOperationPayload::TenantResourceApply {
+        tenant_id: TENANT_ID.to_owned(),
+        resources: Vec::new(),
+    });
+
+    // Over-large sets are refused.
+    let flood = (0..=MAX_TENANT_RESOURCE_IDENTITIES)
+        .map(|index| resource(TenantResourceKind::User, format!("user-{index}").as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(flood.len(), MAX_TENANT_RESOURCE_IDENTITIES + 1);
+    expect_policy_error(ControlOperationPayload::TenantResourceApply {
+        tenant_id: TENANT_ID.to_owned(),
+        resources: flood,
+    });
+
+    // Duplicate identities are refused even when digests differ.
+    expect_policy_error(ControlOperationPayload::TenantResourceApply {
+        tenant_id: TENANT_ID.to_owned(),
+        resources: vec![
+            resource(TenantResourceKind::User, "user-1"),
+            TenantResourceIdentity {
+                kind: TenantResourceKind::User,
+                resource_id: "user-1".to_owned(),
+                digest: "0".repeat(64),
+            },
+        ],
+    });
+
+    // Digests must be lowercase hex SHA-256.
+    let mut bad_digest = resource(TenantResourceKind::User, "user-1");
+    bad_digest.digest = "D".repeat(64);
+    expect_policy_error(ControlOperationPayload::TenantResourceRevoke {
+        tenant_id: TENANT_ID.to_owned(),
+        resources: vec![bad_digest],
+    });
+
+    // Tenant scope must be a canonical UUID.
+    expect_policy_error(tenant_apply_payload("not-a-uuid"));
+
+    // Duplicate selectors follow the same rule.
+    let duplicate_selector =
+        |selectors: Vec<TenantResourceSelector>| ControlOperationPayload::TenantResourceEnumerate {
+            tenant_id: TENANT_ID.to_owned(),
+            selectors,
+        };
+    expect_policy_error(duplicate_selector(vec![
+        TenantResourceSelector {
+            kind: TenantResourceKind::User,
+            resource_id: "user-1".to_owned(),
+        },
+        TenantResourceSelector {
+            kind: TenantResourceKind::User,
+            resource_id: "user-1".to_owned(),
+        },
+    ]));
+
+    // Nested objects reject unknown members instead of dropping them.
+    let raw = serde_json::json!({
+        "name": "tenant-resource-apply",
+        "tenant_id": TENANT_ID,
+        "resources": [{
+            "kind": "user",
+            "resource_id": "user-1",
+            "digest": "d".repeat(64),
+            "endpoint": "https://attacker.example",
+        }],
+    });
+    let error = serde_json::from_value::<ControlOperationPayload>(raw)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unknown resource field 'endpoint'"),
+        "{error}"
+    );
+
+    let raw = serde_json::json!({
+        "name": "tenant-resource-enumerate",
+        "tenant_id": TENANT_ID,
+        "selectors": [{"kind": "wallet-provider", "resource_id": "x"}],
+    });
+    let error = serde_json::from_value::<ControlOperationPayload>(raw)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown selector kind"), "{error}");
 }
 
 #[test]
@@ -408,19 +676,14 @@ fn uuidv7_shape_is_enforced_for_ids() {
 
 proptest! {
     #[test]
-    fn lifetimes_beyond_the_admission_window_never_validate(
-        delta in (MAX_CONTROL_OPERATION_LIFETIME_SECONDS + 1)..10_000i64,
-    ) {
-        let mut operation = operation();
-        operation.exp = operation.iat + delta;
-        prop_assert!(validate_control_operation(&operation).is_err());
-    }
-
-    #[test]
-    fn arbitrary_text_kids_and_hashes_never_panic(input in any::<String>()) {
+    fn arbitrary_text_kids_hashes_and_revisions_never_panic(input in any::<String>()) {
         let mut operation = operation();
         operation.kid = input.clone();
         let _ = validate_control_operation(&operation);
+        operation.kid = controller_key_id(&controller_key().verifying_key());
+        operation.config_revision = input.clone();
+        let _ = validate_control_operation(&operation);
+        let _ = config_revision_matches(&operation, input.as_bytes());
         let mut result = result_entry();
         result.request_hash = input;
         let _ = validate_control_result(&result);
@@ -489,12 +752,12 @@ fn control_results_roundtrip_through_journal_and_stdout_shapes() {
 }
 
 #[test]
-fn opaque_revision_fencing_compares_constant_time() {
+fn config_revision_fencing_compares_constant_time() {
     let operation = operation();
-    assert!(opaque_revision_matches(&operation, b"secret-revision-1"));
-    assert!(!opaque_revision_matches(&operation, b"secret-revision-2"));
+    assert!(config_revision_matches(&operation, b"config-revision-1"));
+    assert!(!config_revision_matches(&operation, b"config-revision-2"));
     assert!(!constant_time_eq(
-        operation.opaque_revision.as_bytes(),
+        operation.config_revision.as_bytes(),
         b"short"
     ));
     assert!(constant_time_eq(b"digest", b"digest"));
