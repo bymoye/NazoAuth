@@ -21,6 +21,8 @@ semantic versioning once public release tags are cut.
   through the reviewed frontend descriptor chain.
 - Update release, CI, container, and dependency controls to preserve exact-source
   provenance through published binaries and OCI images.
+- Extend the explicit controller compatibility range through NazoAuthCtl 0.2.x
+  while retaining protocol-version and signed-release checks.
 
 ### Fixed
 

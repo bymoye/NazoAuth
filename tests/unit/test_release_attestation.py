@@ -134,7 +134,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             {
                 "version": 1,
                 "minimum_ctl_version": "0.1.19",
-                "maximum_ctl_version_exclusive": "0.2.0",
+                "maximum_ctl_version_exclusive": "0.3.0",
             },
         )
         self.assertEqual(set(value["oci"]["platform_manifests"]), {"linux/amd64", "linux/arm64"})
