@@ -289,18 +289,13 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for required in (
             "actions: read",
-            "NAZOAUTH_RELEASE_BRANCH: agent/extract-nazoauthctl",
             "printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 -w 0",
             "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth",
             "refs/heads/main:refs/remotes/origin/main",
-            '"refs/heads/$NAZOAUTH_RELEASE_BRANCH:$release_ref"',
-            'git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main',
-            '[[ "$(git rev-parse "$release_ref")" = "$RELEASE_SHA" ]]',
+            'if ! git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main',
             "gate_event=push",
             "gate_branch=main",
-            "gate_event=workflow_dispatch",
-            "gate_branch=$NAZOAUTH_RELEASE_BRANCH",
-            'neither reachable from main nor the exact release branch head',
+            "is not reachable from main",
             "/actions/workflows/${workflow}/runs",
             '-f event="$gate_event"',
             '-f branch="$gate_branch"',
@@ -318,6 +313,8 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "- name: Require successful governed CI for exact tag commit", 1
         )[1].split("- uses: dtolnay/rust-toolchain@", 1)[0]
         self.assertNotIn("github.ref_type == 'tag'", gate)
+        self.assertNotIn("NAZOAUTH_RELEASE_BRANCH", gate)
+        self.assertNotIn("release_ref", gate)
 
         policy = (
             ROOT / ".github" / "workflows" / "release-policy.yml"

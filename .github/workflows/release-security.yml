@@ -12,7 +12,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  NAZOAUTH_RELEASE_BRANCH: agent/extract-nazoauthctl
   NAZOAUTH_BUILD_RELEASE: ${{ github.ref_type == 'tag' && github.ref_name || format('sha-{0}', github.sha) }}
   NAZOAUTH_BUILD_REVISION: ${{ github.sha }}
   NAZOAUTH_BUILD_ID: github:${{ github.run_id }}:${{ github.run_attempt }}
@@ -32,22 +31,16 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          release_ref="refs/remotes/origin/$NAZOAUTH_RELEASE_BRANCH"
           basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" fetch \
             --no-tags origin \
-            refs/heads/main:refs/remotes/origin/main \
-            "refs/heads/$NAZOAUTH_RELEASE_BRANCH:$release_ref"
-          if git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
-            gate_event=push
-            gate_branch=main
-          elif [[ "$(git rev-parse "$release_ref")" = "$RELEASE_SHA" ]]; then
-            gate_event=workflow_dispatch
-            gate_branch=$NAZOAUTH_RELEASE_BRANCH
-          else
-            echo "release tag commit $RELEASE_SHA is neither reachable from main nor the exact release branch head" >&2
+            refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
+            echo "release tag commit $RELEASE_SHA is not reachable from main" >&2
             exit 1
           fi
+          gate_event=push
+          gate_branch=main
           for workflow in code-quality.yml release-policy.yml; do
             runs="$(gh api \
               --method GET \
