@@ -8,6 +8,8 @@ use crate::verification::*;
 
 // This module is included by lib.rs so private protocol invariants remain testable.
 
+mod control_operation_tests;
+
 fn task() -> TaskEnvelope {
     TaskEnvelope {
         ver: PROTOCOL_VERSION,

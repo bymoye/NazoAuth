@@ -49,6 +49,7 @@ pub enum ProtocolError {
     Policy(&'static str),
 }
 
+mod control_operation;
 mod signing;
 mod verification;
 mod wire;
@@ -56,6 +57,7 @@ mod wire;
 #[cfg(test)]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
+pub use control_operation::*;
 pub use signing::{
     canonical_config_sha256, canonical_openid4vp_evidence_context_sha256,
     canonical_openid4vp_normalized_create_request, canonical_openid4vp_presentation_binding_sha256,
