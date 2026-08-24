@@ -9,6 +9,7 @@ FROM docker.io/library/debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad
 ARG TARGETARCH
 
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates \
     && groupadd --gid 10001 nazoauth \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin nazoauth \
