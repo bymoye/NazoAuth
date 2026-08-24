@@ -3,6 +3,30 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.2.0 - 2026-08-24
+
+### Added
+
+- Add recoverable, idempotent OpenID4VP verification lifecycles with signed
+  receipts that bind the presentation transaction, verified credentials, and
+  terminal outcome.
+- Add complete, executable OIDC, FAPI, CIBA, OpenID4VCI, and OpenID4VP
+  conformance profiles with lease-scoped provisioning and cleanup evidence.
+
+### Changed
+
+- Harden protocol policy, TLS, elliptic-curve, URI, client-authentication, and
+  credential-validation boundaries against malformed or ambiguous inputs.
+- Pin the embedded administration UI to an immutable, attested release artifact
+  through the reviewed frontend descriptor chain.
+- Update release, CI, container, and dependency controls to preserve exact-source
+  provenance through published binaries and OCI images.
+
+### Fixed
+
+- Close fail-open and replay gaps across OAuth/OIDC, FAPI, CIBA, OpenID4VC,
+  operator tasks, onboarding, persistence, and key-management state transitions.
+
 ## 0.1.36 - 2026-08-13
 
 ### Fixed
