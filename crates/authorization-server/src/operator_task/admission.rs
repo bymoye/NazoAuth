@@ -155,19 +155,3 @@ fn build_identity(admitted: AdmittedController) -> anyhow::Result<AdmittedContro
         verifying_key,
     })
 }
-
-/// Refuse tenant-resource mutations before journal acceptance (E05/H07
-/// boundary): the payload-less wire contract cannot drive resource work that
-/// requires the provider's per-resource payloads and preparation bridge, so
-/// admitting it would create guaranteed-to-fail authorizations.
-pub(super) fn ensure_serviced_by_one_shot(
-    operation: &nazo_operator_protocol::ControlOperationPayload,
-) -> anyhow::Result<()> {
-    use nazo_operator_protocol::ControlOperationPayload as Payload;
-    match operation {
-        Payload::TenantResourceApply { .. } | Payload::TenantResourceRevoke { .. } => {
-            bail!("tenant-resource mutations are not serviced by the one-shot operator")
-        }
-        _ => Ok(()),
-    }
-}

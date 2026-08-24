@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use nazo_operator_protocol::{
     CONTROL_OPERATION_SCHEMA, CONTROL_RESULT_SCHEMA, ControlBuildIdentity, ControlOperation,
-    ControlOperationPayload, ControlOutcome, ControlResult, ControlTarget,
+    ControlOperationPayload, ControlOutcome, ControlResult, ControlResultData, ControlTarget,
 };
 
 use super::*;
@@ -90,6 +90,7 @@ fn succeeded_result(operation_id: &str, request_hash: &str) -> ControlResult {
         error: None,
         accepted_at: 1_000,
         completed_at: Some(1_005),
+        result: None,
     }
 }
 
@@ -97,8 +98,11 @@ fn succeeded_result(operation_id: &str, request_hash: &str) -> ControlResult {
 /// operation class whose state owner deduplicates re-entry (migration
 /// ledger semantics).  `invocations` counts attempts, `applications` counts
 /// mutations that actually happened.
-type LedgerSideEffect =
-    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>>;
+type LedgerSideEffect = Box<
+    dyn FnOnce() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<ControlResultData>>>>,
+    >,
+>;
 
 fn ledger_side_effect(directory: &Path) -> (Arc<AtomicUsize>, Arc<AtomicUsize>, LedgerSideEffect) {
     let invocations = Arc::new(AtomicUsize::new(0));
@@ -112,12 +116,15 @@ fn ledger_side_effect(directory: &Path) -> (Arc<AtomicUsize>, Arc<AtomicUsize>, 
         let applications = Arc::clone(&applications_clone);
         Box::pin(async move {
             if state_path_present(&marker)? {
-                return Ok(());
+                return Ok(None);
             }
             fs::write(&marker, b"applied")?;
             applications.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(())
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>
+            Ok(None)
+        })
+            as std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<Option<ControlResultData>>>>,
+            >
     };
     (invocations, applications, Box::new(effect))
 }
@@ -509,7 +516,7 @@ async fn after_side_effect_crash_never_duplicates_the_mutation_and_recovers_the_
     begin_execution(&directory, OPERATION_ID, &hash('a'), true).unwrap();
     {
         let (_invocations, applications, effect) = ledger_side_effect(&directory);
-        effect().await.unwrap();
+        let _ = effect().await.unwrap();
         assert_eq!(applications.load(AtomicOrdering::SeqCst), 1);
     }
     assert_eq!(
@@ -611,7 +618,7 @@ async fn after_result_crash_returns_the_durable_result_without_reexecution() {
     .unwrap();
     begin_execution(&directory, OPERATION_ID, &hash('a'), true).unwrap();
     let (_invocations, applications, effect) = ledger_side_effect(&directory);
-    effect().await.unwrap();
+    let _ = effect().await.unwrap();
     complete(&directory, &succeeded_result(OPERATION_ID, &hash('a'))).unwrap();
     assert_eq!(applications.load(AtomicOrdering::SeqCst), 1);
 
@@ -918,6 +925,41 @@ fn concurrent_offers_have_exactly_one_creator_and_conflicts_are_deterministic() 
         Err(JournalFlowError::OperationIdConflict)
     ));
     fs::remove_dir_all(directory.as_ref()).unwrap();
+}
+
+#[tokio::test]
+async fn typed_result_data_is_attached_on_success_and_durable_for_recovery() {
+    use nazo_operator_protocol::{TenantResourceIdentity, TenantResourceKind};
+
+    let directory = temporary_directory();
+    let data = ControlResultData::TenantResourceEnumerate {
+        revision: 3,
+        resources: vec![TenantResourceIdentity {
+            kind: TenantResourceKind::User,
+            resource_id: "user-1".to_owned(),
+            digest: "d".repeat(64),
+        }],
+    };
+    let outcome = run_journaled_operation(
+        &directory,
+        &operation(OPERATION_ID),
+        &hash('a'),
+        &snapshot(),
+        true,
+        &|_| {},
+        || async { Ok(Some(data.clone())) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.result.result, Some(data.clone()));
+    match status(&directory, OPERATION_ID, &hash('a'))
+        .unwrap()
+        .unwrap()
+    {
+        JournalCheckpoint::Completed(stored) => assert_eq!(stored.result, Some(data)),
+        other => panic!("expected completed checkpoint, got {other:?}"),
+    }
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

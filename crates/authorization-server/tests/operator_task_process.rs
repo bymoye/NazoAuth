@@ -541,23 +541,35 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
         "revision",
     );
 
-    // Tenant-resource mutations are refused before acceptance until H07.
-    assert_rejection(
-        &run(
-            signed(
-                &operation(
-                    "019c8ca2-30a6-7000-8000-00000000b00a",
-                    &kid,
-                    ControlOperationPayload::TenantResourceApply {
-                        tenant_id: uuid::Uuid::now_v7().to_string(),
-                        resources: Vec::new(),
-                    },
-                ),
-                &controller,
+    // Tenant-resource mutations are serviced since H07: a signed apply is
+    // admitted and journaled like any other operation, then dispatched onto
+    // the shared CAS engine.  Without mounted change-set material the frame
+    // ends as a durable failed result — an execution outcome, never an
+    // admission rejection.
+    let output = run(
+        signed(
+            &operation(
+                "019c8ca2-30a6-7000-8000-00000000b00a",
+                &kid,
+                ControlOperationPayload::TenantResourceApply {
+                    tenant_id: uuid::Uuid::now_v7().to_string(),
+                    resources: vec![nazo_operator_protocol::TenantResourceIdentity {
+                        kind: nazo_operator_protocol::TenantResourceKind::User,
+                        resource_id: "user-1".to_owned(),
+                        digest: "d".repeat(64),
+                    }],
+                },
             ),
-            env(),
+            &controller,
         ),
-        "unsupported",
+        env(),
+    );
+    assert_success(&output);
+    let result = decode_control_result(&output.stdout).expect("durable result");
+    assert_eq!(result.outcome, ControlOutcome::Failed);
+    assert_eq!(
+        result.error,
+        Some(nazo_operator_protocol::ControlErrorCode::ExecutionFailed)
     );
     fs::remove_dir_all(root).unwrap();
 }

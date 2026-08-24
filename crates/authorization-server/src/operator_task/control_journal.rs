@@ -78,7 +78,7 @@ use anyhow::{Context as _, bail};
 use chrono::Utc;
 use nazo_operator_protocol::{
     CONTROL_RESULT_SCHEMA, ControlErrorCode, ControlOperation, ControlOutcome, ControlResult,
-    validate_control_result,
+    ControlResultData, validate_control_result,
 };
 
 use super::*;
@@ -680,9 +680,11 @@ pub(crate) struct JournaledOutcome {
 ///
 /// `resume_allowed` must be true only for operation classes whose state
 /// owner proved idempotent re-entry (the E05 mapping table in
-/// execution.rs owns the decision).  `pause` receives every failpoint name in
-/// order; production wires the debug-gated process failpoint helper, tests
-/// record calls.
+/// execution.rs owns the decision).  The side-effect closure returns the
+/// operation's typed result data (H07); it is attached to the durable
+/// [`ControlResult`] only when the side effect succeeded.  `pause` receives
+/// every failpoint name in order; production wires the debug-gated process
+/// failpoint helper, tests record calls.
 pub(crate) async fn run_journaled_operation<F, Fut>(
     state_directory: &Path,
     operation: &ControlOperation,
@@ -694,7 +696,7 @@ pub(crate) async fn run_journaled_operation<F, Fut>(
 ) -> Result<JournaledOutcome, JournalFlowError>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: std::future::Future<Output = anyhow::Result<Option<ControlResultData>>>,
 {
     pause("control-journal-before-accept");
     match accept(state_directory, operation, request_hash, snapshot)? {
@@ -722,11 +724,12 @@ where
     )?;
     pause("control-journal-before-side-effect");
 
-    let (outcome, error) = match side_effect().await {
-        Ok(()) => (ControlOutcome::Succeeded, None),
+    let (outcome, error, data) = match side_effect().await {
+        Ok(data) => (ControlOutcome::Succeeded, None, data),
         Err(_) => (
             ControlOutcome::Failed,
             Some(ControlErrorCode::ExecutionFailed),
+            None,
         ),
     };
     pause("control-journal-after-side-effect");
@@ -739,6 +742,7 @@ where
         error,
         accepted_at: snapshot.accepted_at,
         completed_at: Some(Utc::now().timestamp()),
+        result: data,
     };
     validate_control_result(&result).map_err(transport)?;
     pause("control-journal-before-result");

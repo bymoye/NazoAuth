@@ -877,83 +877,11 @@ fn prepare_task(
         let raw = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
             TenantResourceProviderError::BadRequest("manifest is not valid base64url")
         })?;
-        if raw.is_empty() || raw.len() > MAX_MANIFEST_BYTES {
-            return Err(if raw.len() > MAX_MANIFEST_BYTES {
-                TenantResourceProviderError::TooLarge
-            } else {
-                TenantResourceProviderError::BadRequest("manifest is empty")
-            });
-        }
-        if sha256_hex(&raw) != task.change_set_sha256 {
-            return Err(TenantResourceProviderError::Forbidden(
-                "change-set digest does not match task",
-            ));
-        }
-        let manifest: ApplyManifest = serde_json::from_slice(&raw)
-            .map_err(|_| TenantResourceProviderError::BadRequest("invalid resource manifest"))?;
-        if manifest.schema != APPLY_MANIFEST_SCHEMA
-            || manifest.resources.is_empty()
-            || manifest.resources.len() > nazo_operator_protocol::MAX_TENANT_RESOURCE_IDENTITIES
-        {
-            return Err(TenantResourceProviderError::BadRequest(
-                "unsupported resource manifest",
-            ));
-        }
-        let expected = task_resource_identities(task)?;
-        let mut seen_ids = BTreeSet::new();
-        let mut seen_kinds = BTreeSet::new();
-        let mut payload_total = 0usize;
-        let mut prepared = Vec::with_capacity(manifest.resources.len());
-        for resource in manifest.resources {
-            validate_resource_id(&resource.resource_id)?;
-            if !seen_ids.insert(resource.resource_id.clone())
-                || !seen_kinds.insert((resource.kind, resource.resource_id.clone()))
-            {
-                return Err(TenantResourceProviderError::BadRequest(
-                    "resource identities must be unique",
-                ));
-            }
-            let payload = URL_SAFE_NO_PAD
-                .decode(&resource.payload_base64url)
-                .map_err(|_| {
-                    TenantResourceProviderError::BadRequest(
-                        "resource payload is not valid base64url",
-                    )
-                })?;
-            if payload.is_empty() || payload.len() > MAX_RESOURCE_PAYLOAD_BYTES {
-                return Err(if payload.len() > MAX_RESOURCE_PAYLOAD_BYTES {
-                    TenantResourceProviderError::TooLarge
-                } else {
-                    TenantResourceProviderError::BadRequest("resource payload is empty")
-                });
-            }
-            payload_total = payload_total
-                .checked_add(payload.len())
-                .ok_or(TenantResourceProviderError::TooLarge)?;
-            if payload_total > MAX_RESOURCE_PAYLOAD_TOTAL_BYTES {
-                return Err(TenantResourceProviderError::TooLarge);
-            }
-            let identity = expected
-                .get(&(resource.kind, resource.resource_id.clone()))
-                .ok_or(TenantResourceProviderError::Forbidden(
-                    "manifest resource is not authorized by task",
-                ))?;
-            if sha256_hex(&payload) != identity.digest {
-                return Err(TenantResourceProviderError::Forbidden(
-                    "resource payload digest does not match task",
-                ));
-            }
-            let typed = decode_payload(resource.kind, &payload)?;
-            prepared.push(PreparedTenantResource {
-                identity: identity.clone(),
-                payload: Some(typed),
-            });
-        }
-        if prepared.len() != expected.len() {
-            return Err(TenantResourceProviderError::Forbidden(
-                "manifest resources do not match task",
-            ));
-        }
+        let prepared = decode_change_set_payloads(
+            &raw,
+            Some(&task.change_set_sha256),
+            &task_resource_identities(task)?,
+        )?;
         return Ok(PreparedTenantResourceTask {
             task: task.clone(),
             request_sha256: String::new(),
@@ -982,6 +910,95 @@ fn prepare_task(
         request_sha256: String::new(),
         resources,
     })
+}
+
+/// Shared change-set decoder for both drivers: the HTTP provider execute
+/// envelope and the one-shot [`crate::operator_task`] ControlOperation
+/// pipeline (H07).  `raw_manifest` carries the decoded Apply-manifest JSON.
+/// Every manifest resource must be pre-authorized by the signed identity set
+/// (`authorized`), and each per-resource payload must hash exactly to its
+/// signed digest — the same material binding as the external public JWK.
+pub(crate) fn decode_change_set_payloads(
+    raw_manifest: &[u8],
+    expected_change_set_sha256: Option<&str>,
+    authorized: &BTreeMap<(TenantResourceKind, String), TenantResourceIdentity>,
+) -> Result<Vec<PreparedTenantResource>, TenantResourceProviderError> {
+    if raw_manifest.is_empty() {
+        return Err(TenantResourceProviderError::BadRequest("manifest is empty"));
+    }
+    if raw_manifest.len() > MAX_MANIFEST_BYTES {
+        return Err(TenantResourceProviderError::TooLarge);
+    }
+    if let Some(expected) = expected_change_set_sha256
+        && sha256_hex(raw_manifest) != expected
+    {
+        return Err(TenantResourceProviderError::Forbidden(
+            "change-set digest does not match task",
+        ));
+    }
+    let manifest: ApplyManifest = serde_json::from_slice(raw_manifest)
+        .map_err(|_| TenantResourceProviderError::BadRequest("invalid resource manifest"))?;
+    if manifest.schema != APPLY_MANIFEST_SCHEMA
+        || manifest.resources.is_empty()
+        || manifest.resources.len() > nazo_operator_protocol::MAX_TENANT_RESOURCE_IDENTITIES
+    {
+        return Err(TenantResourceProviderError::BadRequest(
+            "unsupported resource manifest",
+        ));
+    }
+    let mut seen_ids = BTreeSet::new();
+    let mut seen_kinds = BTreeSet::new();
+    let mut payload_total = 0usize;
+    let mut prepared = Vec::with_capacity(manifest.resources.len());
+    for resource in manifest.resources {
+        validate_resource_id(&resource.resource_id)?;
+        if !seen_ids.insert(resource.resource_id.clone())
+            || !seen_kinds.insert((resource.kind, resource.resource_id.clone()))
+        {
+            return Err(TenantResourceProviderError::BadRequest(
+                "resource identities must be unique",
+            ));
+        }
+        let payload = URL_SAFE_NO_PAD
+            .decode(&resource.payload_base64url)
+            .map_err(|_| {
+                TenantResourceProviderError::BadRequest("resource payload is not valid base64url")
+            })?;
+        if payload.is_empty() || payload.len() > MAX_RESOURCE_PAYLOAD_BYTES {
+            return Err(if payload.len() > MAX_RESOURCE_PAYLOAD_BYTES {
+                TenantResourceProviderError::TooLarge
+            } else {
+                TenantResourceProviderError::BadRequest("resource payload is empty")
+            });
+        }
+        payload_total = payload_total
+            .checked_add(payload.len())
+            .ok_or(TenantResourceProviderError::TooLarge)?;
+        if payload_total > MAX_RESOURCE_PAYLOAD_TOTAL_BYTES {
+            return Err(TenantResourceProviderError::TooLarge);
+        }
+        let identity = authorized
+            .get(&(resource.kind, resource.resource_id.clone()))
+            .ok_or(TenantResourceProviderError::Forbidden(
+                "manifest resource is not authorized by task",
+            ))?;
+        if sha256_hex(&payload) != identity.digest {
+            return Err(TenantResourceProviderError::Forbidden(
+                "resource payload digest does not match task",
+            ));
+        }
+        let typed = decode_payload(resource.kind, &payload)?;
+        prepared.push(PreparedTenantResource {
+            identity: identity.clone(),
+            payload: Some(typed),
+        });
+    }
+    if prepared.len() != authorized.len() {
+        return Err(TenantResourceProviderError::Forbidden(
+            "manifest resources do not match task",
+        ));
+    }
+    Ok(prepared)
 }
 
 fn task_resource_identities(

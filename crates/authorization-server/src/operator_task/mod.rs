@@ -187,13 +187,6 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
         identity::validate_config_revision(&verified),
         RejectionClass::Revision,
     )?;
-    // Tenant-resource mutations need the provider payload channel that only
-    // exists behind the HTTP boundary; refuse them before any acceptance so
-    // unservicable work is never admitted (H07 completes their wiring).
-    reject(
-        admission::ensure_serviced_by_one_shot(&verified.operation),
-        RejectionClass::Unsupported,
-    )?;
 
     // (6)+(7) Journal accept-before-side-effect, then checkpoint-driven
     // execution with per-operation resume ownership (E05 mapping table in
@@ -214,6 +207,13 @@ async fn journaled_execution(
     snapshot: &control_journal::AuthorizationSnapshot,
 ) -> anyhow::Result<()> {
     let resume_allowed = execution::resume_allowed(&operation.operation);
+    let context = execution::ExecutionContext {
+        operation_id: &operation.operation_id,
+        deployment_id: &operation.deployment_id,
+        controller_id: &snapshot.controller_id,
+        kid: &snapshot.kid,
+        request_hash,
+    };
     let outcome = control_journal::run_journaled_operation(
         state_directory,
         operation,
@@ -223,7 +223,7 @@ async fn journaled_execution(
         &|name| {
             let _ = pause_at_test_failpoint(name);
         },
-        || execution::execute(&operation.operation),
+        || execution::execute(&operation.operation, &context),
     )
     .await
     .map_err(map_journal_error)?;
@@ -271,7 +271,6 @@ enum RejectionClass {
     Deployment,
     Target,
     Revision,
-    Unsupported,
     Conflict,
     Unavailable,
 }
@@ -285,7 +284,6 @@ impl RejectionClass {
             Self::Deployment => "deployment",
             Self::Target => "target",
             Self::Revision => "revision",
-            Self::Unsupported => "unsupported",
             Self::Conflict => "conflict",
             Self::Unavailable => "unavailable",
         }

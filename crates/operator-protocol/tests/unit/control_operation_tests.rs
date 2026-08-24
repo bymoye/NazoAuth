@@ -73,6 +73,14 @@ fn result_entry() -> ControlResult {
         error: None,
         accepted_at: 1_000,
         completed_at: Some(1_005),
+        result: None,
+    }
+}
+
+fn enumerate_result_data() -> ControlResultData {
+    ControlResultData::TenantResourceEnumerate {
+        revision: 7,
+        resources: vec![resource(TenantResourceKind::User, "user-1")],
     }
 }
 
@@ -749,6 +757,110 @@ fn control_results_roundtrip_through_journal_and_stdout_shapes() {
         decode_control_result(&oversized),
         Err(ProtocolError::TooLarge)
     ));
+}
+
+#[test]
+fn typed_result_data_is_closed_and_outcome_coupled() {
+    // Succeeded results may carry the enumerate channel; the field is omitted
+    // entirely when empty so pre-extension bytes stay stable.
+    let plain = encode_control_result(&result_entry()).unwrap();
+    assert!(!std::str::from_utf8(&plain).unwrap().contains("result"));
+
+    let mut enumerated = result_entry();
+    enumerated.result = Some(enumerate_result_data());
+    let decoded = decode_control_result(&encode_control_result(&enumerated).unwrap()).unwrap();
+    assert_eq!(decoded, enumerated);
+    let wire_bytes = encode_control_result(&enumerated).unwrap();
+    let wire = std::str::from_utf8(&wire_bytes).unwrap();
+    assert!(wire.contains("\"kind\":\"tenant-resource-enumerate\""));
+
+    // Failed and in-progress outcomes never carry result data.
+    let mut failed = result_entry();
+    failed.outcome = ControlOutcome::Failed;
+    failed.error = Some(ControlErrorCode::ExecutionFailed);
+    failed.result = Some(enumerate_result_data());
+    assert!(validate_control_result(&failed).is_err());
+    let mut running = result_entry();
+    running.outcome = ControlOutcome::InProgress;
+    running.completed_at = None;
+    running.result = Some(enumerate_result_data());
+    assert!(validate_control_result(&running).is_err());
+
+    // The variant itself is strictly parsed: unknown kind, unknown member,
+    // missing member, wrong scalar type, and duplicate identities are refused.
+    let parse_data = |value: serde_json::Value| {
+        serde_json::from_value::<ControlResultData>(value).map_err(|error| error.to_string())
+    };
+    let raw = serde_json::json!({"kind": "tenant-resource-apply", "revision": 1, "resources": []});
+    assert!(parse_data(raw).unwrap_err().contains("unknown result kind"));
+    let raw = serde_json::json!({
+        "kind": "tenant-resource-enumerate", "revision": 1, "resources": [],
+        "selectors": [],
+    });
+    assert!(
+        parse_data(raw)
+            .unwrap_err()
+            .contains("unknown result field")
+    );
+    let raw = serde_json::json!({"kind": "tenant-resource-enumerate", "resources": []});
+    assert!(
+        parse_data(raw)
+            .unwrap_err()
+            .contains("requires unsigned field 'revision'")
+    );
+    let raw = serde_json::json!({
+        "kind": "tenant-resource-enumerate",
+        "revision": -1,
+        "resources": [],
+    });
+    assert!(parse_data(raw).is_err());
+    let raw = serde_json::json!({
+        "kind": "tenant-resource-enumerate",
+        "revision": 1,
+        "resources": [
+            {"kind": "user", "resource_id": "user-1", "digest": "d".repeat(64)},
+            {"kind": "user", "resource_id": "user-1", "digest": "e".repeat(64)},
+        ],
+    });
+    // Shape-wise duplicates deserialize; the journal-entry validator refuses
+    // them (asserted below through validate_control_result).
+    assert!(parse_data(raw).is_ok());
+
+    // Validation also runs through the journal-entry boundary.
+    let mut duplicated = result_entry();
+    duplicated.result = ControlResultData::TenantResourceEnumerate {
+        revision: 1,
+        resources: vec![
+            resource(TenantResourceKind::User, "user-1"),
+            TenantResourceIdentity {
+                kind: TenantResourceKind::User,
+                resource_id: "user-1".to_owned(),
+                digest: "0".repeat(64),
+            },
+        ],
+    }
+    .into();
+    assert!(validate_control_result(&duplicated).is_err());
+    let mut malformed_digest = result_entry();
+    malformed_digest.result = ControlResultData::TenantResourceEnumerate {
+        revision: 1,
+        resources: vec![TenantResourceIdentity {
+            kind: TenantResourceKind::User,
+            resource_id: "user-1".to_owned(),
+            digest: "D".repeat(64),
+        }],
+    }
+    .into();
+    assert!(validate_control_result(&malformed_digest).is_err());
+    let mut flooded = result_entry();
+    flooded.result = ControlResultData::TenantResourceEnumerate {
+        revision: 1,
+        resources: (0..=MAX_TENANT_RESOURCE_IDENTITIES)
+            .map(|index| resource(TenantResourceKind::User, format!("user-{index}").as_str()))
+            .collect(),
+    }
+    .into();
+    assert!(validate_control_result(&flooded).is_err());
 }
 
 #[test]

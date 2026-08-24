@@ -23,6 +23,7 @@ mod runtime_modules;
 mod schema;
 mod settings;
 mod tenant_resource_executor;
+mod tenant_resource_preparation;
 mod tenant_resource_provider;
 
 #[cfg(test)]

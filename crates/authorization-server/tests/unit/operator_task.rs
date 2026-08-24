@@ -213,8 +213,11 @@ fn resume_ownership_table_pins_every_closed_variant() {
             },
             true,
         ),
-        // Refused before acceptance today (H07 completes the wiring); if a
-        // record ever existed, re-entry must fail closed.
+        // Serviced through the shared CAS engine since H07.  Re-entry stays
+        // fail closed because this driver writes no `tenant_resource_operations`
+        // replay row: an ambiguous crash window cannot prove whether the
+        // transaction committed, so it must never be re-run or reported as
+        // failed.
         (
             ControlOperationPayload::TenantResourceApply {
                 tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
@@ -236,20 +239,87 @@ fn resume_ownership_table_pins_every_closed_variant() {
 }
 
 #[test]
-fn unserviced_tenant_mutations_are_refused_before_acceptance() {
-    let tenant = "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned();
-    let apply = ControlOperationPayload::TenantResourceApply {
-        tenant_id: tenant.clone(),
-        resources: Vec::new(),
+fn mounted_change_set_material_is_a_regular_bounded_file() {
+    let directory = temporary_directory();
+    let change_set = directory.join("change-set.json");
+    fs::write(&change_set, br#"{"schema":1,"resources":[]}"#).unwrap();
+    assert_eq!(
+        execution::read_regular_bounded_file(&change_set).unwrap(),
+        br#"{"schema":1,"resources":[]}"#.to_vec()
+    );
+
+    // Symlinks are refused even when they point at valid material.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&change_set, directory.join("link.json")).unwrap();
+        assert!(execution::read_regular_bounded_file(&directory.join("link.json")).is_err());
+    }
+
+    // Directories and missing files are refused.
+    assert!(
+        execution::read_regular_bounded_file(&directory)
+            .unwrap_err()
+            .to_string()
+            .contains("regular non-symlink")
+    );
+    assert!(execution::read_regular_bounded_file(&directory.join("missing.json")).is_err());
+
+    // Oversized material is refused.
+    let oversized = directory.join("oversized.json");
+    fs::write(&oversized, vec![b'x'; execution::MAX_CHANGE_SET_BYTES + 1]).unwrap();
+    assert!(execution::read_regular_bounded_file(&oversized).is_err());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn apply_change_sets_are_digest_bound_to_the_signed_identities() {
+    use nazo_operator_protocol::TenantResourceIdentity;
+    use nazo_operator_protocol::TenantResourceKind;
+
+    let password_payload = serde_json::json!({
+        "username": "operator-user",
+        "email": "operator-user@example.test",
+        "password": "correct horse battery staple",
+        "email_verified": true,
+    });
+    let raw_payload = serde_json::to_vec(&password_payload).unwrap();
+    let digest: String = Sha256::digest(&raw_payload)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let identity = TenantResourceIdentity {
+        kind: TenantResourceKind::User,
+        resource_id: "user-1".to_owned(),
+        digest: digest.clone(),
     };
-    let revoke = ControlOperationPayload::TenantResourceRevoke {
-        tenant_id: tenant.clone(),
-        resources: Vec::new(),
-    };
-    assert!(admission::ensure_serviced_by_one_shot(&apply).is_err());
-    assert!(admission::ensure_serviced_by_one_shot(&revoke).is_err());
-    assert!(admission::ensure_serviced_by_one_shot(&ControlOperationPayload::MigrateApply).is_ok());
-    assert!(admission::ensure_serviced_by_one_shot(&ControlOperationPayload::KeysList).is_ok());
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "resources": [{
+            "kind": "user",
+            "resource_id": "user-1",
+            "payload_base64url": URL_SAFE_NO_PAD.encode(&raw_payload),
+        }],
+    });
+    let raw_manifest = serde_json::to_vec(&manifest).unwrap();
+
+    let prepared =
+        execution::prepare_change_set_material(&raw_manifest, std::slice::from_ref(&identity))
+            .expect("digest-bound change set");
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].identity, identity);
+
+    // Any drift between the mounted bytes and the signed digests is refused.
+    assert!(
+        execution::prepare_change_set_material(b"{}", std::slice::from_ref(&identity)).is_err(),
+        "an empty manifest cannot satisfy a non-empty signed delta"
+    );
+    let mut other = manifest.clone();
+    other["resources"][0]["payload_base64url"] =
+        serde_json::json!(URL_SAFE_NO_PAD.encode(b"drift"));
+    assert!(
+        execution::prepare_change_set_material(&serde_json::to_vec(&other).unwrap(), &[identity])
+            .is_err()
+    );
 }
 
 #[test]
@@ -557,34 +627,51 @@ async fn task_lock_acquisition_is_bounded() {
 
 #[tokio::test]
 async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database() {
+    let context = execution::ExecutionContext {
+        operation_id: "019c8ca2-30a6-7000-8000-000000000005",
+        deployment_id: "deployment-test",
+        controller_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90",
+        kid: "kid-controller-test-key-0000000000000000000",
+        request_hash: &"a".repeat(64),
+    };
     // Unsupported signing parameters fail inside the existing engine before
     // any durable state changes.
-    let generated = execution::execute(&ControlOperationPayload::KeysGenerateLocal {
-        alg: "unsupported-algorithm".to_owned(),
-        purposes: vec!["credential".to_owned()],
-    })
+    let generated = execution::execute(
+        &ControlOperationPayload::KeysGenerateLocal {
+            alg: "unsupported-algorithm".to_owned(),
+            purposes: vec!["credential".to_owned()],
+        },
+        &context,
+    )
     .await;
     assert!(generated.is_err());
 
-    let external = execution::execute(&ControlOperationPayload::KeysRegisterExternal {
-        kid: "external-1".to_owned(),
-        alg: "ES256".to_owned(),
-        key_ref: "provider:key-1".to_owned(),
-        public_jwk_sha256: "a".repeat(64),
-    })
+    let external = execution::execute(
+        &ControlOperationPayload::KeysRegisterExternal {
+            kid: "external-1".to_owned(),
+            alg: "ES256".to_owned(),
+            key_ref: "provider:key-1".to_owned(),
+            public_jwk_sha256: "a".repeat(64),
+        },
+        &context,
+    )
     .await;
     assert!(external.is_err());
 
-    let apply = execution::execute(&ControlOperationPayload::TenantResourceApply {
-        tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
-        resources: Vec::new(),
-    })
+    // The apply delta cannot proceed without its mounted change-set material.
+    let apply = execution::execute(
+        &ControlOperationPayload::TenantResourceApply {
+            tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
+            resources: Vec::new(),
+        },
+        &context,
+    )
     .await;
     assert!(apply.is_err());
 
     // Read-only local keyset dispatches map their typed errors without a
     // database connection; their outcome depends on ambient configuration so
     // only the Ok/Err totality is pinned here.
-    let _ = execution::execute(&ControlOperationPayload::KeysList).await;
-    let _ = execution::execute(&ControlOperationPayload::KeysValidate).await;
+    let _ = execution::execute(&ControlOperationPayload::KeysList, &context).await;
+    let _ = execution::execute(&ControlOperationPayload::KeysValidate, &context).await;
 }

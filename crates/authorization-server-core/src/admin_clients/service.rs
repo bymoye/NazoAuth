@@ -9,6 +9,10 @@ use super::{
 use crate::ClientSecretDigesterPort;
 use crate::OAuthClient;
 
+/// Concrete service shape is cheap to clone (repository and crypto handles are
+/// internally shared), so long-lived callers such as the one-shot tenant-resource
+/// operator path can hold it by value next to the HTTP composition.
+#[derive(Clone)]
 pub struct AdminClientService<R, S, C> {
     pub(super) repository: R,
     pub(super) sector_identifiers: S,

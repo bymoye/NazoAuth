@@ -12,6 +12,14 @@
 //! acceptance the journal owns authorization; later key expiry never retracts
 //! an accepted operation.
 //!
+//! # Typed result data (H07)
+//!
+//! [`ControlResult`] carries an optional closed [`ControlResultData`]
+//! channel (05 §8 `result?`).  It is the only way operation output reaches
+//! ctl: engines' richer return values have no other wire representation.  The
+//! request contract itself is unchanged by this extension — every golden
+//! request vector stays byte-stable.
+//!
 //! # Canonical bytes (E02)
 //!
 //! The canonical encoding of a value is: serialize to JSON, recursively
@@ -458,6 +466,78 @@ pub struct ControlResult {
     /// Terminal completion time; required exactly when the outcome is
     /// terminal, absent while in progress.
     pub completed_at: Option<i64>,
+    /// Closed typed result data (05 §8 `result?`).  Present if and only if
+    /// `outcome` is [`ControlOutcome::Succeeded`] *and* the operation's
+    /// contract defines returned data.  Omitted from the wire form entirely
+    /// when absent, so journal entries written before this extension keep
+    /// their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ControlResultData>,
+}
+
+/// Closed typed result-data variants (H07).  Only operations whose contract
+/// defines returned data may populate the channel; adding a variant is a
+/// protocol change.  Deserialization is hand-written for the same reason as
+/// [`ControlOperationPayload`]: serde silently ignores `deny_unknown_fields`
+/// on internally tagged enums.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ControlResultData {
+    /// Authoritative tenant-resource enumeration snapshot.  `revision` is the
+    /// CAS revision the read is consistent with; `resources` is the sorted,
+    /// digest-bound active identity set selected by the request's selectors.
+    TenantResourceEnumerate {
+        revision: u64,
+        resources: Vec<TenantResourceIdentity>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ControlResultData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut members = match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Object(members) => members,
+            _ => return Err(serde::de::Error::custom("result must be a JSON object")),
+        };
+        let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
+        let data = match kind.as_str() {
+            "tenant-resource-enumerate" => {
+                let revision = match members.remove("revision") {
+                    Some(serde_json::Value::Number(number)) => {
+                        number.as_u64().ok_or_else(|| {
+                            serde::de::Error::custom(
+                                "result field 'revision' must be an unsigned integer",
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(serde::de::Error::custom(
+                            "result requires unsigned field 'revision'",
+                        ));
+                    }
+                };
+                let resources = take_resource_vec_member(&mut members, "resources")
+                    .map_err(serde::de::Error::custom)?;
+                ControlResultData::TenantResourceEnumerate {
+                    revision,
+                    resources,
+                }
+            }
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown result kind '{other}'"
+                )));
+            }
+        };
+        if let Some(member) = members.keys().next() {
+            return Err(serde::de::Error::custom(format!(
+                "unknown result field '{member}'"
+            )));
+        }
+        Ok(data)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -896,6 +976,11 @@ pub fn validate_control_result(result: &ControlResult) -> Result<(), ProtocolErr
                     "in-progress results have no completion time",
                 ));
             }
+            if result.result.is_some() {
+                return Err(ProtocolError::Policy(
+                    "in-progress results carry no result data",
+                ));
+            }
         }
         ControlOutcome::Succeeded | ControlOutcome::Failed => {
             if result.completed_at.is_none() {
@@ -917,10 +1002,41 @@ pub fn validate_control_result(result: &ControlResult) -> Result<(), ProtocolErr
                         "failed results require an error code",
                     ));
                 }
+                if result.result.is_some() {
+                    return Err(ProtocolError::Policy("failed results carry no result data"));
+                }
             } else if result.error.is_some() {
                 return Err(ProtocolError::Policy(
                     "succeeded results carry no error code",
                 ));
+            }
+            if let Some(data) = &result.result {
+                validate_control_result_data(data)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Structural invariants of the typed result channel: bounded, unique,
+/// digest-bound identity sets only.
+fn validate_control_result_data(data: &ControlResultData) -> Result<(), ProtocolError> {
+    match data {
+        ControlResultData::TenantResourceEnumerate { resources, .. } => {
+            if resources.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+                return Err(ProtocolError::Policy(
+                    "tenant resource result sets are out of bounds",
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for resource in resources {
+                validate_file_identifier(&resource.resource_id)?;
+                validate_lower_hex(&resource.digest, 64)?;
+                if !seen.insert((resource.kind, resource.resource_id.as_str())) {
+                    return Err(ProtocolError::Policy(
+                        "tenant resource result identities must be unique",
+                    ));
+                }
             }
         }
     }
