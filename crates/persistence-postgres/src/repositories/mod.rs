@@ -4,6 +4,7 @@ mod audit_ledger;
 mod authorization;
 mod authorization_flow;
 pub(crate) mod clients;
+mod controller_registry;
 mod federation;
 mod grants;
 mod initial_admin_bootstrap;
@@ -31,6 +32,13 @@ pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::{
     OAuthClientRepository, active_public_client_id_on_connection, deactivate_client_on_connection,
     insert_client_on_connection,
+};
+pub use controller_registry::{
+    AdmittedController, CONTROLLER_KEY_TTL_SECONDS, CommitWithApprovalError,
+    ControllerIdentityAction, ControllerRegistryError, ControllerRegistryRepository,
+    ControllerSlotStatus, ControllerSlotSummary, IDENTITY_APPROVAL_TTL_SECONDS,
+    IdentityApprovalError, IssuedIdentityApproval, MAX_ACTIVE_CONTROLLER_SLOTS, NewControllerSlot,
+    RotateControllerKey, StoredControllerSlot,
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};

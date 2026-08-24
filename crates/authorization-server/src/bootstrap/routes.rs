@@ -31,6 +31,10 @@ use crate::http::admin::{
         create::admin_create_client, detail::admin_get_client, list::admin_clients,
         templates::admin_client_templates, update::admin_patch_client,
     },
+    controller_registry::{
+        admin_controller_approval, admin_controller_slot_commit, admin_controller_slot_revoke,
+        admin_controller_slot_rotate, admin_controller_slots,
+    },
     federation::admin_federation_providers,
     grants::{admin_grants, admin_revoke_grant},
     mtls_trust::{
@@ -314,6 +318,23 @@ pub(crate) fn configure(
                 )
                 .route("/grants", web::get().to(admin_grants))
                 .route("/grants/revoke", web::post().to(admin_revoke_grant))
+                // Controller Registry (D01/D02/D05): authoritative per-deployment
+                // controller key enrollment behind fresh-2FA approvals.
+                .service(
+                    web::scope("/controller-registry")
+                        .app_data(web::JsonConfig::default().limit(8 * 1024))
+                        .route("/slots", web::get().to(admin_controller_slots))
+                        .route("/slots", web::post().to(admin_controller_slot_commit))
+                        .route(
+                            "/slots/rotate",
+                            web::post().to(admin_controller_slot_rotate),
+                        )
+                        .route(
+                            "/slots/revoke",
+                            web::post().to(admin_controller_slot_revoke),
+                        )
+                        .route("/approvals", web::post().to(admin_controller_approval)),
+                )
                 .route("/access-requests", web::get().to(admin_access_requests))
                 .route(
                     "/mtls-trust-requests",

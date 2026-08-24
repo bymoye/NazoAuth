@@ -98,6 +98,12 @@ pub(crate) const CONTROL_JOURNAL_COMPLETED_RETENTION_SECONDS: i64 = 30 * 24 * 60
 /// acceptance the journal owns authorization: resumed executions must not
 /// re-run Controller Key lifecycle checks, because they are not new
 /// authorizations.
+///
+/// `controller_id` is the authoritative controller registry identity defined
+/// by D01: a canonical lowercase RFC 9562 UUIDv7 assigned by NazoAuth when the
+/// slot was enrolled and stable across key rotations (the `kid` names one key
+/// generation; the `controller_id` names the controller).  Validated with
+/// [`nazo_operator_protocol::validate_controller_id`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AuthorizationSnapshot {
     /// Controller registry identity that authorized the operation (D02
@@ -258,6 +264,14 @@ fn ensure_request_hash_shape(value: &str) -> Result<(), JournalFlowError> {
     Ok(())
 }
 
+/// D01 authoritative identity shape: canonical lowercase UUIDv7.  The journal
+/// refuses to persist any other `controller_id` spelling so the durable
+/// snapshot can always be joined against the controller registry.
+fn ensure_controller_id(value: &str) -> Result<(), JournalFlowError> {
+    nazo_operator_protocol::validate_controller_id(value)
+        .map_err(|error| transport(anyhow::anyhow!("journal controller_id is invalid: {error}")))
+}
+
 /// Validate structural invariants of any record read back from disk.
 fn validate_record(record: &OperationJournalRecord) -> anyhow::Result<()> {
     if record.schema != CONTROL_JOURNAL_SCHEMA {
@@ -266,8 +280,7 @@ fn validate_record(record: &OperationJournalRecord) -> anyhow::Result<()> {
     ensure_file_safe_identifier(&record.operation_id)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     ensure_request_hash_shape(&record.request_hash).map_err(|error| anyhow::anyhow!("{error}"))?;
-    ensure_bounded_text("controller_id", &record.controller_id)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    ensure_controller_id(&record.controller_id).map_err(|error| anyhow::anyhow!("{error}"))?;
     ensure_bounded_text("kid", &record.kid).map_err(|error| anyhow::anyhow!("{error}"))?;
     if record.accepted_at <= 0 {
         bail!("control operation journal record has an invalid acceptance time");
@@ -474,7 +487,7 @@ pub(crate) fn accept(
 ) -> Result<AcceptOutcome, JournalFlowError> {
     ensure_file_safe_identifier(&operation.operation_id)?;
     ensure_request_hash_shape(request_hash)?;
-    ensure_bounded_text("controller_id", &snapshot.controller_id)?;
+    ensure_controller_id(&snapshot.controller_id)?;
     ensure_bounded_text("kid", &snapshot.kid)?;
     if snapshot.accepted_at <= 0 {
         return Err(transport(anyhow::anyhow!(

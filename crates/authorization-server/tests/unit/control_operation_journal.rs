@@ -24,6 +24,8 @@ fn temporary_directory() -> PathBuf {
 
 const OPERATION_ID: &str = "019c8ca2-30a6-7000-8000-000000000005";
 const OPERATION_ID_B: &str = "019c8ca2-30a6-7000-8000-000000000006";
+/// D01 authoritative controller identity shape: canonical lowercase UUIDv7.
+const CONTROLLER_ID: &str = "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90";
 
 fn operation(operation_id: &str) -> ControlOperation {
     ControlOperation {
@@ -46,7 +48,7 @@ fn operation(operation_id: &str) -> ControlOperation {
 
 fn snapshot() -> AuthorizationSnapshot {
     AuthorizationSnapshot {
-        controller_id: "controller-test".to_owned(),
+        controller_id: CONTROLLER_ID.to_owned(),
         kid: "kid-controller-test-key-0000000000000000000000000".to_owned(),
         accepted_at: 1_000,
     }
@@ -114,7 +116,7 @@ fn accept_persists_the_authorization_snapshot_before_any_side_effect() {
     let path = control_journal_directory(&directory).join(format!("{OPERATION_ID}.journal.json"));
     let record: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(record["phase"], "accepted");
-    assert_eq!(record["controller_id"], "controller-test");
+    assert_eq!(record["controller_id"], CONTROLLER_ID);
     assert_eq!(record["kid"], snapshot().kid);
     assert_eq!(record["accepted_at"], 1_000);
     assert_eq!(record["request_hash"], hash('a'));
@@ -625,7 +627,7 @@ fn torn_publication_windows_recover_monotonically_or_fail_closed() {
         schema: CONTROL_JOURNAL_SCHEMA,
         operation_id: OPERATION_ID.to_owned(),
         request_hash: hash('a'),
-        controller_id: "controller-test".to_owned(),
+        controller_id: CONTROLLER_ID.to_owned(),
         kid: snapshot().kid,
         accepted_at: 1_000,
         phase: "accepted".to_owned(),
@@ -705,7 +707,7 @@ fn journal_records_fail_closed_on_unknown_fields_schema_drift_and_binding_mismat
             schema: CONTROL_JOURNAL_SCHEMA,
             operation_id: OPERATION_ID.to_owned(),
             request_hash: hash('a'),
-            controller_id: "controller-test".to_owned(),
+            controller_id: CONTROLLER_ID.to_owned(),
             kid: snapshot().kid,
             accepted_at: 1_000,
             phase: "completed".to_owned(),
@@ -746,7 +748,7 @@ fn journal_records_fail_closed_on_unknown_fields_schema_drift_and_binding_mismat
         "schema": CONTROL_JOURNAL_SCHEMA,
         "operation_id": OPERATION_ID,
         "request_hash": hash('a'),
-        "controller_id": "controller-test",
+        "controller_id": CONTROLLER_ID,
         "kid": snapshot().kid,
         "accepted_at": 1_000,
         "phase": "accepted",
@@ -776,7 +778,7 @@ fn journal_records_fail_closed_on_unknown_fields_schema_drift_and_binding_mismat
             schema: CONTROL_JOURNAL_SCHEMA,
             operation_id: OPERATION_ID.to_owned(),
             request_hash: hash('a'),
-            controller_id: "controller-test".to_owned(),
+            controller_id: CONTROLLER_ID.to_owned(),
             kid: snapshot().kid,
             accepted_at: 1_000,
             phase: "completed".to_owned(),
@@ -809,7 +811,7 @@ fn retention_deletes_only_terminal_records_past_the_cutoff() {
             schema: CONTROL_JOURNAL_SCHEMA,
             operation_id: id.to_owned(),
             request_hash: hash('a'),
-            controller_id: "controller-test".to_owned(),
+            controller_id: CONTROLLER_ID.to_owned(),
             kid: snapshot().kid,
             accepted_at: 900,
             phase: phase.to_owned(),
@@ -926,6 +928,24 @@ fn storage_inputs_are_validated_before_touching_the_filesystem() {
             &operation(OPERATION_ID),
             &hash('a'),
             &bad_snapshot
+        ),
+        Err(JournalFlowError::Transport(_))
+    ));
+
+    // The snapshot controller identity must be the D01 canonical UUIDv7;
+    // opaque legacy spellings are refused so journal records always join
+    // against the controller registry.
+    let legacy_snapshot = AuthorizationSnapshot {
+        controller_id: "controller-test".to_owned(),
+        kid: snapshot().kid,
+        accepted_at: 1_000,
+    };
+    assert!(matches!(
+        accept(
+            &directory,
+            &operation(OPERATION_ID),
+            &hash('a'),
+            &legacy_snapshot
         ),
         Err(JournalFlowError::Transport(_))
     ));

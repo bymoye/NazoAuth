@@ -23,6 +23,10 @@ const SENSITIVE_FIELD_NAMES: &[&str] = &[
 
 const AUDIT_EVENT_DEFINITIONS: &[(&str, &str)] = &[
     ("admin_mutation_intent", "administration"),
+    ("controller_identity_approval_issued", "administration"),
+    ("controller_slot_created", "administration"),
+    ("controller_slot_revoked", "administration"),
+    ("controller_slot_rotated", "administration"),
     ("admin_user_created", "administration"),
     ("admin_user_updated", "administration"),
     ("admin_grant_revoked", "administration"),

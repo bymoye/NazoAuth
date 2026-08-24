@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod cli;
 pub mod config;
 mod control_discovery;
+pub mod controller_registry;
 mod crypto;
 mod domain;
 mod http;

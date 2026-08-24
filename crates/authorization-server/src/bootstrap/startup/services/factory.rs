@@ -151,6 +151,7 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
             .app_data(identity.admin_user_registration.clone())
             .app_data(identity.admin_grants.clone())
             .app_data(identity.admin_access_requests.clone())
+            .app_data(identity.controller_registry.clone())
             .app_data(identity.mtls_trust_anchors.clone())
             .app_data(identity.admin_access_delivery.clone())
             .app_data(identity.admin_access_request_config.clone())

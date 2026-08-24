@@ -1,4 +1,36 @@
 diesel::table! {
+    controller_registry_slots (deployment_id, controller_id) {
+        deployment_id -> Varchar,
+        controller_id -> Varchar,
+        label -> Varchar,
+        kid -> Varchar,
+        public_key -> Binary,
+        slot_index -> Int2,
+        issued_at -> Timestamptz,
+        expires_at -> Timestamptz,
+        last_used_at -> Nullable<Timestamptz>,
+        status -> Varchar,
+        revoked_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    controller_identity_approvals (approval_id) {
+        approval_id -> Uuid,
+        deployment_id -> Varchar,
+        action -> Varchar,
+        action_sha256 -> Varchar,
+        admin_user_id -> Uuid,
+        token_hash -> Varchar,
+        expires_at -> Timestamptz,
+        consumed_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     tenants (id) {
         id -> Uuid,
         slug -> Varchar,
@@ -453,6 +485,8 @@ diesel::joinable!(user_client_grants -> oauth_clients (client_id));
 diesel::joinable!(user_client_grants -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    controller_registry_slots,
+    controller_identity_approvals,
     tenants,
     tenant_resource_states,
     tenant_resource_operations,

@@ -2123,6 +2123,26 @@ pub(crate) fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Authoritative controller identity shape (D01): a canonical lowercase
+/// RFC 9562 UUIDv7.  NazoAuth assigns it when a controller slot is created and
+/// keeps it stable across key rotations, so it — unlike the `kid` — names the
+/// controller rather than one generation of its key material.  The same rule
+/// validates the `controller_id` persisted in the control operation journal
+/// authorization snapshot (E03/D02).
+pub fn validate_controller_id(value: &str) -> Result<(), ProtocolError> {
+    validate_uuid(value)?;
+    let bytes = value.as_bytes();
+    if bytes[14] != b'7' {
+        return Err(ProtocolError::Policy("controller_id must be a UUIDv7"));
+    }
+    if !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
+        return Err(ProtocolError::Policy(
+            "controller_id must use the RFC 9562 variant",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_lower_hex(value: &str, length: usize) -> Result<(), ProtocolError> {
     if value.len() != length
         || !value
