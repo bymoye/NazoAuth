@@ -226,14 +226,15 @@ where
 // ---------------------------------------------------------------------------
 
 /// Closed catalog of controller identity actions requiring fresh 2FA approval
-/// (bind/add/rotate/revoke; recovery-root actions belong to 04A and land with
-/// their own stream).
+/// (bind/add/rotate/revoke plus the recovery-root rotation of 04A D12, which
+/// reuses this exact approval machinery with its own action value).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerIdentityAction {
     Bind,
     Add,
     Rotate,
     Revoke,
+    RecoveryRootRotate,
 }
 
 impl ControllerIdentityAction {
@@ -241,6 +242,7 @@ impl ControllerIdentityAction {
     const ADD: &'static str = "add";
     const ROTATE: &'static str = "rotate";
     const REVOKE: &'static str = "revoke";
+    const RECOVERY_ROOT_ROTATE: &'static str = "recovery-root-rotate";
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -249,6 +251,7 @@ impl ControllerIdentityAction {
             Self::Add => Self::ADD,
             Self::Rotate => Self::ROTATE,
             Self::Revoke => Self::REVOKE,
+            Self::RecoveryRootRotate => Self::RECOVERY_ROOT_ROTATE,
         }
     }
 
@@ -259,6 +262,7 @@ impl ControllerIdentityAction {
             Self::ADD => Some(Self::Add),
             Self::ROTATE => Some(Self::Rotate),
             Self::REVOKE => Some(Self::Revoke),
+            Self::RECOVERY_ROOT_ROTATE => Some(Self::RecoveryRootRotate),
             _ => None,
         }
     }
@@ -472,7 +476,7 @@ macro_rules! slot_columns {
 ///   rotation (unlike the `kid`, which changes with key material), fits every
 ///   bounded-text/file-safety rule of the control operation journal, and this
 ///   definition resolves the E03 open question about the snapshot field.
-fn validate_deployment_id(value: &str) -> Result<(), ControllerRegistryError> {
+pub(crate) fn validate_deployment_id(value: &str) -> Result<(), ControllerRegistryError> {
     nazo_operator_protocol::validate_file_identifier_value(value).map_err(|_| {
         ControllerRegistryError::InvalidIdentity(
             "deployment_id is not a valid file-safe identifier",
@@ -488,7 +492,7 @@ fn validate_controller_id(value: &str) -> Result<(), ControllerRegistryError> {
     })
 }
 
-fn validate_kid(value: &str) -> Result<(), ControllerRegistryError> {
+pub(crate) fn validate_kid(value: &str) -> Result<(), ControllerRegistryError> {
     if value.len() != 43
         || !value
             .bytes()
@@ -501,7 +505,7 @@ fn validate_kid(value: &str) -> Result<(), ControllerRegistryError> {
     Ok(())
 }
 
-fn validate_label(value: &str) -> Result<(), ControllerRegistryError> {
+pub(crate) fn validate_label(value: &str) -> Result<(), ControllerRegistryError> {
     if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
         return Err(ControllerRegistryError::InvalidIdentity(
             "controller label must be 1..=128 bounded text",
@@ -511,7 +515,10 @@ fn validate_label(value: &str) -> Result<(), ControllerRegistryError> {
 }
 
 /// Registry self-consistency: `kid` must be exactly `base64url(SHA-256(key))`.
-fn validate_kid_binding(kid: &str, public_key: &[u8; 32]) -> Result<(), ControllerRegistryError> {
+pub(crate) fn validate_kid_binding(
+    kid: &str,
+    public_key: &[u8; 32],
+) -> Result<(), ControllerRegistryError> {
     if kid != URL_SAFE_NO_PAD.encode(Sha256::digest(public_key)) {
         return Err(ControllerRegistryError::InvalidIdentity(
             "kid does not match the controller public key material",
@@ -620,7 +627,7 @@ async fn read_slot_row(
 /// Insert one new active slot under the held advisory lock, picking the lowest
 /// free index.  The partial unique active-slot index is the hard backstop for
 /// any path that could bypass the lock.
-async fn insert_slot_on_connection(
+pub(crate) async fn insert_slot_on_connection(
     connection: &mut AsyncPgConnection,
     slot: &NewControllerSlot,
     now: DateTime<Utc>,
@@ -740,7 +747,7 @@ async fn revoke_slot_on_connection(
 /// the fixed expiry window, and the exact `(deployment_id, action,
 /// action_sha256)` binding; sets `consumed_at` only when everything matches.
 /// A later failure of the authorized mutation rolls the consumption back too.
-async fn consume_approval_on_connection(
+pub(crate) async fn consume_approval_on_connection(
     connection: &mut AsyncPgConnection,
     token_hash: &str,
     expected_deployment_id: &str,

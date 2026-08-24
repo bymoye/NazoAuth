@@ -29,6 +29,7 @@ pub(super) struct IdentityServices {
     pub(super) admin_access_requests: web::Data<nazo_postgres::AccessRequestRepository>,
     pub(super) controller_registry:
         web::Data<crate::controller_registry::ControllerRegistryService>,
+    pub(super) recovery_root: web::Data<crate::recovery_root::RecoveryRootService>,
     pub(super) mtls_trust_anchors: web::Data<MtlsTrustAnchorService>,
     pub(super) admin_access_delivery: web::Data<nazo_valkey::DeliveryStore>,
     pub(super) admin_access_request_config: web::Data<AdminAccessRequestConfig>,
@@ -218,6 +219,13 @@ pub(super) async fn build(
             nazo_postgres::ControllerRegistryRepository::new(diesel_db.clone()),
         )),
     );
+    // 04A D10/D11/D12: Recovery Root anchor, break-glass challenges and
+    // approved rotations share the registry's database authority.
+    let recovery_root = web::Data::new(crate::recovery_root::RecoveryRootService::new(
+        std::sync::Arc::new(nazo_postgres::RecoveryRootRepository::new(
+            diesel_db.clone(),
+        )),
+    ));
     let mtls_trust_anchors = web::Data::new(MtlsTrustAnchorService::new(diesel_db.clone()));
     let admin_access_delivery = web::Data::new(nazo_valkey::DeliveryStore::new(&valkey_connection));
     let protocol = &settings.protocol;
@@ -447,6 +455,7 @@ pub(super) async fn build(
         admin_grants,
         admin_access_requests,
         controller_registry,
+        recovery_root,
         mtls_trust_anchors,
         admin_access_delivery,
         admin_access_request_config,

@@ -45,6 +45,10 @@ const OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_UP: &str =
     include_str!("../../../migrations/20260822000200_openid4vp_opaque_suite_identifiers/up.sql");
 const OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_DOWN: &str =
     include_str!("../../../migrations/20260822000200_openid4vp_opaque_suite_identifiers/down.sql");
+const RECOVERY_ROOT_UP: &str =
+    include_str!("../../../migrations/20260825000100_controller_recovery_root/up.sql");
+const RECOVERY_ROOT_DOWN: &str =
+    include_str!("../../../migrations/20260825000100_controller_recovery_root/down.sql");
 
 #[derive(QueryableByName)]
 struct ProviderType {
@@ -98,6 +102,40 @@ fn openid4vp_suite_identifier_migration_is_bounded_and_rollback_safe() {
         OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_DOWN
             .contains("drain OpenID4VP verification contexts with opaque suite identifiers"),
         "rollback must fail closed while opaque suite identifiers remain"
+    );
+}
+
+#[test]
+fn recovery_root_migration_pins_kdf_ttl_uniqueness_and_fail_closed_downgrade() {
+    for required in [
+        // Only public material is representable; the derivation parameter set
+        // is pinned per row (04A D10).
+        "octet_length(recovery_public_key) = 32",
+        "kdf = 'hkdf-sha256-v1'",
+        "generation >= 1",
+        "PRIMARY KEY (deployment_id)",
+        // Challenges: fixed short window, single-use, bounded attempts,
+        // exactly one pending per deployment, and no root means no challenge.
+        "expires_at = created_at + INTERVAL '600 seconds'",
+        "consumed_at IS NULL OR consumed_at >= created_at",
+        "attempts >= 0 AND attempts <= 64",
+        "UNIQUE INDEX ux_controller_recovery_challenges_pending_per_deployment",
+        "REFERENCES controller_recovery_roots (deployment_id)",
+        "octet_length(nonce) = 32",
+    ] {
+        assert!(
+            RECOVERY_ROOT_UP.contains(required),
+            "recovery root migration is missing {required}"
+        );
+    }
+    assert!(
+        RECOVERY_ROOT_UP
+            .contains("action IN ('bind', 'add', 'rotate', 'revoke', 'recovery-root-rotate')"),
+        "the approval catalog must gain the recovery-root-rotate action for D12"
+    );
+    assert!(
+        RECOVERY_ROOT_DOWN.contains("downgrade refused: unconsumed recovery challenges remain"),
+        "rollback must fail closed while a recovery is mid-flight"
     );
 }
 

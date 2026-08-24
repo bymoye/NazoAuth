@@ -10,6 +10,7 @@ anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
+hmac.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

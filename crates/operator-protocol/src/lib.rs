@@ -50,6 +50,7 @@ pub enum ProtocolError {
 }
 
 mod control_operation;
+mod recovery;
 mod signing;
 mod verification;
 mod wire;
@@ -58,6 +59,12 @@ mod wire;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub use control_operation::*;
+pub use recovery::{
+    RECOVERY_CHALLENGE_ACTION, RECOVERY_KDF_ID, RECOVERY_KDF_INFO, RECOVERY_ROOT_ROTATE_ACTION,
+    RECOVERY_SECRET_PREFIX, RecoveryProposal, RecoveryRootRotation, derive_recovery_seed,
+    format_recovery_secret, hkdf_sha256_v1, parse_recovery_secret, recovery_kid,
+    recovery_public_key_bytes, recovery_verifying_key,
+};
 pub use signing::{
     canonical_config_sha256, canonical_openid4vp_evidence_context_sha256,
     canonical_openid4vp_normalized_create_request, canonical_openid4vp_presentation_binding_sha256,

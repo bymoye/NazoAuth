@@ -12,6 +12,7 @@ mod mfa;
 mod mtls_trust;
 mod openid4vc;
 mod passkeys;
+mod recovery_root;
 mod runtime_modules;
 mod scim;
 mod scim_events;
@@ -61,6 +62,12 @@ pub use openid4vc::{
     unprotect_dataset_claims, upsert_operator_managed_dataset_on_connection,
 };
 pub use passkeys::PasskeyRepository;
+pub use recovery_root::{
+    AdmittedControllerSummary, IssuedRecoveryChallenge, MAX_RECOVERY_CHALLENGE_ATTEMPTS,
+    NewRecoveryChallenge, NewRecoveryRoot, RECOVERY_CHALLENGE_TTL_SECONDS, RecoveredSlotCommit,
+    RecoveryRootError, RecoveryRootRepository, RecoveryRootSummary, RecoveryRotationError,
+    RecoverySubmission, StoredRecoveryRoot,
+};
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};
 pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;

@@ -31,6 +31,35 @@ diesel::table! {
 }
 
 diesel::table! {
+    controller_recovery_roots (deployment_id) {
+        deployment_id -> Varchar,
+        recovery_kid -> Varchar,
+        recovery_public_key -> Binary,
+        kdf -> Varchar,
+        generation -> Int4,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    controller_recovery_challenges (challenge_id) {
+        challenge_id -> Uuid,
+        deployment_id -> Varchar,
+        nonce -> Binary,
+        controller_label -> Varchar,
+        controller_kid -> Varchar,
+        controller_public_key -> Binary,
+        recovery_kid -> Varchar,
+        recovery_public_key -> Binary,
+        attempts -> Int2,
+        expires_at -> Timestamptz,
+        consumed_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     tenants (id) {
         id -> Uuid,
         slug -> Varchar,
@@ -487,6 +516,8 @@ diesel::joinable!(user_client_grants -> users (user_id));
 diesel::allow_tables_to_appear_in_same_query!(
     controller_registry_slots,
     controller_identity_approvals,
+    controller_recovery_roots,
+    controller_recovery_challenges,
     tenants,
     tenant_resource_states,
     tenant_resource_operations,

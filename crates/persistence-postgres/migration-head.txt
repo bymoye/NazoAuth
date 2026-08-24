@@ -1,1 +1,1 @@
-20260824000100_controller_registry
+20260825000100_controller_recovery_root

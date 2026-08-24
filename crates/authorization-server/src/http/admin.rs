@@ -2,11 +2,13 @@
 // 每个子模块按一个管理资源拆分，路由层通过显式模块路径调用。
 pub(crate) mod access_requests;
 pub(crate) mod clients;
+pub(crate) mod controller_recovery;
 pub(crate) mod controller_registry;
 pub(crate) mod federation;
 pub(crate) mod grants;
 pub(crate) mod mtls_trust;
 pub(crate) mod openid4vc;
+pub(crate) mod recovery_root;
 pub(crate) mod users;
 
 use actix_web::{HttpResponse, http::StatusCode};

@@ -16,6 +16,7 @@ mod domain;
 mod http;
 mod keyctl;
 mod operator_task;
+pub mod recovery_root;
 mod runtime_modules;
 #[cfg(test)]
 #[path = "../tests/support/schema.rs"]
