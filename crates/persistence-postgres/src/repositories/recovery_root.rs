@@ -64,6 +64,12 @@ use crate::{DbPool, get_conn};
 
 /// Fixed challenge lifetime in seconds: a single short window, computed
 /// server-side and pinned by the migration CHECK constraint.
+#[derive(diesel::QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+
 pub const RECOVERY_CHALLENGE_TTL_SECONDS: i64 = 600;
 
 /// Maximum number of failed submissions per challenge before it is dead.
@@ -802,6 +808,23 @@ impl RecoveryRootRepository {
                 );
                 if !verified {
                     return Err(RecoveryRootError::InvalidSignature);
+                }
+
+                // W3.5: re-check admitted slots INSIDE this transaction so a
+                // slot bound after challenge issuance blocks the recovery.
+                // Without this, a concurrent bind would be silently revoked
+                // by the break-glass commit below.
+                let active_count = sql_query(
+                    "SELECT COUNT(*) AS count FROM controller_registry_slots \
+                     WHERE deployment_id = $1 AND status = 'active' AND expires_at > $2",
+                )
+                .bind::<Varchar, _>(&submission.deployment_id)
+                .bind::<Timestamptz, _>(now)
+                .get_result::<CountRow>(connection)
+                .await
+                .map_err(transport)?;
+                if active_count.count > 0 {
+                    return Err(RecoveryRootError::ControllersStillAdmitted(Vec::new()));
                 }
 
                 // Accepted: consume the challenge and commit the recovery.
