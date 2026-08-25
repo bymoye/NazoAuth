@@ -202,11 +202,7 @@ fn server_config_file_override_points_loading_at_the_mounted_file() {
     let config_dir = temp_config_dir("override_dir");
     let mounted = temp_config_dir("override_mounted");
     let override_path = mounted.join("app-config.yaml");
-    std::fs::write(
-        &override_path,
-        "BIND: \"0.0.0.0:8000\"\nRUST_LOG: info\n",
-    )
-    .unwrap();
+    std::fs::write(&override_path, "BIND: \"0.0.0.0:8000\"\nRUST_LOG: info\n").unwrap();
     // The configuration directory itself carries no .env.yaml at all.
     std::fs::write(config_dir.join("unrelated.txt"), "x").unwrap();
 
