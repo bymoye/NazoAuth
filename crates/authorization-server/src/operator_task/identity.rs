@@ -225,7 +225,10 @@ pub(super) fn persist_operator_state_identity(
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(0o400);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o400);
+    }
     let mut file = options.open(&temporary)?;
     file.write_all(format!("{deployment_id}\n").as_bytes())?;
     file.sync_all()?;
