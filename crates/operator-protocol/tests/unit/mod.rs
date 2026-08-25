@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use ed25519_dalek::SigningKey;
 use proptest::prelude::*;
 
@@ -10,41 +8,6 @@ use crate::verification::*;
 
 mod control_operation_tests;
 mod recovery_tests;
-
-fn task() -> TaskEnvelope {
-    TaskEnvelope {
-        ver: PROTOCOL_VERSION,
-        iss: "controller:deployment-1".to_owned(),
-        aud: "runtime:deployment-1".to_owned(),
-        jti: "019fffffffffffffffffffffffffffff".to_owned(),
-        iat: 1_000,
-        nbf: 1_000,
-        exp: 1_060,
-        deployment_id: "deployment-1".to_owned(),
-        actor: Actor {
-            kind: ActorKind::LocalRoot,
-            id: "uid:0".to_owned(),
-        },
-        target: TargetExpectation::OciImage {
-            image_ref: "localhost/nazoauth:v1.0.0".to_owned(),
-            image_digest: format!("sha256:{}", "a".repeat(64)),
-        },
-        embedded: EmbeddedIdentity {
-            release: "v1.0.0".to_owned(),
-            revision: "b".repeat(40),
-            protocol: PROTOCOL_VERSION,
-            build_id: "github:1234567".to_owned(),
-        },
-        config: ConfigBinding {
-            manifest_version: CONFIG_MANIFEST_VERSION,
-            config_sha256: "d".repeat(64),
-            secret_binding: SecretBinding::OpaqueRevision {
-                revision: "secret-revision-1".to_owned(),
-            },
-        },
-        operation: TaskOperation::MigrateApply,
-    }
-}
 
 const TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -193,38 +156,6 @@ fn deployment_statement() -> DeploymentStatement {
     }
 }
 
-fn adoption_receipt() -> AdoptionReceipt {
-    AdoptionReceipt {
-        schema: CONTROL_DISCOVERY_SCHEMA,
-        deployment_id: "deployment-1".to_owned(),
-        issuer: "https://auth.example".to_owned(),
-        runtime_instances: vec![AdoptedRuntimeIdentity {
-            runtime_instance_id: "runtime-1".to_owned(),
-            backend: "podman".to_owned(),
-            object_reference: "container/nazoauth-manual".to_owned(),
-            artifact_identity: format!("sha256:{}", "a".repeat(64)),
-        }],
-        verified_release: "v0.1.19".to_owned(),
-        release_manifest_sha256: "b".repeat(64),
-        instance_key_ids: vec!["instance-1".to_owned()],
-        resource_references: BTreeMap::from([
-            (
-                "database".to_owned(),
-                "provider/postgresql-primary".to_owned(),
-            ),
-            ("runtime".to_owned(), "container/nazoauth-manual".to_owned()),
-        ]),
-        capabilities: BTreeMap::from([
-            ("database".to_owned(), "external:shared".to_owned()),
-            ("runtime".to_owned(), "managed:deployment".to_owned()),
-        ]),
-        recovery_proven: true,
-        recovery_evidence: vec!["snapshot/backup-1".to_owned()],
-        plan_sha256: "c".repeat(64),
-        adopted_at: 1_000,
-    }
-}
-
 #[test]
 fn golden_control_discovery_vector_is_stable_and_nonce_bound() {
     let key = SigningKey::from_bytes(&[17; 32]);
@@ -269,72 +200,6 @@ fn offline_deployment_statement_is_identity_evidence_not_artifact_trust() {
         protected_header(&compact).unwrap().typ,
         DEPLOYMENT_STATEMENT_JWS_TYPE
     );
-}
-
-#[test]
-fn adoption_receipt_roundtrips_and_enforces_bounded_recovery_evidence() {
-    let key = SigningKey::from_bytes(&[19; 32]);
-    let receipt = adoption_receipt();
-    let compact = sign_adoption_receipt(&receipt, "receipt-1", &key).unwrap();
-    assert_eq!(
-        verify_adoption_receipt(&compact, "receipt-1", &key.verifying_key()).unwrap(),
-        receipt
-    );
-    assert_eq!(
-        protected_header(&compact).unwrap().typ,
-        ADOPTION_RECEIPT_JWS_TYPE
-    );
-
-    let mut invalid = adoption_receipt();
-    invalid.schema += 1;
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.runtime_instances.clear();
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.runtime_instances = vec![invalid.runtime_instances[0].clone(); 129];
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.instance_key_ids.clear();
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid
-        .runtime_instances
-        .push(invalid.runtime_instances[0].clone());
-    invalid.instance_key_ids.push("instance-2".to_owned());
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid
-        .instance_key_ids
-        .push(invalid.instance_key_ids[0].clone());
-    invalid.runtime_instances.push(AdoptedRuntimeIdentity {
-        runtime_instance_id: "runtime-2".to_owned(),
-        ..invalid.runtime_instances[0].clone()
-    });
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.resource_references = (0..65)
-        .map(|index| (format!("resource-{index}"), "external/shared".to_owned()))
-        .collect();
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.recovery_evidence = vec!["snapshot/evidence".to_owned(); 65];
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.recovery_evidence.clear();
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
-
-    let mut invalid = adoption_receipt();
-    invalid.runtime_instances[0].object_reference = "secret={must-not-be-recorded}".to_owned();
-    assert!(sign_adoption_receipt(&invalid, "receipt-1", &key).is_err());
 }
 
 #[test]
@@ -395,87 +260,23 @@ fn discovery_and_offline_identity_fail_closed_on_invalid_claims() {
 }
 
 #[test]
-fn golden_task_vector_is_stable_and_verifies() {
-    let key = SigningKey::from_bytes(&[7; 32]);
-    let compact = sign_task(&task(), "controller-1", &key).unwrap();
-    assert_eq!(
-        compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6ImNvbnRyb2xsZXItMSIsInR5cCI6Im5hem9hdXRoLW9wZXJhdG9yLXRhc2srand0In0.eyJ2ZXIiOjEsImlzcyI6ImNvbnRyb2xsZXI6ZGVwbG95bWVudC0xIiwiYXVkIjoicnVudGltZTpkZXBsb3ltZW50LTEiLCJqdGkiOiIwMTlmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiIsImlhdCI6MTAwMCwibmJmIjoxMDAwLCJleHAiOjEwNjAsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJhY3RvciI6eyJraW5kIjoibG9jYWwtcm9vdCIsImlkIjoidWlkOjAifSwidGFyZ2V0Ijp7ImtpbmQiOiJvY2ktaW1hZ2UiLCJpbWFnZV9yZWYiOiJsb2NhbGhvc3QvbmF6b2F1dGg6djEuMC4wIiwiaW1hZ2VfZGlnZXN0Ijoic2hhMjU2OmFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifSwiZW1iZWRkZWQiOnsicmVsZWFzZSI6InYxLjAuMCIsInJldmlzaW9uIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsInByb3RvY29sIjoxLCJidWlsZF9pZCI6ImdpdGh1YjoxMjM0NTY3In0sImNvbmZpZyI6eyJtYW5pZmVzdF92ZXJzaW9uIjoxLCJjb25maWdfc2hhMjU2IjoiZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCIsInNlY3JldF9iaW5kaW5nIjp7ImtpbmQiOiJvcGFxdWUtcmV2aXNpb24iLCJyZXZpc2lvbiI6InNlY3JldC1yZXZpc2lvbi0xIn19LCJvcGVyYXRpb24iOnsibmFtZSI6Im1pZ3JhdGUtYXBwbHkifX0.qEhY-6YCHJRQEFUtb3_1jVuISQmyUjc-3exLFMKOgoyVX_fvlwR-NGQ44Y_Ar1FrRK9DgvpWjD-9qklWtiq0AQ"
-    );
-    assert_eq!(
-        verify_task(&compact, "controller-1", &key.verifying_key(), 1_030).unwrap(),
-        task()
-    );
-    assert_eq!(compact_sha256(&compact).len(), 64);
-    assert_eq!(
-        protected_header(&compact).unwrap(),
-        ProtectedHeader {
-            alg: FixedAlgorithm::EdDSA,
-            kid: "controller-1".to_owned(),
-            typ: TASK_JWS_TYPE.to_owned(),
-        }
-    );
-}
-
-#[test]
-fn task_deployment_binding_requires_local_identity_and_exact_claims() {
-    let valid = task();
-    validate_task_deployment_binding(&valid, "deployment-1").unwrap();
-
-    for (mut invalid, expected) in [
-        (
-            {
-                let mut value = valid.clone();
-                value.deployment_id = "deployment-2".to_owned();
-                value
-            },
-            "deployment-1",
-        ),
-        (
-            {
-                let mut value = valid.clone();
-                value.iss = "controller:deployment-2".to_owned();
-                value
-            },
-            "deployment-1",
-        ),
-        (
-            {
-                let mut value = valid.clone();
-                value.aud = "runtime:deployment-2".to_owned();
-                value
-            },
-            "deployment-1",
-        ),
-    ] {
-        assert!(validate_task_deployment_binding(&invalid, expected).is_err());
-        invalid.deployment_id = expected.to_owned();
-        invalid.iss = format!("controller:{expected}");
-        invalid.aud = format!("runtime:{expected}");
-        validate_task_deployment_binding(&invalid, expected).unwrap();
-    }
-
-    assert!(validate_task_deployment_binding(&valid, "").is_err());
-}
-
-#[test]
 fn protected_header_rejects_untrusted_key_lookup_inputs() {
     for header in [
         serde_json::json!({
             "alg": "EdDSA",
             "kid": "../../controller",
-            "typ": TASK_JWS_TYPE,
+            "typ": CONTROL_DISCOVERY_JWS_TYPE,
         }),
         serde_json::json!({
             "alg": "EdDSA",
             "kid": "controller-1",
-            "typ": TASK_JWS_TYPE,
+            "typ": CONTROL_DISCOVERY_JWS_TYPE,
             "jku": "https://attacker.example/jwks.json",
         }),
         serde_json::json!({
             "alg": "none",
             "kid": "controller-1",
-            "typ": TASK_JWS_TYPE,
+            "typ": CONTROL_DISCOVERY_JWS_TYPE,
         }),
     ] {
         let compact = format!(
@@ -492,7 +293,7 @@ fn protected_header_rejects_untrusted_key_lookup_inputs() {
 #[test]
 fn rejects_unknown_claims_and_algorithm_confusion() {
     let key = SigningKey::from_bytes(&[7; 32]);
-    let compact = sign_task(&task(), "controller-1", &key).unwrap();
+    let compact = sign_discovery_statement(&discovery_statement(), "instance-1", &key).unwrap();
     let mut segments = compact.split('.').collect::<Vec<_>>();
     let payload = URL_SAFE_NO_PAD.decode(segments[1]).unwrap();
     let mut value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -504,56 +305,15 @@ fn rejects_unknown_claims_and_algorithm_confusion() {
     );
     let tampered = segments.join(".");
     assert!(matches!(
-        verify_task(&tampered, "controller-1", &key.verifying_key(), 1_030),
+        verify_discovery_statement(
+            &tampered,
+            "instance-1",
+            &key.verifying_key(),
+            &discovery_statement().nonce,
+            1_030,
+        ),
         Err(ProtocolError::Signature)
     ));
-
-    let mut header = ProtectedHeader {
-        alg: FixedAlgorithm::EdDSA,
-        kid: "controller-1".to_owned(),
-        typ: "JWT".to_owned(),
-    };
-    assert_eq!(header.typ, "JWT");
-    header.typ = TASK_JWS_TYPE.to_owned();
-    assert_eq!(header.typ, TASK_JWS_TYPE);
-}
-
-#[test]
-fn expired_envelope_keeps_authenticated_identity_but_cannot_authorize_new_work() {
-    let key = SigningKey::from_bytes(&[7; 32]);
-    let compact = sign_task(&task(), "controller-1", &key).unwrap();
-    assert_eq!(
-        verify_task_signature(&compact, "controller-1", &key.verifying_key()).unwrap(),
-        task()
-    );
-    assert!(verify_task(&compact, "controller-1", &key.verifying_key(), 2_000).is_err());
-}
-
-#[test]
-fn canonical_config_digest_is_order_independent() {
-    let first = CanonicalConfigManifest {
-        version: CONFIG_MANIFEST_VERSION,
-        entries: BTreeMap::from([
-            ("runtime.engine".to_owned(), "podman".to_owned()),
-            (
-                "runtime.issuer".to_owned(),
-                "https://auth.example".to_owned(),
-            ),
-        ]),
-    };
-    let second = CanonicalConfigManifest {
-        version: CONFIG_MANIFEST_VERSION,
-        entries: first
-            .entries
-            .iter()
-            .rev()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    };
-    assert_eq!(
-        canonical_config_sha256(&first).unwrap(),
-        canonical_config_sha256(&second).unwrap()
-    );
 }
 
 #[test]
@@ -674,369 +434,33 @@ fn openid4vc_trust_policy_accepts_bounded_public_bundle_and_rejects_unknowns() {
     assert!(validate_openid4vc_trust_policy(&oversized_json).is_err());
 }
 
-#[test]
-fn every_signed_message_type_roundtrips_and_rejects_a_wrong_key() {
-    let runtime_key = SigningKey::from_bytes(&[11; 32]);
-    let controller_key = SigningKey::from_bytes(&[12; 32]);
-    let wrong_key = SigningKey::from_bytes(&[13; 32]);
-    let source = task();
-    let outcome = TaskOutcome::Succeeded {
-        result: TaskResult::Migration { applied: true },
-    };
-    let runtime = RuntimeReceipt {
-        ver: PROTOCOL_VERSION,
-        iss: "runtime:deployment-1".to_owned(),
-        aud: "controller:deployment-1".to_owned(),
-        jti: source.jti.clone(),
-        request_sha256: "e".repeat(64),
-        deployment_id: source.deployment_id.clone(),
-        actor: source.actor.clone(),
-        operation: "migrate-apply".to_owned(),
-        started_at: 1_001,
-        completed_at: 1_002,
-        embedded: source.embedded.clone(),
-        config: source.config.clone(),
-        outcome: outcome.clone(),
-    };
-    let compact_runtime = sign_runtime_receipt(&runtime, "receipt-1", &runtime_key).unwrap();
-    assert_eq!(
-        verify_runtime_receipt(&compact_runtime, "receipt-1", &runtime_key.verifying_key())
-            .unwrap(),
-        runtime
-    );
-    validate_runtime_receipt_deployment_binding(&runtime, "deployment-1").unwrap();
-    assert!(validate_runtime_receipt_deployment_binding(&runtime, "deployment-2").is_err());
-    let mut wrong_runtime = runtime.clone();
-    wrong_runtime.aud = "controller:deployment-2".to_owned();
-    assert!(validate_runtime_receipt_deployment_binding(&wrong_runtime, "deployment-1").is_err());
-    assert!(
-        verify_runtime_receipt(&compact_runtime, "receipt-1", &wrong_key.verifying_key()).is_err()
-    );
-
-    let final_receipt = FinalReceipt {
-        ver: PROTOCOL_VERSION,
-        iss: source.iss.clone(),
-        aud: "operator-audit".to_owned(),
-        jti: source.jti.clone(),
-        request_sha256: "e".repeat(64),
-        deployment_id: source.deployment_id.clone(),
-        actor: source.actor.clone(),
-        operation: "migrate-apply".to_owned(),
-        completed_at: 1_002,
-        audit_sequence: 1,
-        audit_previous_sha256: "0".repeat(64),
-        controller_verified_target: RuntimeTargetClaim::OciImage {
-            image_ref: "localhost/nazoauth:v1.0.0".to_owned(),
-            image_digest: format!("sha256:{}", "a".repeat(64)),
-        },
-        embedded: source.embedded.clone(),
-        config: source.config.clone(),
-        runtime_receipt_sha256: compact_sha256(&compact_runtime),
-        outcome,
-    };
-    let compact_final =
-        sign_final_receipt(&final_receipt, "controller-1", &controller_key).unwrap();
-    assert_eq!(
-        verify_final_receipt(
-            &compact_final,
-            "controller-1",
-            &controller_key.verifying_key()
-        )
-        .unwrap(),
-        final_receipt
-    );
-
-    let transition = ControllerTrustTransition {
-        ver: PROTOCOL_VERSION,
-        deployment_id: source.deployment_id.clone(),
-        issued_at: 1_003,
-        authorization: TransitionAuthorization::Controller,
-        previous_key_id: "controller-1".to_owned(),
-        next_key_id: "controller-2".to_owned(),
-        next_public_key_sha256: "f".repeat(64),
-        previous_audit_key_id: "audit-1".to_owned(),
-        next_audit_key_id: "audit-2".to_owned(),
-        next_audit_public_key_sha256: "a".repeat(64),
-        previous_break_glass_key_id: "break-glass-1".to_owned(),
-        next_break_glass_key_id: "break-glass-1".to_owned(),
-        next_break_glass_public_key_sha256: "b".repeat(64),
-        reason: "scheduled-rotation".to_owned(),
-    };
-    let compact_transition =
-        sign_trust_transition(&transition, "controller-1", &controller_key).unwrap();
-    assert_eq!(
-        verify_trust_transition(
-            &compact_transition,
-            "controller-1",
-            &controller_key.verifying_key()
-        )
-        .unwrap(),
-        transition
-    );
-
-    let event = ManagementAuditEvent {
-        ver: PROTOCOL_VERSION,
-        deployment_id: source.deployment_id,
-        sequence: 1,
-        previous_sha256: "0".repeat(64),
-        request_id: source.jti,
-        issued_at: 1_004,
-        actor: source.actor,
-        operation: "update".to_owned(),
-        release: "v1.0.0".to_owned(),
-        recovery_boundary: "artifact-and-schema-compatible".to_owned(),
-    };
-    let compact_event = sign_management_event(&event, "controller-1", &controller_key).unwrap();
-    assert_eq!(
-        verify_management_event(
-            &compact_event,
-            "controller-1",
-            &controller_key.verifying_key()
-        )
-        .unwrap(),
-        event.clone()
-    );
-
-    let mut encoded_evidence = event.clone();
-    encoded_evidence.recovery_boundary = format!("evidence-v1.{}", "_".repeat(300));
-    assert!(sign_management_event(&encoded_evidence, "controller-1", &controller_key).is_ok());
-    encoded_evidence.recovery_boundary = "{raw-json-is-not-an-audit-boundary}".to_owned();
-    assert!(matches!(
-        sign_management_event(&encoded_evidence, "controller-1", &controller_key),
-        Err(ProtocolError::Policy(_))
-    ));
-}
-
-#[test]
-fn historic_conformance_receipt_remains_readable() {
-    let controller_key = SigningKey::from_bytes(&[36; 32]);
-    let source = task();
-    let receipt = FinalReceipt {
-        ver: PROTOCOL_VERSION,
-        iss: source.iss.clone(),
-        aud: "operator-audit".to_owned(),
-        jti: source.jti.clone(),
-        request_sha256: "e".repeat(64),
-        deployment_id: source.deployment_id.clone(),
-        actor: source.actor.clone(),
-        operation: "conformance-lease-list".to_owned(),
-        completed_at: 1_002,
-        audit_sequence: 1,
-        audit_previous_sha256: "0".repeat(64),
-        controller_verified_target: RuntimeTargetClaim::OciImage {
-            image_ref: "localhost/nazoauth:v1.0.0".to_owned(),
-            image_digest: format!("sha256:{}", "a".repeat(64)),
-        },
-        embedded: source.embedded,
-        config: source.config,
-        runtime_receipt_sha256: "f".repeat(64),
-        outcome: TaskOutcome::Succeeded {
-            result: TaskResult::ConformanceLeaseList { leases: Vec::new() },
-        },
-    };
-    let compact = sign_final_receipt(&receipt, "controller-1", &controller_key).unwrap();
-    assert_eq!(
-        verify_final_receipt(&compact, "controller-1", &controller_key.verifying_key()).unwrap(),
-        receipt
-    );
-}
-
 proptest! {
     #[test]
     fn arbitrary_compact_input_never_panics(input in any::<Vec<u8>>()) {
         let key = SigningKey::from_bytes(&[9; 32]);
         let input = String::from_utf8_lossy(&input);
-        let _ = verify_task(&input, "controller-1", &key.verifying_key(), 1_030);
+        let _ = verify_discovery_statement(
+            &input,
+            "instance-1",
+            &key.verifying_key(),
+            &discovery_statement().nonce,
+            1_030,
+        );
     }
 
     #[test]
     fn validity_window_is_enforced(delta in 61i64..10_000) {
-        let mut envelope = task();
-        envelope.exp = envelope.iat + delta;
-        let key = SigningKey::from_bytes(&[7; 32]);
-        prop_assert!(matches!(sign_task(&envelope, "controller-1", &key), Err(ProtocolError::Policy(_))));
+        let mut capability = tenant_resource_capability();
+        capability.expires_at = capability.issued_at + delta;
+        prop_assert!(matches!(
+            validate_tenant_resource_capability(&capability, capability.issued_at),
+            Err(ProtocolError::Policy(_))
+        ));
     }
 }
 
 #[test]
-fn task_and_receipt_validation_covers_crypto_targets_and_versions() {
-    let valid = task();
-    validate_task(&valid).unwrap();
-
-    let mut invalid = valid.clone();
-    invalid.ver += 1;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.actor.id = "uid 0".to_owned();
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.jti = "jti/with-slash".to_owned();
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.deployment_id = "deployment/1".to_owned();
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.exp = invalid.iat - 1;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.exp = invalid.iat + MAX_TASK_LIFETIME_SECONDS + 1;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.nbf = invalid.iat - 1;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.config.manifest_version += 1;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.config.config_sha256 = "D".repeat(64);
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.embedded.build_id = "build id".to_owned();
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.iat = 0;
-    invalid.nbf = 0;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.embedded.protocol = PROTOCOL_VERSION + 1;
-    assert!(validate_task(&invalid).is_err());
-    let mut invalid = valid.clone();
-    invalid.embedded.release = "bad release".to_owned();
-    assert!(validate_task(&invalid).is_err());
-
-    let mut host_binary = valid.clone();
-    host_binary.target = TargetExpectation::HostBinary {
-        path: "/usr/local/bin/nazoauth".to_owned(),
-        sha256: "e".repeat(64),
-    };
-    validate_task(&host_binary).unwrap();
-    host_binary.target = TargetExpectation::HostBinary {
-        path: "relative path with spaces".to_owned(),
-        sha256: "e".repeat(64),
-    };
-    assert!(validate_task(&host_binary).is_err());
-    host_binary.target = TargetExpectation::HostBinary {
-        path: "/usr/local/bin/nazoauth".to_owned(),
-        sha256: "E".repeat(64),
-    };
-    assert!(validate_task(&host_binary).is_err());
-    let mut bad_oci = valid.clone();
-    bad_oci.target = TargetExpectation::OciImage {
-        image_ref: "localhost/nazoauth:v1".to_owned(),
-        image_digest: "e".repeat(64),
-    };
-    assert!(validate_task(&bad_oci).is_err());
-
-    let mut hmac = valid.clone();
-    hmac.config.secret_binding = SecretBinding::HmacSha256 {
-        key_id: "config-key".to_owned(),
-        digest: "f".repeat(64),
-    };
-    validate_task(&hmac).unwrap();
-    hmac.config.secret_binding = SecretBinding::HmacSha256 {
-        key_id: "bad key".to_owned(),
-        digest: "f".repeat(64),
-    };
-    assert!(validate_task(&hmac).is_err());
-    hmac.config.secret_binding = SecretBinding::HmacSha256 {
-        key_id: "config-key".to_owned(),
-        digest: "F".repeat(64),
-    };
-    assert!(validate_task(&hmac).is_err());
-
-    let source = task();
-    let mut final_receipt = FinalReceipt {
-        ver: PROTOCOL_VERSION,
-        iss: source.iss.clone(),
-        aud: "operator-audit".to_owned(),
-        jti: source.jti.clone(),
-        request_sha256: "a".repeat(64),
-        deployment_id: source.deployment_id.clone(),
-        actor: source.actor.clone(),
-        operation: "migrate-apply".to_owned(),
-        completed_at: 1_002,
-        audit_sequence: 1,
-        audit_previous_sha256: "0".repeat(64),
-        controller_verified_target: RuntimeTargetClaim::HostBinary {
-            path: "/usr/local/bin/nazoauth".to_owned(),
-            sha256: "b".repeat(64),
-        },
-        embedded: source.embedded.clone(),
-        config: source.config.clone(),
-        runtime_receipt_sha256: "c".repeat(64),
-        outcome: TaskOutcome::Succeeded {
-            result: TaskResult::Migration { applied: true },
-        },
-    };
-    validate_final_receipt(&final_receipt).unwrap();
-    final_receipt.ver += 1;
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.ver = PROTOCOL_VERSION;
-    final_receipt.iss = "bad value".to_owned();
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.iss = source.iss.clone();
-    final_receipt.jti = "bad/jti".to_owned();
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.jti = source.jti.clone();
-    final_receipt.deployment_id = "bad/id".to_owned();
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.deployment_id = source.deployment_id.clone();
-    final_receipt.request_sha256 = "A".repeat(64);
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.request_sha256 = "a".repeat(64);
-    final_receipt.runtime_receipt_sha256 = "B".repeat(64);
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.runtime_receipt_sha256 = "c".repeat(64);
-    final_receipt.audit_previous_sha256 = "G".repeat(64);
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.audit_previous_sha256 = "0".repeat(64);
-    final_receipt.completed_at = 0;
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.completed_at = 1_002;
-    final_receipt.audit_sequence = 0;
-    assert!(validate_final_receipt(&final_receipt).is_err());
-    final_receipt.audit_sequence = 1;
-    final_receipt.controller_verified_target = RuntimeTargetClaim::HostBinary {
-        path: "bad path".to_owned(),
-        sha256: "b".repeat(64),
-    };
-    assert!(validate_final_receipt(&final_receipt).is_err());
-
-    let mut runtime = RuntimeReceipt {
-        ver: PROTOCOL_VERSION,
-        iss: "runtime:deployment-1".to_owned(),
-        aud: "controller:deployment-1".to_owned(),
-        jti: source.jti,
-        request_sha256: "a".repeat(64),
-        deployment_id: "deployment-1".to_owned(),
-        actor: source.actor,
-        operation: "migrate-apply".to_owned(),
-        started_at: 1_001,
-        completed_at: 1_002,
-        embedded: source.embedded,
-        config: source.config,
-        outcome: TaskOutcome::Failed {
-            code: "runtime-failure".to_owned(),
-        },
-    };
-    let key = SigningKey::from_bytes(&[14; 32]);
-    sign_runtime_receipt(&runtime, "receipt-1", &key).unwrap();
-    runtime.completed_at = runtime.started_at - 1;
-    assert!(sign_runtime_receipt(&runtime, "receipt-1", &key).is_err());
-    runtime.completed_at = 1_002;
-    runtime.embedded.protocol = PROTOCOL_VERSION + 1;
-    assert!(sign_runtime_receipt(&runtime, "receipt-1", &key).is_err());
-    runtime.embedded.protocol = PROTOCOL_VERSION;
-    runtime.ver = PROTOCOL_VERSION + 1;
-    let compact = sign_compact(&runtime, "receipt-1", RUNTIME_RECEIPT_JWS_TYPE, &key).unwrap();
-    assert!(matches!(
-        verify_runtime_receipt(&compact, "receipt-1", &key.verifying_key()),
-        Err(ProtocolError::Policy("unsupported receipt version"))
-    ));
-}
-
-#[test]
-fn identity_transition_and_audit_boundaries_are_checked() {
+fn discovery_identity_and_identifier_boundaries_are_checked() {
     let statement = discovery_statement();
     validate_discovery_statement(&statement, 1_030, Some(&statement.nonce)).unwrap();
     let mut invalid = statement.clone();
@@ -1102,128 +526,6 @@ fn identity_transition_and_audit_boundaries_are_checked() {
     let mut deployment = deployment_statement();
     deployment.control_protocol_versions.clear();
     assert!(validate_deployment_statement(&deployment).is_err());
-
-    let mut receipt = adoption_receipt();
-    validate_adoption_receipt(&receipt).unwrap();
-    receipt.schema += 1;
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.deployment_id = "deployment/1".to_owned();
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.issuer = "issuer value".to_owned();
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.verified_release = "release value".to_owned();
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.release_manifest_sha256 = "A".repeat(64);
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.plan_sha256 = "A".repeat(64);
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.adopted_at = 0;
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.runtime_instances[0].runtime_instance_id = "runtime/1".to_owned();
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.runtime_instances[0].backend = "backend\nvalue".to_owned();
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt.instance_key_ids[0] = "instance/1".to_owned();
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt
-        .resource_references
-        .insert("bad name".to_owned(), "value".to_owned());
-    assert!(validate_adoption_receipt(&receipt).is_err());
-    let mut receipt = adoption_receipt();
-    receipt
-        .resource_references
-        .insert("name".to_owned(), "bad\nvalue".to_owned());
-    assert!(validate_adoption_receipt(&receipt).is_err());
-
-    let transition = ControllerTrustTransition {
-        ver: PROTOCOL_VERSION,
-        deployment_id: "deployment-1".to_owned(),
-        issued_at: 1_003,
-        authorization: TransitionAuthorization::Controller,
-        previous_key_id: "controller-1".to_owned(),
-        next_key_id: "controller-2".to_owned(),
-        next_public_key_sha256: "a".repeat(64),
-        previous_audit_key_id: "audit-1".to_owned(),
-        next_audit_key_id: "audit-2".to_owned(),
-        next_audit_public_key_sha256: "b".repeat(64),
-        previous_break_glass_key_id: "break-glass-1".to_owned(),
-        next_break_glass_key_id: "break-glass-2".to_owned(),
-        next_break_glass_public_key_sha256: "c".repeat(64),
-        reason: "scheduled-rotation".to_owned(),
-    };
-    validate_transition(&transition).unwrap();
-    let mut invalid_transition = transition.clone();
-    invalid_transition.ver += 1;
-    assert!(validate_transition(&invalid_transition).is_err());
-    let mut invalid_transition = transition.clone();
-    invalid_transition.issued_at = 0;
-    assert!(validate_transition(&invalid_transition).is_err());
-    let mut invalid_transition = transition.clone();
-    invalid_transition.next_public_key_sha256 = "A".repeat(64);
-    assert!(validate_transition(&invalid_transition).is_err());
-    let mut invalid_transition = transition.clone();
-    invalid_transition.next_audit_public_key_sha256 = "B".repeat(64);
-    assert!(validate_transition(&invalid_transition).is_err());
-    let mut invalid_transition = transition;
-    invalid_transition.next_break_glass_public_key_sha256 = "C".repeat(64);
-    assert!(validate_transition(&invalid_transition).is_err());
-
-    let event = ManagementAuditEvent {
-        ver: PROTOCOL_VERSION,
-        deployment_id: "deployment-1".to_owned(),
-        sequence: 1,
-        previous_sha256: "0".repeat(64),
-        request_id: "request-1".to_owned(),
-        issued_at: 1_004,
-        actor: Actor {
-            kind: ActorKind::Automation,
-            id: "automation-1".to_owned(),
-        },
-        operation: "update".to_owned(),
-        release: "v1.0.0".to_owned(),
-        recovery_boundary: "artifact-and-schema-compatible".to_owned(),
-    };
-    validate_management_event(&event).unwrap();
-    let mut invalid_event = event.clone();
-    invalid_event.ver += 1;
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.issued_at = 0;
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.sequence = 0;
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.deployment_id = "deployment/1".to_owned();
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.request_id = "request/1".to_owned();
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.previous_sha256 = "A".repeat(64);
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.actor.id = "automation id".to_owned();
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.operation = "operation value".to_owned();
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event.clone();
-    invalid_event.release = "release value".to_owned();
-    assert!(validate_management_event(&invalid_event).is_err());
-    let mut invalid_event = event;
-    invalid_event.recovery_boundary = "boundary value".to_owned();
-    assert!(validate_management_event(&invalid_event).is_err());
 
     validate_identifier("issuer:https://auth.example").unwrap();
     for value in [String::new(), "bad value".to_owned(), "x".repeat(257)] {

@@ -2825,7 +2825,6 @@ dependencies = [
 name = "nazo-operator-protocol"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "base64 0.23.1",
  "chrono",
  "ed25519-dalek 3.0.0",

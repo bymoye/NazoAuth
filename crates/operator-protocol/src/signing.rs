@@ -6,29 +6,23 @@ use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 
 use crate::verification::{
-    validate_adoption_receipt, validate_deployment_statement, validate_discovery_statement,
-    validate_file_identifier, validate_final_receipt, validate_identifier,
-    validate_management_event, validate_openid4vp_verification_intent,
-    validate_openid4vp_verification_receipt, validate_runtime_receipt, validate_task,
-    validate_tenant_resource_capability, validate_tenant_resource_identities,
-    validate_tenant_resource_receipt, validate_tenant_resource_task, validate_transition,
-    verify_task_window, verify_tenant_resource_task_window,
+    validate_deployment_statement, validate_discovery_statement, validate_file_identifier,
+    validate_identifier, validate_openid4vp_verification_intent,
+    validate_openid4vp_verification_receipt, validate_tenant_resource_capability,
+    validate_tenant_resource_identities, validate_tenant_resource_receipt,
+    validate_tenant_resource_task, verify_tenant_resource_task_window,
 };
 use crate::wire::{
-    AdoptionReceipt, CanonicalConfigManifest, ControllerTrustTransition, DeploymentStatement,
-    DiscoveryStatement, FinalReceipt, FixedAlgorithm, ManagementAuditEvent,
-    Openid4vpEvidenceContext, Openid4vpNormalizedCreateRequest, Openid4vpPresentationBinding,
-    Openid4vpVerificationIntent, Openid4vpVerificationReceipt, ProtectedHeader, RuntimeReceipt,
-    TaskEnvelope, TenantResourceCapability, TenantResourceIdentity, TenantResourceKind,
-    TenantResourceReceipt, TenantResourceTask,
+    DeploymentStatement, DiscoveryStatement, FixedAlgorithm, Openid4vpEvidenceContext,
+    Openid4vpNormalizedCreateRequest, Openid4vpPresentationBinding, Openid4vpVerificationIntent,
+    Openid4vpVerificationReceipt, ProtectedHeader, TenantResourceCapability,
+    TenantResourceIdentity, TenantResourceKind, TenantResourceReceipt, TenantResourceTask,
 };
 use crate::{
-    ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
-    DEPLOYMENT_STATEMENT_JWS_TYPE, FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE,
-    MAX_COMPACT_JWS_BYTES, OPENID4VP_VERIFICATION_INTENT_JWS_TYPE,
-    OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE,
-    TASK_JWS_TYPE, TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
-    TENANT_RESOURCE_TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
+    CONTROL_DISCOVERY_JWS_TYPE, DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_COMPACT_JWS_BYTES,
+    OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE, ProtocolError,
+    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+    TENANT_RESOURCE_TASK_JWS_TYPE,
 };
 
 pub fn sign_discovery_statement(
@@ -59,15 +53,6 @@ pub fn sign_deployment_statement(
     sign_compact(statement, key_id, DEPLOYMENT_STATEMENT_JWS_TYPE, key)
 }
 
-pub fn sign_adoption_receipt(
-    receipt: &AdoptionReceipt,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_adoption_receipt(receipt)?;
-    sign_compact(receipt, key_id, ADOPTION_RECEIPT_JWS_TYPE, key)
-}
-
 pub fn encode_instance_public_key(key: &VerifyingKey) -> String {
     URL_SAFE_NO_PAD.encode(key.to_bytes())
 }
@@ -85,25 +70,6 @@ pub fn decode_instance_public_key(encoded: &str) -> Result<VerifyingKey, Protoco
 
 pub fn instance_key_id(key: &VerifyingKey) -> String {
     format!("instance-{}", &hex_sha256(&key.to_bytes())[..32])
-}
-
-pub fn sign_task(
-    task: &TaskEnvelope,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_task(task)?;
-    verify_task_window(task, task.iat)?;
-    sign_compact(task, key_id, TASK_JWS_TYPE, key)
-}
-
-pub fn sign_runtime_receipt(
-    receipt: &RuntimeReceipt,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_runtime_receipt(receipt)?;
-    sign_compact(receipt, key_id, RUNTIME_RECEIPT_JWS_TYPE, key)
 }
 
 pub fn sign_openid4vp_verification_receipt(
@@ -182,33 +148,6 @@ pub fn openid4vp_verification_capability_sha256(capability: &str) -> Result<Stri
     Ok(hex_sha256(&binding))
 }
 
-pub fn sign_final_receipt(
-    receipt: &FinalReceipt,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_final_receipt(receipt)?;
-    sign_compact(receipt, key_id, FINAL_RECEIPT_JWS_TYPE, key)
-}
-
-pub fn sign_trust_transition(
-    transition: &ControllerTrustTransition,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_transition(transition)?;
-    sign_compact(transition, key_id, TRUST_TRANSITION_JWS_TYPE, key)
-}
-
-pub fn sign_management_event(
-    event: &ManagementAuditEvent,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_management_event(event)?;
-    sign_compact(event, key_id, MANAGEMENT_EVENT_JWS_TYPE, key)
-}
-
 pub fn sign_tenant_resource_capability(
     capability: &TenantResourceCapability,
     key_id: &str,
@@ -240,16 +179,6 @@ pub fn sign_tenant_resource_receipt(
 ) -> Result<String, ProtocolError> {
     validate_tenant_resource_receipt(receipt)?;
     sign_compact(receipt, key_id, TENANT_RESOURCE_RECEIPT_JWS_TYPE, key)
-}
-
-pub fn canonical_config_sha256(
-    manifest: &CanonicalConfigManifest,
-) -> Result<String, ProtocolError> {
-    if manifest.version != CONFIG_MANIFEST_VERSION {
-        return Err(ProtocolError::Policy("unsupported config manifest version"));
-    }
-    let bytes = serde_json::to_vec(manifest).map_err(|_| ProtocolError::Json)?;
-    Ok(hex_sha256(&bytes))
 }
 
 /// Compute the canonical digest of an active tenant-resource identity set.

@@ -1,15 +1,8 @@
 //! Closed, non-secret wire protocol for privileged NazoAuth operator tasks.
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const CONFIG_MANIFEST_VERSION: u32 = 1;
-pub const TASK_JWS_TYPE: &str = "nazoauth-operator-task+jwt";
-pub const RUNTIME_RECEIPT_JWS_TYPE: &str = "nazoauth-runtime-receipt+jwt";
-pub const FINAL_RECEIPT_JWS_TYPE: &str = "nazoauth-operator-receipt+jwt";
-pub const TRUST_TRANSITION_JWS_TYPE: &str = "nazoauth-controller-trust-transition+jwt";
-pub const MANAGEMENT_EVENT_JWS_TYPE: &str = "nazoauth-management-event+jwt";
 pub const CONTROL_DISCOVERY_JWS_TYPE: &str = "nazoauth-control-discovery+jwt";
 pub const DEPLOYMENT_STATEMENT_JWS_TYPE: &str = "nazoauth-deployment-statement+jwt";
-pub const ADOPTION_RECEIPT_JWS_TYPE: &str = "nazoauth-adoption-receipt+jwt";
 pub const TENANT_RESOURCE_CAPABILITY_JWS_TYPE: &str = "nazoauth-tenant-resource-capability+jwt";
 pub const TENANT_RESOURCE_TASK_JWS_TYPE: &str = "nazoauth-tenant-resource-task+jwt";
 pub const TENANT_RESOURCE_RECEIPT_JWS_TYPE: &str = "nazoauth-tenant-resource-receipt+jwt";
@@ -45,7 +38,7 @@ pub enum ProtocolError {
     Header,
     #[error("compact JWS signature is invalid")]
     Signature,
-    #[error("task envelope violates protocol policy: {0}")]
+    #[error("protocol policy violation: {0}")]
     Policy(&'static str),
 }
 
@@ -66,21 +59,18 @@ pub use recovery::{
     recovery_public_key_bytes, recovery_verifying_key,
 };
 pub use signing::{
-    canonical_config_sha256, canonical_openid4vp_evidence_context_sha256,
-    canonical_openid4vp_normalized_create_request, canonical_openid4vp_presentation_binding_sha256,
-    canonical_tenant_resource_manifest_sha256, compact_sha256, decode_instance_public_key,
-    encode_instance_public_key, instance_key_id, openid4vp_verification_capability_sha256,
-    protected_header, sign_adoption_receipt, sign_deployment_statement, sign_discovery_statement,
-    sign_final_receipt, sign_management_event, sign_openid4vp_verification_intent,
-    sign_openid4vp_verification_receipt, sign_runtime_receipt, sign_task,
-    sign_tenant_resource_capability, sign_tenant_resource_receipt, sign_tenant_resource_task,
-    sign_trust_transition,
+    canonical_openid4vp_evidence_context_sha256, canonical_openid4vp_normalized_create_request,
+    canonical_openid4vp_presentation_binding_sha256, canonical_tenant_resource_manifest_sha256,
+    compact_sha256, decode_instance_public_key, encode_instance_public_key, instance_key_id,
+    openid4vp_verification_capability_sha256, protected_header, sign_deployment_statement,
+    sign_discovery_statement, sign_openid4vp_verification_intent,
+    sign_openid4vp_verification_receipt, sign_tenant_resource_capability,
+    sign_tenant_resource_receipt, sign_tenant_resource_task,
 };
 pub use verification::{
     Openid4vpVerificationIntentExpectations, Openid4vpVerificationReceiptExpectations,
     validate_controller_id, validate_discovery_request, validate_file_identifier_value,
     validate_openid4vc_trust_policy, validate_openid4vp_create_request_jti,
-    validate_runtime_receipt_deployment_binding, validate_task_deployment_binding,
     validate_tenant_resource_capability, validate_tenant_resource_capability_binding,
     validate_tenant_resource_capability_request_binding, validate_tenant_resource_receipt,
     validate_tenant_resource_receipt_binding, validate_tenant_resource_receipt_capability_binding,
@@ -90,15 +80,13 @@ pub use verification::{
     validate_tenant_resource_task_capability_binding,
     validate_tenant_resource_task_capability_binding_at,
     validate_tenant_resource_task_capability_binding_with_digest,
-    validate_tenant_resource_task_deployment_binding, verify_adoption_receipt,
-    verify_deployment_statement, verify_discovery_statement, verify_final_receipt,
-    verify_management_event, verify_openid4vp_verification_intent,
-    verify_openid4vp_verification_receipt, verify_runtime_receipt, verify_task,
-    verify_task_signature, verify_task_window, verify_tenant_resource_capability,
+    validate_tenant_resource_task_deployment_binding, verify_deployment_statement,
+    verify_discovery_statement, verify_openid4vp_verification_intent,
+    verify_openid4vp_verification_receipt, verify_tenant_resource_capability,
     verify_tenant_resource_capability_signature, verify_tenant_resource_receipt,
     verify_tenant_resource_receipt_signature, verify_tenant_resource_receipt_window,
     verify_tenant_resource_task, verify_tenant_resource_task_signature,
-    verify_tenant_resource_task_window, verify_trust_transition,
+    verify_tenant_resource_task_window,
 };
 pub use wire::*;
 
