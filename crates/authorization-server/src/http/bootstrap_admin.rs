@@ -26,6 +26,11 @@ pub(crate) struct InitialAdminBootstrapEndpoint {
     repository: nazo_postgres::InitialAdminBootstrapRepository,
     expected_token_hash: Arc<RwLock<Option<String>>>,
     token_path: PathBuf,
+    /// Deployment identity this server instance was started with. When set,
+    /// every bootstrap claim must name exactly this deployment, binding the
+    /// single-use capability to one managed deployment instead of any replica
+    /// that happens to share the token file.
+    expected_deployment_id: Option<String>,
 }
 
 impl InitialAdminBootstrapEndpoint {
@@ -33,6 +38,7 @@ impl InitialAdminBootstrapEndpoint {
         pool: nazo_postgres::DbPool,
         data_dir: &std::path::Path,
         issuer: &str,
+        deployment_id: Option<&str>,
         tenant: nazo_identity::TenantContext,
     ) -> anyhow::Result<Self> {
         let (token_path, token) =
@@ -55,6 +61,7 @@ impl InitialAdminBootstrapEndpoint {
             repository,
             expected_token_hash: Arc::new(RwLock::new(expected_token_hash)),
             token_path,
+            expected_deployment_id: deployment_id.map(str::to_owned),
         })
     }
 
@@ -63,6 +70,15 @@ impl InitialAdminBootstrapEndpoint {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn deployment_id_matches(&self, presented: &str) -> bool {
+        // Exact bytes: a deployment identity is an identifier, not free text,
+        // and the binding must not be loosened by incidental whitespace.
+        match &self.expected_deployment_id {
+            Some(expected) => constant_time_eq(expected.as_bytes(), presented.as_bytes()),
+            None => presented.is_empty(),
+        }
     }
 
     fn close(&self) {
@@ -142,6 +158,11 @@ fn valid_bootstrap_request_id(request_id: &str) -> bool {
 pub(crate) struct InitialAdminClaimRequest {
     request_id: String,
     token: String,
+    /// Deployment identity the caller believes it is claiming against. Must
+    /// equal this server's `DEPLOYMENT_ID` when one is configured, and must be
+    /// absent/empty otherwise.
+    #[serde(default)]
+    deployment_id: String,
     email: String,
     password: String,
 }
@@ -162,6 +183,9 @@ pub(crate) async fn claim_initial_admin(
     let token_hash = hash_token(&payload.token);
     if !constant_time_eq(expected_hash.as_bytes(), token_hash.as_bytes()) {
         return bootstrap_error(StatusCode::NOT_FOUND, "invalid_bootstrap_token");
+    }
+    if !endpoint.deployment_id_matches(&payload.deployment_id) {
+        return bootstrap_error(StatusCode::BAD_REQUEST, "deployment_mismatch");
     }
     let Ok(email) = normalize_email_address(&payload.email) else {
         return bootstrap_error(StatusCode::BAD_REQUEST, "invalid_email");

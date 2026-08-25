@@ -14,6 +14,14 @@ fn endpoint(
     expected_token_hash: Option<String>,
     token_path: PathBuf,
 ) -> InitialAdminBootstrapEndpoint {
+    endpoint_with_deployment(expected_token_hash, token_path, None)
+}
+
+fn endpoint_with_deployment(
+    expected_token_hash: Option<String>,
+    token_path: PathBuf,
+    expected_deployment_id: Option<&str>,
+) -> InitialAdminBootstrapEndpoint {
     let pool =
         nazo_postgres::create_pool("postgresql://unused:unused@127.0.0.1:1/unused", 1).unwrap();
     InitialAdminBootstrapEndpoint {
@@ -23,14 +31,35 @@ fn endpoint(
         ),
         expected_token_hash: Arc::new(RwLock::new(expected_token_hash)),
         token_path,
+        expected_deployment_id: expected_deployment_id.map(str::to_owned),
+    }
+}
+
+const REQUEST_ID: &str = "bootstrap-admin-0123456789abcdef0123456789abcdef";
+const TOKEN: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+
+fn claim_request(
+    token: &str,
+    deployment_id: &str,
+    email: &str,
+    password: String,
+) -> InitialAdminClaimRequest {
+    InitialAdminClaimRequest {
+        request_id: REQUEST_ID.to_owned(),
+        token: token.to_owned(),
+        deployment_id: deployment_id.to_owned(),
+        email: email.to_owned(),
+        password,
     }
 }
 
 #[test]
 fn claim_request_is_closed_json() {
-    let valid = br#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","token":"token","email":"admin@example.com","password":"correct horse battery staple"}"#;
+    let valid = br#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","token":"token","deployment_id":"deploy-x","email":"admin@example.com","password":"correct horse battery staple"}"#;
     assert!(serde_json::from_slice::<InitialAdminClaimRequest>(valid).is_ok());
-    let unknown = br#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","token":"token","email":"admin@example.com","password":"correct horse battery staple","next":"/ui/auth"}"#;
+    let no_deployment = br#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","token":"token","email":"admin@example.com","password":"correct horse battery staple"}"#;
+    assert!(serde_json::from_slice::<InitialAdminClaimRequest>(no_deployment).is_ok());
+    let unknown = br#"{"request_id":"bootstrap-admin-0123456789abcdef0123456789abcdef","token":"token","deployment_id":"deploy-x","email":"admin@example.com","password":"correct horse battery staple","next":"/ui/auth"}"#;
     assert!(serde_json::from_slice::<InitialAdminClaimRequest>(unknown).is_err());
 }
 
@@ -57,7 +86,6 @@ fn bootstrap_token_format_matches_the_48_byte_base64url_generator() {
 
 #[actix_web::test]
 async fn claim_rejects_closed_invalid_and_malformed_inputs_before_persistence() {
-    let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
     let token_path = std::env::temp_dir().join(format!(
         "nazoauth-bootstrap-token-test-{}",
         rand::random::<u64>()
@@ -65,37 +93,37 @@ async fn claim_rejects_closed_invalid_and_malformed_inputs_before_persistence() 
     let closed = Data::new(endpoint(None, token_path.clone()));
     let response = claim_initial_admin(
         closed,
-        Json(InitialAdminClaimRequest {
-            request_id: "bootstrap-admin-0123456789abcdef0123456789abcdef".to_owned(),
-            token: "token".to_owned(),
-            email: "admin@example.com".to_owned(),
-            password: "correct horse battery staple".to_owned(),
-        }),
+        Json(claim_request(
+            "token",
+            "",
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )),
     )
     .await;
     assert_eq!(response.status(), StatusCode::GONE);
 
-    let ready = Data::new(endpoint(Some(hash_token(token)), token_path.clone()));
+    let ready = Data::new(endpoint(Some(hash_token(TOKEN)), token_path.clone()));
     let response = claim_initial_admin(
         ready.clone(),
-        Json(InitialAdminClaimRequest {
-            request_id: "bootstrap-admin-0123456789abcdef0123456789abcdef".to_owned(),
-            token: "wrong".to_owned(),
-            email: "admin@example.com".to_owned(),
-            password: "correct horse battery staple".to_owned(),
-        }),
+        Json(claim_request(
+            "wrong",
+            "",
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )),
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let response = claim_initial_admin(
         ready.clone(),
-        Json(InitialAdminClaimRequest {
-            request_id: "bootstrap-admin-0123456789abcdef0123456789abcdef".to_owned(),
-            token: token.to_owned(),
-            email: "not-an-email".to_owned(),
-            password: "correct horse battery staple".to_owned(),
-        }),
+        Json(claim_request(
+            TOKEN,
+            "",
+            "not-an-email",
+            "correct horse battery staple".to_owned(),
+        )),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -103,12 +131,7 @@ async fn claim_rejects_closed_invalid_and_malformed_inputs_before_persistence() 
     for password in ["short".to_owned(), "x".repeat(1025)] {
         let response = claim_initial_admin(
             ready.clone(),
-            Json(InitialAdminClaimRequest {
-                request_id: "bootstrap-admin-0123456789abcdef0123456789abcdef".to_owned(),
-                token: token.to_owned(),
-                email: "admin@example.com".to_owned(),
-                password,
-            }),
+            Json(claim_request(TOKEN, "", "admin@example.com", password)),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -118,28 +141,103 @@ async fn claim_rejects_closed_invalid_and_malformed_inputs_before_persistence() 
 }
 
 #[actix_web::test]
-async fn valid_claim_fails_closed_and_remains_retryable_when_persistence_is_unavailable() {
-    let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+async fn deployment_id_binding_rejects_mismatched_or_unexpected_claims_before_persistence() {
     let token_path = std::env::temp_dir().join(format!(
-        "nazoauth-bootstrap-persistence-failure-{}",
+        "nazoauth-bootstrap-deployment-test-{}",
         rand::random::<u64>()
     ));
-    fs::write(&token_path, token).unwrap();
-    let endpoint = Data::new(endpoint(Some(hash_token(token)), token_path.clone()));
 
+    // A server started with DEPLOYMENT_ID only accepts that exact identity.
+    let bound = Data::new(endpoint_with_deployment(
+        Some(hash_token(TOKEN)),
+        token_path.clone(),
+        Some("deploy-abc123"),
+    ));
+    for presented in ["deploy-other", "", " deploy-abc123 "] {
+        let response = claim_initial_admin(
+            bound.clone(),
+            Json(claim_request(
+                TOKEN,
+                presented,
+                "admin@example.com",
+                "correct horse battery staple".to_owned(),
+            )),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+        assert_eq!(body["error"], "deployment_mismatch");
+    }
+
+    // A server without DEPLOYMENT_ID refuses claims that invent an identity.
+    let unbound = Data::new(endpoint(Some(hash_token(TOKEN)), token_path));
     let response = claim_initial_admin(
-        endpoint.clone(),
-        Json(InitialAdminClaimRequest {
-            request_id: "bootstrap-admin-0123456789abcdef0123456789abcdef".to_owned(),
-            token: token.to_owned(),
-            email: "Admin@Example.COM".to_owned(),
-            password: "correct horse battery staple".to_owned(),
-        }),
+        unbound,
+        Json(claim_request(
+            TOKEN,
+            "deploy-abc123",
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn a_deployment_bound_claim_passes_the_identity_gate() {
+    let token_path = std::env::temp_dir().join(format!(
+        "nazoauth-bootstrap-deployment-pass-{}",
+        rand::random::<u64>()
+    ));
+    fs::write(&token_path, TOKEN).unwrap();
+    let bound = Data::new(endpoint_with_deployment(
+        Some(hash_token(TOKEN)),
+        token_path.clone(),
+        Some("deploy-abc123"),
+    ));
+
+    // The pool is unreachable, so the request must reach exactly the
+    // persistence-unavailable boundary — proving every earlier gate,
+    // including the deployment binding, accepted the claim.
+    let response = claim_initial_admin(
+        bound,
+        Json(claim_request(
+            TOKEN,
+            "deploy-abc123",
+            "Admin@Example.COM",
+            "correct horse battery staple".to_owned(),
+        )),
     )
     .await;
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(endpoint.expected_token_hash(), Some(hash_token(token)));
+    fs::remove_file(token_path).unwrap();
+}
+
+#[actix_web::test]
+async fn valid_claim_fails_closed_and_remains_retryable_when_persistence_is_unavailable() {
+    let token_path = std::env::temp_dir().join(format!(
+        "nazoauth-bootstrap-persistence-failure-{}",
+        rand::random::<u64>()
+    ));
+    fs::write(&token_path, TOKEN).unwrap();
+    let endpoint = Data::new(endpoint(Some(hash_token(TOKEN)), token_path.clone()));
+
+    let response = claim_initial_admin(
+        endpoint.clone(),
+        Json(claim_request(
+            TOKEN,
+            "",
+            "Admin@Example.COM",
+            "correct horse battery staple".to_owned(),
+        )),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(endpoint.expected_token_hash(), Some(hash_token(TOKEN)));
     assert!(token_path.exists());
     fs::remove_file(token_path).unwrap();
 }
@@ -161,6 +259,7 @@ async fn initialization_persists_a_retryable_token_before_database_ownership_is_
         pool,
         &root,
         "https://auth.example",
+        Some("deploy-abc123"),
         nazo_identity::TenantContext::default_system(),
     )
     .await

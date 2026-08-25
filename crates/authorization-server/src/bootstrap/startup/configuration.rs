@@ -117,6 +117,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
             diesel_db.clone(),
             &settings.storage.data_dir,
             &settings.endpoint.issuer,
+            config.optional_string("DEPLOYMENT_ID").as_deref(),
             settings.tenant.context,
         )
         .await?,
