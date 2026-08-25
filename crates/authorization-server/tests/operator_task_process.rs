@@ -107,6 +107,13 @@ fn write_runtime_fixtures(root: &Path) {
     .unwrap();
     fs::write(root.join("config-revision"), format!("{CONFIG_REVISION}\n")).unwrap();
     fs::create_dir_all(root.join("keys")).unwrap();
+    // Operator-state deployment anchor: non-bootstrap tasks require it, and
+    // persist_operator_state_identity would write the same value on first use.
+    fs::write(
+        root.join("state/deployment-id"),
+        format!("{DEPLOYMENT}\n"),
+    )
+    .unwrap();
 }
 
 struct SpawnOptions<'a> {
@@ -127,6 +134,11 @@ fn spawn_operator_task(root: &Path, compact: &str, options: SpawnOptions<'_>) ->
         )
         .env("NAZOAUTH_OPERATOR_STATE_DIRECTORY", root.join("state"))
         .env("JWK_KEYS_DIR", root.join("keys"))
+        // Admission pins task.embedded to the executing runtime identity; the
+        // fixtures below sign operations whose embedded facts are exactly the
+        // development fallbacks.
+        .env("NAZOAUTH_BUILD_RELEASE", "development")
+        .env("NAZOAUTH_BUILD_REVISION", "development")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -185,7 +197,7 @@ fn wait_for_marker(path: &Path) {
 
 fn build_identity() -> ControlBuildIdentity {
     ControlBuildIdentity {
-        product: "nazauth".to_owned(),
+        product: nazo_operator_protocol::CONTROL_DISCOVERY_PRODUCT.to_owned(),
         version: option_env!("NAZOAUTH_BUILD_RELEASE")
             .unwrap_or("development")
             .to_owned(),
@@ -245,6 +257,7 @@ async fn signed_control_operation_executes_once_and_recovers_from_the_journal() 
         return;
     };
     let controller = SigningKey::from_bytes(&[11; 32]);
+    let public_key = controller.verifying_key().to_bytes();
     let kid = controller_key_id(&controller.verifying_key());
     registry
         .create_slot(
@@ -252,7 +265,7 @@ async fn signed_control_operation_executes_once_and_recovers_from_the_journal() 
                 deployment_id: DEPLOYMENT.to_owned(),
                 label: "primary".to_owned(),
                 kid: kid.clone(),
-                public_key: [11; 32],
+                public_key,
             },
             Utc::now(),
         )
@@ -307,6 +320,7 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
         return;
     };
     let controller = SigningKey::from_bytes(&[12; 32]);
+    let public_key = controller.verifying_key().to_bytes();
     let kid = controller_key_id(&controller.verifying_key());
     registry
         .create_slot(
@@ -314,7 +328,7 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
                 deployment_id: DEPLOYMENT.to_owned(),
                 label: "primary".to_owned(),
                 kid: kid.clone(),
-                public_key: [12; 32],
+                public_key,
             },
             Utc::now(),
         )
@@ -340,7 +354,10 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
     killed.kill().unwrap();
     assert!(!killed.wait().unwrap().success());
 
-    // The accepted record was durably published before any side effect.
+    // The operation was durably journaled before any side effect: at the
+    // before-side-effect failpoint the record has already crossed accepted ->
+    // executing, which is exactly what makes the restart resume (never
+    // duplicate) the mutation.
     let journal = root
         .join("state/control-journal")
         .join(format!("{operation_id}.journal.json"));
@@ -348,7 +365,7 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
     assert!(
         fs::read_to_string(&journal)
             .unwrap()
-            .contains("\"accepted\"")
+            .contains("\"executing\"")
     );
 
     let restarted = run_operator_task(&root, &compact, vec![("DATABASE_URL", database_url)]);
@@ -376,6 +393,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
         return;
     };
     let controller = SigningKey::from_bytes(&[13; 32]);
+    let primary_public_key = controller.verifying_key().to_bytes();
     let kid = controller_key_id(&controller.verifying_key());
     registry
         .create_slot(
@@ -383,7 +401,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
                 deployment_id: DEPLOYMENT.to_owned(),
                 label: "primary".to_owned(),
                 kid: kid.clone(),
-                public_key: [13; 32],
+                public_key: primary_public_key,
             },
             Utc::now(),
         )
@@ -392,6 +410,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
 
     // An expired key: enrolled 31 days ago under the fixed 30-day TTL.
     let expired_key = SigningKey::from_bytes(&[14; 32]);
+    let expired_public_key = expired_key.verifying_key().to_bytes();
     let expired_kid = controller_key_id(&expired_key.verifying_key());
     registry
         .create_slot(
@@ -399,7 +418,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
                 deployment_id: DEPLOYMENT.to_owned(),
                 label: "stale".to_owned(),
                 kid: expired_kid.clone(),
-                public_key: [14; 32],
+                public_key: expired_public_key,
             },
             Utc::now() - ChronoDuration::days(31),
         )
@@ -408,6 +427,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
 
     // A revoked key, revoked through its exact authoritative controller_id.
     let revoked_key = SigningKey::from_bytes(&[15; 32]);
+    let revoked_public_key = revoked_key.verifying_key().to_bytes();
     let revoked_kid = controller_key_id(&revoked_key.verifying_key());
     registry
         .create_slot(
@@ -415,7 +435,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
                 deployment_id: DEPLOYMENT.to_owned(),
                 label: "doomed".to_owned(),
                 kid: revoked_kid.clone(),
-                public_key: [15; 32],
+                public_key: revoked_public_key,
             },
             Utc::now(),
         )
@@ -511,7 +531,21 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
         &kid,
         ControlOperationPayload::KeysValidate,
     );
-    assert_rejection(&run(signed(&forged, &stranger), env()), "authorization");
+    // Build the forged envelope by keeping the trusted kid in the header and
+    // re-signing the same signing input with the stranger key: structurally
+    // valid, cryptographically foreign.
+    let valid_for_kid = signed(&forged, &controller);
+    let mut segments = valid_for_kid.split('.');
+    let (protected, payload) = match (segments.next(), segments.next()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => panic!("compact JWS shape"),
+    };
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as FORGED_B64, Engine as _};
+    use ed25519_dalek::Signer as _;
+    let signing_input = format!("{protected}.{payload}");
+    let forged_signature = FORGED_B64.encode(stranger.sign(signing_input.as_bytes()).to_bytes());
+    let forged_compact = format!("{signing_input}.{forged_signature}");
+    assert_rejection(&run(forged_compact, env()), "authorization");
 
     // Wrong embedded build identity (J1).
     let mut wrong_target = operation(
@@ -583,6 +617,7 @@ async fn keys_family_runs_through_the_real_engine_and_journals_the_outcome() {
         return;
     };
     let controller = SigningKey::from_bytes(&[17; 32]);
+    let public_key = controller.verifying_key().to_bytes();
     let kid = controller_key_id(&controller.verifying_key());
     registry
         .create_slot(
@@ -590,7 +625,7 @@ async fn keys_family_runs_through_the_real_engine_and_journals_the_outcome() {
                 deployment_id: DEPLOYMENT.to_owned(),
                 label: "primary".to_owned(),
                 kid: kid.clone(),
-                public_key: [17; 32],
+                public_key,
             },
             Utc::now(),
         )
