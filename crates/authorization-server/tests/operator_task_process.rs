@@ -109,11 +109,7 @@ fn write_runtime_fixtures(root: &Path) {
     fs::create_dir_all(root.join("keys")).unwrap();
     // Operator-state deployment anchor: non-bootstrap tasks require it, and
     // persist_operator_state_identity would write the same value on first use.
-    fs::write(
-        root.join("state/deployment-id"),
-        format!("{DEPLOYMENT}\n"),
-    )
-    .unwrap();
+    fs::write(root.join("state/deployment-id"), format!("{DEPLOYMENT}\n")).unwrap();
 }
 
 struct SpawnOptions<'a> {
@@ -540,7 +536,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
         (Some(a), Some(b)) => (a, b),
         _ => panic!("compact JWS shape"),
     };
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as FORGED_B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as FORGED_B64};
     use ed25519_dalek::Signer as _;
     let signing_input = format!("{protected}.{payload}");
     let forged_signature = FORGED_B64.encode(stranger.sign(signing_input.as_bytes()).to_bytes());
