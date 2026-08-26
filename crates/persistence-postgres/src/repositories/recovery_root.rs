@@ -77,9 +77,12 @@ pub const RECOVERY_CHALLENGE_TTL_SECONDS: i64 = 600;
 /// the unauthenticated endpoint cannot be used as an oracle or noise source.
 pub const MAX_RECOVERY_CHALLENGE_ATTEMPTS: i32 = 5;
 
-/// Advisory-lock seed namespace so per-deployment recovery locks serialize
-/// rotation commits (D12) against recovery submissions (D11).
-const RECOVERY_LOCK_SEED: i64 = 0x4E5A_4354_5200_0002;
+/// Recovery Root/challenge mutations take the SHARED per-deployment identity
+/// lock (`controller_registry::DEPLOYMENT_IDENTITY_LOCK_SEED`) so they
+/// serialize against concurrent slot binds/rotates/revokes (P0-5). The old
+/// separate RECOVERY seed let a bind commit slip between the challenge's
+/// active-slot re-check and its batch revoke.
+use super::controller_registry::DEPLOYMENT_IDENTITY_LOCK_SEED;
 
 /// One stored Recovery Root (public material only).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,7 +421,7 @@ async fn lock_deployment_recovery(
 ) -> Result<(), RecoveryRootError> {
     sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
         .bind::<Varchar, _>(deployment_id)
-        .bind::<BigInt, _>(RECOVERY_LOCK_SEED)
+        .bind::<BigInt, _>(DEPLOYMENT_IDENTITY_LOCK_SEED)
         .execute(connection)
         .await?;
     Ok(())

@@ -757,3 +757,69 @@ async fn recovered_slots_count_toward_the_three_slot_bound() {
         .expect_err("fourth active slot must be refused");
     assert!(matches!(refused, ControllerRegistryError::SlotLimit(_)));
 }
+
+/// P0-5 negative test: a recovery submission must WAIT for the shared
+/// per-deployment identity lock. Before the lock unification a concurrent
+/// bind could commit its active slot between the challenge's re-check and
+/// the batch revoke, because recovery held a different advisory key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_submission_waits_for_the_deployment_identity_lock() {
+    use nazo_postgres::DEPLOYMENT_IDENTITY_LOCK_SEED;
+    use std::time::Duration as StdDuration;
+
+    let Some((url, repository)) = isolated("lock_interleave").await else {
+        return;
+    };
+    let deployment = "deployment-recovery-lock";
+    let material = recovery_material(deployment, 1);
+    let next = recovery_material(deployment, 2);
+    enroll_root(&repository, deployment, &material, at(0)).await;
+
+    // No admitting controllers exist, so break-glass issuance succeeds.
+    let challenge = challenge_input(deployment, 40, &next);
+    let proposal = proposal_from(&challenge);
+    let issued = repository
+        .issue_recovery_challenge(challenge, at(1))
+        .await
+        .expect("challenge issues without admitted controllers");
+    let signature = material.sign(&proposal, issued.challenge_id, &issued.nonce);
+
+    // An explicit transaction occupies the SHARED deployment identity lock —
+    // exactly what any concurrent bind/rotate commit holds while it runs.
+    let mut holder = AsyncPgConnection::establish(&url)
+        .await
+        .expect("holder connection");
+    holder
+        .batch_execute("BEGIN")
+        .await
+        .expect("holder transaction");
+    holder
+        .batch_execute(&format!(
+            "SELECT pg_advisory_xact_lock(hashtextextended('{deployment}', \
+             {DEPLOYMENT_IDENTITY_LOCK_SEED}));"
+        ))
+        .await
+        .expect("holder takes the identity lock");
+
+    // While the lock is held the submission cannot complete.
+    let pending = repository.submit_recovery_challenge(
+        submission(deployment, issued.challenge_id, &issued.nonce, &signature),
+        at(2),
+    );
+    tokio::pin!(pending);
+    let raced = tokio::time::timeout(StdDuration::from_millis(400), pending.as_mut()).await;
+    assert!(
+        raced.is_err(),
+        "submission must block on the shared deployment identity lock"
+    );
+
+    // Releasing the holder lets the same submission finish its commit.
+    holder
+        .batch_execute("COMMIT")
+        .await
+        .expect("holder releases the lock");
+    let commit = pending
+        .await
+        .expect("submission completes once the lock releases");
+    assert_eq!(commit.slot.kid, kid_of(&controller_key_for_slot(40)));
+}

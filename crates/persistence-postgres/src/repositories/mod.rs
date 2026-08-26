@@ -37,9 +37,9 @@ pub use clients::{
 pub use controller_registry::{
     AdmittedController, CONTROLLER_KEY_TTL_SECONDS, CommitWithApprovalError,
     ControllerIdentityAction, ControllerRegistryError, ControllerRegistryRepository,
-    ControllerSlotStatus, ControllerSlotSummary, IDENTITY_APPROVAL_TTL_SECONDS,
-    IdentityApprovalError, IssuedIdentityApproval, MAX_ACTIVE_CONTROLLER_SLOTS, NewControllerSlot,
-    RotateControllerKey, StoredControllerSlot,
+    ControllerSlotStatus, ControllerSlotSummary, DEPLOYMENT_IDENTITY_LOCK_SEED,
+    IDENTITY_APPROVAL_TTL_SECONDS, IdentityApprovalError, IssuedIdentityApproval,
+    MAX_ACTIVE_CONTROLLER_SLOTS, NewControllerSlot, RotateControllerKey, StoredControllerSlot,
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};

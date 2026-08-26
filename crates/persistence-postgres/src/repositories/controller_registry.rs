@@ -60,9 +60,12 @@ pub const MAX_ACTIVE_CONTROLLER_SLOTS: usize = 3;
 /// Fresh-2FA approval lifetime in seconds: a fixed 10-minute ceiling (04 §3).
 pub const IDENTITY_APPROVAL_TTL_SECONDS: i64 = 600;
 
-/// Advisory-lock seed namespace so per-deployment registry locks cannot collide
-/// with other advisory-key users of this schema.
-const SLOT_LOCK_SEED: i64 = 0x4E5A_4354_5200_0001;
+/// Advisory-lock seed namespace for the per-deployment identity lock. Slot
+/// mutations AND Recovery Root/challenge mutations share this single lock so
+/// a break-glass recovery cannot interleave its active-slot re-check and
+/// batch revoke with a concurrent bind/rotate commit (P0-5): one deployment,
+/// one identity, one lock order.
+pub const DEPLOYMENT_IDENTITY_LOCK_SEED: i64 = 0x4E5A_4354_5200_0001;
 
 /// Legal slot indices; the migration pins this range with a CHECK constraint.
 const SLOT_INDEX_RANGE: [i16; 3] = [0, 1, 2];
@@ -552,7 +555,7 @@ async fn lock_deployment_slots(
 ) -> Result<(), ControllerRegistryError> {
     sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
         .bind::<Varchar, _>(deployment_id)
-        .bind::<BigInt, _>(SLOT_LOCK_SEED)
+        .bind::<BigInt, _>(DEPLOYMENT_IDENTITY_LOCK_SEED)
         .execute(connection)
         .await?;
     Ok(())
