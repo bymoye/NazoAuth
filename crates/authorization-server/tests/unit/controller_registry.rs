@@ -34,6 +34,8 @@ fn slot_request(deployment: &str, label: &str, seed: u8) -> SlotChangeRequest {
         label: label.to_owned(),
         kid: kid_text(seed),
         public_key: public_key_text(seed),
+        recovery_public_key: None,
+        recovery_kid: None,
     }
 }
 
