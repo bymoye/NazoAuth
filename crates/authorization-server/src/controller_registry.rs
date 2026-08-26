@@ -33,7 +33,8 @@ pub use nazo_postgres::{
 use nazo_postgres::{
     AdmittedController, CommitWithApprovalError, ControllerIdentityAction, ControllerRegistryError,
     ControllerRegistryRepository, ControllerSlotSummary, IdentityApprovalError,
-    IssuedIdentityApproval, NewControllerSlot, RotateControllerKey, StoredControllerSlot,
+    IssuedIdentityApproval, NewControllerSlot, NewRecoveryRoot, RotateControllerKey,
+    StoredControllerSlot,
 };
 
 /// Fixed 7-day pre-expiry warning threshold (04 §2).
@@ -81,6 +82,14 @@ pub struct SlotChangeRequest {
     pub public_key: String,
     /// Unpadded base64url SHA-256 of the public key bytes.
     pub kid: String,
+    /// P0-3 atomic first binding: the replacement Recovery Public Key that
+    /// the SAME transaction must enroll as generation 1. Only `bind` may
+    /// carry it — a fresh install can never be left without a Recovery Root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_public_key: Option<String>,
+    /// Unpadded base64url SHA-256 of `recovery_public_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_kid: Option<String>,
 }
 
 /// Rotation keeps the same `controller_id` and replaces its key material.
@@ -135,7 +144,33 @@ impl IdentityChange {
 
     fn validate(&self) -> Result<(), ControllerRegistryServiceError> {
         match self {
-            Self::Bind(request) | Self::Add(request) => {
+            Self::Bind(request) => {
+                validate_slot_request(
+                    &request.deployment_id,
+                    &request.label,
+                    &request.kid,
+                    &request.public_key,
+                )?;
+                // P0-3: the first binding MUST enroll a Recovery Root in the
+                // same transaction; a deployment can never be left without
+                // one. Both fields must arrive together and bind to each other.
+                let (Some(recovery_public_key), Some(recovery_kid)) = (
+                    request.recovery_public_key.as_deref(),
+                    request.recovery_kid.as_deref(),
+                ) else {
+                    return Err(ControllerRegistryServiceError::Invalid(
+                        "bind 必须携带 recovery_public_key/recovery_kid，首次绑定与 Recovery Root 是一个原子事务.",
+                    ));
+                };
+                validate_recovery_binding(recovery_public_key, recovery_kid)?;
+                Ok(())
+            }
+            Self::Add(request) => {
+                if request.recovery_public_key.is_some() || request.recovery_kid.is_some() {
+                    return Err(ControllerRegistryServiceError::Invalid(
+                        "add 不允许携带 recovery 字段；Recovery Root 只随首次 bind 建立.",
+                    ));
+                }
                 validate_slot_request(
                     &request.deployment_id,
                     &request.label,
@@ -167,13 +202,34 @@ impl IdentityChange {
         // order is sorted-key deterministic; compact serialization makes the
         // digest independent of transport formatting.
         let value = match self {
-            Self::Bind(request) => serde_json::json!({
-                "action": "bind",
-                "deployment_id": request.deployment_id,
-                "kid": request.kid,
-                "label": request.label,
-                "public_key": request.public_key,
-            }),
+            Self::Bind(request) => {
+                // P0-3: the recovery fields belong to the approved payload
+                // whenever present, so the digest binds exactly what the
+                // administrator saw and what the commit will enroll.
+                let mut map = serde_json::Map::from_iter([
+                    ("action".to_owned(), serde_json::json!("bind")),
+                    (
+                        "deployment_id".to_owned(),
+                        serde_json::json!(request.deployment_id),
+                    ),
+                    ("kid".to_owned(), serde_json::json!(request.kid)),
+                    ("label".to_owned(), serde_json::json!(request.label)),
+                    (
+                        "public_key".to_owned(),
+                        serde_json::json!(request.public_key),
+                    ),
+                ]);
+                if let Some(recovery_kid) = &request.recovery_kid {
+                    map.insert("recovery_kid".to_owned(), serde_json::json!(recovery_kid));
+                }
+                if let Some(recovery_public_key) = &request.recovery_public_key {
+                    map.insert(
+                        "recovery_public_key".to_owned(),
+                        serde_json::json!(recovery_public_key),
+                    );
+                }
+                serde_json::Value::Object(map)
+            }
             Self::Add(request) => serde_json::json!({
                 "action": "add",
                 "deployment_id": request.deployment_id,
@@ -383,9 +439,33 @@ impl ControllerRegistryService {
             kid: request.kid.clone(),
             public_key: decode_public_key(&request.public_key)?,
         };
+        // P0-3: a bind carries the initial Recovery Root; the repository
+        // enrolls it inside the SAME transaction as approval consumption and
+        // slot insertion, refusing if a root already exists.
+        let initial_root = match (
+            action,
+            request.recovery_public_key.as_deref(),
+            request.recovery_kid.as_deref(),
+        ) {
+            (ControllerIdentityAction::Bind, Some(recovery_public_key), Some(recovery_kid)) => {
+                Some(NewRecoveryRoot {
+                    deployment_id: request.deployment_id.clone(),
+                    kid: recovery_kid.to_owned(),
+                    public_key: decode_public_key(recovery_public_key)?,
+                })
+            }
+            _ => None,
+        };
         let committed = self
             .repository
-            .commit_slot_creation(approval_token, action, &change.action_sha256(), slot, now)
+            .commit_slot_creation(
+                approval_token,
+                action,
+                &change.action_sha256(),
+                slot,
+                initial_root,
+                now,
+            )
             .await?;
         Ok(committed)
     }
@@ -494,6 +574,21 @@ fn decode_public_key(text: &str) -> Result<[u8; 32], ControllerRegistryServiceEr
         .ok_or(ControllerRegistryServiceError::Invalid(
             "public_key 必须是 32 字节 Ed25519 公钥的未填充 base64url 编码.",
         ))
+}
+
+/// P0-3: shape + binding check for the recovery material a bind carries.
+fn validate_recovery_binding(
+    recovery_public_key: &str,
+    recovery_kid: &str,
+) -> Result<(), ControllerRegistryServiceError> {
+    let key = decode_public_key(recovery_public_key)?;
+    let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(key));
+    if digest != recovery_kid {
+        return Err(ControllerRegistryServiceError::Invalid(
+            "recovery_kid 与 recovery_public_key 不匹配.",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

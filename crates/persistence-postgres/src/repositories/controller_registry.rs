@@ -49,6 +49,17 @@ use uuid::Uuid;
 
 use crate::{DbPool, get_conn};
 
+use super::recovery_root::{
+    NewRecoveryRoot, RecoveryRootError, enroll_initial_root_on_connection,
+    read_root_on_connection_for_registry,
+};
+
+/// P0-3 failure text: a bind that carries an initial Recovery Root refuses to
+/// run when a root already exists (first binding initializes; it never
+/// overwrites). The transaction rolls the slot back with it.
+const ROOT_ALREADY_PRESENT: &str =
+    "recovery root already present; bind only initializes a deployment without one";
+
 /// Fixed controller key lifetime in seconds: exactly 30 days (04 §2).  Not a
 /// configuration item, never derived from a natural month, never renewed in
 /// place.
@@ -561,6 +572,22 @@ async fn lock_deployment_slots(
     Ok(())
 }
 
+/// P0-3: map a recovery-plane error raised inside the bind transaction.
+/// Transport stays transport (outcomes cannot be inferred); every other
+/// recovery failure is an authoritative failure of the whole first binding —
+/// the transaction rolls the slot back with it. The mapped variant carries
+/// the recovery error's stable operator message in its anyhow chain so the
+/// diagnostic is not lost, while the retry semantics stay honest: the
+/// approval rolled back unconsumed and identical inputs may resubmit.
+fn map_recovery_error(error: RecoveryRootError) -> CommitWithApprovalError {
+    match error {
+        RecoveryRootError::Transport(inner) => CommitWithApprovalError::Transport(inner),
+        other => CommitWithApprovalError::Transport(anyhow::anyhow!(
+            "initial recovery root enrollment failed and the first binding rolled back: {other}"
+        )),
+    }
+}
+
 async fn load_slot_for_update(
     connection: &mut AsyncPgConnection,
     deployment_id: &str,
@@ -1043,6 +1070,7 @@ impl ControllerRegistryRepository {
         expected_action: ControllerIdentityAction,
         expected_action_sha256: &str,
         slot: NewControllerSlot,
+        initial_root: Option<NewRecoveryRoot>,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, CommitWithApprovalError> {
         validate_slot_input(
@@ -1067,9 +1095,33 @@ impl ControllerRegistryRepository {
                     now,
                 )
                 .await?;
-                insert_slot_on_connection(connection, &slot, now)
+                // P0-3: the shared identity lock is held from BEFORE the root
+                // existence check through the commit, so a concurrent
+                // bind/rotate/revoke can never interleave here.
+                lock_deployment_slots(connection, &slot.deployment_id).await?;
+                if initial_root.is_some() {
+                    let existing =
+                        read_root_on_connection_for_registry(connection, &slot.deployment_id)
+                            .await
+                            .map_err(map_recovery_error)?;
+                    if existing.is_some() {
+                        return Err(CommitWithApprovalError::Mutation(
+                            ControllerRegistryError::InvalidIdentity(ROOT_ALREADY_PRESENT),
+                        ));
+                    }
+                }
+                let stored = insert_slot_on_connection(connection, &slot, now)
                     .await
-                    .map_err(CommitWithApprovalError::Mutation)
+                    .map_err(CommitWithApprovalError::Mutation)?;
+                // Same-transaction enrollment: any failure rolls the slot
+                // back too, so a first binding can never exist without its
+                // Recovery Root (and vice versa).
+                if let Some(root) = &initial_root {
+                    enroll_initial_root_on_connection(connection, root, now)
+                        .await
+                        .map_err(map_recovery_error)?;
+                }
+                Ok(stored)
             })
             .await
     }

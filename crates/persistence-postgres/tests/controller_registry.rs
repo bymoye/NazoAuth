@@ -430,6 +430,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Bind,
             &"b".repeat(64),
             slot_input(deployment, "bind-target", 1),
+            None,
             at(1),
         )
         .await
@@ -446,6 +447,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Add,
             &action_sha256,
             slot_input(deployment, "add-target", 1),
+            None,
             at(2),
         )
         .await
@@ -462,6 +464,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Bind,
             &action_sha256,
             slot_input(deployment, "bind-target", 1),
+            None,
             at(3),
         )
         .await
@@ -475,6 +478,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Bind,
             &action_sha256,
             slot_input(deployment, "bind-target", 1),
+            None,
             at(4),
         )
         .await
@@ -496,6 +500,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Add,
             &action_sha256,
             slot_input(deployment, "unknown", 6),
+            None,
             at(5),
         )
         .await
@@ -522,6 +527,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Add,
             &"c".repeat(64),
             slot_input(deployment, "late", 7),
+            None,
             expected_expiry,
         )
         .await
@@ -557,6 +563,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
                 ControllerIdentityAction::Add,
                 &digest_a,
                 slot_input(&deployment_clone, "race-a", 21),
+                None,
                 at(21),
             )
             .await
@@ -567,6 +574,7 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
             ControllerIdentityAction::Add,
             &digest_b,
             slot_input(deployment, "race-b", 22),
+            None,
             at(21),
         )
         .await;
@@ -599,4 +607,98 @@ async fn approvals_are_single_use_bound_to_action_hash_and_expire() {
         1,
         "the winning commit enrolls exactly one slot"
     );
+}
+
+/// P0-3: a bind that carries an initial Recovery Root enrolls slot + root in
+/// ONE transaction; a second bind attempt over the existing root rolls back
+/// completely (no new slot, root untouched).
+#[tokio::test]
+async fn atomic_first_bind_enrolls_root_and_refuses_a_second() {
+    let Some((url, repository)) = isolated_repository("atomic_bind").await else {
+        return;
+    };
+    let deployment = "deployment-atomic-bind";
+    let admin = Uuid::now_v7();
+    let digest = "a".repeat(64);
+    let issued = repository
+        .issue_identity_approval(
+            deployment,
+            ControllerIdentityAction::Bind,
+            &digest,
+            admin,
+            at(0),
+        )
+        .await
+        .expect("approval issuance should succeed");
+
+    // Recovery key material distinct from the slot's; kid computed over the
+    // exact bytes handed to the commit (the service layer enforces binding).
+    let mut root_key = [0x5Au8; 32];
+    root_key[0] = 0xA5;
+    let root = nazo_postgres::NewRecoveryRoot {
+        deployment_id: deployment.to_owned(),
+        kid: kid_of(&root_key),
+        public_key: root_key,
+    };
+    let committed = repository
+        .commit_slot_creation(
+            &issued.token,
+            ControllerIdentityAction::Bind,
+            &digest,
+            slot_input(deployment, "first-bind", 30),
+            Some(root),
+            at(1),
+        )
+        .await
+        .expect("atomic first bind should succeed");
+    assert_eq!(committed.label, "first-bind");
+
+    // The Recovery Root exists in the same committed state.
+    let recovery = nazo_postgres::RecoveryRootRepository::new(
+        create_pool(url.clone(), 8).expect("pool should create"),
+    );
+    let stored = recovery
+        .current_root(deployment)
+        .await
+        .expect("root lookup works")
+        .expect("first bind must leave exactly one root");
+    assert_eq!(stored.generation, 1);
+    assert_eq!(stored.recovery_kid.as_str(), kid_of(&root_key));
+
+    // A second bind over the existing root is refused and rolls back.
+    let second_issued = repository
+        .issue_identity_approval(
+            deployment,
+            ControllerIdentityAction::Bind,
+            &"b".repeat(64),
+            admin,
+            at(2),
+        )
+        .await
+        .expect("second approval issuance should succeed");
+    let refused = repository
+        .commit_slot_creation(
+            &second_issued.token,
+            ControllerIdentityAction::Bind,
+            &"b".repeat(64),
+            slot_input(deployment, "second-bind", 31),
+            Some(nazo_postgres::NewRecoveryRoot {
+                deployment_id: deployment.to_owned(),
+                kid: kid_of(&[0x33u8; 32]),
+                public_key: [0x33u8; 32],
+            }),
+            at(3),
+        )
+        .await
+        .expect_err("bind over an existing root must refuse");
+    assert!(matches!(
+        refused,
+        CommitWithApprovalError::Mutation(ControllerRegistryError::InvalidIdentity(_))
+    ));
+    // The refusal consumed nothing and enrolled nothing.
+    let slots = repository
+        .list_slots(deployment)
+        .await
+        .expect("listing works");
+    assert_eq!(slots.len(), 1, "the refused bind left no extra slot");
 }

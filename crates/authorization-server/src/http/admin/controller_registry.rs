@@ -79,6 +79,7 @@ pub(crate) async fn admin_controller_slots(
 /// 审批签发请求：`action` 判别必需载荷；字段显式声明以保持严格反序列化。
 /// bind/add 需要 label/public_key/kid；rotate 额外需要 controller_id；
 /// revoke 只允许 deployment_id/controller_id，携带其余字段一律拒绝。
+/// P0-3：仅 bind 允许携带 recovery_public_key/recovery_kid（原子首绑）。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApprovalRequestBody {
@@ -92,6 +93,10 @@ pub(crate) struct ApprovalRequestBody {
     pub public_key: Option<String>,
     #[serde(default)]
     pub kid: Option<String>,
+    #[serde(default)]
+    pub recovery_public_key: Option<String>,
+    #[serde(default)]
+    pub recovery_kid: Option<String>,
 }
 
 impl ApprovalRequestBody {
@@ -130,12 +135,19 @@ impl ApprovalRequestBody {
                 if self.controller_id.is_some() {
                     return Err(Self::unexpected("controller_id"));
                 }
+                if (self.recovery_public_key.is_some() || self.recovery_kid.is_some())
+                    && self.action != "bind"
+                {
+                    return Err(Self::unexpected("recovery_public_key/recovery_kid"));
+                }
                 let (label, public_key, kid) = self.slot_fields()?;
                 let request = SlotChangeRequest {
                     deployment_id: self.deployment_id.clone(),
                     label,
                     kid,
                     public_key,
+                    recovery_public_key: self.recovery_public_key.clone(),
+                    recovery_kid: self.recovery_kid.clone(),
                 };
                 Ok(if self.action == "bind" {
                     IdentityChange::Bind(request)
@@ -265,6 +277,7 @@ pub(crate) async fn admin_controller_approval(
 ///
 /// bind 与 add 共用该载荷；`action` 决定审批绑定语义。字段显式声明以保持
 /// 严格反序列化（serde flatten 会削弱 deny_unknown_fields 的严格性）。
+/// P0-3：仅 bind 允许携带 recovery 双字段（与审批同一原子载荷）。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SlotCommitBody {
@@ -274,6 +287,10 @@ pub(crate) struct SlotCommitBody {
     pub label: String,
     pub public_key: String,
     pub kid: String,
+    #[serde(default)]
+    pub recovery_public_key: Option<String>,
+    #[serde(default)]
+    pub recovery_kid: Option<String>,
 }
 
 impl SlotCommitBody {
@@ -283,6 +300,8 @@ impl SlotCommitBody {
             label: self.label.clone(),
             kid: self.kid.clone(),
             public_key: self.public_key.clone(),
+            recovery_public_key: self.recovery_public_key.clone(),
+            recovery_kid: self.recovery_kid.clone(),
         }
     }
 

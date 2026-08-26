@@ -444,6 +444,42 @@ async fn read_root_on_connection(
     .map_err(transport)
 }
 
+/// P0-3 sibling-module surface for the atomic first-bind commit: the registry
+/// checks root absence and enrolls generation 1 inside ITS transaction, so
+/// slot + root become one atomic unit.
+pub(crate) async fn read_root_on_connection_for_registry(
+    connection: &mut AsyncPgConnection,
+    deployment_id: &str,
+) -> Result<Option<StoredRecoveryRoot>, RecoveryRootError> {
+    read_root_on_connection(connection, deployment_id).await
+}
+
+/// Generation-1-only INSERT: unlike `replace_root_on_connection` this never
+/// bumps an existing row — the caller must have verified absence first.
+pub(crate) async fn enroll_initial_root_on_connection(
+    connection: &mut AsyncPgConnection,
+    root: &NewRecoveryRoot,
+    now: DateTime<Utc>,
+) -> Result<StoredRecoveryRoot, RecoveryRootError> {
+    sql_query(
+        "INSERT INTO controller_recovery_roots
+            (deployment_id, recovery_kid, recovery_public_key, kdf, generation,
+             created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 1, $5, $5)",
+    )
+    .bind::<Varchar, _>(&root.deployment_id)
+    .bind::<Varchar, _>(&root.kid)
+    .bind::<Binary, _>(&root.public_key[..])
+    .bind::<Varchar, _>(RECOVERY_KDF_ID)
+    .bind::<Timestamptz, _>(now)
+    .execute(connection)
+    .await
+    .map_err(transport)?;
+    read_root_on_connection(connection, &root.deployment_id)
+        .await?
+        .ok_or_else(|| transport(anyhow::anyhow!("recovery root missing after insert")))
+}
+
 /// Replace the root inside an open transaction: insert at generation 1 or
 /// bump the existing generation.  The old public key stops verifying at
 /// commit time because every verification reads this row.
