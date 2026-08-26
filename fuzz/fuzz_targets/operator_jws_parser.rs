@@ -8,25 +8,10 @@ fuzz_target!(|data: &[u8]| {
     let key = SigningKey::from_bytes(&[0x42; 32]);
     let verifying_key = key.verifying_key();
     let _ = nazo_operator_protocol::protected_header(&input);
-    let _ = nazo_operator_protocol::verify_task(&input, "fuzz-controller", &verifying_key, 0);
-    let _ = nazo_operator_protocol::verify_runtime_receipt(
+    let kid = nazo_operator_protocol::controller_key_id(&verifying_key);
+    let _ = nazo_operator_protocol::verify_control_operation_signature(
         &input,
-        "fuzz-runtime",
-        &verifying_key,
-    );
-    let _ = nazo_operator_protocol::verify_final_receipt(
-        &input,
-        "fuzz-controller",
-        &verifying_key,
-    );
-    let _ = nazo_operator_protocol::verify_trust_transition(
-        &input,
-        "fuzz-controller",
-        &verifying_key,
-    );
-    let _ = nazo_operator_protocol::verify_management_event(
-        &input,
-        "fuzz-controller",
+        &kid,
         &verifying_key,
     );
 });

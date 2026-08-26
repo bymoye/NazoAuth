@@ -31,6 +31,11 @@ use crate::http::admin::{
         create::admin_create_client, detail::admin_get_client, list::admin_clients,
         templates::admin_client_templates, update::admin_patch_client,
     },
+    controller_recovery::{controller_recovery_challenge, controller_recovery_commit},
+    controller_registry::{
+        admin_controller_approval, admin_controller_slot_commit, admin_controller_slot_revoke,
+        admin_controller_slot_rotate, admin_controller_slots,
+    },
     federation::admin_federation_providers,
     grants::{admin_grants, admin_revoke_grant},
     mtls_trust::{
@@ -39,6 +44,9 @@ use crate::http::admin::{
     },
     openid4vc::{
         admin_delete_credential_dataset, admin_get_credential_dataset, admin_put_credential_dataset,
+    },
+    recovery_root::{
+        admin_recovery_root, admin_recovery_root_approval, admin_recovery_root_rotate,
     },
     users::{admin_create_user, admin_patch_user, admin_users},
 };
@@ -314,6 +322,34 @@ pub(crate) fn configure(
                 )
                 .route("/grants", web::get().to(admin_grants))
                 .route("/grants/revoke", web::post().to(admin_revoke_grant))
+                // Controller Registry (D01/D02/D05): authoritative per-deployment
+                // controller key enrollment behind fresh-2FA approvals.
+                .service(
+                    web::scope("/controller-registry")
+                        .app_data(web::JsonConfig::default().limit(8 * 1024))
+                        .route("/slots", web::get().to(admin_controller_slots))
+                        .route("/slots", web::post().to(admin_controller_slot_commit))
+                        .route(
+                            "/slots/rotate",
+                            web::post().to(admin_controller_slot_rotate),
+                        )
+                        .route(
+                            "/slots/revoke",
+                            web::post().to(admin_controller_slot_revoke),
+                        )
+                        .route("/approvals", web::post().to(admin_controller_approval))
+                        // Recovery Root (04A D12): proactive rotation behind
+                        // the same fresh-2FA approval machinery.
+                        .route("/recovery-root", web::get().to(admin_recovery_root))
+                        .route(
+                            "/recovery-root/approvals",
+                            web::post().to(admin_recovery_root_approval),
+                        )
+                        .route(
+                            "/recovery-root/rotate",
+                            web::post().to(admin_recovery_root_rotate),
+                        ),
+                )
                 .route("/access-requests", web::get().to(admin_access_requests))
                 .route(
                     "/mtls-trust-requests",
@@ -358,6 +394,16 @@ pub(crate) fn configure(
                     }
                 }),
         );
+    // Break-glass controller recovery (04A D11): unauthenticated by design
+    // because the administrator identity may be the unavailable part; every
+    // guard lives in the challenge lifecycle (single use, fixed TTL, exact
+    // key-material binding, capped attempts, one pending per deployment).
+    cfg.service(
+        web::scope("/controller-recovery")
+            .app_data(web::JsonConfig::default().limit(8 * 1024))
+            .route("/challenges", web::post().to(controller_recovery_challenge))
+            .route("/recover", web::post().to(controller_recovery_commit)),
+    );
     cfg.route("/register", web::post().to(dynamic_client_registration))
         .service(
             web::resource("/register/{client_id}")

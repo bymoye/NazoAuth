@@ -2825,10 +2825,10 @@ dependencies = [
 name = "nazo-operator-protocol"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "base64 0.23.1",
  "chrono",
  "ed25519-dalek 3.0.0",
+ "hmac 0.13.0",
  "proptest",
  "rand 0.10.2",
  "serde",
@@ -2844,11 +2844,13 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
+ "base64 0.23.1",
  "blake3",
  "chrono",
  "diesel",
  "diesel-async",
  "diesel_migrations",
+ "ed25519-dalek 3.0.0",
  "futures-util",
  "nazo-auth",
  "nazo-digital-credentials",

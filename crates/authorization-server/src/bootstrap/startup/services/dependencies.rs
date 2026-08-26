@@ -103,7 +103,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         admin_client_policy(&startup.settings),
     ));
     let tenant_resource_provider =
-        super::tenant_resource::build(startup, admin_client_service.clone()).await?;
+        super::tenant_resource::build(startup, admin_client_service.get_ref().clone()).await?;
     let scim_endpoint_settings = &startup.settings.endpoint;
     let scim_protocol = &startup.settings.protocol;
     let scim_storage = &startup.settings.storage;

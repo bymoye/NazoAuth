@@ -1,4 +1,10 @@
 use super::*;
+use crate::tenant_resource_executor::{TenantResourcePreparation, TenantResourcePreparationError};
+use crate::tenant_resource_preparation::{ServerTenantResourcePreparation, map_admin_client_error};
+use nazo_auth::AdminClientError;
+use uuid::Uuid;
+
+type CreateClientRequest = nazo_auth::CreateClientRequest;
 
 fn client_request() -> CreateClientRequest {
     CreateClientRequest {
@@ -60,7 +66,7 @@ fn preparation() -> ServerTenantResourcePreparation {
     let tenant = nazo_identity::TenantContext::default_system();
     let database = nazo_postgres::create_pool("postgresql://unused:unused@127.0.0.1:1/unused", 1)
         .expect("lazy database pool");
-    let service = web::Data::new(ServerAdminClientService::new(
+    let service = ServerAdminClientService::new(
         nazo_postgres::OAuthClientRepository::new(database),
         crate::http::admin::clients::ServerSectorIdentifierResolver,
         crate::http::admin::clients::ServerAdminClientCrypto::new(
@@ -72,7 +78,7 @@ fn preparation() -> ServerTenantResourcePreparation {
             client_secret_pepper: crate::adapters::security::LOCAL_DEVELOPMENT_CLIENT_SECRET_PEPPER
                 .to_owned(),
         },
-    ));
+    );
     ServerTenantResourcePreparation::new(service)
 }
 

@@ -19,7 +19,7 @@ use nazo_identity::{TenantContext, TenantId};
 use nazo_key_management::validate_mtls_trust_anchor;
 use nazo_operator_protocol::{
     TenantResourceIdentity, TenantResourceKind, TenantResourceMapping, TenantResourceOperation,
-    TenantResourceTask, TenantResourceTaskPayload, canonical_tenant_resource_manifest_sha256,
+    TenantResourceSelector, TenantResourceTaskPayload, canonical_tenant_resource_manifest_sha256,
     validate_openid4vc_trust_policy,
 };
 use nazo_postgres::{
@@ -203,6 +203,10 @@ impl PostgresTenantResourceExecutor {
         let resources = prepared.resources;
         let data_key = self.data_key;
         let configured_tenant = self.tenant;
+        let change_set = ChangeSetProvenance {
+            id: task.change_set_id.clone(),
+            sha256: task.change_set_sha256.clone(),
+        };
 
         connection
             .transaction::<String, ExecutorTransactionError, _>(async move |connection| {
@@ -262,65 +266,54 @@ impl PostgresTenantResourceExecutor {
                     return Err(transaction_conflict("baseline_state"));
                 }
 
-                let (result_resources, resource_mappings) = match task.operation {
-                    TenantResourceOperation::Apply => {
-                        apply_resources(
-                            connection,
-                            tenant_id,
-                            configured_tenant,
-                            &task,
-                            &resources,
-                            prepared_payloads.as_ref().ok_or(
-                                ExecutorTransactionError::Executor(
-                                    TenantResourceExecutorError::Rejected,
-                                ),
-                            )?,
-                            &data_key,
-                        )
-                        .await?
-                    }
-                    TenantResourceOperation::Revoke => (
-                        revoke_resources(
-                            connection,
-                            tenant_id,
-                            configured_tenant,
-                            &task,
-                            &resources,
-                        )
-                        .await?,
-                        Vec::new(),
-                    ),
-                    TenantResourceOperation::Enumerate => (
-                        enumerate_resources(connection, tenant_id, &task).await?,
-                        Vec::new(),
-                    ),
-                };
-
-                if task.operation == TenantResourceOperation::Enumerate {
-                    let all_active = active_binding_map(connection, tenant_id).await?;
-                    let all_active = all_active
-                        .values()
-                        .filter_map(|binding| {
-                            parse_kind(&binding.resource_kind).map(|kind| TenantResourceIdentity {
-                                kind,
-                                resource_id: binding.resource_id.clone(),
-                                digest: binding.resource_digest.clone(),
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    let digest =
-                        canonical_tenant_resource_manifest_sha256(&all_active).map_err(|_| {
+                let frame = match task.operation {
+                    TenantResourceOperation::Apply => ResourceFrame::Apply {
+                        resources: &resources,
+                        payloads: prepared_payloads.as_deref().ok_or(
                             ExecutorTransactionError::Executor(
-                                TenantResourceExecutorError::Unavailable,
-                            )
-                        })?;
-                    if digest != current_manifest
-                        || task.resource_manifest_sha256 != current_manifest
-                    {
-                        return Err(ExecutorTransactionError::Executor(
+                                TenantResourceExecutorError::Rejected,
+                            ),
+                        )?,
+                    },
+                    TenantResourceOperation::Revoke => ResourceFrame::Revoke {
+                        resources: &resources,
+                    },
+                    TenantResourceOperation::Enumerate => ResourceFrame::Enumerate {
+                        selectors: match &task.payload {
+                            TenantResourceTaskPayload::Enumerate { selectors } => selectors,
+                            _ => {
+                                return Err(ExecutorTransactionError::Executor(
+                                    TenantResourceExecutorError::Rejected,
+                                ));
+                            }
+                        },
+                    },
+                };
+                let frame = run_resource_frame(
+                    connection,
+                    tenant_id,
+                    configured_tenant,
+                    &data_key,
+                    frame,
+                    &change_set,
+                )
+                .await?;
+                // Caller-declared desired end state (HTTP provider contract):
+                // the resulting manifest must equal the signed declaration.
+                if frame.manifest_sha256 != task.resource_manifest_sha256 {
+                    return Err(match task.operation {
+                        TenantResourceOperation::Revoke => transaction_conflict("revoke_manifest"),
+                        _ => ExecutorTransactionError::Executor(
                             TenantResourceExecutorError::Conflict,
-                        ));
-                    }
+                        ),
+                    });
+                }
+                if task.operation == TenantResourceOperation::Enumerate
+                    && frame.manifest_sha256 != current_manifest
+                {
+                    return Err(ExecutorTransactionError::Executor(
+                        TenantResourceExecutorError::Conflict,
+                    ));
                 }
 
                 let result_revision = if task.operation == TenantResourceOperation::Enumerate {
@@ -348,10 +341,22 @@ impl PostgresTenantResourceExecutor {
                     }
                 };
 
-                let result_resources = sort_identities(result_resources);
-                let audit_event = SecurityAuditEventBuilder::new(&task, &request_sha256)
-                    .resources(&result_resources)
-                    .build();
+                let result_resources = sort_identities(frame.resources);
+                let audit_event = tenant_resource_audit_event(
+                    &task.deployment_id,
+                    &task.tenant_id,
+                    &task.jti,
+                    &request_sha256,
+                    &task.change_set_id,
+                    &task.change_set_sha256,
+                    &serde_json::to_value(&task.actor).map_err(|_| {
+                        ExecutorTransactionError::Executor(TenantResourceExecutorError::Unavailable)
+                    })?,
+                    task.operation,
+                    task.expected_revision,
+                    &task.resource_manifest_sha256,
+                    &result_resources,
+                );
                 let audit = append_fresh_security_audit_on_connection(connection, &audit_event)
                     .await
                     .map_err(ExecutorTransactionError::Diesel)?;
@@ -361,7 +366,7 @@ impl PostgresTenantResourceExecutor {
                 let execution = TenantResourceExecutionResult {
                     revision: result_revision,
                     resources: result_resources,
-                    resource_mappings,
+                    resource_mappings: frame.resource_mappings,
                     audit_sequence,
                     audit_previous_sha256: hex_bytes(&audit.previous_hash),
                 };
@@ -534,6 +539,198 @@ impl PostgresTenantResourceExecutor {
         prepared.sort_by(|left, right| payload_sort_key(left).cmp(&payload_sort_key(right)));
         Ok(prepared)
     }
+
+    /// Execute one tenant-resource operation on behalf of an accepted
+    /// [`nazo_operator_protocol::ControlOperation`] (H07).
+    ///
+    /// Differences from the provider/HTTP driver are deliberate and structural:
+    ///
+    /// * **No capability, no receipt.**  Authorization is the accepted,
+    ///   controller-signed control operation; replay/idempotency authority is
+    ///   the operator-task journal (05 §4/§5).  The legacy
+    ///   `tenant_resource_operations` ledger is *not* written — its schema
+    ///   still requires signed receipt evidence (`receipt_jws` CHECK forbids
+    ///   empty values) from the capability era that A02 rows K1/K2 deleted.
+    /// * **Server-side CAS.**  `expected_revision`, the baseline manifest, and
+    ///   the desired end-state manifest were caller-declared fences of the old
+    ///   contract; here the current state is read inside the transaction and
+    ///   advanced exactly one revision to a digest recomputed from the
+    ///   database.  Concurrent-writer protection comes from the same advisory
+    ///   binding locks and revision CAS row as before.
+    /// * **Same ownership checks.**  The requested scope must equal this
+    ///   deployment's configured tenant, every frame runs through
+    ///   [`Self::prepare_apply_payloads`]/the shared mutation helpers, and the
+    ///   database triggers guarding managed users/clients still apply.
+    pub(crate) async fn execute_control_operation(
+        &self,
+        frame: ControlTenantResourceFrame<'_>,
+    ) -> Result<ControlTenantResourceOutcome, TenantResourceExecutorError> {
+        let ControlTenantResourceFrame {
+            deployment_id,
+            jti,
+            request_sha256,
+            actor,
+            operation,
+            tenant_id,
+            resources,
+            selectors,
+        } = frame;
+        if tenant_id != self.tenant.tenant_id.as_uuid().to_string()
+            || !is_lower_sha256(request_sha256)
+        {
+            return Err(TenantResourceExecutorError::Rejected);
+        }
+        let prepared_payloads = match operation {
+            TenantResourceOperation::Apply => Some(self.prepare_apply_payloads(&resources).await?),
+            _ => None,
+        };
+        // Binding provenance derived from the operation identity: the change
+        // set IS the accepted operation, so its external digest is the
+        // canonical digest of the delta's identity set.
+        let change_set_sha256 = canonical_tenant_resource_manifest_sha256(&sort_identities(
+            resources.iter().map(|r| r.identity.clone()).collect(),
+        ))
+        .map_err(|_| TenantResourceExecutorError::Unavailable)?;
+        let change_set = ChangeSetProvenance {
+            id: jti.to_owned(),
+            sha256: change_set_sha256,
+        };
+
+        let mut connection = self
+            .repository
+            .connection()
+            .await
+            .map_err(map_repository_error)?;
+        let tenant_uuid = self.tenant.tenant_id.as_uuid();
+        let configured_tenant = self.tenant;
+        let data_key = self.data_key;
+        let deployment_id = deployment_id.to_owned();
+        let actor = actor.clone();
+        let selectors = selectors.to_vec();
+
+        connection
+            .transaction::<ControlTenantResourceOutcome, ExecutorTransactionError, _>(
+                async move |connection| {
+                    // Serialize against any concurrent legacy-path frame that
+                    // shares this jti/change-set namespace before reading the
+                    // CAS baseline.
+                    TenantResourceRepository::lock_operation_identity_on_connection(
+                        connection,
+                        &deployment_id,
+                        tenant_uuid,
+                        jti,
+                        jti,
+                    )
+                    .await
+                    .map_err(ExecutorTransactionError::Repository)?;
+                    let current =
+                        TenantResourceRepository::state_on_connection(connection, tenant_uuid)
+                            .await
+                            .map_err(ExecutorTransactionError::Repository)?;
+                    let (current_revision, current_manifest) = match current {
+                        Some(state) => (state.revision, state.resource_manifest_sha256),
+                        None => (0, Self::empty_manifest_sha256()),
+                    };
+
+                    let frame = match operation {
+                        TenantResourceOperation::Apply => ResourceFrame::Apply {
+                            resources: &resources,
+                            payloads: prepared_payloads.as_deref().ok_or(
+                                ExecutorTransactionError::Executor(
+                                    TenantResourceExecutorError::Rejected,
+                                ),
+                            )?,
+                        },
+                        TenantResourceOperation::Revoke => ResourceFrame::Revoke {
+                            resources: &resources,
+                        },
+                        TenantResourceOperation::Enumerate => ResourceFrame::Enumerate {
+                            selectors: &selectors,
+                        },
+                    };
+                    let frame = run_resource_frame(
+                        connection,
+                        tenant_uuid,
+                        configured_tenant,
+                        &data_key,
+                        frame,
+                        &change_set,
+                    )
+                    .await?;
+
+                    if operation == TenantResourceOperation::Enumerate {
+                        if frame.manifest_sha256 != current_manifest {
+                            return Err(ExecutorTransactionError::Executor(
+                                TenantResourceExecutorError::Conflict,
+                            ));
+                        }
+                        let audit_event = tenant_resource_audit_event(
+                            &deployment_id,
+                            &tenant_uuid.to_string(),
+                            jti,
+                            request_sha256,
+                            &change_set.id,
+                            &change_set.sha256,
+                            &actor,
+                            operation,
+                            current_revision,
+                            &frame.manifest_sha256,
+                            &frame.resources,
+                        );
+                        append_fresh_security_audit_on_connection(connection, &audit_event)
+                            .await
+                            .map_err(ExecutorTransactionError::Diesel)?;
+                        return Ok(ControlTenantResourceOutcome {
+                            revision: current_revision,
+                            resources: frame.resources,
+                        });
+                    }
+
+                    let next_revision = current_revision.checked_add(1).ok_or(
+                        ExecutorTransactionError::Executor(
+                            TenantResourceExecutorError::Unavailable,
+                        ),
+                    )?;
+                    match TenantResourceRepository::compare_and_set_state_on_connection(
+                        connection,
+                        tenant_uuid,
+                        current_revision,
+                        next_revision,
+                        &frame.manifest_sha256,
+                    )
+                    .await
+                    .map_err(ExecutorTransactionError::Repository)?
+                    {
+                        TenantResourceStateCas::Applied(_) => {}
+                        TenantResourceStateCas::Conflict(_) => {
+                            return Err(transaction_conflict("state_cas"));
+                        }
+                    }
+                    let audit_event = tenant_resource_audit_event(
+                        &deployment_id,
+                        &tenant_uuid.to_string(),
+                        jti,
+                        request_sha256,
+                        &change_set.id,
+                        &change_set.sha256,
+                        &actor,
+                        operation,
+                        current_revision,
+                        &frame.manifest_sha256,
+                        &frame.resources,
+                    );
+                    append_fresh_security_audit_on_connection(connection, &audit_event)
+                        .await
+                        .map_err(ExecutorTransactionError::Diesel)?;
+                    Ok(ControlTenantResourceOutcome {
+                        revision: next_revision,
+                        resources: frame.resources,
+                    })
+                },
+            )
+            .await
+            .map_err(map_transaction_error)
+    }
 }
 
 /// Prepared values are deliberately not `Debug`: password hashes, encrypted
@@ -594,15 +791,157 @@ fn payload_sort_key(payload: &PreparedApplyPayload) -> (u8, &str) {
     }
 }
 
+/// Change-set provenance recorded on every binding row a delta touches.
+///
+/// The HTTP provider driver carries it on the signed task; the control-operation
+/// driver derives both members from the accepted operation identity.
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeSetProvenance {
+    pub(crate) id: String,
+    /// Lowercase hex SHA-256 bound to the delta's external bytes (or identity
+    /// set when the delta carries no external manifest).
+    pub(crate) sha256: String,
+}
+
+/// Authoritative outcome of one control-operation tenant-resource frame (H07).
+/// This is the entire data surface handed back to the ControlResult channel;
+/// richer executor internals have no wire representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ControlTenantResourceOutcome {
+    /// CAS revision this read/mutation is consistent with.
+    pub revision: u64,
+    /// Sorted identity set selected by the operation.
+    pub resources: Vec<TenantResourceIdentity>,
+}
+
+/// One accepted control operation's tenant-resource frame (H07): provenance,
+/// scope, and typed inputs in a single closed parameter surface.
+pub(crate) struct ControlTenantResourceFrame<'a> {
+    /// Signed deployment binding that proved local at admission.
+    pub deployment_id: &'a str,
+    /// Accepted operation id (`operation_id`, doubles as jti).
+    pub jti: &'a str,
+    /// Canonical request hash of the accepted operation (audit provenance).
+    pub request_sha256: &'a str,
+    /// Non-secret controller descriptor recorded on the audit event.
+    pub actor: &'a Value,
+    pub operation: TenantResourceOperation,
+    /// Tenant scope claimed by the signed payload; must equal the configured
+    /// tenant or the executor rejects the frame outright.
+    pub tenant_id: &'a str,
+    /// Apply/revoke delta.  Apply entries carry digest-bound typed payloads;
+    /// revoke entries are payload-less.
+    pub resources: Vec<PreparedTenantResource>,
+    /// Enumerate selectors; ignored by the other variants.
+    pub selectors: &'a [TenantResourceSelector],
+}
+
+/// Typed input of one shared tenant-resource frame.
+enum ResourceFrame<'a> {
+    Apply {
+        resources: &'a [PreparedTenantResource],
+        payloads: &'a [PreparedApplyPayload],
+    },
+    Revoke {
+        resources: &'a [PreparedTenantResource],
+    },
+    Enumerate {
+        selectors: &'a [TenantResourceSelector],
+    },
+}
+
+/// Normalized outcome of one shared mutation/enumeration frame.
+struct MutationFrameResult {
+    /// Sorted identities this operation reports (delta for apply/revoke,
+    /// selection for enumerate).
+    resources: Vec<TenantResourceIdentity>,
+    /// Apply-only public identifier mappings; empty otherwise.
+    resource_mappings: Vec<TenantResourceMapping>,
+    /// Canonical SHA-256 of the complete active identity set implied by this
+    /// frame, recomputed from the database inside the caller's transaction.
+    manifest_sha256: String,
+}
+
+/// Shared dispatch of one tenant-resource frame onto the CAS engine.  Both
+/// drivers (HTTP provider task and ControlOperation pipeline) execute through
+/// here so ownership checks, dependency ordering, identity locks, and manifest
+/// recomputation cannot drift apart.
+async fn run_resource_frame(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    configured_tenant: TenantContext,
+    data_key: &Option<[u8; 32]>,
+    frame: ResourceFrame<'_>,
+    change_set: &ChangeSetProvenance,
+) -> Result<MutationFrameResult, ExecutorTransactionError> {
+    match frame {
+        ResourceFrame::Apply {
+            resources,
+            payloads,
+        } => {
+            let (resources, resource_mappings, manifest_sha256) = apply_resources(
+                connection,
+                tenant_id,
+                configured_tenant,
+                resources,
+                payloads,
+                data_key,
+                change_set,
+            )
+            .await?;
+            Ok(MutationFrameResult {
+                resources,
+                resource_mappings,
+                manifest_sha256,
+            })
+        }
+        ResourceFrame::Revoke { resources } => {
+            let (resources, manifest_sha256) = revoke_resources(
+                connection,
+                tenant_id,
+                configured_tenant,
+                resources,
+                change_set,
+            )
+            .await?;
+            Ok(MutationFrameResult {
+                resources,
+                resource_mappings: Vec::new(),
+                manifest_sha256,
+            })
+        }
+        ResourceFrame::Enumerate { selectors } => {
+            let (selected, complete) =
+                enumerate_resources(connection, tenant_id, selectors).await?;
+            let manifest_sha256 =
+                canonical_tenant_resource_manifest_sha256(&complete).map_err(|_| {
+                    ExecutorTransactionError::Executor(TenantResourceExecutorError::Unavailable)
+                })?;
+            Ok(MutationFrameResult {
+                resources: selected,
+                resource_mappings: Vec::new(),
+                manifest_sha256,
+            })
+        }
+    }
+}
+
 async fn apply_resources(
     connection: &mut AsyncPgConnection,
     tenant_id: Uuid,
     tenant: TenantContext,
-    task: &TenantResourceTask,
     resources: &[PreparedTenantResource],
     payloads: &[PreparedApplyPayload],
     data_key: &Option<[u8; 32]>,
-) -> Result<(Vec<TenantResourceIdentity>, Vec<TenantResourceMapping>), ExecutorTransactionError> {
+    change_set: &ChangeSetProvenance,
+) -> Result<
+    (
+        Vec<TenantResourceIdentity>,
+        Vec<TenantResourceMapping>,
+        String,
+    ),
+    ExecutorTransactionError,
+> {
     let active = active_binding_map(connection, tenant_id).await?;
     let mut locators = BTreeMap::<ResourceKey, String>::new();
     let delta_keys = resources
@@ -927,8 +1266,8 @@ async fn apply_resources(
                 resource_kind: kind_name(resource.identity.kind),
                 resource_id: &resource.identity.resource_id,
                 resource_digest: &resource.identity.digest,
-                change_set_id: &task.change_set_id,
-                change_set_sha256: &task.change_set_sha256,
+                change_set_id: &change_set.id,
+                change_set_sha256: &change_set.sha256,
                 active: true,
                 locator,
             },
@@ -950,18 +1289,13 @@ async fn apply_resources(
         .collect::<Vec<_>>();
     let digest = canonical_tenant_resource_manifest_sha256(&active_after)
         .map_err(|_| ExecutorTransactionError::Executor(TenantResourceExecutorError::Rejected))?;
-    if digest != task.resource_manifest_sha256 {
-        return Err(ExecutorTransactionError::Executor(
-            TenantResourceExecutorError::Conflict,
-        ));
-    }
 
     // Prepare the public mapping set for the receipt extension.  The protocol
     // only exposes User UUIDs and OAuth public client IDs; mTLS, dataset, and
     // trust-policy locators intentionally remain internal.
     let resource_mappings =
         collect_apply_resource_mappings(connection, tenant_id, resources, &locators).await?;
-    Ok((result, resource_mappings))
+    Ok((result, resource_mappings, digest))
 }
 
 async fn collect_apply_resource_mappings(
@@ -1052,9 +1386,9 @@ async fn revoke_resources(
     connection: &mut AsyncPgConnection,
     tenant_id: Uuid,
     tenant: TenantContext,
-    task: &TenantResourceTask,
     resources: &[PreparedTenantResource],
-) -> Result<Vec<TenantResourceIdentity>, ExecutorTransactionError> {
+    _change_set: &ChangeSetProvenance,
+) -> Result<(Vec<TenantResourceIdentity>, String), ExecutorTransactionError> {
     let active = active_binding_map(connection, tenant_id).await?;
     let mut targets = Vec::with_capacity(resources.len());
     for resource in resources {
@@ -1132,10 +1466,7 @@ async fn revoke_resources(
         .collect::<Vec<_>>();
     let digest = canonical_tenant_resource_manifest_sha256(&remaining)
         .map_err(|_| ExecutorTransactionError::Executor(TenantResourceExecutorError::Rejected))?;
-    if digest != task.resource_manifest_sha256 {
-        return Err(transaction_conflict("revoke_manifest"));
-    }
-    Ok(sort_identities(revoked))
+    Ok((sort_identities(revoked), digest))
 }
 
 #[derive(QueryableByName)]
@@ -1330,22 +1661,17 @@ fn is_operator_locator(locator: &str, kind: TenantResourceKind) -> bool {
     parse_locator(locator, kind).is_ok()
 }
 
+/// Authoritative read-only enumeration.  Returns the selector-filtered,
+/// sorted identity set plus the complete active set so callers can assert
+/// manifest consistency without a second read.
 async fn enumerate_resources(
     connection: &mut AsyncPgConnection,
     tenant_id: Uuid,
-    task: &TenantResourceTask,
-) -> Result<Vec<TenantResourceIdentity>, ExecutorTransactionError> {
+    selectors: &[TenantResourceSelector],
+) -> Result<(Vec<TenantResourceIdentity>, Vec<TenantResourceIdentity>), ExecutorTransactionError> {
     let active = TenantResourceRepository::active_bindings_on_connection(connection, tenant_id)
         .await
         .map_err(map_repository_error)?;
-    let selectors = match &task.payload {
-        TenantResourceTaskPayload::Enumerate { selectors } => selectors,
-        _ => {
-            return Err(ExecutorTransactionError::Executor(
-                TenantResourceExecutorError::Rejected,
-            ));
-        }
-    };
     let selected = |binding: &TenantResourceBinding| {
         selectors.is_empty()
             || selectors.iter().any(|selector| {
@@ -1354,17 +1680,25 @@ async fn enumerate_resources(
             })
     };
     let mut result = Vec::new();
-    for binding in active.into_iter().filter(selected) {
+    let mut complete = Vec::new();
+    for binding in active.into_iter() {
         let kind = parse_kind(&binding.resource_kind).ok_or(ExecutorTransactionError::Executor(
             TenantResourceExecutorError::Unavailable,
         ))?;
-        result.push(TenantResourceIdentity {
+        complete.push(TenantResourceIdentity {
             kind,
-            resource_id: binding.resource_id,
-            digest: binding.resource_digest,
+            resource_id: binding.resource_id.clone(),
+            digest: binding.resource_digest.clone(),
         });
+        if selected(&binding) {
+            result.push(TenantResourceIdentity {
+                kind,
+                resource_id: binding.resource_id,
+                digest: binding.resource_digest,
+            });
+        }
     }
-    Ok(sort_identities(result))
+    Ok((sort_identities(result), sort_identities(complete)))
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -1637,46 +1971,41 @@ fn profile_text(value: Option<&Value>, max_bytes: usize) -> Result<Option<String
     Ok(Some(text.to_owned()))
 }
 
-struct SecurityAuditEventBuilder<'a> {
-    task: &'a TenantResourceTask,
-    request_sha256: &'a str,
-    resources: Vec<TenantResourceIdentity>,
-}
-
-impl<'a> SecurityAuditEventBuilder<'a> {
-    fn new(task: &'a TenantResourceTask, request_sha256: &'a str) -> Self {
-        Self {
-            task,
-            request_sha256,
-            resources: Vec::new(),
-        }
-    }
-
-    fn resources(mut self, resources: &[TenantResourceIdentity]) -> Self {
-        self.resources = resources.to_owned();
-        self
-    }
-
-    fn build(self) -> nazo_postgres::SecurityAuditEvent {
-        nazo_postgres::SecurityAuditEvent {
-            event_id: Uuid::now_v7(),
-            event_type: format!("tenant_resource_{}", operation_name(self.task.operation)),
-            event_category: "tenant_resource".to_owned(),
-            payload: json!({
-                "deployment_id": self.task.deployment_id,
-                "tenant_id": self.task.tenant_id,
-                "jti": self.task.jti,
-                "request_sha256": self.request_sha256,
-                "change_set_id": self.task.change_set_id,
-                "change_set_sha256": self.task.change_set_sha256,
-                "actor": &self.task.actor,
-                "operation": operation_name(self.task.operation),
-                "expected_revision": self.task.expected_revision,
-                "resource_manifest_sha256": self.task.resource_manifest_sha256,
-                "resources": self.resources,
-            }),
-            occurred_at: Utc::now(),
-        }
+/// Build the append-only security-audit event for one executed tenant-resource
+/// frame.  Explicit fields instead of a wire task: both the HTTP provider
+/// driver and the ControlOperation driver (H07) produce identical event shapes.
+#[allow(clippy::too_many_arguments)]
+fn tenant_resource_audit_event(
+    deployment_id: &str,
+    tenant_id: &str,
+    jti: &str,
+    request_sha256: &str,
+    change_set_id: &str,
+    change_set_sha256: &str,
+    actor: &Value,
+    operation: TenantResourceOperation,
+    expected_revision: u64,
+    resource_manifest_sha256: &str,
+    resources: &[TenantResourceIdentity],
+) -> nazo_postgres::SecurityAuditEvent {
+    nazo_postgres::SecurityAuditEvent {
+        event_id: Uuid::now_v7(),
+        event_type: format!("tenant_resource_{}", operation_name(operation)),
+        event_category: "tenant_resource".to_owned(),
+        payload: json!({
+            "deployment_id": deployment_id,
+            "tenant_id": tenant_id,
+            "jti": jti,
+            "request_sha256": request_sha256,
+            "change_set_id": change_set_id,
+            "change_set_sha256": change_set_sha256,
+            "actor": actor,
+            "operation": operation_name(operation),
+            "expected_revision": expected_revision,
+            "resource_manifest_sha256": resource_manifest_sha256,
+            "resources": resources,
+        }),
+        occurred_at: Utc::now(),
     }
 }
 

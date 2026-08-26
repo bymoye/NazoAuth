@@ -1,142 +1,80 @@
-//! Privileged task entry point. It accepts only a signed, non-secret envelope on stdin.
+//! One-shot application operator entry (E04/E05).
+//!
+//! The process admits exactly one signed [`ControlOperation`] per run and
+//! executes it under operation-journal discipline.  The admission order is
+//! fixed by NazoAuthCtl-goal-plan/05 E04 and must not be reordered:
+//!
+//! ```text
+//! 1. parse schema / size / closed operation enum (reject unknown fields)
+//! 2. look up the controller kid/public key BY deployment_id in the
+//!    Controller Registry repository (D01/D02 authority; the old
+//!    mounted-file controller.pub trust path is deleted)
+//! 3. verify the Ed25519 signature over the canonical bytes
+//! 4. key expiry/revocation at first admission (the registry lookup only
+//!    returns active, unexpired slots)
+//! 5. deployment binding, embedded build identity (J1), and config_revision
+//!    fencing
+//! 6. enter the operation journal accept checkpoint (E03)
+//! 7. execute strictly per journal checkpoints; internal steps never
+//!    re-authenticate
+//! ```
+//!
+//! There is deliberately no human 2FA re-check, no receipt/audit key, and no
+//! `iat`/`nbf`/`exp` request authorization here: the frozen envelope carries
+//! no time claims, replay defense is accept-once journaling, and Controller
+//! Key validity is evaluated exactly once, at first accept (05 §2/§5).  An
+//! already-accepted operation resumes from the journal alone — including its
+//! authorization snapshot — and is unaffected by later key expiry or
+//! revocation.
+//!
+//! Everything before the journal accept checkpoint is an admission decision:
+//! failures exit non-zero with a closed stderr classification line
+//! (`nazoauth-operator-rejection=<class>`).  Everything after acceptance is a
+//! durable [`nazo_operator_protocol::ControlResult`] printed on stdout as
+//! typed JSON; it is the only output channel.
 
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::{Cursor, Read as _, Write as _},
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
-
 use anyhow::{Context as _, bail};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use fs2::FileExt as _;
 use nazo_operator_protocol::{
-    EmbeddedIdentity, RuntimeReceipt, SecretBinding, TaskEnvelope, TaskOperation, TaskOutcome,
-    TaskResult, compact_sha256, sign_runtime_receipt, validate_runtime_receipt_deployment_binding,
-    validate_task_deployment_binding, verify_runtime_receipt, verify_task_signature,
-    verify_task_window,
+    ControlOperation, MAX_COMPACT_JWS_BYTES, encode_control_result,
+    verify_control_operation_signature,
 };
-use sha2::{Digest as _, Sha256};
-use yaml_serde::Value as YamlValue;
 
-use crate::control_discovery::read_identifier;
-
-const CONTEXT_PATH: &str = "/run/nazoauth-operator/context.json";
-const CONTROLLER_PUBLIC_KEY_PATH: &str = "/run/nazoauth-operator/controller.pub";
-const RECEIPT_PRIVATE_KEY_PATH: &str = "/run/nazoauth-operator/receipt.key";
-const SECRET_REVISION_PATH: &str = "/run/nazoauth-operator/secret-revision";
-const EXTERNAL_PUBLIC_JWK_PATH: &str = "/run/nazoauth-operator/public.jwk";
-const STATE_DIRECTORY: &str = "/var/lib/nazoauth/operator-state";
-const CONFIG_MANIFEST_PATH: &str = "/run/nazoauth-operator/config-manifest.json";
-const TASK_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
-const TASK_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TaskContext {
-    controller_key_id: String,
-    receipt_key_id: String,
-}
-
-/// Durable, per-request lifecycle state.
-///
-/// `Executing` is terminal for operations whose state owner cannot prove
-/// idempotent recovery.  `migrate-apply` is the one exception: the Diesel
-/// migration ledger is the state owner and makes the same request safe to
-/// re-enter after a process died before publishing its receipt.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(tag = "phase", rename_all = "kebab-case", deny_unknown_fields)]
-enum TaskLifecycle {
-    Prepared { request_sha256: String },
-    Executing { request_sha256: String },
-    Completed { request_sha256: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestClaim {
-    Created,
-    Current,
-    Legacy,
-}
-
-const REQUEST_CLAIM_PREFIX: &str = "nazoauth-operator-request-v1:";
-
+mod admission;
+mod control_journal;
 mod execution;
 mod identity;
-mod lifecycle;
-mod receipts;
 
-use execution::execute_with_jti;
 pub(crate) use identity::embedded_identity;
-use identity::{
-    operation_name, persist_operator_state_identity, validate_config_manifest,
-    validate_embedded_identity, validate_local_task_identity, validate_secret_binding,
-};
-#[cfg(test)]
-use identity::{
-    validate_config_manifest_at, validate_local_task_identity_at, validate_secret_binding_at,
-};
-use lifecycle::{
-    acquire_task_lock, can_reenter_migration, claim_request, ensure_current_claim,
-    load_or_prepare_lifecycle, mark_task_executing, write_lifecycle_atomic,
-};
-#[cfg(test)]
-use lifecycle::{
-    acquire_task_lock_with_timeout, lifecycle_temporary_path, read_lifecycle,
-    write_initial_lifecycle,
-};
-use receipts::{
-    read_published_receipt, read_verifying_key, recover_receipt_temporary, sign_task_outcome,
-    stable_error_code, verify_public_jwk, write_receipt_atomic,
-};
-#[cfg(test)]
-use receipts::{
-    read_signing_key, receipt_temporary_path, validate_receipt_for_task, verify_public_jwk_at,
-};
+
+const CONFIG_REVISION_PATH: &str = "/run/nazauth-operator/config-revision";
+const STATE_DIRECTORY: &str = "/var/lib/nazauth/operator-state";
+const TASK_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
+const TASK_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// One-shot processes need at most two concurrent registry/state queries.
+const OPERATOR_DATABASE_MAX_CONNECTIONS: usize = 2;
 
 pub async fn run() -> anyhow::Result<()> {
     let mut compact = String::new();
     std::io::stdin()
-        .take((nazo_operator_protocol::MAX_COMPACT_JWS_BYTES + 1) as u64)
+        .take((MAX_COMPACT_JWS_BYTES + 1) as u64)
         .read_to_string(&mut compact)
-        .context("failed to read operator task envelope from stdin")?;
+        .context("failed to read control operation from stdin")?;
     let compact = compact.trim_end_matches(['\r', '\n']);
-    let context_path = configured_path("NAZOAUTH_OPERATOR_CONTEXT_FILE", CONTEXT_PATH);
-    let context: TaskContext = serde_json::from_slice(
-        &fs::read(context_path).context("failed to read operator task context")?,
-    )
-    .context("operator task context is invalid")?;
-    let controller_key = read_verifying_key(&configured_path(
-        "NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE",
-        CONTROLLER_PUBLIC_KEY_PATH,
-    ))?;
-    let task = match verify_task_signature(compact, &context.controller_key_id, &controller_key) {
-        Ok(task) => task,
-        Err(error) => {
-            // A closed, non-secret classification for the ctl retirement probe.
-            // Do not include key material, envelope content, or parser detail.
-            eprintln!("nazoauth-operator-rejection=authorization");
-            return Err(error).context("operator task authorization failed");
-        }
-    };
-    validate_embedded_identity(&task)?;
-    validate_config_manifest(&task)?;
-    // Secret rotation is an authorization boundary, not merely controller
-    // metadata.  Validate the local authority before creating or reusing a
-    // durable request claim so a rotated deployment cannot resume an older
-    // envelope, including one that was already claimed before restart.
-    validate_secret_binding(&task)?;
-    let expected_deployment_id = validate_local_task_identity(&task)?;
-    let state = configured_path("NAZOAUTH_OPERATOR_STATE_DIRECTORY", STATE_DIRECTORY);
-    fs::create_dir_all(&state)?;
-    ensure_real_state_directory(&state)?;
-    let lock_path = state.join("task.lock");
+
+    let state_directory = configured_path("NAZOAUTH_OPERATOR_STATE_DIRECTORY", STATE_DIRECTORY);
+    fs::create_dir_all(&state_directory)?;
+    ensure_real_state_directory(&state_directory)?;
+    let lock_path = state_directory.join("task.lock");
     if state_path_present(&lock_path)? {
         regular_state_file_present(&lock_path, "operator task lock")?;
     }
@@ -145,106 +83,241 @@ pub async fn run() -> anyhow::Result<()> {
         .read(true)
         .write(true)
         .truncate(false)
-        .open(lock_path)?;
-    regular_state_file_present(&state.join("task.lock"), "operator task lock")?;
-
-    let request_sha256 = compact_sha256(compact);
-    let receipt_path = state.join(format!("{}.receipt.jws", task.jti));
-    let request_path = state.join(format!("{}.request.sha256", task.jti));
-    let receipt_key_path = configured_path(
-        "NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE",
-        RECEIPT_PRIVATE_KEY_PATH,
-    );
-    // Keep the OS lock held through state publication and operation execution.
-    // A pre-claim lock timeout is transport failure, not an authoritative
-    // operation outcome: another holder may still publish the same JTI's
-    // success receipt.  The bounded error lets ctl preserve intent and retry.
+        .open(&lock_path)?;
+    regular_state_file_present(&state_directory.join("task.lock"), "operator task lock")?;
+    // Keep the OS lock held through admission, journal publication, and
+    // execution so only one one-shot process ever drives one state directory.
+    // A pre-admission lock timeout is transport failure, not an authoritative
+    // outcome: ctl preserves intent and retries.
     let _task_lock = acquire_task_lock(lock).await?;
 
-    let request_was_claimed = regular_state_file_present(&request_path, "operator request claim")?;
-    if !request_was_claimed {
-        // A versioned claim is published only after the envelope was accepted
-        // inside its authorization window.  Its durable presence therefore
-        // lets a restarted runtime finish a previously accepted Prepared task
-        // without treating expiry as permission to mint or execute a new task.
-        verify_task_window(&task, Utc::now().timestamp())
-            .context("operator task authorization failed")?;
-    }
-    let claim = claim_request(&request_path, &request_sha256)?;
-    persist_operator_state_identity(&state, &expected_deployment_id)?;
-    if let Some(prior) = read_published_receipt(
-        &receipt_path,
-        &task,
-        &request_sha256,
-        &expected_deployment_id,
-        &context.receipt_key_id,
-        &receipt_key_path,
-    )? {
-        print!("{prior}");
-        return Ok(());
+    let outcome = execute_compact(&state_directory, compact).await;
+
+    // Bounded retention cleanup rides at the tail of the one-shot entry (E03
+    // note): terminal results stay recoverable for thirty days, after which
+    // the next successful operator run deletes them.  Housekeeping must never
+    // fail an executed operation, so its errors are swallowed here.
+    if outcome.is_ok() {
+        let cutoff =
+            Utc::now().timestamp() - control_journal::CONTROL_JOURNAL_COMPLETED_RETENTION_SECONDS;
+        let _ = control_journal::cleanup_completed_before(&state_directory, cutoff);
     }
 
-    if let Some(prior) = recover_receipt_temporary(
-        &receipt_path,
-        &task,
-        &request_sha256,
-        &expected_deployment_id,
-        &context.receipt_key_id,
-        &receipt_key_path,
-    )? {
-        print!("{prior}");
-        return Ok(());
-    }
+    outcome
+}
 
-    ensure_current_claim(claim)?;
-    let lifecycle_path = state.join(format!("{}.lifecycle.json", task.jti));
-    let lifecycle = load_or_prepare_lifecycle(&lifecycle_path, &request_sha256)?;
-
-    let migration_reentry = can_reenter_migration(&task.operation, &lifecycle);
-    if !migration_reentry {
-        mark_task_executing(&lifecycle_path, &lifecycle, &request_sha256)?;
-        pause_at_test_failpoint("after-executing")?;
-    }
-
-    let started_at = Utc::now().timestamp();
-    let outcome = execute_with_jti(&task.operation, &task.jti).await;
-    pause_at_test_failpoint("after-operation")?;
-    let completed_at = Utc::now().timestamp();
-    let compact_receipt = sign_task_outcome(
-        &task,
-        &request_sha256,
-        outcome,
-        &context.receipt_key_id,
-        &receipt_key_path,
-        started_at,
-        completed_at,
+/// Full E04 pipeline for one presented compact JWS.  Prints the durable
+/// [`nazo_operator_protocol::ControlResult`] on success.
+async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Result<()> {
+    // (1) Parse schema/size/closed enum before any authority is consulted.
+    let presented = reject(admission::present(compact), RejectionClass::Request)?;
+    let request_hash = reject(
+        nazo_operator_protocol::control_operation_request_hash(&presented)
+            .map_err(anyhow::Error::new),
+        RejectionClass::Request,
     )?;
-    write_receipt_atomic(&receipt_path, compact_receipt.as_bytes())?;
-    write_lifecycle_atomic(
-        &lifecycle_path,
-        &TaskLifecycle::Completed { request_sha256 },
+
+    // Resume-first: an accepted journal record owns authorization for this
+    // exact canonical request (same id + same hash implies byte-equal
+    // payload), so the operation resumes without any registry lookup,
+    // signature check, or key lifecycle evaluation (05 §5).  A different hash
+    // under the same id is the permanent OPERATION_ID_CONFLICT.
+    let snapshot =
+        control_journal::accepted_snapshot(state_directory, &presented.operation_id, &request_hash)
+            .map_err(map_journal_error)?;
+    if let Some(snapshot) = snapshot {
+        return journaled_execution(state_directory, &presented, &request_hash, &snapshot).await;
+    }
+
+    // (2)+(4) Registry authority: find the controller key for this deployment
+    // and admit it only while it is active and unexpired at admission time.
+    let repository = connect_controller_registry().await?;
+    let admitted = match admission::admit_controller(
+        &repository,
+        &presented.deployment_id,
+        &presented.kid,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(admitted) => admitted,
+        Err(admission::AdmissionError::Rejected(failure)) => {
+            rejection_line(match failure {
+                admission::KeyAdmissionFailure::Expired => RejectionClass::Expired,
+                admission::KeyAdmissionFailure::Untrusted => RejectionClass::Authorization,
+            });
+            bail!("controller key admission failed: {failure:?}");
+        }
+        Err(admission::AdmissionError::Transport(error)) => {
+            rejection_line(RejectionClass::Unavailable);
+            return Err(error.context("controller registry is unavailable"));
+        }
+    };
+
+    // (3) Signature over the canonical bytes through the single frozen
+    // verifier API; it re-validates header, encoding, envelope policy, and
+    // key binding.  The verified operation replaces the pre-parsed one from
+    // here on, so there is no parse/verify TOCTOU gap.
+    let verified = reject(
+        verify_control_operation_signature(compact, &admitted.kid, &admitted.verifying_key)
+            .map_err(anyhow::Error::new),
+        RejectionClass::Authorization,
     )?;
-    print!("{compact_receipt}");
+
+    // (5) Fencing: this binary is the authorized target artifact (J1), the
+    // operation names this local deployment, and its config_revision matches
+    // the local revision marker.
+    reject(
+        identity::validate_embedded_target_identity(&verified.target),
+        RejectionClass::Target,
+    )?;
+    let local_deployment_id = reject(
+        identity::validate_local_operation_identity(&verified.operation),
+        RejectionClass::Deployment,
+    )?;
+    if local_deployment_id != verified.deployment_id {
+        rejection_line(RejectionClass::Deployment);
+        bail!("operator task deployment identity is not local");
+    }
+    // Persist/verify the operator state anchor only after the signed
+    // deployment binding proved local, so an unadmitted request can never
+    // seed state directory identity.
+    identity::persist_operator_state_identity(state_directory, &local_deployment_id)?;
+    reject(
+        identity::validate_config_revision(&verified),
+        RejectionClass::Revision,
+    )?;
+
+    // (6)+(7) Journal accept-before-side-effect, then checkpoint-driven
+    // execution with per-operation resume ownership (E05 mapping table in
+    // execution.rs).
+    let snapshot = control_journal::AuthorizationSnapshot {
+        controller_id: admitted.controller_id.clone(),
+        kid: admitted.kid.clone(),
+        accepted_at: Utc::now().timestamp(),
+    };
+    journaled_execution(state_directory, &verified, &request_hash, &snapshot).await
+}
+
+/// Run one operation under journal discipline and print its durable result.
+async fn journaled_execution(
+    state_directory: &Path,
+    operation: &ControlOperation,
+    request_hash: &str,
+    snapshot: &control_journal::AuthorizationSnapshot,
+) -> anyhow::Result<()> {
+    let resume_allowed = execution::resume_allowed(&operation.operation);
+    let context = execution::ExecutionContext {
+        operation_id: &operation.operation_id,
+        deployment_id: &operation.deployment_id,
+        controller_id: &snapshot.controller_id,
+        kid: &snapshot.kid,
+        request_hash,
+    };
+    let outcome = control_journal::run_journaled_operation(
+        state_directory,
+        operation,
+        request_hash,
+        snapshot,
+        resume_allowed,
+        &|name| {
+            let _ = pause_at_test_failpoint(name);
+        },
+        || execution::execute(&operation.operation, &context),
+    )
+    .await
+    .map_err(map_journal_error)?;
+    let bytes = reject(
+        encode_control_result(&outcome.result).map_err(anyhow::Error::new),
+        RejectionClass::Request,
+    )?;
+    print!("{}", String::from_utf8_lossy(&bytes));
     Ok(())
 }
+
+fn map_journal_error(error: control_journal::JournalFlowError) -> anyhow::Error {
+    match error {
+        control_journal::JournalFlowError::OperationIdConflict => {
+            rejection_line(RejectionClass::Conflict);
+            anyhow::Error::new(error).context("operation id conflict")
+        }
+        control_journal::JournalFlowError::UnknownOutcome => anyhow::Error::new(error)
+            .context("operator task may have executed without a durable result; refusing replay"),
+        other => anyhow::Error::new(other),
+    }
+}
+
+async fn connect_controller_registry() -> anyhow::Result<nazo_postgres::ControllerRegistryRepository>
+{
+    Ok(nazo_postgres::ControllerRegistryRepository::new(
+        operator_database().await?,
+    ))
+}
+
+/// Least-privilege database handle for one-shot work: only the migration-grade
+/// configuration source (DATABASE_URL / DATABASE_URL_FILE) is consulted.
+pub(super) async fn operator_database() -> anyhow::Result<nazo_postgres::DbPool> {
+    let config = crate::config::ConfigSource::load_for_migrations()?;
+    let database_url = crate::config::database_url(&config);
+    nazo_postgres::create_pool(&database_url, OPERATOR_DATABASE_MAX_CONNECTIONS)
+        .context("failed to create the operator database pool")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectionClass {
+    Request,
+    Authorization,
+    Expired,
+    Deployment,
+    Target,
+    Revision,
+    Conflict,
+    Unavailable,
+}
+
+impl RejectionClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Authorization => "authorization",
+            Self::Expired => "expired",
+            Self::Deployment => "deployment",
+            Self::Target => "target",
+            Self::Revision => "revision",
+            Self::Conflict => "conflict",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+fn rejection_line(class: RejectionClass) {
+    // A closed, non-secret classification for ctl probes.  Do not include key
+    // material, envelope content, or parser detail.
+    eprintln!("nazoauth-operator-rejection={}", class.as_str());
+}
+
+fn reject<T>(result: anyhow::Result<T>, class: RejectionClass) -> anyhow::Result<T> {
+    result.inspect_err(|_| rejection_line(class))
+}
+
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> anyhow::Result<()> {
+pub(super) fn sync_directory(path: &Path) -> anyhow::Result<()> {
     fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> anyhow::Result<()> {
+pub(super) fn sync_directory(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configured_path(variable: &str, fallback: &str) -> PathBuf {
+pub(super) fn configured_path(variable: &str, fallback: &str) -> PathBuf {
     env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(fallback))
 }
 
-fn regular_state_file_present(path: &Path, description: &str) -> anyhow::Result<bool> {
+pub(super) fn regular_state_file_present(path: &Path, description: &str) -> anyhow::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
         Ok(_) => bail!("{description} is not a regular non-symlink file"),
@@ -253,7 +326,7 @@ fn regular_state_file_present(path: &Path, description: &str) -> anyhow::Result<
     }
 }
 
-fn state_path_present(path: &Path) -> anyhow::Result<bool> {
+pub(super) fn state_path_present(path: &Path) -> anyhow::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -261,7 +334,7 @@ fn state_path_present(path: &Path) -> anyhow::Result<bool> {
     }
 }
 
-fn ensure_real_state_directory(path: &Path) -> anyhow::Result<()> {
+pub(super) fn ensure_real_state_directory(path: &Path) -> anyhow::Result<()> {
     let metadata = fs::symlink_metadata(path).with_context(|| {
         format!(
             "failed to inspect operator state directory {}",
@@ -273,6 +346,34 @@ fn ensure_real_state_directory(path: &Path) -> anyhow::Result<()> {
     } else {
         bail!("operator state directory is not a real non-symlink directory")
     }
+}
+
+async fn acquire_task_lock(lock: std::fs::File) -> anyhow::Result<std::fs::File> {
+    acquire_task_lock_with_timeout(lock, TASK_LOCK_TIMEOUT).await
+}
+
+async fn acquire_task_lock_with_timeout(
+    lock: std::fs::File,
+    timeout: Duration,
+) -> anyhow::Result<std::fs::File> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if task_lock_is_contended(&error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    bail!("operator task lock acquisition timed out");
+                }
+                tokio::time::sleep(TASK_LOCK_RETRY_INTERVAL).await;
+            }
+            Err(error) => return Err(error).context("failed to acquire operator task lock"),
+        }
+    }
+}
+
+fn task_lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || cfg!(windows) && error.raw_os_error() == Some(33)
 }
 
 #[cfg(debug_assertions)]

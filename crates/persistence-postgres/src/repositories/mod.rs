@@ -4,6 +4,7 @@ mod audit_ledger;
 mod authorization;
 mod authorization_flow;
 pub(crate) mod clients;
+mod controller_registry;
 mod federation;
 mod grants;
 mod initial_admin_bootstrap;
@@ -11,6 +12,7 @@ mod mfa;
 mod mtls_trust;
 mod openid4vc;
 mod passkeys;
+mod recovery_root;
 mod runtime_modules;
 mod scim;
 mod scim_events;
@@ -31,6 +33,13 @@ pub use authorization_flow::AuthorizationFlowRepository;
 pub use clients::{
     OAuthClientRepository, active_public_client_id_on_connection, deactivate_client_on_connection,
     insert_client_on_connection,
+};
+pub use controller_registry::{
+    AdmittedController, CONTROLLER_KEY_TTL_SECONDS, CommitWithApprovalError,
+    ControllerIdentityAction, ControllerRegistryError, ControllerRegistryRepository,
+    ControllerSlotStatus, ControllerSlotSummary, DEPLOYMENT_IDENTITY_LOCK_SEED,
+    IDENTITY_APPROVAL_TTL_SECONDS, IdentityApprovalError, IssuedIdentityApproval,
+    MAX_ACTIVE_CONTROLLER_SLOTS, NewControllerSlot, RotateControllerKey, StoredControllerSlot,
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};
@@ -53,6 +62,12 @@ pub use openid4vc::{
     unprotect_dataset_claims, upsert_operator_managed_dataset_on_connection,
 };
 pub use passkeys::PasskeyRepository;
+pub use recovery_root::{
+    AdmittedControllerSummary, IssuedRecoveryChallenge, MAX_RECOVERY_CHALLENGE_ATTEMPTS,
+    NewRecoveryChallenge, NewRecoveryRoot, RECOVERY_CHALLENGE_TTL_SECONDS, RecoveredSlotCommit,
+    RecoveryRootError, RecoveryRootRepository, RecoveryRootSummary, RecoveryRotationError,
+    RecoverySubmission, StoredRecoveryRoot,
+};
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};
 pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;

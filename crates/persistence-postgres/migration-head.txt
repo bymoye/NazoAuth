@@ -1,1 +1,1 @@
-20260822000200_openid4vp_opaque_suite_identifiers
+20260825000100_controller_recovery_root

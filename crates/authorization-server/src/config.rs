@@ -1,5 +1,6 @@
 //! Runtime configuration loading.
-// Configuration is read once at startup from defaults, .env.yaml, and whitelisted environment variables.
+// Configuration is read once at startup from defaults, .env.yaml (or the
+// `NAZOAUTH_SERVER_CONFIG_FILE` override), and whitelisted environment variables.
 
 use std::{
     collections::HashMap,
@@ -14,6 +15,12 @@ use rand::Rng as _;
 use yaml_serde::Value as YamlValue;
 
 const CONFIG_FILE: &str = ".env.yaml";
+/// Optional override of the `.env.yaml` location for managed deployments that
+/// mount the configuration outside the working directory (for example
+/// `/app/.env.yaml` in a container). Absolute values are used as-is; relative
+/// values resolve against the configuration directory. The key is already
+/// whitelisted as a non-config NazoAuth environment variable.
+const CONFIG_FILE_OVERRIDE_ENV: &str = "NAZOAUTH_SERVER_CONFIG_FILE";
 const UNSUPPORTED_DOTENV_FILE: &str = ".env";
 const INITIAL_CONFIG: &str = r#"# Generated local NazoAuth configuration.
 BIND: "0.0.0.0:8000"
@@ -296,7 +303,14 @@ pub fn prepare_server_config() -> anyhow::Result<ServerConfigPreparation> {
 }
 
 fn prepare_server_config_in(path: impl AsRef<Path>) -> anyhow::Result<ServerConfigPreparation> {
-    let config_path = path.as_ref().join(CONFIG_FILE);
+    prepare_server_config_at(path, config_file_override_from_env().as_deref())
+}
+
+fn prepare_server_config_at(
+    path: impl AsRef<Path>,
+    config_file_override: Option<&str>,
+) -> anyhow::Result<ServerConfigPreparation> {
+    let config_path = resolve_config_file(path.as_ref(), config_file_override);
     if config_path.exists() {
         return Ok(ServerConfigPreparation::Ready);
     }
@@ -385,6 +399,24 @@ impl ConfigSource {
         resolve_secret_files: bool,
         include_worker_config: bool,
     ) -> anyhow::Result<Self> {
+        Self::load_from_dir_with_config_file_override(
+            path,
+            config_file_override_from_env().as_deref(),
+            env,
+            materialize_generated_secrets,
+            resolve_secret_files,
+            include_worker_config,
+        )
+    }
+
+    fn load_from_dir_with_config_file_override(
+        path: impl AsRef<Path>,
+        config_file_override: Option<&str>,
+        env: impl IntoIterator<Item = (String, String)>,
+        materialize_generated_secrets: bool,
+        resolve_secret_files: bool,
+        include_worker_config: bool,
+    ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let config_dir = std::fs::canonicalize(path).with_context(|| {
             format!(
@@ -402,7 +434,7 @@ impl ConfigSource {
             config_dir: config_dir.clone(),
             ..Self::default()
         };
-        let config_path = path.join(CONFIG_FILE);
+        let config_path = resolve_config_file(path, config_file_override);
         if config_path.exists() {
             source.merge_yaml_file_with_worker_policy(config_path, include_worker_config)?;
         }
@@ -731,6 +763,32 @@ fn is_unknown_nazoauth_environment_key(key: &str) -> bool {
         && !NON_CONFIG_NAZOAUTH_ENV_PREFIXES
             .iter()
             .any(|prefix| key.starts_with(prefix))
+}
+
+fn config_file_override_from_env() -> Option<String> {
+    let value = std::env::var(CONFIG_FILE_OVERRIDE_ENV).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Resolve the effective configuration file: the `NAZOAUTH_SERVER_CONFIG_FILE`
+/// override when set (absolute as-is, relative against the configuration
+/// directory), `.env.yaml` in the configuration directory otherwise.
+fn resolve_config_file(config_dir: &Path, override_value: Option<&str>) -> PathBuf {
+    match override_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(configured) => {
+            let configured = Path::new(configured);
+            if configured.is_absolute() {
+                configured.to_owned()
+            } else {
+                config_dir.join(configured)
+            }
+        }
+        None => config_dir.join(CONFIG_FILE),
+    }
 }
 
 fn resolve_persistent_path(

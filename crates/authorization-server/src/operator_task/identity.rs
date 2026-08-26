@@ -1,97 +1,95 @@
+//! Local identity anchors for the one-shot operator (E04 step 5).
+//!
+//! Three independent fences run after signature verification and before
+//! journal acceptance:
+//!
+//! 1. embedded build identity equality (J1): the signed `target.embedded`
+//!    must equal the build identity of *this* executing binary, so an
+//!    operation authorized for artifact A can never execute on runtime B;
+//! 2. deployment binding: the signed `deployment_id` must match the local
+//!    authoritative anchors (server config, persisted instance identity, and
+//!    the operator state anchor);
+//! 3. config_revision fencing: the signed opaque revision must equal the
+//!    local revision marker, constant-time compared through the frozen
+//!    [`nazo_operator_protocol::config_revision_matches`] helper.
+//!
+//! The old TaskEnvelope-era secret-binding HMAC checks and canonical config
+//! manifest validation are gone with that envelope: `config_revision` is the
+//! only revision fence in the frozen contract.
+
+use std::{io::Cursor, path::Path};
+
+use anyhow::{Context as _, bail};
+use yaml_serde::Value as YamlValue;
+
 use super::*;
+use crate::control_discovery::read_identifier;
+use nazo_operator_protocol::ControlOperationPayload;
 
-use crate::adapters::security::constant_time_eq;
-
-pub(super) fn validate_embedded_identity(task: &TaskEnvelope) -> anyhow::Result<()> {
-    let actual = embedded_identity();
-    if actual != task.embedded {
-        bail!("embedded build identity does not match the authorized task target");
-    }
-    if task.config.manifest_version != nazo_operator_protocol::CONFIG_MANIFEST_VERSION {
-        bail!("unsupported canonical config manifest version");
-    }
-    if matches!(task.config.secret_binding, SecretBinding::OpaqueRevision { ref revision } if revision.is_empty())
-    {
-        bail!("secret revision must not be empty");
+/// J1: the operation must name exactly this executing binary's build.
+///
+/// The frozen contract expresses build identity as
+/// [`nazo_operator_protocol::ControlBuildIdentity`] `{product, version,
+/// commit}`; this runtime maps it onto the same build environment as the
+/// legacy embedded identity: `product` is the fixed workspace product name
+/// (`CONTROL_DISCOVERY_PRODUCT`), `version` comes from
+/// `NAZOAUTH_BUILD_RELEASE`, and `commit` from `NAZOAUTH_BUILD_REVISION`.
+/// ctl must construct `target.embedded` from exactly these values (see the
+/// E04 report's ctl-contract notes).
+pub(super) fn validate_embedded_target_identity(
+    target: &nazo_operator_protocol::ControlTarget,
+) -> anyhow::Result<()> {
+    let actual = control_build_identity();
+    if *target.embedded() != actual {
+        bail!("embedded build identity does not match the executing runtime");
     }
     Ok(())
 }
 
-pub(super) fn validate_secret_binding(task: &TaskEnvelope) -> anyhow::Result<()> {
-    let revision_path = configured_path(
-        "NAZOAUTH_OPERATOR_SECRET_REVISION_FILE",
-        SECRET_REVISION_PATH,
-    );
-    validate_secret_binding_at(task, &revision_path)
+/// This binary's build identity in the frozen contract's shape.
+pub(crate) fn control_build_identity() -> nazo_operator_protocol::ControlBuildIdentity {
+    nazo_operator_protocol::ControlBuildIdentity {
+        product: nazo_operator_protocol::CONTROL_DISCOVERY_PRODUCT.to_owned(),
+        version: option_env!("NAZOAUTH_BUILD_RELEASE")
+            .unwrap_or("development")
+            .to_owned(),
+        commit: option_env!("NAZOAUTH_BUILD_REVISION")
+            .unwrap_or("development")
+            .to_owned(),
+    }
 }
 
-pub(super) fn validate_secret_binding_at(
-    task: &TaskEnvelope,
+pub(super) fn validate_config_revision(operation: &ControlOperation) -> anyhow::Result<()> {
+    let revision_path = configured_path(
+        "NAZOAUTH_OPERATOR_CONFIG_REVISION_FILE",
+        CONFIG_REVISION_PATH,
+    );
+    validate_config_revision_at(operation, &revision_path)
+}
+
+pub(super) fn validate_config_revision_at(
+    operation: &ControlOperation,
     revision_path: &Path,
 ) -> anyhow::Result<()> {
-    let SecretBinding::OpaqueRevision { revision } = &task.config.secret_binding else {
-        // The v1 controller emits OpaqueRevision from the single
-        // secret-revision authority.  HMAC bindings require a separately
-        // provisioned deployment key/provider, which this runtime does not
-        // have; accepting one without recomputing it would be fail-open.
-        bail!("operator task HMAC secret binding has no local provider");
-    };
-    let local_revision = read_identifier(revision_path).with_context(|| {
+    let local_revision = fs::read_to_string(revision_path).with_context(|| {
         format!(
-            "operator task secret revision authority is unavailable: {}",
+            "operator configuration revision authority is unavailable: {}",
             revision_path.display()
         )
     })?;
-    if !constant_time_eq(local_revision.as_bytes(), revision.as_bytes()) {
-        bail!("operator task secret revision binding mismatch");
+    let local_revision = local_revision.trim();
+    if local_revision.is_empty() {
+        bail!("operator configuration revision authority is empty");
+    }
+    if !nazo_operator_protocol::config_revision_matches(operation, local_revision.as_bytes()) {
+        bail!("operator configuration revision binding mismatch");
     }
     Ok(())
 }
 
-pub(super) fn validate_config_manifest(task: &TaskEnvelope) -> anyhow::Result<()> {
-    let manifest_path = configured_path(
-        "NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE",
-        CONFIG_MANIFEST_PATH,
-    );
-    let server_config_path = configured_path("NAZOAUTH_SERVER_CONFIG_FILE", "/app/.env.yaml");
-    validate_config_manifest_at(task, &manifest_path, &server_config_path)
-}
-
-pub(super) fn validate_config_manifest_at(
-    task: &TaskEnvelope,
-    manifest_path: &Path,
-    server_config_path: &Path,
-) -> anyhow::Result<()> {
-    let bytes = fs::read(manifest_path).context("canonical config manifest is unavailable")?;
-    let manifest: nazo_operator_protocol::CanonicalConfigManifest =
-        serde_json::from_slice(&bytes).context("canonical config manifest is invalid")?;
-    let digest = nazo_operator_protocol::canonical_config_sha256(&manifest)?;
-    if digest != task.config.config_sha256 {
-        bail!("canonical config manifest digest mismatch");
-    }
-    let expected_keys = ["deployment_id", "operation", "server_config_sha256"];
-    if manifest.entries.len() != expected_keys.len()
-        || expected_keys
-            .iter()
-            .any(|key| !manifest.entries.contains_key(*key))
-        || manifest.entries.get("deployment_id") != Some(&task.deployment_id)
-        || manifest.entries.get("operation") != Some(&operation_name(&task.operation).to_owned())
-    {
-        bail!("canonical config manifest is not the closed task manifest");
-    }
-    let actual: String = Sha256::digest(fs::read(server_config_path)?)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    if manifest.entries.get("server_config_sha256") != Some(&actual) {
-        bail!("server configuration digest mismatch");
-    }
-    Ok(())
-}
-
-/// Bind the signed task to the deployment identity that is local to this
+/// Bind the signed operation to the deployment identity that is local to this
 /// runtime.  The controller signature is necessary but not sufficient: a
-/// stale controller mount can carry a valid envelope for another deployment.
+/// stale or forged envelope for another deployment must never execute here.
 ///
 /// Managed runtimes normally persist `DATA_DIR/instance/deployment-id`; the
 /// operator state directory also keeps a local anchor so containerized tasks
@@ -102,21 +100,23 @@ pub(super) fn validate_config_manifest_at(
 /// operations also require the operator-state anchor. An explicit
 /// `NAZOAUTH_OPERATOR_DEPLOYMENT_ID_FILE` always requires that file and is
 /// useful for systemd/container layouts with a separate identity mount.
-pub(super) fn validate_local_task_identity(task: &TaskEnvelope) -> anyhow::Result<String> {
+pub(super) fn validate_local_operation_identity(
+    operation: &ControlOperationPayload,
+) -> anyhow::Result<String> {
     let server_config_path = configured_path("NAZOAUTH_SERVER_CONFIG_FILE", "/app/.env.yaml");
     let explicit_identity_path =
         env::var_os("NAZOAUTH_OPERATOR_DEPLOYMENT_ID_FILE").map(PathBuf::from);
     let state_directory = configured_path("NAZOAUTH_OPERATOR_STATE_DIRECTORY", STATE_DIRECTORY);
-    validate_local_task_identity_at(
-        task,
+    validate_local_operation_identity_at(
+        operation,
         &server_config_path,
         explicit_identity_path.as_deref(),
         Some(&state_directory),
     )
 }
 
-pub(super) fn validate_local_task_identity_at(
-    task: &TaskEnvelope,
+pub(super) fn validate_local_operation_identity_at(
+    operation: &ControlOperationPayload,
     server_config_path: &Path,
     explicit_identity_path: Option<&Path>,
     operator_state_directory: Option<&Path>,
@@ -184,27 +184,25 @@ pub(super) fn validate_local_task_identity_at(
     {
         bail!("persisted and operator state deployment identities do not match");
     }
-    if state_deployment_id.is_none() && !matches!(&task.operation, TaskOperation::MigrateApply) {
+    let bootstrap_operation = matches!(operation, ControlOperationPayload::MigrateApply);
+    if state_deployment_id.is_none() && !bootstrap_operation {
         bail!(
             "operator state deployment identity is unavailable for a non-bootstrap operator task"
         );
     }
-    let expected = if let Some(state) = state_deployment_id {
-        state
-    } else if let Some(persisted) = persisted_deployment_id {
-        persisted
-    } else if let Some(configured) = configured_deployment_id {
-        if !matches!(&task.operation, TaskOperation::MigrateApply) {
+    if let Some(state) = state_deployment_id {
+        return Ok(state);
+    }
+    if let Some(persisted) = persisted_deployment_id {
+        return Ok(persisted);
+    }
+    if let Some(configured) = configured_deployment_id {
+        if !bootstrap_operation {
             bail!("persisted deployment identity is unavailable for a non-bootstrap operator task");
         }
-        configured
-    } else {
-        bail!("no local deployment identity is available");
-    };
-    validate_task_deployment_binding(task, &expected).map_err(|error| {
-        anyhow::anyhow!("operator task deployment identity is not local: {error}")
-    })?;
-    Ok(expected)
+        return Ok(configured);
+    }
+    bail!("no local deployment identity is available");
 }
 
 pub(super) fn persist_operator_state_identity(
@@ -227,7 +225,10 @@ pub(super) fn persist_operator_state_identity(
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(0o400);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o400);
+    }
     let mut file = options.open(&temporary)?;
     file.write_all(format!("{deployment_id}\n").as_bytes())?;
     file.sync_all()?;
@@ -267,18 +268,8 @@ pub(super) fn yaml_mapping_scalar(
     Ok(Some(value.trim().to_owned()).filter(|value| !value.is_empty()))
 }
 
-pub(super) fn operation_name(operation: &TaskOperation) -> &'static str {
-    match operation {
-        TaskOperation::MigrateApply => "migrate-apply",
-        TaskOperation::KeysList => "keys-list",
-        TaskOperation::KeysValidate => "keys-validate",
-        TaskOperation::KeysGenerateLocal { .. } => "keys-generate-local",
-        TaskOperation::KeysRegisterExternal { .. } => "keys-register-external",
-    }
-}
-
-pub(crate) fn embedded_identity() -> EmbeddedIdentity {
-    EmbeddedIdentity {
+pub(crate) fn embedded_identity() -> nazo_operator_protocol::EmbeddedIdentity {
+    nazo_operator_protocol::EmbeddedIdentity {
         release: option_env!("NAZOAUTH_BUILD_RELEASE")
             .unwrap_or("development")
             .to_owned(),

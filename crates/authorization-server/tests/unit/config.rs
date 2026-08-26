@@ -198,6 +198,71 @@ fn existing_server_config_is_never_overwritten() {
 }
 
 #[test]
+fn server_config_file_override_points_loading_at_the_mounted_file() {
+    let config_dir = temp_config_dir("override_dir");
+    let mounted = temp_config_dir("override_mounted");
+    let override_path = mounted.join("app-config.yaml");
+    std::fs::write(&override_path, "BIND: \"0.0.0.0:8000\"\nRUST_LOG: info\n").unwrap();
+    // The configuration directory itself carries no .env.yaml at all.
+    std::fs::write(config_dir.join("unrelated.txt"), "x").unwrap();
+
+    let source = ConfigSource::load_from_dir_with_config_file_override(
+        &config_dir,
+        Some(override_path.to_str().unwrap()),
+        std::iter::empty::<(String, String)>(),
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(source.string("BIND", "unset"), "0.0.0.0:8000");
+    assert_eq!(source.string("RUST_LOG", "unset"), "info");
+    let _ = std::fs::remove_dir_all(&config_dir);
+    let _ = std::fs::remove_dir_all(&mounted);
+}
+
+#[test]
+fn relative_server_config_file_override_resolves_against_the_configuration_directory() {
+    let config_dir = temp_config_dir("relative_override");
+    std::fs::write(config_dir.join("nested.yaml"), "RUST_LOG: info\n").unwrap();
+
+    let source = ConfigSource::load_from_dir_with_config_file_override(
+        &config_dir,
+        Some("nested.yaml"),
+        std::iter::empty::<(String, String)>(),
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(source.string("RUST_LOG", "unset"), "info");
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+#[test]
+fn first_server_run_creates_the_overridden_configuration_file() {
+    let config_dir = temp_config_dir("prepare_override_dir");
+    std::fs::create_dir(config_dir.join("mounted")).unwrap();
+    let override_path = config_dir.join("mounted").join("app-config.yaml");
+
+    let result =
+        prepare_server_config_at(&config_dir, Some(override_path.to_str().unwrap())).unwrap();
+
+    assert_eq!(
+        result,
+        ServerConfigPreparation::Created(override_path.clone())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&override_path).unwrap(),
+        INITIAL_CONFIG
+    );
+    assert!(!config_dir.join(CONFIG_FILE).exists());
+    let _ = std::fs::remove_dir_all(&config_dir);
+}
+
+#[test]
 fn unknown_yaml_key_is_rejected_with_the_key_name() {
     let path = temp_config_dir("unknown_yaml_key");
     std::fs::write(path.join(".env.yaml"), "COOKIE_SECUR: true\n").unwrap();

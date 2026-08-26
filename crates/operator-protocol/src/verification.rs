@@ -10,14 +10,13 @@ use serde::de::DeserializeOwned;
 use crate::signing::{compact_segments, decode_json, decode_protected_header};
 use crate::wire::*;
 use crate::{
-    ADOPTION_RECEIPT_JWS_TYPE, CONFIG_MANIFEST_VERSION, CONTROL_DISCOVERY_JWS_TYPE,
-    CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA, DEPLOYMENT_STATEMENT_JWS_TYPE,
-    FINAL_RECEIPT_JWS_TYPE, MANAGEMENT_EVENT_JWS_TYPE, MAX_DISCOVERY_LIFETIME_SECONDS,
-    MAX_TASK_LIFETIME_SECONDS, MAX_TENANT_RESOURCE_IDENTITIES, MAX_TENANT_RESOURCE_KINDS,
+    CONTROL_DISCOVERY_JWS_TYPE, CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA,
+    DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_DISCOVERY_LIFETIME_SECONDS, MAX_TASK_LIFETIME_SECONDS,
+    MAX_TENANT_RESOURCE_IDENTITIES, MAX_TENANT_RESOURCE_KINDS,
     OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE,
-    PROTOCOL_VERSION, ProtocolError, RUNTIME_RECEIPT_JWS_TYPE, TASK_JWS_TYPE,
-    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_CAPABILITY_VERSION,
-    TENANT_RESOURCE_RECEIPT_JWS_TYPE, TENANT_RESOURCE_TASK_JWS_TYPE, TRUST_TRANSITION_JWS_TYPE,
+    PROTOCOL_VERSION, ProtocolError, TENANT_RESOURCE_CAPABILITY_JWS_TYPE,
+    TENANT_RESOURCE_CAPABILITY_VERSION, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
+    TENANT_RESOURCE_TASK_JWS_TYPE,
 };
 
 pub fn validate_discovery_request(request: &DiscoveryRequest) -> Result<(), ProtocolError> {
@@ -62,16 +61,6 @@ pub fn verify_deployment_statement(
     }
     validate_deployment_statement(&statement)?;
     Ok(statement)
-}
-
-pub fn verify_adoption_receipt(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-) -> Result<AdoptionReceipt, ProtocolError> {
-    let receipt = verify_compact(compact, expected_key_id, ADOPTION_RECEIPT_JWS_TYPE, key)?;
-    validate_adoption_receipt(&receipt)?;
-    Ok(receipt)
 }
 
 pub struct Openid4vpVerificationReceiptExpectations<'a> {
@@ -415,121 +404,6 @@ pub fn validate_file_identifier_value(value: &str) -> Result<(), ProtocolError> 
     validate_file_identifier(value)
 }
 
-pub fn verify_task(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-    now: i64,
-) -> Result<TaskEnvelope, ProtocolError> {
-    let task = verify_task_signature(compact, expected_key_id, key)?;
-    verify_task_window(&task, now)?;
-    Ok(task)
-}
-
-pub fn verify_task_signature(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-) -> Result<TaskEnvelope, ProtocolError> {
-    let task = verify_compact(compact, expected_key_id, TASK_JWS_TYPE, key)?;
-    validate_task(&task)?;
-    Ok(task)
-}
-
-/// Bind a signed task's issuer, audience, and deployment claim to the
-/// deployment identity trusted by the local runtime.
-///
-/// Signature verification only proves that the configured controller signed
-/// the envelope.  It does not prove that the envelope was intended for this
-/// runtime: a valid controller envelope from another deployment would still
-/// verify with a stale or mis-mounted controller key.  The application must
-/// obtain `expected_deployment_id` from its local read-only identity/config
-/// boundary and call this check before claiming or executing the task.
-pub fn validate_task_deployment_binding(
-    task: &TaskEnvelope,
-    expected_deployment_id: &str,
-) -> Result<(), ProtocolError> {
-    validate_file_identifier(expected_deployment_id)?;
-    if task.deployment_id != expected_deployment_id
-        || task.iss != format!("controller:{expected_deployment_id}")
-        || task.aud != format!("runtime:{expected_deployment_id}")
-    {
-        return Err(ProtocolError::Policy(
-            "operator task deployment binding mismatch",
-        ));
-    }
-    Ok(())
-}
-
-/// Bind a runtime receipt's issuer, audience, and deployment claim to the
-/// same deployment identity as its originating task.
-pub fn validate_runtime_receipt_deployment_binding(
-    receipt: &RuntimeReceipt,
-    expected_deployment_id: &str,
-) -> Result<(), ProtocolError> {
-    validate_file_identifier(expected_deployment_id)?;
-    if receipt.deployment_id != expected_deployment_id
-        || receipt.iss != format!("runtime:{expected_deployment_id}")
-        || receipt.aud != format!("controller:{expected_deployment_id}")
-    {
-        return Err(ProtocolError::Policy(
-            "runtime receipt deployment binding mismatch",
-        ));
-    }
-    Ok(())
-}
-
-pub fn verify_task_window(task: &TaskEnvelope, now: i64) -> Result<(), ProtocolError> {
-    if now < task.nbf || now > task.exp {
-        return Err(ProtocolError::Policy("task is outside its validity window"));
-    }
-    Ok(())
-}
-
-pub fn verify_runtime_receipt(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-) -> Result<RuntimeReceipt, ProtocolError> {
-    let receipt: RuntimeReceipt =
-        verify_compact(compact, expected_key_id, RUNTIME_RECEIPT_JWS_TYPE, key)?;
-    validate_runtime_receipt(&receipt)?;
-    Ok(receipt)
-}
-
-pub fn verify_final_receipt(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-) -> Result<FinalReceipt, ProtocolError> {
-    let receipt: FinalReceipt =
-        verify_compact(compact, expected_key_id, FINAL_RECEIPT_JWS_TYPE, key)?;
-    validate_final_receipt(&receipt)?;
-    Ok(receipt)
-}
-
-pub fn verify_trust_transition(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-) -> Result<ControllerTrustTransition, ProtocolError> {
-    let transition: ControllerTrustTransition =
-        verify_compact(compact, expected_key_id, TRUST_TRANSITION_JWS_TYPE, key)?;
-    validate_transition(&transition)?;
-    Ok(transition)
-}
-
-pub fn verify_management_event(
-    compact: &str,
-    expected_key_id: &str,
-    key: &VerifyingKey,
-) -> Result<ManagementAuditEvent, ProtocolError> {
-    let event: ManagementAuditEvent =
-        verify_compact(compact, expected_key_id, MANAGEMENT_EVENT_JWS_TYPE, key)?;
-    validate_management_event(&event)?;
-    Ok(event)
-}
-
 fn verify_compact<T: DeserializeOwned>(
     compact: &str,
     expected_key_id: &str,
@@ -610,80 +484,6 @@ pub(crate) fn validate_deployment_statement(
     Ok(())
 }
 
-pub(crate) fn validate_adoption_receipt(receipt: &AdoptionReceipt) -> Result<(), ProtocolError> {
-    if receipt.schema != CONTROL_DISCOVERY_SCHEMA {
-        return Err(ProtocolError::Policy("unsupported adoption receipt schema"));
-    }
-    validate_file_identifier(&receipt.deployment_id)?;
-    validate_identifier(&receipt.issuer)?;
-    validate_identifier(&receipt.verified_release)?;
-    validate_lower_hex(&receipt.release_manifest_sha256, 64)?;
-    validate_lower_hex(&receipt.plan_sha256, 64)?;
-    if receipt.adopted_at <= 0 || receipt.runtime_instances.is_empty() {
-        return Err(ProtocolError::Policy("invalid adoption receipt"));
-    }
-    if receipt.runtime_instances.len() > 128
-        || receipt.instance_key_ids.len() > 128
-        || receipt.runtime_instances.len() != receipt.instance_key_ids.len()
-    {
-        return Err(ProtocolError::Policy(
-            "adoption receipt instance identities are inconsistent",
-        ));
-    }
-    let mut runtime_ids = std::collections::BTreeSet::new();
-    for runtime in &receipt.runtime_instances {
-        validate_file_identifier(&runtime.runtime_instance_id)?;
-        if !runtime_ids.insert(runtime.runtime_instance_id.as_str()) {
-            return Err(ProtocolError::Policy(
-                "adoption receipt runtime identities must be unique",
-            ));
-        }
-        for value in [
-            &runtime.backend,
-            &runtime.object_reference,
-            &runtime.artifact_identity,
-        ] {
-            validate_audit_boundary(value)?;
-        }
-    }
-    let mut key_ids = std::collections::BTreeSet::new();
-    for key_id in &receipt.instance_key_ids {
-        validate_file_identifier(key_id)?;
-        if !key_ids.insert(key_id.as_str()) {
-            return Err(ProtocolError::Policy(
-                "adoption receipt key identities must be unique",
-            ));
-        }
-    }
-    if receipt.resource_references.len() > 64 || receipt.capabilities.len() > 16 {
-        return Err(ProtocolError::Policy(
-            "adoption receipt exceeds policy limit",
-        ));
-    }
-    for (name, value) in receipt
-        .resource_references
-        .iter()
-        .chain(receipt.capabilities.iter())
-    {
-        validate_identifier(name)?;
-        validate_audit_boundary(value)?;
-    }
-    if receipt.recovery_evidence.len() > 64 {
-        return Err(ProtocolError::Policy(
-            "adoption receipt exceeds recovery evidence limit",
-        ));
-    }
-    if receipt.recovery_proven && receipt.recovery_evidence.is_empty() {
-        return Err(ProtocolError::Policy(
-            "adoption recovery proof requires evidence",
-        ));
-    }
-    for evidence in &receipt.recovery_evidence {
-        validate_audit_boundary(evidence)?;
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn validate_discovery_identity(
     schema: u32,
@@ -755,60 +555,6 @@ fn validate_discovery_nonce(nonce: &str) -> Result<(), ProtocolError> {
             "control discovery nonce must encode 32 bytes",
         ));
     }
-    Ok(())
-}
-
-pub(crate) fn validate_task(task: &TaskEnvelope) -> Result<(), ProtocolError> {
-    if task.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy("unsupported task version"));
-    }
-    for value in [&task.iss, &task.aud, &task.actor.id] {
-        validate_identifier(value)?;
-    }
-    validate_file_identifier(&task.jti)?;
-    validate_file_identifier(&task.deployment_id)?;
-    if task.iat <= 0
-        || task.nbf <= 0
-        || task.exp <= 0
-        || task.exp < task.iat
-        || task.exp - task.iat > MAX_TASK_LIFETIME_SECONDS
-    {
-        return Err(ProtocolError::Policy("task lifetime exceeds 60 seconds"));
-    }
-    if task.nbf < task.iat {
-        return Err(ProtocolError::Policy(
-            "task validity starts before issuance",
-        ));
-    }
-    if task.config.manifest_version != CONFIG_MANIFEST_VERSION {
-        return Err(ProtocolError::Policy("unsupported config manifest version"));
-    }
-    validate_lower_hex(&task.config.config_sha256, 64)?;
-    validate_embedded_identity(&task.embedded)?;
-    match &task.target {
-        TargetExpectation::OciImage {
-            image_ref,
-            image_digest,
-        } => {
-            validate_oci_image_reference(image_ref)?;
-            let digest = image_digest
-                .strip_prefix("sha256:")
-                .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
-            validate_lower_hex(digest, 64)?;
-        }
-        TargetExpectation::HostBinary { path, sha256 } => {
-            validate_host_binary_path(path)?;
-            validate_lower_hex(sha256, 64)?;
-        }
-    }
-    match &task.config.secret_binding {
-        SecretBinding::OpaqueRevision { revision } => validate_identifier(revision)?,
-        SecretBinding::HmacSha256 { key_id, digest } => {
-            validate_identifier(key_id)?;
-            validate_lower_hex(digest, 64)?;
-        }
-    }
-    validate_operation(&task.operation)?;
     Ok(())
 }
 
@@ -1518,136 +1264,12 @@ pub fn validate_tenant_resource_capability_request_binding(
     Ok(())
 }
 
-pub(crate) fn validate_runtime_receipt(receipt: &RuntimeReceipt) -> Result<(), ProtocolError> {
-    if receipt.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy("unsupported receipt version"));
-    }
-    for value in [
-        &receipt.iss,
-        &receipt.aud,
-        &receipt.operation,
-        &receipt.actor.id,
-    ] {
-        validate_identifier(value)?;
-    }
-    validate_file_identifier(&receipt.jti)?;
-    validate_file_identifier(&receipt.deployment_id)?;
-    validate_lower_hex(&receipt.request_sha256, 64)?;
-    validate_embedded_identity(&receipt.embedded)?;
-    validate_config_binding(&receipt.config)?;
-    if receipt.started_at <= 0
-        || receipt.completed_at <= 0
-        || receipt.completed_at < receipt.started_at
-    {
-        return Err(ProtocolError::Policy(
-            "runtime receipt time range is invalid",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_final_receipt(receipt: &FinalReceipt) -> Result<(), ProtocolError> {
-    if receipt.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy("unsupported receipt version"));
-    }
-    for value in [
-        &receipt.iss,
-        &receipt.aud,
-        &receipt.operation,
-        &receipt.actor.id,
-    ] {
-        validate_identifier(value)?;
-    }
-    validate_file_identifier(&receipt.jti)?;
-    validate_file_identifier(&receipt.deployment_id)?;
-    validate_lower_hex(&receipt.request_sha256, 64)?;
-    validate_lower_hex(&receipt.runtime_receipt_sha256, 64)?;
-    validate_lower_hex(&receipt.audit_previous_sha256, 64)?;
-    validate_embedded_identity(&receipt.embedded)?;
-    validate_config_binding(&receipt.config)?;
-    if receipt.completed_at <= 0 || receipt.audit_sequence == 0 {
-        return Err(ProtocolError::Policy(
-            "final receipt time or audit sequence is invalid",
-        ));
-    }
-    match &receipt.controller_verified_target {
-        RuntimeTargetClaim::OciImage {
-            image_ref,
-            image_digest,
-        } => {
-            validate_oci_image_reference(image_ref)?;
-            let digest = image_digest
-                .strip_prefix("sha256:")
-                .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
-            validate_lower_hex(digest, 64)?;
-        }
-        RuntimeTargetClaim::HostBinary { path, sha256 } => {
-            validate_host_binary_path(path)?;
-            validate_lower_hex(sha256, 64)?;
-        }
-    }
-    Ok(())
-}
-
 fn validate_embedded_identity(identity: &EmbeddedIdentity) -> Result<(), ProtocolError> {
     if identity.protocol != PROTOCOL_VERSION {
         return Err(ProtocolError::Policy("embedded protocol version mismatch"));
     }
     for value in [&identity.release, &identity.revision, &identity.build_id] {
         validate_identifier(value)?;
-    }
-    Ok(())
-}
-
-fn validate_config_binding(config: &ConfigBinding) -> Result<(), ProtocolError> {
-    if config.manifest_version != CONFIG_MANIFEST_VERSION {
-        return Err(ProtocolError::Policy("unsupported config manifest version"));
-    }
-    validate_lower_hex(&config.config_sha256, 64)?;
-    match &config.secret_binding {
-        SecretBinding::OpaqueRevision { revision } => validate_identifier(revision),
-        SecretBinding::HmacSha256 { key_id, digest } => {
-            validate_identifier(key_id)?;
-            validate_lower_hex(digest, 64)
-        }
-    }
-}
-
-pub(crate) fn validate_operation(operation: &TaskOperation) -> Result<(), ProtocolError> {
-    match operation {
-        TaskOperation::MigrateApply | TaskOperation::KeysList | TaskOperation::KeysValidate => {}
-        TaskOperation::KeysGenerateLocal { alg, purposes } => {
-            validate_identifier(alg)?;
-            if purposes.is_empty() || purposes.len() > 8 {
-                return Err(ProtocolError::Policy("invalid signing purposes"));
-            }
-            for purpose in purposes {
-                validate_identifier(purpose)?;
-            }
-        }
-        TaskOperation::KeysRegisterExternal {
-            kid,
-            alg,
-            key_ref,
-            public_jwk_sha256,
-        } => {
-            validate_file_identifier(kid)?;
-            validate_identifier(alg)?;
-            validate_lower_hex(public_jwk_sha256, 64)?;
-            if key_ref.is_empty()
-                || key_ref.len() > 512
-                || ["//", "@", "?", "#", "="]
-                    .iter()
-                    .any(|forbidden| key_ref.contains(forbidden))
-                || !key_ref.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || ".:_/-+".contains(character)
-                })
-            {
-                return Err(ProtocolError::Policy(
-                    "external key reference must be a non-secret provider locator",
-                ));
-            }
-        }
     }
     Ok(())
 }
@@ -1990,98 +1612,6 @@ fn valid_jwk_coordinate(value: Option<&serde_json::Value>, expected_len: usize) 
         .is_ok_and(|decoded| decoded.len() == expected_len)
 }
 
-pub(crate) fn validate_transition(
-    transition: &ControllerTrustTransition,
-) -> Result<(), ProtocolError> {
-    if transition.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy(
-            "unsupported trust transition version",
-        ));
-    }
-    if transition.issued_at <= 0 {
-        return Err(ProtocolError::Policy(
-            "trust transition has an invalid issuance time",
-        ));
-    }
-    for value in [
-        &transition.deployment_id,
-        &transition.previous_key_id,
-        &transition.next_key_id,
-        &transition.previous_audit_key_id,
-        &transition.next_audit_key_id,
-        &transition.previous_break_glass_key_id,
-        &transition.next_break_glass_key_id,
-        &transition.reason,
-    ] {
-        validate_identifier(value)?;
-    }
-    validate_lower_hex(&transition.next_public_key_sha256, 64)?;
-    validate_lower_hex(&transition.next_audit_public_key_sha256, 64)?;
-    validate_lower_hex(&transition.next_break_glass_public_key_sha256, 64)
-}
-
-pub(crate) fn validate_management_event(event: &ManagementAuditEvent) -> Result<(), ProtocolError> {
-    if event.ver != PROTOCOL_VERSION {
-        return Err(ProtocolError::Policy(
-            "unsupported management event version",
-        ));
-    }
-    if event.issued_at <= 0 || event.sequence == 0 {
-        return Err(ProtocolError::Policy(
-            "management event time or sequence is invalid",
-        ));
-    }
-    validate_file_identifier(&event.deployment_id)?;
-    validate_file_identifier(&event.request_id)?;
-    validate_lower_hex(&event.previous_sha256, 64)?;
-    for value in [&event.actor.id, &event.operation, &event.release] {
-        validate_identifier(value)?;
-    }
-    validate_audit_boundary(&event.recovery_boundary)?;
-    Ok(())
-}
-
-fn validate_audit_boundary(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value.len() > 4096
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || ".:_/@+_-".contains(character))
-    {
-        return Err(ProtocolError::Policy("invalid audit recovery boundary"));
-    }
-    Ok(())
-}
-
-fn validate_oci_image_reference(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty()
-        || value.len() > 2048
-        || value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-    {
-        return Err(ProtocolError::Policy("invalid OCI image reference"));
-    }
-    Ok(())
-}
-
-fn validate_host_binary_path(value: &str) -> Result<(), ProtocolError> {
-    let windows_absolute = value.as_bytes().get(1) == Some(&b':')
-        && value
-            .as_bytes()
-            .get(2)
-            .is_some_and(|byte| matches!(byte, b'/' | b'\\'));
-    if value.is_empty()
-        || value.len() > 4096
-        || value.chars().any(char::is_control)
-        || value.contains(['{', '}'])
-        || !(value.starts_with('/') || value.starts_with("\\\\") || windows_absolute)
-    {
-        return Err(ProtocolError::Policy("invalid host binary path"));
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty()
         || value.len() > 256
@@ -2108,7 +1638,7 @@ pub(crate) fn validate_file_identifier(value: &str) -> Result<(), ProtocolError>
 
 /// Validate a canonical UUID string without pulling UUID parsing and its
 /// feature surface into this deliberately small wire crate.
-fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
     if value.len() != 36
         || !value.bytes().enumerate().all(|(index, byte)| {
             if matches!(index, 8 | 13 | 18 | 23) {
@@ -2123,7 +1653,27 @@ fn validate_uuid(value: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_lower_hex(value: &str, length: usize) -> Result<(), ProtocolError> {
+/// Authoritative controller identity shape (D01): a canonical lowercase
+/// RFC 9562 UUIDv7.  NazoAuth assigns it when a controller slot is created and
+/// keeps it stable across key rotations, so it — unlike the `kid` — names the
+/// controller rather than one generation of its key material.  The same rule
+/// validates the `controller_id` persisted in the control operation journal
+/// authorization snapshot (E03/D02).
+pub fn validate_controller_id(value: &str) -> Result<(), ProtocolError> {
+    validate_uuid(value)?;
+    let bytes = value.as_bytes();
+    if bytes[14] != b'7' {
+        return Err(ProtocolError::Policy("controller_id must be a UUIDv7"));
+    }
+    if !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
+        return Err(ProtocolError::Policy(
+            "controller_id must use the RFC 9562 variant",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_lower_hex(value: &str, length: usize) -> Result<(), ProtocolError> {
     if value.len() != length
         || !value
             .chars()

@@ -1250,29 +1250,25 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
     let desired_manifest =
         canonical_tenant_resource_manifest_sha256(&desired).expect("complete graph manifest");
     let empty_manifest = PostgresTenantResourceExecutor::empty_manifest_sha256();
-    let apply_task = resource_task(
-        tenant_id,
-        "ordinary-graph-apply",
-        "ordinary-graph-change",
-        TenantResourceOperation::Apply,
-        TenantResourceTaskPayload::Apply {
-            resources: desired.clone(),
-        },
-        0,
-        (empty_manifest.clone(), desired_manifest.clone()),
-    );
+    let change_set = ChangeSetProvenance {
+        id: "ordinary-graph-change".to_owned(),
+        sha256: format!("{:064x}", 1),
+    };
     let mut connection = nazo_postgres::get_conn(&pool).await.expect("connection");
-    let (applied, mappings) = apply_resources(
+    let (applied, mappings, computed) = apply_resources(
         &mut connection,
         tenant_id,
         tenant,
-        &apply_task,
         &resources,
         &payloads,
         &Some(data_key),
+        &change_set,
     )
     .await
     .expect("apply complete graph");
+    // The caller-declared end-state fence (HTTP driver contract): the
+    // recomputed active manifest must equal the declared one.
+    assert_eq!(computed, desired_manifest);
     assert_eq!(applied.len(), 5);
     assert_eq!(mappings.len(), 2);
     assert!(mappings.iter().any(|mapping| {
@@ -1282,19 +1278,20 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
         mapping.kind == TenantResourceKind::OauthClient && mapping.resource_id == client.resource_id
     }));
 
-    let (replayed, replayed_mappings) = apply_resources(
+    let (replayed, replayed_mappings, replayed_computed) = apply_resources(
         &mut connection,
         tenant_id,
         tenant,
-        &apply_task,
         &resources,
         &payloads,
         &Some(data_key),
+        &change_set,
     )
     .await
     .expect("replay complete graph");
     assert_eq!(replayed, applied);
     assert_eq!(replayed_mappings, mappings);
+    assert_eq!(replayed_computed, computed);
 
     let parent_only = [ResourceKey::from_identity(&user)].into_iter().collect();
     let active = active_binding_map(&mut connection, tenant_id)
@@ -1307,22 +1304,14 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
         ))
     ));
 
-    let revoke_task = resource_task(
-        tenant_id,
-        "ordinary-graph-revoke",
-        "ordinary-graph-revoke-change",
-        TenantResourceOperation::Revoke,
-        TenantResourceTaskPayload::Revoke {
-            resources: desired.clone(),
-        },
-        1,
-        (desired_manifest, empty_manifest),
-    );
-    let revoked = revoke_resources(
+    let revoke_change_set = ChangeSetProvenance {
+        id: "ordinary-graph-revoke-change".to_owned(),
+        sha256: format!("{:064x}", 2),
+    };
+    let (revoked, remaining) = revoke_resources(
         &mut connection,
         tenant_id,
         tenant,
-        &revoke_task,
         &resources
             .iter()
             .map(|resource| PreparedTenantResource {
@@ -1330,10 +1319,14 @@ async fn postgres_executor_applies_and_revokes_the_complete_ordinary_resource_gr
                 payload: None,
             })
             .collect::<Vec<_>>(),
+        &revoke_change_set,
     )
     .await
     .expect("revoke complete graph");
     assert_eq!(revoked.len(), 5);
+    // The caller-declared end-state fence: revoking the whole graph leaves the
+    // empty manifest.
+    assert_eq!(remaining, empty_manifest);
     assert!(
         TenantResourceRepository::active_bindings_on_connection(&mut connection, tenant_id)
             .await

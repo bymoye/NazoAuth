@@ -27,6 +27,9 @@ pub(super) struct IdentityServices {
         web::Data<dyn nazo_identity::ports::RegistrationAccountRepositoryPort>,
     pub(super) admin_grants: web::Data<dyn nazo_auth::AdminGrantRepositoryPort>,
     pub(super) admin_access_requests: web::Data<nazo_postgres::AccessRequestRepository>,
+    pub(super) controller_registry:
+        web::Data<crate::controller_registry::ControllerRegistryService>,
+    pub(super) recovery_root: web::Data<crate::recovery_root::RecoveryRootService>,
     pub(super) mtls_trust_anchors: web::Data<MtlsTrustAnchorService>,
     pub(super) admin_access_delivery: web::Data<nazo_valkey::DeliveryStore>,
     pub(super) admin_access_request_config: web::Data<AdminAccessRequestConfig>,
@@ -208,6 +211,20 @@ pub(super) async fn build(
     );
     let admin_access_requests = web::Data::new(nazo_postgres::AccessRequestRepository::new(
         diesel_db.clone(),
+    ));
+    // D01/D02/D05: authoritative controller registry behind fresh-2FA
+    // approvals.  Built once here so handlers only ever see the typed facade.
+    let controller_registry = web::Data::new(
+        crate::controller_registry::ControllerRegistryService::new(std::sync::Arc::new(
+            nazo_postgres::ControllerRegistryRepository::new(diesel_db.clone()),
+        )),
+    );
+    // 04A D10/D11/D12: Recovery Root anchor, break-glass challenges and
+    // approved rotations share the registry's database authority.
+    let recovery_root = web::Data::new(crate::recovery_root::RecoveryRootService::new(
+        std::sync::Arc::new(nazo_postgres::RecoveryRootRepository::new(
+            diesel_db.clone(),
+        )),
     ));
     let mtls_trust_anchors = web::Data::new(MtlsTrustAnchorService::new(diesel_db.clone()));
     let admin_access_delivery = web::Data::new(nazo_valkey::DeliveryStore::new(&valkey_connection));
@@ -437,6 +454,8 @@ pub(super) async fn build(
         admin_user_registration,
         admin_grants,
         admin_access_requests,
+        controller_registry,
+        recovery_root,
         mtls_trust_anchors,
         admin_access_delivery,
         admin_access_request_config,

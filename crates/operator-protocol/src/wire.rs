@@ -1,7 +1,5 @@
 //! Stable serde wire models for the operator protocol.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -17,31 +15,11 @@ pub enum FixedAlgorithm {
     EdDSA,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskEnvelope {
-    pub ver: u32,
-    pub iss: String,
-    pub aud: String,
-    pub jti: String,
-    pub iat: i64,
-    pub nbf: i64,
-    pub exp: i64,
-    pub deployment_id: String,
-    pub actor: Actor,
-    pub target: TargetExpectation,
-    pub embedded: EmbeddedIdentity,
-    pub config: ConfigBinding,
-    pub operation: TaskOperation,
-}
-
 /// Closed operation names for the tenant resource management contract.
 ///
-/// This is deliberately separate from [`TaskOperation`].  The existing
-/// operator task protocol is consumed by older controllers; adding variants
-/// there would make those consumers silently accept a capability they do not
-/// understand.  Tenant resource management therefore has its own signed
-/// envelope and a closed operation set.
+/// This is deliberately separate from the retired operator task envelope: the
+/// tenant resource contract carries its own signed envelope and a closed
+/// operation set.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TenantResourceOperation {
@@ -253,19 +231,6 @@ pub enum ActorKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum TargetExpectation {
-    OciImage {
-        image_ref: String,
-        image_digest: String,
-    },
-    HostBinary {
-        path: String,
-        sha256: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddedIdentity {
     pub release: String,
@@ -335,66 +300,6 @@ pub struct DeploymentStatement {
     pub issued_at: i64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdoptionReceipt {
-    pub schema: u32,
-    pub deployment_id: String,
-    pub issuer: String,
-    pub runtime_instances: Vec<AdoptedRuntimeIdentity>,
-    pub verified_release: String,
-    pub release_manifest_sha256: String,
-    pub instance_key_ids: Vec<String>,
-    pub resource_references: BTreeMap<String, String>,
-    pub capabilities: BTreeMap<String, String>,
-    pub recovery_proven: bool,
-    pub recovery_evidence: Vec<String>,
-    pub plan_sha256: String,
-    pub adopted_at: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdoptedRuntimeIdentity {
-    pub runtime_instance_id: String,
-    pub backend: String,
-    pub object_reference: String,
-    pub artifact_identity: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigBinding {
-    pub manifest_version: u32,
-    pub config_sha256: String,
-    pub secret_binding: SecretBinding,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum SecretBinding {
-    OpaqueRevision { revision: String },
-    HmacSha256 { key_id: String, digest: String },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum TaskOperation {
-    MigrateApply,
-    KeysList,
-    KeysValidate,
-    KeysGenerateLocal {
-        alg: String,
-        purposes: Vec<String>,
-    },
-    KeysRegisterExternal {
-        kid: String,
-        alg: String,
-        key_ref: String,
-        public_jwk_sha256: String,
-    },
-}
-
 /// Public trust material for the ordinary OpenID4VC provider.
 ///
 /// It carries only the public trust policy needed by a production provider and
@@ -408,24 +313,6 @@ pub struct Openid4vcTrustPolicy {
     pub key_attestation_jwks: serde_json::Value,
     pub credential_trust_anchor_pem: String,
     pub wallet_authorization_origins: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeReceipt {
-    pub ver: u32,
-    pub iss: String,
-    pub aud: String,
-    pub jti: String,
-    pub request_sha256: String,
-    pub deployment_id: String,
-    pub actor: Actor,
-    pub operation: String,
-    pub started_at: i64,
-    pub completed_at: i64,
-    pub embedded: EmbeddedIdentity,
-    pub config: ConfigBinding,
-    pub outcome: TaskOutcome,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -571,189 +458,4 @@ pub struct Openid4vpVerificationIntent {
 #[serde(rename_all = "snake_case")]
 pub enum Openid4vpVerificationStatus {
     Verified,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum RuntimeTargetClaim {
-    OciImage {
-        image_ref: String,
-        image_digest: String,
-    },
-    HostBinary {
-        path: String,
-        sha256: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct FinalReceipt {
-    pub ver: u32,
-    pub iss: String,
-    pub aud: String,
-    pub jti: String,
-    pub request_sha256: String,
-    pub deployment_id: String,
-    pub actor: Actor,
-    pub operation: String,
-    pub completed_at: i64,
-    pub audit_sequence: u64,
-    pub audit_previous_sha256: String,
-    pub controller_verified_target: RuntimeTargetClaim,
-    pub embedded: EmbeddedIdentity,
-    pub config: ConfigBinding,
-    pub runtime_receipt_sha256: String,
-    pub outcome: TaskOutcome,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ControllerTrustTransition {
-    pub ver: u32,
-    pub deployment_id: String,
-    pub issued_at: i64,
-    pub authorization: TransitionAuthorization,
-    pub previous_key_id: String,
-    pub next_key_id: String,
-    pub next_public_key_sha256: String,
-    pub previous_audit_key_id: String,
-    pub next_audit_key_id: String,
-    pub next_audit_public_key_sha256: String,
-    pub previous_break_glass_key_id: String,
-    pub next_break_glass_key_id: String,
-    pub next_break_glass_public_key_sha256: String,
-    pub reason: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TransitionAuthorization {
-    Controller,
-    BreakGlass,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManagementAuditEvent {
-    pub ver: u32,
-    pub deployment_id: String,
-    pub sequence: u64,
-    pub previous_sha256: String,
-    pub request_id: String,
-    pub issued_at: i64,
-    pub actor: Actor,
-    pub operation: String,
-    pub release: String,
-    pub recovery_boundary: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum TaskOutcome {
-    Succeeded { result: TaskResult },
-    Failed { code: String },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum TaskResult {
-    Migration {
-        applied: bool,
-    },
-    /// Read-only compatibility for historic signed audit records.
-    ConformanceMatrix {
-        summary: ConformanceMatrixSummary,
-    },
-    KeyList {
-        keyset_revision: String,
-    },
-    KeyValidation {
-        keyset_revision: String,
-    },
-    KeyGenerated {
-        kid: String,
-        keyset_revision: String,
-    },
-    ExternalKeyRegistered {
-        kid: String,
-        keyset_revision: String,
-    },
-    /// Read-only compatibility for historic signed audit records.
-    ConformanceLeaseCreated {
-        lease: ConformanceLeaseSummary,
-    },
-    /// Read-only compatibility for historic signed audit records.
-    ConformanceOnboardingApplied {
-        onboarding: ConformanceOnboardingSummary,
-    },
-    /// Read-only compatibility for historic signed audit records.
-    ConformanceLeaseList {
-        leases: Vec<ConformanceLeaseSummary>,
-    },
-    /// Read-only compatibility for historic signed audit records.
-    ConformanceLeaseRevoked {
-        lease_id: String,
-        deactivated_clients: u64,
-    },
-    /// Read-only compatibility for historic signed audit records.
-    ConformanceLeaseCleaned {
-        cleaned_leases: u64,
-        deleted_clients: u64,
-        #[serde(default)]
-        deleted_credential_datasets: u64,
-    },
-}
-
-/// Historic lease metadata retained only to deserialize and authenticate
-/// already-signed conformance receipts.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConformanceLeaseSummary {
-    pub lease_id: String,
-    pub profile: String,
-    pub material_sha256: String,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub revoked_at: Option<i64>,
-    pub cleaned_at: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConformanceOnboardingSummary {
-    pub lease_id: String,
-    pub request_jti: String,
-    pub applicant_id: String,
-    pub client_mappings: Vec<ConformanceClientIdMapping>,
-    pub client_count: u32,
-    pub matrix_sha256: String,
-    pub bundle_sha256: String,
-    pub expires_at: i64,
-    pub idempotent_replay: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConformanceClientIdMapping {
-    pub logical_client_id: String,
-    pub client_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConformanceMatrixSummary {
-    pub schema: u32,
-    pub sha256: String,
-    pub size: u64,
-    pub group_count: u32,
-    pub plan_count: u32,
-    pub source_release: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CanonicalConfigManifest {
-    pub version: u32,
-    pub entries: BTreeMap<String, String>,
 }
