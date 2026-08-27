@@ -58,13 +58,6 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
 
     // 数据库和 Valkey 客户端在 server factory 外创建，避免每个 worker 重复初始化。
     let diesel_db = create_pool(database_url.clone(), database_max_connections(&config)?)?;
-    // 启动期幂等迁移：diesel ledger 去重 + advisory lock 保证并发/重复启动
-    // 安全，fresh install（尚无 controller key 签发 MigrateApply）依赖它把
-    // 空库推进到 preflight 可查询的状态。显式的 MigrateApply
-    // ControlOperation 驱动同一迁移驱动，语义不变。
-    nazo_postgres::run_pending_migrations(&database_url)
-        .await
-        .map_err(|error| anyhow::anyhow!("startup migration failed: {error}"))?;
     nazo_postgres::ActiveTenantBoundaryRepository::new(diesel_db.clone())
         .preflight(settings.tenant.context)
         .await

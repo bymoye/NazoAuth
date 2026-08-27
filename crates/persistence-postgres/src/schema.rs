@@ -27,6 +27,12 @@ diesel::table! {
         expires_at -> Timestamptz,
         consumed_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
+        accepted_signature_sha256 -> Nullable<Binary>,
+        recovered_controller_id -> Nullable<Varchar>,
+        recovered_slot_index -> Nullable<Int2>,
+        recovered_slot_issued_at -> Nullable<Timestamptz>,
+        recovered_slot_expires_at -> Nullable<Timestamptz>,
+        recovery_generation -> Nullable<Int4>,
     }
 }
 

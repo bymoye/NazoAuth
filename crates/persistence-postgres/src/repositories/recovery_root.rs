@@ -47,6 +47,7 @@ use diesel::sql_types::{
     BigInt, Binary, Integer, Nullable, SmallInt, Timestamptz, Uuid as DieselUuid, Varchar,
 };
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use nazo_operator_protocol::RECOVERY_KDF_ID;
@@ -58,7 +59,7 @@ use super::controller_registry::{
     validate_kid, validate_kid_binding, validate_label,
 };
 use super::controller_registry::{
-    CommitWithApprovalError, NewControllerSlot, StoredControllerSlot,
+    CommitWithApprovalError, ControllerSlotStatus, NewControllerSlot, StoredControllerSlot,
 };
 use crate::{DbPool, get_conn};
 
@@ -391,11 +392,25 @@ struct ChallengeRow {
     expires_at: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Timestamptz>)]
     consumed_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Binary>)]
+    accepted_signature_sha256: Option<Vec<u8>>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    recovered_controller_id: Option<String>,
+    #[diesel(sql_type = Nullable<SmallInt>)]
+    recovered_slot_index: Option<i16>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    recovered_slot_issued_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    recovered_slot_expires_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    recovery_generation: Option<i32>,
 }
 
 const CHALLENGE_COLUMNS: &str = "challenge_id, deployment_id, nonce, controller_label, controller_kid, \
      controller_public_key, recovery_kid, recovery_public_key, attempts, \
-     expires_at, consumed_at, created_at";
+     expires_at, consumed_at, created_at, accepted_signature_sha256, \
+     recovered_controller_id, recovered_slot_index, recovered_slot_issued_at, \
+     recovered_slot_expires_at, recovery_generation";
 
 const ROOT_COLUMNS: &str =
     "deployment_id, recovery_kid, recovery_public_key, kdf, generation, created_at, updated_at";
@@ -413,6 +428,10 @@ fn digest_matches(left: &[u8], right: &[u8]) -> bool {
     hasher.update(right);
     let right = hasher.finalize().to_hex().to_string();
     left == right
+}
+
+fn signature_sha256(signature: &[u8; 64]) -> [u8; 32] {
+    Sha256::digest(signature).into()
 }
 
 async fn lock_deployment_recovery(
@@ -799,13 +818,58 @@ impl RecoveryRootRepository {
                 .filter(|row| row.deployment_id == submission.deployment_id)
                 .ok_or(RecoveryRootError::ChallengeUnknown)?;
                 if challenge.consumed_at.is_some() {
-                    return Err(
-                        if i32::from(challenge.attempts) >= MAX_RECOVERY_CHALLENGE_ATTEMPTS {
-                            RecoveryRootError::ChallengeExhausted
-                        } else {
-                            RecoveryRootError::ChallengeReplayed
+                    if i32::from(challenge.attempts) >= MAX_RECOVERY_CHALLENGE_ATTEMPTS
+                        && challenge.accepted_signature_sha256.is_none()
+                    {
+                        return Err(RecoveryRootError::ChallengeExhausted);
+                    }
+                    let submitted_signature_sha256 = signature_sha256(&submission.signature);
+                    if !digest_matches(&submission.nonce, &challenge.nonce)
+                        || !challenge
+                            .accepted_signature_sha256
+                            .as_deref()
+                            .is_some_and(|stored| {
+                                digest_matches(&submitted_signature_sha256, stored)
+                            })
+                    {
+                        return Err(RecoveryRootError::ChallengeReplayed);
+                    }
+                    let (
+                        Some(controller_id),
+                        Some(slot_index),
+                        Some(issued_at),
+                        Some(expires_at),
+                        Some(recovery_generation),
+                    ) = (
+                        challenge.recovered_controller_id.clone(),
+                        challenge.recovered_slot_index,
+                        challenge.recovered_slot_issued_at,
+                        challenge.recovered_slot_expires_at,
+                        challenge.recovery_generation,
+                    )
+                    else {
+                        return Err(transport(anyhow::anyhow!(
+                            "consumed recovery challenge has no complete result receipt"
+                        )));
+                    };
+                    return Ok(RecoveredSlotCommit {
+                        slot: StoredControllerSlot {
+                            deployment_id: challenge.deployment_id,
+                            controller_id,
+                            label: challenge.controller_label,
+                            kid: challenge.controller_kid,
+                            public_key: challenge.controller_public_key,
+                            slot_index,
+                            issued_at,
+                            expires_at,
+                            last_used_at: None,
+                            status: ControllerSlotStatus::Active,
+                            revoked_at: None,
+                            created_at: issued_at,
+                            updated_at: issued_at,
                         },
-                    );
+                        recovery_generation,
+                    });
                 }
                 if challenge.expires_at <= now {
                     return Err(RecoveryRootError::ChallengeExpired);
@@ -866,16 +930,10 @@ impl RecoveryRootRepository {
                     return Err(RecoveryRootError::ControllersStillAdmitted(Vec::new()));
                 }
 
-                // Accepted: consume the challenge and commit the recovery.
-                sql_query(
-                    "UPDATE controller_recovery_challenges
-                     SET consumed_at = $2 WHERE challenge_id = $1",
-                )
-                .bind::<DieselUuid, _>(submission.challenge_id)
-                .bind::<Timestamptz, _>(now)
-                .execute(connection)
-                .await
-                .map_err(transport)?;
+                // Accepted: commit the recovery and its exact retry receipt in
+                // the same transaction. A lost HTTP response can then be
+                // recovered by resending the byte-identical signed answer;
+                // no new authority is exercised on that readback path.
                 sql_query(
                     "UPDATE controller_registry_slots
                      SET status = 'revoked', revoked_at = $2, updated_at = $2
@@ -906,7 +964,7 @@ impl RecoveryRootRepository {
                 let replaced = replace_root_on_connection(
                     connection,
                     &NewRecoveryRoot {
-                        deployment_id: submission.deployment_id,
+                        deployment_id: submission.deployment_id.clone(),
                         kid: challenge.recovery_kid,
                         public_key: challenge.recovery_public_key.clone().try_into().map_err(
                             |_| {
@@ -919,6 +977,29 @@ impl RecoveryRootRepository {
                     now,
                 )
                 .await?;
+                let accepted_signature_sha256 = signature_sha256(&submission.signature);
+                sql_query(
+                    "UPDATE controller_recovery_challenges
+                     SET consumed_at = $2,
+                         accepted_signature_sha256 = $3,
+                         recovered_controller_id = $4,
+                         recovered_slot_index = $5,
+                         recovered_slot_issued_at = $6,
+                         recovered_slot_expires_at = $7,
+                         recovery_generation = $8
+                     WHERE challenge_id = $1",
+                )
+                .bind::<DieselUuid, _>(submission.challenge_id)
+                .bind::<Timestamptz, _>(now)
+                .bind::<Binary, _>(accepted_signature_sha256.to_vec())
+                .bind::<Varchar, _>(&slot.controller_id)
+                .bind::<SmallInt, _>(slot.slot_index)
+                .bind::<Timestamptz, _>(slot.issued_at)
+                .bind::<Timestamptz, _>(slot.expires_at)
+                .bind::<Integer, _>(replaced.generation)
+                .execute(connection)
+                .await
+                .map_err(transport)?;
                 Ok(RecoveredSlotCommit {
                     slot,
                     recovery_generation: replaced.generation,

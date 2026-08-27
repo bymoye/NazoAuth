@@ -49,6 +49,8 @@ const RECOVERY_ROOT_UP: &str =
     include_str!("../../../migrations/20260825000100_controller_recovery_root/up.sql");
 const RECOVERY_ROOT_DOWN: &str =
     include_str!("../../../migrations/20260825000100_controller_recovery_root/down.sql");
+const RECOVERY_RECEIPT_UP: &str =
+    include_str!("../../../migrations/20260827000100_controller_recovery_receipt/up.sql");
 
 #[derive(QueryableByName)]
 struct ProviderType {
@@ -137,6 +139,25 @@ fn recovery_root_migration_pins_kdf_ttl_uniqueness_and_fail_closed_downgrade() {
         RECOVERY_ROOT_DOWN.contains("downgrade refused: unconsumed recovery challenges remain"),
         "rollback must fail closed while a recovery is mid-flight"
     );
+}
+
+#[test]
+fn recovery_receipt_migration_binds_exact_retry_to_immutable_result() {
+    for required in [
+        "accepted_signature_sha256",
+        "octet_length(accepted_signature_sha256) = 32",
+        "recovered_controller_id",
+        "recovered_slot_index BETWEEN 0 AND 2",
+        "recovered_slot_issued_at",
+        "recovered_slot_expires_at > recovered_slot_issued_at",
+        "recovery_generation",
+        "REFERENCES controller_registry_slots (deployment_id, controller_id)",
+    ] {
+        assert!(
+            RECOVERY_RECEIPT_UP.contains(required),
+            "recovery receipt migration is missing {required}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

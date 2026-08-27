@@ -24,6 +24,7 @@ fn parses_all_product_commands() {
         parse(&["nazoauth", "build-identity"]).unwrap(),
         Command::BuildIdentity
     );
+    assert_eq!(parse(&["nazoauth", "migrate"]).unwrap(), Command::Migrate);
 }
 
 #[test]
@@ -59,18 +60,22 @@ fn public_commands_reject_accidental_arguments() {
             .to_string(),
         "operator-task does not accept argument now"
     );
+    assert_eq!(
+        parse(&["nazoauth", "migrate", "now"])
+            .unwrap_err()
+            .to_string(),
+        "migrate does not accept argument now"
+    );
 }
 
 #[test]
-fn legacy_mutation_commands_are_closed() {
-    for command in ["migrate", "keyctl"] {
-        assert!(
-            parse(&["nazoauth", command])
-                .unwrap_err()
-                .to_string()
-                .starts_with(&format!("unknown command {command}"))
-        );
-    }
+fn removed_mutation_command_is_unknown() {
+    assert!(
+        parse(&["nazoauth", "keyctl"])
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown command keyctl")
+    );
 }
 
 #[test]

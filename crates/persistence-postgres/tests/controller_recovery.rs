@@ -680,8 +680,25 @@ async fn replay_expiry_and_wrong_signers_fail_closed_without_partial_state() {
             at(604),
         )
         .await
-        .expect_err("replay must fail");
-    assert!(matches!(replayed, RecoveryRootError::ChallengeReplayed));
+        .expect("an exact retry must return the committed receipt");
+    assert_eq!(replayed, commit);
+
+    let altered_replay = repository
+        .submit_recovery_challenge(
+            submission(
+                deployment,
+                live_issued.challenge_id,
+                &live_issued.nonce,
+                &forged,
+            ),
+            at(605),
+        )
+        .await
+        .expect_err("a different signed answer must not read the receipt");
+    assert!(matches!(
+        altered_replay,
+        RecoveryRootError::ChallengeReplayed
+    ));
 
     // Cross-deployment submissions cannot read another deployment's challenge.
     let cross = repository

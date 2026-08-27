@@ -1,0 +1,9 @@
+ALTER TABLE controller_recovery_challenges
+    DROP CONSTRAINT fk_controller_recovery_challenges_recovered_slot,
+    DROP CONSTRAINT ck_controller_recovery_challenges_receipt_shape,
+    DROP COLUMN recovery_generation,
+    DROP COLUMN recovered_slot_expires_at,
+    DROP COLUMN recovered_slot_issued_at,
+    DROP COLUMN recovered_slot_index,
+    DROP COLUMN recovered_controller_id,
+    DROP COLUMN accepted_signature_sha256;
