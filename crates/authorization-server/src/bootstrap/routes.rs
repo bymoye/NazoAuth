@@ -141,11 +141,6 @@ pub(crate) fn configure(
             .wrap(cors::cors_well_known(settings))
             .route(web::get().to(startup)),
     );
-    cfg.service(
-        web::resource("/ready")
-            .wrap(cors::cors_well_known(settings))
-            .route(web::get().to(ready)),
-    );
     // NO CORS: /authorize
     cfg.route("/authorize", web::get().to(authorize_get))
         .route("/authorize", web::post().to(authorize_post))

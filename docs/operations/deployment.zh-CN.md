@@ -48,7 +48,7 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 `docker-compose`，并把预期 embedded release、revision 和 build ID 绑定到编译镜像时使用的
 同一组值；它不会联系或冒充 GitHub Actions。可直接打开：
 
-- `http://127.0.0.1:8000/ready`：依赖就绪探针
+- `http://127.0.0.1:8000/health`：依赖就绪探针
 - `http://127.0.0.1:8000/live`：进程存活探针
 - `http://127.0.0.1:8000/.well-known/openid-configuration`
 
@@ -137,7 +137,7 @@ cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执�
 
 重载前必须使用相同 HAProxy 镜像或二进制执行
 `haproxy -c -f /path/to/candidate.cfg`，并保存 root-only 的旧配置。重载后验证
-`/ready`、Discovery、Suite 未授权边界、AES-GCM 握手成功，以及 CBC 与 CHACHA20
+`/health`、Discovery、Suite 未授权边界、AES-GCM 握手成功，以及 CBC 与 CHACHA20
 被拒绝。任一检查失败都应立即恢复旧配置并再次重载。
 
 ## 验证
@@ -146,7 +146,7 @@ cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执�
 
 1. `nazoauthctl status` 报告签名 Release 和双层 target identity；
 2. `nazoauthctl doctor` 验证审计、readiness、target digest 和 runtime DDL 边界；
-3. `/ready` 返回 HTTP 200；
+3. `/health` 返回 HTTP 200；
 4. `/.well-known/openid-configuration` 返回配置的 issuer；
 5. 反向代理通过公开 HTTPS origin 提供相同接口；
 6. 服务重启后签名密钥和头像卷仍保持挂载。
@@ -187,7 +187,7 @@ snapshot 恢复。完整边界见[一键安装与升级](one-click-update.zh-CN.
 
 - 备份 Compose 自动生成的数据库、Valkey 和应用秘密，或接入外部秘密管理；
 - 建立可验证的备份和恢复流程；
-- 监控 PostgreSQL、Valkey、磁盘空间和 `/ready`；仅用 `/live` 判断是否应重启进程；
+- 监控 PostgreSQL、Valkey、磁盘空间和 `/health`；仅用 `/live` 判断是否应重启进程；
 - 将签名密钥和头像放在持久存储上；
 - 需要 HA 时改用外部 PostgreSQL/Valkey 或编排平台；
 - 对精确提交执行

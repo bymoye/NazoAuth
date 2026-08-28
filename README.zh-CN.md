@@ -86,7 +86,7 @@ nazoauthctl doctor --instance production
 runtime 必须明确选择 `podman`、`docker` 或 `host`。NazoAuthCtl 不会为外部
 PostgreSQL 或 Valkey 创建凭据。lifecycle PostgreSQL role 负责迁移、备份与恢复；
 长期运行服务只拿权限更低的 runtime role。目标机私有边界可检查
-`http://127.0.0.1:8000/ready` 和
+`http://127.0.0.1:8000/health` 和
 `http://127.0.0.1:8000/.well-known/openid-configuration`。数据、签名密钥、应用
 secret 和头像会持久保存。当前格式导入与备份策略见
 [受管安装、更新与恢复](docs/operations/one-click-update.zh-CN.md)。

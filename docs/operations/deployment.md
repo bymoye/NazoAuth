@@ -58,7 +58,7 @@ binds the expected embedded release, revision, and build ID to the same values
 used to compile the image; it does not contact or impersonate GitHub Actions.
 Open:
 
-- `http://127.0.0.1:8000/ready` for dependency readiness
+- `http://127.0.0.1:8000/health` for dependency readiness
 - `http://127.0.0.1:8000/live` for process liveness
 - `http://127.0.0.1:8000/.well-known/openid-configuration`
 
@@ -167,7 +167,7 @@ can atomically install and restore their CA.
 
 Before reloading HAProxy, validate the candidate with the same HAProxy image or
 binary (`haproxy -c -f /path/to/candidate.cfg`) and retain a root-only copy of
-the previous configuration. After reload, verify `/ready`, Discovery, the
+the previous configuration. After reload, verify `/health`, Discovery, the
 unauthenticated Suite boundary, an allowed AES-GCM handshake, and rejection of
 CBC and CHACHA20. Roll back the saved configuration and reload immediately if
 any check fails.
@@ -178,7 +178,7 @@ Activation requires all of these checks:
 
 1. `nazoauthctl status` reports the signed Release and both target identities;
 2. `nazoauthctl doctor` verifies audit, readiness, target digest, and the runtime DDL boundary;
-3. `/ready` returns HTTP 200;
+3. `/health` returns HTTP 200;
 4. `/.well-known/openid-configuration` returns the configured issuer;
 5. the reverse proxy serves the same endpoints through the public HTTPS origin;
 6. signing-key and avatar volumes remain mounted after a service restart.
@@ -224,7 +224,7 @@ production:
 
 - back up Compose-generated database, Valkey, and application secrets or use an external secret manager;
 - define backup and restore procedures;
-- monitor PostgreSQL, Valkey, disk usage, and `/ready`; use `/live` only for
+- monitor PostgreSQL, Valkey, disk usage, and `/health`; use `/live` only for
   process restart decisions;
 - keep signing keys and avatars on durable storage;
 - use an external PostgreSQL/Valkey service or an orchestrator when HA is

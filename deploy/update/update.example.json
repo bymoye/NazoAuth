@@ -34,7 +34,7 @@
     "network": "nazo_oauth_net",
     "ip_address": "10.101.0.20",
     "publish_address": "",
-    "health_url": "http://10.101.0.20:8000/ready",
+    "health_url": "http://10.101.0.20:8000/health",
     "readiness_attempts": 60,
     "readiness_interval_seconds": 1,
     "public_discovery_url": "https://auth.example.com/.well-known/openid-configuration",

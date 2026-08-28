@@ -133,7 +133,7 @@ The runtime is exactly `podman`, `docker`, or `host`; there is no automatic
 runtime selection. NazoAuthCtl never creates credentials for external
 PostgreSQL or Valkey. The lifecycle PostgreSQL role runs migrations, backup,
 and recovery; the less-privileged runtime role is the only database identity
-given to the server. Open `http://127.0.0.1:8000/ready` or
+given to the server. Open `http://127.0.0.1:8000/health` or
 `http://127.0.0.1:8000/.well-known/openid-configuration` on the target's
 private boundary. Data, signing keys, generated application secrets, and
 avatars are persistent. See [managed installation, update, and recovery](docs/operations/one-click-update.md)
