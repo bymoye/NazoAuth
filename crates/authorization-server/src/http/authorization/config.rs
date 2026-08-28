@@ -49,3 +49,25 @@ impl From<&Settings> for AuthorizationHttpConfig {
         }
     }
 }
+
+impl AuthorizationHttpConfig {
+    pub(crate) fn requires_fapi2_security(&self, client: &nazo_auth::ClientSecurityPolicy) -> bool {
+        self.profile.requires_fapi2_security() || client.requires_fapi2_security()
+    }
+
+    pub(crate) fn requires_signed_authorization_request(
+        &self,
+        client: &nazo_auth::ClientSecurityPolicy,
+    ) -> bool {
+        self.profile.requires_signed_authorization_request()
+            || client.require_signed_authorization_request
+    }
+
+    pub(crate) fn requires_signed_authorization_response(
+        &self,
+        client: &nazo_auth::ClientSecurityPolicy,
+    ) -> bool {
+        self.profile.requires_signed_authorization_response()
+            || client.require_signed_authorization_response
+    }
+}

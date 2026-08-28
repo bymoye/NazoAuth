@@ -66,9 +66,11 @@ pub(crate) async fn authorization_response_redirect_with_context(
         };
         let client_policy = &client.security_policy;
         AuthorizationResponseClientPolicy {
-            signed_response_required: client_policy.require_signed_authorization_response,
+            signed_response_required: context
+                .config
+                .requires_signed_authorization_response(client_policy),
             session_management_allowed: client_policy.session_management,
-            ttl_seconds: if client_policy.requires_fapi2_security() {
+            ttl_seconds: if context.config.requires_fapi2_security(client_policy) {
                 context.config.auth_code_ttl_seconds.min(60)
             } else {
                 context.config.auth_code_ttl_seconds

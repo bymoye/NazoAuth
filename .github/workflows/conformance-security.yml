@@ -263,6 +263,26 @@ jobs:
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
             nazo-oauth-e2e:latest nazoauth migrate
+          docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
+          WITH changed AS (
+              UPDATE runtime_module_desired_states
+              SET desired_mode = 'enabled',
+                  revision = revision + 1,
+                  reason = 'RFC 9967 CI fixture',
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE module_id = 'scim_security_events'
+                AND desired_mode = 'disabled'
+              RETURNING module_id, revision, actor_id, reason, updated_at
+          )
+          INSERT INTO runtime_module_state_events (
+              event_id, module_id, event_type, revision, instance_id, actor_id,
+              reason, before_state, after_state, outcome_code, occurred_at
+          )
+          SELECT
+              uuidv7(), module_id, 'desired_state_changed', revision, NULL, actor_id,
+              reason, 'disabled', 'enabled', NULL, updated_at
+          FROM changed;
+          SQL
           app_password="$(openssl rand -hex 24)"
           docker exec nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE nazoauth_e2e_app LOGIN PASSWORD '$app_password' NOSUPERUSER NOBYPASSRLS NOINHERIT"

@@ -195,7 +195,14 @@ pub(super) async fn authorize_request_with_context(
         );
     }
     let client_policy = &client.security_policy;
-    if client_policy.requires_fapi2_security() && pending_external_request_uri.is_some() {
+    let fapi2_security = context.config.requires_fapi2_security(client_policy);
+    let signed_request_required = context
+        .config
+        .requires_signed_authorization_request(client_policy);
+    let signed_response_required = context
+        .config
+        .requires_signed_authorization_response(client_policy);
+    if fapi2_security && pending_external_request_uri.is_some() {
         consumed_request_uri_error = Some("request_uri_not_supported");
         pending_external_request_uri = None;
     }
@@ -266,11 +273,11 @@ pub(super) async fn authorize_request_with_context(
     if let Some(error) = consumed_request_uri_error {
         return authorization_oauth_error_redirect(context, &redirect_uri, error, q).await;
     }
-    if client_policy.requires_fapi2_security() && !used_pushed_authorization_request {
+    if fapi2_security && !used_pushed_authorization_request {
         return authorization_oauth_error_redirect(context, &redirect_uri, "invalid_request", q)
             .await;
     }
-    if client_policy.require_signed_authorization_request
+    if signed_request_required
         && !used_pushed_authorization_request
         && !direct_request_object_present
     {
@@ -305,13 +312,12 @@ pub(super) async fn authorize_request_with_context(
                 context,
                 nazo_runtime_modules::ModuleId::NativeSso,
             ),
-            form_post: !client_policy.requires_fapi2_security(),
+            form_post: !fapi2_security,
         },
         AuthorizationProfilePolicy {
-            signed_authorization_response_required: client_policy
-                .require_signed_authorization_response,
+            signed_authorization_response_required: signed_response_required,
             pkce_required: !client_policy.allow_confidential_oidc_without_pkce
-                || client_policy.requires_fapi2_security()
+                || fapi2_security
                 || client.require_dpop_bound_tokens
                 || client.require_mtls_bound_tokens
                 || dpop_jkt.is_some()
@@ -363,10 +369,9 @@ pub(super) async fn authorize_request_with_context(
                     state: q.get("state").map(String::as_str),
                     oidc_sid: None,
                     client_policy: Some(AuthorizationResponseClientPolicy {
-                        signed_response_required: client_policy
-                            .require_signed_authorization_response,
+                        signed_response_required,
                         session_management_allowed: client_policy.session_management,
-                        ttl_seconds: if client_policy.requires_fapi2_security() {
+                        ttl_seconds: if fapi2_security {
                             context.config.auth_code_ttl_seconds.min(60)
                         } else {
                             context.config.auth_code_ttl_seconds
@@ -484,7 +489,7 @@ pub(super) async fn authorize_request_with_context(
     }
     let now = Utc::now();
     let request_id = Uuid::now_v7().to_string();
-    let authorization_code_ttl_seconds = if client_policy.requires_fapi2_security() {
+    let authorization_code_ttl_seconds = if fapi2_security {
         context.config.auth_code_ttl_seconds.min(60)
     } else {
         context.config.auth_code_ttl_seconds
@@ -516,9 +521,7 @@ pub(super) async fn authorize_request_with_context(
         mtls_x5t_s256,
         pushed_request_uri: pending_pushed_request_uri,
         pushed_request_digest: pending_pushed_request_digest,
-        signed_authorization_response_required: Some(
-            client_policy.require_signed_authorization_response,
-        ),
+        signed_authorization_response_required: Some(signed_response_required),
         session_management_allowed: Some(client_policy.session_management),
         authorization_code_ttl_seconds: Some(authorization_code_ttl_seconds),
         issued_at: now,

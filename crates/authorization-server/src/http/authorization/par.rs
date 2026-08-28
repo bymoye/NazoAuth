@@ -303,7 +303,8 @@ async fn par_after_rate_limit_inner(
         }
     };
     let client_policy = &client.security_policy;
-    let par_ttl_seconds = if client_policy.requires_fapi2_security() {
+    let fapi2_security = context.config.requires_fapi2_security(client_policy);
+    let par_ttl_seconds = if fapi2_security {
         context.config.par_ttl_seconds.min(599)
     } else {
         context.config.par_ttl_seconds
@@ -399,8 +400,10 @@ async fn par_after_rate_limit_inner(
             require_dpop_bound_tokens: client.require_dpop_bound_tokens,
             require_mtls_bound_tokens: client.require_mtls_bound_tokens,
             require_request_object: client.require_par_request_object
-                || client_policy.require_signed_authorization_request,
-            fapi2_security: client_policy.requires_fapi2_security(),
+                || context
+                    .config
+                    .requires_signed_authorization_request(client_policy),
+            fapi2_security,
         },
     ) {
         return par_admission_error(error);
@@ -427,11 +430,11 @@ async fn par_after_rate_limit_inner(
             redirect_uris: &client.redirect_uris,
             allowed_audiences: &client.allowed_audiences,
             pkce_required: !client_policy.allow_confidential_oidc_without_pkce
-                || client_policy.requires_fapi2_security()
+                || fapi2_security
                 || client.require_dpop_bound_tokens
                 || client.require_mtls_bound_tokens
                 || params.contains_key("dpop_jkt"),
-            fapi2_requires_explicit_redirect_uri: client_policy.requires_fapi2_security(),
+            fapi2_requires_explicit_redirect_uri: fapi2_security,
         },
     ) {
         return par_admission_error(error);
