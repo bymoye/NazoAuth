@@ -211,10 +211,7 @@ jobs:
           PAIRWISE_SUBJECT_SECRET: ""
           PAR_TTL_SECONDS: 90
           REQUIRE_PUSHED_AUTHORIZATION_REQUESTS: false
-          ENABLE_AUTHORIZATION_DETAILS: true
-          ENABLE_FAPI_HTTP_SIGNATURES: false
           FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS: 60
-          ENABLE_SCIM_SECURITY_EVENTS: true
           FEDERATION_PROVIDER_CONFIGS: >-
             [{"provider_id":"codecov-oidc","enabled":true,"display_name":"Codecov OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"codecov-oidc-client","client_secret":"codecov-oidc-secret","redirect_uri":"http://127.0.0.1:8000/auth/federation/codecov-oidc/callback","scopes":"openid email profile"}]
           FEDERATION_SAML_GATEWAY_ENABLED: true
@@ -243,7 +240,6 @@ jobs:
           } >> runtime/e2e/.env.yaml
           cp runtime/e2e/.env.yaml runtime/e2e/.env-signed.yaml
           sed -i 's/RUNTIME_INSTANCE_ID: "e2e-primary"/RUNTIME_INSTANCE_ID: "e2e-signed"/' runtime/e2e/.env-signed.yaml
-          sed -i 's/ENABLE_FAPI_HTTP_SIGNATURES: false/ENABLE_FAPI_HTTP_SIGNATURES: true/' runtime/e2e/.env-signed.yaml
       - name: Start PostgreSQL and Valkey
         run: |
           docker network create nazo-oauth-e2e-net

@@ -481,7 +481,6 @@ def check_rfc9967_test_boundaries() -> None:
         encoding="utf-8"
     )
     required_workflow_fragments = (
-        "ENABLE_SCIM_SECURITY_EVENTS: true",
         "python scripts/rfc9967_scim_set_e2e.py",
         "python tests/unit/test_rfc9967_scim_set_e2e_source_policy.py",
     )

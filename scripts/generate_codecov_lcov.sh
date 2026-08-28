@@ -251,7 +251,6 @@ export SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE='false'
 # production fail-closed requirement.
 export MFA_TOTP_ENCRYPTION_KEY_ID='codecov-ephemeral-v1'
 export MFA_TOTP_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-export ENABLE_AUTHORIZATION_DETAILS='true'
 export RUNTIME_INSTANCE_ID='codecov-primary'
 PRIMARY_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-primary"
 SIGNED_INSTANCE_IDENTITY_DIR="$SCRIPT_ROOT/runtime/codecov/instance-signed"
@@ -369,6 +368,7 @@ def create_local_rsa_key(alg: str):
     entry = {
         "kid": kid,
         "alg": alg,
+        "backend": "local-pem",
         "file": file_name,
         "created_at": now,
         "retire_at": None,
@@ -392,8 +392,7 @@ cargo build --locked --workspace --all-features --bin nazoauth
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
 LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$SERVER_BIN" server &
 SERVER_PID=$!
-ENABLE_FAPI_HTTP_SIGNATURES='true' \
-  RUNTIME_INSTANCE_ID='codecov-signed' \
+RUNTIME_INSTANCE_ID='codecov-signed' \
   INSTANCE_IDENTITY_DIR="$SIGNED_INSTANCE_IDENTITY_DIR" \
   BIND="127.0.0.1:${SIGNED_SERVER_PORT}" \
   LLVM_PROFILE_FILE="$(profile_path 'signed-server-%p.profraw')" \
