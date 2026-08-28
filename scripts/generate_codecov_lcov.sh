@@ -282,7 +282,14 @@ keyset_path = key_dir / "keyset.json"
 if keyset_path.is_file():
     keyset = json.loads(keyset_path.read_text(encoding="utf-8"))
 else:
-    keyset = {"active_kid": "", "keys": []}
+    keyset = {
+        "schema_version": "nazo.keyset.v1",
+        "active_kid": "",
+        "keys": [],
+    }
+
+if keyset.get("schema_version") != "nazo.keyset.v1":
+    raise RuntimeError(f"keyset schema must be nazo.keyset.v1: {keyset_path}")
 
 keys = keyset.setdefault("keys", [])
 if not isinstance(keys, list):
