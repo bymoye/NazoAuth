@@ -13,7 +13,7 @@ nazoauthctl install \
   --host production-host \
   --name production \
   --public-url https://auth.example.com \
-  --to v0.2.2 \
+  --to v0.2.3 \
   --runtime podman \
   --database-host db.internal \
   --database-port 5432 \
@@ -62,7 +62,7 @@ printf '%s' '{"email":"admin@example.com","password":"..."}' | \
 ## 更新与回滚
 
 ```sh
-nazoauthctl update --instance production --to v0.2.2 --yes
+nazoauthctl update --instance production --to v0.2.3 --yes
 nazoauthctl rollback --instance production --yes
 ```
 
