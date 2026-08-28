@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 SUPPORTED_LOCAL_RSA_ALGS = {"RS256", "PS256"}
+KEYSET_SCHEMA_VERSION = "nazo.keyset.v1"
+REQUEST_OBJECT_ENCRYPTION_KEY_FILE = "request-object-encryption.pem"
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,24 +36,24 @@ def parse_args() -> argparse.Namespace:
 
 def load_keyset(keyset_path: Path) -> dict[str, Any]:
     if not keyset_path.is_file():
-        return {"active_kid": "", "keys": []}
+        return {
+            "schema_version": KEYSET_SCHEMA_VERSION,
+            "active_kid": "",
+            "keys": [],
+        }
     loaded = json.loads(keyset_path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise RuntimeError(f"keyset must be a JSON object: {keyset_path}")
-    keys = loaded.setdefault("keys", [])
+    if loaded.get("schema_version") != KEYSET_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"keyset schema must be {KEYSET_SCHEMA_VERSION}: {keyset_path}"
+        )
+    if not isinstance(loaded.get("active_kid"), str):
+        raise RuntimeError(f"keyset active_kid must be a string: {keyset_path}")
+    keys = loaded.get("keys")
     if not isinstance(keys, list):
         raise RuntimeError(f"keyset keys must be an array: {keyset_path}")
     return loaded
-
-
-def local_key_path(key_dir: Path, entry: Any) -> Path | None:
-    if (
-        isinstance(entry, dict)
-        and entry.get("backend", "local-pem") == "local-pem"
-        and isinstance(entry.get("file"), str)
-    ):
-        return key_dir / entry["file"]
-    return None
 
 
 def is_server_rsa_pem(path: Path) -> bool:
@@ -59,30 +61,13 @@ def is_server_rsa_pem(path: Path) -> bool:
         return False
     first_line = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     return bool(first_line and first_line[0].strip() == "-----BEGIN RSA PRIVATE KEY-----")
-
-
-def usable_key_entry(key_dir: Path, entry: Any) -> bool:
-    if not isinstance(entry, dict):
-        return True
-    if entry.get("backend", "local-pem") != "local-pem":
-        return True
-    if entry.get("alg") not in SUPPORTED_LOCAL_RSA_ALGS:
-        return True
-    path = local_key_path(key_dir, entry)
-    return path is not None and is_server_rsa_pem(path)
-
-
-def key_is_live(entry: dict[str, Any]) -> bool:
-    return entry.get("retire_at") is None
-
-
 def live_local_key(keys: list[Any], key_dir: Path, alg: str) -> dict[str, Any] | None:
     for entry in keys:
         if (
             isinstance(entry, dict)
             and entry.get("alg") == alg
-            and entry.get("backend", "local-pem") == "local-pem"
-            and key_is_live(entry)
+            and entry.get("backend") == "local-pem"
+            and entry.get("retire_at") is None
             and isinstance(entry.get("file"), str)
             and is_server_rsa_pem(key_dir / entry["file"])
         ):
@@ -109,6 +94,7 @@ def create_local_rsa_key(
     entry = {
         "kid": kid,
         "alg": alg,
+        "backend": "local-pem",
         "file": file_name,
         "created_at": now,
         "retire_at": None,
@@ -117,12 +103,33 @@ def create_local_rsa_key(
     return entry
 
 
+def ensure_request_object_encryption_key(key_dir: Path) -> None:
+    target = key_dir / REQUEST_OBJECT_ENCRYPTION_KEY_FILE
+    if target.is_file():
+        return
+    subprocess.run(
+        [
+            "openssl",
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:3072",
+            "-out",
+            str(target),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    target.chmod(0o600)
+
+
 def ensure_keyset(key_dir: Path, active_alg: str, required_algs: list[str]) -> None:
     key_dir.mkdir(parents=True, exist_ok=True)
     keyset_path = key_dir / "keyset.json"
     keyset = load_keyset(keyset_path)
     keys = keyset["keys"]
-    keys[:] = [entry for entry in keys if usable_key_entry(key_dir, entry)]
 
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     required = list(dict.fromkeys([active_alg, *required_algs]))
@@ -133,6 +140,7 @@ def ensure_keyset(key_dir: Path, active_alg: str, required_algs: list[str]) -> N
 
     active = live_by_alg[active_alg]
     keyset["active_kid"] = active["kid"]
+    ensure_request_object_encryption_key(key_dir)
     keyset_path.write_text(json.dumps(keyset, indent=2) + "\n", encoding="utf-8")
     os.chmod(keyset_path, 0o600)
 
