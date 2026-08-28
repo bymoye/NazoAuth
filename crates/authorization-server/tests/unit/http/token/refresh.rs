@@ -1199,6 +1199,7 @@ async fn refresh_grant_rejects_unbound_active_successor_inside_lost_response_win
     successor.subject = client.client_id.clone();
     successor.user_id = None;
     successor.dpop_jkt = None;
+    successor.authentication_context = revoked.authentication_context.clone();
     let successor_raw = format!("refresh-token-retry-successor-{suffix}");
     insert_refresh_token_row(&state, &successor_raw, &successor, Some(revoked.id), None).await;
     assert!(
@@ -1266,6 +1267,7 @@ async fn refresh_grant_rotates_from_mtls_bound_successor_inside_lost_response_wi
     successor.user_id = None;
     successor.dpop_jkt = None;
     successor.mtls_x5t_s256 = revoked.mtls_x5t_s256.clone();
+    successor.authentication_context = revoked.authentication_context.clone();
     let successor_raw = format!("refresh-token-mtls-retry-successor-{suffix}");
     insert_refresh_token_row(&state, &successor_raw, &successor, Some(revoked.id), None).await;
 
@@ -1390,11 +1392,7 @@ async fn lost_response_successor_enforces_fixed_window_boundaries_in_real_postgr
     successor.dpop_jkt = revoked.dpop_jkt.clone();
     successor.issued_at = now;
     successor.expires_at = now + Duration::hours(1);
-    successor.authentication_context = refresh_authentication_context(
-        state.settings.endpoint.issuer.as_str(),
-        "refresh-fixed-window-client",
-        successor.issued_at,
-    );
+    successor.authentication_context = revoked.authentication_context.clone();
     insert_refresh_token_row(
         &state,
         &format!("refresh-lost-window-successor-{}", Uuid::now_v7()),
@@ -1479,6 +1477,7 @@ async fn refresh_grant_rejects_lost_response_retry_without_exactly_one_active_su
             successor.subject = revoked.subject.clone();
             successor.user_id = None;
             successor.dpop_jkt = revoked.dpop_jkt.clone();
+            successor.authentication_context = revoked.authentication_context.clone();
             if shape == "expired" {
                 successor.expires_at = Utc::now() - Duration::seconds(1);
             }
@@ -1714,6 +1713,7 @@ async fn lost_response_rotation_rolls_back_successor_revoke_when_insert_fails() 
     successor.user_id = None;
     successor.dpop_jkt = None;
     successor.mtls_x5t_s256 = revoked.mtls_x5t_s256.clone();
+    successor.authentication_context = revoked.authentication_context.clone();
     insert_refresh_token_row(
         &state,
         "refresh-lost-insert-failure-successor",
@@ -1759,7 +1759,7 @@ async fn lost_response_rotation_rolls_back_successor_revoke_when_insert_fails() 
     let (status, body) =
         response_json(token_refresh(&state, &req, &client, &form, None).await).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"], "server_error");
     let family = load_family_rows(&state, family_id).await;
     assert!(family.iter().all(|row| row.reuse_detected_at.is_none()));
@@ -1811,6 +1811,7 @@ async fn refresh_grant_rejects_future_revocation_or_reuse_marked_lost_response_f
         successor.subject = revoked.subject.clone();
         successor.user_id = None;
         successor.dpop_jkt = revoked.dpop_jkt.clone();
+        successor.authentication_context = revoked.authentication_context.clone();
         insert_refresh_token_row(
             &state,
             &format!("refresh-lost-{label}-successor-{}", Uuid::now_v7()),
@@ -1866,6 +1867,7 @@ async fn concurrent_mtls_bound_lost_response_retries_yield_one_success_then_comp
     successor.user_id = None;
     successor.dpop_jkt = None;
     successor.mtls_x5t_s256 = revoked.mtls_x5t_s256.clone();
+    successor.authentication_context = revoked.authentication_context.clone();
     insert_refresh_token_row(
         &state,
         &format!("refresh-concurrent-lost-successor-{}", Uuid::now_v7()),
