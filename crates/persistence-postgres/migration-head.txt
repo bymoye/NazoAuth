@@ -1,1 +1,1 @@
-20260828000600_remove_legacy_persisted_security_state
+20260828000700_initial_admin_bootstrap_receipt_only

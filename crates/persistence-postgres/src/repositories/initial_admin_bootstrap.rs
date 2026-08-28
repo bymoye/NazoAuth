@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, sql_query};
 use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use sha2::{Digest as _, Sha256};
@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     DbPool, get_conn,
-    schema::{identity_security_events, initial_admin_bootstrap, users},
+    schema::{identity_security_events, initial_admin_bootstrap_receipts, users},
 };
 
 const INITIAL_ADMIN_BOOTSTRAP_LOCK: i64 = 564_196_923_451_771_042;
@@ -23,132 +23,24 @@ impl InitialAdminBootstrapRepository {
         Self { pool, tenant }
     }
 
-    pub async fn ensure_claim(
-        &self,
-        token_hash: &str,
-        expires_at: DateTime<Utc>,
-    ) -> anyhow::Result<InitialAdminBootstrapState> {
+    pub async fn load_state(&self) -> anyhow::Result<InitialAdminBootstrapState> {
         let mut connection = get_conn(&self.pool).await?;
-        let token_hash = token_hash.to_owned();
         let tenant_id = self.tenant.tenant_id.as_uuid();
-        connection
-            .transaction::<_, diesel::result::Error, _>(async move |connection| {
-                lock_initial_admin_bootstrap(connection).await?;
-                let existing = initial_admin_bootstrap::table
-                    .find(true)
-                    .select((
-                        initial_admin_bootstrap::token_hash,
-                        initial_admin_bootstrap::expires_at,
-                        initial_admin_bootstrap::consumed_at,
-                        initial_admin_bootstrap::request_id,
-                        initial_admin_bootstrap::request_email_hash,
-                        initial_admin_bootstrap::claimed_user_id,
-                        initial_admin_bootstrap::claim_result,
-                        initial_admin_bootstrap::receipt_version,
-                        initial_admin_bootstrap::claimed_at,
-                    ))
-                    .first::<(
-                        String,
-                        DateTime<Utc>,
-                        Option<DateTime<Utc>>,
-                        Option<String>,
-                        Option<String>,
-                        Option<Uuid>,
-                        Option<String>,
-                        Option<i16>,
-                        Option<DateTime<Utc>>,
-                    )>(connection)
-                    .await
-                    .optional()?;
-                if let Some((
-                    existing_hash,
-                    existing_expiry,
-                    Some(_),
-                    request_id,
-                    request_email_hash,
-                    claimed_user_id,
-                    claim_result,
-                    receipt_version,
-                    claimed_at,
-                )) = &existing
-                {
-                    let complete_receipt = request_id.is_some()
-                        && request_email_hash.is_some()
-                        && claimed_user_id.is_some()
-                        && claim_result.as_deref() == Some("created")
-                        && *receipt_version == Some(1)
-                        && claimed_at.is_some();
-                    return if complete_receipt {
-                        Ok(InitialAdminBootstrapState::Claimed {
-                            expires_at: *existing_expiry,
-                            expected_token_hash: existing_hash.clone(),
-                        })
-                    } else {
-                        // Pre-receipt releases only persisted consumed_at. They are closed,
-                        // not replayable: there is no durable response identity to prove.
-                        Ok(InitialAdminBootstrapState::Closed)
-                    };
-                }
-                if administrator_exists(connection, tenant_id).await? {
-                    diesel::delete(initial_admin_bootstrap::table)
-                        .execute(connection)
-                        .await?;
-                    return Ok(InitialAdminBootstrapState::Closed);
-                }
-                if let Some((existing_hash, existing_expiry, None, ..)) = existing
-                    && existing_expiry > Utc::now()
-                {
-                    return if existing_hash == token_hash {
-                        Ok(InitialAdminBootstrapState::Ready {
-                            expires_at: existing_expiry,
-                        })
-                    } else {
-                        Ok(InitialAdminBootstrapState::OwnedByAnotherInstance {
-                            expires_at: existing_expiry,
-                        })
-                    };
-                }
-
-                diesel::insert_into(initial_admin_bootstrap::table)
-                    .values((
-                        initial_admin_bootstrap::singleton.eq(true),
-                        initial_admin_bootstrap::token_hash.eq(token_hash),
-                        initial_admin_bootstrap::expires_at.eq(expires_at),
-                        initial_admin_bootstrap::consumed_at.eq::<Option<DateTime<Utc>>>(None),
-                        initial_admin_bootstrap::request_id.eq::<Option<String>>(None),
-                        initial_admin_bootstrap::request_email_hash.eq::<Option<String>>(None),
-                        initial_admin_bootstrap::claimed_user_id.eq::<Option<Uuid>>(None),
-                        initial_admin_bootstrap::claim_result.eq::<Option<String>>(None),
-                        initial_admin_bootstrap::receipt_version.eq::<Option<i16>>(None),
-                        initial_admin_bootstrap::claimed_at.eq::<Option<DateTime<Utc>>>(None),
-                        initial_admin_bootstrap::created_at.eq(Utc::now()),
-                        initial_admin_bootstrap::updated_at.eq(Utc::now()),
-                    ))
-                    .on_conflict(initial_admin_bootstrap::singleton)
-                    .do_update()
-                    .set((
-                        initial_admin_bootstrap::token_hash.eq(diesel::upsert::excluded(
-                            initial_admin_bootstrap::token_hash,
-                        )),
-                        initial_admin_bootstrap::expires_at.eq(diesel::upsert::excluded(
-                            initial_admin_bootstrap::expires_at,
-                        )),
-                        initial_admin_bootstrap::consumed_at.eq::<Option<DateTime<Utc>>>(None),
-                        initial_admin_bootstrap::request_id.eq::<Option<String>>(None),
-                        initial_admin_bootstrap::request_email_hash.eq::<Option<String>>(None),
-                        initial_admin_bootstrap::claimed_user_id.eq::<Option<Uuid>>(None),
-                        initial_admin_bootstrap::claim_result.eq::<Option<String>>(None),
-                        initial_admin_bootstrap::receipt_version.eq::<Option<i16>>(None),
-                        initial_admin_bootstrap::claimed_at.eq::<Option<DateTime<Utc>>>(None),
-                        initial_admin_bootstrap::created_at.eq(Utc::now()),
-                        initial_admin_bootstrap::updated_at.eq(Utc::now()),
-                    ))
-                    .execute(connection)
-                    .await?;
-                Ok(InitialAdminBootstrapState::Ready { expires_at })
-            })
+        if let Some(expected_token_hash) = initial_admin_bootstrap_receipts::table
+            .find(true)
+            .select(initial_admin_bootstrap_receipts::token_hash)
+            .first::<String>(&mut connection)
             .await
-            .map_err(anyhow::Error::from)
+            .optional()?
+        {
+            return Ok(InitialAdminBootstrapState::Claimed {
+                expected_token_hash,
+            });
+        }
+        if administrator_exists(&mut connection, tenant_id).await? {
+            return Ok(InitialAdminBootstrapState::Closed);
+        }
+        Ok(InitialAdminBootstrapState::Ready)
     }
 
     pub async fn claim(
@@ -170,72 +62,37 @@ impl InitialAdminBootstrapRepository {
         connection
             .transaction::<_, diesel::result::Error, _>(async move |connection| {
                 lock_initial_admin_bootstrap(connection).await?;
-                let claim = initial_admin_bootstrap::table
+                let claim = initial_admin_bootstrap_receipts::table
                     .find(true)
                     .select((
-                        initial_admin_bootstrap::token_hash,
-                        initial_admin_bootstrap::expires_at,
-                        initial_admin_bootstrap::consumed_at,
-                        initial_admin_bootstrap::request_id,
-                        initial_admin_bootstrap::request_email_hash,
-                        initial_admin_bootstrap::claimed_user_id,
-                        initial_admin_bootstrap::claim_result,
-                        initial_admin_bootstrap::receipt_version,
+                        initial_admin_bootstrap_receipts::token_hash,
+                        initial_admin_bootstrap_receipts::request_id,
+                        initial_admin_bootstrap_receipts::request_email_hash,
+                        initial_admin_bootstrap_receipts::claimed_user_id,
                     ))
                     .for_update()
-                    .first::<(
-                        String,
-                        DateTime<Utc>,
-                        Option<DateTime<Utc>>,
-                        Option<String>,
-                        Option<String>,
-                        Option<Uuid>,
-                        Option<String>,
-                        Option<i16>,
-                    )>(connection)
+                    .first::<(String, String, String, Uuid)>(connection)
                     .await
                     .optional()?;
-                let Some((
+                if let Some((
                     expected_hash,
-                    expires_at,
-                    consumed_at,
                     stored_request_id,
                     stored_email_hash,
                     claimed_user_id,
-                    claim_result,
-                    receipt_version,
                 )) = claim
-                else {
-                    return Ok(InitialAdminClaimOutcome::InvalidOrExpired);
-                };
-                if consumed_at.is_some() {
-                    if stored_request_id.is_none()
-                        && stored_email_hash.is_none()
-                        && claimed_user_id.is_none()
-                        && claim_result.is_none()
-                        && receipt_version.is_none()
-                    {
+                {
+                    if expected_hash != token_hash {
                         return Ok(InitialAdminClaimOutcome::Closed);
                     }
-                    if expected_hash != token_hash {
-                        return Ok(InitialAdminClaimOutcome::InvalidOrExpired);
-                    }
-                    if stored_request_id.as_deref() != Some(request_id.as_str())
-                        || stored_email_hash.as_deref() != Some(email_hash.as_str())
-                        || claim_result.as_deref() != Some("created")
-                        || receipt_version != Some(1)
-                    {
+                    if stored_request_id != request_id || stored_email_hash != email_hash {
                         return Ok(InitialAdminClaimOutcome::IdempotencyConflict);
                     }
-                    let Some(id) = claimed_user_id else {
-                        return Ok(InitialAdminClaimOutcome::IdempotencyConflict);
-                    };
                     let audit_count = identity_security_events::table
                         .filter(identity_security_events::request_id.eq(&request_id))
                         .filter(identity_security_events::event_type.eq("initial_admin_bootstrap"))
                         .filter(identity_security_events::outcome.eq("success"))
                         .filter(identity_security_events::tenant_id.eq(tenant_id))
-                        .filter(identity_security_events::target_user_id.eq(Some(id)))
+                        .filter(identity_security_events::target_user_id.eq(Some(claimed_user_id)))
                         .select(diesel::dsl::count_star())
                         .first::<i64>(connection)
                         .await?;
@@ -244,15 +101,12 @@ impl InitialAdminBootstrapRepository {
                     }
                     return Ok(InitialAdminClaimOutcome::Created {
                         request_id,
-                        id,
+                        id: claimed_user_id,
                         email,
                     });
                 }
                 if administrator_exists(connection, tenant_id).await? {
                     return Ok(InitialAdminClaimOutcome::Closed);
-                }
-                if expected_hash != token_hash || expires_at <= Utc::now() {
-                    return Ok(InitialAdminClaimOutcome::InvalidOrExpired);
                 }
                 if users::table
                     .filter(users::tenant_id.eq(tenant_id))
@@ -284,16 +138,14 @@ impl InitialAdminBootstrapRepository {
                     ))
                     .execute(connection)
                     .await?;
-                diesel::update(initial_admin_bootstrap::table.find(true))
-                    .set((
-                        initial_admin_bootstrap::consumed_at.eq(Some(now)),
-                        initial_admin_bootstrap::request_id.eq(Some(&request_id)),
-                        initial_admin_bootstrap::request_email_hash.eq(Some(&email_hash)),
-                        initial_admin_bootstrap::claimed_user_id.eq(Some(id)),
-                        initial_admin_bootstrap::claim_result.eq(Some("created")),
-                        initial_admin_bootstrap::receipt_version.eq(Some(1_i16)),
-                        initial_admin_bootstrap::claimed_at.eq(Some(now)),
-                        initial_admin_bootstrap::updated_at.eq(now),
+                diesel::insert_into(initial_admin_bootstrap_receipts::table)
+                    .values((
+                        initial_admin_bootstrap_receipts::singleton.eq(true),
+                        initial_admin_bootstrap_receipts::token_hash.eq(&token_hash),
+                        initial_admin_bootstrap_receipts::request_id.eq(&request_id),
+                        initial_admin_bootstrap_receipts::request_email_hash.eq(&email_hash),
+                        initial_admin_bootstrap_receipts::claimed_user_id.eq(id),
+                        initial_admin_bootstrap_receipts::created_at.eq(now),
                     ))
                     .execute(connection)
                     .await?;
@@ -319,16 +171,8 @@ impl InitialAdminBootstrapRepository {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InitialAdminBootstrapState {
     Closed,
-    Ready {
-        expires_at: DateTime<Utc>,
-    },
-    Claimed {
-        expires_at: DateTime<Utc>,
-        expected_token_hash: String,
-    },
-    OwnedByAnotherInstance {
-        expires_at: DateTime<Utc>,
-    },
+    Ready,
+    Claimed { expected_token_hash: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,7 +183,6 @@ pub enum InitialAdminClaimOutcome {
         email: String,
     },
     Closed,
-    InvalidOrExpired,
     EmailConflict,
     IdempotencyConflict,
 }

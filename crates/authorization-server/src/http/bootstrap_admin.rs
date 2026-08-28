@@ -8,7 +8,6 @@ use actix_web::{
     http::StatusCode,
     web::{Data, Json},
 };
-use chrono::{Duration, Utc};
 use nazo_identity::{email::normalize_email_address, ports::SecretHashPort as _};
 use serde::Deserialize;
 use serde_json::json;
@@ -18,8 +17,6 @@ use crate::{
     adapters::security::constant_time_eq, bootstrap::RegistrationSecretHasher,
     config::read_or_create_runtime_secret,
 };
-
-const INITIAL_ADMIN_CLAIM_TTL_MINUTES: i64 = 30;
 
 #[derive(Clone)]
 pub(crate) struct InitialAdminBootstrapEndpoint {
@@ -48,12 +45,7 @@ impl InitialAdminBootstrapEndpoint {
         }
         let token_hash = hash_token(&token);
         let repository = nazo_postgres::InitialAdminBootstrapRepository::new(pool, tenant);
-        let state = repository
-            .ensure_claim(
-                &token_hash,
-                Utc::now() + Duration::minutes(INITIAL_ADMIN_CLAIM_TTL_MINUTES),
-            )
-            .await?;
+        let state = repository.load_state().await?;
         let expected_token_hash = bootstrap_token_state(state, &token_path, issuer, token_hash);
         Ok(Self {
             repository,
@@ -95,25 +87,15 @@ fn bootstrap_token_state(
             remove_consumed_token(token_path);
             None
         }
-        nazo_postgres::InitialAdminBootstrapState::OwnedByAnotherInstance { expires_at } => {
-            remove_consumed_token(token_path);
-            tracing::warn!(
-                %expires_at,
-                "initial administrator setup is owned by another instance; share DATA_DIR across replicas"
-            );
-            None
-        }
-        nazo_postgres::InitialAdminBootstrapState::Ready { expires_at } => {
+        nazo_postgres::InitialAdminBootstrapState::Ready => {
             tracing::warn!(
                 issuer = %issuer.trim_end_matches('/'),
-                %expires_at,
                 token_file = %token_path.display(),
                 "initial administrator setup is required; use the operator workflow to read the private runtime-owned token file"
             );
             Some(token_hash)
         }
         nazo_postgres::InitialAdminBootstrapState::Claimed {
-            expires_at,
             expected_token_hash,
         } => {
             if expected_token_hash != token_hash {
@@ -121,7 +103,6 @@ fn bootstrap_token_state(
             }
             tracing::warn!(
                 issuer = %issuer.trim_end_matches('/'),
-                %expires_at,
                 token_file = %token_path.display(),
                 "initial administrator claim is committed; retain the private token until the controller verifies its idempotent receipt"
             );
@@ -226,9 +207,6 @@ fn claim_outcome_response(
             endpoint.close();
             remove_consumed_token(&endpoint.token_path);
             bootstrap_error(StatusCode::GONE, "bootstrap_closed")
-        }
-        nazo_postgres::InitialAdminClaimOutcome::InvalidOrExpired => {
-            bootstrap_error(StatusCode::NOT_FOUND, "invalid_bootstrap_token")
         }
         nazo_postgres::InitialAdminClaimOutcome::EmailConflict => {
             bootstrap_error(StatusCode::CONFLICT, "email_conflict")

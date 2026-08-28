@@ -160,19 +160,13 @@ diesel::table! {
 }
 
 diesel::table! {
-    initial_admin_bootstrap (singleton) {
+    initial_admin_bootstrap_receipts (singleton) {
         singleton -> Bool,
         token_hash -> Varchar,
-        expires_at -> Timestamptz,
-        consumed_at -> Nullable<Timestamptz>,
-        request_id -> Nullable<Varchar>,
-        request_email_hash -> Nullable<Varchar>,
-        claimed_user_id -> Nullable<Uuid>,
-        claim_result -> Nullable<Varchar>,
-        receipt_version -> Nullable<Int2>,
-        claimed_at -> Nullable<Timestamptz>,
+        request_id -> Varchar,
+        request_email_hash -> Varchar,
+        claimed_user_id -> Uuid,
         created_at -> Timestamptz,
-        updated_at -> Timestamptz,
     }
 }
 
@@ -543,7 +537,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     realms,
     organizations,
     users,
-    initial_admin_bootstrap,
+    initial_admin_bootstrap_receipts,
     user_totp_credentials,
     user_mfa_backup_codes,
     user_mfa_remembered_devices,

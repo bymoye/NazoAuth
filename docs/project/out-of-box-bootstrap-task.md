@@ -25,8 +25,9 @@ The effective configuration order is:
   service credentials, proxy trust, CA trust, and KMS ownership remain explicit.
 - A fresh local or official Compose deployment has no published default
   database, Valkey, administrator, or OAuth secret.
-- The initial administrator claim is time bounded, single use, stores only a
-  verifier in PostgreSQL, and is closed permanently after an administrator
+- The initial administrator claim is deployment bound and single use. Its
+  verifier stays in private runtime state; PostgreSQL stores only the committed
+  idempotency receipt. The claim closes permanently after an administrator
   exists.
 - Concurrent first starts and concurrent administrator claims have one
   authoritative winner.
@@ -46,8 +47,7 @@ The effective configuration order is:
       creates the first administrator without SMTP.
 - [x] Add `nazoauthctl bootstrap-admin`, which verifies and reads the private
       runtime-owned mount and transports all credentials only through request stdin.
-- [x] Reject the endpoint after claim expiry, consumption, or the existence of
-      any administrator.
+- [x] Reject the endpoint after consumption or the existence of any administrator.
 
 ### 2. Persistent generated secrets
 
@@ -92,13 +92,11 @@ or a second in-memory protocol state, neither of which is authoritative across c
 the database transaction therefore remains the only claim/replay decision point. Rate and resource
 limits at the public HTTP boundary remain the mitigation for a compromised bootstrap token.
 
-The controller's non-secret pending receipt is bound with the deployment secret revision rather
-than a controller private key, so normal identity rotation and break-glass recovery do not strand
-an outcome-unknown request. A successful pending state also binds the verified application user ID,
-the original token through HMAC, and a controller-owned database recovery epoch. Managed database
-recovery rotates that epoch before touching the database. If a token still exists during success
-recovery, ctl replays the request and requires the same application receipt before deleting it; a
-different token fails closed and is never deleted as though the old success still applied.
+The controller derives the request identity from the fresh install operation.
+If the server commits but the response is lost, rerunning the same bootstrap
+command therefore replays the one durable application receipt. The controller
+deletes the runtime token and fresh-install context only after it verifies that
+receipt.
 
 ## Completion evidence
 

@@ -71,8 +71,9 @@ bootstrap state, and the UI release cache—use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
 
-When the database has no administrator, the server creates a time-bounded,
-single-use token in its private bootstrap state. It never prints the token or a
+When the database has no administrator, the server creates a deployment-bound,
+single-use token in its private bootstrap state. It remains valid until the
+first administrator is created. The server never prints the token or a
 token-bearing URL. The formal managed flow reads that private runtime-owned state through
 `nazoauthctl bootstrap-admin`; the authorization server exposes only the JSON
 `POST /auth/bootstrap-admin` API and does not serve an embedded setup page.

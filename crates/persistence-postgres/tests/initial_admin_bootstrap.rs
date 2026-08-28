@@ -1,4 +1,3 @@
-use chrono::{Duration, Utc};
 use diesel::{
     QueryableByName, sql_query,
     sql_types::{BigInt, Text, Uuid as DieselUuid},
@@ -14,11 +13,6 @@ use uuid::Uuid;
 mod support;
 
 use support::{run_isolated_application_migrations, schema_database_url};
-
-const RECEIPT_MIGRATION_UP: &str =
-    include_str!("../../../migrations/20260801000100_initial_admin_bootstrap_receipt/up.sql");
-const RECEIPT_MIGRATION_DOWN: &str =
-    include_str!("../../../migrations/20260801000100_initial_admin_bootstrap_receipt/down.sql");
 
 #[derive(QueryableByName)]
 struct AdminRoleRow {
@@ -78,20 +72,10 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
         TenantContext::default_system(),
     );
     let token_hash = "a".repeat(64);
-    assert!(matches!(
-        repository
-            .ensure_claim(&token_hash, Utc::now() + Duration::minutes(30))
-            .await
-            .unwrap(),
-        InitialAdminBootstrapState::Ready { .. }
-    ));
-    assert!(matches!(
-        repository
-            .ensure_claim(&"b".repeat(64), Utc::now() + Duration::minutes(30))
-            .await
-            .unwrap(),
-        InitialAdminBootstrapState::OwnedByAnotherInstance { .. }
-    ));
+    assert_eq!(
+        repository.load_state().await.unwrap(),
+        InitialAdminBootstrapState::Ready
+    );
 
     let first = {
         let repository = repository.clone();
@@ -178,14 +162,6 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
     assert_eq!(replay_one.unwrap(), replay_two.unwrap());
 
     let mut isolated = AsyncPgConnection::establish(&isolated_url).await.unwrap();
-    sql_query(
-        "UPDATE initial_admin_bootstrap
-         SET created_at = now() - interval '2 minutes',
-             expires_at = now() - interval '1 minute'",
-    )
-    .execute(&mut isolated)
-    .await
-    .unwrap();
     sql_query("UPDATE users SET email = 'renamed@example.com' WHERE id = $1")
         .bind::<diesel::sql_types::Uuid, _>(winning_id)
         .execute(&mut isolated)
@@ -197,7 +173,7 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
                 &winning_request_id,
                 &token_hash,
                 &winning_email,
-                PasswordHashInput::new("expired-replay-password-hash").unwrap(),
+                PasswordHashInput::new("restart-replay-password-hash").unwrap(),
             )
             .await
             .unwrap(),
@@ -241,7 +217,7 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
             )
             .await
             .unwrap(),
-        InitialAdminClaimOutcome::InvalidOrExpired
+        InitialAdminClaimOutcome::Closed
     );
     assert_eq!(
         outcomes
@@ -251,13 +227,9 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
         1
     );
     assert!(matches!(
-        repository
-            .ensure_claim(&"b".repeat(64), Utc::now() + Duration::minutes(30))
-            .await
-            .unwrap(),
+        repository.load_state().await.unwrap(),
         InitialAdminBootstrapState::Claimed {
             expected_token_hash,
-            ..
         } if expected_token_hash == token_hash
     ));
 
@@ -293,16 +265,6 @@ async fn initial_admin_claim_has_one_concurrent_winner_and_idempotent_receipt() 
     .await
     .unwrap();
     assert_eq!(audit_count.count, 1);
-    let downgrade_error = isolated
-        .batch_execute(RECEIPT_MIGRATION_DOWN)
-        .await
-        .unwrap_err();
-    assert!(
-        downgrade_error
-            .to_string()
-            .contains("cannot remove initial administrator receipts or audit evidence")
-    );
-
     coordinator
         .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE;"))
         .await
@@ -361,13 +323,10 @@ async fn initial_admin_claim_respects_explicit_non_default_tenant_context() {
     let repository =
         InitialAdminBootstrapRepository::new(create_pool(isolated_url.clone(), 2).unwrap(), tenant);
     let token_hash = "f".repeat(64);
-    assert!(matches!(
-        repository
-            .ensure_claim(&token_hash, Utc::now() + Duration::minutes(30))
-            .await
-            .unwrap(),
-        InitialAdminBootstrapState::Ready { .. }
-    ));
+    assert_eq!(
+        repository.load_state().await.unwrap(),
+        InitialAdminBootstrapState::Ready
+    );
     let outcome = repository
         .claim(
             "bootstrap-admin-ffffffffffffffffffffffffffffffff",
@@ -421,60 +380,6 @@ async fn initial_admin_claim_respects_explicit_non_default_tenant_context() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_consumed_claim_is_closed_without_becoming_replayable() {
-    let Some(database_url) = database_url() else {
-        return;
-    };
-    let schema = format!("initial_admin_legacy_{}", Uuid::now_v7().simple());
-    let mut coordinator = AsyncPgConnection::establish(&database_url).await.unwrap();
-    coordinator
-        .batch_execute(&format!("CREATE SCHEMA \"{schema}\";"))
-        .await
-        .unwrap();
-    let isolated_url = schema_database_url(&database_url, &schema);
-    run_isolated_application_migrations(&isolated_url).await;
-    let repository = InitialAdminBootstrapRepository::new(
-        create_pool(isolated_url.clone(), 2).unwrap(),
-        TenantContext::default_system(),
-    );
-    let mut isolated = AsyncPgConnection::establish(&isolated_url).await.unwrap();
-    sql_query(
-        "INSERT INTO initial_admin_bootstrap
-         (singleton, token_hash, expires_at, consumed_at, created_at, updated_at)
-         VALUES (true, $1, now() + interval '30 minutes', now(), now(), now())",
-    )
-    .bind::<Text, _>("e".repeat(64))
-    .execute(&mut isolated)
-    .await
-    .unwrap();
-
-    assert_eq!(
-        repository
-            .ensure_claim(&"f".repeat(64), Utc::now() + Duration::minutes(30))
-            .await
-            .unwrap(),
-        InitialAdminBootstrapState::Closed
-    );
-    isolated
-        .batch_execute(RECEIPT_MIGRATION_DOWN)
-        .await
-        .unwrap();
-    isolated.batch_execute(RECEIPT_MIGRATION_UP).await.unwrap();
-    assert_eq!(
-        repository
-            .ensure_claim(&"f".repeat(64), Utc::now() + Duration::minutes(30))
-            .await
-            .unwrap(),
-        InitialAdminBootstrapState::Closed
-    );
-
-    coordinator
-        .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE;"))
-        .await
-        .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bootstrap_audit_failure_rolls_back_user_receipt_and_consumption() {
     let Some(database_url) = database_url() else {
         return;
@@ -492,10 +397,10 @@ async fn bootstrap_audit_failure_rolls_back_user_receipt_and_consumption() {
         TenantContext::default_system(),
     );
     let token_hash = "d".repeat(64);
-    repository
-        .ensure_claim(&token_hash, Utc::now() + Duration::minutes(30))
-        .await
-        .unwrap();
+    assert_eq!(
+        repository.load_state().await.unwrap(),
+        InitialAdminBootstrapState::Ready
+    );
 
     let mut isolated = AsyncPgConnection::establish(&isolated_url).await.unwrap();
     isolated
@@ -530,12 +435,11 @@ async fn bootstrap_audit_failure_rolls_back_user_receipt_and_consumption() {
         .await
         .unwrap();
     assert_eq!(users.count, 0);
-    let consumed = sql_query(
-        "SELECT count(*)::bigint AS count FROM initial_admin_bootstrap WHERE consumed_at IS NOT NULL OR request_id IS NOT NULL",
-    )
-    .get_result::<CountRow>(&mut isolated)
-    .await
-    .unwrap();
+    let consumed =
+        sql_query("SELECT count(*)::bigint AS count FROM initial_admin_bootstrap_receipts")
+            .get_result::<CountRow>(&mut isolated)
+            .await
+            .unwrap();
     assert_eq!(consumed.count, 0);
 
     isolated

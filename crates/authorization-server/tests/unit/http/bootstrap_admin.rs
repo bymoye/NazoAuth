@@ -303,13 +303,11 @@ fn repository_bootstrap_states_control_token_lifetime() {
         rand::random::<u64>()
     ));
     fs::create_dir(&root).unwrap();
-    let expires_at = Utc::now() + Duration::minutes(5);
-
     let ready_path = root.join("ready");
     fs::write(&ready_path, "token").unwrap();
     assert_eq!(
         bootstrap_token_state(
-            nazo_postgres::InitialAdminBootstrapState::Ready { expires_at },
+            nazo_postgres::InitialAdminBootstrapState::Ready,
             &ready_path,
             "https://auth.example/",
             "hash".to_owned(),
@@ -323,7 +321,6 @@ fn repository_bootstrap_states_control_token_lifetime() {
     assert_eq!(
         bootstrap_token_state(
             nazo_postgres::InitialAdminBootstrapState::Claimed {
-                expires_at,
                 expected_token_hash: "persisted-hash".to_owned(),
             },
             &claimed_path,
@@ -334,21 +331,18 @@ fn repository_bootstrap_states_control_token_lifetime() {
     );
     assert!(!claimed_path.exists());
 
-    for (name, state) in [
-        ("closed", nazo_postgres::InitialAdminBootstrapState::Closed),
-        (
-            "owned",
-            nazo_postgres::InitialAdminBootstrapState::OwnedByAnotherInstance { expires_at },
+    let closed_path = root.join("closed");
+    fs::write(&closed_path, "token").unwrap();
+    assert_eq!(
+        bootstrap_token_state(
+            nazo_postgres::InitialAdminBootstrapState::Closed,
+            &closed_path,
+            "https://auth.example",
+            "hash".to_owned(),
         ),
-    ] {
-        let path = root.join(name);
-        fs::write(&path, "token").unwrap();
-        assert_eq!(
-            bootstrap_token_state(state, &path, "https://auth.example", "hash".to_owned()),
-            None
-        );
-        assert!(!path.exists());
-    }
+        None
+    );
+    assert!(!closed_path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -389,11 +383,6 @@ async fn repository_claim_outcomes_have_closed_http_transitions() {
             "closed",
             nazo_postgres::InitialAdminClaimOutcome::Closed,
             StatusCode::GONE,
-        ),
-        (
-            "expired",
-            nazo_postgres::InitialAdminClaimOutcome::InvalidOrExpired,
-            StatusCode::NOT_FOUND,
         ),
         (
             "conflict",

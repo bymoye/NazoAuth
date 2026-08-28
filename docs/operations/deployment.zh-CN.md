@@ -59,8 +59,8 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 `docker compose down` 后仍会保留。除非明确要删除全部本地数据，不要执行
 `docker compose down -v`。
 
-新数据库没有管理员时，服务会在私有 bootstrap 状态中创建限时、单次使用的 token，
-但不会打印 token 或携带 token 的 URL。正式受管流程通过 `nazoauthctl bootstrap-admin`
+新数据库没有管理员时，服务会在私有 bootstrap 状态中创建与部署绑定、单次使用的 token；
+该 token 在首个管理员创建前保持有效，但不会被打印，也不会出现在 URL 中。正式受管流程通过 `nazoauthctl bootstrap-admin`
 验证并读取私有的 runtime-owned 状态；授权服务器只暴露 JSON `POST /auth/bootstrap-admin` API，不再提供
 后端内嵌初始化页面。
 
