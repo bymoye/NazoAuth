@@ -56,7 +56,11 @@ when it is not.
 
 Recommended production separation:
 
-* give the server writer role only ledger append/check-availability rights;
+* pre-create distinct lifecycle, server-writer, and exporter database roles;
+* run `nazoauth migrate` with the lifecycle database URL and
+  `NAZOAUTH_MIGRATION_RUNTIME_ROLE` naming the server-writer role; migration
+  resets that role's direct `public` schema/table/sequence privileges, grants
+  application DML, and grants only ledger append/check-availability functions;
 * give the worker exporter role only outbox claim/ack/health rights;
 * provide the worker `AUDIT_ANCHOR_DATABASE_URL` and `AUDIT_ANCHOR_TOKEN` (or
   its secret-file form), while the server receives only the preflight status
@@ -68,6 +72,11 @@ This repository contains the worker protocol and local health/preflight logic;
 it does not prove a deployed receiver's WORM guarantees, cross-host
 availability, or real external acceptance.  Those require a deployment-level
 probe and an independent receiver audit.
+
+Database provisioning remains responsible for database `CONNECT`, removal of
+`PUBLIC` schema `CREATE` and database temporary-table rights, and the exporter
+function grants. Those are database-wide trust decisions and are not silently
+changed by an application migration.
 
 Worker configuration also includes `AUDIT_ANCHOR_MODE`, `DEPLOYMENT_ID`,
 `AUDIT_ANCHOR_URL`, `AUDIT_ANCHOR_STATUS_FILE`, polling/request/freshness/lag

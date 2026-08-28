@@ -4,6 +4,8 @@ use anyhow::bail;
 
 use crate::config::{ConfigSource, ServerConfigPreparation, database_url};
 
+const MIGRATION_RUNTIME_ROLE_ENV: &str = "NAZOAUTH_MIGRATION_RUNTIME_ROLE";
+
 const USAGE: &str =
     "usage: nazoauth <server|operator-task|audit-anchor-worker|build-identity|migrate>";
 
@@ -64,7 +66,10 @@ pub(crate) async fn run_migrations() -> anyhow::Result<bool> {
     // long-running runtime's writable data directories.
     let config = ConfigSource::load_for_migrations()?;
     let database_url = database_url(&config);
+    let runtime_role = std::env::var(MIGRATION_RUNTIME_ROLE_ENV)
+        .map_err(|_| anyhow::anyhow!("{MIGRATION_RUNTIME_ROLE_ENV} is required"))?;
     let applied = nazo_postgres::run_pending_migrations(&database_url).await?;
+    nazo_postgres::configure_runtime_role(&database_url, runtime_role.trim()).await?;
     nazo_postgres::cleanup_expired_security_state(&database_url).await?;
     Ok(applied)
 }

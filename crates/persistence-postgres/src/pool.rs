@@ -1,6 +1,6 @@
 use diesel::ConnectionError;
 use diesel_async::{
-    AsyncMigrationHarness, AsyncPgConnection, SimpleAsyncConnection,
+    AsyncConnection, AsyncMigrationHarness, AsyncPgConnection, SimpleAsyncConnection,
     pooled_connection::{
         AsyncDieselConnectionManager, ManagerConfig, deadpool::Object, deadpool::Pool,
     },
@@ -44,6 +44,12 @@ pub struct DbPoolMetrics {
 struct AdvisoryLockStatus {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     acquired: bool,
+}
+
+#[derive(diesel::QueryableByName)]
+struct RuntimeRoleStatus {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    acceptable: bool,
 }
 
 pub fn create_pool(
@@ -147,6 +153,84 @@ pub async fn run_pending_migrations(database_url: &str) -> anyhow::Result<bool> 
     })
     .await
     .map_err(|error| anyhow::anyhow!("migration runtime task failed: {error}"))?
+}
+
+/// Complete the schema migration contract for the long-running application
+/// role. The migration owner remains the sole DDL authority; the runtime gets
+/// only application DML, sequence use, and the writer side of the audit API.
+pub async fn configure_runtime_role(database_url: &str, runtime_role: &str) -> anyhow::Result<()> {
+    use diesel_async::RunQueryDsl as _;
+
+    if runtime_role.is_empty()
+        || runtime_role.len() > 63
+        || !runtime_role
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        anyhow::bail!("runtime PostgreSQL role must be a bounded alphanumeric token");
+    }
+
+    let mut connection = establish_connection(database_url).await?;
+    let status = diesel::sql_query(
+        "SELECT (\
+             current_user <> $1 \
+             AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1) \
+             AND NOT EXISTS (\
+                 SELECT 1 FROM pg_roles AS inherited \
+                 WHERE inherited.rolsuper \
+                   AND pg_has_role($1, inherited.oid, 'MEMBER')\
+             )\
+         ) AS acceptable",
+    )
+    .bind::<diesel::sql_types::Text, _>(runtime_role)
+    .get_result::<RuntimeRoleStatus>(&mut connection)
+    .await?;
+    if !status.acceptable {
+        anyhow::bail!(
+            "runtime PostgreSQL role must exist, differ from the lifecycle role, and have no superuser membership"
+        );
+    }
+
+    let quoted_role = format!("\"{runtime_role}\"");
+    connection
+        .transaction::<(), anyhow::Error, _>(async move |connection| {
+            connection
+                .batch_execute(&format!(
+                    "REVOKE ALL ON SCHEMA public FROM {quoted_role};\
+                     GRANT USAGE ON SCHEMA public TO {quoted_role};\
+                     REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {quoted_role};\
+                     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {quoted_role};\
+                     REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {quoted_role};\
+                     GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {quoted_role};\
+                     REVOKE ALL ON TABLE \
+                         public.__diesel_schema_migrations, \
+                         public.security_audit_chain_state, \
+                         public.security_audit_events, \
+                         public.security_audit_event_outbox \
+                     FROM {quoted_role};\
+                     REVOKE ALL ON FUNCTION \
+                         public.nazo_reject_security_audit_event_mutation(), \
+                         public.nazo_security_audit_chain_head_for_update(), \
+                         public.nazo_append_security_audit_event(UUID, TEXT, TEXT, JSONB, TIMESTAMPTZ, BYTEA, BYTEA), \
+                         public.nazo_claim_security_audit_events(BIGINT, INTEGER), \
+                         public.nazo_ack_security_audit_event(UUID, INTEGER), \
+                         public.nazo_reschedule_security_audit_event(UUID, INTEGER, TIMESTAMPTZ, TEXT), \
+                         public.nazo_security_audit_anchor_freshness(), \
+                         public.nazo_security_audit_anchor_health(), \
+                         public.nazo_security_audit_privilege_preflight(BOOLEAN, BOOLEAN, BOOLEAN) \
+                     FROM {quoted_role};\
+                     GRANT EXECUTE ON FUNCTION \
+                         public.nazo_security_audit_chain_head_for_update(), \
+                         public.nazo_append_security_audit_event(UUID, TEXT, TEXT, JSONB, TIMESTAMPTZ, BYTEA, BYTEA), \
+                         public.nazo_security_audit_anchor_freshness(), \
+                         public.nazo_security_audit_privilege_preflight(BOOLEAN, BOOLEAN, BOOLEAN) \
+                     TO {quoted_role};"
+                ))
+                .await?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
 }
 
 async fn run_pending_migrations_inner(database_url: &str) -> anyhow::Result<bool> {

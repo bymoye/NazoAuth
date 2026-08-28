@@ -36,6 +36,32 @@ services:
     networks:
       perf_net:
 
+  postgres-init:
+    image: docker.io/library/postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    environment:
+      PGPASSWORD: postgres
+    command:
+      - sh
+      - -euc
+      - |
+        psql -h postgres -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nazoauth_perf_runtime') THEN
+            CREATE ROLE nazoauth_perf_runtime LOGIN PASSWORD 'runtime' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+          END IF;
+        END
+        $$;
+        REVOKE ALL ON DATABASE oauth FROM PUBLIC;
+        GRANT CONNECT ON DATABASE oauth TO postgres, nazoauth_perf_runtime;
+        REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+        SQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      perf_net:
+
   keyset:
     build:
       context: .
@@ -77,6 +103,9 @@ services:
       target: perf-runtime
     volumes:
       - perf_runtime:/var/lib/nazo_oauth
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/oauth"
+      NAZOAUTH_MIGRATION_RUNTIME_ROLE: "nazoauth_perf_runtime"
     command:
       - sh
       - -euc
@@ -94,6 +123,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
       valkey:
         condition: service_healthy
     networks:

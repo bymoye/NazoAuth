@@ -258,9 +258,18 @@ jobs:
           [ "$ready" = "true" ]
       - name: Migrate and start server
         run: |
+          app_password="$(openssl rand -hex 24)"
+          docker exec nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE nazoauth_e2e_app LOGIN PASSWORD '$app_password' NOSUPERUSER NOBYPASSRLS NOINHERIT"
+          docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE ALL ON DATABASE oauth FROM PUBLIC;
+          GRANT CONNECT ON DATABASE oauth TO postgres, nazoauth_e2e_app;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          SQL
           docker run --rm --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
             --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            -e NAZOAUTH_MIGRATION_RUNTIME_ROLE=nazoauth_e2e_app \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
             nazo-oauth-e2e:latest nazoauth migrate
           docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
@@ -282,50 +291,6 @@ jobs:
               uuidv7(), module_id, 'desired_state_changed', revision, NULL, actor_id,
               reason, 'disabled', 'enabled', NULL, updated_at
           FROM changed;
-          SQL
-          app_password="$(openssl rand -hex 24)"
-          docker exec nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 \
-            -c "CREATE ROLE nazoauth_e2e_app LOGIN PASSWORD '$app_password' NOSUPERUSER NOBYPASSRLS NOINHERIT"
-          docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
-          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-          GRANT CONNECT ON DATABASE oauth TO nazoauth_e2e_app;
-          GRANT USAGE ON SCHEMA public TO nazoauth_e2e_app;
-          DO $grant_business_tables$
-          DECLARE
-              relation RECORD;
-          BEGIN
-              FOR relation IN
-                  SELECT schemaname, tablename
-                  FROM pg_tables
-                  WHERE schemaname = 'public'
-                    AND tablename NOT IN (
-                        'security_audit_chain_state',
-                        'security_audit_events',
-                        'security_audit_event_outbox'
-                    )
-              LOOP
-                  EXECUTE format(
-                      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO nazoauth_e2e_app',
-                      relation.schemaname,
-                      relation.tablename
-                  );
-              END LOOP;
-          END
-          $grant_business_tables$;
-          GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO nazoauth_e2e_app;
-          REVOKE ALL ON TABLE
-              public.security_audit_chain_state,
-              public.security_audit_events,
-              public.security_audit_event_outbox
-          FROM nazoauth_e2e_app;
-          GRANT EXECUTE ON FUNCTION
-              public.nazo_security_audit_privilege_preflight(boolean, boolean, boolean),
-              public.nazo_security_audit_chain_head_for_update(),
-              public.nazo_append_security_audit_event(
-                  uuid, text, text, jsonb, timestamptz, bytea, bytea
-              ),
-              public.nazo_security_audit_anchor_freshness()
-          TO nazoauth_e2e_app;
           SQL
           test "$(
             docker exec -e PGPASSWORD="$app_password" nazo-oauth-e2e-postgres \

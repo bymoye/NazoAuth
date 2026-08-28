@@ -839,8 +839,15 @@ fn environment_overrides_yaml_by_allowlist() {
 fn unknown_nazoauth_environment_key_is_rejected_without_rejecting_system_environment() {
     let mut source = ConfigSource::default();
     source
-        .merge_env([("PATH".to_owned(), "/usr/bin".to_owned())])
+        .merge_env([
+            ("PATH".to_owned(), "/usr/bin".to_owned()),
+            (
+                "NAZOAUTH_MIGRATION_RUNTIME_ROLE".to_owned(),
+                "nazo_runtime".to_owned(),
+            ),
+        ])
         .unwrap();
+    assert!(source.get("NAZOAUTH_MIGRATION_RUNTIME_ROLE").is_none());
 
     let error = source
         .merge_env([("NAZOAUTH_UNKNOWN_CONFIG".to_owned(), "value".to_owned())])

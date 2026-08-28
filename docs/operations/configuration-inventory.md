@@ -50,6 +50,11 @@ Legend:
 | `AUDIT_ANCHOR_MODE`, `AUDIT_ANCHOR_STATUS_FILE`, `AUDIT_ANCHOR_FRESHNESS_SECONDS`, `AUDIT_ANCHOR_MAX_LAG_SECONDS` | **保留（条件）**。These are the server-side durable-audit preflight policy. |
 | `AUDIT_ANCHOR_BATCH_SIZE`, `AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS`, `AUDIT_ANCHOR_DATABASE_URL`, `AUDIT_ANCHOR_DATABASE_URL_FILE`, `AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS`, `AUDIT_ANCHOR_POLL_INTERVAL_SECONDS`, `AUDIT_ANCHOR_REQUEST_TIMEOUT_SECONDS`, `AUDIT_ANCHOR_TOKEN`, `AUDIT_ANCHOR_TOKEN_FILE`, `AUDIT_ANCHOR_URL` | **保留（外部/worker-only）**。These are accepted only by the isolated audit-anchor worker loader. The endpoint and HMAC token must be provisioned consistently with the external anchor service; they cannot be invented by the server. |
 
+`NAZOAUTH_MIGRATION_RUNTIME_ROLE` is intentionally not a server configuration
+option. It is required only by the one-shot `nazoauth migrate` command, names
+the pre-created long-running PostgreSQL role, and is never persisted as a
+second deployment fact.
+
 ## NazoAuthCtl options
 
 ### Durable `UpdateConfig` fields

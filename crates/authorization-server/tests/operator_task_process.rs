@@ -30,6 +30,7 @@ use sha2::{Digest as _, Sha256};
 
 const DEPLOYMENT: &str = "deployment-process";
 const CONFIG_REVISION: &str = "config-revision-process";
+const MIGRATION_RUNTIME_ROLE: &str = "nazoauth_operator_process_runtime";
 
 /// Mirror of the persistence-layer isolated-schema fixture: the public
 /// security-audit migration is pre-marked applied because its state table is
@@ -42,6 +43,24 @@ async fn isolated_registry(
     let base = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .ok()?;
+    nazo_postgres::run_pending_migrations(&base)
+        .await
+        .expect("public application migrations should apply");
+    let mut role_coordinator = AsyncPgConnection::establish(&base)
+        .await
+        .expect("test database should connect for role preparation");
+    role_coordinator
+        .batch_execute(&format!(
+            "SELECT pg_advisory_lock(564196923451771042);\
+             DO $$ BEGIN \
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{MIGRATION_RUNTIME_ROLE}') THEN \
+                 CREATE ROLE {MIGRATION_RUNTIME_ROLE} NOSUPERUSER NOBYPASSRLS NOINHERIT; \
+               END IF; \
+             END $$;\
+             SELECT pg_advisory_unlock(564196923451771042);"
+        ))
+        .await
+        .expect("runtime role fixture should exist");
     let schema = format!(
         "operator_process_{}_{}",
         case,
@@ -136,6 +155,7 @@ fn spawn_operator_task(root: &Path, compact: &str, options: SpawnOptions<'_>) ->
         // development fallbacks.
         .env("NAZOAUTH_BUILD_RELEASE", "development")
         .env("NAZOAUTH_BUILD_REVISION", "development")
+        .env("NAZOAUTH_MIGRATION_RUNTIME_ROLE", MIGRATION_RUNTIME_ROLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

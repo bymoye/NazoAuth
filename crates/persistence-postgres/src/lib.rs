@@ -19,8 +19,8 @@ pub(crate) mod rows;
 pub(crate) mod schema;
 
 pub use pool::{
-    DbConnection, DbPool, DbPoolMetrics, cleanup_expired_security_state, create_pool,
-    db_pool_metrics, get_conn, health_check, run_pending_migrations,
+    DbConnection, DbPool, DbPoolMetrics, cleanup_expired_security_state, configure_runtime_role,
+    create_pool, db_pool_metrics, get_conn, health_check, run_pending_migrations,
 };
 pub use repositories::{
     AccessRequestRepository, ActiveTenantBoundaryRepository, AdmittedController,
