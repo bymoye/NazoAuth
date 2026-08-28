@@ -16,34 +16,6 @@ pub struct TenantResourceState {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Persisted idempotency key and signed receipt for one machine operation.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TenantResourceOperationRecord {
-    pub id: Uuid,
-    pub deployment_id: String,
-    pub tenant_id: Uuid,
-    pub jti: String,
-    pub change_set_id: String,
-    pub change_set_sha256: String,
-    pub request_sha256: String,
-    pub operation: String,
-    pub expected_revision: u64,
-    pub result_revision: u64,
-    pub receipt_json: Value,
-    pub receipt_jws: String,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Result of recording an operation.  A replay is safe only when the request
-/// digest matches; a different digest for the same deployment/tenant/JTI is a
-/// conflict and must not replace the original receipt.
-#[derive(Clone, Debug, PartialEq)]
-pub enum TenantResourceOperationWrite {
-    Inserted(TenantResourceOperationRecord),
-    Replayed(TenantResourceOperationRecord),
-    Conflict(TenantResourceOperationRecord),
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TenantResourceBinding {
     pub id: Uuid,
@@ -51,8 +23,6 @@ pub struct TenantResourceBinding {
     pub resource_kind: String,
     pub resource_id: String,
     pub resource_digest: String,
-    pub change_set_id: String,
-    pub change_set_sha256: String,
     pub active: bool,
     pub locator: String,
     pub created_at: DateTime<Utc>,
@@ -135,36 +105,6 @@ struct StateRow {
 }
 
 #[derive(QueryableByName)]
-struct OperationRow {
-    #[diesel(sql_type = sql_types::Uuid)]
-    id: Uuid,
-    #[diesel(sql_type = sql_types::Varchar)]
-    deployment_id: String,
-    #[diesel(sql_type = sql_types::Uuid)]
-    tenant_id: Uuid,
-    #[diesel(sql_type = sql_types::Varchar)]
-    jti: String,
-    #[diesel(sql_type = sql_types::Varchar)]
-    change_set_id: String,
-    #[diesel(sql_type = sql_types::Varchar)]
-    change_set_sha256: String,
-    #[diesel(sql_type = sql_types::Varchar)]
-    request_sha256: String,
-    #[diesel(sql_type = sql_types::Varchar)]
-    operation: String,
-    #[diesel(sql_type = sql_types::BigInt)]
-    expected_revision: i64,
-    #[diesel(sql_type = sql_types::BigInt)]
-    result_revision: i64,
-    #[diesel(sql_type = sql_types::Jsonb)]
-    receipt_json: Value,
-    #[diesel(sql_type = sql_types::Text)]
-    receipt_jws: String,
-    #[diesel(sql_type = sql_types::Timestamptz)]
-    created_at: DateTime<Utc>,
-}
-
-#[derive(QueryableByName)]
 struct BindingRow {
     #[diesel(sql_type = sql_types::Uuid)]
     id: Uuid,
@@ -176,10 +116,6 @@ struct BindingRow {
     resource_id: String,
     #[diesel(sql_type = sql_types::Varchar)]
     resource_digest: String,
-    #[diesel(sql_type = sql_types::Varchar)]
-    change_set_id: String,
-    #[diesel(sql_type = sql_types::Varchar)]
-    change_set_sha256: String,
     #[diesel(sql_type = sql_types::Bool)]
     active: bool,
     #[diesel(sql_type = sql_types::Text)]
@@ -257,28 +193,6 @@ impl TryFrom<StateRow> for TenantResourceState {
     }
 }
 
-impl TryFrom<OperationRow> for TenantResourceOperationRecord {
-    type Error = RepositoryError;
-
-    fn try_from(row: OperationRow) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: row.id,
-            deployment_id: row.deployment_id,
-            tenant_id: row.tenant_id,
-            jti: row.jti,
-            change_set_id: row.change_set_id,
-            change_set_sha256: row.change_set_sha256,
-            request_sha256: row.request_sha256,
-            operation: row.operation,
-            expected_revision: decode_revision(row.expected_revision)?,
-            result_revision: decode_revision(row.result_revision)?,
-            receipt_json: row.receipt_json,
-            receipt_jws: row.receipt_jws,
-            created_at: row.created_at,
-        })
-    }
-}
-
 impl From<BindingRow> for TenantResourceBinding {
     fn from(row: BindingRow) -> Self {
         Self {
@@ -287,8 +201,6 @@ impl From<BindingRow> for TenantResourceBinding {
             resource_kind: row.resource_kind,
             resource_id: row.resource_id,
             resource_digest: row.resource_digest,
-            change_set_id: row.change_set_id,
-            change_set_sha256: row.change_set_sha256,
             active: row.active,
             locator: row.locator,
             created_at: row.created_at,
@@ -429,186 +341,16 @@ impl TenantResourceRepository {
         ))
     }
 
-    pub async fn operation_on_connection(
-        connection: &mut AsyncPgConnection,
-        deployment_id: &str,
-        tenant_id: Uuid,
-        jti: &str,
-        change_set_id: &str,
-    ) -> Result<Option<TenantResourceOperationRecord>, RepositoryError> {
-        Self::lock_operation_identity_on_connection(
-            connection,
-            deployment_id,
-            tenant_id,
-            jti,
-            change_set_id,
-        )
-        .await?;
-        sql_query(
-            "SELECT id, deployment_id, tenant_id, jti, request_sha256,
-                    change_set_id, change_set_sha256,
-                    operation, expected_revision, result_revision,
-                    receipt_json, receipt_jws, created_at
-             FROM tenant_resource_operations
-             WHERE deployment_id = $1 AND tenant_id = $2 AND jti = $3
-             FOR UPDATE",
-        )
-        .bind::<sql_types::Varchar, _>(deployment_id)
-        .bind::<sql_types::Uuid, _>(tenant_id)
-        .bind::<sql_types::Varchar, _>(jti)
-        .get_result::<OperationRow>(connection)
-        .await
-        .optional()
-        .map_err(map_error)?
-        .map(TenantResourceOperationRecord::try_from)
-        .transpose()
-    }
-
-    pub async fn operation_by_change_set_on_connection(
-        connection: &mut AsyncPgConnection,
-        deployment_id: &str,
-        tenant_id: Uuid,
-        change_set_id: &str,
-    ) -> Result<Option<TenantResourceOperationRecord>, RepositoryError> {
-        lock_operation_change_set_on_connection(
-            connection,
-            deployment_id,
-            tenant_id,
-            change_set_id,
-        )
-        .await?;
-        Self::operation_by_change_set_without_lock(
-            connection,
-            deployment_id,
-            tenant_id,
-            change_set_id,
-        )
-        .await
-    }
-
-    async fn operation_by_change_set_without_lock(
-        connection: &mut AsyncPgConnection,
-        deployment_id: &str,
-        tenant_id: Uuid,
-        change_set_id: &str,
-    ) -> Result<Option<TenantResourceOperationRecord>, RepositoryError> {
-        sql_query(
-            "SELECT id, deployment_id, tenant_id, jti, change_set_id,
-                    change_set_sha256, request_sha256, operation,
-                    expected_revision, result_revision,
-                    receipt_json, receipt_jws, created_at
-             FROM tenant_resource_operations
-             WHERE deployment_id = $1 AND tenant_id = $2 AND change_set_id = $3
-             FOR UPDATE",
-        )
-        .bind::<sql_types::Varchar, _>(deployment_id)
-        .bind::<sql_types::Uuid, _>(tenant_id)
-        .bind::<sql_types::Varchar, _>(change_set_id)
-        .get_result::<OperationRow>(connection)
-        .await
-        .optional()
-        .map_err(map_error)?
-        .map(TenantResourceOperationRecord::try_from)
-        .transpose()
-    }
-
-    pub async fn record_operation_on_connection(
-        connection: &mut AsyncPgConnection,
-        operation: NewTenantResourceOperation<'_>,
-    ) -> Result<TenantResourceOperationWrite, RepositoryError> {
-        Self::lock_operation_identity_on_connection(
-            connection,
-            operation.deployment_id,
-            operation.tenant_id,
-            operation.jti,
-            operation.change_set_id,
-        )
-        .await?;
-        let expected_revision = encode_revision(operation.expected_revision)?;
-        let result_revision = encode_revision(operation.result_revision)?;
-        let id = Uuid::now_v7();
-        let inserted = sql_query(
-            "INSERT INTO tenant_resource_operations
-                (id, deployment_id, tenant_id, jti, change_set_id, change_set_sha256,
-                 request_sha256, operation, expected_revision, result_revision,
-                 receipt_json, receipt_jws)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-             ON CONFLICT DO NOTHING
-             RETURNING id, deployment_id, tenant_id, jti, change_set_id,
-                       change_set_sha256, request_sha256,
-                       operation, expected_revision, result_revision,
-                       receipt_json, receipt_jws, created_at",
-        )
-        .bind::<sql_types::Uuid, _>(id)
-        .bind::<sql_types::Varchar, _>(operation.deployment_id)
-        .bind::<sql_types::Uuid, _>(operation.tenant_id)
-        .bind::<sql_types::Varchar, _>(operation.jti)
-        .bind::<sql_types::Varchar, _>(operation.change_set_id)
-        .bind::<sql_types::Varchar, _>(operation.change_set_sha256)
-        .bind::<sql_types::Varchar, _>(operation.request_sha256)
-        .bind::<sql_types::Varchar, _>(operation.operation)
-        .bind::<sql_types::BigInt, _>(expected_revision)
-        .bind::<sql_types::BigInt, _>(result_revision)
-        .bind::<sql_types::Jsonb, _>(operation.receipt_json)
-        .bind::<sql_types::Text, _>(operation.receipt_jws)
-        .get_result::<OperationRow>(connection)
-        .await
-        .optional()
-        .map_err(map_error)?;
-        if let Some(row) = inserted {
-            return Ok(TenantResourceOperationWrite::Inserted(row.try_into()?));
-        }
-        let existing_jti = Self::operation_on_connection(
-            connection,
-            operation.deployment_id,
-            operation.tenant_id,
-            operation.jti,
-            operation.change_set_id,
-        )
-        .await?;
-        if let Some(existing) = existing_jti {
-            if existing.request_sha256 == operation.request_sha256
-                && existing.change_set_id == operation.change_set_id
-                && existing.change_set_sha256 == operation.change_set_sha256
-            {
-                return Ok(TenantResourceOperationWrite::Replayed(existing));
-            }
-            return Ok(TenantResourceOperationWrite::Conflict(existing));
-        }
-        if let Some(existing) = Self::operation_by_change_set_without_lock(
-            connection,
-            operation.deployment_id,
-            operation.tenant_id,
-            operation.change_set_id,
-        )
-        .await?
-        {
-            return Ok(TenantResourceOperationWrite::Conflict(existing));
-        }
-        Err(RepositoryError::Consistency(
-            "operation conflict disappeared before receipt lookup".to_owned(),
-        ))
-    }
-
-    /// Serialize all reads and writes for one deployment/tenant/JTI/change-set
-    /// pair until the caller-owned transaction ends.  JTI is always locked
-    /// before change-set so callers cannot introduce inverse lock ordering.
+    /// Serialize one accepted operation's resource transition until the
+    /// caller-owned transaction ends. The control-outcome ledger is the
+    /// sole replay authority for that operation id.
     pub async fn lock_operation_identity_on_connection(
         connection: &mut AsyncPgConnection,
         deployment_id: &str,
         tenant_id: Uuid,
         jti: &str,
-        change_set_id: &str,
     ) -> Result<(), RepositoryError> {
-        lock_operation_jti_on_connection(connection, deployment_id, tenant_id, jti).await?;
-        lock_operation_change_set_on_connection(
-            connection,
-            deployment_id,
-            tenant_id,
-            change_set_id,
-        )
-        .await?;
-        Ok(())
+        lock_operation_jti_on_connection(connection, deployment_id, tenant_id, jti).await
     }
 
     /// Lock one tenant resource identity for the duration of the caller's
@@ -635,17 +377,16 @@ impl TenantResourceRepository {
             binding.resource_id,
         )
         .await?;
-        let requested_active = binding.active;
         let id = Uuid::now_v7();
         let inserted = sql_query(
             "INSERT INTO tenant_resource_bindings
                 (id, tenant_id, resource_kind, resource_id, resource_digest,
-                 change_set_id, change_set_sha256, active, locator)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8)
-             ON CONFLICT (tenant_id, resource_kind, resource_id, change_set_id)
+                 active, locator)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (tenant_id, resource_kind, resource_id)
              DO NOTHING
              RETURNING id, tenant_id, resource_kind, resource_id, resource_digest,
-                       change_set_id, change_set_sha256, active, locator,
+                       active, locator,
                        created_at, updated_at",
         )
         .bind::<sql_types::Uuid, _>(id)
@@ -653,68 +394,54 @@ impl TenantResourceRepository {
         .bind::<sql_types::Varchar, _>(binding.resource_kind)
         .bind::<sql_types::Varchar, _>(binding.resource_id)
         .bind::<sql_types::Varchar, _>(binding.resource_digest)
-        .bind::<sql_types::Varchar, _>(binding.change_set_id)
-        .bind::<sql_types::Varchar, _>(binding.change_set_sha256)
+        .bind::<sql_types::Bool, _>(binding.active)
         .bind::<sql_types::Text, _>(binding.locator)
         .get_result::<BindingRow>(connection)
         .await
         .optional()
         .map_err(map_error)?;
         if let Some(row) = inserted {
-            if !requested_active {
-                return Ok(row.into());
-            }
-            sql_query(
-                "UPDATE tenant_resource_bindings
-                 SET active = FALSE, updated_at = CURRENT_TIMESTAMP
-                 WHERE tenant_id = $1 AND resource_kind = $2
-                   AND resource_id = $3 AND active
-                   AND change_set_id <> $4",
-            )
-            .bind::<sql_types::Uuid, _>(binding.tenant_id)
-            .bind::<sql_types::Varchar, _>(binding.resource_kind)
-            .bind::<sql_types::Varchar, _>(binding.resource_id)
-            .bind::<sql_types::Varchar, _>(binding.change_set_id)
-            .execute(connection)
-            .await
-            .map_err(map_error)?;
-            return sql_query(
-                "UPDATE tenant_resource_bindings
-                 SET active = TRUE, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = $1
-                 RETURNING id, tenant_id, resource_kind, resource_id, resource_digest,
-                           change_set_id, change_set_sha256, active, locator,
-                           created_at, updated_at",
-            )
-            .bind::<sql_types::Uuid, _>(row.id)
-            .get_result::<BindingRow>(connection)
-            .await
-            .map(BindingRow::into)
-            .map_err(map_error);
+            return Ok(row.into());
         }
         let existing = sql_query(
             "SELECT id, tenant_id, resource_kind, resource_id, resource_digest,
-                    change_set_id, change_set_sha256, active, locator,
+                    active, locator,
                     created_at, updated_at
              FROM tenant_resource_bindings
              WHERE tenant_id = $1 AND resource_kind = $2
-               AND resource_id = $3 AND change_set_id = $4
+               AND resource_id = $3
              FOR UPDATE",
         )
         .bind::<sql_types::Uuid, _>(binding.tenant_id)
         .bind::<sql_types::Varchar, _>(binding.resource_kind)
         .bind::<sql_types::Varchar, _>(binding.resource_id)
-        .bind::<sql_types::Varchar, _>(binding.change_set_id)
         .get_result::<BindingRow>(connection)
         .await
         .map_err(map_error)?;
         let existing_binding: TenantResourceBinding = existing.into();
         if existing_binding.resource_digest == binding.resource_digest
-            && existing_binding.change_set_sha256 == binding.change_set_sha256
-            && existing_binding.active == requested_active
+            && existing_binding.active == binding.active
             && existing_binding.locator == binding.locator
         {
             return Ok(existing_binding);
+        }
+        if !existing_binding.active {
+            return sql_query(
+                "UPDATE tenant_resource_bindings
+                 SET resource_digest = $2, active = $3, locator = $4,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $1 AND NOT active
+                 RETURNING id, tenant_id, resource_kind, resource_id, resource_digest,
+                           active, locator, created_at, updated_at",
+            )
+            .bind::<sql_types::Uuid, _>(existing_binding.id)
+            .bind::<sql_types::Varchar, _>(binding.resource_digest)
+            .bind::<sql_types::Bool, _>(binding.active)
+            .bind::<sql_types::Text, _>(binding.locator)
+            .get_result::<BindingRow>(connection)
+            .await
+            .map(BindingRow::into)
+            .map_err(map_error);
         }
         Err(RepositoryError::Conflict)
     }
@@ -725,7 +452,7 @@ impl TenantResourceRepository {
     ) -> Result<Vec<TenantResourceBinding>, RepositoryError> {
         sql_query(
             "SELECT id, tenant_id, resource_kind, resource_id, resource_digest,
-                    change_set_id, change_set_sha256, active, locator,
+                    active, locator,
                     created_at, updated_at
              FROM tenant_resource_bindings
              WHERE tenant_id = $1 AND active
@@ -757,7 +484,7 @@ impl TenantResourceRepository {
              WHERE tenant_id = $1 AND resource_kind = $2
                AND resource_id = $3 AND resource_digest = $4 AND active
              RETURNING id, tenant_id, resource_kind, resource_id, resource_digest,
-                       change_set_id, change_set_sha256, active, locator,
+                       active, locator,
                        created_at, updated_at",
         )
         .bind::<sql_types::Uuid, _>(tenant_id)
@@ -773,7 +500,7 @@ impl TenantResourceRepository {
         }
         let current = sql_query(
             "SELECT id, tenant_id, resource_kind, resource_id, resource_digest,
-                    change_set_id, change_set_sha256, active, locator,
+                    active, locator,
                     created_at, updated_at
              FROM tenant_resource_bindings
              WHERE tenant_id = $1 AND resource_kind = $2
@@ -1231,20 +958,6 @@ async fn lock_operation_jti_on_connection(
     lock_advisory_key_on_connection(connection, key).await
 }
 
-async fn lock_operation_change_set_on_connection(
-    connection: &mut AsyncPgConnection,
-    deployment_id: &str,
-    tenant_id: Uuid,
-    change_set_id: &str,
-) -> Result<(), RepositoryError> {
-    let key = format!(
-        "nazoauth:tenant-resource-operation:change-set:{tenant_id}:{}:{deployment_id}:{}:{change_set_id}",
-        deployment_id.len(),
-        change_set_id.len(),
-    );
-    lock_advisory_key_on_connection(connection, key).await
-}
-
 async fn lock_advisory_key_on_connection(
     connection: &mut AsyncPgConnection,
     key: String,
@@ -1261,27 +974,11 @@ async fn lock_advisory_key_on_connection(
     Ok(())
 }
 
-pub struct NewTenantResourceOperation<'a> {
-    pub deployment_id: &'a str,
-    pub tenant_id: Uuid,
-    pub jti: &'a str,
-    pub change_set_id: &'a str,
-    pub change_set_sha256: &'a str,
-    pub request_sha256: &'a str,
-    pub operation: &'a str,
-    pub expected_revision: u64,
-    pub result_revision: u64,
-    pub receipt_json: &'a Value,
-    pub receipt_jws: &'a str,
-}
-
 pub struct NewTenantResourceBinding<'a> {
     pub tenant_id: Uuid,
     pub resource_kind: &'a str,
     pub resource_id: &'a str,
     pub resource_digest: &'a str,
-    pub change_set_id: &'a str,
-    pub change_set_sha256: &'a str,
     pub active: bool,
     pub locator: &'a str,
 }

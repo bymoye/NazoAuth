@@ -110,14 +110,10 @@ async fn public_operator_key_commands_reject_unsupported_algorithms_before_loadi
         .unwrap_err();
     assert_eq!(generate.to_string(), "unsupported signing alg none");
 
-    let register = operator_register_external(
-        "external",
-        "none",
-        "kms://key/1",
-        PathBuf::from("must-not-be-read.json"),
-    )
-    .await
-    .unwrap_err();
+    let register =
+        operator_register_external("external", "none", "kms://key/1", b"must-not-be-parsed")
+            .await
+            .unwrap_err();
     assert_eq!(register.to_string(), "unsupported signing alg none");
 }
 
@@ -149,24 +145,17 @@ async fn typed_operator_key_lifecycle_returns_content_revisions() {
         .await
         .unwrap();
 
-    let public_jwk = directory.join("external-public.jwk.json");
-    tokio::fs::write(
-        &public_jwk,
-        serde_json::to_vec(&serde_json::json!({
-            "kty":"OKP", "crv":"Ed25519", "kid":"external", "alg":"EdDSA", "use":"sig",
-            "x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        }))
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+    let public_jwk = serde_json::json!({
+        "kty":"OKP", "crv":"Ed25519", "kid":"external", "alg":"EdDSA", "use":"sig",
+        "x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    });
     nazo_key_management::KeyManager::register_external(
         &key_settings,
         nazo_key_management::ExternalKeyRegistration {
             kid: "external".to_owned(),
             algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://key/1".to_owned(),
-            public_jwk_file: public_jwk,
+            public_jwk,
         },
     )
     .await

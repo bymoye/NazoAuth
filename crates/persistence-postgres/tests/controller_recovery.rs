@@ -105,6 +105,14 @@ impl RecoveryMaterial {
             .sign(&proposal.challenge_message(&challenge_id.to_string(), nonce))
             .to_bytes()
     }
+
+    fn sign_allocation(
+        &self,
+        proposal: &RecoveryProposal,
+        allocation_nonce: &[u8; 32],
+    ) -> [u8; 64] {
+        proposal.sign_allocation(allocation_nonce, &self.seed)
+    }
 }
 
 fn controller_key_for_slot(seed: u8) -> [u8; 32] {
@@ -117,15 +125,22 @@ fn challenge_input(
     deployment: &str,
     controller_seed: u8,
     next: &RecoveryMaterial,
+    current: &RecoveryMaterial,
 ) -> NewRecoveryChallenge {
-    NewRecoveryChallenge {
+    let allocation_nonce = [controller_seed.wrapping_add(100); 32];
+    let mut challenge = NewRecoveryChallenge {
         deployment_id: deployment.to_owned(),
         controller_label: "recovered-primary".to_owned(),
         controller_kid: kid_of(&controller_key_for_slot(controller_seed)),
         controller_public_key: controller_key_for_slot(controller_seed),
         recovery_kid: recovery_kid(&next.public_key),
         recovery_public_key: next.public_key,
-    }
+        allocation_nonce,
+        allocation_signature: [0; 64],
+    };
+    challenge.allocation_signature =
+        current.sign_allocation(&proposal_from(&challenge), &allocation_nonce);
+    challenge
 }
 
 fn proposal_from(challenge: &NewRecoveryChallenge) -> RecoveryProposal {
@@ -232,6 +247,17 @@ async fn rotation_needs_unconsumed_fresh_approval_and_bumps_exactly_one_generati
         RecoveryRotationError::Approval(IdentityApprovalError::UnknownToken)
     ));
 
+    // A valid old-root allocation may be in flight when an administrator
+    // proactively rotates the root. The rotation must close it atomically so
+    // it cannot squat on the new generation's one-pending slot.
+    let pending_before_rotation = repository
+        .issue_recovery_challenge(
+            challenge_input(deployment, 50, &recovery_material(deployment, 3), &first),
+            at(1),
+        )
+        .await
+        .expect("old root can authorize one pending challenge");
+
     // Approved rotation bumps exactly one generation and replaces material.
     let rotation = second.rotation(deployment);
     let issued = repository
@@ -250,6 +276,26 @@ async fn rotation_needs_unconsumed_fresh_approval_and_bumps_exactly_one_generati
         .expect("approved rotation should commit");
     assert_eq!(rotated.generation, 2);
     assert_eq!(rotated.recovery_kid, kid_of(&second.public_key));
+    let old_pending = repository
+        .submit_recovery_challenge(
+            submission(
+                deployment,
+                pending_before_rotation.challenge_id,
+                &pending_before_rotation.nonce,
+                &[0; 64],
+            ),
+            at(4),
+        )
+        .await
+        .expect_err("rotation must terminalize the old generation's pending challenge");
+    assert!(matches!(old_pending, RecoveryRootError::ChallengeReplayed));
+    repository
+        .issue_recovery_challenge(
+            challenge_input(deployment, 51, &recovery_material(deployment, 4), &second),
+            at(4),
+        )
+        .await
+        .expect("the new root must not be blocked by old pending state");
 
     // Replay of the consumed token fails and changes nothing.
     let replay = repository
@@ -276,6 +322,33 @@ async fn rotation_needs_unconsumed_fresh_approval_and_bumps_exactly_one_generati
         2
     );
 
+    // A generation bump must always replace key material; otherwise proofs
+    // from before a nominal rotation would still verify afterwards.
+    let same_rotation = second.rotation(deployment);
+    let same_approval = repository
+        .issue_rotation_approval(
+            deployment,
+            &same_rotation.action_sha256(),
+            Uuid::now_v7(),
+            at(5),
+        )
+        .await
+        .expect("approval issuance is independent of current root material");
+    let same_key = repository
+        .commit_rotation(
+            &same_approval.token,
+            deployment,
+            &same_rotation.action_sha256(),
+            second.root_input(deployment),
+            at(6),
+        )
+        .await
+        .expect_err("rotation to identical recovery material must fail");
+    assert!(matches!(
+        same_key,
+        RecoveryRotationError::Mutation(RecoveryRootError::InvalidIdentity(_))
+    ));
+
     // An unconsumed but expired approval cannot commit either.
     let stale_rotation = first.rotation(deployment);
     let stale = repository
@@ -283,7 +356,7 @@ async fn rotation_needs_unconsumed_fresh_approval_and_bumps_exactly_one_generati
             deployment,
             &stale_rotation.action_sha256(),
             Uuid::now_v7(),
-            at(5),
+            at(7),
         )
         .await
         .expect("issuance should succeed");
@@ -293,7 +366,7 @@ async fn rotation_needs_unconsumed_fresh_approval_and_bumps_exactly_one_generati
             deployment,
             &stale_rotation.action_sha256(),
             first.root_input(deployment),
-            at(5) + Duration::seconds(RECOVERY_CHALLENGE_TTL_SECONDS + 60),
+            at(7) + Duration::seconds(RECOVERY_CHALLENGE_TTL_SECONDS + 60),
         )
         .await
         .expect_err("expired approval must fail");
@@ -304,18 +377,131 @@ async fn rotation_needs_unconsumed_fresh_approval_and_bumps_exactly_one_generati
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotated_away_recovery_keys_can_never_be_installed_again() {
+    let Some((_url, repository)) = isolated("root_history").await else {
+        return;
+    };
+    let deployment = "deployment-recovery-history";
+    let first = recovery_material(deployment, 1);
+    let second = recovery_material(deployment, 2);
+    enroll_root(&repository, deployment, &first, at(0)).await;
+
+    let second_rotation = second.rotation(deployment);
+    let second_approval = repository
+        .issue_rotation_approval(
+            deployment,
+            &second_rotation.action_sha256(),
+            Uuid::now_v7(),
+            at(1),
+        )
+        .await
+        .expect("approval should issue");
+    let rotated = repository
+        .commit_rotation(
+            &second_approval.token,
+            deployment,
+            &second_rotation.action_sha256(),
+            second.root_input(deployment),
+            at(2),
+        )
+        .await
+        .expect("fresh key should rotate");
+    assert_eq!(rotated.generation, 2);
+
+    let reuse_rotation = first.rotation(deployment);
+    let reuse_approval = repository
+        .issue_rotation_approval(
+            deployment,
+            &reuse_rotation.action_sha256(),
+            Uuid::now_v7(),
+            at(3),
+        )
+        .await
+        .expect("approval should issue");
+    let reuse = repository
+        .commit_rotation(
+            &reuse_approval.token,
+            deployment,
+            &reuse_rotation.action_sha256(),
+            first.root_input(deployment),
+            at(4),
+        )
+        .await
+        .expect_err("historical key reuse must fail");
+    assert!(matches!(
+        reuse,
+        RecoveryRotationError::Mutation(RecoveryRootError::InvalidIdentity(_))
+    ));
+
+    let root = repository
+        .current_root(deployment)
+        .await
+        .expect("root read should work")
+        .expect("root should remain installed");
+    assert_eq!(root.generation, 2);
+    assert_eq!(root.recovery_public_key, second.public_key);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_rotations_cannot_install_one_recovery_key_twice() {
+    let Some((_url, repository)) = isolated("root_history_concurrent").await else {
+        return;
+    };
+    let deployment = "deployment-recovery-history-race";
+    let first = recovery_material(deployment, 1);
+    let second = recovery_material(deployment, 2);
+    enroll_root(&repository, deployment, &first, at(0)).await;
+    let rotation = second.rotation(deployment);
+    let action_sha256 = rotation.action_sha256();
+    let first_approval = repository
+        .issue_rotation_approval(deployment, &action_sha256, Uuid::now_v7(), at(1))
+        .await
+        .unwrap();
+    let second_approval = repository
+        .issue_rotation_approval(deployment, &action_sha256, Uuid::now_v7(), at(1))
+        .await
+        .unwrap();
+
+    let first_commit = repository.commit_rotation(
+        &first_approval.token,
+        deployment,
+        &action_sha256,
+        second.root_input(deployment),
+        at(2),
+    );
+    let second_commit = repository.commit_rotation(
+        &second_approval.token,
+        deployment,
+        &action_sha256,
+        second.root_input(deployment),
+        at(2),
+    );
+    let (first_result, second_result) = tokio::join!(first_commit, second_commit);
+    let failure = match (first_result, second_result) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => error,
+        (Ok(_), Ok(_)) => panic!("the same recovery key committed twice"),
+        (Err(first), Err(second)) => {
+            panic!("both serialized rotations failed: {first}; {second}")
+        }
+    };
+    assert!(matches!(
+        failure,
+        RecoveryRotationError::Mutation(RecoveryRootError::InvalidIdentity(_))
+    ));
+
+    let root = repository.current_root(deployment).await.unwrap().unwrap();
+    assert_eq!(root.generation, 2);
+    assert_eq!(root.recovery_public_key, second.public_key);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn challenges_are_refused_while_any_controller_is_admitted_and_single_pending() {
     let Some((_url, repository)) = isolated("gate").await else {
         return;
     };
     let deployment = "deployment-recovery-gate";
-    enroll_root(
-        &repository,
-        deployment,
-        &recovery_material(deployment, 1),
-        at(0),
-    )
-    .await;
+    let current = recovery_material(deployment, 1);
+    enroll_root(&repository, deployment, &current, at(0)).await;
     let registry = repository.registry();
     let key = controller_key_for_slot(9);
     registry
@@ -331,12 +517,23 @@ async fn challenges_are_refused_while_any_controller_is_admitted_and_single_pend
         .await
         .expect("slot should enroll");
 
+    // An unauthenticated caller cannot allocate state or use the endpoint as
+    // an admitted-controller oracle: proof verification happens first.
+    let mut forged_allocation =
+        challenge_input(deployment, 10, &recovery_material(deployment, 2), &current);
+    forged_allocation.allocation_signature[0] ^= 1;
+    let forged = repository
+        .issue_recovery_challenge(forged_allocation, at(1))
+        .await
+        .expect_err("invalid allocation proof must fail before state or gate disclosure");
+    assert!(matches!(forged, RecoveryRootError::InvalidAllocationProof));
+
     // With one admitting key left the ordinary fresh-2FA identity paths are
     // available, so the break-glass challenge is refused outright.
     let refused = repository
         .issue_recovery_challenge(
-            challenge_input(deployment, 10, &recovery_material(deployment, 2)),
-            at(1),
+            challenge_input(deployment, 10, &recovery_material(deployment, 2), &current),
+            at(2),
         )
         .await
         .expect_err("challenge must be refused while controllers admit");
@@ -355,27 +552,35 @@ async fn challenges_are_refused_while_any_controller_is_admitted_and_single_pend
         .expect("listing works")
     {
         registry
-            .revoke_slot(deployment, &slot.controller_id, at(2))
+            .revoke_slot(deployment, &slot.controller_id, at(3))
             .await
             .expect("revocation should succeed");
     }
     let issued = repository
         .issue_recovery_challenge(
-            challenge_input(deployment, 10, &recovery_material(deployment, 2)),
-            at(3),
+            challenge_input(deployment, 10, &recovery_material(deployment, 2), &current),
+            at(4),
         )
         .await
         .expect("challenge should issue without admitting keys");
     assert_eq!(
-        (issued.expires_at - at(3)).num_seconds(),
+        (issued.expires_at - at(4)).num_seconds(),
         RECOVERY_CHALLENGE_TTL_SECONDS
     );
+    let idempotent = repository
+        .issue_recovery_challenge(
+            challenge_input(deployment, 10, &recovery_material(deployment, 2), &current),
+            at(5),
+        )
+        .await
+        .expect("the same live allocation proof must return the same challenge");
+    assert_eq!(idempotent, issued);
 
     // At most ONE outstanding challenge per deployment.
     let pending = repository
         .issue_recovery_challenge(
-            challenge_input(deployment, 11, &recovery_material(deployment, 3)),
-            at(4),
+            challenge_input(deployment, 11, &recovery_material(deployment, 3), &current),
+            at(6),
         )
         .await
         .expect_err("second pending challenge must be refused");
@@ -392,7 +597,7 @@ async fn challenges_are_refused_while_any_controller_is_admitted_and_single_pend
                     &issued.nonce,
                     &[0xffu8; 64],
                 ),
-                at(5 + i64::from(attempt)),
+                at(7 + i64::from(attempt)),
             )
             .await
             .expect_err("wrong signature must fail");
@@ -412,10 +617,22 @@ async fn challenges_are_refused_while_any_controller_is_admitted_and_single_pend
         .expect_err("exhausted challenge must refuse");
     assert!(matches!(dead, RecoveryRootError::ChallengeExhausted));
 
+    let replayed_allocation = repository
+        .issue_recovery_challenge(
+            challenge_input(deployment, 10, &recovery_material(deployment, 2), &current),
+            at(21),
+        )
+        .await
+        .expect_err("a consumed allocation proof must not create another challenge");
+    assert!(matches!(
+        replayed_allocation,
+        RecoveryRootError::AllocationProofReplayed
+    ));
+
     repository
         .issue_recovery_challenge(
-            challenge_input(deployment, 12, &recovery_material(deployment, 4)),
-            at(21),
+            challenge_input(deployment, 12, &recovery_material(deployment, 4), &current),
+            at(22),
         )
         .await
         .expect("a new challenge may issue once the old one is dead");
@@ -454,7 +671,7 @@ async fn accepted_recovery_revokes_everything_installs_one_slot_and_rotates_the_
     }
 
     // The break-glass flow: challenge bound to the EXACT proposed material.
-    let challenge = challenge_input(deployment, 9, &next_material);
+    let challenge = challenge_input(deployment, 9, &next_material, &old_material);
     let proposal = proposal_from(&challenge);
     proposal
         .validate()
@@ -538,12 +755,26 @@ async fn accepted_recovery_revokes_everything_installs_one_slot_and_rotates_the_
         .await
         .expect("fixture revocation frees the gate");
     let later = recovery_material(deployment, 3);
+    let stale_allocation = repository
+        .issue_recovery_challenge(
+            challenge_input(deployment, 21, &later, &old_material),
+            at(21),
+        )
+        .await
+        .expect_err("a proof made by the rotated-away root must fail allocation");
+    assert!(matches!(
+        stale_allocation,
+        RecoveryRootError::InvalidAllocationProof
+    ));
     let issued_second = repository
-        .issue_recovery_challenge(challenge_input(deployment, 21, &later), at(21))
+        .issue_recovery_challenge(
+            challenge_input(deployment, 21, &later, &next_material),
+            at(21),
+        )
         .await
         .expect("new challenge should issue");
     let stale_signature = old_material.sign(
-        &proposal_from(&challenge_input(deployment, 21, &later)),
+        &proposal_from(&challenge_input(deployment, 21, &later, &next_material)),
         issued_second.challenge_id,
         &issued_second.nonce,
     );
@@ -576,6 +807,66 @@ async fn accepted_recovery_revokes_everything_installs_one_slot_and_rotates_the_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_cannot_reinstall_a_historical_root_or_leave_a_slot() {
+    let Some((_url, repository)) = isolated("recover_root_history").await else {
+        return;
+    };
+    let deployment = "deployment-recovery-history-commit";
+    let first = recovery_material(deployment, 1);
+    let second = recovery_material(deployment, 2);
+    enroll_root(&repository, deployment, &first, at(0)).await;
+
+    let to_second = challenge_input(deployment, 10, &second, &first);
+    let to_second_proposal = proposal_from(&to_second);
+    let issued = repository
+        .issue_recovery_challenge(to_second, at(1))
+        .await
+        .expect("first recovery challenge should issue");
+    let signature = first.sign(&to_second_proposal, issued.challenge_id, &issued.nonce);
+    let recovered = repository
+        .submit_recovery_challenge(
+            submission(deployment, issued.challenge_id, &issued.nonce, &signature),
+            at(2),
+        )
+        .await
+        .expect("fresh recovery root should commit");
+    repository
+        .registry()
+        .revoke_slot(deployment, &recovered.slot.controller_id, at(3))
+        .await
+        .expect("fixture revocation should close ordinary admission");
+
+    let back_to_first = challenge_input(deployment, 11, &first, &second);
+    let back_to_first_proposal = proposal_from(&back_to_first);
+    let issued = repository
+        .issue_recovery_challenge(back_to_first, at(4))
+        .await
+        .expect("current root may allocate the exact proposal");
+    let signature = second.sign(&back_to_first_proposal, issued.challenge_id, &issued.nonce);
+    let rejected = repository
+        .submit_recovery_challenge(
+            submission(deployment, issued.challenge_id, &issued.nonce, &signature),
+            at(5),
+        )
+        .await
+        .expect_err("historical root must not be reinstalled");
+    assert!(matches!(rejected, RecoveryRootError::InvalidIdentity(_)));
+
+    let root = repository.current_root(deployment).await.unwrap().unwrap();
+    assert_eq!(root.generation, 2);
+    assert_eq!(root.recovery_public_key, second.public_key);
+    assert!(
+        repository
+            .registry()
+            .admitted_controllers(deployment, at(6))
+            .await
+            .unwrap()
+            .is_empty(),
+        "failed recovery must roll back the proposed controller slot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_expiry_and_wrong_signers_fail_closed_without_partial_state() {
     let Some((_url, repository)) = isolated("failclosed").await else {
         return;
@@ -587,7 +878,7 @@ async fn replay_expiry_and_wrong_signers_fail_closed_without_partial_state() {
 
     // Expired challenge: dead by the fixed server-side window even though it
     // was never consumed.
-    let expired_challenge = challenge_input(deployment, 30, &next);
+    let expired_challenge = challenge_input(deployment, 30, &next, &material);
     let expired_proposal = proposal_from(&expired_challenge);
     let expired_issued = repository
         .issue_recovery_challenge(expired_challenge, at(0))
@@ -624,7 +915,7 @@ async fn replay_expiry_and_wrong_signers_fail_closed_without_partial_state() {
     // and an identical replay afterwards is rejected as consumed.  The first
     // (lapsed) challenge stays pending until its TTL passes, so reissuing
     // starts after expiry — a live pending challenge blocks issuance.
-    let live_challenge = challenge_input(deployment, 31, &next);
+    let live_challenge = challenge_input(deployment, 31, &next, &material);
     let live_proposal = proposal_from(&live_challenge);
     let live_issued = repository
         .issue_recovery_challenge(live_challenge, at(601))
@@ -726,7 +1017,7 @@ async fn recovered_slots_count_toward_the_three_slot_bound() {
     let next = recovery_material(deployment, 2);
     enroll_root(&repository, deployment, &material, at(0)).await;
 
-    let challenge = challenge_input(deployment, 40, &next);
+    let challenge = challenge_input(deployment, 40, &next, &material);
     let proposal = proposal_from(&challenge);
     let issued = repository
         .issue_recovery_challenge(challenge, at(0))
@@ -793,7 +1084,7 @@ async fn recovery_submission_waits_for_the_deployment_identity_lock() {
     enroll_root(&repository, deployment, &material, at(0)).await;
 
     // No admitting controllers exist, so break-glass issuance succeeds.
-    let challenge = challenge_input(deployment, 40, &next);
+    let challenge = challenge_input(deployment, 40, &next, &material);
     let proposal = proposal_from(&challenge);
     let issued = repository
         .issue_recovery_challenge(challenge, at(1))

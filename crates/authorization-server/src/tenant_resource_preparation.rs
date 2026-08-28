@@ -3,9 +3,8 @@
 //! [`TenantResourcePreparation`] implementations must delegate to the
 //! deployment's existing client-registration and password-hashing services so
 //! operator-driven resources obey exactly the same policy as every other
-//! client/user creation path.  This module is that adapter; both consumers —
-//! the HTTP provider composition and the one-shot ControlOperation pipeline
-//! (H07) — construct it here so the rules cannot drift apart.
+//! client/user creation path. This adapter is constructed by the current
+//! ControlOperation pipeline so those rules cannot drift apart.
 
 use std::sync::Arc;
 

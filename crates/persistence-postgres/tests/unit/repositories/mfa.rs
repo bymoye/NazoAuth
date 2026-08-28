@@ -54,34 +54,15 @@ fn totp_envelope_authenticates_secret_and_identity_binding() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            None,
-            Some(protected.clone()),
-            Some(key_id.clone()),
+            protected.clone(),
+            key_id.clone(),
         )
         .expect("decryption succeeds"),
         "JBSWY3DPEHPK3PXP"
     );
     let other_user = UserId::new(Uuid::now_v7()).expect("user id is valid");
     assert!(matches!(
-        decode_totp_secret(
-            Some(&key_ring),
-            tenant_id,
-            other_user,
-            None,
-            Some(protected),
-            Some(key_id),
-        ),
-        Err(RepositoryError::Consistency(_))
-    ));
-    assert!(matches!(
-        decode_totp_secret(
-            Some(&key_ring),
-            tenant_id,
-            user_id,
-            Some("JBSWY3DPEHPK3PXP".to_owned()),
-            None,
-            None,
-        ),
+        decode_totp_secret(Some(&key_ring), tenant_id, other_user, protected, key_id,),
         Err(RepositoryError::Consistency(_))
     ));
 }
@@ -116,9 +97,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            None,
-            Some(previous_protected.clone()),
-            Some(previous.id().to_owned()),
+            previous_protected.clone(),
+            previous.id().to_owned(),
         )
         .expect("previous key remains decryptable"),
         "JBSWY3DPEHPK3PXP"
@@ -128,9 +108,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             None,
             tenant_id,
             user_id,
-            None,
-            Some(previous_protected.clone()),
-            Some(previous.id().to_owned()),
+            previous_protected.clone(),
+            previous.id().to_owned(),
         ),
         Err(RepositoryError::Consistency(_))
     ));
@@ -139,24 +118,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            Some("plaintext".to_owned()),
-            Some(previous_protected.clone()),
-            Some(previous.id().to_owned()),
-        ),
-        Err(RepositoryError::Consistency(_))
-    ));
-    assert!(matches!(
-        decode_totp_secret(Some(&key_ring), tenant_id, user_id, None, None, None,),
-        Err(RepositoryError::Consistency(_))
-    ));
-    assert!(matches!(
-        decode_totp_secret(
-            Some(&key_ring),
-            tenant_id,
-            user_id,
-            None,
-            Some(previous_protected.clone()),
-            None,
+            vec![TOTP_ENVELOPE_VERSION; TOTP_MIN_PROTECTED_LEN - 1],
+            previous.id().to_owned(),
         ),
         Err(RepositoryError::Consistency(_))
     ));
@@ -165,9 +128,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            None,
-            Some(vec![TOTP_ENVELOPE_VERSION; TOTP_MIN_PROTECTED_LEN - 1]),
-            Some(previous.id().to_owned()),
+            vec![TOTP_ENVELOPE_VERSION + 1; TOTP_MIN_PROTECTED_LEN],
+            previous.id().to_owned(),
         ),
         Err(RepositoryError::Consistency(_))
     ));
@@ -176,20 +138,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            None,
-            Some(vec![TOTP_ENVELOPE_VERSION + 1; TOTP_MIN_PROTECTED_LEN]),
-            Some(previous.id().to_owned()),
-        ),
-        Err(RepositoryError::Consistency(_))
-    ));
-    assert!(matches!(
-        decode_totp_secret(
-            Some(&key_ring),
-            tenant_id,
-            user_id,
-            None,
-            Some(previous_protected.clone()),
-            Some("retired".to_owned()),
+            previous_protected.clone(),
+            "retired".to_owned(),
         ),
         Err(RepositoryError::Consistency(_))
     ));
@@ -201,9 +151,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            None,
-            Some(invalid_utf8),
-            Some(current.id().to_owned()),
+            invalid_utf8,
+            current.id().to_owned(),
         ),
         Err(RepositoryError::Consistency(_))
     ));
@@ -213,9 +162,8 @@ fn totp_secret_validation_rejects_malformed_rows_and_uses_previous_keys() {
             Some(&key_ring),
             tenant_id,
             user_id,
-            None,
-            Some(invalid_length),
-            Some(current.id().to_owned()),
+            invalid_length,
+            current.id().to_owned(),
         ),
         Err(RepositoryError::Consistency(_))
     ));
@@ -252,14 +200,6 @@ fn backup_hash_count_and_error_mappings_are_fail_closed() {
     );
     assert_eq!(
         MfaAuditError::Diesel(diesel::result::Error::NotFound).into_repository(),
-        RepositoryError::Conflict
-    );
-    assert_eq!(
-        MfaSecretMigrationError::Repository(RepositoryError::Conflict).into_repository(),
-        RepositoryError::Conflict
-    );
-    assert_eq!(
-        MfaSecretMigrationError::Diesel(diesel::result::Error::NotFound).into_repository(),
         RepositoryError::Conflict
     );
 }

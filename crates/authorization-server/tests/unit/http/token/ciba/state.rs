@@ -10,7 +10,7 @@ use nazo_auth::{
     CibaAtomicResult, CibaAuthenticationContext, CibaCreateFailure, CibaDecision,
     CibaDecisionEvaluation, CibaDecisionFailure, CibaPollCommit, CibaPollFailure,
     CibaPollTransition, CibaStateFuture, CibaStateStorePort, CibaStoredRequest,
-    evaluate_ciba_decision, evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
+    evaluate_ciba_decision, evaluate_ciba_poll,
 };
 use nazo_valkey::AtomicResult as ValkeyAtomicResult;
 use nazo_valkey::test_support::ciba_request_storage_key;
@@ -37,6 +37,18 @@ fn pending_state(now: i64) -> CibaRequestState {
         last_poll_at: None,
         ping_notification: None,
     }
+}
+
+fn approval_context(auth_time: i64) -> CibaAuthenticationContext {
+    CibaAuthenticationContext {
+        auth_time,
+        amr: vec!["pwd".to_owned()],
+        oidc_sid: Some("ciba-test-session".to_owned()),
+    }
+}
+
+fn approve(auth_time: i64) -> CibaDecision {
+    CibaDecision::Approve(approval_context(auth_time))
 }
 
 async fn live_valkey() -> Option<ValkeyClient> {
@@ -349,6 +361,7 @@ fn ciba_poll_selects_terminal_states_before_protocol_success() {
     ));
 
     state.status = CibaStatus::Approved;
+    state.authentication_context = Some(approval_context(900));
     assert!(matches!(
         evaluate_ciba_poll(&state, 1_001),
         CibaPollTransition::Approved
@@ -365,24 +378,25 @@ fn ciba_poll_selects_terminal_states_before_protocol_success() {
 fn ciba_decision_rejects_mismatch_terminal_and_expired_states() {
     let state = pending_state(1_000);
     assert!(matches!(
-        evaluate_ciba_decision(&state, Some(Uuid::now_v7()), CibaDecision::Approve, 1_001),
+        evaluate_ciba_decision(&state, Some(Uuid::now_v7()), &approve(900), 1_001),
         CibaDecisionEvaluation::UserMismatch
     ));
 
     let mut terminal = state.clone();
     terminal.status = CibaStatus::Approved;
+    terminal.authentication_context = Some(approval_context(900));
     assert!(matches!(
-        evaluate_ciba_decision(&terminal, Some(terminal.user_id), CibaDecision::Deny, 1_001),
+        evaluate_ciba_decision(
+            &terminal,
+            Some(terminal.user_id),
+            &CibaDecision::Deny,
+            1_001
+        ),
         CibaDecisionEvaluation::AlreadyHandled
     ));
 
     assert!(matches!(
-        evaluate_ciba_decision(
-            &state,
-            Some(state.user_id),
-            CibaDecision::Approve,
-            state.expires_at
-        ),
+        evaluate_ciba_decision(&state, Some(state.user_id), &approve(900), state.expires_at),
         CibaDecisionEvaluation::Expired
     ));
 }
@@ -391,7 +405,7 @@ fn ciba_decision_rejects_mismatch_terminal_and_expired_states() {
 fn ciba_decision_changes_only_status() {
     let state = pending_state(1_000);
     let CibaDecisionEvaluation::Commit(next) =
-        evaluate_ciba_decision(&state, Some(state.user_id), CibaDecision::Approve, 1_001)
+        evaluate_ciba_decision(&state, Some(state.user_id), &approve(900), 1_001)
     else {
         panic!("valid decision should produce a terminal replacement")
     };
@@ -411,17 +425,38 @@ fn approved_ciba_state_preserves_the_authenticated_session_context() {
         amr: vec!["pwd".to_owned(), "otp".to_owned()],
         oidc_sid: Some("sid-1".to_owned()),
     };
-    let CibaDecisionEvaluation::Commit(next) = evaluate_ciba_decision_with_authentication_context(
+    let CibaDecisionEvaluation::Commit(next) = evaluate_ciba_decision(
         &state,
         Some(state.user_id),
-        CibaDecision::Approve,
-        Some(context.clone()),
+        &CibaDecision::Approve(context.clone()),
         1_001,
     ) else {
         panic!("valid decision should produce a terminal replacement")
     };
 
     assert_eq!(next.authentication_context, Some(context));
+}
+
+#[actix_web::test]
+async fn approved_ciba_state_without_authentication_context_is_rejected_before_poll() {
+    let store = RecordingCibaStore::new(false);
+    let mut state = pending_state(1_000);
+    state.status = CibaStatus::Approved;
+    let client_id = state.client_id.clone();
+    let service = CibaService::new(store.clone());
+
+    assert!(matches!(
+        service
+            .poll(
+                "approved-without-context",
+                &client_id,
+                CibaStoredRequest::new(state, 0),
+                || 1_001,
+            )
+            .await,
+        Err(CibaPollFailure::Storage(CibaStatePortError::CorruptData))
+    ));
+    assert!(store.calls().is_empty());
 }
 
 #[actix_web::test]
@@ -452,11 +487,10 @@ async fn ciba_decision_authorization_deadline_blocks_cas_without_mutating_pendin
     let service = CibaService::new(store.clone());
 
     let result = service
-        .decide_with_authentication_context_and_deadline(
+        .decide_with_authorization_deadline(
             auth_req_id,
-            CibaDecision::Approve,
+            approve(900),
             Some(state.user_id),
-            None,
             Some(900),
             || 1_001,
         )
@@ -482,11 +516,10 @@ async fn expired_ciba_decision_uses_deadline_guarded_cleanup_delete() {
     let service = CibaService::new(store.clone());
 
     let result = service
-        .decide_with_authentication_context_and_deadline(
+        .decide_with_authorization_deadline(
             auth_req_id,
-            CibaDecision::Approve,
+            approve(900),
             Some(state.user_id),
-            None,
             Some(900),
             || 1_001,
         )
@@ -533,6 +566,7 @@ async fn approved_ciba_poll_authorization_expiry_does_not_redeem_terminal_state(
     let store = RecordingCibaStore::new(false);
     let mut state = pending_state(1_000);
     state.status = CibaStatus::Approved;
+    state.authentication_context = Some(approval_context(900));
     let auth_req_id = "authorization-poll-terminal-expired";
     store.seed(auth_req_id, state.clone());
     let initial = CibaService::new(store.clone())
@@ -566,19 +600,17 @@ async fn concurrent_ciba_decisions_retry_stale_cas_and_commit_one_terminal_state
     let service = CibaService::new(store.clone());
 
     let (approve, deny) = tokio::join!(
-        service.decide_with_authentication_context_and_deadline(
+        service.decide_with_authorization_deadline(
             auth_req_id,
-            CibaDecision::Approve,
+            approve(900),
             Some(state.user_id),
-            None,
             Some(2_000),
             || 1_001,
         ),
-        service.decide_with_authentication_context_and_deadline(
+        service.decide_with_authorization_deadline(
             auth_req_id,
             CibaDecision::Deny,
             Some(state.user_id),
-            None,
             Some(2_000),
             || 1_001,
         ),
@@ -640,11 +672,11 @@ async fn ciba_poll_client_mismatch_rejects_before_authorization_cas() {
 }
 
 #[actix_web::test]
-async fn legacy_ciba_state_migrates_from_actual_expiretime() {
+async fn ciba_state_without_retention_deadline_is_rejected() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let auth_req_id = format!("legacy-{}", Uuid::now_v7());
     let key = ciba_request_storage_key(&auth_req_id);
     let now = valkey_server_time(&valkey).await;
@@ -663,13 +695,12 @@ async fn legacy_ciba_state_migrates_from_actual_expiretime() {
     .to_string();
     stage_at_deadline(&valkey, &key, &raw, deadline).await;
 
-    let stored = CibaStore::new(&connection)
+    let error = CibaService::new(CibaStore::new(&connection))
         .load(&auth_req_id)
         .await
-        .unwrap()
-        .unwrap();
+        .expect_err("a state missing the current retention deadline must be rejected");
 
-    assert_eq!(stored.value().retention_expires_at, deadline);
+    assert_eq!(error, CibaStatePortError::CorruptData);
     let snapshot = valkey_atomic_snapshot(&valkey, &key)
         .await
         .unwrap()
@@ -683,7 +714,7 @@ async fn ciba_state_rejects_deadline_that_disagrees_with_expiretime() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let auth_req_id = format!("mismatch-{}", Uuid::now_v7());
     let key = ciba_request_storage_key(&auth_req_id);
     let now = valkey_server_time(&valkey).await;
@@ -707,11 +738,11 @@ async fn ciba_state_rejects_deadline_that_disagrees_with_expiretime() {
 }
 
 #[actix_web::test]
-async fn ciba_compare_set_persists_legacy_deadline_without_refreshing_it() {
+async fn ciba_compare_set_preserves_current_retention_deadline() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let auth_req_id = format!("replace-{}", Uuid::now_v7());
     let key = ciba_request_storage_key(&auth_req_id);
     let now = valkey_server_time(&valkey).await;
@@ -757,7 +788,7 @@ async fn ciba_creation_retries_collision_without_overwriting_existing_state() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let state = pending_state(now);
     let occupied_id = format!("occupied-{}", Uuid::now_v7());
@@ -810,7 +841,7 @@ async fn ciba_creation_stops_after_four_collisions() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let state = pending_state(now);
     let ids = (0..4)
@@ -842,7 +873,7 @@ async fn concurrent_ciba_decisions_commit_exactly_one_terminal_state() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let state = pending_state(now);
     let auth_req_id = format!("decision-race-{}", Uuid::now_v7());
@@ -853,12 +884,7 @@ async fn concurrent_ciba_decisions_commit_exactly_one_terminal_state() {
 
     let service = CibaService::new(CibaStore::new(&connection));
     let (approve, deny) = tokio::join!(
-        service.decide(
-            &auth_req_id,
-            CibaDecision::Approve,
-            Some(state.user_id),
-            || now
-        ),
+        service.decide(&auth_req_id, approve(now), Some(state.user_id), || now),
         service.decide(
             &auth_req_id,
             CibaDecision::Deny,
@@ -884,7 +910,7 @@ async fn ciba_decision_rejects_user_mismatch_without_mutation() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let state = pending_state(now);
     let auth_req_id = format!("decision-user-{}", Uuid::now_v7());
@@ -895,12 +921,7 @@ async fn ciba_decision_rejects_user_mismatch_without_mutation() {
 
     let service = CibaService::new(CibaStore::new(&connection));
     let result = service
-        .decide(
-            &auth_req_id,
-            CibaDecision::Approve,
-            Some(Uuid::now_v7()),
-            || now,
-        )
+        .decide(&auth_req_id, approve(now), Some(Uuid::now_v7()), || now)
         .await;
 
     assert!(matches!(result, Err(CibaDecisionFailure::UserMismatch)));
@@ -915,7 +936,7 @@ async fn expired_ciba_decision_consumes_state_without_success_outcome() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let mut state = pending_state(now);
     state.expires_at = now - 1;
@@ -928,12 +949,7 @@ async fn expired_ciba_decision_consumes_state_without_success_outcome() {
 
     let service = CibaService::new(CibaStore::new(&connection));
     let result = service
-        .decide(
-            &auth_req_id,
-            CibaDecision::Approve,
-            Some(state.user_id),
-            || now,
-        )
+        .decide(&auth_req_id, approve(now), Some(state.user_id), || now)
         .await;
 
     assert!(matches!(result, Err(CibaDecisionFailure::Expired)));
@@ -945,7 +961,7 @@ async fn three_concurrent_premature_polls_each_add_exactly_five_seconds() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let mut state = pending_state(now);
     state.last_poll_at = Some(now);
@@ -982,10 +998,11 @@ async fn concurrent_approved_polls_consume_state_once() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let mut state = pending_state(now);
     state.status = CibaStatus::Approved;
+    state.authentication_context = Some(approval_context(now));
     let auth_req_id = format!("poll-approved-{}", Uuid::now_v7());
     CibaStore::new(&connection)
         .create(&auth_req_id, &state)
@@ -1013,7 +1030,7 @@ async fn ciba_poll_conflict_retry_consumes_assertion_once() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let state = pending_state(now);
     let auth_req_id = format!("poll-assertion-{}", Uuid::now_v7());
@@ -1053,10 +1070,11 @@ async fn approved_state_is_consumed_before_downstream_issuance() {
     let Some(valkey) = live_valkey().await else {
         return;
     };
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+    let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
     let now = valkey_server_time(&valkey).await;
     let mut state = pending_state(now);
     state.status = CibaStatus::Approved;
+    state.authentication_context = Some(approval_context(now));
     let auth_req_id = format!("poll-downstream-{}", Uuid::now_v7());
     CibaStore::new(&connection)
         .create(&auth_req_id, &state)

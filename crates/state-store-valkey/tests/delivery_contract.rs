@@ -3,12 +3,12 @@ use std::time::Duration;
 use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
 use nazo_identity::UserId;
-use nazo_valkey::{DeliveryConsume, DeliveryStore, ValkeyConnection};
+use nazo_valkey::{DeliveryConsume, DeliveryStore};
 use serde_json::json;
 
 async fn setup() -> Option<(DeliveryStore, fred::prelude::Client)> {
     let url = std::env::var("VALKEY_URL").ok()?;
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let inspector = Builder::from_config(Config::from_url(&url).unwrap())
@@ -28,7 +28,10 @@ async fn client_delivery_preserves_exact_key_semantic_payload_and_ttl() {
     };
     let user_id = UserId::new(uuid::Uuid::from_u128(7)).unwrap();
     let token = format!("token-{}", uuid::Uuid::now_v7());
-    let key = format!("oauth:client_delivery:{}:{token}", user_id.as_uuid());
+    let key = nazo_valkey::test_support::state_storage_key(format!(
+        "oauth:client_delivery:{}:{token}",
+        user_id.as_uuid()
+    ));
     let payload = json!({
         "delivery_state": "committed",
         "request_id": uuid::Uuid::from_u128(8),

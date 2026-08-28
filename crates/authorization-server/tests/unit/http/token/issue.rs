@@ -16,13 +16,33 @@ pub(crate) async fn issue_token_response(
     client: &ClientRow,
     issue: TokenIssue,
 ) -> HttpResponse {
+    issue_token_response_with_modules(state, client, issue, state.active_module_snapshot()).await
+}
+
+async fn issue_native_sso_token_response(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    issue: TokenIssue,
+) -> HttpResponse {
+    let mut modules = state.active_module_snapshot();
+    modules
+        .accepting
+        .insert(nazo_runtime_modules::ModuleId::NativeSso);
+    issue_token_response_with_modules(state, client, issue, modules).await
+}
+
+async fn issue_token_response_with_modules(
+    state: &TestInfrastructure,
+    client: &ClientRow,
+    issue: TokenIssue,
+    modules: nazo_runtime_modules::ActiveModuleSnapshot,
+) -> HttpResponse {
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
         nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
         state.keyset.clone(),
     );
     let config = TokenIssuanceConfig::from(state.settings.as_ref());
-    let modules = state.active_module_snapshot();
     let authorization = test_support::test_authorization_service(state);
     issue_token_response_with_service(
         &TokenIssuanceContext {
@@ -404,8 +424,16 @@ async fn insert_issue_client(state: &TestInfrastructure, client: &ClientRow) {
     sql_query(
         "INSERT INTO oauth_clients (\
             id, tenant_id, realm_id, organization_id, client_id, client_name, client_type,\
-            redirect_uris, scopes, grant_types, token_endpoint_auth_method, is_active\
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)",
+            redirect_uris, scopes, grant_types, token_endpoint_auth_method, is_active, security_policy\
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE,\
+            jsonb_build_object(\
+                'version', 1, 'assurance', 'baseline',\
+                'require_signed_authorization_request', false,\
+                'require_signed_authorization_response', false,\
+                'require_signed_introspection_response', false,\
+                'session_management', false, 'allow_cross_device_flows', false,\
+                'allow_confidential_oidc_without_pkce', false\
+            ))",
     )
     .bind::<SqlUuid, _>(client.id)
     .bind::<SqlUuid, _>(client.tenant_id)
@@ -1044,11 +1072,7 @@ async fn native_sso_issue_fails_closed_when_the_runtime_module_is_disabled() {
 
 #[actix_web::test]
 async fn native_sso_issue_requires_openid_before_token_signing() {
-    let mut state = issue_state_with_valid_signing_key();
-    Arc::get_mut(&mut state.settings)
-        .expect("test state owns its settings")
-        .modules
-        .enable_native_sso = true;
+    let state = issue_state_with_valid_signing_key();
     let client = client_with_grants(&["authorization_code", "refresh_token"]);
     let mut issue = token_issue_without_openid();
     issue.native_sso = Some(NativeSsoTokenBinding {
@@ -1678,13 +1702,9 @@ async fn id_token_encryption_failure_does_not_issue_an_unencrypted_token() {
 
 #[actix_web::test]
 async fn native_sso_issue_requires_a_refresh_session_before_persisting_device_state() {
-    let Some(mut state) = issue_state_with_live_database() else {
+    let Some(state) = issue_state_with_live_database() else {
         return;
     };
-    Arc::get_mut(&mut state.settings)
-        .expect("test state owns its settings")
-        .modules
-        .enable_native_sso = true;
     let mut client = client_with_grants(&["authorization_code"]);
     client.client_id = format!("issue-native-missing-refresh-{}", Uuid::now_v7());
     let user_id = Uuid::now_v7();
@@ -1700,7 +1720,7 @@ async fn native_sso_issue_requires_a_refresh_session_before_persisting_device_st
         sid: "native-sso-sid".to_owned(),
     });
 
-    let response = issue_token_response(&state, &client, issue).await;
+    let response = issue_native_sso_token_response(&state, &client, issue).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&response), "invalid_grant");
@@ -1712,7 +1732,7 @@ async fn native_sso_issue_requires_a_refresh_session_before_persisting_device_st
 
 #[actix_web::test]
 async fn native_sso_issue_persists_device_state_with_the_refresh_family() {
-    let Some(mut state) = issue_state_with_live_database() else {
+    let Some(state) = issue_state_with_live_database() else {
         return;
     };
     state
@@ -1720,10 +1740,6 @@ async fn native_sso_issue_persists_device_state_with_the_refresh_family() {
         .init()
         .await
         .expect("live Native SSO fixture should connect to Valkey");
-    Arc::get_mut(&mut state.settings)
-        .expect("test state owns its settings")
-        .modules
-        .enable_native_sso = true;
     let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
     client.client_id = format!("issue-native-success-{}", Uuid::now_v7());
     let user_id = Uuid::now_v7();
@@ -1742,7 +1758,7 @@ async fn native_sso_issue_persists_device_state_with_the_refresh_family() {
         sid: "native-sso-sid".to_owned(),
     });
 
-    let response = issue_token_response(&state, &client, issue).await;
+    let response = issue_native_sso_token_response(&state, &client, issue).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let value: Value = serde_json::from_slice(&response_body(response).await)
@@ -2027,13 +2043,9 @@ async fn malformed_active_subject_claims_fail_closed_before_id_token_signing() {
 
 #[actix_web::test]
 async fn native_sso_device_secret_failure_does_not_return_partial_credentials() {
-    let Some(mut state) = issue_state_with_live_database_and_disconnected_valkey() else {
+    let Some(state) = issue_state_with_live_database_and_disconnected_valkey() else {
         return;
     };
-    Arc::get_mut(&mut state.settings)
-        .expect("test state owns its settings")
-        .modules
-        .enable_native_sso = true;
     let mut client = client_with_grants(&["authorization_code", "refresh_token"]);
     client.client_id = format!("native-sso-store-error-{}", Uuid::now_v7());
     let user_id = Uuid::now_v7();
@@ -2051,7 +2063,7 @@ async fn native_sso_device_secret_failure_does_not_return_partial_credentials() 
         sid: "native-sso-sid".to_owned(),
     });
 
-    let response = issue_token_response(&state, &client, issue).await;
+    let response = issue_native_sso_token_response(&state, &client, issue).await;
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(oauth_error_code(&response), "server_error");

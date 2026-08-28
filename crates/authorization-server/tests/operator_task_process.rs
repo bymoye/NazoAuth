@@ -26,6 +26,7 @@ use nazo_operator_protocol::{
     ControlOutcome, ControlTarget, controller_key_id, decode_control_result,
     sign_control_operation,
 };
+use sha2::{Digest as _, Sha256};
 
 const DEPLOYMENT: &str = "deployment-process";
 const CONFIG_REVISION: &str = "config-revision-process";
@@ -203,6 +204,13 @@ fn build_identity() -> ControlBuildIdentity {
     }
 }
 
+fn server_binary_sha256() -> String {
+    Sha256::digest(fs::read(env!("CARGO_BIN_EXE_nazoauth")).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn operation(operation_id: &str, kid: &str, payload: ControlOperationPayload) -> ControlOperation {
     ControlOperation {
         schema: CONTROL_OPERATION_SCHEMA,
@@ -210,7 +218,7 @@ fn operation(operation_id: &str, kid: &str, payload: ControlOperationPayload) ->
         kid: kid.to_owned(),
         deployment_id: DEPLOYMENT.to_owned(),
         target: ControlTarget::HostBinary {
-            sha256: "a".repeat(64),
+            sha256: server_binary_sha256(),
             embedded: build_identity(),
         },
         config_revision: CONFIG_REVISION.to_owned(),
@@ -550,7 +558,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
         ControlOperationPayload::KeysValidate,
     );
     wrong_target.target = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
+        sha256: server_binary_sha256(),
         embedded: ControlBuildIdentity {
             product: "nazauth".to_owned(),
             version: "counterfeit".to_owned(),

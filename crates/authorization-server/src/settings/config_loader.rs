@@ -433,18 +433,8 @@ impl Settings {
                 fapi_resource_dpop_nonce_policy,
                 request_object_jti_policy,
                 auth_code_ttl_seconds,
-                access_token_ttl_seconds: positive_i64(
-                    config,
-                    "ACCESS_TOKEN_TTL_SECONDS",
-                    300,
-                    "ACCESS_TOKEN_TTL_SECONDS",
-                )?,
-                id_token_ttl_seconds: positive_i64(
-                    config,
-                    "ID_TOKEN_TTL_SECONDS",
-                    600,
-                    "ID_TOKEN_TTL_SECONDS",
-                )?,
+                access_token_ttl_seconds: super::bounded_access_token_ttl_seconds(config)?,
+                id_token_ttl_seconds: super::bounded_id_token_ttl_seconds(config)?,
                 refresh_token_ttl_seconds: positive_i64(
                     config,
                     "REFRESH_TOKEN_TTL_SECONDS",
@@ -494,20 +484,8 @@ impl Settings {
                 signing_key_prepublish_seconds: task_key_settings.prepublish_window.num_seconds(),
             },
             modules: ModuleSettings {
-                enable_request_object: false,
-                enable_par_request_object: false,
-                enable_authorization_details: config.bool("ENABLE_AUTHORIZATION_DETAILS", false)?,
-                enable_device_authorization_grant: false,
-                enable_frontchannel_logout: false,
-                enable_session_management: false,
-                enable_ciba: false,
-                enable_native_sso: config.bool("ENABLE_NATIVE_SSO", false)?,
-                enable_fapi_http_signatures: config.bool("ENABLE_FAPI_HTTP_SIGNATURES", false)?,
-                enable_scim_security_events: config.bool("ENABLE_SCIM_SECURITY_EVENTS", false)?,
                 enable_openid4vci_issuer,
                 enable_openid4vp_verifier,
-                enable_dynamic_client_registration:
-                    dynamic_client_registration_initial_access_token.is_some(),
                 dynamic_client_registration_initial_access_token,
                 remote_client_document_private_origins: config
                     .optional_string("REMOTE_CLIENT_DOCUMENT_PRIVATE_ORIGINS")

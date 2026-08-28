@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use actix_web::web;
 use nazo_http_actix::{
@@ -8,11 +8,10 @@ use nazo_http_actix::{
 };
 use nazo_postgres::{DbPool, RuntimeModuleRepository};
 use nazo_runtime_modules::{
-    ActiveModuleSnapshot, CasOutcome, CatalogDurations, DesiredMode, DesiredStateChange,
-    DesiredStateRecord, DesiredStateUpdate, DesiredStateUpdateOutcome, ModuleCatalog,
-    ModuleEventPage, ModuleId, ModuleLifecycle, ModuleRevision, ModuleState, ModuleStateRepository,
-    ReconcileOutcome, RegistryError, RuntimeModuleManagement, RuntimeModuleManagementError,
-    RuntimeModuleRegistry, RuntimeModuleView,
+    ActiveModuleSnapshot, CatalogDurations, DesiredStateUpdate, DesiredStateUpdateOutcome,
+    ModuleCatalog, ModuleEventPage, ModuleId, ModuleLifecycle, ModuleRevision, ModuleState,
+    ModuleStateRepository, ReconcileOutcome, RegistryError, RuntimeModuleManagement,
+    RuntimeModuleManagementError, RuntimeModuleRegistry, RuntimeModuleView,
 };
 
 use crate::settings::Settings;
@@ -90,24 +89,13 @@ impl RuntimeModules {
         instance_id: &str,
     ) -> anyhow::Result<Self> {
         let repository = Arc::new(RuntimeModuleRepository::new(pool));
-        let migration = repository
-            .migrate_composable_default_policy(&inherited_enabled(settings))
-            .await?;
-        tracing::info!(
-            previous_version = migration.previous_version,
-            current_version = migration.current_version,
-            materialized_inherited_rows = migration.materialized_inherited_rows,
-            initialized_empty_state = migration.initialized_empty_state,
-            "runtime module default policy is ready"
-        );
-        let inherited_enabled = inherited_enabled(settings);
-        let catalog = module_catalog(settings, inherited_enabled.clone())?;
+        let catalog = module_catalog(settings)?;
         let lifecycle = Arc::new(ServerModuleLifecycle {
             repository: repository.clone(),
         });
         let instance_id = instance_id.to_owned();
         let (accepting, draining) =
-            seed_desired_states(&repository, &catalog, &instance_id).await?;
+            load_explicit_desired_states(&repository, &catalog, &instance_id).await?;
         let registry = Arc::new(RuntimeModuleRegistry::new(
             repository.clone(),
             lifecycle,
@@ -213,37 +201,28 @@ fn map_management_error(
         | RuntimeModuleManagementError::Registry(
             RegistryError::RevisionExhausted(_) | RegistryError::SnapshotRevisionExhausted,
         )
-        | RuntimeModuleManagementError::MissingCatalogSpec(_) => {
+        | RuntimeModuleManagementError::MissingCatalogSpec(_)
+        | RuntimeModuleManagementError::MissingDesiredState(_) => {
             tracing::error!(?error, "runtime module catalog is inconsistent");
             RuntimeModuleAdminError::CatalogInconsistent
         }
     }
 }
 
-fn module_catalog(
-    settings: &Settings,
-    inherited_enabled: BTreeSet<ModuleId>,
-) -> anyhow::Result<ModuleCatalog> {
+fn module_catalog(settings: &Settings) -> anyhow::Result<ModuleCatalog> {
     let protocol = &settings.protocol;
     let session = &settings.session;
-    let mut catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(
-                settings.device.device_authorization_ttl_seconds,
-            ),
-            ciba: Duration::from_secs(settings.ciba.ciba_auth_req_id_ttl_seconds),
-            authorization_code: Duration::from_secs(protocol.auth_code_ttl_seconds),
-            refresh_token: Duration::from_secs(
-                u64::try_from(protocol.refresh_token_ttl_seconds)
-                    .map_err(|_| anyhow::anyhow!("REFRESH_TOKEN_TTL_SECONDS cannot be negative"))?,
-            ),
-            session: Duration::from_secs(session.session_ttl_seconds),
-            scim_security_events: Duration::from_secs(
-                settings.storage.scim_event_retention_seconds,
-            ),
-        },
-        inherited_enabled,
-    )?;
+    let mut catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(settings.device.device_authorization_ttl_seconds),
+        ciba: Duration::from_secs(settings.ciba.ciba_auth_req_id_ttl_seconds),
+        authorization_code: Duration::from_secs(protocol.auth_code_ttl_seconds),
+        refresh_token: Duration::from_secs(
+            u64::try_from(protocol.refresh_token_ttl_seconds)
+                .map_err(|_| anyhow::anyhow!("REFRESH_TOKEN_TTL_SECONDS cannot be negative"))?,
+        ),
+        session: Duration::from_secs(session.session_ttl_seconds),
+        scim_security_events: Duration::from_secs(settings.storage.scim_event_retention_seconds),
+    })?;
     let mut runtime_disable_blocked = BTreeSet::new();
     if protocol
         .authorization_server_profile
@@ -269,45 +248,19 @@ fn module_catalog(
     Ok(catalog)
 }
 
-async fn seed_desired_states(
+async fn load_explicit_desired_states(
     repository: &RuntimeModuleRepository,
     catalog: &ModuleCatalog,
     instance_id: &str,
 ) -> anyhow::Result<(BTreeSet<ModuleId>, BTreeSet<ModuleId>)> {
-    // Bootstrap every record before applying dependency policy. The runtime
-    // administration path assumes that the complete closed catalog already
-    // exists, so using it to insert records one at a time makes first startup
-    // depend on enum order. CAS keeps concurrent first starts idempotent.
-    for module_id in ModuleId::ALL {
-        if repository.read_desired(module_id).await?.is_none() {
-            match repository
-                .compare_and_set_desired(DesiredStateChange {
-                    expected_revision: None,
-                    next: DesiredStateRecord {
-                        module_id,
-                        mode: DesiredMode::Inherit,
-                        revision: ModuleRevision::new(1),
-                        actor_id: None,
-                        reason: Some("initial configuration inheritance".to_owned()),
-                        updated_at: SystemTime::now(),
-                    },
-                })
-                .await
-                .map_err(|error| anyhow::anyhow!("runtime desired-state seed failed: {error:?}"))?
-            {
-                CasOutcome::Applied(_) | CasOutcome::Stale { .. } => {}
-            }
-        }
-    }
-
     let mut accepting = BTreeSet::new();
     let mut draining = BTreeSet::new();
     for module_id in ModuleId::ALL {
         let desired = repository
             .read_desired(module_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("runtime desired state is missing after seed"))?;
-        let enabled = desired.mode.resolve(catalog.inherited_enabled(module_id));
+            .ok_or_else(|| anyhow::anyhow!("runtime desired state is missing"))?;
+        let enabled = desired.mode.is_enabled();
         if catalog.runtime_disable_blocked(module_id) && !enabled {
             anyhow::bail!(
                 "runtime module {module_id:?} is required by the active security profile"
@@ -330,53 +283,6 @@ async fn seed_desired_states(
         }
     }
     Ok((accepting, draining))
-}
-
-pub(crate) fn inherited_enabled(settings: &Settings) -> BTreeSet<ModuleId> {
-    let modules = &settings.modules;
-    let mut enabled = BTreeSet::from([
-        ModuleId::DeviceAuthorization,
-        ModuleId::TokenExchange,
-        ModuleId::JwtBearerGrant,
-        ModuleId::Ciba,
-        ModuleId::RequestObjects,
-        ModuleId::Jarm,
-        ModuleId::Scim,
-        ModuleId::FrontchannelLogout,
-        ModuleId::SessionManagement,
-    ]);
-    let prerequisite_ready = [
-        (
-            ModuleId::DynamicClientRegistration,
-            modules
-                .dynamic_client_registration_initial_access_token
-                .is_some(),
-        ),
-        (
-            ModuleId::AuthorizationDetails,
-            modules.enable_authorization_details,
-        ),
-        (
-            ModuleId::HttpMessageSignatures,
-            modules.enable_fapi_http_signatures,
-        ),
-        (
-            ModuleId::ScimSecurityEvents,
-            modules.enable_scim_security_events,
-        ),
-        (ModuleId::Openid4vciIssuer, modules.enable_openid4vci_issuer),
-        (
-            ModuleId::Openid4vpVerifier,
-            modules.enable_openid4vp_verifier,
-        ),
-        (ModuleId::NativeSso, modules.enable_native_sso),
-    ];
-    enabled.extend(
-        prerequisite_ready
-            .into_iter()
-            .filter_map(|(module_id, ready)| ready.then_some(module_id)),
-    );
-    enabled
 }
 
 #[cfg(test)]

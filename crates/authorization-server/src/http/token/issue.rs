@@ -11,7 +11,7 @@ use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
 use crate::http::dpop::DpopErrorContext;
 use crate::http::dpop::dpop_error_response;
 use crate::http::dpop::issue_dpop_nonce_with_authorization_service;
-use crate::settings::{AuthorizationServerProfile, DpopNoncePolicy, Settings};
+use crate::settings::{DpopNoncePolicy, Settings};
 use actix_web::HttpResponse;
 use actix_web::http::StatusCode;
 use actix_web::http::header;
@@ -47,7 +47,6 @@ pub(crate) struct TokenIssuanceConfig {
     openid4vci_enabled: bool,
     openid4vci_credential_scopes: Box<[String]>,
     pairwise_subject_secret: Option<Box<str>>,
-    authorization_server_profile: AuthorizationServerProfile,
     client_ip_header_mode: ClientIpHeaderMode,
     client_secret_pepper: Box<str>,
     rate_limit_window_seconds: u64,
@@ -81,7 +80,6 @@ impl From<&Settings> for TokenIssuanceConfig {
                 .pairwise_subject_secret
                 .as_deref()
                 .map(Into::into),
-            authorization_server_profile: settings.protocol.authorization_server_profile,
             client_ip_header_mode: settings.endpoint.client_ip_header_mode,
             client_secret_pepper: settings.protocol.client_secret_pepper.as_str().into(),
             rate_limit_window_seconds: settings.identity.rate_limit.window_seconds,
@@ -142,10 +140,6 @@ impl TokenIssuanceConfig {
         self.auth_code_ttl_seconds.max(1)
     }
 
-    pub(crate) fn authorization_server_profile(&self) -> AuthorizationServerProfile {
-        self.authorization_server_profile
-    }
-
     pub(crate) fn client_ip_header_mode(&self) -> ClientIpHeaderMode {
         self.client_ip_header_mode
     }
@@ -195,7 +189,10 @@ pub(super) use authorization_code_state::{
     mark_failed_authorization_code, revoke_issued_authorization_code_tokens,
 };
 pub(crate) use refresh_persistence::should_issue_refresh_token;
-use refresh_persistence::{PendingRefreshToken, RefreshPersistResult, persist_refresh_token};
+use refresh_persistence::{
+    PendingRefreshToken, RefreshPersistResult, persist_refresh_token,
+    refresh_authentication_context,
+};
 
 fn client_session_sid_enabled(frontchannel_logout: bool, client: &ClientRow) -> bool {
     (frontchannel_logout

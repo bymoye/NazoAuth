@@ -1,7 +1,7 @@
 use nazo_identity::ports::RepositoryError;
 use nazo_runtime_modules::{
-    DesiredMode, DesiredStateRecord, InstanceStateRecord, ModuleEventRecord, ModuleEventState,
-    ModuleEventType, ModuleId, ModuleRevision, ModuleState,
+    DesiredMode, DesiredStateRecord, HistoricalDesiredMode, InstanceStateRecord, ModuleEventRecord,
+    ModuleEventState, ModuleEventType, ModuleId, ModuleRevision, ModuleState,
 };
 use uuid::Uuid;
 
@@ -82,7 +82,7 @@ pub(super) fn parse_event_state(
     value: &str,
 ) -> Result<ModuleEventState, RepositoryError> {
     if event_type == ModuleEventType::DesiredStateChanged {
-        parse_desired_mode(value).map(ModuleEventState::Desired)
+        parse_historical_desired_mode(value).map(ModuleEventState::Desired)
     } else {
         parse_actual_state(value).map(ModuleEventState::Actual)
     }
@@ -107,11 +107,21 @@ pub(super) fn parse_revision(value: i64) -> Result<ModuleRevision, RepositoryErr
 
 pub(super) fn parse_desired_mode(value: &str) -> Result<DesiredMode, RepositoryError> {
     match value {
-        "inherit" => Ok(DesiredMode::Inherit),
         "enabled" => Ok(DesiredMode::Enabled),
         "disabled" => Ok(DesiredMode::Disabled),
         _ => Err(RepositoryError::Consistency(format!(
             "unknown runtime desired mode: {value}"
+        ))),
+    }
+}
+
+fn parse_historical_desired_mode(value: &str) -> Result<HistoricalDesiredMode, RepositoryError> {
+    match value {
+        "inherit" => Ok(HistoricalDesiredMode::Inherit),
+        "enabled" => Ok(HistoricalDesiredMode::Enabled),
+        "disabled" => Ok(HistoricalDesiredMode::Disabled),
+        _ => Err(RepositoryError::Consistency(format!(
+            "unknown runtime historical desired mode: {value}"
         ))),
     }
 }

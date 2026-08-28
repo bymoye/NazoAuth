@@ -308,7 +308,10 @@ jobs:
           if ($identity.release -ne $env:NAZOAUTH_BUILD_RELEASE) { throw "embedded release mismatch" }
           if ($identity.revision -ne $env:NAZOAUTH_BUILD_REVISION) { throw "embedded revision mismatch" }
           if ($identity.build_id -ne $env:NAZOAUTH_BUILD_ID) { throw "embedded build id mismatch" }
-          if ($identity.protocol -ne 1) { throw "embedded protocol mismatch" }
+          $protocolSource = Get-Content "crates/operator-protocol/src/lib.rs" -Raw
+          $protocolMatch = [regex]::Match($protocolSource, 'pub const PROTOCOL_VERSION: u32 = (\d+);')
+          if (!$protocolMatch.Success) { throw "unable to read the source protocol version" }
+          if ($identity.protocol -ne [int]$protocolMatch.Groups[1].Value) { throw "embedded protocol mismatch" }
       - name: Verify Linux single-file native dependency boundary
         if: matrix.os == 'linux'
         shell: bash

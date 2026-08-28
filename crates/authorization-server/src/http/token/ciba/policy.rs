@@ -127,15 +127,10 @@ pub(crate) fn validate_ciba_security_profile_client_with_config(
 }
 
 pub(crate) fn validate_ciba_token_request_profile(
-    config: &CibaHttpConfig,
     client: &ClientRow,
     auth_method: &str,
 ) -> Result<(), HttpResponse> {
-    let profile = if config
-        .authorization_server_profile
-        .effective_client_policy(client)
-        .requires_fapi2_security()
-    {
+    let profile = if client.security_policy.requires_fapi2_security() {
         SecurityProfile::Fapi2Security
     } else {
         SecurityProfile::Baseline

@@ -411,7 +411,10 @@ impl LiveAdminAccessRequestFixture {
                     "reset".to_owned(),
                     "on".to_owned(),
                     format!(">{password}"),
-                    "~oauth:session:*".to_owned(),
+                    format!(
+                        "~{}",
+                        nazo_valkey::test_support::state_storage_key("oauth:session:*")
+                    ),
                     "+@all".to_owned(),
                 ],
             )
@@ -456,7 +459,10 @@ impl LiveAdminAccessRequestFixture {
                     "reset".to_owned(),
                     "on".to_owned(),
                     format!(">{password}"),
-                    "~oauth:*".to_owned(),
+                    format!(
+                        "~{}",
+                        nazo_valkey::test_support::state_storage_key("oauth:*")
+                    ),
                     "+@all".to_owned(),
                     "-del".to_owned(),
                 ],
@@ -576,7 +582,7 @@ impl LiveAdminAccessRequestFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -1090,7 +1096,10 @@ async fn approve_access_request_creates_client_and_marks_request_approved_once()
     )
     .await;
     assert_eq!(other_claim.status(), StatusCode::NOT_FOUND);
-    let delivery_key = format!("oauth:client_delivery:{}:{delivery_token}", applicant.id);
+    let delivery_key = nazo_valkey::test_support::state_storage_key(format!(
+        "oauth:client_delivery:{}:{delivery_token}",
+        applicant.id
+    ));
     let staged_raw: String = fixture
         .state
         .valkey
@@ -1493,7 +1502,10 @@ async fn approve_access_request_rolls_back_when_status_write_fails_after_client_
         .valkey
         .custom(
             fred::cmd!("KEYS"),
-            vec![format!("oauth:client_delivery:{}:*", applicant.id)],
+            vec![nazo_valkey::test_support::state_storage_key(format!(
+                "oauth:client_delivery:{}:*",
+                applicant.id
+            ))],
         )
         .await
         .expect("staged delivery keys should be inspectable");

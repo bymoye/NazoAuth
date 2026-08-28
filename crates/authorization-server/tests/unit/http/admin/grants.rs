@@ -361,7 +361,7 @@ impl LiveAdminGrantFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -443,12 +443,23 @@ impl LiveAdminGrantFixture {
             r#"
             INSERT INTO oauth_tokens (
                 id, tenant_id, refresh_token_blake3, token_family_id, rotated_from_id,
-                client_id, user_id, scopes, authorization_details, issued_at, expires_at,
+                client_id, user_id, scopes, audience, oidc_auth_context,
+                authorization_details, issued_at, expires_at,
                 revoked_at, reuse_detected_at, subject, dpop_jkt, mtls_x5t_s256
             )
             VALUES (
                 $1, $2, $3, $4, NULL,
-                $5, $6, '["openid","offline_access"]'::jsonb, '[]'::jsonb, now(),
+                $5, $6, '["openid","offline_access"]'::jsonb,
+                '["resource://default"]'::jsonb,
+                jsonb_build_object(
+                    'version', 1, 'issuer', 'https://issuer.example.test',
+                    'audience', $7, 'auth_time', floor(extract(epoch from now()))::bigint,
+                    'amr', '["pwd"]'::jsonb, 'oidc_sid', NULL, 'id_token_sid', NULL,
+                    'acr', NULL, 'nonce', NULL, 'userinfo_claims', '[]'::jsonb,
+                    'userinfo_claim_requests', '[]'::jsonb, 'id_token_claims', '[]'::jsonb,
+                    'id_token_claim_requests', '[]'::jsonb
+                ),
+                '[]'::jsonb, now(),
                 now() + interval '1 day', NULL, NULL, 'subject-1', NULL, NULL
             )
             "#,
@@ -459,6 +470,7 @@ impl LiveAdminGrantFixture {
         .bind::<SqlUuid, _>(family_id)
         .bind::<SqlUuid, _>(client.id)
         .bind::<Nullable<SqlUuid>, _>(Some(user.id))
+        .bind::<Text, _>(client.client_id.as_str())
         .execute(&mut conn)
         .await
         .expect("refresh token row should insert");

@@ -1,4 +1,5 @@
 use super::*;
+use uuid::Uuid;
 
 use crate::config::DEFAULT_DATA_DIR;
 
@@ -49,6 +50,25 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
             &audit_anchor_data_dir,
         )?,
     )?;
+    let control_discovery = web::Data::new(
+        crate::control_discovery::ControlDiscoveryEndpoint::initialize(
+            &settings.storage.data_dir,
+            config
+                .optional_string("INSTANCE_IDENTITY_DIR")
+                .map(|_| config.persistent_path("INSTANCE_IDENTITY_DIR", None))
+                .transpose()?
+                .as_deref(),
+            config.optional_string("DEPLOYMENT_ID").as_deref(),
+            config.optional_string("RUNTIME_INSTANCE_ID").as_deref(),
+            &settings.endpoint.issuer,
+        )?,
+    );
+    let valkey_state_epoch = config.required_string("VALKEY_STATE_EPOCH")?;
+    let valkey_state_epoch = Uuid::parse_str(&valkey_state_epoch)
+        .map_err(|_| anyhow::anyhow!("VALKEY_STATE_EPOCH must be a UUID"))?;
+    if valkey_state_epoch.get_version_num() != 7 {
+        anyhow::bail!("VALKEY_STATE_EPOCH must be a UUIDv7");
+    }
     let valkey_url = config.string("VALKEY_URL", "redis://127.0.0.1:6379/0");
     let valkey_command_timeout_ms = config.parse::<u64>("VALKEY_COMMAND_TIMEOUT_MS", 1_000)?;
     if valkey_command_timeout_ms == 0 {
@@ -74,34 +94,19 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
         require_audit_least_privilege,
         audit_anchor_preflight,
     )?;
-    #[cfg(not(test))]
-    let valkey =
-        nazo_valkey::ValkeyConnection::connect(&valkey_url, valkey_command_timeout).await?;
-    #[cfg(test)]
-    let valkey = nazo_valkey::test_support::connect(&valkey_url, valkey_command_timeout).await?;
-    #[cfg(not(test))]
-    let valkey_connection = valkey;
-    #[cfg(test)]
-    let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
+    let valkey_connection = nazo_valkey::ValkeyConnection::connect(
+        &valkey_url,
+        valkey_command_timeout,
+        control_discovery.deployment_id(),
+        valkey_state_epoch,
+    )
+    .await?;
     valkey_connection
         .bind_tenant_owner(settings.tenant.context.tenant_id)
         .await
         .map_err(|error| anyhow::anyhow!("Valkey tenant ownership preflight failed: {error}"))?;
 
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
-    let instance_identity_dir = config
-        .optional_string("INSTANCE_IDENTITY_DIR")
-        .map(|_| config.persistent_path("INSTANCE_IDENTITY_DIR", None))
-        .transpose()?;
-    let control_discovery = web::Data::new(
-        crate::control_discovery::ControlDiscoveryEndpoint::initialize(
-            &settings.storage.data_dir,
-            instance_identity_dir.as_deref(),
-            config.optional_string("DEPLOYMENT_ID").as_deref(),
-            config.optional_string("RUNTIME_INSTANCE_ID").as_deref(),
-            &settings.endpoint.issuer,
-        )?,
-    );
     let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
         settings.endpoint.mtls_certificate_source,
     ));
@@ -117,7 +122,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
             diesel_db.clone(),
             &settings.storage.data_dir,
             &settings.endpoint.issuer,
-            config.optional_string("DEPLOYMENT_ID").as_deref(),
+            control_discovery.deployment_id(),
             settings.tenant.context,
         )
         .await?,

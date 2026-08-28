@@ -175,7 +175,7 @@ where
             authorization_encrypted_response_enc: trim_optional_string(
                 request.authorization_encrypted_response_enc,
             ),
-            security_policy: Some(request.security_policy),
+            security_policy: request.security_policy,
         },
         require_mtls_bound_tokens: request.require_mtls_bound_tokens,
         issued_secret,

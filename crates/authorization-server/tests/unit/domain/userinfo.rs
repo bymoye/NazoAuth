@@ -280,7 +280,7 @@ async fn insert_userinfo_client(state: &Data<TestInfrastructure>, client_id: &st
             tls_client_auth_san_ip, tls_client_auth_san_email,
             allow_client_assertion_audience_array,
             allow_client_assertion_endpoint_audience, require_par_request_object,
-            is_active,
+            is_active, security_policy,
             post_logout_redirect_uris, backchannel_logout_session_required
         )
         VALUES (
@@ -289,6 +289,7 @@ async fn insert_userinfo_client(state: &Data<TestInfrastructure>, client_id: &st
             '["resource://default"]'::jsonb, '["authorization_code"]'::jsonb,
             'client_secret_post', false, false, '[]'::jsonb, '[]'::jsonb,
             '[]'::jsonb, '[]'::jsonb, false, false, false, true,
+            '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
             '[]'::jsonb, true
         )
         RETURNING id
@@ -1179,27 +1180,17 @@ async fn userinfo_rejects_mtls_bound_token_with_mismatched_verified_certificate(
         Some("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8"),
     )
     .await;
+    let certificate = crate::test_support::rfc9440_certificate_fixture("userinfo-mismatch");
     let req = actix_web::test::TestRequest::get()
         .uri("/userinfo")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .insert_header((header::AUTHORIZATION, format!("Bearer {}", token.token)))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=userinfo-mismatch",
-        ))
         .to_http_request();
 
     let response = call_userinfo(state, req, Bytes::new()).await;

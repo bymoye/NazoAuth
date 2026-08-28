@@ -101,52 +101,12 @@ where
         }
     }
 
-    pub async fn issue(
-        &self,
-        access: &CredentialAccess,
-        request: &CredentialRequest,
-        issuance: &CredentialIssuance,
-        expected_nonce: &str,
-        now: DateTime<Utc>,
-    ) -> Result<CredentialResponse, CredentialIssuanceError> {
-        let pending = self
-            .issue_pending(access, request, issuance, expected_nonce, now)
-            .await?;
-        if let Err(error) = self.commit_pending(&pending, now).await {
-            let _ = self.rollback_pending(&pending, now).await;
-            return Err(error);
-        }
-        Ok(pending.response)
-    }
-
     /// Prepare a credential response without committing single-use state.
     ///
     /// The HTTP adapter must call [`Self::commit_pending`] only after it has
     /// completely encoded/encrypted the response. This keeps malformed client
     /// response-encryption parameters from permanently consuming a proof nonce.
     pub async fn issue_pending(
-        &self,
-        access: &CredentialAccess,
-        request: &CredentialRequest,
-        issuance: &CredentialIssuance,
-        expected_nonce: &str,
-        now: DateTime<Utc>,
-    ) -> Result<PendingCredentialIssuance, CredentialIssuanceError> {
-        self.issue_pending_with_identity(
-            access,
-            request,
-            issuance,
-            expected_nonce,
-            IssuanceIdentity {
-                issuance_id: Uuid::now_v7(),
-                request_digest: "legacy".to_owned(),
-            },
-            now,
-        )
-        .await
-    }
-
-    pub async fn issue_pending_with_identity(
         &self,
         access: &CredentialAccess,
         request: &CredentialRequest,

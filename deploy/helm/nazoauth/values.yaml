@@ -7,6 +7,9 @@ image:
 
 publicBaseUrl: "https://auth.example.com"
 transportMode: trusted-proxy
+# Required non-nil UUID. Rotate this before starting a candidate on restored
+# PostgreSQL or Valkey state.
+valkeyStateEpoch: ""
 
 service:
   type: ClusterIP

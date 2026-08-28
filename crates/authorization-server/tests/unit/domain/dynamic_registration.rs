@@ -3,7 +3,8 @@ use nazo_auth::DynamicRegistrationSecretPort;
 use nazo_http_actix::{DynamicRegistrationRateLimitError, DynamicRegistrationRequestGuard};
 
 use crate::{
-    config::ConfigSource, runtime_modules::test_support::runtime_module_registry_for_test,
+    config::ConfigSource,
+    runtime_modules::test_support::runtime_module_registry_with_modules_for_test,
     settings::Settings,
 };
 
@@ -66,6 +67,7 @@ fn dynamic_registration_config_copies_security_and_rate_limit_settings() {
 
 fn unavailable_dynamic_registration_guard(
     settings: &Settings,
+    enabled: bool,
 ) -> ServerDynamicRegistrationRequestGuard {
     let pool = nazo_postgres::create_pool(
         "postgres://dynamic-registration-test:dynamic-registration-test@127.0.0.1:1/nazo"
@@ -73,8 +75,13 @@ fn unavailable_dynamic_registration_guard(
         1,
     )
     .expect("pool construction should not connect");
-    let runtime = runtime_module_registry_for_test(pool.clone(), settings)
-        .expect("runtime module fixture should build");
+    let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
+    if enabled {
+        active_modules.insert(nazo_runtime_modules::ModuleId::DynamicClientRegistration);
+    }
+    let runtime =
+        runtime_module_registry_with_modules_for_test(pool.clone(), settings, active_modules)
+            .expect("runtime module fixture should build");
     let mut builder = ValkeyBuilder::from_config(
         ValkeyConfig::from_url("redis://127.0.0.1:1").expect("unavailable Valkey URL"),
     );
@@ -87,7 +94,7 @@ fn unavailable_dynamic_registration_guard(
         connection.max_command_attempts = 1;
     });
     let valkey = builder.build().expect("Valkey client should build");
-    let valkey = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
+    let valkey = nazo_valkey::test_support::scoped_connection(valkey);
     ServerDynamicRegistrationRequestGuard::new(
         nazo_valkey::RateLimitStore::new(&valkey),
         &DynamicRegistrationConfig::from(settings),
@@ -102,7 +109,7 @@ async fn dynamic_registration_guard_fails_closed_for_unavailable_dependencies() 
         "initial-token",
     )]);
     let settings = Settings::from_config(&config).expect("enabled dynamic registration settings");
-    let guard = unavailable_dynamic_registration_guard(&settings);
+    let guard = unavailable_dynamic_registration_guard(&settings, true);
 
     assert!(guard.accepts_new_requests());
     assert_eq!(
@@ -114,7 +121,7 @@ async fn dynamic_registration_guard_fails_closed_for_unavailable_dependencies() 
 #[test]
 fn dynamic_registration_guard_rejects_new_requests_when_module_is_disabled() {
     let settings = Settings::from_config(&ConfigSource::default()).expect("settings");
-    let guard = unavailable_dynamic_registration_guard(&settings);
+    let guard = unavailable_dynamic_registration_guard(&settings, false);
 
     assert!(!guard.accepts_new_requests());
 }

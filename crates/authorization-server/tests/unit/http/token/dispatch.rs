@@ -85,15 +85,10 @@ pub(crate) async fn token(
 }
 
 pub(crate) fn validate_token_request_profile(
-    settings: &Settings,
     client: &ClientRow,
     auth_method: &str,
 ) -> Result<(), HttpResponse> {
-    validate_token_request_profile_with_profile(
-        settings.protocol.authorization_server_profile,
-        client,
-        auth_method,
-    )
+    super::validate_token_request_profile(client, auth_method)
 }
 
 use super::*;
@@ -344,14 +339,14 @@ async fn live_valkey_invalid_db_token_state(
     }))
 }
 
-async fn live_trusted_proxy_invalid_db_token_state(
+async fn live_rfc9440_invalid_db_token_state(
     profile: AuthorizationServerProfile,
 ) -> Option<Data<TestInfrastructure>> {
     let state = live_valkey_invalid_db_token_state(profile).await?;
     let mut updated = (*state.settings).clone();
     updated.endpoint.transport_mode = TransportMode::TrustedProxy;
     updated.endpoint.mtls_certificate_source =
-        crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders;
+        crate::http::mtls::MtlsCertificateSourceMode::Rfc9440;
     updated.endpoint.trusted_proxy_cidrs =
         vec![IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse")];
     Some(Data::new(TestInfrastructure {
@@ -362,14 +357,14 @@ async fn live_trusted_proxy_invalid_db_token_state(
     }))
 }
 
-async fn live_trusted_proxy_token_state(
+async fn live_rfc9440_token_state(
     profile: AuthorizationServerProfile,
 ) -> Option<Data<TestInfrastructure>> {
     let state = live_token_state(profile).await?;
     let mut updated = (*state.settings).clone();
     updated.endpoint.transport_mode = TransportMode::TrustedProxy;
     updated.endpoint.mtls_certificate_source =
-        crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders;
+        crate::http::mtls::MtlsCertificateSourceMode::Rfc9440;
     updated.endpoint.trusted_proxy_cidrs =
         vec![IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse")];
     Some(Data::new(TestInfrastructure {
@@ -449,7 +444,7 @@ async fn insert_token_client(
             tls_client_auth_san_ip, tls_client_auth_san_email,
             allow_client_assertion_audience_array,
             allow_client_assertion_endpoint_audience, require_par_request_object,
-            is_active,
+            is_active, security_policy,
             post_logout_redirect_uris, backchannel_logout_session_required
         )
         VALUES (
@@ -461,6 +456,7 @@ async fn insert_token_client(
             false,
             false, false,
             $11,
+            '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
             '[]'::jsonb, true
         )
         "#,
@@ -479,6 +475,27 @@ async fn insert_token_client(
     .execute(&mut conn)
     .await
     .expect("test client insert should succeed");
+}
+
+async fn set_token_client_security_policy(
+    state: &Data<TestInfrastructure>,
+    client_id: &str,
+    policy: nazo_auth::ClientSecurityPolicy,
+) {
+    let mut connection = get_conn(&state.diesel_db)
+        .await
+        .expect("database connection should open");
+    sql_query(
+        "UPDATE oauth_clients SET security_policy = $1 WHERE tenant_id = $2 AND client_id = $3",
+    )
+    .bind::<Jsonb, _>(
+        serde_json::to_value(policy).expect("client security policy should serialize"),
+    )
+    .bind::<SqlUuid, _>(DEFAULT_TENANT_ID)
+    .bind::<Text, _>(client_id)
+    .execute(&mut connection)
+    .await
+    .expect("test client security policy update should succeed");
 }
 
 async fn set_client_mtls_thumbprint(
@@ -560,7 +577,8 @@ async fn valid_browser_session_cookie_cannot_authenticate_oauth_protocol_endpoin
     let email = format!("{username}@example.test");
     let session_id = format!("browser-session-{}", Uuid::now_v7());
     let unauthenticated_client_id = format!("browser-session-client-{}", Uuid::now_v7());
-    let session_key = format!("oauth:session:{session_id}");
+    let session_key =
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{session_id}"));
     let mut conn = get_conn(&state.diesel_db)
         .await
         .expect("database connection should be available");
@@ -1151,13 +1169,12 @@ async fn token_endpoint_rejects_mtls_client_without_verified_certificate() {
 
 #[actix_web::test]
 async fn token_endpoint_rejects_mtls_client_with_mismatched_verified_certificate() {
-    let Some(state) =
-        live_trusted_proxy_token_state(AuthorizationServerProfile::Oauth2Baseline).await
+    let Some(state) = live_rfc9440_token_state(AuthorizationServerProfile::Oauth2Baseline).await
     else {
         return;
     };
     let registered_thumbprint = fixture_mtls_thumbprint("registered-mismatch");
-    let presented_thumbprint = fixture_mtls_thumbprint("presented-mismatch");
+    let presented_certificate = crate::test_support::rfc9440_certificate_fixture("dispatch-actual");
     insert_token_client(
         &state,
         "mtls-token-client-mismatch",
@@ -1174,22 +1191,11 @@ async fn token_endpoint_rejects_mtls_client_with_mismatched_verified_certificate
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
         .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
-            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
         )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("client-cert", presented_certificate.header.as_str()))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            presented_thumbprint.as_str(),
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=dispatch-actual",
-        ))
         .to_http_request();
     let body =
         Bytes::from_static(b"grant_type=client_credentials&client_id=mtls-token-client-mismatch");
@@ -1255,6 +1261,12 @@ async fn token_endpoint_applies_fapi_profile_checks_after_successful_client_secr
         false,
         false,
         true,
+    )
+    .await;
+    set_token_client_security_policy(
+        &state,
+        "fapi-secret-client",
+        nazo_auth::ClientSecurityPolicy::fapi2(),
     )
     .await;
     let req = token_request("application/x-www-form-urlencoded");
@@ -1406,17 +1418,12 @@ async fn token_endpoint_returns_unsupported_grant_only_after_client_authenticati
 
 #[actix_web::test]
 async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without_client_id() {
-    let Some(state) =
-        live_trusted_proxy_token_state(AuthorizationServerProfile::Oauth2Baseline).await
+    let Some(state) = live_rfc9440_token_state(AuthorizationServerProfile::Oauth2Baseline).await
     else {
         return;
     };
     let client_id = format!("mtls-cert-only-{}", Uuid::now_v7());
-    let thumbprint = format!(
-        "{:032x}{:032x}",
-        Uuid::now_v7().as_u128(),
-        Uuid::now_v7().as_u128()
-    );
+    let certificate = crate::test_support::rfc9440_certificate_fixture(&client_id);
     insert_token_client(
         &state,
         &client_id,
@@ -1429,27 +1436,16 @@ async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without
         true,
     )
     .await;
-    set_client_mtls_thumbprint(&state, &client_id, &thumbprint).await;
+    set_client_mtls_thumbprint(&state, &client_id, &certificate.thumbprint).await;
 
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
         .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
-            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
         )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            thumbprint.as_str(),
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            format!("CN={client_id}"),
-        ))
         .to_http_request();
     let body = Bytes::from_static(b"grant_type=urn%3Aexample%3Aunsupported");
 
@@ -1464,31 +1460,20 @@ async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without
 
 #[actix_web::test]
 async fn mtls_client_credentials_without_client_id_returns_none_when_client_not_active() {
-    let Some(state) =
-        live_trusted_proxy_token_state(AuthorizationServerProfile::Oauth2Baseline).await
+    let Some(state) = live_rfc9440_token_state(AuthorizationServerProfile::Oauth2Baseline).await
     else {
         return;
     };
-    let presented_thumbprint = fixture_mtls_thumbprint("unknown-client");
+    let presented_certificate =
+        crate::test_support::rfc9440_certificate_fixture("dispatch-mtls-unknown");
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
         .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
-            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
         )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("client-cert", presented_certificate.header.as_str()))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            presented_thumbprint.as_str(),
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=dispatch-mtls-unknown",
-        ))
         .to_http_request();
 
     assert!(
@@ -1740,30 +1725,19 @@ async fn token_endpoint_rejects_client_lookup_db_failure_with_server_error() {
 #[actix_web::test]
 async fn token_endpoint_fails_closed_when_certificate_only_mtls_client_lookup_errors() {
     let Some(state) =
-        live_trusted_proxy_invalid_db_token_state(AuthorizationServerProfile::Oauth2Baseline).await
+        live_rfc9440_invalid_db_token_state(AuthorizationServerProfile::Oauth2Baseline).await
     else {
         return;
     };
-    let presented_thumbprint = fixture_mtls_thumbprint("lookup-error");
+    let presented_certificate = crate::test_support::rfc9440_certificate_fixture("dispatch-mtls");
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
         .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
-            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
         )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
+        .insert_header(("client-cert", presented_certificate.header.as_str()))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            presented_thumbprint.as_str(),
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=dispatch-mtls",
-        ))
         .to_http_request();
     let body = Bytes::from_static(b"grant_type=urn%3Aexample%3Aunsupported");
 
@@ -2078,19 +2052,12 @@ fn mtls_client_credentials_uses_tls_auth_method() {
 }
 
 #[test]
-fn baseline_profile_does_not_restrict_token_client_auth() {
+fn baseline_client_policy_does_not_restrict_token_client_auth() {
     let mut client = client();
     client.token_endpoint_auth_method = "client_secret_basic".to_owned();
     client.require_dpop_bound_tokens = false;
 
-    assert!(
-        validate_token_request_profile(
-            &settings(AuthorizationServerProfile::Oauth2Baseline),
-            &client,
-            "client_secret_basic",
-        )
-        .is_ok()
-    );
+    assert!(validate_token_request_profile(&client, "client_secret_basic").is_ok());
 }
 
 #[test]
@@ -2135,56 +2102,58 @@ fn missing_grant_registration_is_rejected_before_grant_dispatch() {
 }
 
 #[test]
-fn fapi2_profile_requires_confidential_client_auth_and_sender_constraint() {
-    let fapi = settings(AuthorizationServerProfile::Fapi2Security);
-    let valid_client = client();
+fn fapi2_client_policy_requires_confidential_client_auth_and_sender_constraint() {
+    let mut valid_client = client();
+    valid_client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
 
-    assert!(validate_token_request_profile(&fapi, &valid_client, "private_key_jwt").is_ok());
+    assert!(validate_token_request_profile(&valid_client, "private_key_jwt").is_ok());
 
-    let weak_auth = validate_token_request_profile(&fapi, &valid_client, "client_secret_basic")
+    let weak_auth = validate_token_request_profile(&valid_client, "client_secret_basic")
         .expect_err("client_secret_basic is not a FAPI2 client auth method");
     assert_eq!(weak_auth.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(oauth_error_code(&weak_auth), "invalid_client");
 
     let mut bearer_client = client();
+    bearer_client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
     bearer_client.require_dpop_bound_tokens = false;
-    let bearer = validate_token_request_profile(&fapi, &bearer_client, "private_key_jwt")
+    let bearer = validate_token_request_profile(&bearer_client, "private_key_jwt")
         .expect_err("FAPI2 requires sender-constrained tokens");
     assert_eq!(bearer.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&bearer), "invalid_request");
 
     let mut public_client = client();
+    public_client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
     public_client.client_type = "public".to_owned();
-    let public = validate_token_request_profile(&fapi, &public_client, "none")
+    let public = validate_token_request_profile(&public_client, "none")
         .expect_err("FAPI2 rejects public clients");
     assert_eq!(public.status(), StatusCode::BAD_REQUEST);
     assert_eq!(oauth_error_code(&public), "unauthorized_client");
 }
 
 #[test]
-fn fapi2_profile_accepts_mtls_confidential_sender_constrained_clients() {
-    let fapi = settings(AuthorizationServerProfile::Fapi2Security);
+fn fapi2_client_policy_accepts_mtls_confidential_sender_constrained_clients() {
     let mut client = client();
+    client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
     client.token_endpoint_auth_method = "tls_client_auth".to_owned();
     client.require_dpop_bound_tokens = false;
     client.require_mtls_bound_tokens = true;
 
     assert!(
-        validate_token_request_profile(&fapi, &client, "tls_client_auth").is_ok(),
+        validate_token_request_profile(&client, "tls_client_auth").is_ok(),
         "FAPI2 allows confidential mTLS clients when tokens are sender constrained"
     );
 }
 
 #[test]
-fn fapi2_profile_accepts_self_signed_mtls_confidential_sender_constrained_clients() {
-    let fapi = settings(AuthorizationServerProfile::Fapi2Security);
+fn fapi2_client_policy_accepts_self_signed_mtls_confidential_sender_constrained_clients() {
     let mut client = client();
+    client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
     client.token_endpoint_auth_method = "self_signed_tls_client_auth".to_owned();
     client.require_dpop_bound_tokens = false;
     client.require_mtls_bound_tokens = true;
 
     assert!(
-        validate_token_request_profile(&fapi, &client, "self_signed_tls_client_auth").is_ok(),
+        validate_token_request_profile(&client, "self_signed_tls_client_auth").is_ok(),
         "FAPI2 allows self-signed mTLS when the client is confidential and sender constrained"
     );
 }

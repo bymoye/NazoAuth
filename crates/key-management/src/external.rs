@@ -1,6 +1,5 @@
 //! External signer boundary for active JWT signing keys.
 
-use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
@@ -525,25 +524,26 @@ pub(super) fn jwt_provider_error(message: impl Into<String>) -> jsonwebtoken::er
 
 /// Registers an externally managed signing key without copying private material into the keyset.
 ///
-/// The public JWK is read before the keyset is changed, and the JSON update is committed through
-/// the shared atomic writer.  Retrying the exact registration is idempotent; changing any part of
-/// an existing `kid` fails closed so a key reference cannot silently drift.
+/// The caller supplies the already parsed public JWK, and the JSON update is committed through the
+/// shared atomic writer. Retrying the exact registration is idempotent; changing any part of an
+/// existing `kid` fails closed so a key reference cannot silently drift.
 pub(crate) async fn register_external_key(
     settings: &KeySettings,
     registration: ExternalKeyRegistration,
 ) -> anyhow::Result<()> {
     let algorithm = signing_algorithm_name(registration.algorithm)
         .ok_or_else(|| anyhow::anyhow!("unsupported signing alg"))?;
-    let public_jwk_raw = tokio::fs::read_to_string(&registration.public_jwk_file)
-        .await
-        .with_context(|| format!("failed to read {}", registration.public_jwk_file.display()))?;
-    let public_jwk: Value = serde_json::from_str(&public_jwk_raw)
-        .with_context(|| format!("failed to parse {}", registration.public_jwk_file.display()))?;
+    let public_jwk = registration.public_jwk;
     let path = settings.keys_dir.join("keyset.json");
-    let mut keyset = if path.exists() {
-        load_keyset_json(settings).await?
+    let creating_keyset = !path.exists();
+    let mut keyset = if creating_keyset {
+        json!({
+            "schema_version": crate::serialization::KEYSET_SCHEMA_VERSION,
+            "active_kid": registration.kid,
+            "keys": []
+        })
     } else {
-        json!({"active_kid":registration.kid,"keys":[]})
+        load_keyset_json(settings).await?
     };
     if let Some(existing) = keyset_keys(&keyset)?
         .iter()
@@ -568,6 +568,9 @@ pub(crate) async fn register_external_key(
         "retire_at":null
     }));
     validate_keyset_json(&keyset)?;
+    if creating_keyset {
+        crate::request_object_encryption::ensure_request_object_encryption_key(settings).await?;
+    }
     write_json_atomic(&path, &keyset).await
 }
 

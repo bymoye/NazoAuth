@@ -44,6 +44,21 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             false,
         );
     }
+    if issue_includes_openid && issue.refresh_token_scopes.is_some() && issue.auth_time.is_none() {
+        mark_failed_authorization_code_if_needed(
+            token_service,
+            issue.authorization_code_hash.as_deref(),
+            "refresh_id_token_authentication_context_missing",
+            auth_code_ttl_seconds,
+        )
+        .await;
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refreshed ID token requires the original authentication context.",
+            false,
+        );
+    }
     if issue.native_sso.is_some() && !context.permits(nazo_runtime_modules::ModuleId::NativeSso) {
         mark_failed_authorization_code_if_needed(
             token_service,
@@ -88,6 +103,31 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             refresh_authorization_scopes,
             openid4vci_credential_authorization,
         );
+    let refresh_authentication_context = if will_issue_refresh {
+        let Some(context) = refresh_authentication_context(
+            &issue,
+            context.config.issuer(),
+            &client.client_id,
+            None,
+        ) else {
+            mark_failed_authorization_code_if_needed(
+                token_service,
+                issue.authorization_code_hash.as_deref(),
+                "refresh_authentication_context_missing",
+                auth_code_ttl_seconds,
+            )
+            .await;
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh token requires a complete authentication context.",
+                false,
+            );
+        };
+        Some(context)
+    } else {
+        None
+    };
     if will_issue_refresh
         && client.token_endpoint_auth_method == "attest_jwt_client_auth"
         && issue.refresh_token_client_attestation_jkt.is_none()
@@ -395,13 +435,7 @@ pub(super) async fn issue_token_response_with_service_and_grant(
     }
     let mut refresh_token_family_id = None;
     let mut issued_id_token_sid = None;
-    // A refreshed ID Token is optional under OIDC Core 12.2, but if it is
-    // emitted it must carry the original authentication context. Legacy
-    // refresh rows have no persisted context; keep their access/refresh
-    // response usable while omitting an unverifiable ID Token.
-    let can_issue_refresh_id_token =
-        issue.refresh_token_scopes.is_none() || issue.auth_time.is_some();
-    if issue_includes_openid && can_issue_refresh_id_token {
+    if issue_includes_openid {
         let user_id = issue
             .user_id
             .expect("openid token issues are rejected before signing without a user subject");
@@ -606,13 +640,17 @@ pub(super) async fn issue_token_response_with_service_and_grant(
             // requests OpenID again.
             let id_token_sid_for_refresh_persistence =
                 persisted_id_token_sid(&issue, issued_id_token_sid.as_deref());
+            let mut authentication_context = refresh_authentication_context
+                .clone()
+                .expect("refresh issuance validated authentication context");
+            authentication_context.id_token_sid =
+                id_token_sid_for_refresh_persistence.map(ToOwned::to_owned);
             match persist_refresh_token(
                 token_service,
                 client,
-                context.config.issuer(),
                 &issue,
                 &refresh,
-                id_token_sid_for_refresh_persistence,
+                authentication_context,
             )
             .await
             {

@@ -87,7 +87,7 @@ fn client(tenant: TenantContext) -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
-            security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
+            security_policy: nazo_auth::ClientSecurityPolicy::default(),
         },
         require_mtls_bound_tokens: false,
         is_active: true,

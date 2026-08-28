@@ -57,7 +57,7 @@ conventions.
 ## Running locally
 
 The runtime matrix expects a migrated server with
-`ENABLE_SCIM_SECURITY_EVENTS=true`, a PostgreSQL fixture connection, and the
+the persisted `scim_security_events` module enabled, a PostgreSQL fixture connection, and the
 same Python dependencies used by the repository E2E runner image:
 
 ```text

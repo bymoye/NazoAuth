@@ -12,11 +12,9 @@ use chrono::Utc;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use nazo_operator_protocol::{
     CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA, DeploymentStatement, DiscoveryRequest,
-    DiscoveryResponse, DiscoveryStatement, EmbeddedIdentity, PROTOCOL_VERSION,
-    TenantResourceCapability, TenantResourceReceipt, decode_instance_public_key,
+    DiscoveryResponse, DiscoveryStatement, PROTOCOL_VERSION, decode_instance_public_key,
     encode_instance_public_key, instance_key_id, sign_deployment_statement,
-    sign_discovery_statement, sign_tenant_resource_capability, sign_tenant_resource_receipt,
-    validate_discovery_request, verify_deployment_statement,
+    sign_discovery_statement, validate_discovery_request, verify_deployment_statement,
 };
 
 use crate::{config::read_or_create_instance_identity_key, operator_task::embedded_identity};
@@ -132,33 +130,6 @@ impl ControlDiscoveryEndpoint {
         self.identity.signing_key.verifying_key()
     }
 
-    pub(crate) fn embedded_identity(&self) -> EmbeddedIdentity {
-        EmbeddedIdentity {
-            release: self.identity.deployment.release.clone(),
-            revision: self.identity.deployment.revision.clone(),
-            protocol: PROTOCOL_VERSION,
-            build_id: self.identity.deployment.build_id.clone(),
-        }
-    }
-
-    pub(crate) fn sign_tenant_resource_capability(
-        &self,
-        capability: &TenantResourceCapability,
-    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
-        sign_tenant_resource_capability(
-            capability,
-            &self.identity.key_id,
-            &self.identity.signing_key,
-        )
-    }
-
-    pub(crate) fn sign_tenant_resource_receipt(
-        &self,
-        receipt: &TenantResourceReceipt,
-    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
-        sign_tenant_resource_receipt(receipt, &self.identity.key_id, &self.identity.signing_key)
-    }
-
     pub(crate) fn sign_openid4vp_verification_receipt(
         &self,
         receipt: &nazo_operator_protocol::Openid4vpVerificationReceipt,
@@ -208,31 +179,6 @@ impl ControlDiscoveryEndpoint {
                 &self.identity.signing_key,
             )?,
             instance_public_key: self.identity.public_key.clone(),
-        })
-    }
-}
-
-impl crate::tenant_resource_provider::TenantResourceSigner for ControlDiscoveryEndpoint {
-    fn sign_capability(
-        &self,
-        capability: &TenantResourceCapability,
-    ) -> Result<String, crate::tenant_resource_provider::TenantResourceProviderError> {
-        self.sign_tenant_resource_capability(capability)
-            .map_err(|_| {
-                crate::tenant_resource_provider::TenantResourceProviderError::Unavailable(
-                    "runtime capability signing failed",
-                )
-            })
-    }
-
-    fn sign_receipt(
-        &self,
-        receipt: &TenantResourceReceipt,
-    ) -> Result<String, crate::tenant_resource_provider::TenantResourceProviderError> {
-        self.sign_tenant_resource_receipt(receipt).map_err(|_| {
-            crate::tenant_resource_provider::TenantResourceProviderError::Unavailable(
-                "runtime receipt signing failed",
-            )
         })
     }
 }

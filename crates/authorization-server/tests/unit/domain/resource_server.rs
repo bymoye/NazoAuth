@@ -49,7 +49,7 @@ async fn insert_signature_client(pool: &DbPool, tenant_id: Uuid, client_id: &str
             tls_client_auth_san_dns, tls_client_auth_san_uri, tls_client_auth_san_ip,
             tls_client_auth_san_email, allow_client_assertion_audience_array,
             allow_client_assertion_endpoint_audience, require_par_request_object,
-            is_active, post_logout_redirect_uris, backchannel_logout_session_required, jwks
+            is_active, security_policy, post_logout_redirect_uris, backchannel_logout_session_required, jwks
         )
         VALUES (
             $1, '00000000-0000-0000-0000-000000000002',
@@ -59,7 +59,9 @@ async fn insert_signature_client(pool: &DbPool, tenant_id: Uuid, client_id: &str
             '["resource://default"]'::jsonb, '["authorization_code"]'::jsonb,
             'private_key_jwt', false, false, NULL, NULL,
             '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb,
-            false, false, false, $3, '[]'::jsonb, true, $4
+            false, false, false, $3,
+            '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
+            '[]'::jsonb, true, $4
         )
         "#,
     )
@@ -125,7 +127,7 @@ async fn production_signature_verifier_binds_replay_to_the_scoped_client_tenant(
     insert_signature_client(&pool, second_tenant, &client_id, jwks).await;
 
     let replay_connection =
-        nazo_valkey::ValkeyConnection::connect(&valkey_url, Duration::from_secs(1))
+        nazo_valkey::test_support::scoped_connect(&valkey_url, Duration::from_secs(1))
             .await
             .expect("configured Valkey should connect");
     let settings =

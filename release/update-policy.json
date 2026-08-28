@@ -4,7 +4,7 @@
   "schema_compatible": false,
   "database_restore": "backup",
   "irreversible_migration": true,
-  "minimum_supported_version": "0.1.8",
-  "migration_floor": "20260827000100",
-  "rationale": "TOTP envelope encryption, tenant-resource ownership, token-issuance records, run-token fences, retirement of legacy control state, tenant-bound logout delivery identity, opaque OpenID4VP verification suite bindings, and durable controller recovery receipts create authoritative data older releases cannot enforce. The previous application therefore cannot resume safely. Recovery requires the controller-created, verified pre-update database backup; artifact-only rollback is blocked across this barrier."
+  "minimum_supported_version": "0.2.2",
+  "migration_floor": "20260828000600",
+  "rationale": "Protocol v2, durable replay, recovery invalidation, mandatory Valkey epochs, bounded signed-token expiry, and migration 006 form one security boundary. Earlier releases cannot enforce tenant-bound OpenID4VP AAD, complete refresh and client policy, encrypted-only TOTP, or explicit runtime state and must never reopen this database. Recovery requires the controller-verified pre-update database backup; artifact-only rollback is forbidden."
 }

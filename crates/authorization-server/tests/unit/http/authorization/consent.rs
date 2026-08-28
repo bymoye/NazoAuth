@@ -298,7 +298,7 @@ impl ConsentLiveFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -309,7 +309,10 @@ impl ConsentLiveFixture {
     async fn store_consent_payload(&self, payload: &ConsentPayload) {
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:consent:{}", payload.request_id),
+            nazo_valkey::test_support::state_storage_key(format!(
+                "oauth:consent:{}",
+                payload.request_id
+            )),
             serde_json::to_string(payload).expect("consent payload should serialize"),
             self.state.settings.protocol.auth_code_ttl_seconds,
         )
@@ -320,7 +323,7 @@ impl ConsentLiveFixture {
     async fn store_raw_consent_payload(&self, request_id: &str, raw: &str) {
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:consent:{request_id}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:consent:{request_id}")),
             raw.to_owned(),
             self.state.settings.protocol.auth_code_ttl_seconds,
         )
@@ -569,7 +572,10 @@ async fn authorize_consent_fails_closed_when_consent_state_read_fails() {
                 "reset".to_owned(),
                 "on".to_owned(),
                 format!(">{password}"),
-                "~oauth:session:*".to_owned(),
+                format!(
+                    "~{}",
+                    nazo_valkey::test_support::state_storage_key("oauth:session:*")
+                ),
                 "+@all".to_owned(),
             ],
         )

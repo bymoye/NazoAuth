@@ -53,7 +53,7 @@ path. The live demo is available at <https://auth.nazo.run/ui/auth>.
 | Item | Value |
 | --- | --- |
 | Package | `nazo-oauth-server` |
-| Workspace version | `0.1.9` release candidate |
+| Workspace version | `0.2.2` |
 | License | AGPL-3.0-or-later |
 | Language | Rust 2024 |
 | Runtime services | PostgreSQL, Valkey |
@@ -107,24 +107,37 @@ composite score:
 
 Install the independently signed `nazoauthctl` from
 [`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl). Controller
-source, CI, installation, and Releases now live only in that repository; the
-NazoAuth `v0.1.20` tag retains the pre-removal source as a review and rollback
-point. See the [repository split boundary](docs/operations/controller-repository-split.md),
-then run:
+source, CI, installation, and Releases live only in that repository. Register
+the target and provide two existing, distinct PostgreSQL roles plus the existing
+Valkey credential:
 
 ```sh
-sudo nazoauthctl install --runtime auto
-sudo nazoauthctl bootstrap-admin
-sudo nazoauthctl status
-sudo nazoauthctl doctor
+nazoauthctl host add production-host --ssh production --privilege sudo
+nazoauthctl install --host production-host --name production \
+  --public-url https://auth.example.com --runtime podman \
+  --database-host db.internal --database-port 5432 --database-name oauth \
+  --database-runtime-user nazo_runtime \
+  --database-runtime-password-file ./database-runtime-password \
+  --database-lifecycle-user nazo_lifecycle \
+  --database-lifecycle-password-file ./database-lifecycle-password \
+  --valkey-host valkey.internal --valkey-port 6379 \
+  --valkey-password-file ./valkey-password
+nazoauthctl bootstrap-admin --instance production
+nazoauthctl bind --instance production --label operations \
+  --output-secret-file ./production-recovery-secret
+nazoauthctl status --instance production
+nazoauthctl doctor --instance production
 ```
 
-`auto` selects Podman first and Docker second. The controller generates private
-PostgreSQL and Valkey credentials, starts both services, runs a signed one-shot
-migration task, and starts NazoAuth. There are no published default passwords.
-Open `http://127.0.0.1:8000/health` or
-`http://127.0.0.1:8000/.well-known/openid-configuration`. Data, signing keys,
-generated application secrets, and avatars are persistent.
+The runtime is exactly `podman`, `docker`, or `host`; there is no automatic
+runtime selection. NazoAuthCtl never creates credentials for external
+PostgreSQL or Valkey. The lifecycle PostgreSQL role runs migrations, backup,
+and recovery; the less-privileged runtime role is the only database identity
+given to the server. Open `http://127.0.0.1:8000/ready` or
+`http://127.0.0.1:8000/.well-known/openid-configuration` on the target's
+private boundary. Data, signing keys, generated application secrets, and
+avatars are persistent. See [managed installation, update, and recovery](docs/operations/one-click-update.md)
+for current-format import and backup policy.
 
 On a database without an administrator, `nazoauthctl bootstrap-admin` reads the
 runtime-owned one-time claim without printing it. Interactive use prompts on a
@@ -146,9 +159,10 @@ controller and are never attempted by the managed server runtime:
 nazoauth server
 ```
 
-Explicit YAML and environment values still take precedence. Managed deployments
-run schema changes only through `sudo nazoauthctl migrate --yes`, which issues a
-short-lived signed task to the exact verified release target.
+Explicit YAML and environment values still take precedence. In managed
+deployments, schema changes run only inside the signed install, update, or
+recover lifecycle operation for the exact verified release target. The server
+runtime never holds the lifecycle database credential.
 
 ## Configuration
 
@@ -176,9 +190,9 @@ secret when required are generated under `DATA_DIR/secrets` if absent.
 Back up that directory with the database. A missing or malformed persisted
 secret fails startup instead of being silently replaced.
 
-New deployments use composable server capabilities and explicit per-client
-policy. `AUTHORIZATION_SERVER_PROFILE` is retained only as a compatibility
-preset for clients that predate stored client policy.
+Deployments use composable server capabilities and explicit, versioned
+per-client policy. Every OAuth client must have a current `security_policy`;
+the server does not infer one from a process-level preset.
 
 `PUBLIC_BASE_URL` drives the same-origin defaults:
 

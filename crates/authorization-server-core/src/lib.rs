@@ -89,7 +89,7 @@ pub use ciba::{
     CibaPingNotificationStatus, CibaPollCommit, CibaPollFailure, CibaPollTransition,
     CibaRequestState, CibaService, CibaStateFuture, CibaStatePortError, CibaStateStorePort,
     CibaStatus, CibaStoredRequest, ciba_retention_deadline, evaluate_ciba_decision,
-    evaluate_ciba_decision_with_authentication_context, evaluate_ciba_poll,
+    evaluate_ciba_poll,
 };
 pub use ciba_ping::{
     CibaPingResponseAction, MAX_CIBA_LOGOUT_URI_BYTES, classify_ciba_ping_status,

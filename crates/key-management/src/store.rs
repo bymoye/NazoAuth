@@ -30,12 +30,12 @@ pub(crate) use crate::serialization::list_keys;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub(crate) use crate::serialization::{
-    GeneratedKeyMaterial, der_to_pem, ed25519_pkcs8_private_der, ed25519_seed_from_pkcs8,
-    external_public_jwk, generate_key_material, key_entry_algorithm, key_entry_backend,
-    key_entry_created_at, key_entry_purposes, key_entry_retire_at, keyset_active_kid, keyset_keys,
-    keyset_keys_mut, load_keyset_json, pem_to_der, public_jwk_from_private_der,
-    reject_private_jwk_members, validate_keyset_json, write_json_atomic,
-    write_private_key_pem_atomic,
+    GeneratedKeyMaterial, KEYSET_SCHEMA_VERSION, der_to_pem, ed25519_pkcs8_private_der,
+    ed25519_seed_from_pkcs8, external_public_jwk, generate_key_material, key_entry_algorithm,
+    key_entry_backend, key_entry_created_at, key_entry_purposes, key_entry_retire_at,
+    keyset_active_kid, keyset_keys, keyset_keys_mut, load_keyset_json, pem_to_der,
+    public_jwk_from_private_der, reject_private_jwk_members, validate_keyset_json,
+    write_json_atomic, write_private_key_pem_atomic,
 };
 pub use crate::serialization::{signing_algorithm_from_name, signing_algorithm_name};
 

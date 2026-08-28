@@ -1,230 +1,110 @@
-# 一键安装与升级
+# 受管安装、更新与恢复
 
-`nazoauthctl` 是独立 Linux 部署的正式生命周期入口。它只消费不可变的标签发布
-制品，不在生产主机克隆源码，也不要求 Rust、Node.js 或镜像构建环境。它本身是
-Rust 二进制，由独立的
-[`NazoAuthCtl` 仓库](https://github.com/nazozero/NazoAuthCtl)构建、签名和发布。
+NazoAuthCtl v0.2 只支持当前 protocol 2 谱系。控制端 Registry 负责主机与实例清单；目标机 `DeploymentState` 是 runtime、制品、配置、资源、journal 与备份事实的唯一权威。已删除的控制器状态、task envelope、旧命令和 secret-provider 入口不会被读取或转换。
 
-## 首次安装
+## 全新安装
 
-控制器仓库中的 bootstrap 脚本使用 GitHub CLI 下载精确公开非草稿 Release，验证其 GitHub
-build-provenance attestation 与精确 tag、控制器 Release 工作流和托管 runner 的绑定，
-执行 help 冒烟测试，之后才原子安装为普通非符号链接文件。正式文档不提供
-`curl | sh` 信任路径。
+先注册目标主机。SSH 主机使用本机现有的 OpenSSH Host 别名，远端 helper 必须与控制端是完全相同的 NazoAuthCtl 构建。
 
-从同一个不可变源码 tag 下载并审阅这个小型 bootstrap，然后固定该 tag 执行：
+安装需要明确给出公网 issuer 以及外部 PostgreSQL、Valkey 的连接事实。密码只从受限私有文件读取，不接受 argv 明文：
 
 ```sh
-# 将 vX.Y.Z 替换为你选择的精确不可变 Release tag。
-version=v0.1.23
-curl --fail --silent --show-error --location --proto '=https' \
-  --output install_nazoauthctl.sh \
-  "https://raw.githubusercontent.com/nazozero/NazoAuthCtl/$version/scripts/install_nazoauthctl.sh"
-less install_nazoauthctl.sh
-sudo sh install_nazoauthctl.sh --version "$version"
+nazoauthctl install \
+  --host production-host \
+  --name production \
+  --public-url https://auth.example.com \
+  --to v0.2.2 \
+  --runtime podman \
+  --database-host db.internal \
+  --database-port 5432 \
+  --database-name nazoauth \
+  --database-runtime-user nazo_runtime \
+  --database-runtime-password-file ./database-runtime-password \
+  --database-lifecycle-user nazo_lifecycle \
+  --database-lifecycle-password-file ./database-lifecycle-password \
+  --valkey-host valkey.internal \
+  --valkey-port 6379 \
+  --valkey-password-file ./valkey-password
 ```
 
-bootstrap 需要 `gh`、`install` 和标准 POSIX 工具。GitHub CLI 必须已经完成认证，
-或能以其他方式读取公开 Release 与 attestation API。验证失败或触发速率限制时，
-安装会在替换现有文件前封闭失败。
+Ctl 会先验证官方 Release 与不可变 runtime 制品，再为每个 deployment 生成独立、非空的 UUIDv7 state epoch，按目标机 OS 的路径语义写入配置和 secret，启动 runtime、检查本地健康、提交 `DeploymentState`，最后才注册实例。SSH 响应丢失时，prepared-install journal 会重放同一个 deployment ID 与 operation ID，不会安装第二个实例。
 
-默认只需要选择运行方式。`auto` 优先使用已安装的 Podman，其次使用 Docker：
+runtime 与 lifecycle PostgreSQL role 必须不同。服务进程只拿 runtime URL；迁移、备份与恢复使用 lifecycle role。PostgreSQL 与 Valkey 属于 external/shared 资源；Ctl 记录其所有权边界，但不创建、替换或删除它们。
+
+若要从目标机上已经停止写入的当前格式数据建立全新 deployment，必须同时追加：
 
 ```sh
-sudo nazoauthctl install --runtime auto
+  --import-data-root /srv/nazoauth-import/data \
+  --import-mfa-key-file /srv/nazoauth-import/mfa-totp-key
 ```
 
-未指定公网地址时，服务安全地只发布到
-`http://127.0.0.1:8000`。安装器自动生成 PostgreSQL、Valkey 和应用秘密，创建
-持久卷、配置、备份目录、签名前端，并验证 readiness、Discovery 和 `/ui/`。
+这两个绝对目标机路径不可拆分。导入只复制当前 allowlist 内的数据、签名密钥、应用 secret 与 MFA key；旧 DeploymentState、控制端状态、bootstrap 状态、UI cache 和旧命令格式都不会被读取。
 
-可显式选择运行方式：
+## Controller 绑定与初始管理员
 
 ```sh
-sudo nazoauthctl install --runtime podman
-sudo nazoauthctl install --runtime docker
-sudo nazoauthctl install --runtime host
+nazoauthctl bind --instance production --label operations \
+  --output-secret-file ./production-recovery-secret
+nazoauthctl bootstrap-admin --instance production
 ```
 
-全新安装完成后，以交互方式创建首任管理员：
+首次 bind 会在同一事务注册 Controller Key 与 Recovery Root。Recovery Secret 必须在提交前离线保存。若提交中断，owner-only pending 记录只保留这一份已交付的 proposal 与 secret，重试不会悄悄生成另一份；终态对账后立即删除。
+
+自动化通过 stdin 提交严格的 `email`/`password` JSON：
 
 ```sh
-sudo nazoauthctl bootstrap-admin
+printf '%s' '{"email":"admin@example.com","password":"..."}' | \
+  nazoauthctl bootstrap-admin --instance production --credentials-stdin
 ```
 
-控制器会提示邮箱，并以无回显方式读取密码。它根据受管 runtime 的 bootstrap mount
-定位宿主机源目录，验证目录和 token 都是私有普通文件，并由精确 runtime UID 持有
-（容器为 `10001`，host 为配置的 systemd service UID），再将一次性 token
-和凭据仅通过子进程 stdin 放入 HTTPS 请求体。它们不会进入 argv、普通环境变量、配置、
-日志、审计记录或命令输出。自动化只接受恰好包含 `email`、`password` 的封闭 JSON：
+凭据和单次 bootstrap token 不进入 argv、普通环境变量、Registry 或日志。
+
+## 更新与回滚
 
 ```sh
-secret-provider read nazoauth/initial-admin | \
-  sudo nazoauthctl bootstrap-admin --credentials-stdin --yes
+nazoauthctl update --instance production --to v0.2.2 --yes
+nazoauthctl rollback --instance production --yes
 ```
 
-`--yes` 只跳过确认提示；命令仍会验证精确 HTTP 201 响应契约、`/ui/auth` 后续路径，
-以及本地一次性 token 已耐久消费。
+更新只解析并验证一个不可变制品，签发一个 canonical `ControlOperation`，并在激活前通过目标机 journaled lifecycle 执行迁移。durable `ControlResult` 必须同时绑定 operation ID、request hash、typed payload、目标制品与配置 revision。响应丢失只会重放同一操作。
 
-控制器只持久化非秘密 request ID、使用部署 secret revision 计算的规范化邮箱 HMAC、
-recovery epoch、已验证的应用 receipt identity，以及封闭状态。因此 controller 或
-break-glass key 轮换不会使未决请求失去恢复能力。若数据库已经提交但 HTTP 响应丢失，
-下次执行会复用原 request ID，取回同一个
-数据库权威 receipt，而不会创建第二个管理员。网络或异常响应窗口在确认匹配 receipt 前
-记为 outcome-unknown；密码、邮箱和 token 都不会进入该恢复状态。
+回滚仅在签名 release policy 与实时 schema 事实允许时切换 runtime 制品。不可逆迁移一旦应用，`rollback` 会返回 `ROLLBACK_RECOVERY_REQUIRED`、保持 writer 停止，并要求从已验证 snapshot 执行 `recover`；它不会暗示数据库已回滚。
 
-`host` 把签名的 `nazoauth` 二进制安装成 systemd 服务。没有外部数据库时，它仍
-使用本机已有的 Podman 或 Docker 托管 PostgreSQL 和 Valkey。独立发布物支持 Linux
-x86_64 和 Arm64；musl 发行版应选择对应的 musl target。宿主机模式还会实际执行
-候选二进制的 `--help`，动态链接不兼容时在修改服务前失败。
-
-安装器不会猜测 DNS 或证书归属。提供 HTTPS origin 时，DNS 和 TLS 入口必须已经
-把该 origin 转发到安装端口；安装只有在公网 Discovery 返回相同 issuer 后才成功：
+## 备份与恢复实证
 
 ```sh
-sudo nazoauthctl install \
-  --runtime docker \
-  --public-url https://auth.example.com
+nazoauthctl backup snapshot --instance production
+nazoauthctl backup restore-test --instance production
+nazoauthctl policy backup-before-update require --instance production \
+  --max-age-seconds 86400
+nazoauthctl backup copy --instance production --to-host recovery-host
+nazoauthctl backup show --instance production
 ```
 
-NazoAuth 没有一致性套件专用安装 profile。外部一致性编排、临时资源和套件凭据属于
-`nazoauthctl`，不得进入服务端安装契约。
+snapshot 将 PostgreSQL custom-format dump、deployment data、secrets、配置、runtime 制品/build identity、schema、MFA/JWKS 事实与数据库 sentinel 绑定到同一个不可变 manifest。restore-test 使用隔离数据库和 runtime。`require` 会在该精确 manifest 缺失、未通过 restore-test 或超过最大时效时阻断更新。off-host copy 在两端使用同一 ExecutionTarget 抽象，因此任一端都可以是本地或 SSH 注册主机；两端必须是不同主机，并各自持久化字节级校验 receipt。同机文件不算异机证据。
 
-### 使用已有 PostgreSQL 和 Valkey
-
-用户配置的是 URL；root 管理的秘密文件只是安装器内部的安全落盘方式。交互输入
-不会回显：
+## 灾难恢复
 
 ```sh
-sudo nazoauthctl install --runtime host --external-dependencies
+nazoauthctl recover --instance production --yes
 ```
 
-自动化环境通过安全 stdin 或已打开的 FD 传入严格 JSON，URL 不允许进入 argv 或普通环境变量：
+只有恢复后的 Controller Registry 明确返回 `CONTROLLER_KEY_UNTRUSTED` 或 `CONTROLLER_KEY_EXPIRED`，Ctl 才会读取 owner-only Recovery Secret 文件并进入 break-glass ceremony：
 
 ```sh
-secret-provider read nazoauth/dependencies | sudo nazoauthctl install \
-  --runtime docker --external-dependencies --secrets-stdin
+nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret --yes
 ```
 
-JSON 只允许 `database_url`、`migration_database_url` 和 `valkey_url` 三个字段。
-运行时 PostgreSQL 账号不得有 DDL 权限，独立 migration URL 只挂载给一次性迁移任务。
-外部依赖模式不会创建数据库或缓存容器；首次迁移和每次
-升级前，更新器都必须成功生成并校验 PostgreSQL custom-format dump 与 Valkey
-RDB。纯宿主机模式因此需要 `cosign`、`pg_dump`、`pg_restore` 和 `valkey-cli`。
+网络错误、5xx、unknown outcome 和其他拒绝码都不会降级为恢复。恢复流程会停止原 runtime，恢复已验证 snapshot，启动仅 loopback 可达的候选，并通过进程独占的目标侧本地通道访问 `/controller-recovery/challenges` 与 `/controller-recovery/recover`；该通道不发送 Cookie/CSRF，也不开放公网入口。
 
-## 日常操作
+恢复后的 Controller 使用新的 UUIDv7 Valkey state epoch 签发 `RecoveryInvalidate`。NazoAuth 撤销 refresh token，并返回覆盖 access/ID token 最大 TTL 与时钟偏差的绝对 `not_before`。控制端与目标机都在原 runtime 保持停止时校验期限；期限后才以恢复的制品、配置和数据替换并启动原 runtime，再按不可变 ID 清理候选。任何失败均保持公网闭合，并从持久化阶段继续。
 
-```sh
-sudo nazoauthctl status
-sudo nazoauthctl doctor
-sudo nazoauthctl check
-sudo nazoauthctl update --plan
-sudo nazoauthctl update --yes --to v1.2.3
-sudo nazoauthctl rollback --yes
-sudo nazoauthctl recover --yes
-sudo nazoauthctl recover-update --yes
-sudo nazoauthctl recover-identity --yes
-sudo nazoauthctl migrate --yes
-sudo nazoauthctl keys list
-sudo nazoauthctl keys validate
-sudo nazoauthctl keys export-openid4vc-trust --output /etc/nazoauth/public/vp-request-object-anchor.pem
-sudo nazoauthctl audit verify
-sudo nazoauthctl audit show [--request-id REQUEST_ID]
-sudo nazoauthctl identity rotate --yes
-sudo nazoauthctl break-glass recover-controller --reason lost --yes
-```
+不可逆迁移后 `rollback` 会被拒绝。只能从持久化 `recover` 事务及其已验证 snapshot 继续；不得手工重启 writer，也不得清空共享 Valkey。
 
-文件型 break-glass 私钥与 controller/audit key 独立，并且从不挂载进应用或任务容器。
-安装后应将加密副本导出到离线托管。当前文件型流程仍需要 root-owned 宿主机副本；在未来
-接入真实 secret provider 前不能删除它。文件权限不能抵抗宿主机 root。每次 break-glass
-恢复都由旧恢复身份签署 transition，并原子
-替换 controller、audit 和 break-glass 三类身份；下一次事故前必须先归档新的离线恢复材料。
+## 信任边界
 
-`install` 是幂等入口：检测到由它管理且已经 ready 的实例时不会重建或升级。
-`check` 只验证可用发布，`update` 更新到最新正式标签，`--to` 固定不可变版本。
-配置读取本身也不允许产生副作用。存在未完成的 update journal 或 identity transition 时，
-`status`、`doctor`、`check`、`update --plan` 和审计查看都会 fail closed；只有显式确认的
-`recover-update --yes` 与 `recover-identity --yes` 可以收敛对应状态。独立的
-`recover --yes` 只负责已声明的数据库备份和上一制品恢复，绝不是隐式 update journal
-恢复入口。
+激活前必须验证 Release bytes、attestation、Sigstore identity、manifest 与 OCI digest。应用独立验证签名 ControlOperation 和 embedded build target；Ctl 负责真实 runtime digest observation。双方都不声称自己无法产生的证明。
 
-自动化可以依赖退出码：`0` 表示成功，`2` 表示 CLI 用法被拒绝，`1` 表示生命周期、信任、
-授权、健康、备份或恢复的 fail-closed 失败。在 clean-install 验收中，任何非零结果都不得从
-失败步骤继续。
+公网引导对经过 attestation 验证的 Release reader 采取失败关闭，并且只接受公开非草稿 Release。操作端必须具备 GitHub CLI、`python3`、`sha256sum` 与 `install`；缺少 reader 或验证工具时直接失败，不允许退回到未验证制品。
 
-`nazoauthctl` 虽然运行在宿主机，但不会进入容器可写层修改应用状态。Docker 或
-Podman 模式会使用当前或候选版本镜像启动一次性任务容器，接入部署网络，并挂载
-操作所需的最小配置和状态，固定执行 `nazoauth operator-task`，并从 stdin 接收
-有效期 60 秒的 Ed25519 JWS。JWS 只提供来源认证和完整性，不提供机密性；秘密只走
-安全 stdin/FD、secret mount 或 secret provider，不进入 argv、普通环境、日志、审计或
-持久化 envelope。最终签名收据同时绑定 ctl 验证的 OCI/宿主机 digest 与应用验证的
-embedded build identity；应用不伪称能自行证明 OCI digest。
-
-## 信任与事务边界
-
-每个正式标签的 GitHub Release 发布 8 个带平台后缀的 `nazoauth` 可执行文件和匹配
-版本的 `nazo-operator-protocol` 包。每个 server subject 的 schema 5 GitHub
-attestation 绑定其二进制 digest、已签名多架构 OCI index、独立 attestation 的
-NazoAuthWeb descriptor、operator protocol 与 ctl 兼容范围，以及回滚边界。
-控制器必须先验证证书身份精确匹配
-`release-security.yml@refs/tags/<version>`，再解析封闭 predicate 和下载制品。SBOM、
-predicate、签名 bundle 和 OCI archive 只作为 CI evidence 保留，不进入 GitHub Release。
-
-NazoAuthCtl 的构建、签名、自更新和回退属于独立的 `nazozero/NazoAuthCtl` 发布域。
-本仓库暂时保留的旧 ctl 源码只用于迁移核对，不再构成耦合发布契约。
-
-容器模式在没有本地 Cosign 时，使用按 OCI digest 固定的官方多架构 Cosign
-镜像；完全不使用容器的宿主机模式必须预先安装 Cosign。
-
-安装和升级事务会：
-
-1. 获取主机排他锁；
-2. 验证 subject attestation、封闭 manifest predicate 和所需制品；
-3. 准备并验证候选制品，然后停止当前应用写入者；
-4. 备份并校验 PostgreSQL 和 Valkey，同时快照签名密钥、生成秘密和初始化状态；
-5. 校验镜像 revision 或实际执行宿主机二进制；
-6. 执行迁移并启动候选版本；
-7. 原子切换签名前端，必要时重启应用以重新绑定前端目录；
-8. 验证 readiness、Discovery 和 `/ui/`；
-9. 写入部署记录并从同一签名发布更新 `nazoauthctl`。
-
-`update --plan` 分别展示制品回滚、schema 兼容回滚、备份/PITR 恢复和不可逆
-migration barrier。控制器绝不把数据库恢复描述为自动行为；只有签名策略确认 schema
-兼容时才自动恢复旧制品，数据库必须通过显式 `recover --yes` 从已验证备份恢复。
-`20260801000100` receipt migration 是 additive，上一应用无需 schema downgrade 即可继续
-运行，所以制品回滚仍是 schema-compatible；但它的 down migration 在已经产生新 receipt
-或应用审计证据时会明确拒绝删除证据。这个条件式 schema downgrade barrier 与制品回滚、
-显式已验证备份恢复是三个不同边界；`update --plan` 通过签名 migration floor 和 policy
-rationale 如实展示。
-受管数据库恢复在修改 PostgreSQL 或 Valkey 前，会先持久轮换 bootstrap recovery epoch，
-使本地缓存的初始管理员成功收据失效。因此恢复后不能把旧成功当成当前事实，也不能删除新生成
-的 bootstrap token。external PITR 如果绕过受管恢复流程改变了数据库状态，ctl 会通过
-runtime token 的 HMAC 绑定识别变化并 fail closed，不会伪报成功。
-managed 模式会先停止唯一的受管应用写入者，再依次生成两个备份；恢复 Valkey 仍可能令临时
-会话失效。external 模式只能停止本实例，部署者必须静止其他写入者并负责已声明的备份/PITR
-流程。`update --plan` 会输出这个边界，不会伪称两个数据系统具有跨存储事务快照。
-
-## 前置条件和配置
-
-基础条件是 Linux x86_64 或 Arm64、root、`curl`、`python3`、`sha256sum` 和
-`install`，以及本地 Cosign 或能够运行固定 Cosign 镜像的容器引擎。自举使用匿名
-GitHub API，不需要 GitHub CLI 或账号 token。容器模式需要 Docker 或 Podman；纯宿主机模式
-需要 systemd（包括 `systemd-run`）；外部 PostgreSQL/Valkey
-还需要 `pg_dump`、`pg_restore` 和 `valkey-cli`。自动部署的 PostgreSQL 和 Valkey
-镜像固定到经过评审的多架构 OCI digest。纯宿主机任务通过 `systemd-run` transient
-sandbox 执行。正式执行前，应从目标 GitHub Release 下载 `nazoauthctl`，按上文校验
-其自定义 attestation，再安装到 `/usr/local/sbin/nazoauthctl`。
-
-生命周期控制器只接受 Linux `x86_64` 和 `aarch64`（云厂商界面通常称为 Arm64），
-其他操作系统或 CPU 组合会在创建部署状态前被拒绝。宿主机模式下载并验证与当前架构
-完全匹配的 Release 二进制；Podman 和 Docker 模式分别绑定签名 Release 中的
-`linux/amd64` 或 `linux/arm64` platform manifest digest，不会把 OCI index digest
-伪装成实际运行制品的 digest。
-
-安装器生成 root 所有、不可被组/其他用户写入的
-`/etc/nazoauth/update.json`。已有的手工部署可以从
-`deploy/update/update.example.json` 接入，但 `install` 不会接管没有
-`managed_install` 标记的运维配置。
-
-默认不启用定时自动升级。认证基础设施应由运维人员显式执行升级，或另行评审
-维护窗口自动化。
+命令面以 `nazoauthctl --help` 和各子命令 help 为唯一权威；本文只描述 v0.2 当前模型。

@@ -81,21 +81,11 @@ host- or request-level tenant routing. Protocol signing keys remain
 process-wide and must not be shared between processes configured for different
 tenants.
 
-Valkey transient keys are not yet individually namespaced, so startup
-permanently binds each Valkey logical database to its first active tenant.
-Same-tenant replicas may share it; a different tenant is rejected. A
-non-default tenant may claim only an empty logical database, while the legacy
-default tenant may adopt an existing unmarked database during upgrade.
-Reassigning a logical database requires an explicit destructive flush after all
-old state has expired or been retired.
-
-For a non-default tenant, an older NazoAuth binary that predates the ownership
-preflight is not a safe rollback artifact: it ignores the marker and falls back
-to the legacy default runtime context. Roll back by restoring the previous
-tenant-matched binary and its dedicated Valkey logical database snapshot, or by
-retiring and explicitly flushing the new tenant's transient state before any
-boundary change. Never point an old binary at a logical database already
-claimed by a non-default tenant.
+Every Valkey business key is scoped by deployment ID and UUIDv7 state epoch.
+Startup rejects an unmarked nonempty logical database; it never claims or reads
+unscoped state. A recovered deployment receives a new epoch and waits for the
+signed token-invalidation deadline before public activation. Do not flush a
+shared Valkey database as an install, update, rollback, or recovery shortcut.
 
 A full multi-tenant deployment needs request-level tenant resolution by host,
 path, issuer, or another explicit deployment boundary. That resolver must run

@@ -336,10 +336,7 @@ async fn prepare_client_insert_accepts_composable_fapi_and_signing_policy() {
         .await
         .expect("independent compatible capabilities should be accepted together");
 
-    let policy = prepared
-        .security_policy
-        .as_ref()
-        .expect("new registrations materialize an explicit policy");
+    let policy = &prepared.security_policy;
     assert_eq!(policy.assurance, nazo_auth::ClientAssuranceLevel::Fapi2);
     assert!(policy.require_signed_authorization_request);
     assert!(policy.require_signed_authorization_response);

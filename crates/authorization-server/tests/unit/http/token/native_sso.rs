@@ -38,26 +38,48 @@ fn native_sso_state_with_signing_key() -> TestInfrastructure {
     }
 }
 
-async fn signed_native_sso_id_token(state: &TestInfrastructure, issuer: &str) -> String {
+async fn signed_native_sso_id_token_with_claims(
+    state: &TestInfrastructure,
+    issuer: &str,
+    auth_time: Option<Value>,
+    amr: Option<Value>,
+) -> String {
     let now = Utc::now().timestamp();
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::PS256);
+    let mut claims = json!({
+        "iss": issuer,
+        "sub": "subject-1",
+        "aud": "source-client",
+        "ds_hash": native_sso_device_secret_hash("device-secret"),
+        "sid": "sid-1",
+        "iat": now,
+        "exp": now + 120
+    });
+    let object = claims
+        .as_object_mut()
+        .expect("Native SSO test claims should be an object");
+    if let Some(auth_time) = auth_time {
+        object.insert("auth_time".to_owned(), auth_time);
+    }
+    if let Some(amr) = amr {
+        object.insert("amr".to_owned(), amr);
+    }
     state
         .keyset
-        .encode_jwt(
-            nazo_auth::SigningPurpose::IdToken,
-            &header,
-            &json!({
-                "iss": issuer,
-                "sub": "subject-1",
-                "aud": "source-client",
-                "ds_hash": native_sso_device_secret_hash("device-secret"),
-                "sid": "sid-1",
-                "iat": now,
-                "exp": now + 120
-            }),
-        )
+        .encode_jwt(nazo_auth::SigningPurpose::IdToken, &header, &claims)
         .await
         .expect("Native SSO id_token should sign")
+}
+
+async fn signed_native_sso_id_token(state: &TestInfrastructure, issuer: &str) -> String {
+    let auth_time = Utc::now().timestamp() - 1;
+    signed_native_sso_id_token_with_claims(
+        state,
+        issuer,
+        Some(json!(auth_time)),
+        Some(json!(["pwd"])),
+    )
+    .await
 }
 
 fn token_form() -> TokenForm {
@@ -254,6 +276,8 @@ fn native_sso_id_token_audience_requires_the_source_client() {
         aud: json!("source-client"),
         ds_hash: "hash".to_owned(),
         sid: "sid-1".to_owned(),
+        auth_time: 1_700_000_000,
+        amr: vec!["pwd".to_owned()],
     };
     assert!(native_sso_id_token_audience_contains(
         &base,
@@ -353,4 +377,58 @@ async fn native_sso_id_token_decoder_rejects_wrong_issuer() {
         .expect("token verification should remain available")
         .is_none()
     );
+}
+
+#[tokio::test]
+async fn native_sso_id_token_decoder_rejects_missing_authentication_context_claims() {
+    let state = native_sso_state_with_signing_key();
+    let token = signed_native_sso_id_token_with_claims(
+        &state,
+        state.settings.endpoint.issuer.as_str(),
+        None,
+        Some(json!(["pwd"])),
+    )
+    .await;
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+
+    assert!(matches!(
+        decode_native_sso_id_token_with_service(
+            &service,
+            state.settings.endpoint.issuer.as_str(),
+            &token,
+        )
+        .await,
+        Err(nazo_auth::TokenPortError::CorruptData)
+    ));
+}
+
+#[tokio::test]
+async fn native_sso_id_token_decoder_rejects_invalid_authentication_context_claims() {
+    let state = native_sso_state_with_signing_key();
+    let token = signed_native_sso_id_token_with_claims(
+        &state,
+        state.settings.endpoint.issuer.as_str(),
+        Some(json!("not-a-timestamp")),
+        Some(json!("pwd")),
+    )
+    .await;
+    let service = ServerTokenService::new(
+        crate::test_support::token_issuance_repository(state.diesel_db.clone()),
+        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        state.keyset.clone(),
+    );
+
+    assert!(matches!(
+        decode_native_sso_id_token_with_service(
+            &service,
+            state.settings.endpoint.issuer.as_str(),
+            &token,
+        )
+        .await,
+        Err(nazo_auth::TokenPortError::CorruptData)
+    ));
 }

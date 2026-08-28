@@ -52,6 +52,8 @@ fn challenge_request_shape_is_strict() {
         "kid": kid_text(2),
         "recovery_public_key": key_text(3),
         "recovery_kid": kid_text(3),
+        "allocation_nonce": URL_SAFE_NO_PAD.encode([4u8; 32]),
+        "allocation_signature": URL_SAFE_NO_PAD.encode([5u8; 64]),
     })
     .to_string();
     assert!(
@@ -63,6 +65,15 @@ fn challenge_request_shape_is_strict() {
     assert!(
         serde_json::from_str::<RecoveryChallengeRequest>(&smuggled).is_err(),
         "unknown field must be refused"
+    );
+    let mut unsigned: serde_json::Value = serde_json::from_str(&well_formed).unwrap();
+    unsigned
+        .as_object_mut()
+        .unwrap()
+        .remove("allocation_signature");
+    assert!(
+        serde_json::from_value::<RecoveryChallengeRequest>(unsigned).is_err(),
+        "the pre-proof request shape must be rejected instead of accepted through a fallback"
     );
 }
 

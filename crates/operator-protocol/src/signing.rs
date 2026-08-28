@@ -7,22 +7,17 @@ use sha2::{Digest as _, Sha256};
 
 use crate::verification::{
     validate_deployment_statement, validate_discovery_statement, validate_file_identifier,
-    validate_identifier, validate_openid4vp_verification_intent,
-    validate_openid4vp_verification_receipt, validate_tenant_resource_capability,
-    validate_tenant_resource_identities, validate_tenant_resource_receipt,
-    validate_tenant_resource_task, verify_tenant_resource_task_window,
+    validate_identifier, validate_lower_hex, validate_openid4vp_verification_intent,
+    validate_openid4vp_verification_receipt,
 };
 use crate::wire::{
     DeploymentStatement, DiscoveryStatement, FixedAlgorithm, Openid4vpEvidenceContext,
     Openid4vpNormalizedCreateRequest, Openid4vpPresentationBinding, Openid4vpVerificationIntent,
-    Openid4vpVerificationReceipt, ProtectedHeader, TenantResourceCapability,
-    TenantResourceIdentity, TenantResourceKind, TenantResourceReceipt, TenantResourceTask,
+    Openid4vpVerificationReceipt, ProtectedHeader, TenantResourceIdentity, TenantResourceKind,
 };
 use crate::{
     CONTROL_DISCOVERY_JWS_TYPE, DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_COMPACT_JWS_BYTES,
     OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE, ProtocolError,
-    TENANT_RESOURCE_CAPABILITY_JWS_TYPE, TENANT_RESOURCE_RECEIPT_JWS_TYPE,
-    TENANT_RESOURCE_TASK_JWS_TYPE,
 };
 
 pub fn sign_discovery_statement(
@@ -148,65 +143,36 @@ pub fn openid4vp_verification_capability_sha256(capability: &str) -> Result<Stri
     Ok(hex_sha256(&binding))
 }
 
-pub fn sign_tenant_resource_capability(
-    capability: &TenantResourceCapability,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_tenant_resource_capability(capability, capability.issued_at)?;
-    if capability.instance_key_id != key_id {
-        return Err(ProtocolError::Policy(
-            "tenant resource capability key id does not match signer",
-        ));
-    }
-    sign_compact(capability, key_id, TENANT_RESOURCE_CAPABILITY_JWS_TYPE, key)
-}
-
-pub fn sign_tenant_resource_task(
-    task: &TenantResourceTask,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_tenant_resource_task(task)?;
-    verify_tenant_resource_task_window(task, task.iat)?;
-    sign_compact(task, key_id, TENANT_RESOURCE_TASK_JWS_TYPE, key)
-}
-
-pub fn sign_tenant_resource_receipt(
-    receipt: &TenantResourceReceipt,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_tenant_resource_receipt(receipt)?;
-    sign_compact(receipt, key_id, TENANT_RESOURCE_RECEIPT_JWS_TYPE, key)
-}
-
-/// Compute the canonical digest of an active tenant-resource identity set.
+/// Canonical digest of a current ControlOperation tenant-resource snapshot.
 ///
-/// The manifest bytes themselves are deliberately not part of the signed wire
-/// contract.  Callers must pass the complete active set, not an Apply/Revoke
-/// delta.  The encoding is domain-separated, length-prefixed, and sorted by
-/// the fixed wire kind label, resource ID, and resource digest.  Validation is
-/// shared with the signed task/receipt validators, so malformed or duplicate
-/// identities fail closed.  An empty set is valid and has one deterministic
-/// digest.
+/// Both the server and ctl use this domain-separated encoding to bind
+/// `ControlResultData::resource_manifest_sha256` to the complete active
+/// identity set. It is part of the current result contract.
 pub fn canonical_tenant_resource_manifest_sha256(
     resources: &[TenantResourceIdentity],
 ) -> Result<String, ProtocolError> {
-    validate_tenant_resource_identities(resources, false)?;
-
-    let mut entries: Vec<(&str, &str, &str)> = resources
-        .iter()
-        .map(|resource| {
-            (
-                tenant_resource_kind_wire_label(resource.kind),
-                resource.resource_id.as_str(),
-                resource.digest.as_str(),
-            )
-        })
-        .collect();
+    if resources.len() > crate::MAX_TENANT_RESOURCE_IDENTITIES {
+        return Err(ProtocolError::Policy(
+            "tenant resource identities are out of bounds",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut entries = Vec::with_capacity(resources.len());
+    for resource in resources {
+        validate_file_identifier(&resource.resource_id)?;
+        validate_lower_hex(&resource.digest, 64)?;
+        if !seen.insert((resource.kind, resource.resource_id.as_str())) {
+            return Err(ProtocolError::Policy(
+                "tenant resource identities must be unique",
+            ));
+        }
+        entries.push((
+            tenant_resource_kind_wire_label(resource.kind),
+            resource.resource_id.as_str(),
+            resource.digest.as_str(),
+        ));
+    }
     entries.sort_unstable();
-
     let mut encoded = Vec::new();
     append_len_prefixed(&mut encoded, b"nazoauth:tenant-resource-manifest:v1");
     encoded.extend_from_slice(&(entries.len() as u64).to_be_bytes());

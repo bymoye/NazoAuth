@@ -40,6 +40,9 @@ pub const RECOVERY_KDF_ID: &str = "hkdf-sha256-v1";
 pub const RECOVERY_KDF_INFO: &[u8] = b"nazoauthctl/recovery";
 /// Canonical `action` discriminator inside the signed challenge message.
 pub const RECOVERY_CHALLENGE_ACTION: &str = "controller-recovery";
+/// Canonical `action` discriminator inside the proof that authorizes
+/// allocation of a recovery challenge.
+pub const RECOVERY_CHALLENGE_ALLOCATION_ACTION: &str = "controller-recovery-allocate";
 
 const HEX_DIGITS_LOWER: &[u8] = b"0123456789abcdef";
 
@@ -244,6 +247,65 @@ impl RecoveryProposal {
             }
         }
         Ok(())
+    }
+
+    /// Canonical bytes authorizing allocation of one challenge for this exact
+    /// proposal.  The client-generated nonce makes each authorization unique;
+    /// the server verifies the signature against the currently anchored
+    /// Recovery Root before it creates any pending row.
+    #[must_use]
+    pub fn allocation_message(&self, allocation_nonce: &[u8; 32]) -> Vec<u8> {
+        let value = serde_json::json!({
+            "action": RECOVERY_CHALLENGE_ALLOCATION_ACTION,
+            "allocation_nonce": URL_SAFE_NO_PAD.encode(allocation_nonce),
+            "controller": {
+                "kid": self.controller_kid,
+                "label": self.controller_label,
+                "public_key": URL_SAFE_NO_PAD.encode(self.controller_public_key),
+            },
+            "deployment_id": self.deployment_id,
+            "recovery": {
+                "kid": self.recovery_kid,
+                "public_key": URL_SAFE_NO_PAD.encode(self.recovery_public_key),
+            },
+        });
+        serde_json::to_vec(&value).expect("sorted-key JSON serialization cannot fail")
+    }
+
+    /// Sign one challenge-allocation authorization with the current Recovery
+    /// Root key.  The secret-derived seed remains caller-owned and never
+    /// enters a serializable type.
+    #[must_use]
+    pub fn sign_allocation(
+        &self,
+        allocation_nonce: &[u8; 32],
+        current_seed: &[u8; 32],
+    ) -> [u8; 64] {
+        SigningKey::from_bytes(current_seed)
+            .sign(&self.allocation_message(allocation_nonce))
+            .to_bytes()
+    }
+
+    /// Verify one allocation proof against the currently anchored Recovery
+    /// Public Key.  Ed25519 verification is the authorization boundary; no IP
+    /// address or unauthenticated allocation state participates in authority.
+    #[must_use]
+    pub fn verify_allocation_signature(
+        &self,
+        allocation_nonce: &[u8; 32],
+        recovery_public_key: &[u8; 32],
+        signature: &[u8; 64],
+    ) -> bool {
+        use ed25519_dalek::Verifier as _;
+        let Ok(signature) = ed25519_dalek::Signature::from_slice(signature) else {
+            return false;
+        };
+        let Ok(verifying_key) = VerifyingKey::from_bytes(recovery_public_key) else {
+            return false;
+        };
+        verifying_key
+            .verify(&self.allocation_message(allocation_nonce), &signature)
+            .is_ok()
     }
 
     /// Canonical bytes the control side signs with the OLD Recovery Key.

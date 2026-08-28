@@ -50,7 +50,8 @@ use crate::verification::{
     validate_file_identifier, validate_identifier, validate_lower_hex, validate_uuid,
 };
 use crate::wire::{
-    FixedAlgorithm, ProtectedHeader, TenantResourceIdentity, TenantResourceSelector,
+    FixedAlgorithm, ProtectedHeader, TenantResourceIdentity, TenantResourceMapping,
+    TenantResourceSelector,
 };
 use crate::{MAX_COMPACT_JWS_BYTES, MAX_TENANT_RESOURCE_IDENTITIES, ProtocolError};
 
@@ -243,6 +244,12 @@ pub enum ControlOperationPayload {
         tenant_id: String,
         resources: Vec<TenantResourceIdentity>,
     },
+    /// Invalidate pre-restore protocol state after a candidate has started
+    /// with the signed Valkey state epoch. This never accepts arbitrary
+    /// recovery commands or a second authority channel.
+    RecoveryInvalidate {
+        state_epoch: String,
+    },
 }
 
 impl<'de> Deserialize<'de> for ControlOperationPayload {
@@ -309,6 +316,10 @@ impl<'de> Deserialize<'de> for ControlOperationPayload {
                     selectors,
                 }
             }
+            "recovery-invalidate" => ControlOperationPayload::RecoveryInvalidate {
+                state_epoch: take_string_member(&mut members, "state_epoch")
+                    .map_err(serde::de::Error::custom)?,
+            },
             other => {
                 return Err(serde::de::Error::custom(format!(
                     "unknown operation '{other}'"
@@ -483,12 +494,39 @@ pub struct ControlResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ControlResultData {
+    /// Authoritative outcome of an applied tenant-resource change set.
+    TenantResourceApply {
+        revision: u64,
+        /// Identities applied by this operation, not the complete active set.
+        resources: Vec<TenantResourceIdentity>,
+        resource_mappings: Vec<TenantResourceMapping>,
+        /// Canonical digest of the complete active set after the operation.
+        resource_manifest_sha256: String,
+    },
+    /// Durable post-restore invalidation boundary. Ctl must keep ingress
+    /// closed until strictly after `not_before`.
+    RecoveryInvalidation {
+        state_epoch: String,
+        not_before: i64,
+        revoked_refresh_tokens: u64,
+    },
+    /// Authoritative outcome of a revoked tenant-resource change set.
+    TenantResourceRevoke {
+        revision: u64,
+        /// Identities revoked by this operation, not the remaining active set.
+        resources: Vec<TenantResourceIdentity>,
+        /// Canonical digest of the complete remaining active set.
+        resource_manifest_sha256: String,
+    },
     /// Authoritative tenant-resource enumeration snapshot.  `revision` is the
     /// CAS revision the read is consistent with; `resources` is the sorted,
     /// digest-bound active identity set selected by the request's selectors.
     TenantResourceEnumerate {
         revision: u64,
         resources: Vec<TenantResourceIdentity>,
+        /// Canonical digest of the complete active set, including identities
+        /// omitted by request selectors.
+        resource_manifest_sha256: String,
     },
 }
 
@@ -503,7 +541,7 @@ impl<'de> Deserialize<'de> for ControlResultData {
         };
         let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
         let data = match kind.as_str() {
-            "tenant-resource-enumerate" => {
+            "tenant-resource-apply" | "tenant-resource-revoke" | "tenant-resource-enumerate" => {
                 let revision = match members.remove("revision") {
                     Some(serde_json::Value::Number(number)) => {
                         number.as_u64().ok_or_else(|| {
@@ -520,9 +558,73 @@ impl<'de> Deserialize<'de> for ControlResultData {
                 };
                 let resources = take_resource_vec_member(&mut members, "resources")
                     .map_err(serde::de::Error::custom)?;
-                ControlResultData::TenantResourceEnumerate {
-                    revision,
-                    resources,
+                let resource_manifest_sha256 =
+                    take_string_member(&mut members, "resource_manifest_sha256")
+                        .map_err(serde::de::Error::custom)?;
+                match kind.as_str() {
+                    "tenant-resource-apply" => {
+                        let resource_mappings = members
+                            .remove("resource_mappings")
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(
+                                    "result requires field 'resource_mappings'",
+                                )
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value(value).map_err(serde::de::Error::custom)
+                            })?;
+                        ControlResultData::TenantResourceApply {
+                            revision,
+                            resources,
+                            resource_mappings,
+                            resource_manifest_sha256,
+                        }
+                    }
+                    "tenant-resource-revoke" => ControlResultData::TenantResourceRevoke {
+                        revision,
+                        resources,
+                        resource_manifest_sha256,
+                    },
+                    _ => ControlResultData::TenantResourceEnumerate {
+                        revision,
+                        resources,
+                        resource_manifest_sha256,
+                    },
+                }
+            }
+            "recovery-invalidation" => {
+                let state_epoch = take_string_member(&mut members, "state_epoch")
+                    .map_err(serde::de::Error::custom)?;
+                let not_before = match members.remove("not_before") {
+                    Some(serde_json::Value::Number(number)) => {
+                        number.as_i64().ok_or_else(|| {
+                            serde::de::Error::custom("result field 'not_before' must be an integer")
+                        })?
+                    }
+                    _ => {
+                        return Err(serde::de::Error::custom(
+                            "result requires integer field 'not_before'",
+                        ));
+                    }
+                };
+                let revoked_refresh_tokens = match members.remove("revoked_refresh_tokens") {
+                    Some(serde_json::Value::Number(number)) => {
+                        number.as_u64().ok_or_else(|| {
+                            serde::de::Error::custom(
+                                "result field 'revoked_refresh_tokens' must be an unsigned integer",
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(serde::de::Error::custom(
+                            "result requires unsigned field 'revoked_refresh_tokens'",
+                        ));
+                    }
+                };
+                ControlResultData::RecoveryInvalidation {
+                    state_epoch,
+                    not_before,
+                    revoked_refresh_tokens,
                 }
             }
             other => {
@@ -553,18 +655,6 @@ pub enum ControlOutcome {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ControlErrorCode {
-    /// Same `operation_id` presented with a different canonical request hash.
-    OperationIdConflict,
-    /// Unknown, revoked, or otherwise untrusted controller kid.
-    ControllerKeyUntrusted,
-    /// Controller key no longer valid at first admission (does not affect
-    /// already-accepted operations resumed from the journal).
-    ControllerKeyExpired,
-    /// Embedded build identity does not equal the executing binary (J1) or
-    /// the artifact binding does not match the runtime.
-    TargetIdentityMismatch,
-    /// Opaque config/revision fencing failed (D2 family).
-    ConfigRevisionMismatch,
     /// The operation was admitted and executed but the business action
     /// failed inside NazoAuth.
     ExecutionFailed,
@@ -589,12 +679,7 @@ pub fn validate_control_operation(operation: &ControlOperation) -> Result<(), Pr
 
 fn validate_control_target(target: &ControlTarget) -> Result<(), ProtocolError> {
     match target {
-        ControlTarget::OciImage { image_digest, .. } => {
-            let digest = image_digest
-                .strip_prefix("sha256:")
-                .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
-            validate_lower_hex(digest, 64)?;
-        }
+        ControlTarget::OciImage { image_digest, .. } => validate_oci_image_digest(image_digest)?,
         ControlTarget::HostBinary { sha256, .. } => validate_lower_hex(sha256, 64)?,
     }
     let embedded = target.embedded();
@@ -602,6 +687,16 @@ fn validate_control_target(target: &ControlTarget) -> Result<(), ProtocolError> 
         validate_identifier(value)?;
     }
     Ok(())
+}
+
+/// Validate the immutable OCI artifact identity carried by a control target.
+/// Runtime admission uses this same protocol authority for the digest injected
+/// by the one-shot launcher before comparing the two exact values.
+pub fn validate_oci_image_digest(image_digest: &str) -> Result<(), ProtocolError> {
+    let digest = image_digest
+        .strip_prefix("sha256:")
+        .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
+    validate_lower_hex(digest, 64)
 }
 
 impl ControlTarget {
@@ -683,6 +778,9 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
                 }
             }
         }
+        ControlOperationPayload::RecoveryInvalidate { state_epoch } => {
+            validate_recovery_state_epoch(state_epoch)?;
+        }
     }
     Ok(())
 }
@@ -735,6 +833,12 @@ fn validate_uuidv7(value: &str) -> Result<(), ProtocolError> {
         ));
     }
     Ok(())
+}
+
+fn validate_recovery_state_epoch(value: &str) -> Result<(), ProtocolError> {
+    validate_uuidv7(value).map_err(|_| {
+        ProtocolError::Policy("recovery state epoch must be a canonical non-nil UUIDv7")
+    })
 }
 
 fn validate_controller_kid(kid: &str) -> Result<(), ProtocolError> {
@@ -945,6 +1049,30 @@ pub fn encode_control_result(result: &ControlResult) -> Result<Vec<u8>, Protocol
     Ok(bytes)
 }
 
+/// Prove that typed result data can be published in every valid
+/// [`ControlResult`] envelope.  The envelope uses the longest valid signed
+/// integer spellings, so a value accepted here cannot cross the wire limit
+/// when the journal supplies real timestamps.
+///
+/// Stateful executors must call this before committing the mutation that
+/// produces `data`; otherwise a structurally valid but oversized result could
+/// commit its side effect and then fail permanent journal publication.
+pub fn validate_control_result_data_for_wire(
+    data: &ControlResultData,
+) -> Result<(), ProtocolError> {
+    let envelope = ControlResult {
+        schema: CONTROL_RESULT_SCHEMA,
+        operation_id: "00000000-0000-7000-8000-000000000000".to_owned(),
+        request_hash: "0".repeat(64),
+        outcome: ControlOutcome::Succeeded,
+        error: None,
+        accepted_at: i64::MIN,
+        completed_at: Some(i64::MAX),
+        result: Some(data.clone()),
+    };
+    encode_control_result(&envelope).map(|_| ())
+}
+
 /// Decode and validate a [`ControlResult`] received from a one-shot process
 /// or read back from the journal.
 pub fn decode_control_result(bytes: &[u8]) -> Result<ControlResult, ProtocolError> {
@@ -1021,24 +1149,109 @@ pub fn validate_control_result(result: &ControlResult) -> Result<(), ProtocolErr
 /// Structural invariants of the typed result channel: bounded, unique,
 /// digest-bound identity sets only.
 fn validate_control_result_data(data: &ControlResultData) -> Result<(), ProtocolError> {
-    match data {
-        ControlResultData::TenantResourceEnumerate { resources, .. } => {
-            if resources.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+    if let ControlResultData::RecoveryInvalidation {
+        state_epoch,
+        not_before,
+        ..
+    } = data
+    {
+        validate_recovery_state_epoch(state_epoch)?;
+        if *not_before <= 0 {
+            return Err(ProtocolError::Policy(
+                "invalid recovery invalidation result",
+            ));
+        }
+        return Ok(());
+    }
+    let (resources, resource_mappings, resource_manifest_sha256, is_apply) = match data {
+        ControlResultData::TenantResourceApply {
+            resources,
+            resource_mappings,
+            resource_manifest_sha256,
+            ..
+        } => (
+            resources,
+            resource_mappings.as_slice(),
+            resource_manifest_sha256,
+            true,
+        ),
+        ControlResultData::TenantResourceRevoke {
+            resources,
+            resource_manifest_sha256,
+            ..
+        }
+        | ControlResultData::TenantResourceEnumerate {
+            resources,
+            resource_manifest_sha256,
+            ..
+        } => (resources, &[][..], resource_manifest_sha256, false),
+        ControlResultData::RecoveryInvalidation { .. } => unreachable!("validated above"),
+    };
+    validate_lower_hex(resource_manifest_sha256, 64)?;
+    if resources.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+        return Err(ProtocolError::Policy(
+            "tenant resource result sets are out of bounds",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for resource in resources {
+        validate_file_identifier(&resource.resource_id)?;
+        validate_lower_hex(&resource.digest, 64)?;
+        if !seen.insert((resource.kind, resource.resource_id.as_str())) {
+            return Err(ProtocolError::Policy(
+                "tenant resource result identities must be unique",
+            ));
+        }
+    }
+    if resource_mappings.len() > resources.len() {
+        return Err(ProtocolError::Policy(
+            "tenant resource result mappings are out of bounds",
+        ));
+    }
+    let resource_set = resources
+        .iter()
+        .map(|resource| (resource.kind, resource.resource_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_mappings = resources
+        .iter()
+        .filter(|resource| {
+            matches!(
+                resource.kind,
+                crate::wire::TenantResourceKind::User
+                    | crate::wire::TenantResourceKind::OauthClient
+            )
+        })
+        .map(|resource| (resource.kind, resource.resource_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut mapped = std::collections::BTreeSet::new();
+    for mapping in resource_mappings {
+        validate_file_identifier(&mapping.resource_id)?;
+        match mapping.kind {
+            crate::wire::TenantResourceKind::User => validate_uuid(&mapping.public_id)?,
+            crate::wire::TenantResourceKind::OauthClient => {
+                validate_identifier(&mapping.public_id)?
+            }
+            _ => {
                 return Err(ProtocolError::Policy(
-                    "tenant resource result sets are out of bounds",
+                    "invalid tenant resource result mapping",
                 ));
             }
-            let mut seen = std::collections::BTreeSet::new();
-            for resource in resources {
-                validate_file_identifier(&resource.resource_id)?;
-                validate_lower_hex(&resource.digest, 64)?;
-                if !seen.insert((resource.kind, resource.resource_id.as_str())) {
-                    return Err(ProtocolError::Policy(
-                        "tenant resource result identities must be unique",
-                    ));
-                }
-            }
         }
+        if !matches!(
+            mapping.kind,
+            crate::wire::TenantResourceKind::User | crate::wire::TenantResourceKind::OauthClient
+        ) || !resource_set.contains(&(mapping.kind, mapping.resource_id.as_str()))
+            || !mapped.insert((mapping.kind, mapping.resource_id.as_str()))
+        {
+            return Err(ProtocolError::Policy(
+                "invalid tenant resource result mapping",
+            ));
+        }
+    }
+    if is_apply && mapped != expected_mappings {
+        return Err(ProtocolError::Policy(
+            "tenant resource apply mappings must cover public resources exactly",
+        ));
     }
     Ok(())
 }

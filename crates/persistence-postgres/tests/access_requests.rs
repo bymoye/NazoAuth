@@ -109,7 +109,7 @@ fn client(suffix: &str) -> ValidatedClientRegistration {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
-        security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
+        security_policy: nazo_auth::ClientSecurityPolicy::default(),
     }
 }
 
@@ -367,10 +367,10 @@ async fn duplicate_client_conflict_does_not_report_request_as_processed() {
         policy_uri: Some("https://client.example.test/policy".to_owned()),
         tos_uri: Some("https://client.example.test/terms".to_owned()),
     };
-    registration.security_policy = Some(nazo_auth::ClientSecurityPolicy {
+    registration.security_policy = nazo_auth::ClientSecurityPolicy {
         session_management: true,
         ..nazo_auth::ClientSecurityPolicy::default()
-    });
+    };
     let expected_registration = registration.clone();
     let prepared = prepared_client(tenant, registration, true);
     let approved = repository
@@ -406,12 +406,8 @@ async fn duplicate_client_conflict_does_not_report_request_as_processed() {
         persisted.presentation.tos_uri,
         expected_registration.presentation.tos_uri
     );
-    assert_eq!(
-        persisted
-            .security_policy
-            .as_ref()
-            .map(|policy| policy.session_management),
-        Some(true),
+    assert!(
+        persisted.security_policy.session_management,
         "access-request approval must preserve composable client security policy"
     );
     assert_eq!(

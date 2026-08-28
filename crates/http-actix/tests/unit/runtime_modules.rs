@@ -145,7 +145,7 @@ fn view() -> RuntimeModuleView {
         applied_revision: Some(ModuleRevision::new(6)),
         dependencies: vec![ModuleId::RequestObjects],
         dependents: vec![ModuleId::Jarm],
-        allowed_actions: vec![DesiredMode::Inherit, DesiredMode::Enabled],
+        allowed_actions: vec![DesiredMode::Enabled],
         disable_policy: DisablePolicy::DrainStoredTransactions {
             max_duration: Duration::from_secs(300),
         },
@@ -233,7 +233,7 @@ fn assert_no_store(response: &HttpResponse) {
 }
 
 #[actix_web::test]
-async fn list_preserves_the_existing_wire_contract_and_cache_policy() {
+async fn list_exposes_only_current_actions_and_disables_caching() {
     let response = admin_runtime_modules(
         endpoint(
             administration(),
@@ -252,10 +252,7 @@ async fn list_preserves_the_existing_wire_contract_and_cache_policy() {
     assert_eq!(body["items"][0]["desired_state"], "disabled");
     assert_eq!(body["items"][0]["actual_state"], "draining");
     assert_eq!(body["items"][0]["revision"], 7);
-    assert_eq!(
-        body["items"][0]["allowed_actions"],
-        json!(["inherit", "enable"])
-    );
+    assert_eq!(body["items"][0]["allowed_actions"], json!(["enable"]));
     assert_eq!(
         body["items"][0]["disable_policy"],
         "drain_stored_transactions:300s"

@@ -8,11 +8,11 @@ JWS with type `nazoauth-control-discovery+jwt` plus the instance public key.
 The signed statement binds the nonce, issuer, immutable deployment ID,
 runtime-instance ID, embedded build identity, and supported control and
 operator protocol versions. It contains no database or Valkey URL, credential,
-administrator data, controller material, break-glass material, or privileged
+administrator data, Controller key material, Recovery Secret material, or privileged
 operation.
 
-The instance identity is separate from OAuth signing, controller, receipt,
-audit, and break-glass identities. A single-instance deployment stores it at:
+The instance identity is separate from OAuth signing and the registered
+Controller key. A single-instance deployment stores it at:
 
 ```text
 DATA_DIR/instance/identity.key
@@ -38,11 +38,11 @@ but use separate instance identity directories and runtime-instance IDs. Set
 `DEPLOYMENT_ID` for the deployment. A persisted identity mismatch fails startup
 closed.
 
-The one-shot `operator-task` executor applies the same boundary before it
-claims a request: `deployment_id` must equal the local deployment identity,
-`iss` must be exactly `controller:<deployment_id>`, and `aud` must be exactly
-`runtime:<deployment_id>`. When `DATA_DIR/instance/deployment-id` already
-exists, it must agree with `DEPLOYMENT_ID` in the mounted server configuration.
+The one-shot `operator-task` executor validates a signed canonical
+`ControlOperation` before it claims a request: the Controller Registry key,
+deployment ID, target digest and embedded build identity must all match local
+facts. When `DATA_DIR/instance/deployment-id` already exists, it must agree with
+`DEPLOYMENT_ID` in the mounted server configuration.
 The operator-state mount also persists the same identity for one-shot
 containers that intentionally do not mount the full server data directory;
 once present, that anchor is required for every subsequent task. During the
@@ -52,7 +52,7 @@ first migration, before either local anchor exists, the canonical mounted
 read-only identity mount; a configured but unavailable file fails closed. This
 check is local and does not make the recovery controller a runtime dependency.
 
-The wire DTOs, JWS types, signing/verification policy, compatibility parsing,
+The wire DTOs, JWS types, signing/verification policy, strict parsing,
 and fixed vectors live only in `crates/operator-protocol`. Controllers consume
 that crate at an exact version and source revision; they do not copy protocol
 code.
@@ -80,9 +80,10 @@ fails closed; key rotation must not overlap an active receipt window.
 Result and capability AEAD associated data binds tenant, transaction, evidence
 context, presentation-request digest, exact trust-policy tuple, and signed
 intent digest; capability ciphertext additionally binds the issuance JTI.
-Legacy transaction-ID-only AEAD fallback is accepted only for an unexpired
-pre-migration transaction with none of the create/evidence columns populated.
-Such a row cannot be upgraded by attaching evidence or issuing a receipt.
+Migration `20260828000600` deletes every pre-binding transaction and makes the
+create-request binding columns mandatory. Reads accept only the domain- and
+tenant-bound AEAD contract; transaction-ID-only ciphertext is never retried or
+reinterpreted.
 
 The database cleanup function deletes at most 256 expired transactions per
 call, uses the indexed effective expiry deadline, and is invoked before

@@ -216,7 +216,9 @@ fn service_error_response(error: crate::recovery_root::RecoveryRootServiceError)
         Error::Invalid(description) => {
             oauth_error(StatusCode::BAD_REQUEST, "invalid_request", description)
         }
-        Error::Root(recovery_error) => root_error_response(recovery_error),
+        Error::Root(recovery_error) => {
+            super::controller_recovery::root_error_response(recovery_error)
+        }
         Error::Rotation(rotation_error) => rotation_error_response(rotation_error),
     }
 }
@@ -250,7 +252,7 @@ fn rotation_error_response(error: nazo_postgres::RecoveryRotationError) -> HttpR
             oauth_error(status, "invalid_request", description)
         }
         nazo_postgres::RecoveryRotationError::Mutation(recovery_error) => {
-            root_error_response(recovery_error)
+            super::controller_recovery::root_error_response(recovery_error)
         }
         nazo_postgres::RecoveryRotationError::Transport(inner) => {
             tracing::warn!(%inner, "recovery root rotation storage failure");
@@ -258,76 +260,6 @@ fn rotation_error_response(error: nazo_postgres::RecoveryRotationError) -> HttpR
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
                 "恢复根状态暂不可用.",
-            )
-        }
-    }
-}
-
-fn root_error_response(error: nazo_postgres::RecoveryRootError) -> HttpResponse {
-    use nazo_postgres::RecoveryRootError as Error;
-    match error {
-        Error::ControllersStillAdmitted(admitted) => {
-            let items: Vec<serde_json::Value> = admitted
-                .iter()
-                .map(|controller| {
-                    serde_json::json!({
-                        "controller_id": controller.controller_id,
-                        "kid": controller.kid,
-                        "expires_at": controller.expires_at.to_rfc3339(),
-                    })
-                })
-                .collect();
-            HttpResponse::build(StatusCode::CONFLICT).json(serde_json::json!({
-                "error": "controller_still_admitted",
-                "error_description":
-                    "该 deployment 仍有可用的 Controller Key；普通身份变更应走 fresh-2FA 流程.",
-                "admitted_controllers": items,
-            }))
-        }
-        Error::ChallengePending => oauth_error(
-            StatusCode::CONFLICT,
-            "invalid_request",
-            "该 deployment 已有待完成的恢复挑战；等待其过期或完成后重试.",
-        ),
-        Error::ChallengeUnknown => oauth_error(
-            StatusCode::NOT_FOUND,
-            "invalid_request",
-            "未找到该恢复挑战.",
-        ),
-        Error::ChallengeExpired => oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "恢复挑战已过期；请重新发起挑战.",
-        ),
-        Error::ChallengeExhausted => oauth_error(
-            StatusCode::CONFLICT,
-            "invalid_request",
-            "恢复挑战失败次数已达上限并已作废；请重新发起挑战.",
-        ),
-        Error::ChallengeReplayed => oauth_error(
-            StatusCode::CONFLICT,
-            "invalid_request",
-            "恢复挑战已被使用；挑战只能提交一次.",
-        ),
-        Error::NonceMismatch | Error::InvalidSignature => oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "恢复答案验证失败；请核对 Recovery Secret 与挑战内容后重试.",
-        ),
-        Error::RootMissing => oauth_error(
-            StatusCode::CONFLICT,
-            "invalid_request",
-            "该 deployment 尚未登记 Recovery Root；无法执行恢复.",
-        ),
-        Error::InvalidIdentity(reason) => {
-            oauth_error(StatusCode::BAD_REQUEST, "invalid_request", reason)
-        }
-        Error::Transport(inner) => {
-            tracing::warn!(%inner, "controller recovery storage failure");
-            oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "恢复状态暂不可用.",
             )
         }
     }

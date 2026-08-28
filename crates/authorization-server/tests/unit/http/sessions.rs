@@ -91,7 +91,7 @@ fn session_request(state: &TestInfrastructure, sid: &str) -> HttpRequest {
 async fn store_raw_session(state: &TestInfrastructure, sid: &str, raw: &str) {
     valkey_set_ex(
         &state.valkey,
-        format!("oauth:session:{sid}"),
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
         raw.to_owned(),
         state.settings.session.session_ttl_seconds,
     )
@@ -291,9 +291,12 @@ async fn invalid_or_malformed_session_payloads_are_cleared_and_anonymous() {
             .is_none()
     );
     assert_eq!(
-        valkey_get(&state.valkey, format!("oauth:session:{invalid_sid}"))
-            .await
-            .expect("invalid session cleanup lookup should succeed"),
+        valkey_get(
+            &state.valkey,
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{invalid_sid}")),
+        )
+        .await
+        .expect("invalid session cleanup lookup should succeed"),
         None
     );
 
@@ -321,7 +324,9 @@ async fn invalid_or_malformed_session_payloads_are_cleared_and_anonymous() {
     assert_eq!(
         valkey_get(
             &state.valkey,
-            format!("oauth:session:{invalid_pending_sid}")
+            nazo_valkey::test_support::state_storage_key(format!(
+                "oauth:session:{invalid_pending_sid}"
+            ))
         )
         .await
         .expect("invalid pending MFA cleanup lookup should succeed"),
@@ -339,9 +344,12 @@ async fn invalid_or_malformed_session_payloads_are_cleared_and_anonymous() {
             .is_none()
     );
     assert_eq!(
-        valkey_get(&state.valkey, format!("oauth:session:{malformed_sid}"))
-            .await
-            .expect("malformed pending MFA cleanup lookup should succeed"),
+        valkey_get(
+            &state.valkey,
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{malformed_sid}")),
+        )
+        .await
+        .expect("malformed pending MFA cleanup lookup should succeed"),
         None
     );
 }

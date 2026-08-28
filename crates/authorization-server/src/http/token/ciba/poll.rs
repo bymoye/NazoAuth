@@ -88,12 +88,7 @@ pub(crate) async fn token_ciba(
             false,
         );
     }
-    if !issuance
-        .config
-        .authorization_server_profile()
-        .effective_client_policy(client)
-        .allow_cross_device_flows
-    {
+    if !client.security_policy.allow_cross_device_flows {
         return oauth_token_error(
             StatusCode::BAD_REQUEST,
             "unauthorized_client",
@@ -187,7 +182,7 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
     {
         return materialize_ciba_response(super::super::token_client_assertion_error(error));
     }
-    let ciba = match ciba_service
+    let mut ciba = match ciba_service
         .poll(auth_req_id, &client.client_id, initial, || {
             Utc::now().timestamp()
         })
@@ -228,6 +223,15 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
         Ok(CibaPollCommit::Approved(ciba)) => ciba,
         Err(failure) => return materialize_ciba_response(ciba_poll_failure_response(failure)),
     };
+    let Some(authentication_context) = ciba.authentication_context.take() else {
+        tracing::error!("approved CIBA state is missing its authentication context");
+        return materialize_ciba_response(oauth_token_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "CIBA failed.",
+            false,
+        ));
+    };
     let user = match users
         .public_account_by_id(
             nazo_identity::TenantId::new(tenant_id).expect("configured CIBA tenant ID is non-nil"),
@@ -266,7 +270,14 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
             ));
         }
     };
-    let issue = ciba_token_issue(user.id(), subject, *ciba, dpop_jkt, mtls_x5t_s256);
+    let issue = ciba_token_issue(
+        user.id(),
+        subject,
+        *ciba,
+        authentication_context,
+        dpop_jkt,
+        mtls_x5t_s256,
+    );
     let response = issue_token_response_with_service_and_grant(
         issuance,
         token_service,
@@ -296,6 +307,7 @@ pub(super) fn ciba_token_issue(
     user_id: Uuid,
     subject: String,
     ciba: CibaRequestState,
+    authentication_context: CibaAuthenticationContext,
     dpop_jkt: Option<String>,
     mtls_x5t_s256: Option<String>,
 ) -> TokenIssue {
@@ -306,19 +318,9 @@ pub(super) fn ciba_token_issue(
         authorization_details: json!([]),
         audiences: ciba.audiences,
         nonce: None,
-        auth_time: Some(
-            ciba.authentication_context
-                .as_ref()
-                .map_or(ciba.issued_at, |context| context.auth_time),
-        ),
-        amr: ciba.authentication_context.as_ref().map_or_else(
-            || vec!["ciba_automation".to_owned()],
-            |context| context.amr.clone(),
-        ),
-        oidc_sid: ciba
-            .authentication_context
-            .as_ref()
-            .and_then(|context| context.oidc_sid.clone()),
+        auth_time: Some(authentication_context.auth_time),
+        amr: authentication_context.amr,
+        oidc_sid: authentication_context.oidc_sid,
         acr: ciba.acr,
         userinfo_claims: Vec::new(),
         userinfo_claim_requests: Vec::new(),

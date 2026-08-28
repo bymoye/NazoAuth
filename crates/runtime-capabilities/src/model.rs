@@ -1,22 +1,34 @@
-/// How an administrator wants a runtime module's enabled state to be resolved.
+/// Explicit administrator-selected runtime-module state.
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DesiredMode {
-    Inherit,
     Enabled,
     Disabled,
 }
 
 impl DesiredMode {
-    /// Resolves this mode against the configured inherited default.
     #[must_use]
-    pub const fn resolve(self, inherited: bool) -> bool {
-        match self {
-            Self::Inherit => inherited,
-            Self::Enabled => true,
-            Self::Disabled => false,
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+/// Desired-state spelling retained solely for parsing immutable pre-cutover
+/// audit events. It must never appear in current commands or records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HistoricalDesiredMode {
+    Inherit,
+    Enabled,
+    Disabled,
+}
+
+impl From<DesiredMode> for HistoricalDesiredMode {
+    fn from(value: DesiredMode) -> Self {
+        match value {
+            DesiredMode::Enabled => Self::Enabled,
+            DesiredMode::Disabled => Self::Disabled,
         }
     }
 }

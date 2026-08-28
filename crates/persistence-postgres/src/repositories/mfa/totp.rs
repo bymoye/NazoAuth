@@ -43,174 +43,6 @@ impl MfaRepository {
         protect_totp_secret(keys, tenant_id, user_id, secret)
     }
 
-    /// Encrypts legacy plaintext rows and clears the plaintext column in one
-    /// transaction.  This operation is intentionally explicit: a deployment
-    /// must present the current key before any old plaintext is removed.
-    pub async fn migrate_legacy_totp_secrets(&self) -> Result<usize, RepositoryError> {
-        let keyring = self.require_totp_keys()?.clone();
-        let mut connection = self
-            .pool
-            .get()
-            .await
-            .map_err(|_| RepositoryError::Unavailable)?;
-        connection
-            .transaction::<usize, MfaSecretMigrationError, _>(async move |connection| {
-                let rows = user_totp_credentials::table
-                    .filter(user_totp_credentials::secret_base32.is_not_null())
-                    .for_update()
-                    .select((
-                        user_totp_credentials::id,
-                        user_totp_credentials::tenant_id,
-                        user_totp_credentials::user_id,
-                        user_totp_credentials::secret_base32,
-                        user_totp_credentials::secret_ciphertext,
-                        user_totp_credentials::secret_key_id,
-                    ))
-                    .load::<(
-                        uuid::Uuid,
-                        uuid::Uuid,
-                        uuid::Uuid,
-                        Option<String>,
-                        Option<Vec<u8>>,
-                        Option<String>,
-                    )>(connection)
-                    .await?;
-                let mut migrated = 0;
-                for (id, tenant_id, user_id, secret, ciphertext, key_id) in rows {
-                    if ciphertext.is_some() || key_id.is_some() {
-                        return Err(MfaSecretMigrationError::Repository(
-                            RepositoryError::Consistency(
-                                "legacy TOTP row contains an encrypted secret".to_owned(),
-                            ),
-                        ));
-                    }
-                    let secret = secret.ok_or_else(|| {
-                        MfaSecretMigrationError::Repository(RepositoryError::Consistency(
-                            "legacy TOTP row has a null plaintext secret".to_owned(),
-                        ))
-                    })?;
-                    let tenant_id = TenantId::new(tenant_id).map_err(|_| {
-                        MfaSecretMigrationError::Repository(RepositoryError::Consistency(
-                            "legacy TOTP row has an invalid tenant id".to_owned(),
-                        ))
-                    })?;
-                    let user_id = UserId::new(user_id).map_err(|_| {
-                        MfaSecretMigrationError::Repository(RepositoryError::Consistency(
-                            "legacy TOTP row has an invalid user id".to_owned(),
-                        ))
-                    })?;
-                    let (secret_ciphertext, secret_key_id) =
-                        protect_totp_secret(&keyring, tenant_id, user_id, &secret)
-                            .map_err(MfaSecretMigrationError::Repository)?;
-                    diesel::update(user_totp_credentials::table.find(id))
-                        .set((
-                            user_totp_credentials::secret_base32.eq::<Option<String>>(None),
-                            user_totp_credentials::secret_ciphertext.eq(Some(secret_ciphertext)),
-                            user_totp_credentials::secret_key_id.eq(Some(secret_key_id)),
-                            user_totp_credentials::updated_at.eq(now),
-                        ))
-                        .execute(connection)
-                        .await?;
-                    migrated += 1;
-                }
-                Ok(migrated)
-            })
-            .await
-            .map_err(MfaSecretMigrationError::into_repository)
-    }
-
-    /// Re-wraps ciphertext written with the previous key under the current
-    /// key.  Unknown key ids fail closed and roll the whole transaction back.
-    pub async fn rotate_totp_secrets(&self) -> Result<usize, RepositoryError> {
-        let keyring = self.require_totp_keys()?.clone();
-        let mut connection = self
-            .pool
-            .get()
-            .await
-            .map_err(|_| RepositoryError::Unavailable)?;
-        connection
-            .transaction::<usize, MfaSecretMigrationError, _>(async move |connection| {
-                let rows = user_totp_credentials::table
-                    .filter(user_totp_credentials::secret_ciphertext.is_not_null())
-                    .for_update()
-                    .select((
-                        user_totp_credentials::id,
-                        user_totp_credentials::tenant_id,
-                        user_totp_credentials::user_id,
-                        user_totp_credentials::secret_ciphertext,
-                        user_totp_credentials::secret_key_id,
-                    ))
-                    .load::<(
-                        uuid::Uuid,
-                        uuid::Uuid,
-                        uuid::Uuid,
-                        Option<Vec<u8>>,
-                        Option<String>,
-                    )>(connection)
-                    .await?;
-                let mut rotated = 0;
-                for (id, tenant_id, user_id, ciphertext, key_id) in rows {
-                    let tenant_id = TenantId::new(tenant_id).map_err(|_| {
-                        MfaSecretMigrationError::Repository(RepositoryError::Consistency(
-                            "TOTP row has an invalid tenant id".to_owned(),
-                        ))
-                    })?;
-                    let user_id = UserId::new(user_id).map_err(|_| {
-                        MfaSecretMigrationError::Repository(RepositoryError::Consistency(
-                            "TOTP row has an invalid user id".to_owned(),
-                        ))
-                    })?;
-                    let already_current = key_id.as_deref() == Some(keyring.current().id());
-                    let secret = decode_totp_secret(
-                        Some(&keyring),
-                        tenant_id,
-                        user_id,
-                        None,
-                        ciphertext,
-                        key_id,
-                    )
-                    .map_err(MfaSecretMigrationError::Repository)?;
-                    if already_current {
-                        continue;
-                    }
-                    let (secret_ciphertext, secret_key_id) =
-                        protect_totp_secret(&keyring, tenant_id, user_id, &secret)
-                            .map_err(MfaSecretMigrationError::Repository)?;
-                    diesel::update(user_totp_credentials::table.find(id))
-                        .set((
-                            user_totp_credentials::secret_ciphertext.eq(Some(secret_ciphertext)),
-                            user_totp_credentials::secret_key_id.eq(Some(secret_key_id)),
-                            user_totp_credentials::updated_at.eq(now),
-                        ))
-                        .execute(connection)
-                        .await?;
-                    rotated += 1;
-                }
-                Ok(rotated)
-            })
-            .await
-            .map_err(MfaSecretMigrationError::into_repository)
-    }
-
-    /// Returns whether any tenant has a persisted TOTP credential.
-    ///
-    /// This process-wide query is for bootstrap preflight checks. Tenant and
-    /// user flows must use the scoped credential and enrollment queries.
-    pub async fn has_totp_credentials(&self) -> Result<bool, RepositoryError> {
-        let mut connection = self
-            .pool
-            .get()
-            .await
-            .map_err(|_| RepositoryError::Unavailable)?;
-        user_totp_credentials::table
-            .select(user_totp_credentials::id)
-            .first::<uuid::Uuid>(&mut connection)
-            .await
-            .optional()
-            .map(|value| value.is_some())
-            .map_err(|error| RepositoryError::Unexpected(error.to_string()))
-    }
-
     pub async fn totp_credential(
         &self,
         tenant_id: TenantId,
@@ -227,23 +59,19 @@ impl MfaRepository {
             .filter(user_totp_credentials::user_id.eq(user_id.as_uuid()))
             .filter(user_totp_credentials::confirmed_at.is_not_null())
             .select((
-                user_totp_credentials::secret_base32,
                 user_totp_credentials::secret_ciphertext,
                 user_totp_credentials::secret_key_id,
                 user_totp_credentials::last_used_step,
             ))
-            .first::<(Option<String>, Option<Vec<u8>>, Option<String>, Option<i64>)>(
-                &mut connection,
-            )
+            .first::<(Vec<u8>, String, Option<i64>)>(&mut connection)
             .await
             .optional()
             .map_err(|error| RepositoryError::Unexpected(error.to_string()))?
-            .map(|(plaintext, ciphertext, key_id, last_used_step)| {
+            .map(|(ciphertext, key_id, last_used_step)| {
                 decode_totp_secret(
                     self.totp_keys.as_ref(),
                     tenant_id,
                     user_id,
-                    plaintext,
                     ciphertext,
                     key_id,
                 )
@@ -269,39 +97,29 @@ impl MfaRepository {
             .filter(user_totp_credentials::tenant_id.eq(tenant_id.as_uuid()))
             .filter(user_totp_credentials::user_id.eq(user_id.as_uuid()))
             .select((
-                user_totp_credentials::secret_base32,
                 user_totp_credentials::secret_ciphertext,
                 user_totp_credentials::secret_key_id,
                 user_totp_credentials::confirmed_at.is_not_null(),
                 user_totp_credentials::last_used_step,
             ))
-            .first::<(
-                Option<String>,
-                Option<Vec<u8>>,
-                Option<String>,
-                bool,
-                Option<i64>,
-            )>(&mut connection)
+            .first::<(Vec<u8>, String, bool, Option<i64>)>(&mut connection)
             .await
             .optional()
             .map_err(|error| RepositoryError::Unexpected(error.to_string()))?
-            .map(
-                |(plaintext, ciphertext, key_id, confirmed, last_used_step)| {
-                    decode_totp_secret(
-                        self.totp_keys.as_ref(),
-                        tenant_id,
-                        user_id,
-                        plaintext,
-                        ciphertext,
-                        key_id,
-                    )
-                    .map(|secret_base32| TotpEnrollment {
-                        secret_base32,
-                        confirmed,
-                        last_used_step,
-                    })
-                },
-            )
+            .map(|(ciphertext, key_id, confirmed, last_used_step)| {
+                decode_totp_secret(
+                    self.totp_keys.as_ref(),
+                    tenant_id,
+                    user_id,
+                    ciphertext,
+                    key_id,
+                )
+                .map(|secret_base32| TotpEnrollment {
+                    secret_base32,
+                    confirmed,
+                    last_used_step,
+                })
+            })
             .transpose()
     }
     pub async fn begin_totp_enrollment(
@@ -336,10 +154,8 @@ impl MfaRepository {
                     Some((id, None)) => {
                         diesel::update(user_totp_credentials::table.find(id))
                             .set((
-                                user_totp_credentials::secret_base32.eq::<Option<String>>(None),
-                                user_totp_credentials::secret_ciphertext
-                                    .eq(Some(secret_ciphertext)),
-                                user_totp_credentials::secret_key_id.eq(Some(secret_key_id)),
+                                user_totp_credentials::secret_ciphertext.eq(secret_ciphertext),
+                                user_totp_credentials::secret_key_id.eq(secret_key_id),
                                 user_totp_credentials::label.eq(label),
                                 user_totp_credentials::last_used_step.eq::<Option<i64>>(None),
                                 user_totp_credentials::updated_at.eq(now),
@@ -353,10 +169,8 @@ impl MfaRepository {
                             .values((
                                 user_totp_credentials::tenant_id.eq(tenant_id.as_uuid()),
                                 user_totp_credentials::user_id.eq(user_id.as_uuid()),
-                                user_totp_credentials::secret_base32.eq::<Option<String>>(None),
-                                user_totp_credentials::secret_ciphertext
-                                    .eq(Some(secret_ciphertext)),
-                                user_totp_credentials::secret_key_id.eq(Some(secret_key_id)),
+                                user_totp_credentials::secret_ciphertext.eq(secret_ciphertext),
+                                user_totp_credentials::secret_key_id.eq(secret_key_id),
                                 user_totp_credentials::label.eq(label),
                             ))
                             .execute(connection)
@@ -394,14 +208,13 @@ impl MfaRepository {
                     .filter(user_totp_credentials::confirmed_at.is_null())
                     .for_update()
                     .select((
-                        user_totp_credentials::secret_base32,
                         user_totp_credentials::secret_ciphertext,
                         user_totp_credentials::secret_key_id,
                     ))
-                    .first::<(Option<String>, Option<Vec<u8>>, Option<String>)>(connection)
+                    .first::<(Vec<u8>, String)>(connection)
                     .await
                     .optional()?;
-                let Some((plaintext, ciphertext, key_id)) = credential else {
+                let Some((ciphertext, key_id)) = credential else {
                     insert_identity_security_event(
                         connection,
                         &mfa_event(
@@ -416,15 +229,9 @@ impl MfaRepository {
                     .map_err(MfaAuditError::Repository)?;
                     return Ok(TotpVerificationOutcome::Replay);
                 };
-                let secret = decode_totp_secret(
-                    totp_keys.as_ref(),
-                    tenant_id,
-                    user_id,
-                    plaintext,
-                    ciphertext,
-                    key_id,
-                )
-                .map_err(MfaAuditError::Repository)?;
+                let secret =
+                    decode_totp_secret(totp_keys.as_ref(), tenant_id, user_id, ciphertext, key_id)
+                        .map_err(MfaAuditError::Repository)?;
                 let Some(step) = verified_totp_step(&secret, code, timestamp, None) else {
                     insert_identity_security_event(
                         connection,
@@ -539,23 +346,19 @@ impl MfaRepository {
                     .filter(user_totp_credentials::confirmed_at.is_not_null())
                     .for_update()
                     .select((
-                        user_totp_credentials::secret_base32,
                         user_totp_credentials::secret_ciphertext,
                         user_totp_credentials::secret_key_id,
                         user_totp_credentials::last_used_step,
                     ))
-                    .first::<(Option<String>, Option<Vec<u8>>, Option<String>, Option<i64>)>(
-                        connection,
-                    )
+                    .first::<(Vec<u8>, String, Option<i64>)>(connection)
                     .await
                     .optional()?;
                 let outcome = match credential {
-                    Some((plaintext, ciphertext, key_id, last_step)) => {
+                    Some((ciphertext, key_id, last_step)) => {
                         let secret = decode_totp_secret(
                             totp_keys.as_ref(),
                             tenant_id,
                             user_id,
-                            plaintext,
                             ciphertext,
                             key_id,
                         )
@@ -724,92 +527,49 @@ pub(super) fn decode_totp_secret(
     keyring: Option<&MfaTotpKeyRing>,
     tenant_id: TenantId,
     user_id: UserId,
-    plaintext: Option<String>,
-    protected: Option<Vec<u8>>,
-    key_id: Option<String>,
+    protected: Vec<u8>,
+    key_id: String,
 ) -> Result<String, RepositoryError> {
-    match (plaintext, protected, key_id) {
-        (Some(_), Some(_), _) => Err(RepositoryError::Consistency(
-            "TOTP row contains both plaintext and encrypted secrets".to_owned(),
-        )),
-        (Some(_), None, _) => Err(RepositoryError::Consistency(
-            "legacy plaintext TOTP secret requires explicit migration".to_owned(),
-        )),
-        (None, None, _) => Err(RepositoryError::Consistency(
-            "TOTP row has no protected secret".to_owned(),
-        )),
-        (None, Some(protected), Some(key_id)) => {
-            let keyring = keyring.ok_or_else(|| {
-                RepositoryError::Consistency(
-                    "MFA TOTP encryption key is not configured; TOTP operations are disabled"
-                        .to_owned(),
-                )
-            })?;
-            let key = if keyring.current().id() == key_id {
-                keyring.current()
-            } else if keyring.previous().is_some_and(|key| key.id() == key_id) {
-                keyring.previous().expect("previous key was checked")
-            } else {
-                return Err(RepositoryError::Consistency(
-                    "TOTP secret uses an unavailable encryption key version".to_owned(),
-                ));
-            };
-            if protected.len() < TOTP_MIN_PROTECTED_LEN || protected[0] != TOTP_ENVELOPE_VERSION {
-                return Err(RepositoryError::Consistency(
-                    "TOTP secret envelope is malformed".to_owned(),
-                ));
-            }
-            let nonce: &[u8; TOTP_NONCE_LEN] =
-                protected[1..1 + TOTP_NONCE_LEN].try_into().map_err(|_| {
-                    RepositoryError::Consistency("TOTP secret nonce is malformed".to_owned())
-                })?;
-            let plaintext = Aes256Gcm::new_from_slice(key.key())
-                .map_err(|_| {
-                    RepositoryError::Consistency("invalid TOTP encryption key".to_owned())
-                })?
-                .decrypt(
-                    nonce.into(),
-                    Payload {
-                        msg: &protected[1 + TOTP_NONCE_LEN..],
-                        aad: &totp_aad(tenant_id, user_id, &key_id),
-                    },
-                )
-                .map_err(|_| {
-                    RepositoryError::Consistency("TOTP secret authentication failed".to_owned())
-                })?;
-            let secret = String::from_utf8(plaintext).map_err(|_| {
-                RepositoryError::Consistency("TOTP secret is not valid UTF-8".to_owned())
-            })?;
-            if secret.trim().len() < 16 || secret.len() > 128 {
-                return Err(RepositoryError::Consistency(
-                    "TOTP secret is shorter than 16 bytes or exceeds the supported length"
-                        .to_owned(),
-                ));
-            }
-            Ok(secret)
-        }
-        (None, Some(_), None) => Err(RepositoryError::Consistency(
-            "encrypted TOTP row has no key id".to_owned(),
-        )),
+    let keyring = keyring.ok_or_else(|| {
+        RepositoryError::Consistency(
+            "MFA TOTP encryption key is not configured; TOTP operations are disabled".to_owned(),
+        )
+    })?;
+    let key = if keyring.current().id() == key_id {
+        keyring.current()
+    } else if keyring.previous().is_some_and(|key| key.id() == key_id) {
+        keyring.previous().expect("previous key was checked")
+    } else {
+        return Err(RepositoryError::Consistency(
+            "TOTP secret uses an unavailable encryption key version".to_owned(),
+        ));
+    };
+    if protected.len() < TOTP_MIN_PROTECTED_LEN || protected[0] != TOTP_ENVELOPE_VERSION {
+        return Err(RepositoryError::Consistency(
+            "TOTP secret envelope is malformed".to_owned(),
+        ));
     }
-}
-
-pub(super) enum MfaSecretMigrationError {
-    Diesel(diesel::result::Error),
-    Repository(RepositoryError),
-}
-
-impl From<diesel::result::Error> for MfaSecretMigrationError {
-    fn from(error: diesel::result::Error) -> Self {
-        Self::Diesel(error)
+    let nonce: &[u8; TOTP_NONCE_LEN] = protected[1..1 + TOTP_NONCE_LEN]
+        .try_into()
+        .map_err(|_| RepositoryError::Consistency("TOTP secret nonce is malformed".to_owned()))?;
+    let plaintext = Aes256Gcm::new_from_slice(key.key())
+        .map_err(|_| RepositoryError::Consistency("invalid TOTP encryption key".to_owned()))?
+        .decrypt(
+            nonce.into(),
+            Payload {
+                msg: &protected[1 + TOTP_NONCE_LEN..],
+                aad: &totp_aad(tenant_id, user_id, &key_id),
+            },
+        )
+        .map_err(|_| {
+            RepositoryError::Consistency("TOTP secret authentication failed".to_owned())
+        })?;
+    let secret = String::from_utf8(plaintext)
+        .map_err(|_| RepositoryError::Consistency("TOTP secret is not valid UTF-8".to_owned()))?;
+    if secret.trim().len() < 16 || secret.len() > 128 {
+        return Err(RepositoryError::Consistency(
+            "TOTP secret is shorter than 16 bytes or exceeds the supported length".to_owned(),
+        ));
     }
-}
-
-impl MfaSecretMigrationError {
-    pub(super) fn into_repository(self) -> RepositoryError {
-        match self {
-            Self::Diesel(error) => map_mfa_error(error),
-            Self::Repository(error) => error,
-        }
-    }
+    Ok(secret)
 }

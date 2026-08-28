@@ -10,8 +10,9 @@ use diesel::sql_types::{Integer, Text, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
 use ed25519_dalek::{Signer as _, SigningKey};
 use fred::interfaces::ClientLike;
+use nazo_auth::SigningPurpose;
 use nazo_digital_credentials::{CertificateRevocationPolicy, VcIssuerTrustPolicy, encrypt_ecdh_es};
-use nazo_key_management::{KeyManager, KeySettings};
+use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
 use nazo_openid4vci::{CredentialResponse, ProofTypeMetadata};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose,
@@ -22,7 +23,7 @@ use crate::{
     config::ConfigSource,
     domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID},
     http::{authorization::ServerAuthorizationService, token::ServerTokenService},
-    runtime_modules::test_support::runtime_module_registry_for_test,
+    runtime_modules::test_support::runtime_module_registry_with_modules_for_test,
     settings::Settings,
 };
 
@@ -40,7 +41,42 @@ async fn fixture_crypto() -> Openid4vcCredentialCrypto {
         Uuid::now_v7().simple()
     ));
     std::fs::create_dir_all(&root).expect("endpoint key fixture directory");
-    let signing_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("endpoint signing key");
+    let settings = KeySettings {
+        keys_dir: root.clone(),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(30),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::hours(1),
+    };
+    KeyManager::load_or_create(settings.clone())
+        .await
+        .expect("endpoint key store initialization");
+    let signing_kid = KeyManager::register_local(
+        &settings,
+        LocalKeyRegistration {
+            algorithm: jsonwebtoken::Algorithm::ES256,
+            purposes: [
+                SigningPurpose::Credential,
+                SigningPurpose::PresentationRequest,
+            ]
+            .into_iter()
+            .collect(),
+        },
+    )
+    .await
+    .expect("endpoint signing key registration");
+    let signing_record = KeyManager::list_keys(&settings)
+        .await
+        .expect("endpoint key listing")
+        .into_iter()
+        .find(|record| record.kid == signing_kid)
+        .expect("registered endpoint signing key");
+    let signing_key_pem = tokio::fs::read_to_string(root.join(signing_record.locator))
+        .await
+        .expect("registered endpoint signing key PEM");
+    let signing_key =
+        KeyPair::from_pem(&signing_key_pem).expect("registered endpoint P-256 signing key");
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("endpoint CA key");
     let now = time::OffsetDateTime::now_utc();
     let mut ca_params = CertificateParams::default();
@@ -60,37 +96,9 @@ async fn fixture_crypto() -> Openid4vcCredentialCrypto {
         .signed_by(&signing_key, &ca)
         .expect("endpoint leaf certificate");
 
-    std::fs::write(
-        root.join("openid4vci-signing.pem"),
-        signing_key.serialize_pem(),
-    )
-    .expect("endpoint signing key");
-    std::fs::write(
-        root.join("keyset.json"),
-        serde_json::to_vec(&json!({
-            "active_kid": "openid4vci-test",
-            "keys": [{
-                "kid": "openid4vci-test",
-                "alg": "ES256",
-                "file": "openid4vci-signing.pem",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "retire_at": null,
-                "purposes": ["credential", "presentation_request"]
-            }]
-        }))
-        .expect("endpoint keyset JSON"),
-    )
-    .expect("endpoint keyset");
-    let keyset = KeyManager::load_or_create(KeySettings {
-        keys_dir: root.clone(),
-        external_command: Vec::new(),
-        external_timeout: std::time::Duration::from_secs(1),
-        rotation_interval: chrono::Duration::days(30),
-        prepublish_window: chrono::Duration::days(1),
-        verification_grace: chrono::Duration::hours(1),
-    })
-    .await
-    .expect("endpoint key manager");
+    let keyset = KeyManager::load_or_create(settings)
+        .await
+        .expect("endpoint key manager");
     let chain = format!("{}{}", leaf.pem(), ca.pem());
     let crypto = Openid4vcCredentialCrypto::new_with_policies(
         keyset,
@@ -118,7 +126,7 @@ async fn operations(enabled: bool) -> ServerCredentialIssuerOperations {
     let valkey = valkey_builder
         .build()
         .expect("valkey fixture should build without connecting");
-    let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
+    let valkey_connection = nazo_valkey::test_support::scoped_connection(valkey);
     operations_with_inputs(
         pool,
         valkey_connection,
@@ -147,7 +155,7 @@ async fn operations_with_client_attestation(
         .expect("valkey fixture should build without connecting");
     operations_with_inputs_and_attestation(
         pool,
-        nazo_valkey::ValkeyConnection::from_existing_client(valkey),
+        nazo_valkey::test_support::scoped_connection(valkey),
         true,
         BTreeMap::from([("unit-config".to_owned(), unit_configuration())]),
         BTreeSet::new(),
@@ -214,8 +222,16 @@ async fn operations_with_inputs_and_attestation(
         nazo_valkey::AuthorizationStateAdapter::new(&valkey_connection),
         keyset.clone(),
     ));
-    let runtime = runtime_module_registry_for_test(pool.clone(), &settings)
-        .expect("runtime module fixture should build");
+    let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
+    if enabled {
+        active_modules.extend([
+            nazo_runtime_modules::ModuleId::Openid4vciIssuer,
+            nazo_runtime_modules::ModuleId::AuthorizationDetails,
+        ]);
+    }
+    let runtime =
+        runtime_module_registry_with_modules_for_test(pool.clone(), &settings, active_modules)
+            .expect("runtime module fixture should build");
     let proof_validator = Openid4vcProofValidator::new(json!({ "keys": [] }))
         .expect("proof validator fixture should build");
     let crypto = fixture_crypto().await;
@@ -363,7 +379,7 @@ impl LiveEndpointFixture {
             .init()
             .await
             .expect("OpenID4VC endpoint fixture Valkey should connect");
-        let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
+        let valkey_connection = nazo_valkey::test_support::scoped_connection(valkey);
         let (configuration_key, configuration) = live_configuration(configuration_id);
         let issuer = operations_with_inputs(
             pool.clone(),

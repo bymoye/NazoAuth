@@ -145,9 +145,9 @@ impl ModuleStateRepository for Repository {
             reason: change.next.reason.clone(),
             before: current
                 .as_ref()
-                .map(|record| nazo_runtime_modules::ModuleEventState::Desired(record.mode)),
+                .map(|record| nazo_runtime_modules::ModuleEventState::Desired(record.mode.into())),
             after: Some(nazo_runtime_modules::ModuleEventState::Desired(
-                change.next.mode,
+                change.next.mode.into(),
             )),
             outcome_code: None,
             occurred_at: change.next.updated_at,
@@ -251,17 +251,14 @@ impl ModuleStateRepository for Repository {
 }
 
 fn catalog() -> ModuleCatalog {
-    ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(30),
-            ciba: Duration::from_secs(30),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(30),
-            session: Duration::from_secs(30),
-            scim_security_events: Duration::from_secs(30),
-        },
-        BTreeSet::new(),
-    )
+    ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(30),
+        ciba: Duration::from_secs(30),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(30),
+        session: Duration::from_secs(30),
+        scim_security_events: Duration::from_secs(30),
+    })
     .unwrap()
 }
 
@@ -619,6 +616,7 @@ fn successful_enable_and_disable_emit_exhaustive_ordered_audit() {
 #[test]
 fn desired_api_records_only_intent_and_blocks_active_profile_dependency() {
     let repository = Arc::new(Repository::new(usize::MAX));
+    repository.force_desired(1, DesiredMode::Disabled);
     let blocked_catalog = catalog().with_runtime_disable_blocked([ModuleId::Ciba]);
     let blocked_registry = RuntimeModuleRegistry::new(
         Arc::clone(&repository),
@@ -650,14 +648,14 @@ fn desired_api_records_only_intent_and_blocks_active_profile_dependency() {
     let accepted = block_on(registry.set_desired_mode(
         ModuleId::Ciba,
         DesiredMode::Enabled,
-        None,
+        Some(ModuleRevision::new(1)),
         Some("admin".to_owned()),
         Some("enable for test".to_owned()),
         SystemTime::UNIX_EPOCH,
     ))
     .unwrap();
     assert!(
-        matches!(accepted, CasOutcome::Applied(record) if record.revision == ModuleRevision::new(1))
+        matches!(accepted, CasOutcome::Applied(record) if record.revision == ModuleRevision::new(2))
     );
     assert_eq!(
         repository.event_types(),

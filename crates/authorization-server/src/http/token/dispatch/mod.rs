@@ -20,7 +20,7 @@ mod errors;
 mod pre_authorized;
 mod rate_limit;
 
-pub(crate) use self::client_auth::validate_token_request_profile_with_profile;
+pub(crate) use self::client_auth::validate_token_request_profile;
 use self::client_auth::{
     attestation_client_id_matches_form_hint, missing_client_authorization_code_holder_error,
     mtls_client_credentials_without_client_id, validate_token_client_enabled,
@@ -509,11 +509,9 @@ pub(crate) async fn token_with_service(
             }
         }
     };
-    if let Err(response) = validate_token_request_profile_with_profile(
-        issuance_config.authorization_server_profile(),
-        &client,
-        client.token_endpoint_auth_method.as_str(),
-    ) {
+    if let Err(response) =
+        validate_token_request_profile(&client, client.token_endpoint_auth_method.as_str())
+    {
         return response;
     }
     let modules = runtime_modules.snapshot();

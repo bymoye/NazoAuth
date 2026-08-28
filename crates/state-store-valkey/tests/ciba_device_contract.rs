@@ -4,8 +4,8 @@ use chrono::{TimeZone, Utc};
 use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
 use nazo_auth::{
-    CibaDecision, CibaPingNotification, CibaPingNotificationStatus, CibaPollCommit,
-    CibaRequestState, CibaService, CibaStatus, DeviceAuthorizationApproval,
+    CibaAuthenticationContext, CibaDecision, CibaPingNotification, CibaPingNotificationStatus,
+    CibaPollCommit, CibaRequestState, CibaService, CibaStatus, DeviceAuthorizationApproval,
     DeviceAuthorizationPayload, DeviceAuthorizationState, DeviceDecisionFailure,
     DeviceGrantService, DevicePollCommit, DevicePollFailure,
 };
@@ -17,9 +17,17 @@ use serde_json::json;
 
 static CIBA_PING_DELIVERY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn ciba_approval_context(auth_time: i64) -> CibaAuthenticationContext {
+    CibaAuthenticationContext {
+        auth_time,
+        amr: vec!["pwd".to_owned()],
+        oidc_sid: Some("ciba-contract-session".to_owned()),
+    }
+}
+
 async fn setup() -> Option<(ValkeyConnection, fred::prelude::Client)> {
     let url = std::env::var("VALKEY_URL").ok()?;
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .unwrap();
     let inspector = Builder::from_config(Config::from_url(&url).unwrap())
@@ -53,10 +61,10 @@ async fn ciba_cas_preserves_exact_key_payload_deadline_and_single_winner() {
     };
     let store = CibaStore::new(&connection);
     let auth_req_id = format!("ciba-{}", uuid::Uuid::now_v7());
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:ciba:{}",
         blake3::hash(auth_req_id.as_bytes()).to_hex()
-    );
+    ));
     let now = server_time(&inspector).await;
     let mut state = CibaRequestState {
         client_id: "client-a".to_owned(),
@@ -131,6 +139,7 @@ async fn ciba_cas_rejects_an_expired_authorization_without_mutating_state() {
     let stored = store.load(&auth_req_id).await.unwrap().unwrap();
     let mut replacement = state.clone();
     replacement.status = CibaStatus::Approved;
+    replacement.authentication_context = Some(ciba_approval_context(now));
     assert_eq!(
         store
             .replace_with_authorization_deadline(&auth_req_id, &stored, &replacement, Some(now))
@@ -164,7 +173,7 @@ async fn concurrent_approved_ciba_polls_consume_auth_req_id_once() {
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource".to_owned()],
         acr: None,
-        authentication_context: None,
+        authentication_context: Some(ciba_approval_context(now)),
         binding_message: None,
         issued_at: now,
         status: CibaStatus::Approved,
@@ -241,7 +250,12 @@ async fn ciba_decision_atomically_schedules_and_terminally_acks_ping_delivery() 
         "the core must allow a pre-persistence ping state while the adapter atomically binds auth_req_id"
     );
     CibaService::new(store.clone())
-        .decide(&auth_req_id, CibaDecision::Approve, Some(user_id), || now)
+        .decide(
+            &auth_req_id,
+            CibaDecision::Approve(ciba_approval_context(now)),
+            Some(user_id),
+            || now,
+        )
         .await
         .unwrap();
 
@@ -308,7 +322,12 @@ async fn expired_ciba_ping_is_failed_without_exposing_its_notification_token() {
         AtomicResult::Applied
     );
     CibaService::new(store.clone())
-        .decide(&auth_req_id, CibaDecision::Approve, Some(user_id), || now)
+        .decide(
+            &auth_req_id,
+            CibaDecision::Approve(ciba_approval_context(now)),
+            Some(user_id),
+            || now,
+        )
         .await
         .unwrap();
 
@@ -358,11 +377,12 @@ async fn device_creation_is_atomic_and_collision_leaves_no_orphan() {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(char::to_uppercase)
         .collect::<String>();
-    let user_key = format!(
+    let user_key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:device:user_code:{}",
         blake3::hash(normalized.as_bytes()).to_hex()
-    );
-    let device_key = format!("oauth:device:code:{device_hash}");
+    ));
+    let device_key =
+        nazo_valkey::test_support::state_storage_key(format!("oauth:device:code:{device_hash}"));
     let state = pending_device(Utc.timestamp_opt(1_000, 0).unwrap());
     inspector
         .set::<(), _, _>(&user_key, "occupied", None, None, false)

@@ -37,7 +37,6 @@ pub(crate) struct CibaHttpConfig {
     pub(crate) csrf_cookie_name: Box<str>,
     pub(crate) ciba_fapi_profile: bool,
     pub(crate) ciba_fapi2_hardening: bool,
-    pub(crate) authorization_server_profile: AuthorizationServerProfile,
 }
 
 impl From<&Settings> for CibaHttpConfig {
@@ -59,7 +58,6 @@ impl From<&Settings> for CibaHttpConfig {
                 .protocol
                 .ciba_security_profile
                 .requires_fapi2_hardening(),
-            authorization_server_profile: settings.protocol.authorization_server_profile,
         }
     }
 }

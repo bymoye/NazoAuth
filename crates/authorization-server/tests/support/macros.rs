@@ -94,7 +94,7 @@ macro_rules! client_row {
                 subject_type: $subject_type,
                 sector_identifier_uri: $sector_uri,
                 sector_identifier_host: $sector_host,
-                security_policy: None,
+                security_policy: nazo_auth::ClientSecurityPolicy::default(),
             },
             require_mtls_bound_tokens: $require_mtls,
             is_active: $is_active,

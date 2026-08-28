@@ -30,7 +30,7 @@ where
             .catalog
             .effective_disable_policy(module_id)
             .ok_or(RegistryError::MissingCatalogSpec(module_id))?;
-        let enabling = mode.resolve(self.catalog.inherited_enabled(module_id));
+        let enabling = mode.is_enabled();
         let snapshot = self.snapshot();
         let mut required_revisions = Vec::new();
         if enabling {
@@ -41,11 +41,7 @@ where
                     .await
                     .map_err(RegistryError::Repository)?
                     .ok_or(RegistryError::MissingDesiredState(*dependency))?;
-                if !dependency_desired
-                    .mode
-                    .resolve(self.catalog.inherited_enabled(*dependency))
-                    || !snapshot.admits(*dependency)
-                {
+                if !dependency_desired.mode.is_enabled() || !snapshot.admits(*dependency) {
                     return Err(RegistryError::DependencyUnavailable {
                         module_id,
                         dependency: *dependency,
@@ -72,11 +68,7 @@ where
                     .await
                     .map_err(RegistryError::Repository)?
                     .ok_or(RegistryError::MissingDesiredState(dependent.id))?;
-                if dependent_desired
-                    .mode
-                    .resolve(self.catalog.inherited_enabled(dependent.id))
-                    || snapshot.admits(dependent.id)
-                {
+                if dependent_desired.mode.is_enabled() || snapshot.admits(dependent.id) {
                     return Err(RegistryError::ActiveDependent {
                         module_id,
                         dependent: dependent.id,
@@ -92,9 +84,12 @@ where
             .repository
             .read_desired(module_id)
             .await
-            .map_err(RegistryError::Repository)?;
-        if current.as_ref().map(|record| record.revision) != expected_revision {
-            return Ok(CasOutcome::Stale { current });
+            .map_err(RegistryError::Repository)?
+            .ok_or(RegistryError::MissingDesiredState(module_id))?;
+        if Some(current.revision) != expected_revision {
+            return Ok(CasOutcome::Stale {
+                current: Some(current),
+            });
         }
         let next_revision = ModuleRevision::new(match expected_revision {
             None => 1,

@@ -9,9 +9,8 @@ use crate::OidcClaimRequest;
 ///
 /// OIDC Core 12.2 requires a refreshed ID Token to retain the original
 /// authentication context (notably `auth_time`) and the original claim
-/// contract.  This state is optional on the domain model so rows written
-/// before the migration remain readable; callers must not synthesize a
-/// replacement context when it is absent.
+/// contract. Every current refresh token carries this state; persistence rejects
+/// nonconforming rows before they enter the domain.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RefreshTokenAuthenticationContext {
     pub version: u16,
@@ -76,7 +75,7 @@ pub struct RefreshToken {
     pub dpop_jkt: Option<String>,
     pub mtls_x5t_s256: Option<String>,
     pub client_attestation_jkt: Option<String>,
-    pub authentication_context: Option<RefreshTokenAuthenticationContext>,
+    pub authentication_context: RefreshTokenAuthenticationContext,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,7 +102,7 @@ pub struct NewRefreshToken {
     pub dpop_jkt: Option<String>,
     pub mtls_x5t_s256: Option<String>,
     pub client_attestation_jkt: Option<String>,
-    pub authentication_context: Option<RefreshTokenAuthenticationContext>,
+    pub authentication_context: RefreshTokenAuthenticationContext,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

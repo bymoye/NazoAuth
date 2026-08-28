@@ -236,7 +236,7 @@ impl TokenManagementOperations for ServerTokenManagementOperations {
                     tracing::warn!(%error, "failed to inspect token state");
                     TokenManagementError::InspectionUnavailable
                 })?;
-            let client_policy = self.config.profile.effective_client_policy(&client);
+            let client_policy = &client.security_policy;
             if signed_response_requested || client_policy.require_signed_introspection_response {
                 return self
                     .protected_introspection(&client, &inspection)

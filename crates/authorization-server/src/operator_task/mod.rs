@@ -7,8 +7,7 @@
 //! ```text
 //! 1. parse schema / size / closed operation enum (reject unknown fields)
 //! 2. look up the controller kid/public key BY deployment_id in the
-//!    Controller Registry repository (D01/D02 authority; the old
-//!    mounted-file controller.pub trust path is deleted)
+//!    Controller Registry repository (D01/D02 authority)
 //! 3. verify the Ed25519 signature over the canonical bytes
 //! 4. key expiry/revocation at first admission (the registry lookup only
 //!    returns active, unexpired slots)

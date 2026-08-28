@@ -8,10 +8,9 @@ use std::{
     time::Duration,
 };
 
-// Public test-only RSA fixture from jsonwebtoken 11.0.0's test corpus. It has
-// no deployment use and is retained here solely as a fixed PEM 3-era PKCS#8
-// representation for parser compatibility.
-const PEM3_HISTORICAL_PKCS8_FIXTURE: &str = r"-----BEGIN PRIVATE KEY-----
+// Public test-only RSA fixture from jsonwebtoken's test corpus. It has no
+// deployment use and provides a fixed PKCS#8 representation for the parser contract.
+const FIXED_PKCS8_FIXTURE: &str = r"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDJETqse41HRBsc
 7cfcq3ak4oZWFCoZlcic525A3FfO4qW9BMtRO/iXiyCCHn8JhiL9y8j5JdVP2Q9Z
 IpfElcFd3/guS9w+5RqQGgCR+H56IVUyHZWtTJbKPcwWXQdNUX0rBFcsBzCRESJL
@@ -73,8 +72,8 @@ async fn load_or_create_keyset_creates_keyset_when_no_keyset_exists() {
 }
 
 #[tokio::test]
-async fn concurrent_upgrade_loaders_share_one_complete_request_object_recipient_key() {
-    let keys_dir = temp_keys_dir("concurrent_request_object_key_upgrade");
+async fn current_keyset_rejects_missing_request_object_recipient_key() {
+    let keys_dir = temp_keys_dir("missing_request_object_key");
     tokio::fs::create_dir_all(&keys_dir).await.unwrap();
     let settings = test_settings(keys_dir.clone());
     create_new_keyset(&settings).await.unwrap();
@@ -83,55 +82,43 @@ async fn concurrent_upgrade_loaders_share_one_complete_request_object_recipient_
         .unwrap();
     let keyset_path = keys_dir.join("keyset.json");
 
-    let (first, second) = tokio::join!(
-        try_load_keyset(&settings, &keyset_path),
-        try_load_keyset(&settings, &keyset_path)
-    );
-    let first = first.unwrap().expect("first loader");
-    let second = second.unwrap().expect("second loader");
-    let persisted = tokio::fs::read(keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE))
-        .await
-        .unwrap();
+    let error = match try_load_keyset(&settings, &keyset_path).await {
+        Ok(_) => panic!("a current keyset must not repair missing recipient key material"),
+        Err(error) => error,
+    };
     let _ = tokio::fs::remove_dir_all(&keys_dir).await;
 
-    assert_eq!(
-        first.request_object_decryption_key,
-        second.request_object_decryption_key
-    );
-    assert_eq!(first.request_object_decryption_key, persisted);
-    assert_eq!(
-        first.request_object_encryption_jwk,
-        second.request_object_encryption_jwk
+    assert!(
+        format!("{error:#}").contains(REQUEST_OBJECT_ENCRYPTION_KEY_FILE),
+        "unexpected missing request-object key error: {error:#}"
     );
 }
 
 #[tokio::test]
-async fn pem3_pkcs8_request_object_key_remains_readable_without_rewrite() {
-    let legacy_keys_dir = temp_keys_dir("pem3_request_object_compatibility");
-    tokio::fs::create_dir_all(&legacy_keys_dir).await.unwrap();
-    let legacy_settings = test_settings(legacy_keys_dir.clone());
-    let legacy_path = legacy_keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
-    let fixture = PEM3_HISTORICAL_PKCS8_FIXTURE.as_bytes();
-    tokio::fs::write(&legacy_path, fixture).await.unwrap();
+async fn pkcs8_request_object_key_is_read_without_rewrite() {
+    let keys_dir = temp_keys_dir("pkcs8_request_object");
+    tokio::fs::create_dir_all(&keys_dir).await.unwrap();
+    let settings = test_settings(keys_dir.clone());
+    let key_path = keys_dir.join(REQUEST_OBJECT_ENCRYPTION_KEY_FILE);
+    let fixture = FIXED_PKCS8_FIXTURE.as_bytes();
+    tokio::fs::write(&key_path, fixture).await.unwrap();
 
     let expected_jwk = request_object_encryption_jwk(fixture).unwrap();
-    ensure_request_object_encryption_key(&legacy_settings)
+    ensure_request_object_encryption_key(&settings)
         .await
         .unwrap();
-    let loaded = load_request_object_decryption_key(&legacy_settings)
-        .await
-        .unwrap();
-    let persisted = tokio::fs::read(&legacy_path).await.unwrap();
+    let loaded = load_request_object_decryption_key(&settings).await.unwrap();
+    let persisted = tokio::fs::read(&key_path).await.unwrap();
     let loaded_jwk = request_object_encryption_jwk(&loaded).unwrap();
-    let _ = tokio::fs::remove_dir_all(&legacy_keys_dir).await;
+    let _ = tokio::fs::remove_dir_all(&keys_dir).await;
 
     assert_eq!(
         persisted, fixture,
-        "existing historical PEM must not be rewritten"
+        "existing PKCS#8 key must not be rewritten"
     );
     assert_eq!(
         loaded, fixture,
-        "PEM 4 must read the historical PKCS#8 bytes"
+        "the parser must return the stored PKCS#8 bytes"
     );
     for field in ["n", "e", "kid"] {
         assert_eq!(loaded_jwk[field], expected_jwk[field], "stable JWK {field}");
@@ -159,6 +146,9 @@ async fn load_or_create_keyset_prepublishes_next_local_key_before_rotation_deadl
     let mut settings = test_settings(keys_dir.clone());
     settings.rotation_interval = chrono::Duration::seconds(10);
     settings.prepublish_window = chrono::Duration::seconds(3);
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     write_local_key_entry(
         &keys_dir,
         "active",
@@ -170,10 +160,12 @@ async fn load_or_create_keyset_prepublishes_next_local_key_before_rotation_deadl
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [{
                 "kid": "active",
                 "alg": "RS256",
+                "backend": "local-pem",
                 "file": "active.pem",
                 "created_at": timestamp(Utc::now() - chrono::Duration::seconds(8)),
                 "retire_at": null
@@ -206,20 +198,20 @@ async fn load_or_create_keyset_prepublishes_next_local_key_before_rotation_deadl
 }
 
 #[tokio::test]
-async fn load_or_create_keyset_records_missing_active_created_at_without_rotating() {
+async fn load_or_create_keyset_rejects_missing_active_created_at() {
     let keys_dir = temp_keys_dir("automatic_missing_created_at");
     tokio::fs::create_dir_all(&keys_dir).await.unwrap();
-    let mut settings = test_settings(keys_dir.clone());
-    settings.rotation_interval = chrono::Duration::seconds(10);
-    settings.prepublish_window = chrono::Duration::seconds(3);
+    let settings = test_settings(keys_dir.clone());
     write_local_key_entry(&keys_dir, "active", "RS256", "active.pem", Utc::now()).await;
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [{
                 "kid": "active",
                 "alg": "RS256",
+                "backend": "local-pem",
                 "file": "active.pem",
                 "retire_at": null
             }]
@@ -229,18 +221,13 @@ async fn load_or_create_keyset_records_missing_active_created_at_without_rotatin
     .await
     .unwrap();
 
-    let keyset = load_or_create_keyset(&settings).await.unwrap();
-    let payload: Value = serde_json::from_str(
-        &tokio::fs::read_to_string(keys_dir.join("keyset.json"))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let error = match load_or_create_keyset(&settings).await {
+        Ok(_) => panic!("current keyset entries must include created_at"),
+        Err(error) => error,
+    };
     let _ = tokio::fs::remove_dir_all(&keys_dir).await;
 
-    assert_eq!(keyset.active_kid, "active");
-    assert!(payload["keys"][0]["created_at"].as_str().is_some());
-    assert_eq!(payload["keys"].as_array().unwrap().len(), 2);
+    assert!(format!("{error:#}").contains("missing created_at"));
 }
 
 #[tokio::test]
@@ -250,6 +237,9 @@ async fn load_or_create_keyset_due_without_candidate_prepublishes_without_activa
     let mut settings = test_settings(keys_dir.clone());
     settings.rotation_interval = chrono::Duration::seconds(10);
     settings.prepublish_window = chrono::Duration::seconds(3);
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     write_local_key_entry(
         &keys_dir,
         "active",
@@ -261,10 +251,12 @@ async fn load_or_create_keyset_due_without_candidate_prepublishes_without_activa
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [{
                 "kid": "active",
                 "alg": "RS256",
+                "backend": "local-pem",
                 "file": "active.pem",
                 "created_at": timestamp(Utc::now() - chrono::Duration::seconds(11)),
                 "retire_at": null
@@ -303,6 +295,9 @@ async fn load_or_create_keyset_activates_prepublished_key_after_window_and_grace
     let mut settings = test_settings(keys_dir.clone());
     settings.rotation_interval = chrono::Duration::seconds(10);
     settings.prepublish_window = chrono::Duration::seconds(3);
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     write_local_key_entry(
         &keys_dir,
         "active",
@@ -322,11 +317,13 @@ async fn load_or_create_keyset_activates_prepublished_key_after_window_and_grace
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
                 {
                     "kid": "active",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "active.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(11)),
                     "retire_at": null
@@ -334,6 +331,7 @@ async fn load_or_create_keyset_activates_prepublished_key_after_window_and_grace
                 {
                     "kid": "next",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "next.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(4)),
                     "retire_at": null
@@ -379,6 +377,9 @@ async fn load_or_create_keyset_activates_oldest_local_candidate_and_ignores_exte
     let mut settings = test_settings(keys_dir.clone());
     settings.rotation_interval = chrono::Duration::seconds(10);
     settings.prepublish_window = chrono::Duration::seconds(3);
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     write_local_key_entry(
         &keys_dir,
         "active",
@@ -406,11 +407,13 @@ async fn load_or_create_keyset_activates_oldest_local_candidate_and_ignores_exte
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
                 {
                     "kid": "active",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "active.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(11)),
                     "retire_at": null
@@ -431,6 +434,7 @@ async fn load_or_create_keyset_activates_oldest_local_candidate_and_ignores_exte
                 {
                     "kid": "next-old",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "next-old.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(5)),
                     "retire_at": null
@@ -438,6 +442,7 @@ async fn load_or_create_keyset_activates_oldest_local_candidate_and_ignores_exte
                 {
                     "kid": "next-new",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "next-new.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(4)),
                     "retire_at": null
@@ -479,6 +484,9 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
     // under coverage instrumentation, where parsing the generated RSA keys can
     // take several seconds before lifecycle maintenance observes the clock.
     settings.prepublish_window = chrono::Duration::seconds(60);
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     write_local_key_entry(
         &keys_dir,
         "active",
@@ -498,11 +506,13 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
                 {
                     "kid": "active",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "active.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(121)),
                     "retire_at": null
@@ -510,6 +520,7 @@ async fn load_or_create_keyset_does_not_activate_fresh_prepublished_key() {
                 {
                     "kid": "next",
                     "alg": "RS256",
+                    "backend": "local-pem",
                     "file": "next.pem",
                     "created_at": timestamp(Utc::now() - chrono::Duration::seconds(1)),
                     "retire_at": null
@@ -575,21 +586,35 @@ async fn keyset_read_and_json_parse_failures_are_reported() {
 }
 
 #[tokio::test]
-async fn keyset_schema_requires_active_kid_keys_and_entry_kid() {
+async fn keyset_schema_requires_current_version_and_required_identity_fields() {
     let cases = [
         (
+            "missing_schema_version",
+            json!({"active_kid": "active", "keys": []}),
+            "missing schema_version",
+        ),
+        (
+            "unsupported_schema_version",
+            json!({"schema_version": "nazo.keyset.v0", "active_kid": "active", "keys": []}),
+            "schema_version must be nazo.keyset.v1",
+        ),
+        (
             "missing_active_kid",
-            json!({"keys": []}),
+            json!({"schema_version": KEYSET_SCHEMA_VERSION, "keys": []}),
             "missing active_kid",
         ),
         (
             "missing_keys",
-            json!({"active_kid": "active"}),
+            json!({"schema_version": KEYSET_SCHEMA_VERSION, "active_kid": "active"}),
             "missing keys array",
         ),
         (
             "missing_entry_kid",
-            json!({"active_kid": "active", "keys": [{"file": "active.pem"}]}),
+            json!({
+                "schema_version": KEYSET_SCHEMA_VERSION,
+                "active_kid": "active",
+                "keys": [{"file": "active.pem"}]
+            }),
             "entry missing kid",
         ),
     ];
@@ -634,7 +659,9 @@ async fn created_keyset_uses_oidc_mandatory_default_signing_alg() {
 
     assert!(keyset.active_kid.starts_with("rs256-"));
     assert_eq!(keyset.active_alg, jsonwebtoken::Algorithm::RS256);
+    assert_eq!(payload["schema_version"], KEYSET_SCHEMA_VERSION);
     assert_eq!(payload["keys"][0]["alg"], "RS256");
+    assert_eq!(payload["keys"][0]["backend"], "local-pem");
     assert_eq!(
         snapshot_from_loaded(&keyset).jwks()["keys"][0]["alg"],
         "RS256"
@@ -642,8 +669,8 @@ async fn created_keyset_uses_oidc_mandatory_default_signing_alg() {
 }
 
 #[tokio::test]
-async fn load_or_create_keyset_backfills_oidc_default_rs256_signing_key() {
-    let keys_dir = temp_keys_dir("backfill_rs256_default");
+async fn load_or_create_keyset_ensures_oidc_default_rs256_signing_key() {
+    let keys_dir = temp_keys_dir("ensure_rs256_default");
     tokio::fs::create_dir_all(&keys_dir).await.unwrap();
     write_local_key_entry(
         &keys_dir,
@@ -653,13 +680,19 @@ async fn load_or_create_keyset_backfills_oidc_default_rs256_signing_key() {
         Utc::now(),
     )
     .await;
+    let settings = test_settings(keys_dir.clone());
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active-ps256",
             "keys": [{
                 "kid": "active-ps256",
                 "alg": "PS256",
+                "backend": "local-pem",
                 "file": "active-ps256.pem",
                 "created_at": timestamp(Utc::now()),
                 "retire_at": null
@@ -669,7 +702,6 @@ async fn load_or_create_keyset_backfills_oidc_default_rs256_signing_key() {
     )
     .await
     .unwrap();
-    let settings = test_settings(keys_dir.clone());
 
     let keyset = load_or_create_keyset(&settings).await.unwrap();
     let keyset_json = tokio::fs::read_to_string(keys_dir.join("keyset.json"))
@@ -713,7 +745,7 @@ async fn load_or_create_keyset_backfills_oidc_default_rs256_signing_key() {
         keyset
             .selected_key(SigningPurpose::IdToken, jsonwebtoken::Algorithm::RS256)
             .is_some(),
-        "the backfilled RS256 private key must remain available in the loaded snapshot"
+        "the ensured RS256 private key must remain available in the loaded snapshot"
     );
 }
 
@@ -738,10 +770,11 @@ async fn duplicate_keyset_kids_are_rejected() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "duplicate",
             "keys": [
-                {"kid": "duplicate", "file": "first.pem", "retire_at": null},
-                {"kid": "duplicate", "file": "second.pem", "retire_at": null}
+                {"kid": "duplicate", "alg": "EdDSA", "backend": "local-pem", "file": "first.pem", "created_at": timestamp(Utc::now()), "retire_at": null},
+                {"kid": "duplicate", "alg": "EdDSA", "backend": "local-pem", "file": "second.pem", "created_at": timestamp(Utc::now()), "retire_at": null}
             ]
         }))
         .unwrap(),
@@ -756,7 +789,7 @@ async fn duplicate_keyset_kids_are_rejected() {
 
     match result {
         Ok(_) => panic!("duplicate keyset kid should be rejected"),
-        Err(error) => assert!(format!("{error:#}").contains("duplicate kid duplicate")),
+        Err(error) => assert!(format!("{error:#}").contains("duplicate key kid duplicate")),
     }
 }
 
@@ -774,10 +807,11 @@ async fn live_previous_key_entry_must_load_successfully() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
-                {"kid": "active", "file": "active.pem", "retire_at": null},
-                {"kid": "previous", "file": "missing.pem", "retire_at": null}
+                {"kid": "active", "alg": "EdDSA", "backend": "local-pem", "file": "active.pem", "created_at": timestamp(Utc::now()), "retire_at": null},
+                {"kid": "previous", "alg": "EdDSA", "backend": "local-pem", "file": "missing.pem", "created_at": timestamp(Utc::now()), "retire_at": null}
             ]
         }))
         .unwrap(),
@@ -804,15 +838,23 @@ async fn retired_previous_key_entry_is_skipped() {
     )
     .await
     .unwrap();
+    let settings = test_settings(keys_dir.clone());
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
-                {"kid": "active", "file": "active.pem", "retire_at": null},
+                {"kid": "active", "alg": "EdDSA", "backend": "local-pem", "file": "active.pem", "created_at": timestamp(Utc::now()), "retire_at": null},
                 {
                     "kid": "previous",
+                    "alg": "EdDSA",
+                    "backend": "local-pem",
                     "file": "missing.pem",
+                    "created_at": timestamp(Utc::now()),
                     "retire_at": "2000-01-01T00:00:00Z"
                 }
             ]
@@ -821,7 +863,6 @@ async fn retired_previous_key_entry_is_skipped() {
     )
     .await
     .unwrap();
-    let settings = test_settings(keys_dir.clone());
     let keyset_path = keys_dir.join("keyset.json");
 
     let keyset = try_load_keyset(&settings, &keyset_path)
@@ -850,14 +891,18 @@ async fn loader_distinguishes_same_algorithm_prepublished_from_auxiliary_active_
         &external_material.private_pkcs8_der,
     )
     .unwrap();
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     write_json_atomic(
         &keys_dir.join("keyset.json"),
         &json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid":"active",
             "keys":[
-                {"kid":"active","alg":"EdDSA","file":"active.pem","created_at":timestamp(now),"retire_at":null},
-                {"kid":"candidate","alg":"EdDSA","file":"candidate.pem","created_at":timestamp(now),"retire_at":null},
-                {"kid":"auxiliary","alg":"RS256","file":"auxiliary.pem","created_at":timestamp(now),"retire_at":null},
+                {"kid":"active","alg":"EdDSA","backend":"local-pem","file":"active.pem","created_at":timestamp(now),"retire_at":null},
+                {"kid":"candidate","alg":"EdDSA","backend":"local-pem","file":"candidate.pem","created_at":timestamp(now),"retire_at":null},
+                {"kid":"auxiliary","alg":"RS256","backend":"local-pem","file":"auxiliary.pem","created_at":timestamp(now),"retire_at":null},
                 {"kid":"external-candidate","alg":"ES256","backend":"external-command","key_ref":"kms://candidate","public_jwk":external_public_jwk,"created_at":timestamp(now),"retire_at":null}
             ]
         }),
@@ -927,10 +972,11 @@ async fn malformed_retire_at_in_keyset_fails_closed() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
-                {"kid": "active", "file": "active.pem", "retire_at": null},
-                {"kid": "previous", "file": "previous.pem", "retire_at": "not-rfc3339"}
+                {"kid": "active", "alg": "EdDSA", "backend": "local-pem", "file": "active.pem", "created_at": timestamp(Utc::now()), "retire_at": null},
+                {"kid": "previous", "alg": "EdDSA", "backend": "local-pem", "file": "previous.pem", "created_at": timestamp(Utc::now()), "retire_at": "not-rfc3339"}
             ]
         }))
         .unwrap(),
@@ -966,11 +1012,15 @@ async fn retired_active_key_entry_is_rejected() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
                 {
                     "kid": "active",
+                    "alg": "EdDSA",
+                    "backend": "local-pem",
                     "file": "active.pem",
+                    "created_at": timestamp(Utc::now()),
                     "retire_at": "2000-01-01T00:00:00Z"
                 }
             ]
@@ -1002,11 +1052,15 @@ async fn active_key_with_future_retirement_metadata_is_rejected() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "active",
             "keys": [
                 {
                     "kid": "active",
+                    "alg": "EdDSA",
+                    "backend": "local-pem",
                     "file": "active.pem",
+                    "created_at": timestamp(Utc::now()),
                     "retire_at": "2999-01-01T00:00:00Z"
                 }
             ]
@@ -1044,9 +1098,10 @@ async fn active_kid_must_reference_a_live_signing_key() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "missing-active",
             "keys": [
-                {"kid": "previous", "file": "previous.pem", "retire_at": null}
+                {"kid": "previous", "alg": "EdDSA", "backend": "local-pem", "file": "previous.pem", "created_at": timestamp(Utc::now()), "retire_at": null}
             ]
         }))
         .unwrap(),
@@ -1063,7 +1118,7 @@ async fn active_kid_must_reference_a_live_signing_key() {
     let _ = tokio::fs::remove_dir_all(&keys_dir).await;
 
     assert!(
-        format!("{error:#}").contains("active_kid does not reference a live key"),
+        format!("{error:#}").contains("active key missing-active does not exist"),
         "unexpected active kid error: {error:#}"
     );
 }
@@ -1094,11 +1149,14 @@ async fn local_key_entry_rejects_invalid_pem_and_algorithm_mismatch() {
         tokio::fs::write(
             keys_dir.join("keyset.json"),
             serde_json::to_string_pretty(&json!({
+                "schema_version": KEYSET_SCHEMA_VERSION,
                 "active_kid": "active",
                 "keys": [{
                     "kid": "active",
                     "alg": signing_algorithm_name(alg).unwrap(),
+                    "backend": "local-pem",
                     "file": "active.pem",
+                    "created_at": timestamp(Utc::now()),
                     "retire_at": null
                 }]
             }))
@@ -1138,6 +1196,7 @@ async fn active_external_command_key_requires_signer_command() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "external-active",
             "keys": [{
                 "kid": "external-active",
@@ -1145,6 +1204,7 @@ async fn active_external_command_key_requires_signer_command() {
                 "backend": "external-command",
                 "key_ref": "kms://tenant/signing/external-active",
                 "public_jwk": public_jwk,
+                "created_at": timestamp(Utc::now()),
                 "retire_at": null
             }]
         }))
@@ -1169,26 +1229,23 @@ async fn external_public_jwk_metadata_is_bound_to_keyset_entry() {
     let active_der = generate_key_material(jsonwebtoken::Algorithm::RS256)
         .unwrap()
         .private_pkcs8_der;
-    let mut public_jwk = public_jwk_from_private_der(
+    let public_jwk = public_jwk_from_private_der(
         "external-active",
         jsonwebtoken::Algorithm::RS256,
         &active_der,
     )
     .unwrap();
-    let object = public_jwk.as_object_mut().unwrap();
-    object.remove("kid");
-    object.remove("alg");
-    object.remove("use");
-
-    let inherited = external_public_jwk(&json!({
-        "kid": "external-active",
-        "alg": "RS256",
-        "public_jwk": public_jwk
-    }))
-    .unwrap();
-    assert_eq!(inherited["kid"], "external-active");
-    assert_eq!(inherited["alg"], "RS256");
-    assert_eq!(inherited["use"], "sig");
+    for field in ["kid", "alg", "use"] {
+        let mut missing = public_jwk.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        let error = external_public_jwk(&json!({
+            "kid": "external-active",
+            "alg": "RS256",
+            "public_jwk": missing
+        }))
+        .expect_err("persisted public JWK metadata must be explicit");
+        assert!(format!("{error:#}").contains(&format!("missing {field}")));
+    }
 
     for (label, public_jwk, expected) in [
         (
@@ -1267,6 +1324,7 @@ async fn external_command_signer_produces_verifiable_jwt() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "external-active",
             "keys": [{
                 "kid": "external-active",
@@ -1274,6 +1332,7 @@ async fn external_command_signer_produces_verifiable_jwt() {
                 "backend": "external-command",
                 "key_ref": "test-ed25519",
                 "public_jwk": public_jwk,
+                "created_at": timestamp(Utc::now()),
                 "retire_at": null
             }]
         }))
@@ -1283,6 +1342,9 @@ async fn external_command_signer_produces_verifiable_jwt() {
     .unwrap();
     let mut settings = test_settings(keys_dir.clone());
     settings.external_command = signer_command;
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     let keyset_path = keys_dir.join("keyset.json");
     let keyset = try_load_keyset(&settings, &keyset_path)
         .await
@@ -1331,6 +1393,7 @@ async fn external_command_signer_signature_must_match_active_public_jwk() {
     tokio::fs::write(
         keys_dir.join("keyset.json"),
         serde_json::to_string_pretty(&json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid": "external-active",
             "keys": [{
                 "kid": "external-active",
@@ -1338,6 +1401,7 @@ async fn external_command_signer_signature_must_match_active_public_jwk() {
                 "backend": "external-command",
                 "key_ref": "kms://tenant/signing/external-active",
                 "public_jwk": public_jwk,
+                "created_at": timestamp(Utc::now()),
                 "retire_at": null
             }]
         }))
@@ -1347,6 +1411,9 @@ async fn external_command_signer_signature_must_match_active_public_jwk() {
     .unwrap();
     let mut settings = test_settings(keys_dir.clone());
     settings.external_command = signer_command;
+    ensure_request_object_encryption_key(&settings)
+        .await
+        .unwrap();
     let keyset_path = keys_dir.join("keyset.json");
     let keyset = try_load_keyset(&settings, &keyset_path)
         .await

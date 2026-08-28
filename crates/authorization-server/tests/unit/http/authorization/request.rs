@@ -361,14 +361,15 @@ fn authorization_policy_enforces_runtime_modules_and_extracts_credential_ids() {
     );
     assert!(credential_configuration_ids(&json!({})).is_empty());
 
-    let mut state = reauth_nonce_state_with_valkey(disconnected_valkey_client());
-    {
-        let settings = Arc::make_mut(&mut state.settings);
-        settings.modules.enable_authorization_details = true;
-        settings.modules.enable_native_sso = true;
-    }
+    let state = reauth_nonce_state_with_valkey(disconnected_valkey_client());
     let dependencies =
         crate::http::authorization::test_support::TestAuthorizationDependencies::new(&state);
+    let required_modules = [
+        nazo_runtime_modules::ModuleId::RequestObjects,
+        nazo_runtime_modules::ModuleId::AuthorizationDetails,
+        nazo_runtime_modules::ModuleId::Jarm,
+        nazo_runtime_modules::ModuleId::NativeSso,
+    ];
     for (module, parameters, expected_error) in [
         (
             nazo_runtime_modules::ModuleId::RequestObjects,
@@ -392,6 +393,7 @@ fn authorization_policy_enforces_runtime_modules_and_extracts_credential_ids() {
         ),
     ] {
         let mut context = dependencies.context();
+        context.modules.accepting.extend(required_modules);
         assert!(
             context.modules.accepting.remove(&module),
             "{module:?} must be enabled by the test fixture"
@@ -405,9 +407,9 @@ fn authorization_policy_enforces_runtime_modules_and_extracts_credential_ids() {
         );
     }
 
-    assert!(
-        runtime_authorization_capability_error(&dependencies.context(), &HashMap::new()).is_none()
-    );
+    let mut context = dependencies.context();
+    context.modules.accepting.extend(required_modules);
+    assert!(runtime_authorization_capability_error(&context, &HashMap::new()).is_none());
 }
 
 async fn live_reauth_nonce_state() -> Option<TestInfrastructure> {

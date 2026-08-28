@@ -5,11 +5,12 @@ use std::{path::Path, sync::Arc};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diesel::sql_query;
 use diesel_async::RunQueryDsl;
+use nazo_auth::SigningPurpose;
 use nazo_digital_credentials::{
     CertificateRevocationPolicy, CredentialFormat, CredentialSignInput, CredentialSignerPort,
     DcqlQuery, EphemeralEncryptionKey, HolderBinding, VcIssuerTrustPolicy, encrypt_ecdh_es,
 };
-use nazo_key_management::{KeyManager, KeySettings};
+use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
 use nazo_openid4vc_http_actix::{
     CreatePresentationRequest, PresentationOperations, PresentationResponseBody,
     PresentationResponseInput,
@@ -42,8 +43,42 @@ async fn fixture_crypto_with_dns(root: &Path, include_dns: bool) -> Openid4vcCre
     tokio::fs::create_dir_all(root)
         .await
         .expect("fixture key directory should be created");
+    let settings = KeySettings {
+        keys_dir: root.to_owned(),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(30),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::hours(1),
+    };
+    KeyManager::load_or_create(settings.clone())
+        .await
+        .expect("fixture key store should initialize");
+    let signing_kid = KeyManager::register_local(
+        &settings,
+        LocalKeyRegistration {
+            algorithm: jsonwebtoken::Algorithm::ES256,
+            purposes: [
+                SigningPurpose::Credential,
+                SigningPurpose::PresentationRequest,
+            ]
+            .into_iter()
+            .collect(),
+        },
+    )
+    .await
+    .expect("fixture signing key should register");
+    let signing_record = KeyManager::list_keys(&settings)
+        .await
+        .expect("fixture keys should list")
+        .into_iter()
+        .find(|record| record.kid == signing_kid)
+        .expect("registered fixture signing key should exist");
+    let signing_key_pem = tokio::fs::read_to_string(root.join(signing_record.locator))
+        .await
+        .expect("registered fixture signing key PEM should load");
     let signing_key =
-        KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("fixture P-256 signing key");
+        KeyPair::from_pem(&signing_key_pem).expect("registered fixture P-256 signing key");
     let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("fixture CA key");
     let mut ca_params = CertificateParams::default();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -65,37 +100,9 @@ async fn fixture_crypto_with_dns(root: &Path, include_dns: bool) -> Openid4vcCre
         .signed_by(&signing_key, &ca)
         .expect("fixture leaf certificate");
 
-    let key_file = root.join("openid4vp-signing.pem");
-    tokio::fs::write(&key_file, signing_key.serialize_pem())
+    let key_manager = KeyManager::load_or_create(settings)
         .await
-        .expect("fixture signing key should be written");
-    let keyset = json!({
-        "active_kid": "openid4vp-test",
-        "keys": [{
-            "kid": "openid4vp-test",
-            "alg": "ES256",
-            "file": "openid4vp-signing.pem",
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "retire_at": null,
-            "purposes": ["credential", "presentation_request"]
-        }]
-    });
-    tokio::fs::write(
-        root.join("keyset.json"),
-        serde_json::to_vec(&keyset).expect("fixture keyset JSON"),
-    )
-    .await
-    .expect("fixture keyset should be written");
-    let key_manager = KeyManager::load_or_create(KeySettings {
-        keys_dir: root.to_owned(),
-        external_command: Vec::new(),
-        external_timeout: std::time::Duration::from_secs(1),
-        rotation_interval: chrono::Duration::days(30),
-        prepublish_window: chrono::Duration::days(1),
-        verification_grace: chrono::Duration::hours(1),
-    })
-    .await
-    .expect("fixture key manager should load");
+        .expect("fixture key manager should load");
     let chain = format!("{}{}", leaf.pem(), ca.pem());
     Openid4vcCredentialCrypto::new_with_policies(
         key_manager,
@@ -125,11 +132,17 @@ async fn operations_with_crypto(
         crate::settings::Settings::from_config(&crate::config::ConfigSource::default())
             .expect("fixture settings should load");
     settings.modules.enable_openid4vp_verifier = enabled;
-    let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
-        pool.clone(),
-        &settings,
-    )
-    .expect("fixture runtime module registry should load");
+    let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
+    if enabled {
+        active_modules.insert(nazo_runtime_modules::ModuleId::Openid4vpVerifier);
+    }
+    let runtime =
+        crate::runtime_modules::test_support::runtime_module_registry_with_modules_for_test(
+            pool.clone(),
+            &settings,
+            active_modules,
+        )
+        .expect("fixture runtime module registry should load");
     ServerPresentationOperations::new(
         pool,
         crate::domain::tenancy::DEFAULT_TENANT_ID,
@@ -184,7 +197,7 @@ fn create_input(
 
 fn evidence_context() -> nazo_operator_protocol::Openid4vpEvidenceContext {
     nazo_operator_protocol::Openid4vpEvidenceContext {
-        run_jti: "run-jti-1".to_owned(),
+        run_jti: Uuid::now_v7().to_string(),
         artifact_sha256: "a".repeat(64),
         matrix_sha256: "b".repeat(64),
         suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),

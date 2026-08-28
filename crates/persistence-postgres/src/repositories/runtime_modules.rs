@@ -15,14 +15,6 @@ use crate::DbPool;
 
 pub type RuntimeModuleEventPage = ModuleEventPage;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeDefaultPolicyMigration {
-    pub previous_version: i32,
-    pub current_version: i32,
-    pub materialized_inherited_rows: usize,
-    pub initialized_empty_state: bool,
-}
-
 #[derive(Clone)]
 pub struct RuntimeModuleRepository {
     pool: DbPool,
@@ -47,13 +39,6 @@ impl RuntimeModuleRepository {
         limit: i64,
     ) -> Result<RuntimeModuleEventPage, RepositoryError> {
         events::page_events(self, offset, limit).await
-    }
-
-    pub async fn migrate_composable_default_policy(
-        &self,
-        legacy_inherited_enabled: &std::collections::BTreeSet<ModuleId>,
-    ) -> Result<RuntimeDefaultPolicyMigration, RepositoryError> {
-        desired::migrate_composable_default_policy(self, legacy_inherited_enabled).await
     }
 }
 

@@ -8,7 +8,7 @@ use crate::domain::tenancy::DEFAULT_REALM_ID;
 
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 
-use crate::settings::Settings;
+use crate::settings::{AuthorizationServerProfile, Settings};
 
 use actix_web::http::header;
 
@@ -16,38 +16,9 @@ use chrono::Duration;
 
 use serde_json::Value;
 
+use nazo_auth::RefreshTokenAuthenticationContext;
+
 use crate::http::token::issue::TokenIssuanceConfig;
-
-fn refresh_token_policy_for_profile(
-    settings: &Settings,
-    client: &ClientRow,
-    token: &TokenRow,
-) -> RefreshTokenPolicy {
-    refresh_token_policy_for_authorization_server_profile(
-        settings.protocol.authorization_server_profile,
-        client,
-        token,
-    )
-}
-
-fn refresh_token_audiences(
-    settings: &Settings,
-    token: &TokenRow,
-    form: &TokenForm,
-) -> Result<Vec<String>, ()> {
-    let original_audiences = json_array_to_strings(&token.audience);
-    let original_audiences = if original_audiences.is_empty() {
-        vec![settings.protocol.default_audience.clone()]
-    } else {
-        original_audiences
-    };
-    if form.audiences.is_empty() {
-        return Ok(original_audiences);
-    }
-    is_subset(&form.audiences, &original_audiences)
-        .then(|| form.audiences.clone())
-        .ok_or(())
-}
 
 pub(crate) async fn token_refresh(
     state: &TestInfrastructure,
@@ -229,6 +200,15 @@ async fn insert_refresh_token_row(
     rotated_from_id: Option<Uuid>,
     reuse_detected_at: Option<DateTime<Utc>>,
 ) {
+    let authentication_context = &token.authentication_context;
+    assert!(
+        authentication_context.is_well_formed(),
+        "refresh fixture authentication context must be a complete v1 value"
+    );
+    assert!(
+        !json_array_to_strings(&token.audience).is_empty(),
+        "refresh fixture must carry an explicit non-empty audience"
+    );
     let mut conn = get_conn(&state.diesel_db)
         .await
         .expect("database connection should be available");
@@ -242,13 +222,14 @@ async fn insert_refresh_token_row(
         r#"
         INSERT INTO oauth_tokens (
             id, tenant_id, refresh_token_blake3, token_family_id, rotated_from_id,
-            client_id, user_id, scopes, authorization_details, issued_at, expires_at,
+            client_id, user_id, scopes, audience, oidc_auth_context, authorization_details,
+            issued_at, expires_at,
             revoked_at, reuse_detected_at, subject, dpop_jkt, mtls_x5t_s256
         )
         VALUES (
             $1, $2, $3, $4, $5,
-            $6, $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16
+            $6, $7, $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17, $18
         )
         "#,
     )
@@ -260,6 +241,8 @@ async fn insert_refresh_token_row(
     .bind::<SqlUuid, _>(token.client_id)
     .bind::<Nullable<SqlUuid>, _>(token.user_id)
     .bind::<Jsonb, _>(token.scopes.clone())
+    .bind::<Jsonb, _>(token.audience.clone())
+    .bind::<Jsonb, _>(json!(authentication_context))
     .bind::<Jsonb, _>(token.authorization_details.clone())
     .bind::<Timestamptz, _>(token.issued_at)
     .bind::<Timestamptz, _>(token.expires_at)
@@ -301,7 +284,7 @@ async fn insert_refresh_client(state: &TestInfrastructure, client: &ClientRow) {
         r#"
         INSERT INTO oauth_clients (
             id, tenant_id, realm_id, organization_id, client_id, client_name, client_type,
-            client_secret_hash, redirect_uris, scopes, allowed_audiences,
+            client_secret_hash, redirect_uris, scopes, allowed_audiences, security_policy,
             grant_types, token_endpoint_auth_method, require_dpop_bound_tokens,
             require_mtls_bound_tokens, tls_client_auth_san_dns, tls_client_auth_san_uri,
             tls_client_auth_san_ip, tls_client_auth_san_email,
@@ -312,13 +295,13 @@ async fn insert_refresh_client(state: &TestInfrastructure, client: &ClientRow) {
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7,
-            $8, $9, $10, $11,
-            $12, $13, $14,
-            $15, $16, $17,
-            $18, $19,
-            $20, $21, $22,
-            $23,
-            $24, $25
+            $8, $9, $10, $11, $12,
+            $13, $14, $15,
+            $16, $17, $18,
+            $19, $20,
+            $21, $22, $23,
+            $24,
+            $25, $26
         )
         "#,
     )
@@ -333,6 +316,7 @@ async fn insert_refresh_client(state: &TestInfrastructure, client: &ClientRow) {
     .bind::<Jsonb, _>(json!(&client.redirect_uris))
     .bind::<Jsonb, _>(json!(&client.scopes))
     .bind::<Jsonb, _>(json!(&client.allowed_audiences))
+    .bind::<Jsonb, _>(json!(&client.security_policy))
     .bind::<Jsonb, _>(json!(&client.grant_types))
     .bind::<Text, _>(client.token_endpoint_auth_method.as_str())
     .bind::<Bool, _>(client.require_dpop_bound_tokens)
@@ -431,27 +415,18 @@ fn refresh_form_without_token() -> TokenForm {
     }
 }
 
-fn mtls_refresh_request(thumbprint: &str) -> HttpRequest {
+fn mtls_refresh_request(
+    certificate: &crate::test_support::Rfc9440CertificateFixture,
+) -> HttpRequest {
     actix_web::test::TestRequest::post()
         .uri("/oauth/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            thumbprint,
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=refresh-lost-response",
-        ))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request()
 }
 
@@ -525,75 +500,114 @@ fn client_row() -> ClientRow {
     }
 }
 
-fn token_row() -> TokenRow {
+fn refresh_authentication_context(
+    issuer: &str,
+    audience: &str,
+    issued_at: DateTime<Utc>,
+) -> RefreshTokenAuthenticationContext {
+    RefreshTokenAuthenticationContext {
+        version: RefreshTokenAuthenticationContext::CURRENT_VERSION,
+        issuer: issuer.to_owned(),
+        audience: audience.to_owned(),
+        auth_time: issued_at.timestamp().saturating_sub(1).max(1),
+        amr: vec!["pwd".to_owned()],
+        oidc_sid: None,
+        id_token_sid: None,
+        acr: None,
+        nonce: None,
+        userinfo_claims: Vec::new(),
+        userinfo_claim_requests: Vec::new(),
+        id_token_claims: Vec::new(),
+        id_token_claim_requests: Vec::new(),
+    }
+}
+
+fn token_row_with_refresh_context(
+    issuer: &str,
+    client_id: Uuid,
+    client_audience: &str,
+) -> TokenRow {
+    let issued_at = Utc::now();
     TokenRow {
         id: Uuid::now_v7(),
         tenant_id: DEFAULT_TENANT_ID,
         token_family_id: Uuid::now_v7(),
-        client_id: Uuid::now_v7(),
+        client_id,
         user_id: Some(Uuid::now_v7()),
         scopes: json!(["openid", "offline_access"]),
         audience: json!(["resource://default"]),
         authorization_details: json!([]),
-        issued_at: Utc::now(),
-        expires_at: Utc::now() + Duration::days(30),
+        issued_at,
+        expires_at: issued_at + Duration::days(30),
         revoked_at: None,
         subject: "subject-1".to_owned(),
         dpop_jkt: Some("dpop-jkt".to_owned()),
         mtls_x5t_s256: None,
         client_attestation_jkt: None,
-        authentication_context: None,
+        authentication_context: refresh_authentication_context(issuer, client_audience, issued_at),
     }
 }
 
+fn token_row() -> TokenRow {
+    token_row_with_refresh_context("https://issuer.example", Uuid::now_v7(), "client-test")
+}
+
+fn token_row_for_client(state: &TestInfrastructure, client: &ClientRow) -> TokenRow {
+    token_row_with_refresh_context(
+        state.settings.endpoint.issuer.as_str(),
+        client.id,
+        &client.client_id,
+    )
+}
+
+fn token_row_for_client_id(
+    state: &TestInfrastructure,
+    client_id: Uuid,
+    client_audience: &str,
+) -> TokenRow {
+    token_row_with_refresh_context(
+        state.settings.endpoint.issuer.as_str(),
+        client_id,
+        client_audience,
+    )
+}
+
 #[test]
-fn fapi_profiles_preserve_refresh_tokens_for_sender_constrained_confidential_clients() {
+fn client_security_policy_preserves_refresh_tokens_for_sender_constrained_confidential_clients() {
     let mut token = token_row();
     token.dpop_jkt = None;
     token.mtls_x5t_s256 = None;
-    let client = client_row();
-
-    for profile in [
-        AuthorizationServerProfile::Fapi2Security,
-        AuthorizationServerProfile::Fapi2MessageSigningAuthzRequest,
-    ] {
-        assert_eq!(
-            refresh_token_policy_for_authorization_server_profile(profile, &client, &token),
-            RefreshTokenPolicy::PreserveExisting,
-            "FAPI prohibits routine refresh-token rotation even when the confidential client's sender constraint is enforced by client policy rather than stored on the refresh-token row"
-        );
-    }
-}
-
-#[test]
-fn baseline_profile_preserves_confidential_sender_constrained_refresh_tokens() {
-    let token = token_row();
-    let client = client_row();
+    let mut client = client_row();
+    client.security_policy.assurance = nazo_auth::ClientAssuranceLevel::Fapi2;
 
     assert_eq!(
-        refresh_token_policy_for_authorization_server_profile(
-            AuthorizationServerProfile::Oauth2Baseline,
-            &client,
-            &token,
-        ),
+        refresh_token_policy(&client, &token),
         RefreshTokenPolicy::PreserveExisting,
-        "client policy identifies sender-constrained confidential clients even when the server hosts multiple profiles"
+        "FAPI prohibits routine refresh-token rotation when the confidential client's sender constraint is enforced by client policy"
     );
 }
 
 #[test]
-fn baseline_profile_rotates_public_sender_constrained_refresh_tokens() {
+fn baseline_client_policy_preserves_confidential_sender_constrained_refresh_tokens() {
+    let token = token_row();
+    let client = client_row();
+
+    assert_eq!(
+        refresh_token_policy(&client, &token),
+        RefreshTokenPolicy::PreserveExisting,
+        "the persisted client policy identifies a sender-constrained confidential client"
+    );
+}
+
+#[test]
+fn baseline_client_policy_rotates_public_sender_constrained_refresh_tokens() {
     let token = token_row();
     let mut client = client_row();
     client.client_type = "public".to_owned();
     client.token_endpoint_auth_method = "none".to_owned();
 
     assert_eq!(
-        refresh_token_policy_for_authorization_server_profile(
-            AuthorizationServerProfile::Oauth2Baseline,
-            &client,
-            &token,
-        ),
+        refresh_token_policy(&client, &token),
         RefreshTokenPolicy::Rotate {
             family_id: token.token_family_id,
             rotated_from_id: token.id,
@@ -603,25 +617,21 @@ fn baseline_profile_rotates_public_sender_constrained_refresh_tokens() {
 }
 
 #[test]
-fn baseline_profile_preserves_confidential_secret_authenticated_sender_constrained_refresh_tokens()
-{
+fn baseline_client_policy_preserves_confidential_secret_authenticated_sender_constrained_refresh_tokens()
+ {
     let token = token_row();
     let mut client = client_row();
     client.token_endpoint_auth_method = "client_secret_basic".to_owned();
 
     assert_eq!(
-        refresh_token_policy_for_authorization_server_profile(
-            AuthorizationServerProfile::Oauth2Baseline,
-            &client,
-            &token,
-        ),
+        refresh_token_policy(&client, &token),
         RefreshTokenPolicy::PreserveExisting,
         "confidential client authentication plus the enforced access-token sender constraint makes routine refresh-token rotation unnecessary"
     );
 }
 
 #[test]
-fn baseline_profile_rotates_unbound_refresh_tokens() {
+fn baseline_client_policy_rotates_unbound_refresh_tokens() {
     let mut token = token_row();
     token.dpop_jkt = None;
     let mut client = client_row();
@@ -629,11 +639,7 @@ fn baseline_profile_rotates_unbound_refresh_tokens() {
     client.require_mtls_bound_tokens = false;
 
     assert_eq!(
-        refresh_token_policy_for_authorization_server_profile(
-            AuthorizationServerProfile::Oauth2Baseline,
-            &client,
-            &token,
-        ),
+        refresh_token_policy(&client, &token),
         RefreshTokenPolicy::Rotate {
             family_id: token.token_family_id,
             rotated_from_id: token.id,
@@ -642,23 +648,22 @@ fn baseline_profile_rotates_unbound_refresh_tokens() {
 }
 
 #[test]
-fn refresh_token_policy_uses_configured_authorization_server_profile() {
-    let mut settings = Settings::from_config(&ConfigSource::default()).unwrap();
-    settings.protocol.authorization_server_profile = AuthorizationServerProfile::Fapi2Security;
+fn refresh_token_policy_uses_persisted_client_policy() {
     let token = token_row();
-    let client = client_row();
+    let mut client = client_row();
+    client.security_policy.assurance = nazo_auth::ClientAssuranceLevel::Fapi2;
 
     assert_eq!(
-        refresh_token_policy_for_profile(&settings, &client, &token),
+        refresh_token_policy(&client, &token),
         RefreshTokenPolicy::PreserveExisting,
-        "FAPI profiles preserve refresh tokens for valid sender-constrained confidential clients"
+        "FAPI client policy preserves refresh tokens for a sender-constrained confidential client"
     );
 
     let mut unbound_token = token_row();
     unbound_token.dpop_jkt = None;
     unbound_token.mtls_x5t_s256 = None;
     assert_eq!(
-        refresh_token_policy_for_profile(&settings, &client, &unbound_token),
+        refresh_token_policy(&client, &unbound_token),
         RefreshTokenPolicy::PreserveExisting,
         "the client policy, not nullable refresh-token row bindings, determines whether a FAPI client is sender constrained"
     );
@@ -667,16 +672,15 @@ fn refresh_token_policy_uses_configured_authorization_server_profile() {
     mtls_bound_token.dpop_jkt = None;
     mtls_bound_token.mtls_x5t_s256 = Some("mtls-thumbprint".to_owned());
     assert_eq!(
-        refresh_token_policy_for_profile(&settings, &client, &mtls_bound_token),
+        refresh_token_policy(&client, &mtls_bound_token),
         RefreshTokenPolicy::PreserveExisting,
         "stored mTLS binding remains compatible with the non-rotating FAPI policy"
     );
 
-    settings.protocol.authorization_server_profile = AuthorizationServerProfile::Oauth2Baseline;
     assert_eq!(
-        refresh_token_policy_for_profile(&settings, &client, &token),
+        refresh_token_policy(&client, &token),
         RefreshTokenPolicy::PreserveExisting,
-        "client-level sender constraints remain authoritative in a multi-profile baseline server"
+        "client-level sender constraints remain authoritative"
     );
 }
 
@@ -686,8 +690,8 @@ async fn concurrent_baseline_refreshes_preserve_an_unbound_row_for_an_mtls_const
     else {
         return;
     };
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
-    let req = mtls_refresh_request(thumbprint);
+    let certificate = crate::test_support::rfc9440_certificate_fixture("refresh-concurrent");
+    let req = mtls_refresh_request(&certificate);
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     client.require_mtls_bound_tokens = true;
@@ -695,7 +699,7 @@ async fn concurrent_baseline_refreshes_preserve_an_unbound_row_for_an_mtls_const
 
     let family_id = Uuid::now_v7();
     let raw = format!("refresh-fapi-unbound-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.token_family_id = family_id;
     token.scopes = json!(["accounts", "offline_access"]);
@@ -819,13 +823,12 @@ fn refresh_token_scope_request_rejects_privilege_expansion() {
 
 #[test]
 fn refresh_token_audience_request_defaults_to_refresh_token_audience() {
-    let settings = Settings::from_config(&ConfigSource::default()).unwrap();
     let mut token = token_row();
     token.audience = json!(["https://api.example/one", "https://api.example/two"]);
     let form = refresh_form_without_token();
 
     assert_eq!(
-        refresh_token_audiences(&settings, &token, &form).unwrap(),
+        super::refresh_token_audiences(&token, &form).unwrap(),
         vec![
             "https://api.example/one".to_owned(),
             "https://api.example/two".to_owned(),
@@ -835,27 +838,39 @@ fn refresh_token_audience_request_defaults_to_refresh_token_audience() {
 
 #[test]
 fn refresh_token_audience_request_may_only_narrow_original_audience() {
-    let settings = Settings::from_config(&ConfigSource::default()).unwrap();
     let mut token = token_row();
     token.audience = json!(["https://api.example/one", "https://api.example/two"]);
     let mut form = refresh_form_without_token();
     form.audiences = vec!["https://api.example/two".to_owned()];
 
     assert_eq!(
-        refresh_token_audiences(&settings, &token, &form).unwrap(),
+        super::refresh_token_audiences(&token, &form).unwrap(),
         vec!["https://api.example/two".to_owned()]
     );
 }
 
 #[test]
 fn refresh_token_audience_request_rejects_expansion() {
-    let settings = Settings::from_config(&ConfigSource::default()).unwrap();
     let mut token = token_row();
     token.audience = json!(["https://api.example/one"]);
     let mut form = refresh_form_without_token();
     form.audiences = vec!["https://api.example/two".to_owned()];
 
-    assert!(refresh_token_audiences(&settings, &token, &form).is_err());
+    assert_eq!(
+        super::refresh_token_audiences(&token, &form),
+        Err(RefreshAudienceError::RequestedExceedsOriginal)
+    );
+}
+
+#[test]
+fn refresh_token_audience_rejects_missing_persisted_binding() {
+    let mut token = token_row();
+    token.audience = json!([]);
+
+    assert_eq!(
+        super::refresh_token_audiences(&token, &refresh_form_without_token()),
+        Err(RefreshAudienceError::MissingOriginal)
+    );
 }
 
 #[actix_web::test]
@@ -961,11 +976,11 @@ async fn refresh_grant_rejects_unknown_expired_and_wrong_client_tokens() {
     assert_eq!(body["error"], "invalid_grant");
     assert!(body.get("access_token").is_none());
 
-    let mut wrong_client = token_row();
     let mut other_client = client_row();
     other_client.id = Uuid::now_v7();
     other_client.client_id = format!("client-other-{}", Uuid::now_v7());
     insert_refresh_client(&state, &other_client).await;
+    let mut wrong_client = token_row_for_client(&state, &other_client);
     wrong_client.client_id = other_client.id;
     wrong_client.user_id = None;
     wrong_client.dpop_jkt = None;
@@ -979,7 +994,7 @@ async fn refresh_grant_rejects_unknown_expired_and_wrong_client_tokens() {
     assert_eq!(body["error"], "invalid_grant");
     assert!(body.get("access_token").is_none());
 
-    let mut expired = token_row();
+    let mut expired = token_row_for_client(&state, &client);
     expired.client_id = client.id;
     expired.scopes = json!(["accounts", "offline_access"]);
     expired.subject = client.client_id.clone();
@@ -1011,7 +1026,7 @@ async fn refresh_grant_marks_family_reuse_and_revokes_active_family_tokens() {
     let family_id = Uuid::now_v7();
     let suffix = Uuid::now_v7().simple();
 
-    let mut reused = token_row();
+    let mut reused = token_row_for_client(&state, &client);
     reused.client_id = client.id;
     reused.token_family_id = family_id;
     reused.scopes = json!(["accounts", "offline_access"]);
@@ -1022,7 +1037,7 @@ async fn refresh_grant_marks_family_reuse_and_revokes_active_family_tokens() {
     let reused_raw = format!("refresh-token-reused-{suffix}");
     insert_refresh_token_row(&state, &reused_raw, &reused, None, None).await;
 
-    let mut active_sibling = token_row();
+    let mut active_sibling = token_row_for_client(&state, &client);
     active_sibling.client_id = client.id;
     active_sibling.token_family_id = family_id;
     active_sibling.scopes = json!(["accounts", "offline_access"]);
@@ -1076,7 +1091,7 @@ async fn refresh_grant_rolls_back_reuse_marker_when_family_revoke_fails() {
     client.require_dpop_bound_tokens = false;
     let family_id = Uuid::now_v7();
 
-    let mut reused = token_row();
+    let mut reused = token_row_for_client(&state, &client);
     reused.client_id = client.id;
     reused.token_family_id = family_id;
     reused.scopes = json!(["accounts", "offline_access"]);
@@ -1086,7 +1101,7 @@ async fn refresh_grant_rolls_back_reuse_marker_when_family_revoke_fails() {
     reused.revoked_at = Some(Utc::now() - Duration::seconds(65));
     let reused_raw = "refresh-token-reuse-marker-failure";
     insert_refresh_token_row(&state, reused_raw, &reused, None, None).await;
-    let mut active_sibling = token_row();
+    let mut active_sibling = token_row_for_client(&state, &client);
     active_sibling.client_id = client.id;
     active_sibling.token_family_id = family_id;
     active_sibling.scopes = json!(["accounts", "offline_access"]);
@@ -1166,7 +1181,7 @@ async fn refresh_grant_rejects_unbound_active_successor_inside_lost_response_win
     let family_id = Uuid::now_v7();
     let suffix = Uuid::now_v7();
 
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client(&state, &client);
     revoked.client_id = client.id;
     revoked.token_family_id = family_id;
     revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1177,7 +1192,7 @@ async fn refresh_grant_rejects_unbound_active_successor_inside_lost_response_win
     let revoked_raw = format!("refresh-token-retry-original-{suffix}");
     insert_refresh_token_row(&state, &revoked_raw, &revoked, None, None).await;
 
-    let mut successor = token_row();
+    let mut successor = token_row_for_client(&state, &client);
     successor.client_id = client.id;
     successor.token_family_id = family_id;
     successor.scopes = json!(["accounts", "offline_access"]);
@@ -1222,15 +1237,16 @@ async fn refresh_grant_rotates_from_mtls_bound_successor_inside_lost_response_wi
     else {
         return;
     };
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
-    let req = mtls_refresh_request(thumbprint);
+    let certificate = crate::test_support::rfc9440_certificate_fixture("refresh-lost-response");
+    let thumbprint = certificate.thumbprint.as_str();
+    let req = mtls_refresh_request(&certificate);
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     insert_refresh_client(&state, &client).await;
     let family_id = Uuid::now_v7();
     let suffix = Uuid::now_v7();
 
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client(&state, &client);
     revoked.client_id = client.id;
     revoked.token_family_id = family_id;
     revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1242,7 +1258,7 @@ async fn refresh_grant_rotates_from_mtls_bound_successor_inside_lost_response_wi
     let revoked_raw = format!("refresh-token-mtls-retry-original-{suffix}");
     insert_refresh_token_row(&state, &revoked_raw, &revoked, None, None).await;
 
-    let mut successor = token_row();
+    let mut successor = token_row_for_client(&state, &client);
     successor.client_id = client.id;
     successor.token_family_id = family_id;
     successor.scopes = revoked.scopes.clone();
@@ -1294,7 +1310,7 @@ async fn sequential_unbound_replay_after_first_commit_fails_closed() {
 
     let family_id = Uuid::now_v7();
     let raw = format!("refresh-sequential-unbound-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.token_family_id = family_id;
     token.scopes = json!(["accounts", "offline_access"]);
@@ -1345,7 +1361,7 @@ async fn lost_response_successor_enforces_fixed_window_boundaries_in_real_postgr
         .with_timezone(&Utc);
     let client_id = Uuid::now_v7();
     let family_id = Uuid::now_v7();
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client_id(&state, client_id, "refresh-fixed-window-client");
     revoked.client_id = client_id;
     revoked.token_family_id = family_id;
     revoked.user_id = None;
@@ -1353,6 +1369,11 @@ async fn lost_response_successor_enforces_fixed_window_boundaries_in_real_postgr
     revoked.issued_at = now - Duration::hours(1);
     revoked.expires_at = now + Duration::hours(1);
     revoked.revoked_at = Some(now);
+    revoked.authentication_context = refresh_authentication_context(
+        state.settings.endpoint.issuer.as_str(),
+        "refresh-fixed-window-client",
+        revoked.issued_at,
+    );
     insert_refresh_token_row(
         &state,
         &format!("refresh-lost-window-original-{}", Uuid::now_v7()),
@@ -1362,13 +1383,18 @@ async fn lost_response_successor_enforces_fixed_window_boundaries_in_real_postgr
     )
     .await;
 
-    let mut successor = token_row();
+    let mut successor = token_row_for_client_id(&state, client_id, "refresh-fixed-window-client");
     successor.client_id = client_id;
     successor.token_family_id = family_id;
     successor.user_id = None;
     successor.dpop_jkt = revoked.dpop_jkt.clone();
     successor.issued_at = now;
     successor.expires_at = now + Duration::hours(1);
+    successor.authentication_context = refresh_authentication_context(
+        state.settings.endpoint.issuer.as_str(),
+        "refresh-fixed-window-client",
+        successor.issued_at,
+    );
     insert_refresh_token_row(
         &state,
         &format!("refresh-lost-window-successor-{}", Uuid::now_v7()),
@@ -1434,7 +1460,7 @@ async fn refresh_grant_rejects_lost_response_retry_without_exactly_one_active_su
     for shape in ["none", "multiple", "expired", "revoked"] {
         let successor_count = usize::from(shape != "none") + usize::from(shape == "multiple");
         let family_id = Uuid::now_v7();
-        let mut revoked = token_row();
+        let mut revoked = token_row_for_client(&state, &client);
         revoked.client_id = client.id;
         revoked.token_family_id = family_id;
         revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1446,7 +1472,7 @@ async fn refresh_grant_rejects_lost_response_retry_without_exactly_one_active_su
         insert_refresh_token_row(&state, &revoked_raw, &revoked, None, None).await;
 
         for _ in 0..successor_count {
-            let mut successor = token_row();
+            let mut successor = token_row_for_client(&state, &client);
             successor.client_id = client.id;
             successor.token_family_id = family_id;
             successor.scopes = revoked.scopes.clone();
@@ -1502,7 +1528,7 @@ async fn refresh_grant_rejects_wrong_client_family_or_sender_constrained_success
     insert_refresh_client(&state, &other_client).await;
 
     let family_id = Uuid::now_v7();
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client(&state, &client);
     revoked.client_id = client.id;
     revoked.token_family_id = family_id;
     revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1514,7 +1540,7 @@ async fn refresh_grant_rejects_wrong_client_family_or_sender_constrained_success
     let revoked_raw = format!("refresh-lost-wrong-constraints-{}", Uuid::now_v7());
     insert_refresh_token_row(&state, &revoked_raw, &revoked, None, None).await;
 
-    let mut wrong_client = token_row();
+    let mut wrong_client = token_row_for_client(&state, &other_client);
     wrong_client.client_id = other_client.id;
     wrong_client.token_family_id = family_id;
     wrong_client.user_id = None;
@@ -1531,7 +1557,7 @@ async fn refresh_grant_rejects_wrong_client_family_or_sender_constrained_success
     )
     .await;
 
-    let mut wrong_family = token_row();
+    let mut wrong_family = token_row_for_client(&state, &client);
     wrong_family.client_id = client.id;
     wrong_family.user_id = None;
     wrong_family.subject = revoked.subject.clone();
@@ -1548,7 +1574,7 @@ async fn refresh_grant_rejects_wrong_client_family_or_sender_constrained_success
     )
     .await;
 
-    let mut wrong_sender = token_row();
+    let mut wrong_sender = token_row_for_client(&state, &client);
     wrong_sender.client_id = client.id;
     wrong_sender.token_family_id = family_id;
     wrong_sender.user_id = None;
@@ -1604,7 +1630,7 @@ async fn lost_response_successor_requires_same_tenant_in_real_postgres() {
 
     let client_id = Uuid::now_v7();
     let family_id = Uuid::now_v7();
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client_id(&state, client_id, "refresh-tenant-client");
     revoked.client_id = client_id;
     revoked.token_family_id = family_id;
     revoked.user_id = None;
@@ -1612,7 +1638,7 @@ async fn lost_response_successor_requires_same_tenant_in_real_postgres() {
     revoked.revoked_at = Some(Utc::now() - Duration::seconds(10));
     insert_refresh_token_row(&state, "refresh-lost-tenant-original", &revoked, None, None).await;
 
-    let mut wrong_tenant = token_row();
+    let mut wrong_tenant = token_row_for_client_id(&state, client_id, "refresh-tenant-client");
     wrong_tenant.tenant_id = Uuid::now_v7();
     wrong_tenant.client_id = client_id;
     wrong_tenant.token_family_id = family_id;
@@ -1657,12 +1683,13 @@ async fn lost_response_rotation_rolls_back_successor_revoke_when_insert_fails() 
     state.settings = Arc::new(settings);
     create_isolated_schema(&state, &schema, &["oauth_tokens"]).await;
 
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
-    let req = mtls_refresh_request(thumbprint);
+    let certificate = crate::test_support::rfc9440_certificate_fixture("refresh-revoked");
+    let thumbprint = certificate.thumbprint.as_str();
+    let req = mtls_refresh_request(&certificate);
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     let family_id = Uuid::now_v7();
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client(&state, &client);
     revoked.client_id = client.id;
     revoked.token_family_id = family_id;
     revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1679,7 +1706,7 @@ async fn lost_response_rotation_rolls_back_successor_revoke_when_insert_fails() 
         None,
     )
     .await;
-    let mut successor = token_row();
+    let mut successor = token_row_for_client(&state, &client);
     successor.client_id = client.id;
     successor.token_family_id = family_id;
     successor.scopes = revoked.scopes.clone();
@@ -1766,7 +1793,7 @@ async fn refresh_grant_rejects_future_revocation_or_reuse_marked_lost_response_f
         ),
     ] {
         let family_id = Uuid::now_v7();
-        let mut revoked = token_row();
+        let mut revoked = token_row_for_client(&state, &client);
         revoked.client_id = client.id;
         revoked.token_family_id = family_id;
         revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1777,7 +1804,7 @@ async fn refresh_grant_rejects_future_revocation_or_reuse_marked_lost_response_f
         let revoked_raw = format!("refresh-lost-{label}-{}", Uuid::now_v7());
         insert_refresh_token_row(&state, &revoked_raw, &revoked, None, reuse_detected_at).await;
 
-        let mut successor = token_row();
+        let mut successor = token_row_for_client(&state, &client);
         successor.client_id = client.id;
         successor.token_family_id = family_id;
         successor.scopes = revoked.scopes.clone();
@@ -1811,14 +1838,15 @@ async fn concurrent_mtls_bound_lost_response_retries_yield_one_success_then_comp
     else {
         return;
     };
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
-    let req = mtls_refresh_request(thumbprint);
+    let certificate = crate::test_support::rfc9440_certificate_fixture("refresh-retry");
+    let thumbprint = certificate.thumbprint.as_str();
+    let req = mtls_refresh_request(&certificate);
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     insert_refresh_client(&state, &client).await;
 
     let family_id = Uuid::now_v7();
-    let mut revoked = token_row();
+    let mut revoked = token_row_for_client(&state, &client);
     revoked.client_id = client.id;
     revoked.token_family_id = family_id;
     revoked.scopes = json!(["accounts", "offline_access"]);
@@ -1830,7 +1858,7 @@ async fn concurrent_mtls_bound_lost_response_retries_yield_one_success_then_comp
     let revoked_raw = format!("refresh-concurrent-lost-original-{}", Uuid::now_v7());
     insert_refresh_token_row(&state, &revoked_raw, &revoked, None, None).await;
 
-    let mut successor = token_row();
+    let mut successor = token_row_for_client(&state, &client);
     successor.client_id = client.id;
     successor.token_family_id = family_id;
     successor.scopes = revoked.scopes.clone();
@@ -1878,7 +1906,7 @@ async fn concurrent_refresh_replay_yields_one_success_and_one_invalid_grant() {
 
     let family_id = Uuid::now_v7();
     let raw = format!("refresh-concurrent-replay-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.token_family_id = family_id;
     token.scopes = json!(["accounts", "offline_access"]);
@@ -1931,7 +1959,7 @@ async fn refresh_grant_rejects_tokens_for_inactive_users_without_openid_scope() 
     let user_id = Uuid::now_v7();
     insert_refresh_user(&state, user_id, false).await;
     let raw_refresh_token = format!("refresh-inactive-user-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.user_id = Some(user_id);
     token.scopes = json!(["offline_access", "api"]);
@@ -1967,7 +1995,7 @@ async fn refresh_grant_accepts_tokens_for_active_users_without_openid_scope() {
     let user_id = Uuid::now_v7();
     insert_refresh_user(&state, user_id, true).await;
     let raw_refresh_token = format!("refresh-active-user-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.user_id = Some(user_id);
     token.scopes = json!(["offline_access", "api"]);
@@ -2006,7 +2034,7 @@ async fn refresh_grant_rejects_unbound_refresh_tokens_for_dpop_required_clients(
     insert_refresh_client(&state, &client).await;
 
     let raw_refresh_token = format!("refresh-unbound-dpop-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.user_id = None;
     token.subject = client.client_id.clone();
@@ -2044,7 +2072,7 @@ async fn refresh_grant_rejects_public_dpop_required_clients_with_unbound_refresh
     insert_refresh_client(&state, &client).await;
 
     let raw_refresh_token = format!("refresh-public-unbound-dpop-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.user_id = None;
     token.subject = client.client_id.clone();
@@ -2080,7 +2108,7 @@ async fn refresh_grant_rejects_dpop_bound_refresh_token_without_proof() {
     insert_refresh_client(&state, &client).await;
 
     let raw_refresh_token = format!("refresh-token-bound-no-proof-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.user_id = None;
     token.subject = client.client_id.clone();
@@ -2115,7 +2143,7 @@ async fn refresh_grant_rejects_missing_offline_access_scope_expansion_and_invali
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     insert_refresh_client(&state, &client).await;
-    let mut no_offline = token_row();
+    let mut no_offline = token_row_for_client(&state, &client);
     no_offline.client_id = client.id;
     no_offline.subject = client.client_id.clone();
     no_offline.user_id = None;
@@ -2131,7 +2159,7 @@ async fn refresh_grant_rejects_missing_offline_access_scope_expansion_and_invali
     assert_eq!(body["error"], "invalid_grant");
     assert!(body.get("access_token").is_none());
 
-    let mut scope_token = token_row();
+    let mut scope_token = token_row_for_client(&state, &client);
     scope_token.client_id = client.id;
     scope_token.subject = client.client_id.clone();
     scope_token.user_id = None;
@@ -2149,7 +2177,7 @@ async fn refresh_grant_rejects_missing_offline_access_scope_expansion_and_invali
     assert!(body.get("access_token").is_none());
 
     let audience_raw = "refresh-token-invalid-audience";
-    let mut audience_token = token_row();
+    let mut audience_token = token_row_for_client(&state, &client);
     audience_token.client_id = client.id;
     audience_token.subject = client.client_id.clone();
     audience_token.user_id = None;
@@ -2176,7 +2204,7 @@ async fn refresh_grant_rejects_mtls_bound_tokens_without_matching_verified_certi
     client.require_dpop_bound_tokens = false;
     insert_refresh_client(&state, &client).await;
 
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.subject = client.client_id.clone();
     token.user_id = None;
@@ -2204,26 +2232,16 @@ async fn refresh_grant_rejects_mtls_bound_tokens_without_matching_verified_certi
     insert_refresh_token_row(&state, &mismatch_raw, &token, None, None).await;
     let mut mismatch_form = refresh_form_without_token();
     mismatch_form.refresh_token = Some(mismatch_raw);
+    let mismatch_certificate = crate::test_support::rfc9440_certificate_fixture("refresh-actual");
     let mismatch_req = actix_web::test::TestRequest::post()
         .uri("/oauth/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=refresh-actual",
-        ))
+        .insert_header(("client-cert", mismatch_certificate.header.as_str()))
         .to_http_request();
     let (status, body) =
         response_json(token_refresh(&state, &mismatch_req, &client, &mismatch_form, None).await)
@@ -2244,7 +2262,7 @@ async fn refresh_grant_requires_verified_certificate_when_client_policy_demands_
     insert_refresh_client(&state, &client).await;
 
     let raw_refresh_token = format!("refresh-policy-mtls-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.subject = client.client_id.clone();
     token.user_id = None;
@@ -2272,13 +2290,14 @@ async fn refresh_grant_accepts_existing_mtls_bound_token_with_matching_certifica
     else {
         return;
     };
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
+    let certificate = crate::test_support::rfc9440_certificate_fixture("refresh-existing-binding");
+    let thumbprint = certificate.thumbprint.as_str();
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     insert_refresh_client(&state, &client).await;
 
     let raw_refresh_token = format!("refresh-token-mtls-bound-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.subject = client.client_id.clone();
     token.user_id = None;
@@ -2293,22 +2312,11 @@ async fn refresh_grant_accepts_existing_mtls_bound_token_with_matching_certifica
         .uri("/oauth/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            thumbprint,
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=refresh-existing-binding",
-        ))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
 
     let (status, body) =
@@ -2337,16 +2345,18 @@ async fn refresh_grant_binds_access_tokens_to_verified_mtls_certificate_when_req
     else {
         return;
     };
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
+    let certificate = crate::test_support::rfc9440_certificate_fixture("refresh-actual");
+    let thumbprint = certificate.thumbprint.as_str();
     let mut client = client_row();
     client.require_dpop_bound_tokens = false;
     client.require_mtls_bound_tokens = true;
     client.token_endpoint_auth_method = "tls_client_auth".to_owned();
     client.tls_client_auth_cert_sha256 = Some(thumbprint.to_owned());
+    client.tls_client_auth_subject_dn = Some("CN=refresh-actual".to_owned());
     insert_refresh_client(&state, &client).await;
 
     let raw_refresh_token = format!("refresh-policy-mtls-success-{}", Uuid::now_v7());
-    let mut token = token_row();
+    let mut token = token_row_for_client(&state, &client);
     token.client_id = client.id;
     token.subject = client.client_id.clone();
     token.user_id = None;
@@ -2361,28 +2371,17 @@ async fn refresh_grant_binds_access_tokens_to_verified_mtls_certificate_when_req
         .uri("/oauth/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            thumbprint,
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=refresh-actual",
-        ))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
     let request_thumbprint = crate::http::mtls::request_mtls_thumbprint(
         &req,
         &state.settings.endpoint.trusted_proxy_cidrs,
     )
-    .expect("trusted proxy request should expose verified client certificate thumbprint");
+    .expect("RFC 9440 request should expose verified client certificate thumbprint");
     assert_eq!(request_thumbprint, thumbprint);
     let (status, body) =
         response_json(token_refresh(&state, &req, &client, &form, None).await).await;

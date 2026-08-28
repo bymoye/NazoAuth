@@ -76,14 +76,6 @@ impl CredentialStorePort for Openid4vciRepository {
         self.nonce_issue(nonce)
     }
 
-    fn consume_nonce<'a>(
-        &'a self,
-        nonce_hash: &'a str,
-        now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
-        self.nonce_consume(nonce_hash, now)
-    }
-
     fn claim_nonce<'a>(
         &'a self,
         nonce_hash: &'a str,
@@ -186,15 +178,6 @@ impl CredentialStorePort for Openid4vciRepository {
         self.deferred_store_and_finalize_nonce_with_response(
             credential, nonce_hash, claim_id, response, now,
         )
-    }
-
-    fn consume_ready_deferred<'a>(
-        &'a self,
-        transaction_hash: &'a str,
-        token_id: Uuid,
-        now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredential>, CredentialStoreError>> {
-        self.deferred_consume_ready(transaction_hash, token_id, now)
     }
 
     fn claim_ready_deferred<'a>(

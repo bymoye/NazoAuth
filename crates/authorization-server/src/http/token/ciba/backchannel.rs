@@ -105,22 +105,16 @@ pub(crate) async fn backchannel_authentication(
             "该客户端未启用 CIBA 授权类型.",
         );
     }
-    if !config
-        .authorization_server_profile
-        .effective_client_policy(&client)
-        .allow_cross_device_flows
-    {
+    if !client.security_policy.allow_cross_device_flows {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "unauthorized_client",
             "该客户端未授权使用跨设备流程.",
         );
     }
-    if let Err(response) = validate_ciba_token_request_profile(
-        &config,
-        &client,
-        client.token_endpoint_auth_method.as_str(),
-    ) {
+    if let Err(response) =
+        validate_ciba_token_request_profile(&client, client.token_endpoint_auth_method.as_str())
+    {
         return response;
     }
     if let Err(response) = validate_ciba_security_profile_client_with_config(

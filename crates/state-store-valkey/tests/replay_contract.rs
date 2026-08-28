@@ -32,18 +32,18 @@ async fn fapi_http_signature_replay_preserves_exact_key_value_and_ttl_contract()
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
     let inspector = inspection_client(&url).await;
     let tenant_id = tenant(10);
     let fingerprint = [0xa5; 32];
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "fapi_http_signature_replay:{}:{}",
         tenant_id.as_uuid(),
         blake3::Hash::from_bytes(fingerprint).to_hex()
-    );
+    ));
     let _: i64 = inspector.del(&key).await.unwrap();
 
     assert!(
@@ -68,7 +68,7 @@ async fn fapi_http_signature_replay_isolated_by_tenant_after_cutover() {
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
@@ -77,14 +77,14 @@ async fn fapi_http_signature_replay_isolated_by_tenant_after_cutover() {
     let second_tenant = tenant(202);
     let fingerprint = *blake3::hash(uuid::Uuid::now_v7().as_bytes()).as_bytes();
     let digest = blake3::Hash::from_bytes(fingerprint).to_hex();
-    let first_key = format!(
+    let first_key = nazo_valkey::test_support::state_storage_key(format!(
         "fapi_http_signature_replay:{}:{digest}",
         first_tenant.as_uuid()
-    );
-    let second_key = format!(
+    ));
+    let second_key = nazo_valkey::test_support::state_storage_key(format!(
         "fapi_http_signature_replay:{}:{digest}",
         second_tenant.as_uuid()
-    );
+    ));
     let _: i64 = inspector
         .del(vec![first_key.clone(), second_key.clone()])
         .await
@@ -117,9 +117,12 @@ async fn fapi_http_signature_replay_isolated_by_tenant_after_cutover() {
 
 #[tokio::test]
 async fn replay_store_distinguishes_unavailable_dependency() {
-    let error = ValkeyConnection::connect("redis://127.0.0.1:1/0", Duration::from_millis(50))
-        .await
-        .expect_err("closed local port must not connect");
+    let error = nazo_valkey::test_support::scoped_connect(
+        "redis://127.0.0.1:1/0",
+        Duration::from_millis(50),
+    )
+    .await
+    .expect_err("closed local port must not connect");
 
     assert!(matches!(
         error.kind(),
@@ -132,7 +135,7 @@ async fn replay_ttl_overflow_fails_before_storage() {
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
@@ -146,10 +149,14 @@ async fn replay_ttl_overflow_fails_before_storage() {
 
 #[tokio::test]
 async fn connection_rejects_cluster_topology_before_connecting() {
-    let error =
-        ValkeyConnection::connect("redis-cluster://127.0.0.1:16384/0", Duration::from_secs(1))
-            .await
-            .expect_err("multi-key scripts require an explicitly standalone topology");
+    let error = ValkeyConnection::connect(
+        "redis-cluster://127.0.0.1:16384/0",
+        Duration::from_secs(1),
+        "test",
+        uuid::Uuid::now_v7(),
+    )
+    .await
+    .expect_err("multi-key scripts require an explicitly standalone topology");
 
     assert_eq!(error.kind(), ErrorKind::UnexpectedResult);
 }
@@ -159,7 +166,7 @@ async fn protocol_replay_keys_preserve_hashing_prefix_and_one_time_semantics() {
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
@@ -175,7 +182,8 @@ async fn protocol_replay_keys_preserve_hashing_prefix_and_one_time_semantics() {
         format!("oauth:jar:jti:{client_digest}:{digest}"),
         format!("oauth:jwt_bearer:jti:{client_digest}:{digest}"),
         format!("oauth:ciba:request_object:jti:{client_digest}:{digest}"),
-    ];
+    ]
+    .map(nazo_valkey::test_support::state_storage_key);
     let _: i64 = inspector.del(keys.to_vec()).await.unwrap();
 
     assert!(store.consume_dpop(jkt, jti, 30).await.unwrap());
@@ -234,7 +242,7 @@ async fn concurrent_private_key_jwt_consumers_have_exactly_one_winner() {
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
@@ -265,7 +273,7 @@ async fn concurrent_dpop_replay_consumers_have_exactly_one_winner() {
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
@@ -296,16 +304,16 @@ async fn dpop_nonce_preserves_exact_key_and_remains_valid_until_expiry() {
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
     let inspector = inspection_client(&url).await;
     let nonce = uuid::Uuid::now_v7().to_string();
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:dpop:nonce:{}",
         blake3::hash(nonce.as_bytes()).to_hex()
-    );
+    ));
     let _: i64 = inspector.del(&key).await.unwrap();
 
     store.issue_dpop_nonce(&nonce, 30).await.unwrap();
@@ -320,7 +328,7 @@ async fn authorization_and_resource_server_share_the_nonce_key_and_ttl_contract(
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);
@@ -340,10 +348,10 @@ async fn authorization_and_resource_server_share_the_nonce_key_and_ttl_contract(
     );
 
     let resource_nonce = format!("rs-{}", uuid::Uuid::now_v7());
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:dpop:nonce:{}",
         blake3::hash(resource_nonce.as_bytes()).to_hex()
-    );
+    ));
     let now = chrono::Utc::now().timestamp();
     DpopNonceStorage::issue_nonce(&store, &resource_nonce, now + 30)
         .await
@@ -365,7 +373,7 @@ async fn concurrent_resource_server_nonce_validations_share_the_validity_window(
     let Some(url) = explicit_valkey_url() else {
         return;
     };
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let store = ReplayStore::new(&connection);

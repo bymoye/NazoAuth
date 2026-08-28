@@ -23,25 +23,23 @@ impl TryFrom<RefreshTokenRow> for RefreshToken {
             dpop_jkt: row.dpop_jkt,
             mtls_x5t_s256: row.mtls_x5t_s256,
             client_attestation_jkt: row.client_attestation_jkt,
-            authentication_context: row
-                .oidc_auth_context
-                .map(|value| {
-                    let context = serde_json::from_value::<
-                        nazo_auth::RefreshTokenAuthenticationContext,
-                    >(value)
+            authentication_context: {
+                let context =
+                    serde_json::from_value::<nazo_auth::RefreshTokenAuthenticationContext>(
+                        row.oidc_auth_context,
+                    )
                     .map_err(|error| {
                         RepositoryError::Unexpected(format!(
                             "invalid refresh token authentication context: {error}"
                         ))
                     })?;
-                    if !context.is_well_formed() {
-                        return Err(RepositoryError::Unexpected(
-                            "invalid refresh token authentication context".to_owned(),
-                        ));
-                    }
-                    Ok(context)
-                })
-                .transpose()?,
+                if !context.is_well_formed() {
+                    return Err(RepositoryError::Unexpected(
+                        "invalid refresh token authentication context".to_owned(),
+                    ));
+                }
+                context
+            },
         })
     }
 }

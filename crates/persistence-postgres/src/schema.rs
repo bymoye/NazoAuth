@@ -27,12 +27,6 @@ diesel::table! {
         expires_at -> Timestamptz,
         consumed_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
-        accepted_signature_sha256 -> Nullable<Binary>,
-        recovered_controller_id -> Nullable<Varchar>,
-        recovered_slot_index -> Nullable<Int2>,
-        recovered_slot_issued_at -> Nullable<Timestamptz>,
-        recovered_slot_expires_at -> Nullable<Timestamptz>,
-        recovery_generation -> Nullable<Int4>,
     }
 }
 
@@ -49,10 +43,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    controller_recovery_root_key_history (deployment_id, recovery_public_key) {
+        deployment_id -> Varchar,
+        recovery_public_key -> Binary,
+        first_seen_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     controller_recovery_challenges (challenge_id) {
         challenge_id -> Uuid,
         deployment_id -> Varchar,
         nonce -> Binary,
+        allocation_nonce -> Binary,
         controller_label -> Varchar,
         controller_kid -> Varchar,
         controller_public_key -> Binary,
@@ -62,6 +65,12 @@ diesel::table! {
         expires_at -> Timestamptz,
         consumed_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
+        accepted_signature_sha256 -> Nullable<Binary>,
+        recovered_controller_id -> Nullable<Varchar>,
+        recovered_slot_index -> Nullable<Int2>,
+        recovered_slot_issued_at -> Nullable<Timestamptz>,
+        recovered_slot_expires_at -> Nullable<Timestamptz>,
+        recovery_generation -> Nullable<Int4>,
     }
 }
 
@@ -86,20 +95,12 @@ diesel::table! {
 }
 
 diesel::table! {
-    tenant_resource_operations (id) {
-        id -> Uuid,
-        deployment_id -> Varchar,
+    tenant_resource_control_operations (operation_id) {
+        operation_id -> Uuid,
+        request_hash -> Varchar,
         tenant_id -> Uuid,
-        jti -> Varchar,
-        change_set_id -> Varchar,
-        change_set_sha256 -> Varchar,
-        request_sha256 -> Varchar,
         operation -> Varchar,
-        expected_revision -> Int8,
-        result_revision -> Int8,
-        receipt_json -> Jsonb,
-        receipt_jws -> Text,
-        created_at -> Timestamptz,
+        outcome -> Jsonb,
     }
 }
 
@@ -110,8 +111,6 @@ diesel::table! {
         resource_kind -> Varchar,
         resource_id -> Varchar,
         resource_digest -> Varchar,
-        change_set_id -> Varchar,
-        change_set_sha256 -> Varchar,
         active -> Bool,
         locator -> Text,
         created_at -> Timestamptz,
@@ -179,8 +178,8 @@ diesel::table! {
 
 diesel::table! {
     user_totp_credentials (id) {
-        id -> Uuid, tenant_id -> Uuid, user_id -> Uuid, secret_base32 -> Nullable<Varchar>,
-        secret_ciphertext -> Nullable<Binary>, secret_key_id -> Nullable<Varchar>,
+        id -> Uuid, tenant_id -> Uuid, user_id -> Uuid,
+        secret_ciphertext -> Binary, secret_key_id -> Varchar,
         label -> Varchar, confirmed_at -> Nullable<Timestamptz>, last_used_step -> Nullable<Int8>,
         created_at -> Timestamptz, updated_at -> Timestamptz,
     }
@@ -246,7 +245,7 @@ diesel::table! {
         dpop_jkt -> Nullable<Varchar>,
         mtls_x5t_s256 -> Nullable<Varchar>,
         client_attestation_jkt -> Nullable<Varchar>,
-        oidc_auth_context -> Nullable<Jsonb>,
+        oidc_auth_context -> Jsonb,
     }
 }
 
@@ -432,7 +431,19 @@ diesel::table! {
         subject_type -> Text,
         sector_identifier_uri -> Nullable<Text>,
         sector_identifier_host -> Nullable<Text>,
-        security_policy -> Nullable<Jsonb>,
+        security_policy -> Jsonb,
+    }
+}
+
+diesel::table! {
+    recovery_invalidations (operation_id) {
+        operation_id -> Uuid,
+        request_hash -> Varchar,
+        tenant_id -> Uuid,
+        state_epoch -> Uuid,
+        not_before -> Timestamptz,
+        revoked_refresh_tokens -> Int8,
+        completed_at -> Timestamptz,
     }
 }
 
@@ -523,10 +534,11 @@ diesel::allow_tables_to_appear_in_same_query!(
     controller_registry_slots,
     controller_identity_approvals,
     controller_recovery_roots,
+    controller_recovery_root_key_history,
     controller_recovery_challenges,
     tenants,
     tenant_resource_states,
-    tenant_resource_operations,
+    tenant_resource_control_operations,
     tenant_resource_bindings,
     realms,
     organizations,
@@ -540,6 +552,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     external_identity_links,
     oauth_tokens,
     oauth_token_issuances,
+    recovery_invalidations,
     user_client_grants,
     client_access_requests,
     oauth_clients,

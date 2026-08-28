@@ -72,7 +72,7 @@ OAuth 2.1 draft / OIDC / FAPI 2.0 / FAPI-CIBA / CIBA 相关能力，并同时支
 | `oauth2-oidc-baseline` | 普通 Web、Native、BFF、API client。 | OAuth 2.1-aligned：authorization code + PKCE、truthful metadata、refresh rotation、无 implicit/password。 |
 | `fapi2-security` | 现代高安全默认链路。 | FAPI 2.0 Security Final：PAR、S256、confidential client、private_key_jwt/mTLS、DPoP 或 mTLS sender constraint、严格 JWT/JWKS。 |
 | `fapi2-message-signing-*` | FAPI2 Message Signing 独立选项。 | signed request object、JARM、RFC 9701 signed/nested introspection、ID Token signing 按选项启用；失败 fail closed。 |
-| `fapi-ciba-id1` | 官方 FAPI-CIBA ID1 兼容 profile，覆盖 `private_key_jwt / mTLS` × `poll / ping`。 | 只表示 CIBA/FAPI-CIBA 兼容，不表示 FAPI 2.0 CIBA；旧 poll 专用值只作为迁移别名。 |
+| `fapi-ciba-id1` | 官方 FAPI-CIBA ID1 profile，覆盖 `private_key_jwt / mTLS` × `poll / ping`。 | 只表示 CIBA/FAPI-CIBA ID1，不表示 FAPI 2.0 CIBA；其他 profile 名称直接拒绝。 |
 | `fapi2-ciba` | 本项目内部 CIBA 强化 profile。 | 将适用于 CIBA 的 FAPI2 控制叠加到 CIBA；不得作为官方 FAPI2-CIBA 标准广告。 |
 | `external-provider-login-rp` | 我们作为 RP 接入第三方登录。 | provider 默认关闭，按 provider id 单独启用；OIDC issuer、OAuth2 endpoint、SAML metadata 均须 allowlist。 |
 
@@ -418,7 +418,7 @@ Issuer 与 OpenID4VP Verifier 后续已完成单独产品立项和实现，Walle
 具体边界见 `openid4vc-final-matrix.zh-CN.md`。Browser-Based Applications draft-27 已完成预发布安全审计，
 NazoAuthWeb 保持授权服务器同源前端与 server-managed session 边界（不是 BFF），第三方浏览器应用保持 public code + S256
 PKCE；最终 RFC 发布后仍必须执行差异审计。FAPI HTTP Signatures 也已作为第二个
-bounded candidate 完成 M8-01/02/03：仅在 `ENABLE_FAPI_HTTP_SIGNATURES=true`
+bounded candidate 完成 M8-01/02/03：仅在持久化 `http_message_signatures` 模块启用
 时约束 `/fapi/resource`，默认关闭、不发布 metadata，并以 2026-06-26 working
 draft、RFC 9421/RFC 9530 Rust 向量和真实 HTTP 正负矩阵作为本地证据。OIDF suite
 当前没有专用计划，因此不能表述为认证；草案或 Final Specification 更新时必须重新执行

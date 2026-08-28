@@ -40,6 +40,7 @@ services:
       DATA_DIR: /var/lib/nazo_oauth
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
       VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
+      VALKEY_STATE_EPOCH: ${NAZOAUTH_VALKEY_STATE_EPOCH:?set a new UUID for first deployment and every restored Valkey state boundary}
       PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
       TRANSPORT_MODE: ${NAZOAUTH_TRANSPORT_MODE:-loopback-http}
       TRUSTED_PROXY_CIDRS: ${NAZOAUTH_TRUSTED_PROXY_CIDRS:-}
@@ -98,32 +99,7 @@ services:
         condition: service_healthy
     networks:
       nazo_oauth_net:
-    command:
-      - sh
-      - -euc
-      - |
-        automation_operator_task prepare \
-          --config /app/.env.yaml \
-          --output /tmp/operator \
-          --deployment-id development-compose \
-          --actor-id docker-compose \
-          --secret-revision "$$(cat /run/nazoauth-secrets/revision)" \
-          --image-ref localhost/nazoauth-development:local \
-          --image-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
-          --embedded-release "$$NAZOAUTH_EXPECTED_BUILD_RELEASE" \
-          --embedded-revision "$$NAZOAUTH_EXPECTED_BUILD_REVISION" \
-          --embedded-build-id "$$NAZOAUTH_EXPECTED_BUILD_ID"
-        NAZOAUTH_OPERATOR_CONTEXT_FILE=/tmp/operator/context.json \
-        NAZOAUTH_OPERATOR_CONTROLLER_PUBLIC_KEY_FILE=/tmp/operator/controller.pub \
-        NAZOAUTH_OPERATOR_RECEIPT_PRIVATE_KEY_FILE=/tmp/operator/receipt.key \
-        NAZOAUTH_OPERATOR_SECRET_REVISION_FILE=/run/nazoauth-secrets/revision \
-        NAZOAUTH_OPERATOR_CONFIG_MANIFEST_FILE=/tmp/operator/config-manifest.json \
-        NAZOAUTH_SERVER_CONFIG_FILE=/app/.env.yaml \
-          nazoauth operator-task </tmp/operator/envelope.jws >/tmp/operator/receipt.jws
-        automation_operator_task verify \
-          --receipt /tmp/operator/receipt.jws \
-          --public-key /tmp/operator/receipt.pub \
-          --request-sha256 /tmp/operator/request.sha256
+    command: ["nazoauth", "migrate"]
 
   postgres:
     image: docker.io/library/postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941

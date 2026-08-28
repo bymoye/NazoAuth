@@ -81,7 +81,38 @@ fn enumerate_result_data() -> ControlResultData {
     ControlResultData::TenantResourceEnumerate {
         revision: 7,
         resources: vec![resource(TenantResourceKind::User, "user-1")],
+        resource_manifest_sha256: "f".repeat(64),
     }
+}
+
+#[test]
+fn result_data_wire_validation_includes_the_complete_result_envelope() {
+    validate_control_result_data_for_wire(&enumerate_result_data()).unwrap();
+
+    let resources = (0..MAX_TENANT_RESOURCE_IDENTITIES)
+        .map(|index| TenantResourceIdentity {
+            kind: TenantResourceKind::User,
+            resource_id: format!("resource-{index:03}-{}", "x".repeat(115)),
+            digest: "f".repeat(64),
+        })
+        .collect::<Vec<_>>();
+    let resource_mappings = resources
+        .iter()
+        .map(|resource| TenantResourceMapping {
+            kind: resource.kind,
+            resource_id: resource.resource_id.clone(),
+            public_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+        })
+        .collect();
+    let oversized = ControlResultData::TenantResourceApply {
+        revision: u64::MAX,
+        resources,
+        resource_mappings,
+        resource_manifest_sha256: "f".repeat(64),
+    };
+
+    let error = validate_control_result_data_for_wire(&oversized).unwrap_err();
+    assert!(matches!(error, ProtocolError::TooLarge), "{error:?}");
 }
 
 fn payload_of(compact: &str) -> serde_json::Value {
@@ -517,6 +548,14 @@ fn target_variants_are_closed_strictly_parsed_and_validated() {
 }
 
 #[test]
+fn oci_runtime_digest_uses_the_control_target_validator() {
+    assert!(validate_oci_image_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
+    assert!(validate_oci_image_digest(&"a".repeat(64)).is_err());
+    assert!(validate_oci_image_digest(&format!("sha256:{}", "A".repeat(64))).is_err());
+    assert!(validate_oci_image_digest(&format!("sha256:{}", "a".repeat(63))).is_err());
+}
+
+#[test]
 fn tenant_resource_payloads_are_bounded_typed_and_unique() {
     let base = || {
         let mut operation = operation();
@@ -653,6 +692,75 @@ fn tenant_resource_payloads_are_bounded_typed_and_unique() {
 }
 
 #[test]
+fn recovery_invalidation_has_one_runtime_owned_tenant_and_strict_epoch_shape() {
+    let epoch = "019c8ca2-30a6-7000-8000-000000000099";
+    let payload = ControlOperationPayload::RecoveryInvalidate {
+        state_epoch: epoch.to_owned(),
+    };
+    assert_eq!(
+        serde_json::to_string(&payload).unwrap(),
+        format!(r#"{{"name":"recovery-invalidate","state_epoch":"{epoch}"}}"#),
+    );
+    assert_eq!(
+        serde_json::from_value::<ControlOperationPayload>(serde_json::json!({
+            "name": "recovery-invalidate",
+            "state_epoch": epoch,
+        }))
+        .unwrap(),
+        payload
+    );
+
+    // The pre-cut shape is rejected: tenant ownership comes only from the
+    // running server's validated configuration, never from ctl input.
+    let old_shape = serde_json::json!({
+        "name": "recovery-invalidate",
+        "tenant_id": TENANT_ID,
+        "state_epoch": epoch,
+    });
+    assert!(
+        serde_json::from_value::<ControlOperationPayload>(old_shape)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown operation field 'tenant_id'")
+    );
+
+    for invalid in [
+        "not-a-uuid",
+        "00000000-0000-0000-0000-000000000000",
+        "3d7d0c60-4a4d-4000-8000-000000000001",
+    ] {
+        let mut invalid_operation = operation();
+        invalid_operation.operation = ControlOperationPayload::RecoveryInvalidate {
+            state_epoch: invalid.to_owned(),
+        };
+        assert!(validate_control_operation(&invalid_operation).is_err());
+    }
+    let mut valid_operation = operation();
+    valid_operation.operation = payload;
+    validate_control_operation(&valid_operation).unwrap();
+
+    let mut valid_result = result_entry();
+    valid_result.result = Some(ControlResultData::RecoveryInvalidation {
+        state_epoch: epoch.to_owned(),
+        not_before: 1,
+        revoked_refresh_tokens: 0,
+    });
+    validate_control_result(&valid_result).unwrap();
+    for invalid in [
+        "00000000-0000-0000-0000-000000000000",
+        "3d7d0c60-4a4d-4000-8000-000000000001",
+    ] {
+        let mut invalid_result = valid_result.clone();
+        invalid_result.result = Some(ControlResultData::RecoveryInvalidation {
+            state_epoch: invalid.to_owned(),
+            not_before: 1,
+            revoked_refresh_tokens: 0,
+        });
+        assert!(validate_control_result(&invalid_result).is_err());
+    }
+}
+
+#[test]
 fn uuidv7_shape_is_enforced_for_ids() {
     let operation = operation();
     validate_control_operation(&operation).unwrap();
@@ -706,7 +814,7 @@ fn control_results_roundtrip_through_journal_and_stdout_shapes() {
 
     let mut failed = result_entry();
     failed.outcome = ControlOutcome::Failed;
-    failed.error = Some(ControlErrorCode::OperationIdConflict);
+    failed.error = Some(ControlErrorCode::ExecutionFailed);
     assert_eq!(
         decode_control_result(&encode_control_result(&failed).unwrap()).unwrap(),
         failed
@@ -714,7 +822,7 @@ fn control_results_roundtrip_through_journal_and_stdout_shapes() {
     // Stable taxonomy spelling on the wire.
     let failed_wire = encode_control_result(&failed).unwrap();
     let wire = std::str::from_utf8(&failed_wire).unwrap();
-    assert!(wire.contains("OPERATION_ID_CONFLICT"));
+    assert!(wire.contains("EXECUTION_FAILED"));
 
     let mut running = result_entry();
     running.outcome = ControlOutcome::InProgress;
@@ -791,10 +899,11 @@ fn typed_result_data_is_closed_and_outcome_coupled() {
     let parse_data = |value: serde_json::Value| {
         serde_json::from_value::<ControlResultData>(value).map_err(|error| error.to_string())
     };
-    let raw = serde_json::json!({"kind": "tenant-resource-apply", "revision": 1, "resources": []});
+    let raw = serde_json::json!({"kind": "tenant-resource-old", "revision": 1, "resources": []});
     assert!(parse_data(raw).unwrap_err().contains("unknown result kind"));
     let raw = serde_json::json!({
         "kind": "tenant-resource-enumerate", "revision": 1, "resources": [],
+        "resource_manifest_sha256": "f".repeat(64),
         "selectors": [],
     });
     assert!(
@@ -821,6 +930,7 @@ fn typed_result_data_is_closed_and_outcome_coupled() {
             {"kind": "user", "resource_id": "user-1", "digest": "d".repeat(64)},
             {"kind": "user", "resource_id": "user-1", "digest": "e".repeat(64)},
         ],
+        "resource_manifest_sha256": "f".repeat(64),
     });
     // Shape-wise duplicates deserialize; the journal-entry validator refuses
     // them (asserted below through validate_control_result).
@@ -838,6 +948,7 @@ fn typed_result_data_is_closed_and_outcome_coupled() {
                 digest: "0".repeat(64),
             },
         ],
+        resource_manifest_sha256: "f".repeat(64),
     }
     .into();
     assert!(validate_control_result(&duplicated).is_err());
@@ -849,6 +960,7 @@ fn typed_result_data_is_closed_and_outcome_coupled() {
             resource_id: "user-1".to_owned(),
             digest: "D".repeat(64),
         }],
+        resource_manifest_sha256: "f".repeat(64),
     }
     .into();
     assert!(validate_control_result(&malformed_digest).is_err());
@@ -858,9 +970,29 @@ fn typed_result_data_is_closed_and_outcome_coupled() {
         resources: (0..=MAX_TENANT_RESOURCE_IDENTITIES)
             .map(|index| resource(TenantResourceKind::User, format!("user-{index}").as_str()))
             .collect(),
+        resource_manifest_sha256: "f".repeat(64),
     }
     .into();
     assert!(validate_control_result(&flooded).is_err());
+}
+
+#[test]
+fn revoke_result_manifest_describes_remaining_active_set_not_revoked_delta() {
+    let revoked = resource(TenantResourceKind::User, "revoked-user");
+    let remaining = resource(TenantResourceKind::OauthClient, "active-client");
+    let remaining_manifest = canonical_tenant_resource_manifest_sha256(&[remaining]).unwrap();
+    assert_ne!(
+        remaining_manifest,
+        canonical_tenant_resource_manifest_sha256(std::slice::from_ref(&revoked)).unwrap()
+    );
+
+    let mut result = result_entry();
+    result.result = Some(ControlResultData::TenantResourceRevoke {
+        revision: 8,
+        resources: vec![revoked],
+        resource_manifest_sha256: remaining_manifest,
+    });
+    validate_control_result(&result).unwrap();
 }
 
 #[test]

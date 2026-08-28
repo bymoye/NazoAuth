@@ -156,6 +156,9 @@ impl ApprovalRequestBody {
                 })
             }
             "rotate" => {
+                if self.recovery_public_key.is_some() || self.recovery_kid.is_some() {
+                    return Err(Self::unexpected("recovery_public_key/recovery_kid"));
+                }
                 let controller_id = self
                     .controller_id
                     .clone()
@@ -170,6 +173,9 @@ impl ApprovalRequestBody {
                 }))
             }
             "revoke" => {
+                if self.recovery_public_key.is_some() || self.recovery_kid.is_some() {
+                    return Err(Self::unexpected("recovery_public_key/recovery_kid"));
+                }
                 if self.label.is_some() || self.public_key.is_some() || self.kid.is_some() {
                     return Err(Self::unexpected("label/public_key/kid"));
                 }
@@ -186,6 +192,10 @@ impl ApprovalRequestBody {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/http/admin/controller_registry.rs"]
+mod tests;
 
 fn invalid_action() -> HttpResponse {
     oauth_error(

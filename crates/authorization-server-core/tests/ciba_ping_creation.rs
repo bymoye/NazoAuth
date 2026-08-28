@@ -1,9 +1,9 @@
 use futures_executor::block_on;
 use nazo_auth::{
-    CibaAtomicResult, CibaAuthenticationContext, CibaCreateFailure, CibaDecision,
-    CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification, CibaPingNotificationStatus,
-    CibaRequestState, CibaService, CibaStateFuture, CibaStateStorePort, CibaStatus,
-    CibaStoredRequest, evaluate_ciba_decision_with_authentication_context,
+    CibaAtomicResult, CibaAuthenticationContext, CibaDecision, CibaDecisionEvaluation,
+    CibaDecisionFailure, CibaPingNotification, CibaPingNotificationStatus, CibaRequestState,
+    CibaService, CibaStateFuture, CibaStateStorePort, CibaStatus, CibaStoredRequest,
+    evaluate_ciba_decision,
 };
 use uuid::Uuid;
 
@@ -58,15 +58,14 @@ impl CibaStateStorePort for CreateStore {
 #[test]
 fn decision_deadline_preserves_the_neutral_atomic_contract() {
     let result = block_on(
-        CibaService::new(CreateStore).decide_with_authentication_context_and_deadline(
+        CibaService::new(CreateStore).decide_with_authorization_deadline(
             "missing-auth-request",
-            CibaDecision::Approve,
-            Some(Uuid::from_u128(7)),
-            Some(CibaAuthenticationContext {
+            CibaDecision::Approve(CibaAuthenticationContext {
                 auth_time: 100,
                 amr: vec!["pwd".to_owned()],
                 oidc_sid: None,
             }),
+            Some(Uuid::from_u128(7)),
             Some(180),
             || 150,
         ),
@@ -179,11 +178,10 @@ fn authentication_context_is_bound_on_approval_and_invalid_context_is_rejected()
         ping_notification: None,
     };
 
-    let evaluation = evaluate_ciba_decision_with_authentication_context(
+    let evaluation = evaluate_ciba_decision(
         &state,
         Some(user_id),
-        CibaDecision::Approve,
-        Some(context.clone()),
+        &CibaDecision::Approve(context.clone()),
         150,
     );
     let CibaDecisionEvaluation::Commit(next) = evaluation else {
@@ -214,19 +212,8 @@ fn authentication_context_is_bound_on_approval_and_invalid_context_is_rejected()
             oidc_sid: Some(String::new()),
         },
     ] {
-        let invalid_state = CibaRequestState {
-            authentication_context: Some(invalid),
-            ..state.clone()
-        };
-        let result = futures_executor::block_on(
-            CibaService::new(CreateStore)
-                .create_unique(&invalid_state, || "invalid-context-id".to_owned()),
-        );
-        assert_eq!(
-            result,
-            Err(CibaCreateFailure::Storage(
-                nazo_auth::CibaStatePortError::CorruptData
-            ))
-        );
+        let result =
+            evaluate_ciba_decision(&state, Some(user_id), &CibaDecision::Approve(invalid), 150);
+        assert_eq!(result, CibaDecisionEvaluation::InvalidAuthenticationContext);
     }
 }

@@ -78,7 +78,7 @@ use anyhow::{Context as _, bail};
 use chrono::Utc;
 use nazo_operator_protocol::{
     CONTROL_RESULT_SCHEMA, ControlErrorCode, ControlOperation, ControlOutcome, ControlResult,
-    ControlResultData, validate_control_result,
+    ControlResultData, encode_control_result, validate_control_result,
 };
 
 use super::*;
@@ -147,6 +147,10 @@ pub(crate) enum JournalFlowError {
     /// proven-idempotent owner, so re-entry could duplicate a mutation.
     /// Fail-closed; requires operator resolution.
     UnknownOutcome,
+    /// A resumable side effect proved it did not reach its durable owner
+    /// because that owner was temporarily unavailable. The executing record
+    /// remains authoritative and may be resumed with the same operation.
+    RetryableExecution(anyhow::Error),
     /// Durable-state or I/O failure.  Nothing about the operation outcome
     /// can be inferred from it.
     Transport(anyhow::Error),
@@ -164,8 +168,25 @@ impl std::fmt::Display for JournalFlowError {
                     "operation journal has an unresolved executing record"
                 )
             }
+            JournalFlowError::RetryableExecution(error) => write!(formatter, "{error:#}"),
             JournalFlowError::Transport(error) => write!(formatter, "{error:#}"),
         }
+    }
+}
+
+/// Execution-layer classification deliberately has only the two facts the
+/// journal can safely act on. It is not a general retry mechanism: an engine
+/// may mark an error retryable only after proving no side effect reached its
+/// own durable owner.
+#[derive(Debug)]
+pub(crate) enum SideEffectError {
+    Terminal(anyhow::Error),
+    Retryable(anyhow::Error),
+}
+
+impl From<anyhow::Error> for SideEffectError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Terminal(error)
     }
 }
 
@@ -603,6 +624,11 @@ pub(crate) fn complete(
     result: &ControlResult,
 ) -> Result<(), JournalFlowError> {
     validate_control_result(result).map_err(transport)?;
+    // A completed journal record must always be representable on the only
+    // ControlResult wire channel. Check its byte ceiling before publishing
+    // terminal state so response-loss recovery can never strand an
+    // unreportable completion.
+    encode_control_result(result).map_err(transport)?;
     ensure_file_safe_identifier(&result.operation_id)?;
     ensure_request_hash_shape(&result.request_hash)?;
     let path = record_path(
@@ -696,7 +722,7 @@ pub(crate) async fn run_journaled_operation<F, Fut>(
 ) -> Result<JournaledOutcome, JournalFlowError>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<Option<ControlResultData>>>,
+    Fut: std::future::Future<Output = Result<Option<ControlResultData>, SideEffectError>>,
 {
     pause("control-journal-before-accept");
     match accept(state_directory, operation, request_hash, snapshot)? {
@@ -726,11 +752,20 @@ where
 
     let (outcome, error, data) = match side_effect().await {
         Ok(data) => (ControlOutcome::Succeeded, None, data),
-        Err(_) => (
-            ControlOutcome::Failed,
-            Some(ControlErrorCode::ExecutionFailed),
-            None,
-        ),
+        Err(SideEffectError::Retryable(error)) if resume_allowed => {
+            return Err(JournalFlowError::RetryableExecution(error));
+        }
+        Err(SideEffectError::Retryable(_)) => return Err(JournalFlowError::UnknownOutcome),
+        Err(SideEffectError::Terminal(error)) => {
+            // The closed result intentionally carries no engine diagnostics;
+            // the local operator log remains the diagnostic channel.
+            tracing::warn!(error = %error, "control operation business execution failed");
+            (
+                ControlOutcome::Failed,
+                Some(ControlErrorCode::ExecutionFailed),
+                None,
+            )
+        }
     };
     pause("control-journal-after-side-effect");
 

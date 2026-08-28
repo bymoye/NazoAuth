@@ -187,15 +187,16 @@ pub trait CibaStateStorePort: Send + Sync {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CibaDecision {
-    Approve,
+    Approve(CibaAuthenticationContext),
     Deny,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CibaDecisionEvaluation {
     Commit(Box<CibaRequestState>),
+    InvalidAuthenticationContext,
     UserMismatch,
     AlreadyHandled,
     Expired,
@@ -235,6 +236,7 @@ pub enum CibaCreateFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CibaDecisionFailure {
     Missing,
+    InvalidAuthenticationContext,
     UserMismatch,
     AlreadyHandled,
     Expired,
@@ -339,32 +341,10 @@ where
     where
         F: FnMut() -> i64,
     {
-        self.decide_with_authentication_context(
+        self.decide_with_authorization_deadline(
             auth_req_id,
             decision,
             expected_user_id,
-            None,
-            current_time,
-        )
-        .await
-    }
-
-    pub async fn decide_with_authentication_context<F>(
-        &self,
-        auth_req_id: &str,
-        decision: CibaDecision,
-        expected_user_id: Option<Uuid>,
-        authentication_context: Option<CibaAuthenticationContext>,
-        current_time: F,
-    ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
-    where
-        F: FnMut() -> i64,
-    {
-        self.decide_with_authentication_context_and_deadline(
-            auth_req_id,
-            decision,
-            expected_user_id,
-            authentication_context,
             None,
             current_time,
         )
@@ -374,12 +354,11 @@ where
     /// Commits a CIBA decision only while the caller-owned authorization is
     /// still valid. The deadline is responsibility-neutral so independent
     /// authorization mechanisms can share the same atomic state fence.
-    pub async fn decide_with_authentication_context_and_deadline<F>(
+    pub async fn decide_with_authorization_deadline<F>(
         &self,
         auth_req_id: &str,
         decision: CibaDecision,
         expected_user_id: Option<Uuid>,
-        authentication_context: Option<CibaAuthenticationContext>,
         authorization_deadline: Option<i64>,
         mut current_time: F,
     ) -> Result<CibaCommittedDecision, CibaDecisionFailure>
@@ -392,13 +371,11 @@ where
                 .await
                 .map_err(CibaDecisionFailure::Storage)?
                 .ok_or(CibaDecisionFailure::Missing)?;
-            match evaluate_ciba_decision_with_authentication_context(
-                &stored.state,
-                expected_user_id,
-                decision,
-                authentication_context.clone(),
-                current_time(),
-            ) {
+            match evaluate_ciba_decision(&stored.state, expected_user_id, &decision, current_time())
+            {
+                CibaDecisionEvaluation::InvalidAuthenticationContext => {
+                    return Err(CibaDecisionFailure::InvalidAuthenticationContext);
+                }
                 CibaDecisionEvaluation::UserMismatch => {
                     return Err(CibaDecisionFailure::UserMismatch);
                 }
@@ -475,13 +452,14 @@ where
         &self,
         auth_req_id: &str,
         expected_client_id: &str,
-        mut stored: CibaStoredRequest<S::Version>,
+        stored: CibaStoredRequest<S::Version>,
         authorization_deadline: Option<i64>,
         mut current_time: F,
     ) -> Result<CibaPollCommit, CibaPollFailure>
     where
         F: FnMut() -> i64,
     {
+        let mut stored = validate_stored_request(stored).map_err(CibaPollFailure::Storage)?;
         for _ in 0..CIBA_TRANSITION_MAX_ATTEMPTS {
             if stored.state.client_id != expected_client_id {
                 return Err(CibaPollFailure::ClientMismatch);
@@ -621,18 +599,7 @@ pub fn evaluate_ciba_poll(state: &CibaRequestState, now: i64) -> CibaPollTransit
 pub fn evaluate_ciba_decision(
     state: &CibaRequestState,
     expected_user_id: Option<Uuid>,
-    decision: CibaDecision,
-    now: i64,
-) -> CibaDecisionEvaluation {
-    evaluate_ciba_decision_with_authentication_context(state, expected_user_id, decision, None, now)
-}
-
-#[must_use]
-pub fn evaluate_ciba_decision_with_authentication_context(
-    state: &CibaRequestState,
-    expected_user_id: Option<Uuid>,
-    decision: CibaDecision,
-    authentication_context: Option<CibaAuthenticationContext>,
+    decision: &CibaDecision,
     now: i64,
 ) -> CibaDecisionEvaluation {
     if expected_user_id.is_some_and(|user_id| user_id != state.user_id) {
@@ -645,12 +612,18 @@ pub fn evaluate_ciba_decision_with_authentication_context(
         return CibaDecisionEvaluation::Expired;
     }
     let mut next = state.clone();
-    next.status = match decision {
-        CibaDecision::Approve => CibaStatus::Approved,
-        CibaDecision::Deny => CibaStatus::Denied,
-    };
-    if decision == CibaDecision::Approve {
-        next.authentication_context = authentication_context;
+    match decision {
+        CibaDecision::Approve(authentication_context) => {
+            if !valid_authentication_context(authentication_context) {
+                return CibaDecisionEvaluation::InvalidAuthenticationContext;
+            }
+            next.status = CibaStatus::Approved;
+            next.authentication_context = Some(authentication_context.clone());
+        }
+        CibaDecision::Deny => {
+            next.status = CibaStatus::Denied;
+            next.authentication_context = None;
+        }
     }
     if let Some(notification) = next.ping_notification.as_mut() {
         notification.status = CibaPingNotificationStatus::Pending;
@@ -688,16 +661,12 @@ fn validate_state_shape(
     if state.expires_at <= 0 || state.retention_expires_at < state.expires_at {
         return Err(CibaStatePortError::CorruptData);
     }
-    if state
-        .authentication_context
-        .as_ref()
-        .is_some_and(|context| {
-            context.auth_time <= 0
-                || context.amr.is_empty()
-                || context.amr.iter().any(|method| method.trim().is_empty())
-                || context.oidc_sid.as_deref().is_some_and(str::is_empty)
-        })
-    {
+    let authentication_context_is_current = match (&state.status, &state.authentication_context) {
+        (CibaStatus::Approved, Some(context)) => valid_authentication_context(context),
+        (CibaStatus::Pending | CibaStatus::Denied, None) => true,
+        (CibaStatus::Approved, None) | (CibaStatus::Pending | CibaStatus::Denied, Some(_)) => false,
+    };
+    if !authentication_context_is_current {
         return Err(CibaStatePortError::CorruptData);
     }
     if let Some(notification) = &state.ping_notification
@@ -728,4 +697,14 @@ fn validate_state_shape(
         return Err(CibaStatePortError::CorruptData);
     }
     Ok(())
+}
+
+fn valid_authentication_context(context: &CibaAuthenticationContext) -> bool {
+    context.auth_time > 0
+        && !context.amr.is_empty()
+        && context.amr.iter().all(|method| !method.trim().is_empty())
+        && context
+            .oidc_sid
+            .as_deref()
+            .is_none_or(|sid| !sid.trim().is_empty())
 }

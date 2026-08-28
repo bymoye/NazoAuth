@@ -76,7 +76,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             sys.executable,
             str(BUILDER),
             "--version",
-            "v0.2.0",
+            "v0.2.2",
             "--target",
             self.target,
             "--backend-commit",
@@ -126,14 +126,14 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             value["artifacts"]["binary"]["sha256"],
             hashlib.sha256(b"server-binary").hexdigest(),
         )
-        self.assertEqual(value["embedded"]["release"], "v0.2.0")
+        self.assertEqual(value["embedded"]["release"], "v0.2.2")
         self.assertEqual(value["embedded"]["revision"], "e" * 40)
-        self.assertEqual(value["embedded"]["protocol"], 1)
+        self.assertEqual(value["embedded"]["protocol"], 2)
         self.assertEqual(
             value["operator_protocol"],
             {
-                "version": 1,
-                "minimum_ctl_version": "0.1.19",
+                "version": 2,
+                "minimum_ctl_version": "0.2.0",
                 "maximum_ctl_version_exclusive": "0.3.0",
             },
         )

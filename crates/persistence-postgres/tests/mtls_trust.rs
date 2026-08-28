@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use diesel::{
     QueryableByName, sql_query,
-    sql_types::{SmallInt, Text, Uuid as SqlUuid},
+    sql_types::{Jsonb, SmallInt, Text, Uuid as SqlUuid},
 };
 use diesel_async::RunQueryDsl;
 use nazo_identity::{
@@ -84,16 +84,20 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
     sql_query(
         "INSERT INTO oauth_clients (
             id, tenant_id, realm_id, organization_id, client_id, client_name, client_type,
-            redirect_uris, scopes, grant_types, token_endpoint_auth_method
+            redirect_uris, scopes, grant_types, token_endpoint_auth_method, security_policy
          ) VALUES ($1,$2,$3,$4,$5,'mTLS trust test','confidential',
             '[]'::jsonb,'[\"openid\"]'::jsonb,'[\"authorization_code\"]'::jsonb,
-            'tls_client_auth')",
+            'tls_client_auth',$6)",
     )
     .bind::<SqlUuid, _>(client_database_id)
     .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
     .bind::<SqlUuid, _>(tenant.realm_id.as_uuid())
     .bind::<SqlUuid, _>(tenant.organization_id.as_uuid())
     .bind::<Text, _>(&client_id)
+    .bind::<Jsonb, _>(
+        serde_json::to_value(nazo_auth::ClientSecurityPolicy::default())
+            .expect("current client security policy should serialize"),
+    )
     .execute(&mut connection)
     .await
     .unwrap();
@@ -101,16 +105,20 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
         "INSERT INTO oauth_clients (
             id, tenant_id, realm_id, organization_id, client_id, client_name, client_type,
             redirect_uris, scopes, grant_types, token_endpoint_auth_method,
-            require_mtls_bound_tokens
+            require_mtls_bound_tokens, security_policy
          ) VALUES ($1,$2,$3,$4,$5,'mTLS bound-token trust test','confidential',
             '[]'::jsonb,'[\"openid\"]'::jsonb,'[\"authorization_code\"]'::jsonb,
-            'private_key_jwt',TRUE)",
+            'private_key_jwt',TRUE,$6)",
     )
     .bind::<SqlUuid, _>(bound_client_database_id)
     .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
     .bind::<SqlUuid, _>(tenant.realm_id.as_uuid())
     .bind::<SqlUuid, _>(tenant.organization_id.as_uuid())
     .bind::<Text, _>(&bound_client_id)
+    .bind::<Jsonb, _>(
+        serde_json::to_value(nazo_auth::ClientSecurityPolicy::default())
+            .expect("current client security policy should serialize"),
+    )
     .execute(&mut connection)
     .await
     .unwrap();

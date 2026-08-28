@@ -31,7 +31,11 @@ pub use service::{
     ResourceServerPortFuture, RevocationLookupKey,
 };
 
-const DEFAULT_CLOCK_SKEW_SECONDS: i64 = 60;
+/// The largest expiry grace NazoAuth resource servers may apply. This is part
+/// of the recovery invalidation bound; accepting a larger skew would make a
+/// signed access token live beyond the authority's durable `not_before`.
+pub const MAX_ACCESS_TOKEN_CLOCK_SKEW_SECONDS: i64 = 60;
+const DEFAULT_CLOCK_SKEW_SECONDS: i64 = MAX_ACCESS_TOKEN_CLOCK_SKEW_SECONDS;
 const DEFAULT_DPOP_MAX_AGE_SECONDS: i64 = 300;
 
 #[derive(Clone, Debug)]
@@ -88,6 +92,7 @@ pub enum ResourceServerVerifierError {
     MissingIssuer,
     MissingAudience,
     MissingJwks,
+    InvalidClockSkew,
     DuplicateKeyId,
     UnsupportedAlgorithm,
     MissingKeyId,
@@ -156,6 +161,9 @@ impl ResourceServerVerifier {
         }
         if config.audiences.is_empty() {
             return Err(ResourceServerVerifierError::MissingAudience);
+        }
+        if !(0..=MAX_ACCESS_TOKEN_CLOCK_SKEW_SECONDS).contains(&config.clock_skew_seconds) {
+            return Err(ResourceServerVerifierError::InvalidClockSkew);
         }
         let Some(keys) = config.jwks.get("keys").and_then(Value::as_array) else {
             return Err(ResourceServerVerifierError::MissingJwks);

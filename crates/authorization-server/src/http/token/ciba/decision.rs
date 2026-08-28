@@ -122,7 +122,11 @@ pub(crate) async fn ciba_decision(
         );
     }
     let decision = if payload.decision == "approve" {
-        CibaDecision::Approve
+        CibaDecision::Approve(CibaAuthenticationContext {
+            auth_time: session.auth_time,
+            amr: session.amr.clone(),
+            oidc_sid: Some(session.oidc_sid.clone()),
+        })
     } else {
         CibaDecision::Deny
     };
@@ -133,11 +137,6 @@ pub(crate) async fn ciba_decision(
             decision,
             expected_user_id: Some(session.user.id()),
             source: CibaDecisionSource::User,
-            authentication_context: Some(CibaAuthenticationContext {
-                auth_time: session.auth_time,
-                amr: session.amr.clone(),
-                oidc_sid: Some(session.oidc_sid.clone()),
-            }),
             source_ip_hash: Some(blake3_hex(&client_ip_with_context(
                 &req,
                 config.client_ip_header_mode,
@@ -153,7 +152,6 @@ struct CibaDecisionCommand {
     decision: CibaDecision,
     expected_user_id: Option<Uuid>,
     source: CibaDecisionSource,
-    authentication_context: Option<CibaAuthenticationContext>,
     source_ip_hash: Option<String>,
 }
 
@@ -180,8 +178,8 @@ async fn prepare_ciba_decision_intent(
             "CIBA decision audit storage unavailable.",
         ));
     }
-    let decision_name = match command.decision {
-        CibaDecision::Approve => "approve",
+    let decision_name = match &command.decision {
+        CibaDecision::Approve(_) => "approve",
         CibaDecision::Deny => "deny",
     };
     let mut fields = audit_fields(&[
@@ -223,17 +221,12 @@ async fn set_ciba_request_decision(
         decision,
         expected_user_id,
         source,
-        authentication_context,
         source_ip_hash,
     } = command;
     let result = ciba_service
-        .decide_with_authentication_context(
-            &auth_req_id,
-            decision,
-            expected_user_id,
-            authentication_context,
-            || Utc::now().timestamp(),
-        )
+        .decide(&auth_req_id, decision, expected_user_id, || {
+            Utc::now().timestamp()
+        })
         .await;
     complete_ciba_decision(result, &auth_req_id, source, source_ip_hash)
 }
@@ -246,12 +239,12 @@ pub(super) fn complete_ciba_decision(
 ) -> HttpResponse {
     match result {
         Ok(committed) => {
-            let event = match committed.decision {
-                CibaDecision::Approve => "ciba_authorization_approved",
+            let event = match &committed.decision {
+                CibaDecision::Approve(_) => "ciba_authorization_approved",
                 CibaDecision::Deny => "ciba_authorization_denied",
             };
-            let decision_name = match committed.decision {
-                CibaDecision::Approve => "approve",
+            let decision_name = match &committed.decision {
+                CibaDecision::Approve(_) => "approve",
                 CibaDecision::Deny => "deny",
             };
             let mut fields = audit_fields(&[
@@ -281,6 +274,11 @@ pub(super) fn complete_ciba_decision(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "CIBA request was already handled.",
+        ),
+        Err(CibaDecisionFailure::InvalidAuthenticationContext) => ciba_error_no_store(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "CIBA authentication context is invalid.",
         ),
         Err(CibaDecisionFailure::Storage(error)) => ciba_state_error_response(error),
         Err(CibaDecisionFailure::Contended) => ciba_error_no_store(

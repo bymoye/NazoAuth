@@ -1,4 +1,4 @@
-use crate::settings::{AuthorizationServerProfile, Settings};
+use crate::settings::Settings;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 
 /// Focused transport/configuration projection for RFC 8628 endpoints.
@@ -14,7 +14,6 @@ pub(crate) struct DeviceHttpConfig {
     pub(crate) ttl_seconds: u64,
     pub(crate) poll_interval_seconds: u64,
     pub(crate) pairwise_subject_secret: Option<Box<str>>,
-    pub(crate) authorization_server_profile: AuthorizationServerProfile,
 }
 
 impl From<&Settings> for DeviceHttpConfig {
@@ -34,7 +33,6 @@ impl From<&Settings> for DeviceHttpConfig {
                 .pairwise_subject_secret
                 .as_deref()
                 .map(Into::into),
-            authorization_server_profile: settings.protocol.authorization_server_profile,
         }
     }
 }

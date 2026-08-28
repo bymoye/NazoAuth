@@ -22,8 +22,6 @@ set can be scanned from one place.
 | Chinese fresh production activation | [operations/fresh-production-activation.zh-CN.md](operations/fresh-production-activation.zh-CN.md) |
 | Configuration | [operations/configuration.md](operations/configuration.md) |
 | Release platform support | [operations/platform-support.md](operations/platform-support.md) |
-| Operator-task security and UX plan | [security/operator-task-protocol-plan.zh-CN.md](security/operator-task-protocol-plan.zh-CN.md) |
-| Operator-task implementation task book | [project/operator-task-protocol-implementation-task.zh-CN.md](project/operator-task-protocol-implementation-task.zh-CN.md) |
 | OpenID Connect integration | [integration/openid-connect.md](integration/openid-connect.md) |
 | Chinese OpenID Connect integration | [integration/openid-connect.zh-CN.md](integration/openid-connect.zh-CN.md) |
 | Protocol and profile status | [protocol/profile-matrix.md](protocol/profile-matrix.md) |
@@ -114,7 +112,6 @@ set can be scanned from one place.
 | --- | --- |
 | [security/threat-model.md](security/threat-model.md) | Threat model and security boundaries. |
 | [security/security-events.md](security/security-events.md) | Security event taxonomy. |
-| [security/operator-task-protocol-plan.zh-CN.md](security/operator-task-protocol-plan.zh-CN.md) | Chinese security, capability-boundary, UX, rollout, and final-acceptance plan for privileged ctl/app interactions. |
 | [../SECURITY.md](../SECURITY.md) | Security policy and reporting channel. |
 
 ### Conformance
@@ -148,7 +145,6 @@ set can be scanned from one place.
 | [project/roadmap.md](project/roadmap.md) | Current scope, roadmap, and deferred capability record. |
 | [project/architecture.md](project/architecture.md) | Workspace boundaries, dependency direction, composition, and runtime-module lifecycle contract. |
 | [project/spec-coverage-and-responsibility-audit-2026-08-20.md](project/spec-coverage-and-responsibility-audit-2026-08-20.md) | Exact-head specification-to-test traceability, Linux coverage evidence, residual gaps, and file-responsibility decisions for the 2026-08-20 audit. |
-| [project/operator-task-protocol-implementation-task.zh-CN.md](project/operator-task-protocol-implementation-task.zh-CN.md) | Chinese ordered implementation task book for the signed operator-task protocol and ctl UX. |
 | [project/openai-build-week-2026.md](project/openai-build-week-2026.md) | English Build Week before/after boundary, Codex collaboration, evidence, and judge test path. |
 
 ### Examples

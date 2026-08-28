@@ -513,18 +513,8 @@ fn secure_deployments_default_to_host_only_cookie_names() {
 }
 
 #[test]
-fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
+fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
     let defaults = Settings::from_config(&ConfigSource::default()).unwrap();
-    assert!(!defaults.modules.enable_request_object);
-    assert!(!defaults.modules.enable_par_request_object);
-    assert!(!defaults.modules.enable_authorization_details);
-    assert!(!defaults.modules.enable_device_authorization_grant);
-    assert!(!defaults.modules.enable_dynamic_client_registration);
-    assert!(!defaults.modules.enable_frontchannel_logout);
-    assert!(!defaults.modules.enable_session_management);
-    assert!(!defaults.modules.enable_ciba);
-    assert!(!defaults.modules.enable_native_sso);
-    assert!(!defaults.modules.enable_scim_security_events);
     assert!(!defaults.modules.enable_openid4vci_issuer);
     assert!(!defaults.modules.enable_openid4vp_verifier);
     assert_eq!(defaults.storage.scim_event_retention_seconds, 604_800);
@@ -544,9 +534,6 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     assert!(defaults.ciba.ciba_notification_private_origins.is_empty());
 
     let config = ConfigSource::from_pairs_for_test([
-        ("ENABLE_AUTHORIZATION_DETAILS", "true"),
-        ("ENABLE_NATIVE_SSO", "true"),
-        ("ENABLE_SCIM_SECURITY_EVENTS", "true"),
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
         ("ENABLE_OPENID4VP_VERIFIER", "true"),
         (
@@ -602,16 +589,6 @@ fn feature_gate_settings_default_closed_and_accept_explicit_enablement() {
     ]);
     let settings = Settings::from_config(&config).unwrap();
 
-    assert!(!settings.modules.enable_request_object);
-    assert!(!settings.modules.enable_par_request_object);
-    assert!(settings.modules.enable_authorization_details);
-    assert!(!settings.modules.enable_device_authorization_grant);
-    assert!(settings.modules.enable_dynamic_client_registration);
-    assert!(!settings.modules.enable_frontchannel_logout);
-    assert!(!settings.modules.enable_session_management);
-    assert!(!settings.modules.enable_ciba);
-    assert!(settings.modules.enable_native_sso);
-    assert!(settings.modules.enable_scim_security_events);
     assert!(settings.modules.enable_openid4vci_issuer);
     assert!(settings.modules.enable_openid4vp_verifier);
     assert_eq!(settings.storage.scim_event_retention_seconds, 86_400);
@@ -652,17 +629,21 @@ fn scim_event_retention_is_bounded_for_delivery_and_data_minimization() {
 }
 
 #[test]
-fn dynamic_client_registration_is_enabled_only_with_an_initial_access_token() {
+fn dynamic_client_registration_initial_access_token_is_optional() {
     let missing_token = ConfigSource::from_pairs_for_test([]);
     let settings = Settings::from_config(&missing_token).unwrap();
-    assert!(!settings.modules.enable_dynamic_client_registration);
+    assert!(
+        settings
+            .modules
+            .dynamic_client_registration_initial_access_token
+            .is_none()
+    );
 
     let protected = ConfigSource::from_pairs_for_test([(
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
         "register-token",
     )]);
     let settings = Settings::from_config(&protected).unwrap();
-    assert!(settings.modules.enable_dynamic_client_registration);
     assert_eq!(
         settings
             .modules
@@ -1500,23 +1481,19 @@ fn saml_gateway_requires_strong_shared_secret_when_enabled() {
     );
 }
 #[test]
-fn fapi_http_signature_settings_default_closed() {
+fn fapi_http_signature_defaults_are_bounded() {
     let settings = Settings::from_config(&ConfigSource::default()).unwrap();
 
-    assert!(!settings.modules.enable_fapi_http_signatures);
     assert_eq!(settings.protocol.fapi_http_signature_max_age_seconds, 60);
 }
 
 #[test]
 fn fapi_http_signature_max_age_accepts_inclusive_boundaries() {
     for value in ["1", "300"] {
-        let config = ConfigSource::from_pairs_for_test([
-            ("ENABLE_FAPI_HTTP_SIGNATURES", "true"),
-            ("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS", value),
-        ]);
+        let config =
+            ConfigSource::from_pairs_for_test([("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS", value)]);
         let settings = Settings::from_config(&config).unwrap();
 
-        assert!(settings.modules.enable_fapi_http_signatures);
         assert_eq!(
             settings
                 .protocol

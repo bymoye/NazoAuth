@@ -4,7 +4,7 @@ use crate::test_support::TestInfrastructure;
 
 use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID};
 
-use super::super::dispatch::validate_token_request_profile_with_profile;
+use super::super::dispatch::validate_token_request_profile;
 use super::request::{
     ciba_binding_message_is_supported, ciba_hint_count, ciba_request_object_audience_valid,
     ciba_request_object_hint_count, ciba_request_object_jti_valid, ciba_request_object_times_valid,
@@ -58,7 +58,7 @@ use diesel::sql_types::{Bool, Text, Uuid as SqlUuid};
 use diesel_async::RunQueryDsl;
 use std::io::{self, Write};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration as StdDuration;
@@ -120,7 +120,6 @@ async fn live_ciba_replay_state() -> Option<TestInfrastructure> {
     let mut settings = Settings::from_config(&ConfigSource::default())
         .expect("default CIBA test settings should load");
     settings.endpoint.issuer = "https://issuer.example".to_owned();
-    settings.modules.enable_ciba = true;
     Some(TestInfrastructure {
         diesel_db: create_pool(database_url, 2).expect("CIBA test database should build"),
         valkey,
@@ -181,6 +180,14 @@ async fn store_ciba_state_with_user(
     status: CibaStatus,
 ) {
     let now = Utc::now().timestamp();
+    let authentication_context = match status {
+        CibaStatus::Approved => Some(CibaAuthenticationContext {
+            auth_time: now,
+            amr: vec!["pwd".to_owned()],
+            oidc_sid: Some(format!("ciba-test-session-{user_id}")),
+        }),
+        CibaStatus::Pending | CibaStatus::Denied => None,
+    };
     CibaStore::new(&state.valkey_connection())
         .create(
             auth_req_id,
@@ -190,7 +197,7 @@ async fn store_ciba_state_with_user(
                 scopes: vec!["openid".to_owned()],
                 audiences: vec!["resource://default".to_owned()],
                 acr: None,
-                authentication_context: None,
+                authentication_context,
                 binding_message: None,
                 issued_at: now,
                 status,
@@ -255,7 +262,7 @@ async fn store_ciba_session(state: &TestInfrastructure, sid: &str, user_id: Uuid
     };
     valkey_set_ex(
         &state.valkey,
-        format!("oauth:session:{sid}"),
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
         serde_json::to_string(&payload).expect("CIBA session should serialize"),
         state.settings.session.session_ttl_seconds,
     )
@@ -274,9 +281,12 @@ async fn call_ciba_token_for_test(
     call_ciba_token_with_request_for_test(state, client, auth_req_id, req).await
 }
 
-const CIBA_TEST_MTLS_THUMBPRINT: &str = "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8";
+fn ciba_test_mtls_certificate() -> &'static crate::test_support::Rfc9440CertificateFixture {
+    static CERTIFICATE: OnceLock<crate::test_support::Rfc9440CertificateFixture> = OnceLock::new();
+    CERTIFICATE.get_or_init(|| crate::test_support::rfc9440_certificate_fixture("ciba-test"))
+}
 
-fn enable_ciba_test_mtls_proxy(state: &mut TestInfrastructure) {
+fn configure_ciba_test_mtls_proxy(state: &mut TestInfrastructure) {
     let mut settings = (*state.settings).clone();
     settings.endpoint.trusted_proxy_cidrs = vec![
         nazo_http_actix::IpCidr::parse("127.0.0.1/32").expect("trusted proxy CIDR should parse"),
@@ -289,16 +299,16 @@ async fn call_ciba_token_with_mtls_for_test(
     client: &ClientRow,
     auth_req_id: String,
 ) -> HttpResponse {
+    let certificate = ciba_test_mtls_certificate();
     let req = actix_web::test::TestRequest::post()
         .uri("/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header(("x-ssl-client-verify", "SUCCESS"))
-        .insert_header(("x-ssl-client-cert-sha256", CIBA_TEST_MTLS_THUMBPRINT))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
     call_ciba_token_with_request_for_test(state, client, auth_req_id, req).await
 }
@@ -407,10 +417,10 @@ async fn token_ciba_rejects_client_policy_before_state_access() {
     let state = ciba_test_state();
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("ciba-kid", &key);
-    client.security_policy = Some(nazo_auth::ClientSecurityPolicy {
+    client.security_policy = nazo_auth::ClientSecurityPolicy {
         allow_cross_device_flows: false,
         ..nazo_auth::ClientSecurityPolicy::default()
-    });
+    };
 
     let response = call_ciba_token_for_test(&state, &client, "not-stored".to_owned()).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -454,9 +464,7 @@ async fn token_ciba_rejects_a_disabled_module_before_state_access() {
 
 #[actix_web::test]
 async fn token_ciba_rejects_a_missing_auth_req_id_before_state_access() {
-    let state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
+    let state = ciba_test_state();
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let client = ciba_private_key_jwt_client("missing-auth-req-id-kid", &key);
     let form = TokenForm {
@@ -481,9 +489,7 @@ async fn token_ciba_rejects_a_missing_auth_req_id_before_state_access() {
 
 #[actix_web::test]
 async fn token_ciba_rejects_an_invalid_fapi_client_before_state_access() {
-    let state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
+    let state = ciba_test_state();
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let client = ciba_private_key_jwt_client("invalid-fapi-client-kid", &key);
 
@@ -495,9 +501,7 @@ async fn token_ciba_rejects_an_invalid_fapi_client_before_state_access() {
 
 #[actix_web::test]
 async fn ciba_backchannel_fails_closed_before_client_state_access() {
-    let state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
+    let state = ciba_test_state();
     let settings = Arc::clone(&state.settings);
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
         state.diesel_db.clone(),
@@ -760,7 +764,7 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
 
 fn ciba_private_key_jwt_client_with_alg(kid: &str, fixture: &ClientSigningFixture) -> ClientRow {
     let public_jwk = fixture.public_jwk(kid);
-    client_row! {
+    let mut client = client_row! {
         id: Uuid::now_v7(),
         tenant_id: DEFAULT_TENANT_ID,
         realm_id: DEFAULT_REALM_ID,
@@ -803,7 +807,9 @@ fn ciba_private_key_jwt_client_with_alg(kid: &str, fixture: &ClientSigningFixtur
         subject_type: "public".to_owned(),
         sector_identifier_uri: None,
         sector_identifier_host: None,
-    }
+    };
+    client.security_policy.allow_cross_device_flows = true;
+    client
 }
 
 fn ciba_private_key_jwt_client(kid: &str, fixture: &ClientSigningFixture) -> ClientRow {
@@ -1446,6 +1452,12 @@ fn ciba_unverified_request_object_hint_rejects_none_and_empty_issuers() {
 
 fn committed_decision_fixture(decision: CibaDecision) -> CibaCommittedDecision {
     let now = Utc::now().timestamp();
+    let (status, authentication_context) = match &decision {
+        CibaDecision::Approve(authentication_context) => {
+            (CibaStatus::Approved, Some(authentication_context.clone()))
+        }
+        CibaDecision::Deny => (CibaStatus::Denied, None),
+    };
     CibaCommittedDecision {
         state: CibaRequestState {
             client_id: "client-1".to_owned(),
@@ -1453,13 +1465,10 @@ fn committed_decision_fixture(decision: CibaDecision) -> CibaCommittedDecision {
             scopes: vec!["openid".to_owned()],
             audiences: vec!["resource://default".to_owned()],
             acr: None,
-            authentication_context: None,
+            authentication_context,
             binding_message: None,
             issued_at: now,
-            status: match decision {
-                CibaDecision::Approve => CibaStatus::Approved,
-                CibaDecision::Deny => CibaStatus::Denied,
-            },
+            status,
             interval_seconds: 5,
             expires_at: now + 60,
             retention_expires_at: now + 180,
@@ -1478,6 +1487,7 @@ fn ciba_decision_audit_is_emitted_only_for_committed_outcome() {
     tracing::subscriber::with_default(subscriber, || {
         for failure in [
             CibaDecisionFailure::Missing,
+            CibaDecisionFailure::InvalidAuthenticationContext,
             CibaDecisionFailure::UserMismatch,
             CibaDecisionFailure::AlreadyHandled,
             CibaDecisionFailure::Expired,
@@ -1494,7 +1504,13 @@ fn ciba_decision_audit_is_emitted_only_for_committed_outcome() {
         assert_eq!(count.as_ref().load(Ordering::SeqCst), 0);
 
         let response = complete_ciba_decision(
-            Ok(committed_decision_fixture(CibaDecision::Approve)),
+            Ok(committed_decision_fixture(CibaDecision::Approve(
+                CibaAuthenticationContext {
+                    auth_time: Utc::now().timestamp(),
+                    amr: vec!["pwd".to_owned()],
+                    oidc_sid: Some("audit-session".to_owned()),
+                },
+            ))),
             "auth-req-id",
             CibaDecisionSource::User,
             Some("source-ip-hash".to_owned()),
@@ -1614,7 +1630,6 @@ fn ciba_poll_failures_preserve_invalid_grant_and_contention_boundaries() {
 #[actix_web::test]
 async fn ciba_verification_page_preserves_redirect_and_non_cacheable_headers() {
     let state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
         settings.endpoint.frontend_base_url = "https://frontend.example/".to_owned();
     });
     let settings = Arc::clone(&state.settings);
@@ -1743,9 +1758,7 @@ async fn ciba_verification_loads_the_bound_user_and_rejects_a_session_mismatch()
 
 #[actix_web::test]
 async fn ciba_browser_decision_rejects_invalid_csrf_before_session_lookup() {
-    let state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
+    let state = ciba_test_state();
     let settings = Arc::clone(&state.settings);
     let runtime = crate::runtime_modules::test_support::runtime_module_registry_for_test(
         state.diesel_db.clone(),
@@ -1954,6 +1967,7 @@ fn fapi_ciba_id1_accepts_both_private_key_jwt_and_mtls_client_authentication() {
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("ciba-kid", &key);
+    client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
     client.require_mtls_bound_tokens = true;
 
     validate_ciba_security_profile_client(&settings, &client, "private_key_jwt")
@@ -2021,12 +2035,8 @@ fn ciba_profile_does_not_apply_authorization_code_only_controls() {
         ..BackchannelAuthenticationForm::default()
     };
 
-    validate_token_request_profile_with_profile(
-        settings.protocol.authorization_server_profile,
-        &client,
-        "private_key_jwt",
-    )
-    .expect("CIBA-compatible client authentication should pass the server profile");
+    validate_token_request_profile(&client, "private_key_jwt")
+        .expect("CIBA-compatible client authentication should pass the server profile");
     validate_ciba_security_profile_client(&settings, &client, "private_key_jwt")
         .expect("official FAPI-CIBA compatibility policy should remain separate");
     validate_ciba_request_object_presence(&settings, &client, &form)
@@ -2144,6 +2154,11 @@ fn ciba_selected_acr_uses_supported_requested_value() {
 
 #[test]
 fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
+    let authentication_context = CibaAuthenticationContext {
+        auth_time: Utc::now().timestamp(),
+        amr: vec!["pwd".to_owned()],
+        oidc_sid: Some("sid-approved".to_owned()),
+    };
     let ciba = CibaRequestState {
         client_id: "client-1".to_owned(),
         user_id: Uuid::now_v7(),
@@ -2165,6 +2180,7 @@ fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
         ciba.user_id,
         "subject-1".to_owned(),
         ciba,
+        authentication_context,
         Some("dpop-jkt".to_owned()),
         None,
     );
@@ -2179,17 +2195,18 @@ fn ciba_token_issue_allows_refresh_and_binds_refresh_sender_constraint() {
 #[test]
 fn ciba_token_issue_transfers_approved_authentication_context() {
     let user_id = Uuid::now_v7();
+    let authentication_context = CibaAuthenticationContext {
+        auth_time: 1_700_000_000,
+        amr: vec!["pwd".to_owned(), "otp".to_owned()],
+        oidc_sid: Some("sid-approved".to_owned()),
+    };
     let ciba = CibaRequestState {
         client_id: "client-1".to_owned(),
         user_id,
         scopes: vec!["openid".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         acr: Some("1".to_owned()),
-        authentication_context: Some(CibaAuthenticationContext {
-            auth_time: 1_700_000_000,
-            amr: vec!["pwd".to_owned(), "otp".to_owned()],
-            oidc_sid: Some("sid-approved".to_owned()),
-        }),
+        authentication_context: None,
         binding_message: None,
         issued_at: 1_700_000_100,
         status: CibaStatus::Approved,
@@ -2200,7 +2217,14 @@ fn ciba_token_issue_transfers_approved_authentication_context() {
         ping_notification: None,
     };
 
-    let issue = ciba_token_issue(user_id, "subject-1".to_owned(), ciba, None, None);
+    let issue = ciba_token_issue(
+        user_id,
+        "subject-1".to_owned(),
+        ciba,
+        authentication_context,
+        None,
+        None,
+    );
 
     assert_eq!(issue.auth_time, Some(1_700_000_000));
     assert_eq!(issue.amr, vec!["pwd", "otp"]);
@@ -2250,9 +2274,7 @@ async fn ciba_token_request_requires_mtls_binding_before_pending_state() {
     let Some(valkey) = live_test_valkey().await else {
         return;
     };
-    let mut state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
+    let mut state = ciba_test_state();
     state.valkey = valkey;
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("ciba-kid", &key);
@@ -2277,9 +2299,7 @@ async fn ciba_token_request_validates_mtls_binding_before_issuing_approved_token
     let Some(valkey) = live_test_valkey().await else {
         return;
     };
-    let mut state = ciba_test_state_with(|settings| {
-        settings.modules.enable_ciba = true;
-    });
+    let mut state = ciba_test_state();
     state.valkey = valkey;
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("ciba-kid", &key);
@@ -2304,7 +2324,7 @@ async fn ciba_token_poll_maps_pending_slow_down_and_denied_states() {
     let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    enable_ciba_test_mtls_proxy(&mut state);
+    configure_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("poll-status-kid", &key);
     client.require_mtls_bound_tokens = true;
@@ -2328,11 +2348,63 @@ async fn ciba_token_poll_maps_pending_slow_down_and_denied_states() {
 }
 
 #[actix_web::test]
+async fn ciba_token_poll_fails_closed_for_approved_state_without_authentication_context() {
+    let Some(mut state) = live_ciba_replay_state().await else {
+        return;
+    };
+    configure_ciba_test_mtls_proxy(&mut state);
+    let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
+    let mut client = ciba_private_key_jwt_client("missing-context-kid", &key);
+    client.security_policy.allow_cross_device_flows = true;
+    client.require_mtls_bound_tokens = true;
+    persist_ciba_test_client(&state, &client).await;
+    let auth_req_id = format!("approved-without-context-{}", Uuid::now_v7());
+    let now = Utc::now().timestamp();
+    CibaStore::new(&state.valkey_connection())
+        .create(
+            &auth_req_id,
+            &CibaRequestState {
+                client_id: client.client_id.clone(),
+                user_id: Uuid::now_v7(),
+                scopes: vec!["openid".to_owned()],
+                audiences: vec!["resource://default".to_owned()],
+                acr: None,
+                authentication_context: None,
+                binding_message: None,
+                issued_at: now,
+                status: CibaStatus::Approved,
+                interval_seconds: 5,
+                expires_at: now + 600,
+                retention_expires_at: now + 720,
+                last_poll_at: None,
+                ping_notification: None,
+            },
+        )
+        .await
+        .expect("malformed approved CIBA fixture should reach the core validation boundary");
+
+    let response = call_ciba_token_with_mtls_for_test(&state, &client, auth_req_id.clone()).await;
+
+    assert_eq!(
+        (response.status(), oauth_error_code(&response)),
+        (StatusCode::SERVICE_UNAVAILABLE, "server_error".to_owned())
+    );
+    let store = CibaStore::new(&state.valkey_connection());
+    assert!(
+        nazo_valkey::CibaStore::load(&store, &auth_req_id)
+            .await
+            .expect("malformed state should remain inspectable")
+            .is_some(),
+        "a malformed approved state must not be redeemed"
+    );
+}
+
+#[actix_web::test]
 async fn ciba_token_poll_maps_an_expired_state_before_user_lookup() {
     let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    enable_ciba_test_mtls_proxy(&mut state);
+    configure_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("expired-status-kid", &key);
     client.require_mtls_bound_tokens = true;
@@ -2372,7 +2444,7 @@ async fn ciba_token_approved_state_issues_access_and_id_tokens_for_an_active_use
     let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    enable_ciba_test_mtls_proxy(&mut state);
+    configure_ciba_test_mtls_proxy(&mut state);
     state.keyset =
         crate::test_support::test_key_manager_with_auxiliary(jsonwebtoken::Algorithm::PS256);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
@@ -2426,12 +2498,16 @@ async fn ciba_replay_rejects_a_consumed_auth_req_id_even_with_a_persisted_respon
     let Some(mut state) = live_ciba_replay_state().await else {
         return;
     };
-    enable_ciba_test_mtls_proxy(&mut state);
+    configure_ciba_test_mtls_proxy(&mut state);
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("ciba-replay-kid", &key);
     client.require_mtls_bound_tokens = true;
     let auth_req_id = format!("ciba-replay-{}", Uuid::now_v7());
-    let grant_key = ciba_grant_key(&auth_req_id, None, Some(CIBA_TEST_MTLS_THUMBPRINT));
+    let grant_key = ciba_grant_key(
+        &auth_req_id,
+        None,
+        Some(ciba_test_mtls_certificate().thumbprint.as_str()),
+    );
 
     crate::http::token::issue::tests::persist_token_issuance_response_for_test(
         &state, &client, &grant_key,
@@ -2634,38 +2710,31 @@ fn ciba_token_profile_covers_fapi2_client_and_sender_constraints() {
     let key = client_signing_fixture(jsonwebtoken::Algorithm::PS256);
     let mut client = ciba_private_key_jwt_client("profile-kid", &key);
 
-    let baseline_settings =
-        Settings::from_config(&ConfigSource::default()).expect("default settings should load");
-    let baseline = CibaHttpConfig::from(&baseline_settings);
     for (dpop, mtls) in [(false, false), (true, false), (false, true), (true, true)] {
         client.require_dpop_bound_tokens = dpop;
         client.require_mtls_bound_tokens = mtls;
-        validate_ciba_token_request_profile(&baseline, &client, "private_key_jwt")
+        validate_ciba_token_request_profile(&client, "private_key_jwt")
             .expect("baseline CIBA profile should preserve each sender-constraint mapping");
     }
 
-    let mut fapi2_settings = baseline_settings;
-    fapi2_settings.protocol.authorization_server_profile =
-        crate::settings::AuthorizationServerProfile::Fapi2Security;
-    let fapi2 = CibaHttpConfig::from(&fapi2_settings);
+    client.security_policy = nazo_auth::ClientSecurityPolicy::fapi2();
 
     client.client_type = "public".to_owned();
-    let public_client = validate_ciba_token_request_profile(&fapi2, &client, "private_key_jwt")
+    let public_client = validate_ciba_token_request_profile(&client, "private_key_jwt")
         .expect_err("FAPI2 CIBA must reject public clients");
     assert_eq!(oauth_error_code(&public_client), "unauthorized_client");
 
     client.client_type = "confidential".to_owned();
     client.require_dpop_bound_tokens = false;
     client.require_mtls_bound_tokens = false;
-    let bearer = validate_ciba_token_request_profile(&fapi2, &client, "private_key_jwt")
+    let bearer = validate_ciba_token_request_profile(&client, "private_key_jwt")
         .expect_err("FAPI2 CIBA must reject bearer tokens");
     assert_eq!(oauth_error_code(&bearer), "invalid_request");
 
     client.require_mtls_bound_tokens = true;
-    let bad_auth_method =
-        validate_ciba_token_request_profile(&fapi2, &client, "client_secret_basic")
-            .expect_err("FAPI2 CIBA must reject shared-secret authentication");
+    let bad_auth_method = validate_ciba_token_request_profile(&client, "client_secret_basic")
+        .expect_err("FAPI2 CIBA must reject shared-secret authentication");
     assert_eq!(oauth_error_code(&bad_auth_method), "invalid_client");
-    validate_ciba_token_request_profile(&fapi2, &client, "private_key_jwt")
+    validate_ciba_token_request_profile(&client, "private_key_jwt")
         .expect("FAPI2 CIBA should accept constrained private_key_jwt clients");
 }

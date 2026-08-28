@@ -17,7 +17,7 @@ pub use management::{
     DesiredStateUpdate, DesiredStateUpdateOutcome, RuntimeModuleManagement,
     RuntimeModuleManagementError, RuntimeModuleView,
 };
-pub use model::{DesiredMode, ModuleEventType, ModuleId, ModuleState};
+pub use model::{DesiredMode, HistoricalDesiredMode, ModuleEventType, ModuleId, ModuleState};
 pub use policy::{DisablePolicy, ModuleCatalogError, ModuleSpec, validate_module_specs};
 pub use reconcile::{
     LifecycleFailure, LifecycleFuture, ModuleLifecycle, NoopModuleLifecycle, ReconcileOutcome,

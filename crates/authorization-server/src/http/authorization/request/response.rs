@@ -57,10 +57,14 @@ pub(crate) async fn authorization_response_redirect_with_context(
                 }
             }
         };
-        let client_policy = client.as_ref().map_or_else(
-            || context.config.profile.legacy_client_policy(),
-            |client| context.config.profile.effective_client_policy(client),
-        );
+        let Some(client) = client.as_ref() else {
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "authorization response client policy is unavailable.",
+            );
+        };
+        let client_policy = &client.security_policy;
         AuthorizationResponseClientPolicy {
             signed_response_required: client_policy.require_signed_authorization_response,
             session_management_allowed: client_policy.session_management,

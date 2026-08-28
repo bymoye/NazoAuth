@@ -274,7 +274,7 @@ impl LiveAdminClientListFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )

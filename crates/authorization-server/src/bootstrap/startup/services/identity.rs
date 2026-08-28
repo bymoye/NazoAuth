@@ -288,17 +288,6 @@ pub(super) async fn build(
     let mfa_totp_keys = mfa_totp_key_ring(&startup.config)?;
     let mfa_repository =
         nazo_postgres::MfaRepository::with_totp_key_ring(diesel_db.clone(), mfa_totp_keys.clone());
-    if mfa_totp_keys.is_some() {
-        let migrated = mfa_repository.migrate_legacy_totp_secrets().await?;
-        let rotated = mfa_repository.rotate_totp_secrets().await?;
-        if migrated > 0 || rotated > 0 {
-            tracing::info!(migrated, rotated, "migrated TOTP secret envelopes");
-        }
-    } else if mfa_repository.has_totp_credentials().await? {
-        anyhow::bail!(
-            "MFA_TOTP_ENCRYPTION_KEY is required before starting with persisted TOTP credentials"
-        );
-    }
     let mfa_profiles = web::Data::new(MfaProfileEndpoint::new(
         Arc::new(ServerMfaProfileOperations::new(
             nazo_identity::MfaService::new(

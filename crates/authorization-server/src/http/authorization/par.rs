@@ -302,7 +302,7 @@ async fn par_after_rate_limit_inner(
             );
         }
     };
-    let client_policy = context.config.profile.effective_client_policy(&client);
+    let client_policy = &client.security_policy;
     let par_ttl_seconds = if client_policy.requires_fapi2_security() {
         context.config.par_ttl_seconds.min(599)
     } else {

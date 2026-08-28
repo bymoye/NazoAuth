@@ -69,16 +69,26 @@ Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启�
 正式发布优先使用生命周期入口：
 
 ```sh
-sudo nazoauthctl install \
-  --runtime auto \
-  --public-url https://auth.example.com
-sudo nazoauthctl bootstrap-admin
+nazoauthctl host add production-host --ssh production --privilege sudo
+nazoauthctl install \
+  --host production-host --name production \
+  --runtime podman --public-url https://auth.example.com \
+  --database-host db.internal --database-port 5432 \
+  --database-name oauth \
+  --database-runtime-user nazo_runtime \
+  --database-runtime-password-file ./database-runtime-password \
+  --database-lifecycle-user nazo_lifecycle \
+  --database-lifecycle-password-file ./database-lifecycle-password \
+  --valkey-host valkey.internal --valkey-port 6379 \
+  --valkey-password-file ./valkey-password
+nazoauthctl bootstrap-admin --instance production
 ```
 
-`auto` 优先使用 Podman，其次使用 Docker。已有 PostgreSQL/Valkey、宿主机安装、
-秘密生成和备份边界见[一键安装与升级](one-click-update.zh-CN.md)。
+runtime 必须明确选择 `podman`、`docker` 或 `host`。两套 PostgreSQL role 与
+Valkey 凭据必须已经存在；NazoAuthCtl 不会为外部服务创建凭据。目标机当前格式
+数据导入与备份边界见[一键安装与升级](one-click-update.zh-CN.md)。
 
-`nazoauthctl` 自动生成私有服务配置、依赖凭据、deployment identity、签名 identity
+`nazoauthctl` 生成私有服务配置、deployment identity、签名 identity、应用 secret
 和恢复状态，并只把 NazoAuth 发布到选定的宿主机 loopback 端口。可使用任意符合要求
 的 TLS 反向代理，把公开 HTTPS 流量转发到 `http://127.0.0.1:8000`。
 `TRUSTED_PROXY_CIDRS` 只能包含受控代理地址；在代理正确清洗 forwarded headers
@@ -97,27 +107,17 @@ RFC 9440 `Client-Cert` header 转交。NazoAuth 再根据客户端注册信息�
 
 NazoAuthCtl 一致性测试每轮都会生成新的 CA 与叶证书，因此测试部署前的代理不能向
 客户端公布过期的固定 client-CA 列表。开始创建 Suite module 前，必须安装本轮生成的
-公开 CA bundle，并在同一次运行的 cleanup 中恢复旧 bundle。HAProxy 3.2 可按以下方式配置：
+公开 CA bundle，并在同一次运行的 cleanup 中恢复旧 bundle。直接使用经过审查的
+[`deploy/proxy/haproxy-rfc9440.cfg`](../../deploy/proxy/haproxy-rfc9440.cfg)：它把
+普通 HTTPS 与 `verify required` 的独立 mTLS listener 分开，清除所有入站 forwarding
+和证书 header，并且只写入从已验证 TLS peer 得到的单例 RFC 9440 `Client-Cert`。
 
 叶证书的 subject DN 必须与 CA 的 subject DN 不同，其 issuer DN 则必须匹配该 CA。
 预检必须执行 `openssl verify -CAfile run-ca.pem client.pem`；否则，不同密钥却复用同一
 subject/issuer DN 的叶证书可能被 OpenSSL/HAProxy 判为自签证书并拒绝握手。
 
-```haproxy
-frontend nazoauth
-  bind :443 ssl crt /run/nazoauth/server.pem ca-file /run/nazoauth/active-conformance-client-cas.pem verify optional ssl-min-ver TLSv1.2 ssl-max-ver TLSv1.3 no-tls-tickets ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384 ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
-  http-request del-header Client-Cert
-  http-request del-header Client-Cert-Chain
-  http-request set-header Client-Cert ":%[ssl_c_der,base64]:" if { ssl_c_used }
-  default_backend nazoauth
-
-backend nazoauth
-  server app 127.0.0.1:8000 check
-```
-
-同一个 listener 还承载普通 HTTPS 路由时，必须使用 `verify optional` 请求证书；
-`verify none` 不会请求。客户端一旦提交证书，就必须能链接到本轮 active bundle。
-NazoAuth 仍会验证注册的 subject/SAN 和可选证书摘要。同时还必须满足：
+客户端证书必须能链接到本轮 active bundle。NazoAuth 仍会验证注册的 subject/SAN
+和可选证书摘要。同时还必须满足：
 
 - HAProxy 先删除公网请求中的证书 header，再写入自己从 TLS 连接取得的证书；
 - 明文 upstream 只绑定 loopback，或以其他方式确保公网客户端无法直连；
@@ -144,8 +144,8 @@ cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执�
 
 满足以下条件后才算启用：
 
-1. `sudo nazoauthctl status` 报告签名 Release 和双层 target identity；
-2. `sudo nazoauthctl doctor` 验证审计、readiness、target digest 和 runtime DDL 边界；
+1. `nazoauthctl status` 报告签名 Release 和双层 target identity；
+2. `nazoauthctl doctor` 验证审计、readiness、target digest 和 runtime DDL 边界；
 3. `/ready` 返回 HTTP 200；
 4. `/.well-known/openid-configuration` 返回配置的 issuer；
 5. 反向代理通过公开 HTTPS origin 提供相同接口；
@@ -154,8 +154,8 @@ cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执�
 查看脱敏后的部署与审计状态：
 
 ```sh
-sudo nazoauthctl status
-sudo nazoauthctl audit show
+nazoauthctl status
+nazoauthctl operation --instance production --limit 20
 ```
 
 ## 升级和回滚
@@ -163,16 +163,23 @@ sudo nazoauthctl audit show
 正式发布的独立安装使用同一个生命周期入口：
 
 ```sh
-sudo nazoauthctl update
+nazoauthctl update --instance production --yes
 ```
 
-该命令校验标签级 Sigstore 身份和不可变制品摘要，创建恢复备份，执行迁移，
-替换应用，检查 readiness 与公网 Discovery；验证失败时自动恢复旧应用镜像和
-应用持久目录。完整边界见[一键安装与升级](one-click-update.zh-CN.md)。
+该命令校验标签级 Sigstore 身份和不可变制品摘要，在同一签名事务中执行迁移与
+激活，再检查 readiness 与公网 Discovery。需要备份硬闸门时显式配置：
 
-源码 Compose 仍可用于开发，但不再是生产环境的日常升级路径。数据库恢复保持
-独立，因为迁移可能是单向的；只有签名发布明确声明迁移集合可重新启动上一应用
-版本时，更新器才接受自动应用回滚。
+```sh
+nazoauthctl policy backup-before-update require --instance production \
+  --max-age-seconds 86400
+```
+
+缺少精确、未过期且通过 restore-test 的 snapshot 时，更新会被拒绝。不可逆迁移
+一旦应用，制品回滚会被拒绝，writer 保持停止，直至 `nazoauthctl recover` 从已验证
+snapshot 恢复。完整边界见[一键安装与升级](one-click-update.zh-CN.md)。
+
+源码 Compose 仍可用于开发，但不是生产升级路径。数据库恢复保持独立，因为迁移
+可能是单向的。
 
 ## 生产边界
 

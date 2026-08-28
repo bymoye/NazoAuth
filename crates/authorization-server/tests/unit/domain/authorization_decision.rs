@@ -364,7 +364,7 @@ impl DecisionLiveFixture {
                 tls_client_auth_san_dns, tls_client_auth_san_uri, tls_client_auth_san_ip,
                 tls_client_auth_san_email, allow_client_assertion_audience_array,
                 allow_client_assertion_endpoint_audience, require_par_request_object,
-                is_active,
+                is_active, security_policy,
                 post_logout_redirect_uris, backchannel_logout_session_required
             )
             VALUES (
@@ -376,7 +376,7 @@ impl DecisionLiveFixture {
                 '[]'::jsonb, '[]'::jsonb,
                 false,
                 false, false,
-                $5,
+                $5, '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
                 '[]'::jsonb, true
             )
             "#,
@@ -401,7 +401,7 @@ impl DecisionLiveFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -412,7 +412,10 @@ impl DecisionLiveFixture {
     async fn store_consent_payload(&self, payload: &ConsentPayload) {
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:consent:{}", payload.request_id),
+            nazo_valkey::test_support::state_storage_key(format!(
+                "oauth:consent:{}",
+                payload.request_id
+            )),
             serde_json::to_string(payload).expect("consent payload should serialize"),
             self.state.settings.protocol.auth_code_ttl_seconds,
         )
@@ -638,7 +641,10 @@ async fn authorization_decision_fails_closed_when_consent_state_read_fails() {
                 "reset".to_owned(),
                 "on".to_owned(),
                 format!(">{password}"),
-                "~oauth:session:*".to_owned(),
+                format!(
+                    "~{}",
+                    nazo_valkey::test_support::state_storage_key("oauth:session:*")
+                ),
                 "+@all".to_owned(),
             ],
         )
@@ -690,7 +696,10 @@ async fn authorization_decision_fails_closed_when_consent_state_consume_fails() 
                 "reset".to_owned(),
                 "on".to_owned(),
                 format!(">{password}"),
-                "~oauth:*".to_owned(),
+                format!(
+                    "~{}",
+                    nazo_valkey::test_support::state_storage_key("oauth:*")
+                ),
                 "+@all".to_owned(),
                 "-eval".to_owned(),
             ],
@@ -728,7 +737,7 @@ async fn authorization_decision_rejects_malformed_consent_payload() {
         .await;
     valkey_set_ex(
         &fixture.state.valkey,
-        "oauth:consent:malformed-request",
+        nazo_valkey::test_support::state_storage_key("oauth:consent:malformed-request"),
         "not-valid-json",
         60,
     )
@@ -952,7 +961,10 @@ async fn authorization_decision_fails_closed_when_authorization_code_store_fails
                 "reset".to_owned(),
                 "on".to_owned(),
                 format!(">{password}"),
-                "~oauth:*".to_owned(),
+                format!(
+                    "~{}",
+                    nazo_valkey::test_support::state_storage_key("oauth:*")
+                ),
                 "+@all".to_owned(),
                 "-set".to_owned(),
             ],

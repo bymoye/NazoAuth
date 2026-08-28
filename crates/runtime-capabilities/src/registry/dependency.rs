@@ -26,11 +26,7 @@ where
                 .await
                 .map_err(RegistryError::Repository)?
                 .ok_or(RegistryError::MissingDesiredState(*dependency))?;
-            if !desired
-                .mode
-                .resolve(self.catalog.inherited_enabled(*dependency))
-                || !snapshot.admits(*dependency)
-            {
+            if !desired.mode.is_enabled() || !snapshot.admits(*dependency) {
                 return Ok(Some(*dependency));
             }
         }
@@ -54,11 +50,7 @@ where
                 .await
                 .map_err(RegistryError::Repository)?
                 .ok_or(RegistryError::MissingDesiredState(dependent.id))?;
-            if desired
-                .mode
-                .resolve(self.catalog.inherited_enabled(dependent.id))
-                || snapshot.admits(dependent.id)
-            {
+            if desired.mode.is_enabled() || snapshot.admits(dependent.id) {
                 return Ok(Some(dependent.id));
             }
         }

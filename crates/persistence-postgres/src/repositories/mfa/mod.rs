@@ -18,8 +18,8 @@ mod totp;
 use backup_codes::validate_backup_hash_count;
 #[cfg(test)]
 use totp::{
-    MfaSecretMigrationError, TOTP_ENVELOPE_VERSION, TOTP_MIN_PROTECTED_LEN, TOTP_NONCE_LEN,
-    decode_totp_secret, protect_totp_secret, totp_aad,
+    TOTP_ENVELOPE_VERSION, TOTP_MIN_PROTECTED_LEN, TOTP_NONCE_LEN, decode_totp_secret,
+    protect_totp_secret, totp_aad,
 };
 
 #[derive(Clone)]

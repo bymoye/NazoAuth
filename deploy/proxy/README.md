@@ -4,8 +4,6 @@ NazoAuth accepts certificate identity only from `TRUSTED_PROXY_CIDRS`.
 
 - Prefer `MTLS_CERTIFICATE_SOURCE=rfc9440` when the TLS terminator emits the
   singleton RFC 9440 `Client-Cert` header and removes any inbound copy.
-- Use `MTLS_CERTIFICATE_SOURCE=legacy-verified-headers` with the reviewed nginx
-  preset in this directory. It requires `X-SSL-Client-Verify: SUCCESS`.
 - Keep `MTLS_CERTIFICATE_SOURCE=disabled` when the deployment has no
   authenticated certificate-forwarding boundary.
 
@@ -50,7 +48,7 @@ Apply a new bundle and configuration as one recoverable operation:
    previous bundle/configuration, reload, repeat the probes, and only then
    retire the old worker and temporary CA.
 
-`nazoauthctl conformance run` can own the bundle portion directly with the
+`nazoauthctl oidf run` can own the bundle portion directly with the
 paired options `--proxy-trust-bundle /run/nazoauth/active-client-cas.pem` and
 `--proxy-reload-executable /usr/local/sbin/reload-nazoauth-proxy`. The reload
 executable must be an absolute, root-owned regular file that is not
@@ -78,5 +76,8 @@ TRUSTED_PROXY_CIDRS: "127.0.0.1/32"
 ```
 
 Use the address NazoAuth actually observes for the proxy instead of the sample
-loopback CIDR. The proxy must overwrite the certificate headers, and its
-upstream must not be reachable by an untrusted peer.
+loopback CIDR. The preset deletes inbound `Forwarded`, `X-Forwarded-*`,
+`Client-Cert`, `Client-Cert-Chain`, and `X-SSL-*` headers. Only the singleton
+RFC 9440 `Client-Cert` value derived from the verified TLS peer is added on the
+dedicated mTLS listener. The upstream must not be reachable by an untrusted
+peer.

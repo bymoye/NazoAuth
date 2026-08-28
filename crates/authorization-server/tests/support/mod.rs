@@ -6,7 +6,10 @@ pub(crate) use database_user_fixture::{
     DatabaseExternalIdentityFixture, DatabasePasskeyFixture, DatabaseUserFixture,
 };
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, OnceLock},
+};
 
 use aws_lc_rs::{
     encoding::{AsDer, Pkcs8V1Der},
@@ -15,11 +18,59 @@ use aws_lc_rs::{
     },
     signature::KeyPair as _,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::jwk::Jwk;
 use p256::elliptic_curve::{Generate, pkcs8::EncodePrivateKey as _};
 use serde_json::{Value, json};
+
+pub(crate) fn persisted_runtime_modules_fixture() -> BTreeSet<nazo_runtime_modules::ModuleId> {
+    use nazo_runtime_modules::ModuleId;
+
+    BTreeSet::from([
+        ModuleId::DeviceAuthorization,
+        ModuleId::TokenExchange,
+        ModuleId::JwtBearerGrant,
+        ModuleId::Ciba,
+        ModuleId::RequestObjects,
+        ModuleId::Jarm,
+        ModuleId::Scim,
+        ModuleId::FrontchannelLogout,
+        ModuleId::SessionManagement,
+    ])
+}
+
+pub(crate) struct Rfc9440CertificateFixture {
+    pub(crate) header: String,
+    pub(crate) thumbprint: String,
+}
+
+pub(crate) fn rfc9440_certificate_fixture(common_name: &str) -> Rfc9440CertificateFixture {
+    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
+    use sha2::{Digest as _, Sha256};
+
+    let mut params = CertificateParams::default();
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::minutes(1);
+    params.not_after = now + time::Duration::hours(1);
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("test P-256 key");
+    let der = params
+        .self_signed(&key)
+        .expect("test certificate")
+        .der()
+        .to_vec();
+    Rfc9440CertificateFixture {
+        header: format!(":{}:", STANDARD.encode(&der)),
+        thumbprint: URL_SAFE_NO_PAD.encode(Sha256::digest(&der)),
+    }
+}
 
 pub(crate) fn hash_client_secret_fixture(secret: &str, pepper: &str) -> String {
     use nazo_auth::ClientSecretDigesterPort as _;
@@ -131,13 +182,13 @@ impl TestInfrastructure {
     pub(crate) fn active_module_snapshot(&self) -> nazo_runtime_modules::ActiveModuleSnapshot {
         nazo_runtime_modules::ActiveModuleSnapshot {
             revision: nazo_runtime_modules::ModuleRevision::new(0),
-            accepting: crate::runtime_modules::inherited_enabled(&self.settings),
+            accepting: persisted_runtime_modules_fixture(),
             draining: std::collections::BTreeSet::new(),
         }
     }
 
     pub(crate) fn valkey_connection(&self) -> nazo_valkey::ValkeyConnection {
-        nazo_valkey::ValkeyConnection::from_existing_client(self.valkey.clone())
+        nazo_valkey::test_support::scoped_connection(self.valkey.clone())
     }
 }
 

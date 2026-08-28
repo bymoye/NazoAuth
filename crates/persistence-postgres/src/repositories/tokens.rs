@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     DbPool,
     rows::auth::RefreshTokenRow,
-    schema::{access_token_revocations, oauth_tokens},
+    schema::{access_token_revocations, oauth_tokens, recovery_invalidations},
 };
 
 const LOST_REFRESH_TOKEN_RETRY_SECONDS: i64 = 60;
@@ -24,10 +24,123 @@ pub struct TokenRepository {
     pool: DbPool,
 }
 
+/// Durable outcome of one post-restore invalidation. The operation id and
+/// request hash make a crash/retry return the original authority boundary
+/// rather than revoking a newly issued token set a second time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryInvalidation {
+    pub state_epoch: Uuid,
+    pub not_before: DateTime<Utc>,
+    pub revoked_refresh_tokens: u64,
+}
+
 impl TokenRepository {
     #[must_use]
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
+    }
+
+    /// Atomically revoke every active refresh token in the restored tenant
+    /// database and publish the one durable ingress-reopen boundary.
+    pub async fn invalidate_after_restore(
+        &self,
+        operation_id: Uuid,
+        request_hash: &str,
+        tenant_id: Uuid,
+        state_epoch: Uuid,
+        not_before: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+    ) -> Result<RecoveryInvalidation, RepositoryError> {
+        if state_epoch.is_nil() {
+            return Err(RepositoryError::Consistency(
+                "recovery state epoch must not be nil".to_owned(),
+            ));
+        }
+        if !is_lower_sha256(request_hash) {
+            return Err(RepositoryError::Consistency(
+                "recovery request hash must be lowercase sha256 hex".to_owned(),
+            ));
+        }
+        let mut connection = self.connection().await?;
+        connection
+            .transaction::<RecoveryInvalidation, diesel::result::Error, _>(async |connection| {
+                lock_recovery_invalidation_scope(connection, tenant_id).await?;
+                if let Some((
+                    stored_hash,
+                    stored_tenant,
+                    stored_epoch,
+                    stored_not_before,
+                    stored_count,
+                )) = recovery_invalidations::table
+                    .filter(recovery_invalidations::operation_id.eq(operation_id))
+                    .select((
+                        recovery_invalidations::request_hash,
+                        recovery_invalidations::tenant_id,
+                        recovery_invalidations::state_epoch,
+                        recovery_invalidations::not_before,
+                        recovery_invalidations::revoked_refresh_tokens,
+                    ))
+                    .first::<(String, Uuid, Uuid, DateTime<Utc>, i64)>(connection)
+                    .await
+                    .optional()?
+                {
+                    if stored_hash != request_hash
+                        || stored_tenant != tenant_id
+                        || stored_epoch != state_epoch
+                    {
+                        return Err(diesel::result::Error::RollbackTransaction);
+                    }
+                    return Ok(RecoveryInvalidation {
+                        state_epoch: stored_epoch,
+                        not_before: stored_not_before,
+                        revoked_refresh_tokens: stored_count as u64,
+                    });
+                }
+                if recovery_invalidations::table
+                    .filter(recovery_invalidations::tenant_id.eq(tenant_id))
+                    .filter(recovery_invalidations::state_epoch.eq(state_epoch))
+                    .select(recovery_invalidations::operation_id)
+                    .first::<Uuid>(connection)
+                    .await
+                    .optional()?
+                    .is_some()
+                {
+                    return Err(diesel::result::Error::RollbackTransaction);
+                }
+                let revoked = diesel::update(
+                    oauth_tokens::table
+                        .filter(oauth_tokens::tenant_id.eq(tenant_id))
+                        .filter(oauth_tokens::revoked_at.is_null()),
+                )
+                .set(oauth_tokens::revoked_at.eq(completed_at))
+                .execute(connection)
+                .await?;
+                diesel::insert_into(recovery_invalidations::table)
+                    .values((
+                        recovery_invalidations::operation_id.eq(operation_id),
+                        recovery_invalidations::request_hash.eq(request_hash),
+                        recovery_invalidations::tenant_id.eq(tenant_id),
+                        recovery_invalidations::state_epoch.eq(state_epoch),
+                        recovery_invalidations::not_before.eq(not_before),
+                        recovery_invalidations::revoked_refresh_tokens.eq(revoked as i64),
+                        recovery_invalidations::completed_at.eq(completed_at),
+                    ))
+                    .execute(connection)
+                    .await?;
+                Ok(RecoveryInvalidation {
+                    state_epoch,
+                    not_before,
+                    revoked_refresh_tokens: revoked as u64,
+                })
+            })
+            .await
+            .map_err(|error| {
+                if matches!(error, diesel::result::Error::RollbackTransaction) {
+                    RepositoryError::Conflict
+                } else {
+                    map_error(error)
+                }
+            })
     }
 
     pub async fn by_raw_refresh_token(
@@ -52,6 +165,24 @@ impl TokenRepository {
         &self,
         token: NewRefreshToken,
     ) -> Result<RefreshTokenPersistResult, RepositoryError> {
+        if !token.authentication_context.is_well_formed()
+            || token.audiences.is_empty()
+            || token
+                .audiences
+                .iter()
+                .any(|audience| audience.trim().is_empty())
+            || token.authentication_context.auth_time > token.issued_at.timestamp()
+        {
+            return Err(RepositoryError::Consistency(
+                "refresh token requires a complete current authentication contract".to_owned(),
+            ));
+        }
+        let authentication_context =
+            serde_json::to_value(&token.authentication_context).map_err(|error| {
+                RepositoryError::Consistency(format!(
+                    "refresh token authentication context could not be serialized: {error}"
+                ))
+            })?;
         let mut connection = self.connection().await?;
         connection
             .transaction::<RefreshTokenPersistResult, diesel::result::Error, _>(
@@ -64,6 +195,17 @@ impl TokenRepository {
                     )
                     .await?;
                     lock_refresh_family(connection, token.family_id).await?;
+                    if refresh_family_has_different_context(
+                        connection,
+                        token.tenant_id,
+                        token.family_id,
+                        &authentication_context,
+                    )
+                    .await?
+                    {
+                        compromise_family(connection, token.tenant_id, token.family_id).await?;
+                        return Ok(RefreshTokenPersistResult::RotationConflict);
+                    }
                     if let Some(rotated_from_id) = token.rotated_from_id {
                         if let Some(retry) = token.lost_response_retry {
                             let original = load_family_token(
@@ -108,7 +250,7 @@ impl TokenRepository {
                             return Ok(RefreshTokenPersistResult::RotationConflict);
                         }
                     }
-                    insert_refresh_token(connection, token).await?;
+                    insert_refresh_token(connection, token, authentication_context).await?;
                     Ok(RefreshTokenPersistResult::Inserted)
                 },
             )
@@ -158,7 +300,8 @@ impl TokenRepository {
         now: DateTime<Utc>,
     ) -> Result<Option<RefreshToken>, RepositoryError> {
         let mut connection = self.connection().await?;
-        lost_response_successor(&mut connection, &row_from_domain(token), client_id, now)
+        let row = row_from_domain(token)?;
+        lost_response_successor(&mut connection, &row, client_id, now)
             .await
             .map_err(map_error)?
             .map(RefreshToken::try_from)
@@ -266,6 +409,13 @@ impl TokenRepository {
     }
 }
 
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 impl AccessTokenRevocationLookup for TokenRepository {
     fn is_revoked<'a>(
         &'a self,
@@ -284,6 +434,7 @@ impl AccessTokenRevocationLookup for TokenRepository {
 async fn insert_refresh_token(
     connection: &mut AsyncPgConnection,
     token: NewRefreshToken,
+    authentication_context: serde_json::Value,
 ) -> diesel::QueryResult<usize> {
     diesel::insert_into(oauth_tokens::table)
         .values((
@@ -302,12 +453,26 @@ async fn insert_refresh_token(
             oauth_tokens::dpop_jkt.eq(token.dpop_jkt),
             oauth_tokens::mtls_x5t_s256.eq(token.mtls_x5t_s256),
             oauth_tokens::client_attestation_jkt.eq(token.client_attestation_jkt),
-            oauth_tokens::oidc_auth_context.eq(token
-                .authentication_context
-                .map(|context| serde_json::to_value(context).expect("context serializes"))),
+            oauth_tokens::oidc_auth_context.eq(authentication_context),
         ))
         .execute(connection)
         .await
+}
+
+async fn refresh_family_has_different_context(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    family_id: Uuid,
+    authentication_context: &serde_json::Value,
+) -> diesel::QueryResult<bool> {
+    oauth_tokens::table
+        .filter(oauth_tokens::tenant_id.eq(tenant_id))
+        .filter(oauth_tokens::token_family_id.eq(family_id))
+        .filter(oauth_tokens::oidc_auth_context.is_distinct_from(authentication_context))
+        .select(diesel::dsl::count_star())
+        .first::<i64>(connection)
+        .await
+        .map(|count| count != 0)
 }
 
 async fn load_family_token(
@@ -326,6 +491,20 @@ async fn load_family_token(
         .first::<RefreshTokenRow>(connection)
         .await
         .optional()
+}
+
+async fn lock_recovery_invalidation_scope(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+) -> diesel::QueryResult<()> {
+    let bytes = tenant_id.as_bytes();
+    let high = i64::from_be_bytes(bytes[..8].try_into().expect("UUID has 16 bytes"));
+    let low = i64::from_be_bytes(bytes[8..].try_into().expect("UUID has 16 bytes"));
+    diesel::sql_query("SELECT pg_advisory_xact_lock($1)")
+        .bind::<diesel::sql_types::BigInt, _>(high ^ low ^ 0x5245_4356_4552_595f_i64)
+        .execute(connection)
+        .await?;
+    Ok(())
 }
 
 pub(super) async fn lock_refresh_family(
@@ -451,8 +630,15 @@ fn blake3_hex(value: &str) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
 }
 
-fn row_from_domain(token: &RefreshToken) -> RefreshTokenRow {
-    RefreshTokenRow {
+fn row_from_domain(token: &RefreshToken) -> Result<RefreshTokenRow, RepositoryError> {
+    let oidc_auth_context =
+        serde_json::to_value(&token.authentication_context).map_err(|error| {
+            RepositoryError::Consistency(format!(
+                "refresh token authentication context could not be serialized: {error}"
+            ))
+        })?;
+
+    Ok(RefreshTokenRow {
         id: token.id,
         tenant_id: token.tenant_id,
         token_family_id: token.token_family_id,
@@ -468,11 +654,8 @@ fn row_from_domain(token: &RefreshToken) -> RefreshTokenRow {
         dpop_jkt: token.dpop_jkt.clone(),
         mtls_x5t_s256: token.mtls_x5t_s256.clone(),
         client_attestation_jkt: token.client_attestation_jkt.clone(),
-        oidc_auth_context: token
-            .authentication_context
-            .as_ref()
-            .map(|context| serde_json::to_value(context).expect("context serializes")),
-    }
+        oidc_auth_context,
+    })
 }
 
 fn map_error(error: diesel::result::Error) -> RepositoryError {

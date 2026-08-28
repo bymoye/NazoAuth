@@ -420,7 +420,6 @@ const fn module_description(value: ModuleId) -> &'static str {
 
 const fn desired_mode_name(value: DesiredMode) -> &'static str {
     match value {
-        DesiredMode::Inherit => "inherit",
         DesiredMode::Enabled => "enabled",
         DesiredMode::Disabled => "disabled",
     }
@@ -428,7 +427,6 @@ const fn desired_mode_name(value: DesiredMode) -> &'static str {
 
 const fn action_name(value: DesiredMode) -> &'static str {
     match value {
-        DesiredMode::Inherit => "inherit",
         DesiredMode::Enabled => "enable",
         DesiredMode::Disabled => "disable",
     }
@@ -469,7 +467,11 @@ const fn event_type_name(value: ModuleEventType) -> &'static str {
 
 const fn event_state_name(value: ModuleEventState) -> &'static str {
     match value {
-        ModuleEventState::Desired(value) => desired_mode_name(value),
+        ModuleEventState::Desired(value) => match value {
+            nazo_runtime_modules::HistoricalDesiredMode::Inherit => "inherit",
+            nazo_runtime_modules::HistoricalDesiredMode::Enabled => "enabled",
+            nazo_runtime_modules::HistoricalDesiredMode::Disabled => "disabled",
+        },
         ModuleEventState::Actual(value) => actual_state_name(value),
     }
 }

@@ -553,9 +553,19 @@ pub(super) const fn module_id(value: nazo_runtime_modules::ModuleId) -> &'static
 pub(super) const fn desired_mode(value: nazo_runtime_modules::DesiredMode) -> &'static str {
     use nazo_runtime_modules::DesiredMode;
     match value {
-        DesiredMode::Inherit => "inherit",
         DesiredMode::Enabled => "enabled",
         DesiredMode::Disabled => "disabled",
+    }
+}
+
+const fn historical_desired_mode(
+    value: nazo_runtime_modules::HistoricalDesiredMode,
+) -> &'static str {
+    use nazo_runtime_modules::HistoricalDesiredMode;
+    match value {
+        HistoricalDesiredMode::Inherit => "inherit",
+        HistoricalDesiredMode::Enabled => "enabled",
+        HistoricalDesiredMode::Disabled => "disabled",
     }
 }
 
@@ -584,7 +594,7 @@ const fn event_type(value: ModuleEventType) -> &'static str {
 
 const fn event_state(value: ModuleEventState) -> &'static str {
     match value {
-        ModuleEventState::Desired(mode) => desired_mode(mode),
+        ModuleEventState::Desired(mode) => historical_desired_mode(mode),
         ModuleEventState::Actual(state) => actual_state(state),
     }
 }

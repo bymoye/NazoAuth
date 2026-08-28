@@ -32,6 +32,13 @@ VALKEY_URL: "redis://127.0.0.1:6379/0"
 DATA_DIR: "runtime"
 RUST_LOG: "info"
 "#;
+
+fn fresh_initial_config() -> String {
+    format!(
+        "{INITIAL_CONFIG}VALKEY_STATE_EPOCH: \"{}\"\n",
+        uuid::Uuid::now_v7()
+    )
+}
 pub const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@127.0.0.1:5432/oauth";
 pub const DEFAULT_DATABASE_MAX_CONNECTIONS: usize = 32;
 const GENERATED_SECRET_BYTES: usize = 48;
@@ -46,7 +53,6 @@ const PERSISTENT_PATH_CONFIG_KEYS: &[&str] = &[
     "TLS_CERTIFICATE_FILE",
     "TLS_CLIENT_CA_FILE",
     "TLS_PRIVATE_KEY_FILE",
-    "TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE",
     "UI_CACHE_DIR",
     "UI_STATIC_DIR",
 ];
@@ -134,12 +140,8 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "DPOP_NONCE_POLICY",
     "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
     "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
-    "ENABLE_AUTHORIZATION_DETAILS",
-    "ENABLE_FAPI_HTTP_SIGNATURES",
-    "ENABLE_NATIVE_SSO",
     "ENABLE_OPENID4VCI_ISSUER",
     "ENABLE_OPENID4VP_VERIFIER",
-    "ENABLE_SCIM_SECURITY_EVENTS",
     "EMAIL_CODE_DEV_RESPONSE_ENABLED",
     "EMAIL_CODE_PEER_COOLDOWN_SECONDS",
     "EMAIL_CODE_SEND_COOLDOWN_SECONDS",
@@ -238,23 +240,14 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "TLS_CLIENT_CA_FILE",
     "TLS_PRIVATE_KEY_FILE",
     "TLS_RELOAD_INTERVAL_SECONDS",
-    "TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE",
     "TRANSPORT_MODE",
     "TRUSTED_PROXY_CIDRS",
     "UI_CACHE_DIR",
     "UI_STATIC_DIR",
     "VALKEY_COMMAND_TIMEOUT_MS",
+    "VALKEY_STATE_EPOCH",
     "VALKEY_URL",
     "VALKEY_URL_FILE",
-];
-const REMOVED_CONFIG_KEYS: &[&str] = &[
-    "ENABLE_REQUEST_OBJECT",
-    "ENABLE_PAR_REQUEST_OBJECT",
-    "ENABLE_DEVICE_AUTHORIZATION_GRANT",
-    "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
-    "ENABLE_CIBA",
-    "ENABLE_FRONTCHANNEL_LOGOUT",
-    "ENABLE_SESSION_MANAGEMENT",
 ];
 // The server may share one allowlisted `.env.yaml` with the sidecar, but it
 // must not materialize the sidecar's database URL, endpoint, or HMAC secret.
@@ -329,7 +322,8 @@ fn prepare_server_config_at(
                 .with_context(|| format!("failed to create initial {}", config_path.display()));
         }
     };
-    file.write_all(INITIAL_CONFIG.as_bytes())
+    let initial_config = fresh_initial_config();
+    file.write_all(initial_config.as_bytes())
         .with_context(|| format!("failed to write initial {}", config_path.display()))?;
     file.sync_all()
         .with_context(|| format!("failed to persist initial {}", config_path.display()))?;
@@ -565,11 +559,6 @@ impl ConfigSource {
         include_worker_config: bool,
     ) -> anyhow::Result<()> {
         for (key, value) in env {
-            if REMOVED_CONFIG_KEYS.contains(&key.as_str()) {
-                bail!(
-                    "{key} was removed; manage this capability through runtime-module administration"
-                );
-            }
             if !ENV_CONFIG_KEYS.contains(&key.as_str()) {
                 if is_unknown_nazoauth_environment_key(&key) {
                     bail!("unknown NazoAuth environment config key {key}");

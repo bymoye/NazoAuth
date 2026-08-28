@@ -33,19 +33,11 @@ use super::{
     sender_constraint_multiple_error, should_issue_refresh_token,
     validate_token_sender_constraints,
 };
-use crate::settings::AuthorizationServerProfile;
-
-fn refresh_token_policy_for_authorization_server_profile(
-    profile: AuthorizationServerProfile,
-    client: &ClientRow,
-    token: &TokenRow,
-) -> RefreshTokenPolicy {
+fn refresh_token_policy(client: &ClientRow, token: &TokenRow) -> RefreshTokenPolicy {
     let sender_constrained_confidential_client = client.client_type == "confidential"
         && (client.require_dpop_bound_tokens || client.require_mtls_bound_tokens);
     if sender_constrained_confidential_client
-        || (profile
-            .effective_client_policy(client)
-            .requires_fapi2_security()
+        || (client.security_policy.requires_fapi2_security()
             && refresh_token_has_stable_sender_constraint(token))
     {
         RefreshTokenPolicy::PreserveExisting
@@ -59,14 +51,6 @@ fn refresh_token_policy_for_authorization_server_profile(
 
 fn refresh_token_has_stable_sender_constraint(token: &TokenRow) -> bool {
     token.dpop_jkt.is_some() || token.mtls_x5t_s256.is_some()
-}
-
-fn refresh_token_policy_for_profile_value(
-    profile: AuthorizationServerProfile,
-    client: &ClientRow,
-    token: &TokenRow,
-) -> RefreshTokenPolicy {
-    refresh_token_policy_for_authorization_server_profile(profile, client, token)
 }
 
 fn refresh_token_scopes(
@@ -103,23 +87,26 @@ fn client_attestation_refresh_binding_matches(
     )
 }
 
-fn refresh_token_audiences_with_default(
-    default_audience: &str,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RefreshAudienceError {
+    MissingOriginal,
+    RequestedExceedsOriginal,
+}
+
+fn refresh_token_audiences(
     token: &TokenRow,
     form: &TokenForm,
-) -> Result<Vec<String>, ()> {
+) -> Result<Vec<String>, RefreshAudienceError> {
     let original_audiences = json_array_to_strings(&token.audience);
-    let original_audiences = if original_audiences.is_empty() {
-        vec![default_audience.to_owned()]
-    } else {
-        original_audiences
-    };
+    if original_audiences.is_empty() {
+        return Err(RefreshAudienceError::MissingOriginal);
+    }
     if form.audiences.is_empty() {
         return Ok(original_audiences);
     }
     is_subset(&form.audiences, &original_audiences)
         .then(|| form.audiences.clone())
-        .ok_or(())
+        .ok_or(RefreshAudienceError::RequestedExceedsOriginal)
 }
 
 async fn lost_response_successor_or_mark_reuse(
@@ -253,6 +240,18 @@ pub(crate) async fn token_refresh_with_service(
             }
         }
     }
+    let authentication_context = &token.authentication_context;
+    if !authentication_context.is_well_formed()
+        || authentication_context.issuer != issuance.config.issuer()
+        || authentication_context.audience != client.client_id
+    {
+        return oauth_token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh_token 的 OpenID 上下文无效或与当前客户端不匹配.",
+            false,
+        );
+    }
     let original_scopes = json_array_to_strings(&token.scopes);
     if let Some(user_id) = token.user_id {
         match token_service
@@ -363,13 +362,17 @@ pub(crate) async fn token_refresh_with_service(
             );
         }
     };
-    let audiences = match refresh_token_audiences_with_default(
-        issuance.config.default_audience(),
-        &token,
-        form,
-    ) {
+    let audiences = match refresh_token_audiences(&token, form) {
         Ok(audiences) => audiences,
-        Err(()) => {
+        Err(RefreshAudienceError::MissingOriginal) => {
+            return oauth_token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token 缺少持久化 audience 绑定.",
+                false,
+            );
+        }
+        Err(RefreshAudienceError::RequestedExceedsOriginal) => {
             return oauth_token_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_target",
@@ -386,23 +389,6 @@ pub(crate) async fn token_refresh_with_service(
             false,
         );
     }
-    if token
-        .authentication_context
-        .as_ref()
-        .is_some_and(|context| {
-            context.issuer != issuance.config.issuer() || context.audience != client.client_id
-        })
-    {
-        // Do not rotate a family while dropping the original OIDC issuer or
-        // audience contract. The caller must re-authorize after a metadata
-        // mismatch rather than receive a permanently degraded successor.
-        return oauth_token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "refresh_token 的 OpenID 上下文与当前客户端不匹配.",
-            false,
-        );
-    }
     let refresh_token_policy = match lost_response_original_id {
         Some(original_id) => RefreshTokenPolicy::RotateLostResponse {
             family_id: token.token_family_id,
@@ -410,50 +396,9 @@ pub(crate) async fn token_refresh_with_service(
             successor_id: token.id,
             retry_started_at: request_started_at,
         },
-        None => refresh_token_policy_for_profile_value(
-            issuance.config.authorization_server_profile(),
-            client,
-            &token,
-        ),
+        None => refresh_token_policy(client, &token),
     };
-    let authentication_context = token.authentication_context.as_ref().filter(|context| {
-        context.issuer == issuance.config.issuer() && context.audience == client.client_id
-    });
-    let refresh_id_token_sid = authentication_context.map(|context| context.id_token_sid.clone());
-    let (
-        nonce,
-        auth_time,
-        amr,
-        oidc_sid,
-        acr,
-        userinfo_claims,
-        userinfo_claim_requests,
-        id_token_claims,
-        id_token_claim_requests,
-    ) = match authentication_context {
-        Some(context) => (
-            context.nonce.clone(),
-            Some(context.auth_time),
-            context.amr.clone(),
-            context.oidc_sid.clone(),
-            context.acr.clone(),
-            context.userinfo_claims.clone(),
-            context.userinfo_claim_requests.clone(),
-            context.id_token_claims.clone(),
-            context.id_token_claim_requests.clone(),
-        ),
-        None => (
-            None,
-            None,
-            Vec::new(),
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ),
-    };
+    let refresh_id_token_sid = Some(authentication_context.id_token_sid.clone());
     issue_token_response_with_service(
         issuance,
         token_service,
@@ -467,19 +412,15 @@ pub(crate) async fn token_refresh_with_service(
             // Keep the original nonce in the persisted refresh contract, but
             // issue.rs suppresses it from the refreshed ID Token as required
             // by OIDC Core 12.2.
-            nonce,
-            // OIDC Core 12.2 requires the original issuer/audience and
-            // auth_time/amr/acr/sid. A legacy row, or a row whose issuer or
-            // audience no longer matches this client, therefore receives no
-            // ID Token rather than a token with a rewritten context.
-            auth_time,
-            amr,
-            oidc_sid,
-            acr,
-            userinfo_claims,
-            userinfo_claim_requests,
-            id_token_claims,
-            id_token_claim_requests,
+            nonce: authentication_context.nonce.clone(),
+            auth_time: Some(authentication_context.auth_time),
+            amr: authentication_context.amr.clone(),
+            oidc_sid: authentication_context.oidc_sid.clone(),
+            acr: authentication_context.acr.clone(),
+            userinfo_claims: authentication_context.userinfo_claims.clone(),
+            userinfo_claim_requests: authentication_context.userinfo_claim_requests.clone(),
+            id_token_claims: authentication_context.id_token_claims.clone(),
+            id_token_claim_requests: authentication_context.id_token_claim_requests.clone(),
             refresh_id_token_sid,
             include_refresh: true,
             refresh_token_policy,

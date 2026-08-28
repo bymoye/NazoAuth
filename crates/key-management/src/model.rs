@@ -252,7 +252,7 @@ pub struct ExternalKeyRegistration {
     pub kid: String,
     pub algorithm: jsonwebtoken::Algorithm,
     pub key_ref: String,
-    pub public_jwk_file: PathBuf,
+    pub public_jwk: Value,
 }
 
 #[derive(Clone, Debug)]

@@ -300,7 +300,7 @@ impl ParTestFixture {
         valkey: fred::prelude::Client,
         keyset: nazo_key_management::KeyManager,
     ) -> Self {
-        let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+        let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
         let session = &settings.session;
         let authorization = AuthorizationTestFixture::new(
             ServerAuthorizationService::new(
@@ -322,7 +322,7 @@ impl ParTestFixture {
                     session.cookie_secure,
                 ),
             ),
-            crate::runtime_modules::inherited_enabled(&settings),
+            crate::test_support::persisted_runtime_modules_fixture(),
             keyset.clone(),
             settings.tenant.context.tenant_id.as_uuid(),
         );
@@ -334,7 +334,7 @@ impl ParTestFixture {
     }
 
     fn with_valkey(&self, valkey: fred::prelude::Client) -> Self {
-        let connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey.clone());
+        let connection = nazo_valkey::test_support::scoped_connection(valkey.clone());
         Self {
             authorization: self.authorization.rebind_storage(
                 self.database.clone(),
@@ -504,7 +504,7 @@ impl LiveParFixture {
                 tls_client_auth_san_ip, tls_client_auth_san_email,
                 allow_client_assertion_audience_array,
                 allow_client_assertion_endpoint_audience, require_par_request_object,
-                is_active,
+                is_active, security_policy,
                 post_logout_redirect_uris, backchannel_logout_session_required
             )
             VALUES (
@@ -516,6 +516,7 @@ impl LiveParFixture {
                 '[]'::jsonb, '[]'::jsonb,
                 false, false, $7,
                 $8,
+                '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
                 '[]'::jsonb, true
             )
             "#,
@@ -558,19 +559,17 @@ fn par_form_request() -> HttpRequest {
         .to_http_request()
 }
 
-fn par_form_request_from_trusted_proxy() -> HttpRequest {
+fn par_form_request_with_rfc9440_certificate(
+    certificate: &crate::test_support::Rfc9440CertificateFixture,
+) -> HttpRequest {
     TestRequest::post()
         .uri("/oauth/par")
         .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
-            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
         )))
         .peer_addr("127.0.0.1:443".parse().expect("peer address should parse"))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
-        .insert_header(("x-ssl-client-verify", "SUCCESS"))
-        .insert_header((
-            "x-ssl-client-cert-sha256",
-            "00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff",
-        ))
         .to_http_request()
 }
 
@@ -1121,11 +1120,7 @@ async fn par_rejects_invalid_dpop_jkt_after_client_authentication() {
 
 #[actix_web::test]
 async fn par_rejects_request_uri_from_request_object_after_client_authentication() {
-    let Some(fixture) = LiveParFixture::new_with_settings(|s| {
-        s.modules.enable_par_request_object = true;
-    })
-    .await
-    else {
+    let Some(fixture) = LiveParFixture::new().await else {
         return;
     };
     let client_id = format!("par-request-object-uri-{}", Uuid::now_v7().simple());
@@ -1162,11 +1157,7 @@ async fn par_rejects_request_uri_from_request_object_after_client_authentication
 
 #[actix_web::test]
 async fn par_rejects_sender_constrained_request_without_pkce_before_persistence() {
-    let Some(fixture) = LiveParFixture::new_with_settings(|settings| {
-        settings.modules.enable_par_request_object = true;
-    })
-    .await
-    else {
+    let Some(fixture) = LiveParFixture::new().await else {
         return;
     };
     let client_id = format!("par-pkce-required-{}", Uuid::now_v7().simple());
@@ -1199,11 +1190,7 @@ async fn par_rejects_sender_constrained_request_without_pkce_before_persistence(
 
 #[actix_web::test]
 async fn par_does_not_trust_unsigned_request_object_for_missing_outer_client_id() {
-    let Some(fixture) = LiveParFixture::new_with_settings(|s| {
-        s.modules.enable_par_request_object = true;
-    })
-    .await
-    else {
+    let Some(fixture) = LiveParFixture::new().await else {
         return;
     };
     let client_id = format!("par-unsigned-request-object-{}", Uuid::now_v7().simple());
@@ -1229,7 +1216,6 @@ async fn par_does_not_trust_unsigned_request_object_for_missing_outer_client_id(
 #[actix_web::test]
 async fn par_uses_authenticated_assertion_identity_to_classify_unsigned_request_object() {
     let Some(fixture) = LiveParFixture::new_with_settings(|settings| {
-        settings.modules.enable_par_request_object = true;
         settings.protocol.authorization_server_profile =
             AuthorizationServerProfile::Fapi2MessageSigningAuthzRequest;
     })
@@ -1265,12 +1251,7 @@ async fn par_uses_authenticated_assertion_identity_to_classify_unsigned_request_
 
 #[actix_web::test]
 async fn par_rejects_authorization_details_from_request_object_when_disabled() {
-    let Some(fixture) = LiveParFixture::new_with_settings(|settings| {
-        settings.modules.enable_par_request_object = true;
-        settings.modules.enable_authorization_details = false;
-    })
-    .await
-    else {
+    let Some(fixture) = LiveParFixture::new().await else {
         return;
     };
     let client_id = format!(
@@ -1351,9 +1332,14 @@ async fn par_persists_mtls_thumbprint_for_sender_constrained_request_uri() {
         urlencoding::encode(&secret),
         "A".repeat(43),
     ));
+    let certificate = crate::test_support::rfc9440_certificate_fixture("par-client");
 
-    let response =
-        par_after_rate_limit(&fixture.par, par_form_request_from_trusted_proxy(), body).await;
+    let response = par_after_rate_limit(
+        &fixture.par,
+        par_form_request_with_rfc9440_certificate(&certificate),
+        body,
+    )
+    .await;
     let (status, value) = par_json_body(response).await;
 
     assert_eq!(status, StatusCode::CREATED);
@@ -1371,7 +1357,7 @@ async fn par_persists_mtls_thumbprint_for_sender_constrained_request_uri() {
         .expect("PAR payload should be persisted");
     assert_eq!(
         stored.mtls_x5t_s256.as_deref(),
-        Some("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8"),
+        Some(certificate.thumbprint.as_str()),
         "mTLS-bound PAR state should persist the normalized certificate thumbprint"
     );
 }

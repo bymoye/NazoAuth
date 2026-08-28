@@ -335,10 +335,6 @@ def check_rust_test_structure() -> None:
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
     allowed_nested_seams = {
-        "crates/authorization-server/src/bootstrap/startup/configuration.rs": (
-            "let valkey = nazo_valkey::test_support::connect(",
-            "let valkey_connection = nazo_valkey::ValkeyConnection::from_existing_client(valkey);",
-        ),
         "crates/authorization-server/src/bootstrap/startup/services/identity.rs": (
             "let session_profiles = web::Data::new(SessionProfileHandles::new(",
         ),

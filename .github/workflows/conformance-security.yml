@@ -187,6 +187,7 @@ jobs:
           INSTANCE_IDENTITY_DIR: "/var/lib/nazo_oauth/runtime-instance"
           DATABASE_URL: "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth"
           VALKEY_URL: "redis://nazo-oauth-e2e-valkey:6379/0"
+          VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e104"
           VALKEY_COMMAND_TIMEOUT_MS: 1000
           ISSUER: "http://127.0.0.1:8000"
           FRONTEND_BASE_URL: "http://127.0.0.1:3000"
@@ -261,37 +262,11 @@ jobs:
           [ "$ready" = "true" ]
       - name: Migrate and start server
         run: |
-          image_digest="$(docker image inspect nazo-oauth-e2e:latest --format '{{.Id}}')"
-          secret_revision=ci-secret-revision
-          cargo run --locked --quiet -p nazo-operator-protocol --example automation_operator_task -- prepare \
-            --config runtime/e2e/.env.yaml \
-            --deployment-id deployment-ci \
-            --actor-id github-actions \
-            --secret-revision "$secret_revision" \
-            --image-ref nazo-oauth-e2e:latest \
-            --image-digest "$image_digest" \
-            --embedded-release development \
-            --embedded-revision development \
-            --embedded-build-id local:development \
-            --output runtime/e2e/operator
-          printf '%s' "$secret_revision" >runtime/e2e/operator/secret-revision
-          chmod 0400 runtime/e2e/operator/secret-revision
-          docker run --rm -i --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
-            --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges --read-only \
+          docker run --rm --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
-            -v "$PWD/runtime/e2e/operator/controller.pub:/run/nazoauth-operator/controller.pub:ro" \
-            -v "$PWD/runtime/e2e/operator/receipt.key:/run/nazoauth-operator/receipt.key:ro" \
-            -v "$PWD/runtime/e2e/operator/context.json:/run/nazoauth-operator/context.json:ro" \
-            -v "$PWD/runtime/e2e/operator/config-manifest.json:/run/nazoauth-operator/config-manifest.json:ro" \
-            -v "$PWD/runtime/e2e/operator/secret-revision:/run/nazoauth-operator/secret-revision:ro" \
-            -v "$PWD/runtime/e2e/operator/state:/var/lib/nazoauth/operator-state" \
-            nazo-oauth-e2e:latest nazoauth operator-task \
-            <runtime/e2e/operator/envelope.jws >runtime/e2e/operator/receipt.jws
-          cargo run --locked --quiet -p nazo-operator-protocol --example automation_operator_task -- verify \
-            --receipt runtime/e2e/operator/receipt.jws \
-            --public-key runtime/e2e/operator/receipt.pub \
-            --request-sha256 runtime/e2e/operator/request.sha256
+            nazo-oauth-e2e:latest nazoauth migrate
           app_password="$(openssl rand -hex 24)"
           docker exec nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE nazoauth_e2e_app LOGIN PASSWORD '$app_password' NOSUPERUSER NOBYPASSRLS NOINHERIT"

@@ -100,7 +100,7 @@ fn succeeded_result(operation_id: &str, request_hash: &str) -> ControlResult {
 /// mutations that actually happened.
 type LedgerSideEffect = Box<
     dyn FnOnce() -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<Option<ControlResultData>>>>,
+        Box<dyn std::future::Future<Output = Result<Option<ControlResultData>, SideEffectError>>>,
     >,
 >;
 
@@ -118,12 +118,16 @@ fn ledger_side_effect(directory: &Path) -> (Arc<AtomicUsize>, Arc<AtomicUsize>, 
             if state_path_present(&marker)? {
                 return Ok(None);
             }
-            fs::write(&marker, b"applied")?;
+            fs::write(&marker, b"applied").map_err(anyhow::Error::from)?;
             applications.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(None)
         })
             as std::pin::Pin<
-                Box<dyn std::future::Future<Output = anyhow::Result<Option<ControlResultData>>>>,
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<Option<ControlResultData>, SideEffectError>,
+                        >,
+                >,
             >
     };
     (invocations, applications, Box::new(effect))
@@ -497,6 +501,46 @@ async fn executing_records_reenter_only_for_proven_idempotent_owners() {
         begin_execution(&directory, OPERATION_ID, &hash('a'), true),
         Err(JournalFlowError::UnknownOutcome)
     ));
+    assert_eq!(applications.load(AtomicOrdering::SeqCst), 1);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn retryable_execution_keeps_a_resumable_record_without_a_false_failure_result() {
+    let directory = temporary_directory();
+    let error = run_journaled_operation(
+        &directory,
+        &operation(OPERATION_ID),
+        &hash('a'),
+        &snapshot(),
+        true,
+        &|_| {},
+        || async {
+            Err(SideEffectError::Retryable(anyhow::anyhow!(
+                "database unavailable"
+            )))
+        },
+    )
+    .await
+    .expect_err("a proven transient failure must not become a terminal result");
+    assert!(matches!(error, JournalFlowError::RetryableExecution(_)));
+    assert!(matches!(
+        status(&directory, OPERATION_ID, &hash('a')).unwrap(),
+        Some(JournalCheckpoint::Executing)
+    ));
+    let (_, applications, effect) = ledger_side_effect(&directory);
+    let resumed = run_journaled_operation(
+        &directory,
+        &operation(OPERATION_ID),
+        &hash('a'),
+        &snapshot(),
+        true,
+        &|_| {},
+        effect,
+    )
+    .await
+    .expect("the same operation may resume only through its proven owner ledger");
+    assert_eq!(resumed.result.outcome, ControlOutcome::Succeeded);
     assert_eq!(applications.load(AtomicOrdering::SeqCst), 1);
     fs::remove_dir_all(directory).unwrap();
 }
@@ -929,16 +973,20 @@ fn concurrent_offers_have_exactly_one_creator_and_conflicts_are_deterministic() 
 
 #[tokio::test]
 async fn typed_result_data_is_attached_on_success_and_durable_for_recovery() {
-    use nazo_operator_protocol::{TenantResourceIdentity, TenantResourceKind};
+    use nazo_operator_protocol::{
+        TenantResourceIdentity, TenantResourceKind, canonical_tenant_resource_manifest_sha256,
+    };
 
     let directory = temporary_directory();
+    let resources = vec![TenantResourceIdentity {
+        kind: TenantResourceKind::User,
+        resource_id: "user-1".to_owned(),
+        digest: "d".repeat(64),
+    }];
     let data = ControlResultData::TenantResourceEnumerate {
         revision: 3,
-        resources: vec![TenantResourceIdentity {
-            kind: TenantResourceKind::User,
-            resource_id: "user-1".to_owned(),
-            digest: "d".repeat(64),
-        }],
+        resource_manifest_sha256: canonical_tenant_resource_manifest_sha256(&resources).unwrap(),
+        resources,
     };
     let outcome = run_journaled_operation(
         &directory,

@@ -87,11 +87,11 @@ impl LiveFixture {
             .expect("default tenant must be non-nil");
         valkey_set_ex(
             &self.state.valkey,
-            format!(
+            nazo_valkey::test_support::state_storage_key(format!(
                 "oauth:email_verify:{}:code:{}",
                 tenant_id.as_uuid(),
                 blake3_hex(&email)
-            ),
+            )),
             hash_password(code).unwrap(),
             300,
         )
@@ -100,7 +100,13 @@ impl LiveFixture {
     }
 
     async fn key_exists(&self, key: &str) -> bool {
-        valkey_get(&self.state.valkey, key).await.unwrap().is_some()
+        valkey_get(
+            &self.state.valkey,
+            nazo_valkey::test_support::state_storage_key(key),
+        )
+        .await
+        .unwrap()
+        .is_some()
     }
 }
 
@@ -182,9 +188,8 @@ async fn unavailable_valkey_rate_limit_fails_closed() {
         config.internal_command_timeout = Duration::from_millis(100);
         config.max_command_attempts = 1;
     });
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(
-        builder.build().expect("client should build"),
-    );
+    let connection =
+        nazo_valkey::test_support::scoped_connection(builder.build().expect("client should build"));
     let limiter =
         ServerAuthenticationRateLimit::new(nazo_valkey::RateLimitStore::new(&connection), 60, 10);
     assert_eq!(
@@ -221,13 +226,14 @@ async fn live_rate_limit_is_atomic_and_preserves_key_and_ttl_contract() {
     );
 
     let key = format!("oauth:rate:auth:{}", blake3_hex(subject.trim()));
+    let storage_key = nazo_valkey::test_support::state_storage_key(&key);
     assert_eq!(
-        valkey_get(&fixture.state.valkey, &key)
+        valkey_get(&fixture.state.valkey, &storage_key)
             .await
             .unwrap()
             .as_deref(),
         Some("2")
     );
-    let ttl: i64 = fixture.state.valkey.ttl(&key).await.unwrap();
+    let ttl: i64 = fixture.state.valkey.ttl(&storage_key).await.unwrap();
     assert!((1..=60).contains(&ttl), "unexpected rate-limit TTL: {ttl}");
 }

@@ -28,10 +28,8 @@ fn complete_fixture_catalog() -> Vec<ModuleSpec> {
 
 #[test]
 fn desired_modes_resolve_against_the_inherited_default() {
-    assert!(!DesiredMode::Inherit.resolve(false));
-    assert!(DesiredMode::Inherit.resolve(true));
-    assert!(DesiredMode::Enabled.resolve(false));
-    assert!(!DesiredMode::Disabled.resolve(true));
+    assert!(DesiredMode::Enabled.is_enabled());
+    assert!(!DesiredMode::Disabled.is_enabled());
 }
 
 #[test]
@@ -358,8 +356,8 @@ impl ModuleStateRepository for InMemoryRepository {
             reason: change.next.reason.clone(),
             before: current
                 .as_ref()
-                .map(|record| ModuleEventState::Desired(record.mode)),
-            after: Some(ModuleEventState::Desired(change.next.mode)),
+                .map(|record| ModuleEventState::Desired(record.mode.into())),
+            after: Some(ModuleEventState::Desired(change.next.mode.into())),
             outcome_code: None,
             occurred_at: change.next.updated_at,
         };

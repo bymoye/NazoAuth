@@ -1,9 +1,8 @@
 //! mTLS client certificate binding helpers.
 //!
-//! The application only trusts certificate data from configured trusted proxy
-//! peers. Deployments can use the standardized RFC 9440 `Client-Cert` field or
-//! the compatibility header contract that includes
-//! `X-SSL-Client-Verify: SUCCESS`.
+//! The application accepts certificate identity only from the direct TLS
+//! connection or the standardized RFC 9440 `Client-Cert` field supplied by a
+//! configured trusted proxy.
 
 use crate::adapters::security::constant_time_eq;
 use crate::domain::ClientRow;
@@ -36,31 +35,6 @@ use x509_parser::{
     x509::X509Name,
 };
 
-const VERIFY_HEADER: &str = "x-ssl-client-verify";
-const DIRECT_THUMBPRINT_HEADERS: &[&str] = &[
-    "x-forwarded-tls-client-cert-sha256",
-    "x-ssl-client-cert-sha256",
-    "x-ssl-client-fingerprint-sha256",
-];
-const CERTIFICATE_HEADERS: &[&str] = &["x-ssl-client-cert", "x-forwarded-tls-client-cert"];
-const SUBJECT_DN_HEADERS: &[&str] = &[
-    "x-forwarded-tls-client-cert-subject-dn",
-    "x-ssl-client-subject-dn",
-    "ssl-client-subject-dn",
-];
-const SAN_DNS_HEADERS: &[&str] = &[
-    "x-forwarded-tls-client-cert-san-dns",
-    "x-ssl-client-san-dns",
-];
-const SAN_URI_HEADERS: &[&str] = &[
-    "x-forwarded-tls-client-cert-san-uri",
-    "x-ssl-client-san-uri",
-];
-const SAN_IP_HEADERS: &[&str] = &["x-forwarded-tls-client-cert-san-ip", "x-ssl-client-san-ip"];
-const SAN_EMAIL_HEADERS: &[&str] = &[
-    "x-forwarded-tls-client-cert-san-email",
-    "x-ssl-client-san-email",
-];
 const RFC9440_CLIENT_CERT_HEADER: &str = "client-cert";
 
 pub(crate) use nazo_http_actix::ClientCertificateFacts as MtlsClientCertificate;
@@ -89,7 +63,6 @@ pub(crate) enum MtlsCertificateSourceMode {
     Disabled,
     DirectTls,
     Rfc9440,
-    LegacyVerifiedHeaders,
 }
 
 impl MtlsCertificateSourceMode {
@@ -99,9 +72,8 @@ impl MtlsCertificateSourceMode {
             Some("disabled") => Ok(Self::Disabled),
             Some("direct-tls") => Ok(Self::DirectTls),
             Some("rfc9440") => Ok(Self::Rfc9440),
-            Some("legacy-verified-headers") => Ok(Self::LegacyVerifiedHeaders),
             Some(value) => anyhow::bail!(
-                "MTLS_CERTIFICATE_SOURCE must be disabled, direct-tls, rfc9440, or legacy-verified-headers; got {value}"
+                "MTLS_CERTIFICATE_SOURCE must be disabled, direct-tls, or rfc9440; got {value}"
             ),
         }
     }
@@ -148,14 +120,7 @@ fn request_mtls_client_certificate_from_configured_source(
         {
             request_mtls_client_certificate_from_rfc9440(req.headers())
         }
-        MtlsCertificateSourceMode::LegacyVerifiedHeaders
-            if request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) =>
-        {
-            request_mtls_client_certificate_from_headers(req.headers())
-        }
-        MtlsCertificateSourceMode::Rfc9440 | MtlsCertificateSourceMode::LegacyVerifiedHeaders => {
-            None
-        }
+        MtlsCertificateSourceMode::Rfc9440 => None,
     }
 }
 
@@ -172,62 +137,6 @@ pub(crate) fn request_mtls_client_certificate_from_rfc9440(
         return None;
     }
     let der = STANDARD.decode(encoded).ok()?;
-    certificate_der_identity(&der)
-}
-
-pub(crate) fn request_mtls_client_certificate_from_headers(
-    headers: &HeaderMap,
-) -> Option<MtlsClientCertificate> {
-    if !headers
-        .get(VERIFY_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("SUCCESS"))
-    {
-        return None;
-    }
-
-    let mut certificate = MtlsClientCertificate {
-        thumbprint: matching_forwarded_value(
-            forwarded_values(headers, DIRECT_THUMBPRINT_HEADERS)
-                .into_iter()
-                .map(|value| normalize_sha256_thumbprint(&value))
-                .collect::<Option<Vec<_>>>()?,
-        )?,
-        subject_dn: matching_forwarded_value(forwarded_values(headers, SUBJECT_DN_HEADERS))?,
-        san_dns: matching_forwarded_list_values(headers, SAN_DNS_HEADERS)?,
-        san_uri: matching_forwarded_list_values(headers, SAN_URI_HEADERS)?,
-        san_ip: matching_forwarded_list_values(headers, SAN_IP_HEADERS)?,
-        san_email: matching_forwarded_list_values(headers, SAN_EMAIL_HEADERS)?,
-        verified_certificate_expiry: false,
-    };
-
-    for pem in forwarded_values(headers, CERTIFICATE_HEADERS) {
-        let parsed = certificate_pem_identity(&pem)?;
-        merge_matching(&mut certificate.thumbprint, parsed.thumbprint)?;
-        merge_matching(&mut certificate.subject_dn, parsed.subject_dn)?;
-        merge_matching_values(&mut certificate.san_dns, parsed.san_dns)?;
-        merge_matching_values(&mut certificate.san_uri, parsed.san_uri)?;
-        merge_matching_values(&mut certificate.san_ip, parsed.san_ip)?;
-        merge_matching_values(&mut certificate.san_email, parsed.san_email)?;
-        certificate.verified_certificate_expiry |= parsed.verified_certificate_expiry;
-    }
-
-    certificate_has_binding_material(&certificate).then_some(certificate)
-}
-
-pub(crate) fn certificate_pem_identity(value: &str) -> Option<MtlsClientCertificate> {
-    let decoded = decode_forwarded_pem(value);
-    let start = decoded.find("-----BEGIN CERTIFICATE-----")?;
-    let end = decoded.find("-----END CERTIFICATE-----")?;
-    if end <= start {
-        return None;
-    }
-    let body_start = start + "-----BEGIN CERTIFICATE-----".len();
-    let body = decoded[body_start..end]
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
-        .collect::<String>();
-    let der = STANDARD.decode(body).ok()?;
     certificate_der_identity(&der)
 }
 
@@ -360,108 +269,10 @@ pub(crate) fn jwks_contains_current_x5c_thumbprint(jwks: &Value, thumbprint: &st
         })
 }
 
-fn certificate_has_binding_material(certificate: &MtlsClientCertificate) -> bool {
-    certificate.thumbprint.is_some()
-        || certificate.subject_dn.is_some()
-        || !certificate.san_dns.is_empty()
-        || !certificate.san_uri.is_empty()
-        || !certificate.san_ip.is_empty()
-        || !certificate.san_email.is_empty()
-}
-
-fn forwarded_values(headers: &HeaderMap, names: &[&str]) -> Vec<String> {
-    let mut values = Vec::new();
-    for name in names {
-        for value in headers.get_all(*name) {
-            if let Ok(text) = value.to_str() {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    values.push(trimmed.to_owned());
-                }
-            }
-        }
-    }
-    values
-}
-
-fn matching_forwarded_list_values(headers: &HeaderMap, names: &[&str]) -> Option<Vec<String>> {
-    let values = forwarded_values(headers, names)
-        .into_iter()
-        .map(|value| sorted_unique(split_forwarded_list_value(&value)))
-        .collect::<Vec<_>>();
-    let Some(first) = values.as_slice().first() else {
-        return Some(Vec::new());
-    };
-    values
-        .iter()
-        .all(|value| string_slices_match(first, value))
-        .then(|| first.clone())
-}
-
-fn split_forwarded_list_value(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn matching_forwarded_value(values: Vec<String>) -> Option<Option<String>> {
-    let Some(first) = values.as_slice().first() else {
-        return Some(None);
-    };
-    values
-        .iter()
-        .all(|value| constant_time_eq(first.as_bytes(), value.as_bytes()))
-        .then_some(Some(first.clone()))
-}
-
-fn merge_matching(target: &mut Option<String>, incoming: Option<String>) -> Option<()> {
-    match (target.as_ref(), incoming) {
-        (_, None) => Some(()),
-        (None, Some(value)) => {
-            *target = Some(value);
-            Some(())
-        }
-        (Some(current), Some(value)) if constant_time_eq(current.as_bytes(), value.as_bytes()) => {
-            Some(())
-        }
-        _ => None,
-    }
-}
-
-fn merge_matching_values(target: &mut Vec<String>, incoming: Vec<String>) -> Option<()> {
-    if target.is_empty() {
-        *target = incoming;
-        return Some(());
-    }
-    string_slices_match(target, &incoming).then_some(())
-}
-
 fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
     values
-}
-
-fn string_slices_match(left: &[String], right: &[String]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| constant_time_eq(left.as_bytes(), right.as_bytes()))
-}
-
-fn decode_forwarded_pem(value: &str) -> String {
-    let decoded = if value.contains('%') {
-        urlencoding::decode(value)
-            .map(std::borrow::Cow::into_owned)
-            .unwrap_or_else(|_| value.to_owned())
-    } else {
-        value.to_owned()
-    };
-    decoded.replace("\\n", "\n")
 }
 
 fn x509_is_current(x509: &X509Certificate<'_>) -> Option<()> {

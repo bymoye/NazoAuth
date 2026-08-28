@@ -47,7 +47,7 @@ pub struct RecoveryRootChangeRequest {
 
 /// One recovery challenge request (D11 steps 1–3): the exact proposed
 /// replacement controller key and replacement Recovery Public Key.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryChallengeRequest {
     pub deployment_id: String,
@@ -56,10 +56,14 @@ pub struct RecoveryChallengeRequest {
     pub kid: String,
     pub recovery_public_key: String,
     pub recovery_kid: String,
+    /// Unpadded base64url of the client-generated 32-byte allocation nonce.
+    pub allocation_nonce: String,
+    /// Unpadded base64url Ed25519 proof by the current Recovery Root.
+    pub allocation_signature: String,
 }
 
 /// The signed answer to one challenge (D11 steps 4–5).
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryAnswerRequest {
     pub deployment_id: String,
@@ -268,6 +272,14 @@ fn validate_challenge_request(
         controller_public_key: proposal.controller_public_key,
         recovery_kid: proposal.recovery_kid,
         recovery_public_key: proposal.recovery_public_key,
+        allocation_nonce: decode_fixed::<32>(
+            &request.allocation_nonce,
+            "allocation_nonce 必须是 32 字节的未填充 base64url 编码.",
+        )?,
+        allocation_signature: decode_fixed::<64>(
+            &request.allocation_signature,
+            "allocation_signature 必须是 64 字节 Ed25519 签名的未填充 base64url 编码.",
+        )?,
     })
 }
 

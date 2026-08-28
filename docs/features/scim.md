@@ -25,9 +25,10 @@ an explicit tenant, scope set, expiry/revocation lifecycle, last-use timestamp,
 and audit identity. A global environment-backed full-access bearer token is not
 implemented by security policy.
 
-RFC 9967 delivery is default-closed. Set `ENABLE_SCIM_SECURITY_EVENTS=true` to
-admit new events and advertise supported event URIs. `SCIM_EVENT_RETENTION_SECONDS`
-defaults to 604800 (7 days) and accepts 3600 through 2592000 (30 days).
+RFC 9967 delivery is default-closed. Explicitly enable the persisted
+`scim_security_events` runtime-module desired state to admit new events and
+advertise supported event URIs. `SCIM_EVENT_RETENTION_SECONDS` defaults to
+604800 (7 days) and accepts 3600 through 2592000 (30 days).
 
 Credential behavior:
 
@@ -38,10 +39,10 @@ Credential behavior:
 - Create, replace, patch, and delete endpoints require `scim:write` or `scim:*`.
 - Successful database-token use updates `last_used_at` and inserts `scim_audit_events`.
 - Successful and denied SCIM token checks emit structured audit events without raw token material.
-- `nazoauthctl migrate --yes` runs `nazo_oauth_cleanup_expired_security_state()` through a signed task, which
-  removes SCIM audit events older than 180 days together with expired security
-  state. This keeps audit retention bounded while preserving a compromise
-  investigation window.
+- The signed install/update migration task invokes
+  `nazo_oauth_cleanup_expired_security_state()`, which removes SCIM audit events
+  older than 180 days together with expired security state. This keeps audit
+  retention bounded while preserving a compromise investigation window.
 
 Outside default SCIM:
 

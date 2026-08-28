@@ -235,7 +235,7 @@ fn oauth_client(tenant: TenantContext, client_id: String) -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
-            security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
+            security_policy: nazo_auth::ClientSecurityPolicy::default(),
         },
         require_mtls_bound_tokens: false,
         is_active: true,
@@ -565,11 +565,28 @@ async fn totp_last_step_compare_and_set_has_one_concurrent_winner() {
     let Some((pool, tenant, user_id)) = database_fixture().await else {
         return;
     };
-    let mut connection = get_conn(&pool).await.unwrap();
-    sql_query("INSERT INTO user_totp_credentials (tenant_id,user_id,secret_base32,label,confirmed_at) VALUES ($1,$2,'JBSWY3DPEHPK3PXP','test',CURRENT_TIMESTAMP)").bind::<SqlUuid,_>(tenant.tenant_id.as_uuid()).bind::<SqlUuid,_>(user_id.as_uuid()).execute(&mut connection).await.unwrap();
-    drop(connection);
     let repository = mfa_repository(pool.clone());
-    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 1);
+    repository
+        .begin_totp_enrollment(
+            tenant.tenant_id,
+            user_id,
+            "JBSWY3DPEHPK3PXP".to_owned(),
+            "test".to_owned(),
+        )
+        .await
+        .unwrap();
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE user_totp_credentials
+         SET confirmed_at = CURRENT_TIMESTAMP
+         WHERE tenant_id = $1 AND user_id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<SqlUuid, _>(user_id.as_uuid())
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
     let (left, right) = tokio::join!(
         repository.compare_and_set_totp_step(tenant.tenant_id, user_id, 42),
         repository.compare_and_set_totp_step(tenant.tenant_id, user_id, 42)
@@ -604,17 +621,28 @@ async fn totp_verification_classification_and_audit_are_atomic_and_replay_safe()
     const STEP: i64 = 1_234_567;
     let timestamp = STEP * nazo_identity::mfa::MFA_TOTP_PERIOD_SECONDS;
     let code = nazo_identity::mfa::totp_for_step(b"12345678901234567890", STEP).unwrap();
-    let mut connection = get_conn(&pool).await.unwrap();
-    sql_query("INSERT INTO user_totp_credentials (tenant_id,user_id,secret_base32,label,confirmed_at) VALUES ($1,$2,$3,'test',CURRENT_TIMESTAMP)")
-        .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
-        .bind::<SqlUuid, _>(user_id.as_uuid())
-        .bind::<Text, _>(SECRET)
-        .execute(&mut connection)
+    let repository = mfa_repository(pool.clone());
+    repository
+        .begin_totp_enrollment(
+            tenant.tenant_id,
+            user_id,
+            SECRET.to_owned(),
+            "test".to_owned(),
+        )
         .await
         .unwrap();
+    let mut connection = get_conn(&pool).await.unwrap();
+    sql_query(
+        "UPDATE user_totp_credentials
+         SET confirmed_at = CURRENT_TIMESTAMP
+         WHERE tenant_id = $1 AND user_id = $2",
+    )
+    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
+    .bind::<SqlUuid, _>(user_id.as_uuid())
+    .execute(&mut connection)
+    .await
+    .unwrap();
     drop(connection);
-    let repository = mfa_repository(pool.clone());
-    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 1);
 
     assert_eq!(
         repository
@@ -819,7 +847,7 @@ async fn backup_code_is_consumed_once_atomically() {
 }
 
 #[tokio::test]
-async fn mfa_encrypted_lifecycle_rotation_and_trait_boundary_are_tenant_safe() {
+async fn mfa_encrypted_lifecycle_and_trait_boundary_are_tenant_safe() {
     let Some((pool, tenant, user_id)) = database_fixture().await else {
         return;
     };
@@ -1082,88 +1110,6 @@ async fn mfa_encrypted_lifecycle_rotation_and_trait_boundary_are_tenant_safe() {
         nazo_identity::ports::TotpVerificationOutcome::Invalid
     );
 
-    let mut connection = get_conn(&pool).await.unwrap();
-    sql_query(
-        "INSERT INTO user_totp_credentials
-            (tenant_id,user_id,secret_base32,label,confirmed_at)
-         VALUES ($1,$2,$3,'legacy',CURRENT_TIMESTAMP)",
-    )
-    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
-    .bind::<SqlUuid, _>(user_id.as_uuid())
-    .bind::<Text, _>(SECRET)
-    .execute(&mut connection)
-    .await
-    .unwrap();
-    drop(connection);
-    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 1);
-    assert_eq!(repository.migrate_legacy_totp_secrets().await.unwrap(), 0);
-    assert_eq!(repository.rotate_totp_secrets().await.unwrap(), 0);
-    trait_repository
-        .clear_mfa_state(tenant.tenant_id, user_id)
-        .await
-        .unwrap();
-
-    let old_key = MfaTotpKey::new("old-key", [0x22; 32]).unwrap();
-    let old_ring = MfaTotpKeyRing::new(old_key.clone(), None).unwrap();
-    let old_repository = MfaRepository::with_totp_key_ring(pool.clone(), Some(old_ring));
-    old_repository
-        .begin_totp_enrollment(
-            tenant.tenant_id,
-            user_id,
-            SECRET.to_owned(),
-            "old key".to_owned(),
-        )
-        .await
-        .unwrap();
-    let current_key = MfaTotpKey::new("new-key", [0x33; 32]).unwrap();
-    let previous_key = MfaTotpKey::new("old-key", [0x22; 32]).unwrap();
-    let rotated_repository = MfaRepository::with_totp_key_ring(
-        pool.clone(),
-        Some(MfaTotpKeyRing::new(current_key, Some(previous_key)).unwrap()),
-    );
-    assert_eq!(rotated_repository.rotate_totp_secrets().await.unwrap(), 1);
-    assert_eq!(rotated_repository.rotate_totp_secrets().await.unwrap(), 0);
-
-    let mut connection = get_conn(&pool).await.unwrap();
-    sql_query(
-        "UPDATE user_totp_credentials
-         SET secret_key_id = 'missing-key'
-         WHERE tenant_id = $1 AND user_id = $2",
-    )
-    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
-    .bind::<SqlUuid, _>(user_id.as_uuid())
-    .execute(&mut connection)
-    .await
-    .unwrap();
-    drop(connection);
-    assert!(matches!(
-        rotated_repository.rotate_totp_secrets().await,
-        Err(RepositoryError::Consistency(_))
-    ));
-
-    let mut connection = get_conn(&pool).await.unwrap();
-    sql_query(
-        "UPDATE user_totp_credentials
-         SET secret_key_id = 'old-key', secret_ciphertext = $3
-         WHERE tenant_id = $1 AND user_id = $2",
-    )
-    .bind::<SqlUuid, _>(tenant.tenant_id.as_uuid())
-    .bind::<SqlUuid, _>(user_id.as_uuid())
-    .bind::<diesel::sql_types::Binary, _>(vec![0_u8; 30])
-    .execute(&mut connection)
-    .await
-    .unwrap();
-    drop(connection);
-    assert!(matches!(
-        old_repository
-            .totp_enrollment(tenant.tenant_id, user_id)
-            .await,
-        Err(RepositoryError::Consistency(_))
-    ));
-    rotated_repository
-        .clear_mfa_state(tenant.tenant_id, user_id)
-        .await
-        .unwrap();
     cleanup(&pool, user_id).await;
 }
 

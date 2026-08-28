@@ -8,8 +8,7 @@
 //! touch signatures — key material is not known yet.
 //!
 //! Stage 2 resolves the controller kid/public key **by deployment_id** from
-//! the D01/D02 Controller Registry (PostgreSQL).  This replaces the retired
-//! mounted-file `controller.pub` trust path: NazoAuth is now the only
+//! the D01/D02 Controller Registry (PostgreSQL). NazoAuth is the only
 //! authority that answers "does this controller key exist, is it revoked, has
 //! it expired".  Stage 4 falls out of the same lookup, because admission
 //! requires an `active` slot with `expires_at > now`; the extra registry read

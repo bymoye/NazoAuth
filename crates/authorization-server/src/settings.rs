@@ -17,6 +17,12 @@ use crate::config::{ConfigSource, DEFAULT_DATA_DIR};
 use crate::http::mtls::MtlsCertificateSourceMode;
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr, parse_trusted_proxy_cidrs};
 
+/// Access tokens are stateless JWTs. Recovery can close ingress only after
+/// this bounded lifetime plus the verifier skew has elapsed.
+pub(crate) const MAX_ACCESS_TOKEN_TTL_SECONDS: i64 = 3_600;
+pub(crate) const MAX_ID_TOKEN_TTL_SECONDS: i64 = 3_600;
+pub(crate) const RECOVERY_ACCESS_TOKEN_CLOCK_SKEW_SECONDS: i64 = 60;
+
 mod config_loader;
 mod email;
 mod federation;
@@ -173,27 +179,6 @@ pub(crate) struct KeyManagementSettings {
 
 #[derive(Clone)]
 pub(crate) struct ModuleSettings {
-    // These fields are retained as an internal fixture seam for endpoint
-    // tests. They are no longer configuration inputs; runtime module state in
-    // the database is the sole authority for these stable capabilities.
-    #[allow(dead_code)]
-    pub(crate) enable_request_object: bool,
-    #[allow(dead_code)]
-    pub(crate) enable_par_request_object: bool,
-    pub(crate) enable_authorization_details: bool,
-    #[allow(dead_code)]
-    pub(crate) enable_device_authorization_grant: bool,
-    #[allow(dead_code)]
-    pub(crate) enable_dynamic_client_registration: bool,
-    #[allow(dead_code)]
-    pub(crate) enable_frontchannel_logout: bool,
-    #[allow(dead_code)]
-    pub(crate) enable_session_management: bool,
-    #[allow(dead_code)]
-    pub(crate) enable_ciba: bool,
-    pub(crate) enable_native_sso: bool,
-    pub(crate) enable_fapi_http_signatures: bool,
-    pub(crate) enable_scim_security_events: bool,
     pub(crate) enable_openid4vci_issuer: bool,
     pub(crate) enable_openid4vp_verifier: bool,
     pub(crate) dynamic_client_registration_initial_access_token: Option<String>,
@@ -499,6 +484,31 @@ pub(super) fn positive_i64(
     Ok(value)
 }
 
+pub(crate) fn bounded_access_token_ttl_seconds(config: &ConfigSource) -> anyhow::Result<i64> {
+    let ttl = positive_i64(
+        config,
+        "ACCESS_TOKEN_TTL_SECONDS",
+        300,
+        "ACCESS_TOKEN_TTL_SECONDS",
+    )?;
+    if ttl > MAX_ACCESS_TOKEN_TTL_SECONDS {
+        bail!(
+            "ACCESS_TOKEN_TTL_SECONDS must not exceed {MAX_ACCESS_TOKEN_TTL_SECONDS} so recovery can bound stateless JWT expiry"
+        );
+    }
+    Ok(ttl)
+}
+
+pub(crate) fn bounded_id_token_ttl_seconds(config: &ConfigSource) -> anyhow::Result<i64> {
+    let ttl = positive_i64(config, "ID_TOKEN_TTL_SECONDS", 600, "ID_TOKEN_TTL_SECONDS")?;
+    if ttl > MAX_ID_TOKEN_TTL_SECONDS {
+        bail!(
+            "ID_TOKEN_TTL_SECONDS must not exceed {MAX_ID_TOKEN_TTL_SECONDS} so recovery can bound signed token expiry"
+        );
+    }
+    Ok(ttl)
+}
+
 fn url_origin(value: &str) -> anyhow::Result<String> {
     let url = Url::parse(value).map_err(|_| anyhow::anyhow!("PUBLIC_BASE_URL must be absolute"))?;
     let Some(host) = url.host_str() else {
@@ -543,14 +553,8 @@ pub(crate) fn key_settings_from_config(
         );
     }
     let data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
-    let access_token_ttl_seconds = positive_i64(
-        config,
-        "ACCESS_TOKEN_TTL_SECONDS",
-        300,
-        "ACCESS_TOKEN_TTL_SECONDS",
-    )?;
-    let id_token_ttl_seconds =
-        positive_i64(config, "ID_TOKEN_TTL_SECONDS", 600, "ID_TOKEN_TTL_SECONDS")?;
+    let access_token_ttl_seconds = bounded_access_token_ttl_seconds(config)?;
+    let id_token_ttl_seconds = bounded_id_token_ttl_seconds(config)?;
     Ok(nazo_key_management::KeySettings {
         keys_dir: match config.optional_string("JWK_KEYS_DIR") {
             Some(_) => config.persistent_path("JWK_KEYS_DIR", None)?,

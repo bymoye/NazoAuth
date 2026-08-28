@@ -82,18 +82,29 @@ token-bearing URL. The formal managed flow reads that private runtime-owned stat
 For a formal release, prefer the lifecycle entry point:
 
 ```sh
-sudo nazoauthctl install \
-  --runtime auto \
-  --public-url https://auth.example.com
-sudo nazoauthctl bootstrap-admin
+nazoauthctl host add production-host --ssh production --privilege sudo
+nazoauthctl install \
+  --host production-host --name production \
+  --runtime podman --public-url https://auth.example.com \
+  --database-host db.internal --database-port 5432 \
+  --database-name oauth \
+  --database-runtime-user nazo_runtime \
+  --database-runtime-password-file ./database-runtime-password \
+  --database-lifecycle-user nazo_lifecycle \
+  --database-lifecycle-password-file ./database-lifecycle-password \
+  --valkey-host valkey.internal --valkey-port 6379 \
+  --valkey-password-file ./valkey-password
+nazoauthctl bootstrap-admin --instance production
 ```
 
-`auto` selects Podman first and Docker second. Existing PostgreSQL/Valkey,
-host installation, generated secrets, and backup boundaries are documented in
+Select exactly one runtime: `podman`, `docker`, or `host`. The two PostgreSQL
+roles and the Valkey credential must already exist; NazoAuthCtl does not create
+credentials for external services. Target-local current-data import and backup
+boundaries are documented in
 [one-click installation and updates](one-click-update.md).
 
-`nazoauthctl` generates the private server configuration, dependency credentials,
-deployment identities, signing identities, and recovery state. It binds NazoAuth
+`nazoauthctl` generates the private server configuration, deployment identity,
+signing identity, application secrets, and recovery state. It binds NazoAuth
 to the selected host loopback port. Put any
 standards-compliant TLS reverse proxy in front of
 `http://127.0.0.1:8000`. Configure `TRUSTED_PROXY_CIDRS` only for proxy
@@ -118,30 +129,20 @@ NazoAuthCtl conformance clients use a fresh CA and leaf certificate for every
 run. A proxy in front of a conformance deployment therefore cannot advertise a
 stale, fixed client-CA list. Install the public CA bundle generated for that run
 before starting Suite modules and restore the previous bundle in the same run's
-cleanup path. With HAProxy 3.2, use this pattern:
+cleanup path. Use the reviewed HAProxy 3.2 boundary in
+[`deploy/proxy/haproxy-rfc9440.cfg`](../../deploy/proxy/haproxy-rfc9440.cfg): it
+separates ordinary HTTPS from a dedicated `verify required` mTLS listener,
+strips all inbound forwarding and certificate headers, and adds only the
+singleton RFC 9440 `Client-Cert` value derived from the verified TLS peer.
 
 The leaf subject DN must differ from the CA subject DN, while its issuer DN must
 match that CA. Include `openssl verify -CAfile run-ca.pem client.pem` in the
 preflight; otherwise OpenSSL/HAProxy can classify a different-key leaf with the
 same subject/issuer DN as self-signed and reject the handshake.
 
-```haproxy
-frontend nazoauth
-  bind :443 ssl crt /run/nazoauth/server.pem ca-file /run/nazoauth/active-conformance-client-cas.pem verify optional ssl-min-ver TLSv1.2 ssl-max-ver TLSv1.3 no-tls-tickets ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384 ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
-  http-request del-header Client-Cert
-  http-request del-header Client-Cert-Chain
-  http-request set-header Client-Cert ":%[ssl_c_der,base64]:" if { ssl_c_used }
-  default_backend nazoauth
-
-backend nazoauth
-  server app 127.0.0.1:8000 check
-```
-
-`verify optional` is required to request a certificate while retaining ordinary
-HTTPS routes on the same listener; `verify none` does not request one. A client
-that supplies a certificate must chain to the active run bundle. NazoAuth still
-performs the registration subject/SAN and optional certificate-digest checks.
-All of the following must remain true:
+A client certificate must chain to the active bundle. NazoAuth still performs
+the registration subject/SAN and optional certificate-digest checks. All of the
+following must remain true:
 
 - HAProxy deletes inbound certificate headers before adding its own value;
 - the cleartext upstream is loopback-only or otherwise inaccessible to clients;
@@ -175,8 +176,8 @@ any check fails.
 
 Activation requires all of these checks:
 
-1. `sudo nazoauthctl status` reports the signed Release and both target identities;
-2. `sudo nazoauthctl doctor` verifies audit, readiness, target digest, and the runtime DDL boundary;
+1. `nazoauthctl status` reports the signed Release and both target identities;
+2. `nazoauthctl doctor` verifies audit, readiness, target digest, and the runtime DDL boundary;
 3. `/ready` returns HTTP 200;
 4. `/.well-known/openid-configuration` returns the configured issuer;
 5. the reverse proxy serves the same endpoints through the public HTTPS origin;
@@ -185,8 +186,8 @@ Activation requires all of these checks:
 Inspect the non-secret deployment state with:
 
 ```sh
-sudo nazoauthctl status
-sudo nazoauthctl audit show
+nazoauthctl status
+nazoauthctl operation --instance production --limit 20
 ```
 
 ## Upgrade and rollback
@@ -194,20 +195,27 @@ sudo nazoauthctl audit show
 For a released standalone installation, the normal upgrade is:
 
 ```sh
-sudo nazoauthctl update
+nazoauthctl update --instance production --yes
 ```
 
 This verifies the tag-specific Sigstore identity and immutable artifact
-digests, creates recovery backups, runs migrations, replaces the application,
-checks readiness and public Discovery, and automatically restores the previous
-application image and persistent application files if verification fails. See
+digests, runs the signed migration and activation transaction, then checks
+readiness and public Discovery. Configure a blocking backup gate explicitly:
+
+```sh
+nazoauthctl policy backup-before-update require --instance production \
+  --max-age-seconds 86400
+```
+
+The gate refuses an update without the exact recent restore-tested snapshot.
+If an irreversible migration has applied, artifact rollback is rejected and
+the writer remains stopped until `nazoauthctl recover` restores a verified
+snapshot. See
 [One-click installation and updates](one-click-update.md).
 
 Source deployments may still use Compose during development. They are not the
-normal production update path. Database restoration remains separate because
-migrations may be forward-only; the updater therefore accepts automatic
-rollback only when the signed release declares the migration set compatible
-with restarting the previous application.
+production update path. Database restoration remains separate because
+migrations may be forward-only.
 
 ## Production boundaries
 

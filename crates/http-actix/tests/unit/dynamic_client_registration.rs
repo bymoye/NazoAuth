@@ -470,12 +470,7 @@ async fn configured_initial_access_token_keeps_oauth_only_client_pkce_policy() {
         .expect("client lock")
         .clone()
         .expect("registered client");
-    assert!(
-        stored
-            .security_policy
-            .as_ref()
-            .is_some_and(|policy| !policy.allow_confidential_oidc_without_pkce)
-    );
+    assert!(!stored.security_policy.allow_confidential_oidc_without_pkce);
 }
 
 #[actix_web::test]
@@ -509,7 +504,7 @@ async fn configured_initial_access_token_applies_baseline_confidential_oidc_poli
             .lock()
             .expect("client lock")
             .as_ref()
-            .and_then(|client| client.security_policy.as_ref())
+            .map(|client| &client.security_policy)
             .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
     );
 }
@@ -545,7 +540,7 @@ async fn configured_token_preserves_oidc_policy() {
             .lock()
             .expect("client lock")
             .as_ref()
-            .and_then(|client| client.security_policy.as_ref())
+            .map(|client| &client.security_policy)
             .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
     );
 }
@@ -582,7 +577,7 @@ async fn configured_initial_access_update_preserves_security_policy() {
             .lock()
             .expect("client lock")
             .as_ref()
-            .and_then(|client| client.security_policy.as_ref())
+            .map(|client| &client.security_policy)
             .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
     );
 
@@ -607,7 +602,7 @@ async fn configured_initial_access_update_preserves_security_policy() {
             .lock()
             .expect("client lock")
             .as_ref()
-            .and_then(|client| client.security_policy.as_ref())
+            .map(|client| &client.security_policy)
             .is_some_and(|policy| policy.allow_confidential_oidc_without_pkce)
     );
 }
@@ -642,7 +637,7 @@ async fn configured_public_client_keeps_strict_pkce_policy() {
             .lock()
             .expect("client lock")
             .as_ref()
-            .and_then(|client| client.security_policy.as_ref())
+            .map(|client| &client.security_policy)
             .is_some_and(|policy| !policy.allow_confidential_oidc_without_pkce)
     );
 }
@@ -886,11 +881,7 @@ async fn client_configuration_update_preserves_server_managed_security_policy() 
     {
         let mut guard = store.client.lock().expect("client lock");
         let current = guard.as_mut().expect("fixture client");
-        current
-            .security_policy
-            .as_mut()
-            .expect("explicit fixture policy")
-            .session_management = true;
+        current.security_policy.session_management = true;
     }
     let service = test::init_service(
         App::new()
@@ -921,56 +912,7 @@ async fn client_configuration_update_preserves_server_managed_security_policy() 
         .expect("client lock")
         .clone()
         .expect("updated client");
-    assert!(
-        stored
-            .security_policy
-            .as_ref()
-            .is_some_and(|policy| policy.session_management)
-    );
-}
-
-#[actix_web::test]
-async fn client_configuration_update_preserves_absent_server_managed_policy() {
-    let store = FakeStore::new();
-    store
-        .client
-        .lock()
-        .expect("client lock")
-        .as_mut()
-        .expect("fixture client")
-        .registration
-        .security_policy = None;
-    let service = test::init_service(
-        App::new()
-            .app_data(Data::new(endpoint_with_store(true, store.clone())))
-            .configure(configure),
-    )
-    .await;
-
-    let response = test::call_service(
-        &service,
-        test::TestRequest::put()
-            .uri("/register/client-test")
-            .insert_header((header::AUTHORIZATION, "Bearer registration-token"))
-            .set_json(json!({
-                "client_id": "client-test",
-                "client_secret": "current-secret",
-                "client_name": "Updated Client",
-                "redirect_uris": ["https://client.example/callback"]
-            }))
-            .to_request(),
-    )
-    .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        store
-            .client
-            .lock()
-            .expect("client lock")
-            .as_ref()
-            .is_some_and(|client| client.security_policy.is_none())
-    );
+    assert!(stored.security_policy.session_management);
 }
 
 #[actix_web::test]
@@ -984,8 +926,6 @@ async fn client_configuration_update_validates_current_server_managed_policy() {
         .expect("fixture client")
         .registration
         .security_policy
-        .as_mut()
-        .expect("explicit fixture policy")
         .version = u16::MAX;
     let service = test::init_service(
         App::new()
@@ -1136,7 +1076,7 @@ fn client() -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
-            security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
+            security_policy: nazo_auth::ClientSecurityPolicy::default(),
         },
         require_mtls_bound_tokens: false,
         is_active: true,

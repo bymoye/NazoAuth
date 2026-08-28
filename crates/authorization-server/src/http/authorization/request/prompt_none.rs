@@ -53,15 +53,21 @@ pub(super) async fn issue_authorization_code_without_interaction_with_context(
     req: &HttpRequest,
     payload: ConsentPayload,
 ) -> HttpResponse {
-    let legacy_policy = context.config.profile.legacy_client_policy();
+    let (Some(signed_response_required), Some(session_management_allowed), Some(ttl_seconds)) = (
+        payload.signed_authorization_response_required,
+        payload.session_management_allowed,
+        payload.authorization_code_ttl_seconds,
+    ) else {
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "authorization request has no current client security policy.",
+        );
+    };
     let response_policy = AuthorizationResponseClientPolicy {
-        signed_response_required: payload
-            .signed_authorization_response_required
-            .unwrap_or(legacy_policy.require_signed_authorization_response),
-        session_management_allowed: payload.session_management_allowed.unwrap_or(true),
-        ttl_seconds: payload
-            .authorization_code_ttl_seconds
-            .unwrap_or(context.config.auth_code_ttl_seconds),
+        signed_response_required,
+        session_management_allowed,
+        ttl_seconds,
     };
     if let Some(request_uri) = payload.pushed_request_uri.as_deref() {
         match consume_pushed_authorization_request_with_context(context, request_uri).await {

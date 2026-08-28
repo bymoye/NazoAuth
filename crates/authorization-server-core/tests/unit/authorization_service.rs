@@ -350,7 +350,7 @@ fn registration(client_id: &str) -> ValidatedClientRegistration {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
-        security_policy: None,
+        security_policy: crate::ClientSecurityPolicy::default(),
     }
 }
 

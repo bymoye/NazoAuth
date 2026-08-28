@@ -207,7 +207,7 @@ pub(crate) async fn set_ex_nx(
     let reply = connection
         .client
         .set::<Option<String>, _, _>(
-            key,
+            connection.state_key(key),
             value,
             Some(Expiration::EX(ttl_seconds.min(i64::MAX as u64) as i64)),
             Some(SetOptions::NX),
@@ -233,7 +233,7 @@ pub(crate) async fn set_ex_nx_string(
     let reply = connection
         .client
         .set::<Option<String>, _, _>(
-            key,
+            connection.state_key(key),
             value,
             Some(Expiration::EX(ttl_seconds.min(i64::MAX as u64) as i64)),
             Some(SetOptions::NX),
@@ -259,7 +259,7 @@ pub(crate) async fn set_ex(
     connection
         .client
         .set::<(), _, _>(
-            key,
+            connection.state_key(key),
             value,
             Some(Expiration::EX(ttl_seconds.min(i64::MAX as u64) as i64)),
             None,
@@ -275,7 +275,7 @@ pub(crate) async fn take(
 ) -> Result<Option<String>, Error> {
     connection
         .client
-        .getdel(key)
+        .getdel(connection.state_key(key))
         .await
         .map_err(Error::from_fred)
 }
@@ -289,7 +289,7 @@ pub(crate) async fn set_ex_string(
     connection
         .client
         .set::<(), _, _>(
-            key,
+            connection.state_key(key),
             value,
             Some(Expiration::EX(ttl_seconds.min(i64::MAX as u64) as i64)),
             None,
@@ -303,18 +303,30 @@ pub(crate) async fn get(
     connection: &ValkeyConnection,
     key: String,
 ) -> Result<Option<String>, Error> {
-    connection.client.get(key).await.map_err(Error::from_fred)
+    connection
+        .client
+        .get(connection.state_key(key))
+        .await
+        .map_err(Error::from_fred)
 }
 
 pub(crate) async fn get_many(
     connection: &ValkeyConnection,
     keys: Vec<String>,
 ) -> Result<Vec<Option<String>>, Error> {
-    connection.client.mget(keys).await.map_err(Error::from_fred)
+    connection
+        .client
+        .mget(connection.state_keys(keys))
+        .await
+        .map_err(Error::from_fred)
 }
 
 pub(crate) async fn delete(connection: &ValkeyConnection, key: String) -> Result<i64, Error> {
-    connection.client.del(key).await.map_err(Error::from_fred)
+    connection
+        .client
+        .del(connection.state_key(key))
+        .await
+        .map_err(Error::from_fred)
 }
 
 pub(crate) async fn compare_delete(
@@ -374,7 +386,7 @@ pub(crate) async fn eval_string(
 
     connection
         .client
-        .eval(script, keys, args)
+        .eval(script, connection.state_keys(keys), args)
         .await
         .map_err(Error::from_fred)
 }

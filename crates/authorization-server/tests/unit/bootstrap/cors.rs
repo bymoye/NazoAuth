@@ -241,7 +241,7 @@ async fn disabled_dynamic_client_registration_keeps_the_static_route_contract() 
     let valkey = fred::prelude::Builder::default_centralized()
         .build()
         .expect("test Valkey client construction should not connect");
-    let valkey = nazo_valkey::ValkeyConnection::from_existing_client(valkey);
+    let valkey = nazo_valkey::test_support::scoped_connection(valkey);
     let runtime_modules = crate::runtime_modules::test_support::runtime_module_registry_for_test(
         pool.clone(),
         settings.as_ref(),

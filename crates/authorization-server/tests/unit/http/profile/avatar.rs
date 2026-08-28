@@ -293,7 +293,7 @@ impl LiveAvatarFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -886,7 +886,7 @@ async fn upload_avatar_reports_session_lookup_failure_after_valid_csrf_before_re
     };
     valkey_set_ex(
         &state.valkey,
-        format!("oauth:session:{sid}"),
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
         serde_json::to_string(&payload).expect("session should serialize"),
         state.settings.session.session_ttl_seconds,
     )
@@ -939,7 +939,7 @@ async fn delete_avatar_reports_session_lookup_failure_after_valid_csrf_before_pr
     };
     valkey_set_ex(
         &state.valkey,
-        format!("oauth:session:{sid}"),
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
         serde_json::to_string(&payload).expect("session should serialize"),
         state.settings.session.session_ttl_seconds,
     )

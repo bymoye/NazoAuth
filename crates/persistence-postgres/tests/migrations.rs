@@ -1,4 +1,7 @@
-use diesel::{QueryableByName, sql_query, sql_types::Text};
+use diesel::{
+    QueryableByName, sql_query,
+    sql_types::{BigInt, Text},
+};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection};
 use uuid::Uuid;
 
@@ -51,6 +54,23 @@ const RECOVERY_ROOT_DOWN: &str =
     include_str!("../../../migrations/20260825000100_controller_recovery_root/down.sql");
 const RECOVERY_RECEIPT_UP: &str =
     include_str!("../../../migrations/20260827000100_controller_recovery_receipt/up.sql");
+const RECOVERY_ALLOCATION_PROOF_UP: &str =
+    include_str!("../../../migrations/20260828000400_recovery_challenge_allocation_proof/up.sql");
+const RECOVERY_ALLOCATION_PROOF_DOWN: &str =
+    include_str!("../../../migrations/20260828000400_recovery_challenge_allocation_proof/down.sql");
+const RECOVERY_ROOT_KEY_HISTORY_UP: &str =
+    include_str!("../../../migrations/20260828000500_recovery_root_key_history/up.sql");
+const RECOVERY_ROOT_KEY_HISTORY_DOWN: &str =
+    include_str!("../../../migrations/20260828000500_recovery_root_key_history/down.sql");
+const LEGACY_PERSISTED_SECURITY_STATE_CUT_UP: &str = include_str!(
+    "../../../migrations/20260828000600_remove_legacy_persisted_security_state/up.sql"
+);
+const LEGACY_PERSISTED_SECURITY_STATE_CUT_DOWN: &str = include_str!(
+    "../../../migrations/20260828000600_remove_legacy_persisted_security_state/down.sql"
+);
+const TENANT_RESOURCE_PROVENANCE_CUT_UP: &str = include_str!(
+    "../../../migrations/20260828000300_remove_tenant_resource_change_set_provenance/up.sql"
+);
 
 #[derive(QueryableByName)]
 struct ProviderType {
@@ -62,6 +82,26 @@ struct ProviderType {
 struct RuntimeTable {
     #[diesel(sql_type = Text)]
     table_name: String,
+}
+
+#[derive(QueryableByName)]
+struct BindingIdentity {
+    #[diesel(sql_type = Text)]
+    resource_id: String,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    active: bool,
+}
+
+#[derive(QueryableByName)]
+struct BooleanRow {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    value: bool,
+}
+
+#[derive(QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = BigInt)]
+    count: i64,
 }
 
 #[derive(QueryableByName)]
@@ -142,6 +182,305 @@ fn recovery_root_migration_pins_kdf_ttl_uniqueness_and_fail_closed_downgrade() {
 }
 
 #[test]
+fn recovery_root_key_history_backfills_current_keys_and_refuses_downgrade() {
+    for required in [
+        "PRIMARY KEY (deployment_id, recovery_public_key)",
+        "REFERENCES controller_recovery_roots (deployment_id)",
+        "octet_length(recovery_public_key) = 32",
+        "INSERT INTO controller_recovery_root_key_history",
+        "SELECT deployment_id, recovery_public_key, created_at",
+    ] {
+        assert!(
+            RECOVERY_ROOT_KEY_HISTORY_UP.contains(required),
+            "Recovery Root key-history migration is missing {required}"
+        );
+    }
+    assert!(
+        RECOVERY_ROOT_KEY_HISTORY_DOWN
+            .contains("downgrade refused: Recovery Root key history is mandatory")
+    );
+}
+
+#[test]
+fn persisted_security_state_cut_removes_every_legacy_authority() {
+    for required in [
+        "DELETE FROM openid4vp_transactions",
+        "ALTER COLUMN create_request_jti SET NOT NULL",
+        "WITH compromised_families AS",
+        "token_family_id IS NOT DISTINCT FROM",
+        "ALTER COLUMN token_family_id SET NOT NULL",
+        "ALTER COLUMN oidc_auth_context SET NOT NULL",
+        "ALTER COLUMN audience DROP DEFAULT",
+        "every OAuth client requires an explicit v1 security_policy",
+        "ALTER COLUMN security_policy SET NOT NULL",
+        "every TOTP credential must already use a complete encrypted envelope",
+        "DROP COLUMN secret_base32",
+        "desired_mode IN ('enabled', 'disabled')",
+        "DROP TABLE runtime_module_default_policy",
+    ] {
+        assert!(
+            LEGACY_PERSISTED_SECURITY_STATE_CUT_UP.contains(required),
+            "persisted security-state cut is missing {required}"
+        );
+    }
+    assert!(
+        LEGACY_PERSISTED_SECURITY_STATE_CUT_DOWN
+            .contains("downgrade refused: legacy persisted security state was permanently removed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisted_security_state_cut_executes_fail_closed_and_establishes_current_invariants() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let schema = format!("persisted_security_cut_{}", Uuid::now_v7().simple());
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    connection
+        .batch_execute(&format!(
+            r#"
+            CREATE SCHEMA "{schema}";
+            SET search_path TO "{schema}", public;
+
+            CREATE TABLE users (id UUID PRIMARY KEY);
+            CREATE TABLE openid4vp_transactions (
+                id UUID PRIMARY KEY,
+                create_request_jti TEXT,
+                create_request_sha256 TEXT,
+                create_request_canonical_json TEXT,
+                CONSTRAINT ck_openid4vp_create_request_shape CHECK (
+                    (create_request_jti IS NULL AND create_request_sha256 IS NULL AND create_request_canonical_json IS NULL)
+                    OR (create_request_jti IS NOT NULL AND create_request_sha256 IS NOT NULL AND create_request_canonical_json IS NOT NULL)
+                )
+            );
+            INSERT INTO openid4vp_transactions VALUES
+                ('00000000-0000-0000-0000-000000000011', NULL, NULL, NULL),
+                ('00000000-0000-0000-0000-000000000012',
+                 '00000000-0000-7000-8000-000000000012', repeat('a', 64), '{{}}');
+
+            CREATE TABLE oauth_clients (
+                id UUID PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                security_policy JSONB,
+                CONSTRAINT ck_oauth_clients_security_policy_object CHECK (
+                    security_policy IS NULL OR jsonb_typeof(security_policy) = 'object'
+                )
+            );
+            INSERT INTO oauth_clients VALUES
+                ('00000000-0000-0000-0000-000000000021', 'client-a', NULL);
+
+            CREATE TABLE oauth_tokens (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL,
+                token_family_id UUID,
+                client_id UUID NOT NULL,
+                audience JSONB NOT NULL DEFAULT '["resource://default"]'::jsonb,
+                oidc_auth_context JSONB,
+                issued_at TIMESTAMPTZ NOT NULL
+            );
+            INSERT INTO oauth_tokens VALUES
+                ('00000000-0000-0000-0000-000000000031',
+                 '00000000-0000-0000-0000-000000000001',
+                 '00000000-0000-7000-8000-000000000031',
+                 '00000000-0000-0000-0000-000000000021', '["resource://a"]',
+                 '{{"version":1,"issuer":"https://issuer.example","audience":"client-a","auth_time":1577836800,"amr":["pwd"],"oidc_sid":null,"id_token_sid":null,"acr":null,"nonce":null,"userinfo_claims":[],"userinfo_claim_requests":[],"id_token_claims":[],"id_token_claim_requests":[]}}',
+                 '2020-01-01T00:00:01Z'),
+                ('00000000-0000-0000-0000-000000000032',
+                 '00000000-0000-0000-0000-000000000001',
+                 '00000000-0000-7000-8000-000000000032',
+                 '00000000-0000-0000-0000-000000000021', '["resource://a"]', NULL,
+                 '2020-01-01T00:00:01Z'),
+                ('00000000-0000-0000-0000-000000000033',
+                 '00000000-0000-0000-0000-000000000001',
+                 '00000000-0000-7000-8000-000000000032',
+                 '00000000-0000-0000-0000-000000000021', '["resource://a"]',
+                 '{{"version":1,"issuer":"https://issuer.example","audience":"client-a","auth_time":1577836800,"amr":["pwd"],"oidc_sid":null,"id_token_sid":null,"acr":null,"nonce":null,"userinfo_claims":[],"userinfo_claim_requests":[],"id_token_claims":[],"id_token_claim_requests":[]}}',
+                 '2020-01-01T00:00:01Z'),
+                ('00000000-0000-0000-0000-000000000034',
+                 '00000000-0000-0000-0000-000000000001', NULL,
+                 '00000000-0000-0000-0000-000000000021', '["resource://a"]',
+                 '{{"version":1,"issuer":"https://issuer.example","audience":"client-a","auth_time":1577836800,"amr":["pwd"],"oidc_sid":null,"id_token_sid":null,"acr":null,"nonce":null,"userinfo_claims":[],"userinfo_claim_requests":[],"id_token_claims":[],"id_token_claim_requests":[]}}',
+                 '2020-01-01T00:00:01Z');
+
+            CREATE TABLE user_totp_credentials (
+                id UUID PRIMARY KEY,
+                secret_base32 TEXT,
+                secret_ciphertext BYTEA,
+                secret_key_id TEXT,
+                CONSTRAINT ck_user_totp_credentials_secret_envelope CHECK (
+                    secret_base32 IS NOT NULL
+                    OR (secret_ciphertext IS NOT NULL AND secret_key_id IS NOT NULL)
+                )
+            );
+            INSERT INTO user_totp_credentials VALUES
+                ('00000000-0000-0000-0000-000000000041', 'JBSWY3DPEHPK3PXP', NULL, NULL);
+
+            CREATE TABLE runtime_module_desired_states (
+                module_id VARCHAR(64) PRIMARY KEY,
+                desired_mode VARCHAR(16) NOT NULL,
+                revision BIGINT NOT NULL,
+                actor_id UUID,
+                reason VARCHAR(500),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT ck_runtime_module_desired_mode CHECK (
+                    desired_mode IN ('inherit', 'enabled', 'disabled')
+                )
+            );
+            CREATE TABLE runtime_module_instance_states (
+                instance_id TEXT NOT NULL,
+                module_id TEXT NOT NULL
+            );
+            CREATE TABLE runtime_module_state_events (
+                event_id UUID PRIMARY KEY,
+                module_id VARCHAR(64) NOT NULL,
+                event_type VARCHAR(32) NOT NULL,
+                revision BIGINT NOT NULL,
+                instance_id VARCHAR(255),
+                actor_id UUID,
+                reason VARCHAR(500),
+                before_state VARCHAR(16),
+                after_state VARCHAR(16),
+                outcome_code VARCHAR(128),
+                occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE runtime_module_default_policy (
+                singleton BOOLEAN PRIMARY KEY,
+                policy_version BIGINT NOT NULL
+            );
+            INSERT INTO runtime_module_desired_states (module_id, desired_mode, revision) VALUES
+                ('device_authorization', 'enabled', 1),
+                ('token_exchange', 'enabled', 1),
+                ('jwt_bearer_grant', 'enabled', 1),
+                ('ciba', 'enabled', 1),
+                ('request_objects', 'enabled', 1),
+                ('jarm', 'enabled', 1),
+                ('scim', 'enabled', 1),
+                ('frontchannel_logout', 'enabled', 1),
+                ('session_management', 'enabled', 1),
+                ('dynamic_client_registration', 'disabled', 1),
+                ('authorization_details', 'disabled', 1),
+                ('http_message_signatures', 'disabled', 1),
+                ('scim_security_events', 'disabled', 1),
+                ('openid4vci_issuer', 'disabled', 1),
+                ('openid4vp_verifier', 'disabled', 1),
+                ('native_sso', 'disabled', 1);
+            "#
+        ))
+        .await
+        .expect("security-state cut fixture should initialize");
+
+    let missing_policy = connection
+        .transaction::<(), diesel::result::Error, _>(async |connection| {
+            connection
+                .batch_execute(LEGACY_PERSISTED_SECURITY_STATE_CUT_UP)
+                .await
+        })
+        .await;
+    assert!(
+        missing_policy.is_err(),
+        "NULL client policy must fail closed"
+    );
+
+    connection
+        .batch_execute(
+            r#"
+            UPDATE oauth_clients SET security_policy = '{
+              "version":1,"assurance":"baseline",
+              "require_signed_authorization_request":false,
+              "require_signed_authorization_response":false,
+              "require_signed_introspection_response":false,
+              "session_management":true,"allow_cross_device_flows":true,
+              "allow_confidential_oidc_without_pkce":false
+            }';
+            "#,
+        )
+        .await
+        .expect("explicit client policy should materialize");
+    let plaintext_totp = connection
+        .transaction::<(), diesel::result::Error, _>(async |connection| {
+            connection
+                .batch_execute(LEGACY_PERSISTED_SECURITY_STATE_CUT_UP)
+                .await
+        })
+        .await;
+    assert!(plaintext_totp.is_err(), "plaintext TOTP must fail closed");
+
+    connection
+        .batch_execute(
+            "UPDATE user_totp_credentials SET secret_base32 = NULL, \
+             secret_ciphertext = decode('01' || repeat('00', 44), 'hex'), \
+             secret_key_id = 'current-key'",
+        )
+        .await
+        .expect("encrypted TOTP pre-cut state should materialize");
+    connection
+        .batch_execute(LEGACY_PERSISTED_SECURITY_STATE_CUT_UP)
+        .await
+        .expect("fully materialized current state should cross the hard cut");
+
+    let surviving_tokens = sql_query("SELECT count(*) AS count FROM oauth_tokens")
+        .get_result::<CountRow>(&mut connection)
+        .await
+        .expect("refresh token count should be readable");
+    assert_eq!(
+        surviving_tokens.count, 1,
+        "only the current family may survive"
+    );
+    let runtime_rows = sql_query(
+        "SELECT count(*) AS count FROM runtime_module_desired_states \
+         WHERE desired_mode IN ('enabled', 'disabled')",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .expect("runtime desired-state count should be readable");
+    assert_eq!(runtime_rows.count, 16);
+    let invented_events = sql_query("SELECT count(*) AS count FROM runtime_module_state_events")
+        .get_result::<CountRow>(&mut connection)
+        .await
+        .expect("runtime audit count should be readable");
+    assert_eq!(
+        invented_events.count, 0,
+        "an existing deployment must retain its audit history without fabricated events"
+    );
+    let old_runtime_policy =
+        sql_query("SELECT to_regclass('runtime_module_default_policy') IS NULL AS value")
+            .get_result::<BooleanRow>(&mut connection)
+            .await
+            .expect("runtime policy catalog should be readable");
+    assert!(old_runtime_policy.value);
+    let legacy_openid = sql_query(
+        "SELECT count(*) AS count FROM openid4vp_transactions \
+         WHERE id = '00000000-0000-0000-0000-000000000011'",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .expect("OpenID4VP lineage should be readable");
+    assert_eq!(legacy_openid.count, 0);
+
+    assert!(
+        sql_query(
+            "INSERT INTO oauth_tokens \
+             (id, tenant_id, token_family_id, client_id, audience, oidc_auth_context, issued_at) \
+             VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000001', \
+             gen_random_uuid(), '00000000-0000-0000-0000-000000000021', '[]', NULL, CURRENT_TIMESTAMP)",
+        )
+        .execute(&mut connection)
+        .await
+        .is_err(),
+        "post-cut schema must reject incomplete refresh contracts"
+    );
+
+    connection
+        .batch_execute(&format!(
+            "SET search_path TO public; DROP SCHEMA \"{schema}\" CASCADE;"
+        ))
+        .await
+        .expect("security-state cut fixture should clean up");
+}
+
+#[test]
 fn recovery_receipt_migration_binds_exact_retry_to_immutable_result() {
     for required in [
         "accepted_signature_sha256",
@@ -158,6 +497,123 @@ fn recovery_receipt_migration_binds_exact_retry_to_immutable_result() {
             "recovery receipt migration is missing {required}"
         );
     }
+}
+
+#[test]
+fn recovery_allocation_proof_migration_hard_cuts_unsigned_pending_state() {
+    for required in [
+        "SET consumed_at = GREATEST(created_at, CURRENT_TIMESTAMP)",
+        "WHERE consumed_at IS NULL",
+        "ADD COLUMN allocation_nonce BYTEA",
+        "uuid_send(challenge_id) || uuid_send(challenge_id)",
+        "octet_length(allocation_nonce) = 32",
+        "UNIQUE (deployment_id, allocation_nonce)",
+    ] {
+        assert!(
+            RECOVERY_ALLOCATION_PROOF_UP.contains(required),
+            "allocation-proof migration is missing {required}"
+        );
+    }
+    assert!(
+        RECOVERY_ALLOCATION_PROOF_DOWN
+            .contains("downgrade refused: Recovery Root allocation proof is mandatory"),
+        "downgrade must not restore the unauthenticated allocation shape"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tenant_resource_provenance_cut_keeps_one_deterministic_binding_and_rejects_ambiguity() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let schema = format!("tenant_resource_cut_{}", Uuid::now_v7().simple());
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    connection
+        .batch_execute(&format!(
+            r#"
+            CREATE SCHEMA "{schema}";
+            SET search_path TO "{schema}";
+            CREATE TABLE tenant_resource_bindings (
+              id UUID PRIMARY KEY, tenant_id UUID NOT NULL, resource_kind VARCHAR(64) NOT NULL,
+              resource_id VARCHAR(255) NOT NULL, resource_digest VARCHAR(64) NOT NULL,
+              change_set_id VARCHAR(255) NOT NULL, change_set_sha256 VARCHAR(64) NOT NULL,
+              active BOOLEAN NOT NULL, locator TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+              CONSTRAINT uq_tenant_resource_binding_version UNIQUE (tenant_id, resource_kind, resource_id, change_set_id),
+              CONSTRAINT ck_tenant_resource_binding_change_set CHECK (change_set_id <> '')
+            );
+            CREATE UNIQUE INDEX uq_tenant_resource_binding_active
+              ON tenant_resource_bindings (tenant_id, resource_kind, resource_id)
+              WHERE active;
+            INSERT INTO tenant_resource_bindings VALUES
+              ('00000000-0000-0000-0000-000000000011','00000000-0000-0000-0000-000000000001','oauth-client','inactive-only','a','old',repeat('0',64),FALSE,'x','2020-01-01','2020-01-01'),
+              ('00000000-0000-0000-0000-000000000012','00000000-0000-0000-0000-000000000001','oauth-client','inactive-only','b','new',repeat('1',64),FALSE,'x','2020-01-02','2020-01-02'),
+              ('00000000-0000-0000-0000-000000000021','00000000-0000-0000-0000-000000000001','oauth-client','one-active','a','old',repeat('0',64),FALSE,'x','2020-01-01','2020-01-01'),
+              ('00000000-0000-0000-0000-000000000022','00000000-0000-0000-0000-000000000001','oauth-client','one-active','b','new',repeat('1',64),TRUE,'x','2020-01-02','2020-01-02');
+            "#
+        ))
+        .await
+        .expect("cut fixture should initialize");
+    connection
+        .batch_execute(TENANT_RESOURCE_PROVENANCE_CUT_UP)
+        .await
+        .expect("0/1 active rows must migrate");
+    let rows =
+        sql_query("SELECT resource_id, active FROM tenant_resource_bindings ORDER BY resource_id")
+            .load::<BindingIdentity>(&mut connection)
+            .await
+            .expect("cut rows readable");
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.resource_id.as_str(), row.active))
+            .collect::<Vec<_>>(),
+        vec![("inactive-only", false), ("one-active", true)]
+    );
+    let index_missing =
+        sql_query("SELECT to_regclass('uq_tenant_resource_binding_active') IS NULL AS value")
+            .get_result::<BooleanRow>(&mut connection)
+            .await
+            .expect("index catalog should be readable");
+    assert!(
+        index_missing.value,
+        "obsolete active-only index must be removed"
+    );
+    connection
+        .batch_execute(&format!(
+            "SET search_path TO public; DROP SCHEMA \"{schema}\" CASCADE;"
+        ))
+        .await
+        .expect("fixture cleanup");
+
+    let schema = format!("tenant_resource_cut_conflict_{}", Uuid::now_v7().simple());
+    connection.batch_execute(&format!(r#"
+        CREATE SCHEMA "{schema}"; SET search_path TO "{schema}";
+        CREATE TABLE tenant_resource_bindings (
+          id UUID PRIMARY KEY, tenant_id UUID NOT NULL, resource_kind VARCHAR(64) NOT NULL, resource_id VARCHAR(255) NOT NULL,
+          resource_digest VARCHAR(64) NOT NULL, change_set_id VARCHAR(255) NOT NULL, change_set_sha256 VARCHAR(64) NOT NULL,
+          active BOOLEAN NOT NULL, locator TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+          CONSTRAINT uq_tenant_resource_binding_version UNIQUE (tenant_id, resource_kind, resource_id, change_set_id),
+          CONSTRAINT ck_tenant_resource_binding_change_set CHECK (change_set_id <> '')
+        );
+        INSERT INTO tenant_resource_bindings VALUES
+          ('00000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000001','oauth-client','ambiguous','a',repeat('0',64),repeat('0',64),TRUE,'x',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+          ('00000000-0000-0000-0000-000000000032','00000000-0000-0000-0000-000000000001','oauth-client','ambiguous','b',repeat('1',64),repeat('1',64),TRUE,'x',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+        "#)).await.expect("ambiguous fixture should initialize");
+    assert!(
+        connection
+            .batch_execute(TENANT_RESOURCE_PROVENANCE_CUT_UP)
+            .await
+            .is_err(),
+        "multiple active historical bindings must fail closed"
+    );
+    connection
+        .batch_execute(&format!(
+            "SET search_path TO public; DROP SCHEMA \"{schema}\" CASCADE;"
+        ))
+        .await
+        .expect("conflict fixture cleanup");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -339,6 +795,24 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
             "runtime_module_state_events",
         ]
     );
+
+    let explicit_desired = sql_query(
+        "SELECT count(*) AS count FROM runtime_module_desired_states \
+         WHERE desired_mode IN ('enabled', 'disabled')",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .expect("explicit runtime baseline should be readable");
+    assert_eq!(explicit_desired.count, 16);
+    let genesis_audit = sql_query(
+        "SELECT count(*) AS count FROM runtime_module_state_events \
+         WHERE event_type = 'desired_state_changed' \
+           AND revision = 1 AND reason = 'clean install baseline'",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .expect("runtime genesis audit should be readable");
+    assert_eq!(genesis_audit.count, 16);
 
     let catalog_probe = connection
         .transaction::<(), diesel::result::Error, _>(async |connection| {

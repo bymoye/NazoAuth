@@ -194,7 +194,7 @@ pub(super) async fn authorize_request_with_context(
             "该客户端未启用 authorization_code 授权类型.",
         );
     }
-    let client_policy = context.config.profile.effective_client_policy(&client);
+    let client_policy = &client.security_policy;
     if client_policy.requires_fapi2_security() && pending_external_request_uri.is_some() {
         consumed_request_uri_error = Some("request_uri_not_supported");
         pending_external_request_uri = None;

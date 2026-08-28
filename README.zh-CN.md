@@ -21,7 +21,7 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 | 项目 | 值 |
 | --- | --- |
 | 包名 | `nazo-oauth-server` |
-| Workspace 版本 | `0.1.9` 发布候选 |
+| Workspace 版本 | `0.2.2` |
 | 许可证 | AGPL-3.0-or-later |
 | 语言 | Rust 2024 |
 | 运行依赖 | PostgreSQL、Valkey |
@@ -66,17 +66,30 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 GitHub Release 安装签名的 `nazoauthctl`，然后执行：
 
 ```sh
-sudo nazoauthctl install --runtime auto
-sudo nazoauthctl bootstrap-admin
-sudo nazoauthctl status
-sudo nazoauthctl doctor
+nazoauthctl host add production-host --ssh production --privilege sudo
+nazoauthctl install --host production-host --name production \
+  --public-url https://auth.example.com --runtime podman \
+  --database-host db.internal --database-port 5432 --database-name oauth \
+  --database-runtime-user nazo_runtime \
+  --database-runtime-password-file ./database-runtime-password \
+  --database-lifecycle-user nazo_lifecycle \
+  --database-lifecycle-password-file ./database-lifecycle-password \
+  --valkey-host valkey.internal --valkey-port 6379 \
+  --valkey-password-file ./valkey-password
+nazoauthctl bootstrap-admin --instance production
+nazoauthctl bind --instance production --label operations \
+  --output-secret-file ./production-recovery-secret
+nazoauthctl status --instance production
+nazoauthctl doctor --instance production
 ```
 
-`auto` 优先选择 Podman，其次选择 Docker。控制器会生成 PostgreSQL、Valkey 和应用
-秘密，启动依赖，通过签名的一次性任务执行迁移，再启动 NazoAuth。可打开
-`http://127.0.0.1:8000/health` 或
-`http://127.0.0.1:8000/.well-known/openid-configuration`。数据、签名密钥和头像
-会持久保存。
+runtime 必须明确选择 `podman`、`docker` 或 `host`。NazoAuthCtl 不会为外部
+PostgreSQL 或 Valkey 创建凭据。lifecycle PostgreSQL role 负责迁移、备份与恢复；
+长期运行服务只拿权限更低的 runtime role。目标机私有边界可检查
+`http://127.0.0.1:8000/ready` 和
+`http://127.0.0.1:8000/.well-known/openid-configuration`。数据、签名密钥、应用
+secret 和头像会持久保存。当前格式导入与备份策略见
+[受管安装、更新与恢复](docs/operations/one-click-update.zh-CN.md)。
 
 数据库还没有管理员时，`nazoauthctl bootstrap-admin` 会读取 runtime 所有、且不会被
 打印的一次性 claim。交互模式只通过 TTY 提示；自动化必须通过 stdin 或专用文件描述符
@@ -94,9 +107,9 @@ nazoauth server
 ```
 
 如果当前目录没有 `.env.yaml`，该命令会创建最小配置，生成持久化应用秘密与签名密钥，
-然后使用安全默认值继续启动。显式 YAML 和环境配置仍然优先。受管部署的 schema 变更只由
-正式的 `nazoauthctl migrate --yes` 签名一次性任务执行，长期运行的应用身份不持有 DDL
-权限。
+然后使用安全默认值继续启动。显式 YAML 和环境配置仍然优先。受管部署的 schema
+变更只在精确验证 Release 的签名 install、update 或 recover 生命周期操作内执行；
+长期运行的服务身份不持有 DDL 权限。
 
 ## 配置
 
@@ -118,8 +131,8 @@ RUST_LOG: "info"
 [`docs/operations/configuration.md`](docs/operations/configuration.md) 配置服务端证书、
 私钥、mTLS 客户端 CA 和独立 mTLS 监听地址。
 
-新部署使用可组合的服务端能力与显式的按客户端策略。
-`AUTHORIZATION_SERVER_PROFILE` 只作为未持久化客户端策略的旧客户端兼容预设。
+部署使用可组合的服务端能力与显式、版本化的按客户端策略。每个 OAuth client 都必须
+持有当前 `security_policy`；服务不会从进程级 preset 推断缺失策略。
 
 `PUBLIC_BASE_URL` 派生同域默认值：
 
@@ -139,7 +152,7 @@ RUST_LOG: "info"
 | `JWK_KEYS_DIR` | `DATA_DIR + "/keys"` |
 | `AVATAR_STORAGE_DIR` | `DATA_DIR + "/avatars"` |
 
-高级配置仍然保留，用于兼容旧部署和特殊环境。详见
+高级配置用于明确的特殊部署。详见
 [docs/operations/configuration.md](docs/operations/configuration.md)。
 
 ## 默认边界

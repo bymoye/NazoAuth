@@ -10,7 +10,7 @@ fn security_profile_block_is_reflected_only_in_effective_policy() {
         session: Duration::from_secs(5),
         scim_security_events: Duration::from_secs(6),
     };
-    let base = ModuleCatalog::fixed(durations, BTreeSet::new()).unwrap();
+    let base = ModuleCatalog::fixed(durations).unwrap();
     assert_eq!(
         base.effective_disable_policy(ModuleId::Jarm),
         Some(DisablePolicy::DrainStoredTransactions {

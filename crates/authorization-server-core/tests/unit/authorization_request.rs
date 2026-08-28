@@ -66,7 +66,7 @@ fn request_object_client(jwks: Value) -> OAuthClient {
             authorization_signed_response_alg: None,
             authorization_encrypted_response_alg: None,
             authorization_encrypted_response_enc: None,
-            security_policy: None,
+            security_policy: crate::ClientSecurityPolicy::default(),
         },
         require_mtls_bound_tokens: false,
         is_active: true,

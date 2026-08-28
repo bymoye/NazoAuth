@@ -16,15 +16,11 @@ pub struct CatalogDurations {
 #[derive(Clone, Debug)]
 pub struct ModuleCatalog {
     specs: BTreeMap<ModuleId, ModuleSpec>,
-    inherited_enabled: BTreeSet<ModuleId>,
     runtime_disable_blocked: BTreeSet<ModuleId>,
 }
 
 impl ModuleCatalog {
-    pub fn fixed(
-        durations: CatalogDurations,
-        inherited_enabled: BTreeSet<ModuleId>,
-    ) -> Result<Self, ModuleCatalogError> {
+    pub fn fixed(durations: CatalogDurations) -> Result<Self, ModuleCatalogError> {
         let finish = DisablePolicy::FinishExecutingRequests;
         let drain = |max_duration| DisablePolicy::DrainStoredTransactions { max_duration };
         let policies = [
@@ -68,7 +64,6 @@ impl ModuleCatalog {
         validate_module_specs(&specs)?;
         Ok(Self {
             specs: specs.into_iter().map(|spec| (spec.id, spec)).collect(),
-            inherited_enabled,
             runtime_disable_blocked: BTreeSet::new(),
         })
     }
@@ -104,11 +99,6 @@ impl ModuleCatalog {
     #[must_use]
     pub fn spec(&self, module_id: ModuleId) -> Option<&ModuleSpec> {
         self.specs.get(&module_id)
-    }
-
-    #[must_use]
-    pub fn inherited_enabled(&self, module_id: ModuleId) -> bool {
-        self.inherited_enabled.contains(&module_id)
     }
 
     #[must_use]

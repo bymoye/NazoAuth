@@ -81,44 +81,6 @@ async fn lifecycle_prepublishes_then_activates_with_grace() {
 }
 
 #[tokio::test]
-async fn lifecycle_upgrades_legacy_protocol_response_keys_for_signed_introspection() {
-    let directory = std::env::temp_dir().join(format!(
-        "nazo-key-introspection-purpose-upgrade-{}",
-        Uuid::now_v7()
-    ));
-    let settings = settings(directory.clone());
-    create_new_keyset(&settings).await.unwrap();
-    let path = directory.join("keyset.json");
-    let mut payload: Value =
-        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-    payload["keys"][0]["created_at"] =
-        json!(timestamp(Utc::now() - chrono::Duration::seconds(2_000)));
-    write_json_atomic(&path, &payload).await.unwrap();
-    maintain_keyset_lifecycle(&settings, &path).await.unwrap();
-    let mut payload: Value =
-        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-    for key in payload["keys"].as_array_mut().unwrap() {
-        if let Some(purposes) = key.get_mut("purposes").and_then(Value::as_array_mut) {
-            purposes.retain(|purpose| purpose != "introspection");
-        }
-    }
-    write_json_atomic(&path, &payload).await.unwrap();
-
-    maintain_keyset_lifecycle(&settings, &path).await.unwrap();
-
-    let upgraded: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-    for key in upgraded["keys"].as_array().unwrap() {
-        if let Some(purposes) = key["purposes"].as_array()
-            && purposes.iter().any(|purpose| purpose == "id_token")
-            && purposes.iter().any(|purpose| purpose == "jarm")
-        {
-            assert!(purposes.iter().any(|purpose| purpose == "introspection"));
-        }
-    }
-    tokio::fs::remove_dir_all(directory).await.unwrap();
-}
-
-#[tokio::test]
 async fn key_manager_lists_persisted_key_states_without_server_schema_logic() {
     let directory = std::env::temp_dir().join(format!("nazo-key-list-{}", Uuid::now_v7()));
     let settings = settings(directory.clone());
@@ -126,12 +88,13 @@ async fn key_manager_lists_persisted_key_states_without_server_schema_logic() {
     write_json_atomic(
         &directory.join("keyset.json"),
         &json!({
+            "schema_version": KEYSET_SCHEMA_VERSION,
             "active_kid":"active",
             "keys":[
-                {"kid":"active","alg":"EdDSA","file":"active.pem","retire_at":null},
-                {"kid":"candidate","alg":"EdDSA","file":"candidate.pem","retire_at":null},
-                {"kid":"grace","alg":"RS256","file":"grace.pem","retire_at":timestamp(now + chrono::Duration::minutes(5))},
-                {"kid":"retired","alg":"RS256","file":"retired.pem","retire_at":timestamp(now - chrono::Duration::minutes(5))}
+                {"kid":"active","alg":"EdDSA","backend":"local-pem","file":"active.pem","created_at":timestamp(now),"retire_at":null},
+                {"kid":"candidate","alg":"EdDSA","backend":"local-pem","file":"candidate.pem","created_at":timestamp(now),"retire_at":null},
+                {"kid":"grace","alg":"RS256","backend":"local-pem","file":"grace.pem","created_at":timestamp(now),"retire_at":timestamp(now + chrono::Duration::minutes(5))},
+                {"kid":"retired","alg":"RS256","backend":"local-pem","file":"retired.pem","created_at":timestamp(now),"retire_at":timestamp(now - chrono::Duration::minutes(5))}
             ]
         }),
     )
@@ -158,7 +121,6 @@ async fn key_manager_lists_persisted_key_states_without_server_schema_logic() {
 async fn key_manager_registers_exact_external_key_schema_atomically() {
     let directory = std::env::temp_dir().join(format!("nazo-key-register-{}", Uuid::now_v7()));
     let settings = settings(directory.clone());
-    let public_jwk_file = directory.join("external-public.jwk.json");
     tokio::fs::create_dir_all(&directory).await.unwrap();
     let material = generate_key_material(jsonwebtoken::Algorithm::EdDSA).unwrap();
     let public_jwk = public_jwk_from_private_der(
@@ -167,17 +129,13 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
         &material.private_pkcs8_der,
     )
     .unwrap();
-    tokio::fs::write(&public_jwk_file, serde_json::to_vec(&public_jwk).unwrap())
-        .await
-        .unwrap();
-
     crate::KeyManager::register_external(
         &settings,
         crate::ExternalKeyRegistration {
             kid: "external".to_owned(),
             algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://key/1".to_owned(),
-            public_jwk_file: public_jwk_file.clone(),
+            public_jwk: public_jwk.clone(),
         },
     )
     .await
@@ -189,7 +147,7 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
             kid: "external".to_owned(),
             algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://key/1".to_owned(),
-            public_jwk_file: public_jwk_file.clone(),
+            public_jwk: public_jwk.clone(),
         },
     )
     .await
@@ -200,7 +158,7 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
             kid: "external".to_owned(),
             algorithm: jsonwebtoken::Algorithm::EdDSA,
             key_ref: "kms://different-key".to_owned(),
-            public_jwk_file,
+            public_jwk,
         },
     )
     .await
@@ -213,6 +171,7 @@ async fn key_manager_registers_exact_external_key_schema_atomically() {
             .unwrap(),
     )
     .unwrap();
+    assert_eq!(payload["schema_version"], KEYSET_SCHEMA_VERSION);
     assert_eq!(payload["active_kid"], "external");
     let entry = &payload["keys"][0];
     assert_eq!(entry["kid"], "external");
@@ -266,11 +225,7 @@ async fn external_key_registration_rejects_unusable_algorithm_material() {
             Uuid::now_v7()
         ));
         let settings = settings(directory.clone());
-        let public_jwk_file = directory.join("external-public.jwk.json");
         tokio::fs::create_dir_all(&directory).await.unwrap();
-        tokio::fs::write(&public_jwk_file, serde_json::to_vec(&public_jwk).unwrap())
-            .await
-            .unwrap();
 
         let error = crate::KeyManager::register_external(
             &settings,
@@ -278,7 +233,7 @@ async fn external_key_registration_rejects_unusable_algorithm_material() {
                 kid: "external".to_owned(),
                 algorithm,
                 key_ref: format!("kms://invalid/{label}"),
-                public_jwk_file,
+                public_jwk,
             },
         )
         .await

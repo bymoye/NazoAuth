@@ -170,10 +170,12 @@ fn first_server_run_creates_the_local_configuration_once() {
         result,
         ServerConfigPreparation::Created(config_path.clone())
     );
-    assert_eq!(
-        std::fs::read_to_string(&config_path).unwrap(),
-        INITIAL_CONFIG
-    );
+    let persisted = std::fs::read_to_string(&config_path).unwrap();
+    assert!(persisted.starts_with(INITIAL_CONFIG));
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+    let epoch = uuid::Uuid::parse_str(&source.required_string("VALKEY_STATE_EPOCH").unwrap())
+        .expect("fresh config epoch must be a UUID");
+    assert_eq!(epoch.get_version_num(), 7);
     assert_eq!(
         prepare_server_config_in(&path).unwrap(),
         ServerConfigPreparation::Ready
@@ -195,6 +197,36 @@ fn existing_server_config_is_never_overwritten() {
         "PUBLIC_BASE_URL: https://auth.example\n"
     );
     let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn fresh_server_configs_persist_distinct_valkey_epochs() {
+    let first = temp_config_dir("first_epoch");
+    let second = temp_config_dir("second_epoch");
+    prepare_server_config_in(&first).unwrap();
+    prepare_server_config_in(&second).unwrap();
+
+    let first_epoch = ConfigSource::load_from_dir(&first)
+        .unwrap()
+        .required_string("VALKEY_STATE_EPOCH")
+        .unwrap();
+    let second_epoch = ConfigSource::load_from_dir(&second)
+        .unwrap()
+        .required_string("VALKEY_STATE_EPOCH")
+        .unwrap();
+    assert_ne!(first_epoch, second_epoch);
+
+    let first_contents = std::fs::read_to_string(first.join(CONFIG_FILE)).unwrap();
+    assert_eq!(
+        prepare_server_config_in(&first).unwrap(),
+        ServerConfigPreparation::Ready
+    );
+    assert_eq!(
+        std::fs::read_to_string(first.join(CONFIG_FILE)).unwrap(),
+        first_contents
+    );
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
 }
 
 #[test]
@@ -254,9 +286,22 @@ fn first_server_run_creates_the_overridden_configuration_file() {
         result,
         ServerConfigPreparation::Created(override_path.clone())
     );
+    let persisted = std::fs::read_to_string(&override_path).unwrap();
+    assert!(persisted.starts_with(INITIAL_CONFIG));
+    let source = ConfigSource::load_from_dir_with_config_file_override(
+        &config_dir,
+        Some(override_path.to_str().unwrap()),
+        std::iter::empty::<(String, String)>(),
+        false,
+        false,
+        false,
+    )
+    .unwrap();
     assert_eq!(
-        std::fs::read_to_string(&override_path).unwrap(),
-        INITIAL_CONFIG
+        uuid::Uuid::parse_str(&source.required_string("VALKEY_STATE_EPOCH").unwrap())
+            .unwrap()
+            .get_version_num(),
+        7
     );
     assert!(!config_dir.join(CONFIG_FILE).exists());
     let _ = std::fs::remove_dir_all(&config_dir);
@@ -272,34 +317,6 @@ fn unknown_yaml_key_is_rejected_with_the_key_name() {
 
     let error = result.expect_err("unknown YAML keys must fail startup");
     assert!(error.to_string().contains("COOKIE_SECUR"));
-}
-
-#[test]
-fn removed_stable_module_flags_are_rejected_instead_of_becoming_hidden_policy() {
-    for key in [
-        "ENABLE_REQUEST_OBJECT",
-        "ENABLE_PAR_REQUEST_OBJECT",
-        "ENABLE_DEVICE_AUTHORIZATION_GRANT",
-        "ENABLE_DYNAMIC_CLIENT_REGISTRATION",
-        "ENABLE_CIBA",
-        "ENABLE_FRONTCHANNEL_LOGOUT",
-        "ENABLE_SESSION_MANAGEMENT",
-    ] {
-        let path = temp_config_dir("removed_module_flag");
-        std::fs::write(path.join(CONFIG_FILE), format!("{key}: true\n")).unwrap();
-        let error = ConfigSource::load_from_dir(&path)
-            .expect_err("removed stable module flags must not be accepted");
-        assert!(error.to_string().contains(key), "{key}");
-        let _ = std::fs::remove_dir_all(&path);
-    }
-    let path = temp_config_dir("removed_module_env");
-    let error = ConfigSource::load_from_dir_with_env(
-        &path,
-        [("ENABLE_CIBA".to_owned(), "false".to_owned())],
-    )
-    .expect_err("removed stable module environment flags must not be ignored");
-    assert!(error.to_string().contains("ENABLE_CIBA was removed"));
-    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]
@@ -922,12 +939,8 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "DPOP_NONCE_POLICY",
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
-            "ENABLE_AUTHORIZATION_DETAILS",
-            "ENABLE_FAPI_HTTP_SIGNATURES",
-            "ENABLE_NATIVE_SSO",
             "ENABLE_OPENID4VCI_ISSUER",
             "ENABLE_OPENID4VP_VERIFIER",
-            "ENABLE_SCIM_SECURITY_EVENTS",
             "EMAIL_CODE_DEV_RESPONSE_ENABLED",
             "EMAIL_CODE_PEER_COOLDOWN_SECONDS",
             "EMAIL_CODE_SEND_COOLDOWN_SECONDS",
@@ -1026,12 +1039,12 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TLS_CLIENT_CA_FILE",
             "TLS_PRIVATE_KEY_FILE",
             "TLS_RELOAD_INTERVAL_SECONDS",
-            "TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE",
             "TRANSPORT_MODE",
             "TRUSTED_PROXY_CIDRS",
             "UI_CACHE_DIR",
             "UI_STATIC_DIR",
             "VALKEY_COMMAND_TIMEOUT_MS",
+            "VALKEY_STATE_EPOCH",
             "VALKEY_URL",
             "VALKEY_URL_FILE",
         ]

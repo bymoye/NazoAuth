@@ -1,7 +1,9 @@
 use std::future::Future;
 use std::time::SystemTime;
 
-use crate::{DesiredMode, ModuleEventType, ModuleId, ModuleRevision, ModuleState};
+use crate::{
+    DesiredMode, HistoricalDesiredMode, ModuleEventType, ModuleId, ModuleRevision, ModuleState,
+};
 
 /// Durable desired state, independent of any database row representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,7 +70,7 @@ pub struct InstanceStateMutation {
 /// Typed before/after value for module audit events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModuleEventState {
-    Desired(DesiredMode),
+    Desired(HistoricalDesiredMode),
     Actual(ModuleState),
 }
 

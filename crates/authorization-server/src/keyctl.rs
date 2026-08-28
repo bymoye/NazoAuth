@@ -133,10 +133,12 @@ pub(crate) async fn operator_register_external(
     kid: &str,
     algorithm: &str,
     key_ref: &str,
-    public_jwk_file: PathBuf,
+    public_jwk_bytes: &[u8],
 ) -> anyhow::Result<String> {
     let alg = signing_algorithm_from_name(algorithm)
         .ok_or_else(|| anyhow::anyhow!("unsupported signing alg {algorithm}"))?;
+    let public_jwk = serde_json::from_slice(public_jwk_bytes)
+        .context("failed to parse mounted external public JWK")?;
     let (settings, _) = load_key_task_config()?;
     nazo_key_management::KeyManager::register_external(
         &settings,
@@ -144,7 +146,7 @@ pub(crate) async fn operator_register_external(
             kid: kid.to_owned(),
             algorithm: alg,
             key_ref: key_ref.to_owned(),
-            public_jwk_file,
+            public_jwk,
         },
     )
     .await?;

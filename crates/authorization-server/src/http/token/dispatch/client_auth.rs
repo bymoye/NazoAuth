@@ -133,15 +133,11 @@ pub(super) fn validate_token_client_enabled(
     Ok(())
 }
 
-pub(crate) fn validate_token_request_profile_with_profile(
-    server_profile: crate::settings::AuthorizationServerProfile,
+pub(crate) fn validate_token_request_profile(
     client: &ClientRow,
     auth_method: &str,
 ) -> Result<(), HttpResponse> {
-    let profile = if server_profile
-        .effective_client_policy(client)
-        .requires_fapi2_security()
-    {
+    let profile = if client.security_policy.requires_fapi2_security() {
         SecurityProfile::Fapi2Security
     } else {
         SecurityProfile::Baseline

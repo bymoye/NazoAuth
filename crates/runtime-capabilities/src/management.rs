@@ -50,6 +50,7 @@ pub enum RuntimeModuleManagementError<E> {
     Repository(E),
     Registry(RegistryError<E>),
     MissingCatalogSpec(ModuleId),
+    MissingDesiredState(ModuleId),
 }
 
 pub struct RuntimeModuleManagement<R, L> {
@@ -170,7 +171,9 @@ where
             .catalog
             .spec(module_id)
             .ok_or(RuntimeModuleManagementError::MissingCatalogSpec(module_id))?;
-        let desired_state = desired.map_or(DesiredMode::Inherit, |record| record.mode);
+        let desired =
+            desired.ok_or(RuntimeModuleManagementError::MissingDesiredState(module_id))?;
+        let desired_state = desired.mode;
         let actual_state = instance.map_or_else(
             || {
                 if active.contains(&module_id) {
@@ -190,14 +193,13 @@ where
             .collect();
         let updated_at = instance
             .map(|record| record.updated_at)
-            .or_else(|| desired.map(|record| record.updated_at))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+            .unwrap_or(desired.updated_at);
         Ok(RuntimeModuleView {
             module_id,
             desired_state,
-            resolved_enabled: desired_state.resolve(self.catalog.inherited_enabled(module_id)),
+            resolved_enabled: desired_state.is_enabled(),
             actual_state,
-            revision: desired.map(|record| record.revision),
+            revision: Some(desired.revision),
             transition_revision: instance.map(|record| record.transition_revision),
             applied_revision: instance.and_then(|record| record.applied_revision),
             dependencies: spec.dependencies.iter().copied().collect(),
@@ -219,10 +221,7 @@ where
         mode: DesiredMode,
         active: &std::collections::BTreeSet<ModuleId>,
     ) -> Vec<DesiredMode> {
-        let mut actions = Vec::with_capacity(3);
-        if mode != DesiredMode::Inherit {
-            actions.push(DesiredMode::Inherit);
-        }
+        let mut actions = Vec::with_capacity(2);
         if mode != DesiredMode::Enabled
             && self.catalog.spec(module_id).is_some_and(|spec| {
                 spec.dependencies

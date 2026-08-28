@@ -31,9 +31,7 @@ where
             .await
             .map_err(RegistryError::Repository)?
             .ok_or(RegistryError::MissingDesiredState(module_id))?;
-        let enabled = desired
-            .mode
-            .resolve(self.catalog.inherited_enabled(module_id));
+        let enabled = desired.mode.is_enabled();
         let current = self
             .repository
             .read_instance(&self.instance_id, module_id)

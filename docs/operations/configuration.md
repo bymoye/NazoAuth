@@ -8,10 +8,10 @@ Nazo Auth Server is configured in two layers:
 - runtime/application configuration: feature and integration settings that can
   move to the administrator UI over time
 
-`nazoauth server` requires `.env.yaml` in its working directory. If the file is
-absent, the command copies the minimal example to `.env.yaml`, prints an
-instruction to review it, and exits successfully without opening network or
-database connections. Edit the file before running the command again.
+`nazoauth server` uses `.env.yaml` in its working directory. If the file is
+absent, the command copies the minimal example to `.env.yaml`, reports the new
+path, materializes required service-owned secrets, and continues startup.
+Explicit YAML and environment values still take precedence.
 
 The default deployment is same-origin. The public URL is configured once and
 the server derives the related URLs from it:
@@ -52,43 +52,6 @@ JWK_KEYS_DIR = DATA_DIR + "/keys"
 AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 ```
 
-### Email verification namespace cutover
-
-Email verification codes and their per-email and per-peer cooldowns include the
-registration service tenant. The previous key format was deployment-global and
-included the normalized email directly. Old and new binaries cannot safely
-serve local registration against the same Valkey during this transition:
-legacy reads can cross tenant boundaries, while ignoring a live legacy code or
-cooldown can admit a duplicate send or make an issued code unreachable.
-
-Define the drain interval as the largest value deployed on the old instances:
-
-```text
-T_email = max(
-  EMAIL_CODE_TTL_SECONDS,
-  EMAIL_CODE_SEND_COOLDOWN_SECONDS,
-  EMAIL_CODE_PEER_COOLDOWN_SECONDS
-)
-```
-
-The default `T_email` is 900 seconds, but these settings accept larger positive
-values. Use the actual deployed maximum rather than assuming the default.
-
-Perform a coordinated cutover:
-
-1. Stop admitting both email-code issuance and local-account registration on
-   every old instance, drain requests already in progress, and verify that no
-   old instance can read or write email verification state.
-2. Starting only after that drain completes, wait at least the old deployment's
-   `T_email`.
-3. Replace every instance with the new binary before restoring registration.
-
-There is no database rewrite or Valkey cleanup job; legacy state expires by its
-existing TTL. Rollback is symmetric: stop and drain registration on all new
-instances, wait at least the new deployment's `T_email`, then restore every old
-instance before resuming traffic. Do not mix old and new binaries or use a
-legacy dual-read.
-
 ## Startup settings
 
 | Setting | Default | Notes |
@@ -101,7 +64,8 @@ legacy dual-read.
 | `ORGANIZATION_ID` | `00000000-0000-0000-0000-000000000003` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
 | `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/oauth` | PostgreSQL connection string |
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
-| `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string; its logical database is permanently claimed by `TENANT_ID`, same-tenant replicas may share it, and a non-default tenant requires an empty database on first claim |
+| `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string; startup rejects an unmarked nonempty database rather than adopting historical keys |
+| `VALKEY_STATE_EPOCH` | none (required UUIDv7) | Deployment state boundary. Every transient business key is physically namespaced as `nazo:state:v1:<deployment>:<epoch>:`. Set a fresh UUIDv7 before a restored candidate starts; never reuse a prior epoch. |
 | `DATA_DIR` | `runtime` | Base directory for persistent local files |
 | `UI_CACHE_DIR` | `${DATA_DIR}/ui-releases` | Writable cache for the verified frontend release selected from the embedded descriptor |
 | `UI_STATIC_DIR` | unset | Optional signed frontend directory containing `index.html`; serves files and SPA routes under `/ui/` |
@@ -117,53 +81,26 @@ legacy dual-read.
 | `EMAIL_CODE_PEER_COOLDOWN_SECONDS` | `5` | Per-tenant, per-peer send cooldown; the broader authentication rate limiter remains a separate deployment-wide admission control |
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
-| `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Compatibility preset for clients without a stored `security_policy`; new clients use explicit composable policy. Accepted legacy values remain `oauth2-baseline`, `fapi2-security`, `fapi2-message-signing-authz-request`, `fapi2-message-signing-jarm`, and `fapi2-message-signing-introspection`. |
+| `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Global protocol profile. Every OAuth client must carry an explicit current `security_policy`; rows without it are rejected rather than inferred from this setting. |
 | `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
 | `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | generated under `DATA_DIR/secrets` | Current 32-byte base64url key and derived version id for TOTP seed envelope encryption. Prefer `MFA_TOTP_ENCRYPTION_KEY_FILE` when importing a controlled existing key. |
-| `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional previous key pair accepted only while rotating TOTP envelopes; startup re-wraps legacy/previous rows before serving traffic, so retain it until that startup succeeds. |
+| `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional prior key for decrypting existing encrypted envelopes during a controlled key transition. Startup never scans, encrypts, or re-wraps credential rows. |
 | `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` | Independent current 32-byte base64url key and derived id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`; file injection remains available for controlled rotation. Missing or malformed pairs fail startup. |
-| `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY` / `_ID` | unset | Optional previous key retained only during a rotation overlap; use `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE` for file injection. Existing live envelopes decrypt with current or previous; new envelopes always use current. Startup authenticates every live envelope, and expired rows are lazily removed before a grant key is reused. Remove the previous pair only after all rows encrypted with that id have expired and all old instances have stopped writing it. |
+| `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY` / `_ID` | unset | Optional previous key retained only during a rotation overlap; use `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE` for file injection. Existing live envelopes decrypt with current or previous; new envelopes always use current. Startup authenticates every live envelope, and expired rows are lazily removed before a grant key is reused. Remove the previous pair only after all rows encrypted with that id have expired and no writer still uses that key id. |
 | `OPENID4VC_REVOCATION_POLICY` | `disabled` | `disabled`, `optional`, or `required`. The VP verifier requires `required`; enabling a policy also requires a bounded local snapshot file. Request handling never performs network or file I/O. |
 | `OPENID4VC_REVOCATION_SNAPSHOT_FILE` | unset | Operator-controlled JSON snapshot containing SHA-256 certificate identities and `good`/`revoked` status with hard `this_update`/`next_update` bounds. Invalid reloads retain the previous snapshot only until its own expiry. |
 | `OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS` | `30` | Positive local snapshot reload interval. |
 | `SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE` | `true` | Reject startup and high-impact administration when the server role is a superuser, can assume a ledger owner/privileged role, has direct ledger table capabilities, or lacks the writer function grants. |
-| `ENABLE_FAPI_HTTP_SIGNATURES` | `false` | Experimental resource-only profile for the 2026-06-26 FAPI 2.0 HTTP Signatures working draft; when enabled, `/fapi/resource` requires a registered client JWK and RFC 9421 signature and signs every response |
 | `FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS` | `60` | Request signature age and replay-marker lifetime; accepted range is 1–300 seconds, with at most five seconds of future clock skew |
-| `ENABLE_SCIM_SECURITY_EVENTS` | `false` | Enables default-closed RFC 9967 SET outbox creation, discovery, and RFC 8936 polling; depends on the SCIM runtime module |
 | `SCIM_EVENT_RETENTION_SECONDS` | `604800` | Per-receiver delivery window and outbox retention; accepted range is 3600–2592000 seconds |
 | `RUST_LOG` | `info` | Tracing filter |
-
-### FAPI HTTP-signature replay namespace cutover
-
-FAPI HTTP-signature replay keys include the validated access-token tenant. The
-previous key format did not, so old and new binaries cannot safely serve this
-capability against the same Valkey during the transition: reading the old key
-would preserve cross-tenant false replays, while ignoring it before expiry could
-accept a signature already consumed by an old instance.
-
-Use a coordinated cutover for this one-time key migration:
-
-1. Stop admitting new signed `/fapi/resource` requests on every old instance,
-   drain requests already in progress, and verify that no old instance can write
-   another replay marker.
-2. Starting only after that drain completes, wait at least 305 seconds. This is
-   the maximum configured signature age of 300 seconds plus the five-second
-   future-skew replay allowance.
-3. Replace every instance with the new binary before restoring traffic.
-
-There is no data rewrite or cleanup job; old keys expire through their existing
-TTL. Rollback is symmetric: stop this traffic, drain every request that can
-write a tenant-scoped marker, wait at least 305 seconds from completion of that
-drain, then restore the old binary on every instance.
-Do not mix old and new binaries or roll back early, because either action can
-split the authoritative replay boundary.
 
 The response key id is not the envelope format. The current format is `v1` and
 is stored separately from `response_key_id`; a format change requires an
 explicit migration. Keep the current and previous key material available for
-the full durable-response recovery window. A `nazoauth migrate` rollback is
-refused while issuance rows remain, so take an explicit database backup and
-drain/expire the saga before any destructive schema rollback.
+the full durable-response recovery window. Managed schema changes run only in
+the signed install, update, or recover lifecycle. An irreversible migration
+requires verified snapshot recovery rather than artifact rollback.
 
 PostgreSQL connections use Rustls with the AWS-LC provider. `DATABASE_URL`
 accepts `sslmode=disable`, `prefer` (the PostgreSQL client default), or
@@ -187,8 +124,8 @@ ABI. Use `sslmode=require` for remote or untrusted networks and
 | `JWK_KEYS_DIR` | `DATA_DIR + "/keys"`, unless explicitly overridden |
 | `AVATAR_STORAGE_DIR` | `DATA_DIR + "/avatars"`, unless explicitly overridden |
 
-Explicit overrides are retained for advanced deployments and backward
-compatibility. New deployments should prefer same-origin defaults.
+Explicit overrides are retained for advanced deployments. New deployments
+should prefer same-origin defaults.
 
 `JWK_KEYS_DIR` is persistent state, not a disposable cache. On first start,
 NazoAuth atomically creates both its signing keyset and a dedicated
@@ -213,11 +150,29 @@ generated and persisted by the server/managed installer when it is not
 provided. Experimental, draft, remote-trust, and role-specific modules remain
 conditional on their complete prerequisites.
 
-During the first upgrade to composable defaults, existing inherited module
-states are materialized as explicit rows using the current composable defaults.
-After migration, runtime module administration is authoritative. The removed
-stable-module flags are not accepted as configuration and must be deleted from
-older `.env.yaml` files before restarting.
+Before crossing migration `20260828000600`, an existing deployment must
+materialize one explicit `enabled` or `disabled` row for every runtime module.
+Missing rows or `inherit` stop migration; the server does not reconstruct old
+configuration. After migration, runtime module administration is the only
+authority. The removed stable-module flags must be deleted from older
+`.env.yaml` files before restarting.
+
+The same migration is an offline persisted-security cut, not a data converter.
+Before applying it, stop every old writer and retain a verified database
+snapshot. Materialize and review a complete v1 `security_policy` for every
+OAuth client; terminate refresh families that lack the current issuer,
+client-audience, authentication-time, AMR, or claim contract; and remove
+pre-binding OpenID4VP transactions. Every TOTP row must already contain a v1
+encrypted envelope and a non-empty key id, with no plaintext seed remaining.
+Before removing any current or previous TOTP key, an operator-controlled
+pre-cut procedure must authenticate-decrypt every retained row using the same
+tenant/user AAD as the server and record that every distinct stored key id is
+available. Migration 006 can validate envelope shape but cannot prove AEAD
+authenticity or key availability. If any probe fails, do not run the migration;
+repair the stopped candidate before proceeding. After the cut, artifact rollback
+is rejected; `nazoauthctl recover` is the only managed path from a verified
+snapshot. The current server has no startup plaintext encryption, policy
+inference, runtime-state materializer, or alternate read path.
 
 See
 [Composable Capability Policy](../protocol/composable-capability-policy.md)
@@ -225,8 +180,9 @@ for the server/client boundary, default matrix, policy JSON, and upgrade rules.
 
 ## Experimental FAPI HTTP signatures
 
-`ENABLE_FAPI_HTTP_SIGNATURES=true` changes only `/fapi/resource`. It is
-default-off, has no discovery metadata, and is not an OIDF-certified profile.
+The explicit persisted `http_message_signatures` runtime-module state changes
+only `/fapi/resource`. It is default-off, has no discovery metadata, and is
+not an OIDF-certified profile.
 Each token's `client_id` must resolve to an active client with an exact public
 JWK matching the request `keyid` and algorithm. Supported algorithms are
 Ed25519, RSA PKCS#1 v1.5 SHA-256 with RSA keys of at least 2048 bits, and
@@ -249,12 +205,12 @@ required, reject TLS 1.0/1.1, and set `Strict-Transport-Security` for
 browser-facing issuer hosts. `ISSUER`, `PUBLIC_BASE_URL`, and
 `FRONTEND_BASE_URL` must use the externally visible HTTPS origin in production.
 
-Reverse proxies must strip inbound client-supplied `Forwarded`,
-`X-Forwarded-*`, mTLS, and certificate-related headers before adding trusted
-values. Configure `TRUSTED_PROXY_CIDRS` only for proxy addresses that are
-allowed to supply client IP or verified certificate metadata. Keep
-`CLIENT_IP_HEADER_MODE=none` unless every hop between the public listener and
-the application is under the same administrative trust boundary.
+The supported proxy preset strips inbound `Forwarded`, `X-Forwarded-*`,
+`Client-Cert`, `Client-Cert-Chain`, and every `X-SSL-*` certificate header. It
+adds only the singleton RFC 9440 `Client-Cert` value derived from the verified
+TLS peer on the dedicated mTLS listener. Configure `TRUSTED_PROXY_CIDRS` only
+for the exact proxy addresses and keep `CLIENT_IP_HEADER_MODE=none` for this
+boundary.
 
 Trusted mTLS header mode is a deployment boundary, not a browser feature. The
 proxy or sidecar must verify the client certificate, forward only normalized
@@ -264,7 +220,7 @@ client assertions, DPoP proofs, access tokens, refresh tokens, authorization
 codes, provider tokens, and secret references must not be logged or returned in
 error responses.
 
-For concrete HAProxy 3.2 and nginx presets, dynamic conformance CA installation,
+For the concrete HAProxy 3.2 preset, dynamic conformance CA installation,
 atomic reload, and rollback requirements, see
 [`deploy/proxy/README.md`](../../deploy/proxy/README.md). A conformance client CA
 is generated for one run and must not be hard-coded or retained as a permanent
@@ -288,10 +244,9 @@ is only appropriate for local loopback development.
 The following settings are still supported but should not be part of a quick
 deployment path. They are candidates for the administrator UI:
 
-- conditional capability gates: `ENABLE_AUTHORIZATION_DETAILS`,
-  `ENABLE_NATIVE_SSO`, `ENABLE_FAPI_HTTP_SIGNATURES`,
-  `ENABLE_SCIM_SECURITY_EVENTS`, `ENABLE_OPENID4VCI_ISSUER`,
-  `ENABLE_OPENID4VP_VERIFIER`
+- conditional OpenID4VC service settings: `ENABLE_OPENID4VCI_ISSUER`,
+  `ENABLE_OPENID4VP_VERIFIER`. All runtime capabilities use their explicit
+  persisted desired state.
 - protocol tuning: `DPOP_NONCE_POLICY`, `FAPI_RESOURCE_DPOP_NONCE_POLICY`, `REQUEST_OBJECT_JTI_POLICY`,
   `CIBA_SECURITY_PROFILE`, `REQUIRE_PUSHED_AUTHORIZATION_REQUESTS`,
   `PAR_TTL_SECONDS`,
@@ -331,8 +286,7 @@ loopback endpoints.
 - passkeys: `PASSKEY_RP_NAME`, `PASSKEY_REQUIRE_USER_VERIFICATION`,
   `PASSKEY_REQUIRE_USER_HANDLE`, `PASSKEY_STRICT_BASE64`
 - federation: `FEDERATION_PROVIDER_CONFIGS`, `FEDERATION_SAML_GATEWAY_*`
-- SCIM: `ENABLE_SCIM_SECURITY_EVENTS`,
-  `SCIM_EVENT_RETENTION_SECONDS`
+- SCIM: `SCIM_EVENT_RETENTION_SECONDS`
 - external signing: `SIGNING_EXTERNAL_COMMAND`,
   `SIGNING_EXTERNAL_TIMEOUT_MS`,
   `SIGNING_KEY_ROTATION_INTERVAL_SECONDS`,
@@ -342,10 +296,8 @@ loopback endpoints.
 - proxy and client IP handling: `TRUSTED_PROXY_CIDRS`,
   `CLIENT_IP_HEADER_MODE`, `MTLS_CERTIFICATE_SOURCE`
 
-`MTLS_CERTIFICATE_SOURCE` accepts `disabled`, `direct-tls`, `rfc9440`, or
-`legacy-verified-headers`. `rfc9440` consumes the singleton RFC 9440
-`Client-Cert` DER byte sequence. `legacy-verified-headers` requires
-`X-SSL-Client-Verify: SUCCESS` and the existing forwarded certificate fields.
+`MTLS_CERTIFICATE_SOURCE` accepts `disabled`, `direct-tls`, or `rfc9440`.
+`rfc9440` consumes the singleton RFC 9440 `Client-Cert` DER byte sequence.
 `trusted-proxy` requires both `TRUSTED_PROXY_CIDRS` and an explicit certificate
 source; use `disabled` when that proxy does not authenticate client certificates.
 `loopback-http` rejects proxy and certificate-source settings. No public mode is
@@ -376,19 +328,6 @@ public health verification, and restoring the previous files after a failed
 rollout. Multi-identity SNI selection remains part of the tenant transport
 snapshot work; an unknown DNS SNI is rejected instead of falling back to the
 single configured identity.
-
-Tenant resource management is an optional machine control-plane surface,
-independent from browser `/admin`, SCIM bearer authentication, and any OIDF
-Suite integration. Set `TENANT_RESOURCE_CONTROLLER_PUBLIC_KEY_FILE` to a
-privileged regular file containing the controller Ed25519 public key as
-unpadded base64url. When it is absent, the machine resource routes are not
-registered. When it is present but unreadable or invalid, startup fails
-closed. The instance identity signs short-lived capability and operation
-receipt JWS values; the pinned controller key verifies short-lived tasks.
-Resource mutations, audit-chain append, revision CAS, and receipt persistence
-commit in one PostgreSQL transaction. Rotate the controller trust anchor with
-a controlled restart; this initial boundary deliberately has no remote key
-rotation endpoint.
 
 An active machine-resource binding is the sole authority for its managed user,
 OAuth client, mTLS anchor, or OpenID4VC dataset. Ordinary admin/SCIM writes may

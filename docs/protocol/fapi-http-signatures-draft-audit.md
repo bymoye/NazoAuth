@@ -19,8 +19,8 @@ addresses intermediary or application-layer mutation, replay, wrong-client or
 wrong-key use, and unsigned-response downgrade. It does not replace TLS,
 sender-constrained tokens, access-token audience checks, or authorization.
 
-The only runtime gate is `ENABLE_FAPI_HTTP_SIGNATURES`, default `false`; the
-only affected route is `/fapi/resource`. No discovery, authorization-server,
+The only runtime gate is the explicit persisted `http_message_signatures`
+module desired state, default disabled; the only affected route is `/fapi/resource`. No discovery, authorization-server,
 protected-resource, registration, or algorithm metadata is advertised.
 Existing OAuth/OIDC, FAPI2 Security, Message Signing, CIBA, and SCIM behavior
 is unchanged while the gate is off.

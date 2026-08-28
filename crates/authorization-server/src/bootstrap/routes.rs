@@ -81,10 +81,6 @@ use crate::http::token::{
 };
 use crate::http::well_known::{captcha_config, live, ready, startup};
 use crate::settings::Settings;
-use crate::tenant_resource_provider::{
-    MAX_TENANT_RESOURCE_EXECUTE_BODY_BYTES, tenant_resource_capability_endpoint,
-    tenant_resource_execute_endpoint,
-};
 use nazo_http_actix::{
     scim_create_user, scim_delete_user, scim_get_user, scim_list_users, scim_patch_user,
     scim_poll_security_events, scim_replace_user, scim_resource_types, scim_schemas,
@@ -466,24 +462,4 @@ pub(crate) fn configure(
     if perf_metrics_enabled {
         cfg.route("/__perf/metrics", web::get().to(perf_metrics));
     }
-}
-
-/// Register the optional machine-management surface only after startup has
-/// successfully loaded the pinned controller key and assembled its provider.
-pub(crate) fn configure_tenant_resource_management(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/management/tenant-resources")
-            .service(
-                web::resource("/capability")
-                    .app_data(web::JsonConfig::default().limit(2 * 1024))
-                    .route(web::post().to(tenant_resource_capability_endpoint)),
-            )
-            .service(
-                web::resource("/execute")
-                    .app_data(web::PayloadConfig::new(
-                        MAX_TENANT_RESOURCE_EXECUTE_BODY_BYTES,
-                    ))
-                    .route(web::post().to(tenant_resource_execute_endpoint)),
-            ),
-    );
 }

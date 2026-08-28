@@ -132,10 +132,7 @@ impl OAuthClientRepository {
                     .eq(&client.authorization_encrypted_response_alg),
                 oauth_clients::authorization_encrypted_response_enc
                     .eq(&client.authorization_encrypted_response_enc),
-                oauth_clients::security_policy.eq(client
-                    .security_policy
-                    .as_ref()
-                    .map(|policy| serde_json::json!(policy))),
+                oauth_clients::security_policy.eq(serde_json::json!(&client.security_policy)),
                 oauth_clients::is_active.eq(client.is_active),
             ))
             .returning(OAuthClientRecord::as_returning())
@@ -249,10 +246,7 @@ impl OAuthClientRepository {
                 .eq(&client.authorization_encrypted_response_alg),
             oauth_clients::authorization_encrypted_response_enc
                 .eq(&client.authorization_encrypted_response_enc),
-            oauth_clients::security_policy.eq(client
-                .security_policy
-                .as_ref()
-                .map(|policy| serde_json::json!(policy))),
+            oauth_clients::security_policy.eq(serde_json::json!(&client.security_policy)),
             oauth_clients::is_active.eq(client.is_active),
             oauth_clients::updated_at.eq(diesel::dsl::now),
         );
@@ -385,7 +379,7 @@ impl OAuthClientRepository {
         );
         metadata_object.insert(
             "security_policy".to_owned(),
-            serde_json::json!(client.security_policy),
+            serde_json::json!(&client.security_policy),
         );
         let record = connection
             .transaction::<OAuthClientRecord, diesel::result::Error, _>(async move |connection| {
@@ -446,7 +440,7 @@ impl OAuthClientRepository {
                 authorization_signed_response_alg = $3->>'authorization_signed_response_alg',
                 authorization_encrypted_response_alg = $3->>'authorization_encrypted_response_alg',
                 authorization_encrypted_response_enc = $3->>'authorization_encrypted_response_enc',
-                security_policy = NULLIF($3->'security_policy', 'null'::jsonb),
+                security_policy = $3->'security_policy',
                 updated_at = CURRENT_TIMESTAMP
             WHERE tenant_id = $1 AND id = $2 AND is_active = TRUE
               AND registration_access_token_blake3 = $6
@@ -551,8 +545,8 @@ impl OAuthClientRepository {
 }
 
 /// Free-function facade used by repository transaction assemblers.  The
-/// associated implementation remains on `OAuthClientRepository` so the
-/// legacy method and the operator path share exactly one insert body.
+/// associated implementation remains on `OAuthClientRepository` so repository
+/// callers and the operator transaction share exactly one insert body.
 pub async fn insert_client_on_connection(
     connection: &mut AsyncPgConnection,
     client: &OAuthClient,
@@ -775,12 +769,7 @@ pub(crate) async fn upsert_client_on_connection(
     .bind::<diesel::sql_types::Nullable<diesel::sql_types::VarChar>, _>(
         &client.introspection_signed_response_alg,
     )
-    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Jsonb>, _>(
-        client
-            .security_policy
-            .as_ref()
-            .map(|policy| serde_json::json!(policy)),
-    )
+    .bind::<diesel::sql_types::Jsonb, _>(&serde_json::json!(&client.security_policy))
     .execute(connection)
     .await
     .map(|_| ())

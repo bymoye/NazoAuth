@@ -366,10 +366,13 @@ impl LivePasskeyFixture {
     }
 
     async fn session_payload(&self, sid: &str) -> SessionPayload {
-        let raw = valkey_get(&self.state.valkey, format!("oauth:session:{sid}"))
-            .await
-            .expect("session lookup should succeed")
-            .expect("session should be present");
+        let raw = valkey_get(
+            &self.state.valkey,
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
+        )
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should be present");
         serde_json::from_str(&raw).expect("session payload should deserialize")
     }
 
@@ -651,7 +654,9 @@ async fn passkey_login_finish_creates_session_updates_counter_and_consumes_cerem
     assert!(
         valkey_get(
             &fixture.state.valkey,
-            format!("oauth:session:{previous_session_id}")
+            nazo_valkey::test_support::state_storage_key(format!(
+                "oauth:session:{previous_session_id}"
+            ))
         )
         .await
         .expect("previous session lookup should succeed")

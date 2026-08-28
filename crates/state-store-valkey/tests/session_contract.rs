@@ -6,11 +6,11 @@ use nazo_identity::{
     SessionId, SessionRotationOutcome, SessionUpdateOutcome, UserId, ports::SessionStorePort,
     session::SessionRecord,
 };
-use nazo_valkey::{SessionStore, ValkeyConnection};
+use nazo_valkey::SessionStore;
 
 async fn setup() -> Option<(SessionStore, fred::prelude::Client)> {
     let url = std::env::var("VALKEY_URL").ok()?;
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let inspector = Builder::from_config(Config::from_url(&url).unwrap())
@@ -39,7 +39,7 @@ async fn session_store_preserves_exact_key_payload_and_ttl() {
         return;
     };
     let sid = uuid::Uuid::now_v7().to_string();
-    let key = format!("oauth:session:{sid}");
+    let key = nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}"));
     let value = payload();
 
     store.store(&sid, &value, 30).await.unwrap();
@@ -53,13 +53,37 @@ async fn session_store_preserves_exact_key_payload_and_ttl() {
 }
 
 #[tokio::test]
+async fn session_load_rejects_a_record_without_current_mfa_state() {
+    let Some((store, inspector)) = setup().await else {
+        return;
+    };
+    let session_id = SessionId::new(format!("missing-mfa-state-{}", uuid::Uuid::now_v7()));
+    let key = nazo_valkey::test_support::state_storage_key(format!(
+        "oauth:session:{}",
+        session_id.as_str()
+    ));
+    inspector
+        .set::<(), _, _>(
+            &key,
+            r#"{"user_id":"00000000-0000-0000-0000-000000000001","auth_time":1000,"amr":["password"]}"#,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert!(SessionStorePort::load(&store, &session_id).await.is_err());
+}
+
+#[tokio::test]
 async fn session_compare_and_set_preserves_ttl_and_logged_in_rps() {
     let Some((store, inspector)) = setup().await else {
         return;
     };
     let sid = format!("bind-{}", uuid::Uuid::now_v7());
     let session_id = SessionId::new(sid.clone());
-    let key = format!("oauth:session:{sid}");
+    let key = nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}"));
     store.store(&sid, &payload(), 30).await.unwrap();
     let before_ttl = inspector.ttl::<i64, _>(&key).await.unwrap();
     let snapshot = SessionStorePort::load(&store, &session_id)
@@ -149,56 +173,11 @@ async fn concurrent_session_rotation_has_exactly_one_winner_and_no_partial_state
             .unwrap()
             .is_none()
     );
-    let first_exists = inspector
-        .exists::<i64, _>(format!("oauth:session:{first_sid}"))
-        .await
-        .unwrap();
-    let second_exists = inspector
-        .exists::<i64, _>(format!("oauth:session:{second_sid}"))
-        .await
-        .unwrap();
+    let first_key =
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{first_sid}"));
+    let second_key =
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{second_sid}"));
+    let first_exists = inspector.exists::<i64, _>(first_key).await.unwrap();
+    let second_exists = inspector.exists::<i64, _>(second_key).await.unwrap();
     assert_eq!(first_exists + second_exists, 1);
-}
-
-#[tokio::test]
-async fn rotation_compares_the_exact_legacy_payload_without_reserializing_it() {
-    let Some((store, inspector)) = setup().await else {
-        return;
-    };
-    let old_session_id = SessionId::new(format!("legacy-{}", uuid::Uuid::now_v7()));
-    let new_session_id = SessionId::new(format!("new-{}", uuid::Uuid::now_v7()));
-    let old_key = format!("oauth:session:{}", old_session_id.as_str());
-    let new_key = format!("oauth:session:{}", new_session_id.as_str());
-    let legacy = r#"{"user_id":"00000000-0000-0000-0000-000000000001","auth_time":1000,"amr":["password"],"oidc_sid":"oidc-sid"}"#;
-    inspector
-        .set::<(), _, _>(&old_key, legacy, None, None, false)
-        .await
-        .unwrap();
-
-    let snapshot = SessionStorePort::load(&store, &old_session_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut replacement = snapshot.record().clone();
-    replacement.set_auth_time(1_001);
-    replacement.add_amr("mfa");
-
-    assert_eq!(
-        SessionStorePort::rotate(
-            &store,
-            &old_session_id,
-            &snapshot,
-            &new_session_id,
-            &replacement,
-            30,
-        )
-        .await
-        .unwrap(),
-        SessionRotationOutcome::Applied
-    );
-    assert_eq!(inspector.exists::<i64, _>(&old_key).await.unwrap(), 0);
-    assert_eq!(
-        inspector.get::<String, _>(&new_key).await.unwrap(),
-        r#"{"user_id":"00000000-0000-0000-0000-000000000001","auth_time":1001,"amr":["password","mfa"],"pending_mfa":false,"oidc_sid":"oidc-sid"}"#
-    );
 }

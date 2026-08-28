@@ -496,10 +496,13 @@ impl LiveFederationFixture {
     }
 
     async fn session_payload(&self, sid: &str) -> SessionPayload {
-        let raw = valkey_get(&self.state.valkey, format!("oauth:session:{sid}"))
-            .await
-            .expect("session lookup should succeed")
-            .expect("session should be present");
+        let raw = valkey_get(
+            &self.state.valkey,
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
+        )
+        .await
+        .expect("session lookup should succeed")
+        .expect("session should be present");
         serde_json::from_str(&raw).expect("session payload should deserialize")
     }
 }

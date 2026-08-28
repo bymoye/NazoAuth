@@ -5,8 +5,8 @@ use diesel::{
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_auth::{
     AccessTokenRevocation, AdminGrantRepositoryPort, NewRefreshToken,
-    PendingBackchannelLogoutDelivery, RefreshTokenPersistResult, TokenRepositoryPort,
-    TokenRevocation,
+    PendingBackchannelLogoutDelivery, RefreshTokenAuthenticationContext, RefreshTokenPersistResult,
+    TokenRepositoryPort, TokenRevocation,
 };
 use nazo_postgres::{
     AuditRepository, AuthorizationRepository, GrantRepository, TokenIssuanceRepository,
@@ -51,11 +51,7 @@ fn tagged_database_url(database_url: &str, application_name: &str) -> String {
     format!("{database_url}{separator}application_name={application_name}")
 }
 
-async fn wait_for_blocked_query(
-    connection: &mut AsyncPgConnection,
-    application_name: &str,
-    expected_query: &str,
-) {
+async fn wait_for_lock_wait(connection: &mut AsyncPgConnection, application_name: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         let blocked = sql_query(
@@ -64,11 +60,9 @@ async fn wait_for_blocked_query(
             FROM pg_stat_activity
             WHERE application_name = $1
               AND wait_event_type = 'Lock'
-              AND query ILIKE $2
             "#,
         )
         .bind::<Text, _>(application_name)
-        .bind::<Text, _>(expected_query)
         .get_result::<CountRow>(connection)
         .await
         .expect("blocked PostgreSQL activity should be observable");
@@ -77,7 +71,7 @@ async fn wait_for_blocked_query(
         }
         tokio::task::yield_now().await;
     }
-    panic!("timed out waiting for blocked query {expected_query} from {application_name}");
+    panic!("timed out waiting for lock wait from {application_name}");
 }
 
 fn family_lock_key(family_id: Uuid) -> i64 {
@@ -85,6 +79,35 @@ fn family_lock_key(family_id: Uuid) -> i64 {
     let high = i64::from_be_bytes(bytes[..8].try_into().expect("UUID has 16 bytes"));
     let low = i64::from_be_bytes(bytes[8..].try_into().expect("UUID has 16 bytes"));
     high ^ low
+}
+
+fn refresh_authentication_context(
+    client_public_id: &str,
+    issued_at: chrono::DateTime<chrono::Utc>,
+) -> RefreshTokenAuthenticationContext {
+    RefreshTokenAuthenticationContext {
+        version: RefreshTokenAuthenticationContext::CURRENT_VERSION,
+        issuer: "https://issuer.example".to_owned(),
+        audience: client_public_id.to_owned(),
+        auth_time: issued_at.timestamp() - 1,
+        amr: vec!["pwd".to_owned()],
+        oidc_sid: None,
+        id_token_sid: None,
+        acr: None,
+        nonce: None,
+        userinfo_claims: Vec::new(),
+        userinfo_claim_requests: Vec::new(),
+        id_token_claims: Vec::new(),
+        id_token_claim_requests: Vec::new(),
+    }
+}
+
+fn refresh_context_json(
+    client_public_id: &str,
+    issued_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    serde_json::to_string(&refresh_authentication_context(client_public_id, issued_at))
+        .expect("refresh authentication context should serialize")
 }
 
 async fn install_rotation_insert_gate(
@@ -146,6 +169,9 @@ fn refresh_token_fixture(
     raw_token: String,
     rotated_from_id: Option<Uuid>,
 ) -> NewRefreshToken {
+    let issued_at = chrono::Utc::now();
+    let authentication_time = chrono::DateTime::from_timestamp(1_700_000_000, 0)
+        .expect("fixed authentication time should be valid");
     NewRefreshToken {
         raw_token,
         tenant_id,
@@ -157,13 +183,16 @@ fn refresh_token_fixture(
         scopes: vec!["openid".to_owned(), "offline_access".to_owned()],
         audiences: vec!["resource://default".to_owned()],
         authorization_details: json!([]),
-        issued_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        issued_at,
+        expires_at: issued_at + chrono::Duration::hours(1),
         subject: fixture.user_id.to_string(),
         dpop_jkt: None,
         mtls_x5t_s256: None,
         client_attestation_jkt: None,
-        authentication_context: None,
+        authentication_context: refresh_authentication_context(
+            &fixture.client_public_id,
+            authentication_time,
+        ),
     }
 }
 
@@ -175,6 +204,7 @@ async fn fixture(database_url: &str) -> FixtureIds {
     let mut connection = AsyncPgConnection::establish(database_url)
         .await
         .expect("test database should connect");
+    let security_policy = r#"{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}"#;
     sql_query(format!(
         r#"
         WITH inserted_user AS (
@@ -184,13 +214,14 @@ async fn fixture(database_url: &str) -> FixtureIds {
         ), inserted_client AS (
             INSERT INTO oauth_clients (
                 client_id, client_name, client_type, redirect_uris, scopes, grant_types,
-                token_endpoint_auth_method
+                token_endpoint_auth_method, security_policy
             ) VALUES (
                 'auth-repo-{suffix}', 'Auth Repository Test', 'confidential',
                 '["https://client.example/callback"]'::jsonb,
                 '["openid", "offline_access"]'::jsonb,
                 '["authorization_code", "refresh_token"]'::jsonb,
-                'client_secret_basic'
+                'client_secret_basic',
+                '{security_policy}'::jsonb
             ) RETURNING id, client_id
         )
         SELECT inserted_user.id AS user_id, inserted_client.id AS client_id,
@@ -236,131 +267,70 @@ async fn refresh_token_client_attestation_binding_round_trips() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refresh_token_authentication_context_conversion_is_strict_and_optional() {
+async fn refresh_token_authentication_context_round_trips_and_rejects_invalid_values() {
     let Some(database_url) = database_url() else {
         return;
     };
     let fixture = fixture(&database_url).await;
     let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let raw_token = format!("context-refresh-{}", Uuid::now_v7());
-    let mut token =
-        refresh_token_fixture(&fixture, tenant_id, Uuid::now_v7(), raw_token.clone(), None);
-    token.authentication_context = None;
+    let token = refresh_token_fixture(&fixture, tenant_id, Uuid::now_v7(), raw_token.clone(), None);
+    let expected_context = token.authentication_context.clone();
     let repository = TokenRepository::new(create_pool(&database_url, 2).unwrap());
     assert_eq!(
         repository
             .persist_refresh_token(token)
             .await
-            .expect("refresh token with no authentication context should persist"),
+            .expect("refresh token with a complete authentication context should persist"),
         RefreshTokenPersistResult::Inserted
     );
     let loaded = repository
         .by_raw_refresh_token(tenant_id, &raw_token)
         .await
-        .expect("refresh token should load without an optional context")
+        .expect("refresh token should load with its authentication context")
         .expect("the persisted refresh token should exist");
-
-    let valid_context = json!({
-        "version": 1,
-        "issuer": "https://issuer.example",
-        "audience": "client",
-        "auth_time": 1_700_000_000_i64,
-        "amr": ["pwd"],
-        "oidc_sid": null,
-        "id_token_sid": null,
-        "acr": null,
-        "nonce": null,
-        "userinfo_claims": [],
-        "userinfo_claim_requests": [],
-        "id_token_claims": [],
-        "id_token_claim_requests": []
-    });
-    let mut connection = AsyncPgConnection::establish(&database_url)
-        .await
-        .expect("test database should connect");
-    sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
-        .bind::<SqlUuid, _>(loaded.id)
-        .bind::<diesel::sql_types::Jsonb, _>(valid_context.clone())
-        .execute(&mut connection)
-        .await
-        .expect("a valid authentication context should be writable for the conversion test");
-    drop(connection);
-    let converted = repository
-        .by_raw_refresh_token(tenant_id, &raw_token)
-        .await
-        .expect("a valid authentication context should convert")
-        .expect("the refresh token should remain present");
-    let context = converted
-        .authentication_context
-        .expect("the converted context should remain optional but present");
-    assert_eq!(context.version, 1);
-    assert_eq!(context.issuer, "https://issuer.example");
-    assert_eq!(context.amr, vec!["pwd".to_owned()]);
-
-    let invalid_json = json!("not-an-authentication-context");
-    let mut connection = AsyncPgConnection::establish(&database_url)
-        .await
-        .expect("test database should connect");
-    sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
-        .bind::<SqlUuid, _>(loaded.id)
-        .bind::<diesel::sql_types::Jsonb, _>(invalid_json)
-        .execute(&mut connection)
-        .await
-        .expect("an invalid JSON value should remain storable for conversion testing");
-    drop(connection);
-    assert!(matches!(
-        repository.by_raw_refresh_token(tenant_id, &raw_token).await,
-        Err(nazo_identity::ports::RepositoryError::Unexpected(_))
-    ));
-
-    let unsupported_context = json!({
-        "version": 2,
-        "issuer": "https://issuer.example",
-        "audience": "client",
-        "auth_time": 1_700_000_000_i64,
-        "amr": ["pwd"],
-        "oidc_sid": null,
-        "id_token_sid": null,
-        "acr": null,
-        "nonce": null,
-        "userinfo_claims": [],
-        "userinfo_claim_requests": [],
-        "id_token_claims": [],
-        "id_token_claim_requests": []
-    });
-    let mut connection = AsyncPgConnection::establish(&database_url)
-        .await
-        .expect("test database should connect");
-    sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
-        .bind::<SqlUuid, _>(loaded.id)
-        .bind::<diesel::sql_types::Jsonb, _>(unsupported_context)
-        .execute(&mut connection)
-        .await
-        .expect("an unsupported context version should remain storable for conversion testing");
-    drop(connection);
-    assert!(matches!(
-        repository.by_raw_refresh_token(tenant_id, &raw_token).await,
-        Err(nazo_identity::ports::RepositoryError::Unexpected(_))
-    ));
+    assert_eq!(loaded.authentication_context, expected_context);
 
     let mut connection = AsyncPgConnection::establish(&database_url)
         .await
         .expect("test database should connect");
-    sql_query("DELETE FROM oauth_tokens WHERE id = $1")
+    let invalid_values = [
+        json!("not-an-authentication-context"),
+        json!({
+            "version": 2,
+            "issuer": "https://issuer.example",
+            "audience": fixture.client_public_id,
+            "auth_time": 1_700_000_000_i64,
+            "amr": ["pwd"],
+            "oidc_sid": null,
+            "id_token_sid": null,
+            "acr": null,
+            "nonce": null,
+            "userinfo_claims": [],
+            "userinfo_claim_requests": [],
+            "id_token_claims": [],
+            "id_token_claim_requests": []
+        }),
+    ];
+    for invalid_value in invalid_values {
+        let result = sql_query("UPDATE oauth_tokens SET oidc_auth_context = $2 WHERE id = $1")
+            .bind::<SqlUuid, _>(loaded.id)
+            .bind::<diesel::sql_types::Jsonb, _>(invalid_value)
+            .execute(&mut connection)
+            .await;
+        assert!(
+            result.is_err(),
+            "the database must reject an invalid refresh authentication context"
+        );
+    }
+    let null_result = sql_query("UPDATE oauth_tokens SET oidc_auth_context = NULL WHERE id = $1")
         .bind::<SqlUuid, _>(loaded.id)
         .execute(&mut connection)
-        .await
-        .expect("the conversion fixture token should be cleaned up");
-    sql_query("DELETE FROM oauth_clients WHERE id = $1")
-        .bind::<SqlUuid, _>(fixture.client_id)
-        .execute(&mut connection)
-        .await
-        .expect("the conversion fixture client should be cleaned up");
-    sql_query("DELETE FROM users WHERE id = $1")
-        .bind::<SqlUuid, _>(fixture.user_id)
-        .execute(&mut connection)
-        .await
-        .expect("the conversion fixture user should be cleaned up");
+        .await;
+    assert!(
+        null_result.is_err(),
+        "the database must reject a missing refresh authentication context"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -426,14 +396,18 @@ async fn grants_upsert_cover_and_revoke_tokens_atomically() {
         .await
         .expect("test database should connect");
     let token_hash = Uuid::now_v7().simple().to_string().repeat(2);
+    let context = refresh_context_json(&fixture.client_public_id, chrono::Utc::now());
     sql_query(format!(
         r#"
         INSERT INTO oauth_tokens (
             refresh_token_blake3, token_family_id, client_id, user_id, scopes,
-            issued_at, expires_at, subject
+            audience, authorization_details, issued_at, expires_at, subject,
+            oidc_auth_context
         ) VALUES (
             '{token_hash}', '{}', '{}', '{}', '["openid", "offline_access"]'::jsonb,
-            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}'
+            '["resource://default"]'::jsonb, '[]'::jsonb,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}',
+            '{context}'::jsonb
         )
         "#,
         Uuid::now_v7(),
@@ -518,7 +492,7 @@ async fn grant_revoke_waits_for_concurrent_refresh_rotation_before_revoking_fami
     );
     let rotation =
         tokio::spawn(async move { rotation_repository.persist_refresh_token(successor).await });
-    wait_for_blocked_query(&mut coordinator, &rotation_application, "%oauth_tokens%").await;
+    wait_for_lock_wait(&mut coordinator, &rotation_application).await;
 
     let revoke_application = format!("grant-revoke-{}", Uuid::now_v7().simple());
     let revoke_repository = GrantRepository::new(
@@ -531,7 +505,7 @@ async fn grant_revoke_waits_for_concurrent_refresh_rotation_before_revoking_fami
             .revoke_by_client_id(tenant_id, user_id, &client_public_id)
             .await
     });
-    wait_for_blocked_query(&mut coordinator, &revoke_application, "%").await;
+    wait_for_lock_wait(&mut coordinator, &revoke_application).await;
 
     sql_query("SELECT pg_advisory_unlock($1)")
         .bind::<BigInt, _>(gate_key)
@@ -577,24 +551,14 @@ async fn refresh_rotation_reuse_compromises_the_whole_family() {
     let family_id = Uuid::now_v7();
     let suffix = Uuid::now_v7();
     let repository = TokenRepository::new(create_pool(&database_url, 4).unwrap());
-    let make = |label: &str, rotated_from_id| NewRefreshToken {
-        raw_token: format!("auth-repo-{label}-{suffix}"),
-        tenant_id,
-        family_id,
-        rotated_from_id,
-        lost_response_retry: None,
-        client_id: fixture.client_id,
-        user_id: Some(fixture.user_id),
-        scopes: vec!["openid".to_owned(), "offline_access".to_owned()],
-        audiences: vec!["resource://default".to_owned()],
-        authorization_details: json!([]),
-        issued_at: chrono::Utc::now(),
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        subject: fixture.user_id.to_string(),
-        dpop_jkt: None,
-        mtls_x5t_s256: None,
-        client_attestation_jkt: None,
-        authentication_context: None,
+    let make = |label: &str, rotated_from_id| {
+        refresh_token_fixture(
+            &fixture,
+            tenant_id,
+            family_id,
+            format!("auth-repo-{label}-{suffix}"),
+            rotated_from_id,
+        )
     };
     assert_eq!(
         repository
@@ -641,14 +605,18 @@ async fn authorization_code_replay_compensation_revokes_both_token_kinds() {
     let token_hash = Uuid::now_v7().simple().to_string().repeat(2);
     let access_jti = format!("authorization-replay-{}", Uuid::now_v7());
     let mut connection = AsyncPgConnection::establish(&database_url).await.unwrap();
+    let context = refresh_context_json(&fixture.client_public_id, chrono::Utc::now());
     sql_query(format!(
         r#"
         INSERT INTO oauth_tokens (
             refresh_token_blake3, token_family_id, client_id, user_id, scopes,
-            issued_at, expires_at, subject
+            audience, authorization_details, issued_at, expires_at, subject,
+            oidc_auth_context
         ) VALUES (
             '{token_hash}', '{family_id}', '{}', '{}', '["openid"]'::jsonb,
-            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}'
+            '["resource://default"]'::jsonb, '[]'::jsonb,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}',
+            '{context}'::jsonb
         )
         "#,
         fixture.client_id, fixture.user_id, fixture.user_id
@@ -696,16 +664,22 @@ async fn token_management_revocation_is_client_scoped_idempotent_and_serializes_
     let first_hash = blake3::hash(first.as_bytes()).to_hex().to_string();
     let second_hash = blake3::hash(second.as_bytes()).to_hex().to_string();
     let mut connection = AsyncPgConnection::establish(&database_url).await.unwrap();
+    let context = refresh_context_json(&owner.client_public_id, chrono::Utc::now());
     sql_query(format!(
         r#"
         INSERT INTO oauth_tokens (
             refresh_token_blake3, token_family_id, client_id, user_id, scopes,
-            issued_at, expires_at, subject
+            audience, authorization_details, issued_at, expires_at, subject,
+            oidc_auth_context
         ) VALUES
             ('{first_hash}', '{family_id}', '{}', '{}', '["openid"]'::jsonb,
-             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}'),
+             '["resource://default"]'::jsonb, '[]'::jsonb,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}',
+             '{context}'::jsonb),
             ('{second_hash}', '{family_id}', '{}', '{}', '["openid"]'::jsonb,
-             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}')
+             '["resource://default"]'::jsonb, '[]'::jsonb,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '1 hour', '{}',
+             '{context}'::jsonb)
         "#,
         owner.client_id,
         owner.user_id,
@@ -857,7 +831,7 @@ async fn authorization_replay_waits_for_concurrent_refresh_rotation_before_compe
     );
     let rotation =
         tokio::spawn(async move { rotation_repository.persist_refresh_token(successor).await });
-    wait_for_blocked_query(&mut coordinator, &rotation_application, "%oauth_tokens%").await;
+    wait_for_lock_wait(&mut coordinator, &rotation_application).await;
 
     let compensation_application = format!("replay-compensation-{}", Uuid::now_v7().simple());
     let compensation_repository = AuthorizationRepository::new(
@@ -880,7 +854,7 @@ async fn authorization_replay_waits_for_concurrent_refresh_rotation_before_compe
             )
             .await
     });
-    wait_for_blocked_query(&mut coordinator, &compensation_application, "%").await;
+    wait_for_lock_wait(&mut coordinator, &compensation_application).await;
 
     sql_query("SELECT pg_advisory_unlock($1)")
         .bind::<BigInt, _>(gate_key)

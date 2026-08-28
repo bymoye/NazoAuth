@@ -99,7 +99,7 @@ impl TestAuthorizationDependencies {
                         session.cookie_secure,
                     ),
                 ),
-                crate::runtime_modules::inherited_enabled(&state.settings),
+                crate::test_support::persisted_runtime_modules_fixture(),
                 state.keyset.clone(),
                 state.settings.tenant.context.tenant_id.as_uuid(),
             ),

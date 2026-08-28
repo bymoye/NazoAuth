@@ -292,11 +292,7 @@ async fn device_authorization_with_admission(
     {
         return response;
     }
-    if !config
-        .authorization_server_profile
-        .effective_client_policy(&client)
-        .allow_cross_device_flows
-    {
+    if !client.security_policy.allow_cross_device_flows {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "unauthorized_client",

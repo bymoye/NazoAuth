@@ -328,15 +328,14 @@ async fn token_client_credentials_binds_mtls_thumbprint_from_verified_certificat
     let state = Data::new(state);
     let mut client = client();
     client.require_mtls_bound_tokens = true;
-    let thumbprint = "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8";
+    let certificate = crate::test_support::rfc9440_certificate_fixture("client-credentials");
     let req = TestRequest::post()
         .uri("/token")
         .app_data(Data::new(crate::http::mtls::MtlsCertificateSource::new(
-            crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+            crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
         )))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header(("x-ssl-client-verify", "SUCCESS"))
-        .insert_header(("x-ssl-client-cert-sha256", thumbprint))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
 
     let response = token_client_credentials(&state, &req, &client, &form(None, &[]), None).await;

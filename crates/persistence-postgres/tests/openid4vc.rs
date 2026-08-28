@@ -639,16 +639,22 @@ async fn openid4vc_state_is_tenant_bound_and_sensitive_values_are_single_use_and
         })
         .await
         .unwrap();
-    let nonce_consumed_at = Utc::now();
+    let nonce_transition_at = Utc::now();
     assert!(
         issuer
-            .consume_nonce(&nonce_hash, nonce_consumed_at)
+            .claim_nonce(&nonce_hash, "state-boundary", nonce_transition_at)
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .finalize_nonce(&nonce_hash, "state-boundary", nonce_transition_at)
             .await
             .unwrap()
     );
     assert!(
         !issuer
-            .consume_nonce(&nonce_hash, nonce_consumed_at)
+            .claim_nonce(&nonce_hash, "state-boundary-replay", nonce_transition_at)
             .await
             .unwrap()
     );
@@ -1807,9 +1813,10 @@ async fn recoverable_issuance_leases_commit_responses_and_deferred_credentials_o
     );
     assert!(
         issuer
-            .consume_ready_deferred(
+            .claim_ready_deferred(
                 &deferred.transaction_hash,
                 access.token_id,
+                "deferred-replay",
                 deferred_ready_at,
             )
             .await
@@ -2306,9 +2313,16 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     assert!(before_consume.claim_expires_at.is_none());
     assert!(before_consume.consumed_at.is_none());
     drop(connection);
+    let monotonic_transition_at = Utc::now() - Duration::minutes(1);
     assert!(
         issuer
-            .consume_nonce(&monotonic_nonce, Utc::now() - Duration::minutes(1))
+            .claim_nonce(&monotonic_nonce, "monotonic-owner", monotonic_transition_at,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .finalize_nonce(&monotonic_nonce, "monotonic-owner", monotonic_transition_at,)
             .await
             .unwrap()
     );
@@ -2341,7 +2355,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     drop(connection);
     assert!(
         !issuer
-            .consume_nonce(&monotonic_nonce, Utc::now())
+            .claim_nonce(&monotonic_nonce, "monotonic-replay", Utc::now())
             .await
             .unwrap()
     );
@@ -2588,8 +2602,7 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
             .unwrap()
     );
 
-    // Exercise every deferred transition, including all transaction rollback
-    // paths and the legacy ready-consume path.
+    // Exercise every deferred transition, including all transaction rollback paths.
     let deferred_ready_at = Utc::now() + Duration::seconds(10);
     let deferred = DeferredCredential {
         id: Uuid::now_v7(),
@@ -2616,23 +2629,36 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
             .is_none()
     );
     let consumed_deferred = issuer
-        .consume_ready_deferred(
+        .claim_ready_deferred(
             &deferred.transaction_hash,
             access.token_id,
+            "boundary-owner",
             deferred_ready_at,
         )
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        consumed_deferred.payload_ciphertext,
+        consumed_deferred.credential.payload_ciphertext,
         deferred.payload_ciphertext
     );
     assert!(
         issuer
-            .consume_ready_deferred(
+            .finalize_deferred(
                 &deferred.transaction_hash,
                 access.token_id,
+                "boundary-owner",
+                deferred_ready_at,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        issuer
+            .claim_ready_deferred(
+                &deferred.transaction_hash,
+                access.token_id,
+                "boundary-replay",
                 deferred_ready_at,
             )
             .await

@@ -1,9 +1,6 @@
-use std::collections::BTreeSet;
 use std::time::Duration;
 
-use nazo_runtime_modules::{
-    CatalogDurations, DisablePolicy, ModuleCatalog, ModuleId, ModuleRevision,
-};
+use nazo_runtime_modules::{CatalogDurations, DisablePolicy, ModuleCatalog, ModuleId};
 
 fn durations() -> CatalogDurations {
     CatalogDurations {
@@ -18,7 +15,7 @@ fn durations() -> CatalogDurations {
 
 #[test]
 fn fixed_catalog_assigns_every_reviewed_disable_policy() {
-    let catalog = ModuleCatalog::fixed(durations(), BTreeSet::new()).unwrap();
+    let catalog = ModuleCatalog::fixed(durations()).unwrap();
 
     let expected = [
         (
@@ -94,15 +91,4 @@ fn fixed_catalog_assigns_every_reviewed_disable_policy() {
     for (module_id, policy) in expected {
         assert_eq!(catalog.spec(module_id).unwrap().disable_policy, policy);
     }
-}
-
-#[test]
-fn catalog_retains_inherited_defaults_without_mutating_specs() {
-    let enabled = BTreeSet::from([ModuleId::Ciba, ModuleId::Scim]);
-    let catalog = ModuleCatalog::fixed(durations(), enabled).unwrap();
-
-    assert!(catalog.inherited_enabled(ModuleId::Ciba));
-    assert!(catalog.inherited_enabled(ModuleId::Scim));
-    assert!(!catalog.inherited_enabled(ModuleId::Jarm));
-    assert_eq!(ModuleRevision::new(0).get(), 0);
 }

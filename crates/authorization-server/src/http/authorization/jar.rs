@@ -77,7 +77,7 @@ pub(crate) async fn apply_request_object_with_context(
                     }
                 },
                 require_integrity_protected_parameters:
-                    signed_request_object_requires_integrity_protected_parameters(context, client),
+                    signed_request_object_requires_integrity_protected_parameters(client),
                 now: Utc::now().timestamp(),
             },
         )
@@ -92,15 +92,8 @@ pub(crate) async fn apply_request_object_with_context(
     Ok(())
 }
 
-fn signed_request_object_requires_integrity_protected_parameters(
-    context: &AuthorizationRequestContext<'_>,
-    client: &ClientRow,
-) -> bool {
+fn signed_request_object_requires_integrity_protected_parameters(client: &ClientRow) -> bool {
     client.require_dpop_bound_tokens
         || client.require_par_request_object
-        || context
-            .config
-            .profile
-            .effective_client_policy(client)
-            .require_signed_authorization_request
+        || client.security_policy.require_signed_authorization_request
 }

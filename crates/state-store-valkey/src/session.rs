@@ -45,7 +45,6 @@ struct SessionWireRecord {
     user_id: Uuid,
     auth_time: i64,
     amr: Vec<String>,
-    #[serde(default)]
     pending_mfa: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     oidc_sid: Option<String>,

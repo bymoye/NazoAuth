@@ -3,7 +3,8 @@
 //! 这两个端点在设计上不经过管理员会话：Controller Key 全失时管理员身份
 //! 可能正是不可用的部分。它们因此全部 fail-closed——挑战一次性、固定十
 //! 分钟窗口、绑定 deployment 与确切的提案密钥材料、失败次数封顶、每
-//! deployment 同时至多一个未决挑战；签名验证是唯一的常量时间授权边界。
+//! deployment 同时至多一个未决挑战。创建任何 pending 行之前，客户端
+//! 必须用当前 Recovery Root 对完整提案和客户端随机 nonce 签名。
 //! 端点不产生任何会话副作用，也不写攻击者可控的审计事件。
 
 use crate::recovery_root::{RecoveryAnswerRequest, RecoveryChallengeRequest, RecoveryRootService};
@@ -16,9 +17,9 @@ use nazo_http_actix::{json_response, oauth_error};
 
 /// POST /controller-recovery/challenges
 ///
-/// Issue one nonce-bound challenge.  Refused with 409 while any controller
-/// slot would admit operations: the break-glass path only unlocks once the
-/// ordinary fresh-2FA identity paths are unusable.
+/// Verify current-root possession, then issue one nonce-bound challenge.
+/// Refused with 409 while any controller slot would admit operations: the
+/// break-glass path only unlocks once ordinary identity paths are unusable.
 pub(crate) async fn controller_recovery_challenge(
     recovery: Data<RecoveryRootService>,
     Json(body): Json<RecoveryChallengeRequest>,
@@ -32,12 +33,30 @@ pub(crate) async fn controller_recovery_challenge(
             "expires_at": issued.expires_at.to_rfc3339(),
             "algorithm": {
                 "type": "Ed25519",
-                "message": "canonical challenge message per nazo-operator-protocol::recovery",
             },
             "single_use": true,
         })),
-        Err(error) => service_error_response(error),
+        Err(error) => challenge_error_response(error),
     }
+}
+
+fn challenge_error_response(error: crate::recovery_root::RecoveryRootServiceError) -> HttpResponse {
+    use crate::recovery_root::RecoveryRootServiceError as Error;
+    match error {
+        Error::Root(
+            nazo_postgres::RecoveryRootError::RootMissing
+            | nazo_postgres::RecoveryRootError::InvalidAllocationProof,
+        ) => invalid_allocation_proof_response(),
+        other => service_error_response(other),
+    }
+}
+
+fn invalid_allocation_proof_response() -> HttpResponse {
+    oauth_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "恢复挑战分配证明无效；未创建任何待处理状态.",
+    )
 }
 
 /// POST /controller-recovery/recover
@@ -84,7 +103,7 @@ fn service_error_response(error: crate::recovery_root::RecoveryRootServiceError)
     }
 }
 
-fn root_error_response(error: nazo_postgres::RecoveryRootError) -> HttpResponse {
+pub(super) fn root_error_response(error: nazo_postgres::RecoveryRootError) -> HttpResponse {
     use nazo_postgres::RecoveryRootError as Error;
     match error {
         Error::ControllersStillAdmitted(admitted) => {
@@ -109,6 +128,12 @@ fn root_error_response(error: nazo_postgres::RecoveryRootError) -> HttpResponse 
             StatusCode::CONFLICT,
             "invalid_request",
             "该 deployment 已有待完成的恢复挑战；等待其过期或完成后重试.",
+        ),
+        Error::InvalidAllocationProof => invalid_allocation_proof_response(),
+        Error::AllocationProofReplayed => oauth_error(
+            StatusCode::CONFLICT,
+            "invalid_request",
+            "恢复挑战分配证明已经使用或过期；请生成新的随机 nonce 和证明.",
         ),
         Error::ChallengeUnknown => oauth_error(
             StatusCode::NOT_FOUND,
@@ -153,3 +178,7 @@ fn root_error_response(error: nazo_postgres::RecoveryRootError) -> HttpResponse 
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/http/admin/controller_recovery.rs"]
+mod tests;

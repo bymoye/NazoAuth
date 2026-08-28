@@ -71,7 +71,7 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
         connection.max_command_attempts = 1;
     });
     let client = builder.build().expect("test Valkey client should build");
-    let connection = nazo_valkey::ValkeyConnection::from_existing_client(client);
+    let connection = nazo_valkey::test_support::scoped_connection(client);
     let dependencies = Data::new(ReadinessDependencies::new(
         database,
         connection,

@@ -1,8 +1,8 @@
 //! Keyset serialization, validation, and key-material encoding.
 //!
-//! The keyset is persisted as JSON for compatibility with existing deployments.  This module
-//! owns the schema boundary and the atomic file primitives used by lifecycle and registration
-//! operations; callers never write a partially updated keyset or private key directly.
+//! The keyset is persisted as versioned JSON. This module owns the schema boundary and the atomic
+//! file primitives used by lifecycle and registration operations; callers never write a partially
+//! updated keyset or private key directly.
 
 use std::collections::{BTreeSet, HashSet};
 use std::io::ErrorKind;
@@ -23,6 +23,8 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::model::{KeyRecord, KeyRecordStatus, KeySettings};
+
+pub(crate) const KEYSET_SCHEMA_VERSION: &str = "nazo.keyset.v1";
 
 pub(crate) async fn list_keys(settings: &KeySettings) -> anyhow::Result<Vec<KeyRecord>> {
     let value = load_keyset_json(settings).await?;
@@ -53,9 +55,9 @@ pub(crate) async fn list_keys(settings: &KeySettings) -> anyhow::Result<Vec<KeyR
                 algorithm: key
                     .get("alg")
                     .and_then(Value::as_str)
-                    .unwrap_or("EdDSA")
+                    .ok_or_else(|| anyhow!("key {kid} missing alg"))?
                     .to_owned(),
-                backend: key_entry_backend(key).to_owned(),
+                backend: key_entry_backend(key)?.to_owned(),
                 locator: key
                     .get("file")
                     .or_else(|| key.get("key_ref"))
@@ -83,6 +85,15 @@ pub(crate) async fn load_keyset_json(settings: &KeySettings) -> anyhow::Result<V
 }
 
 pub(crate) fn validate_keyset_json(value: &Value) -> anyhow::Result<()> {
+    let schema_version = value
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("keyset.json missing schema_version"))?;
+    if schema_version != KEYSET_SCHEMA_VERSION {
+        anyhow::bail!(
+            "keyset.json schema_version must be {KEYSET_SCHEMA_VERSION}, found {schema_version}"
+        );
+    }
     let active = keyset_active_kid(value)?;
     let mut seen = HashSet::new();
     let mut active_exists = false;
@@ -94,8 +105,11 @@ pub(crate) fn validate_keyset_json(value: &Value) -> anyhow::Result<()> {
         if !seen.insert(kid) {
             anyhow::bail!("duplicate key kid {kid}");
         }
-        let backend = key_entry_backend(key);
-        let alg = key.get("alg").and_then(Value::as_str).unwrap_or("EdDSA");
+        let backend = key_entry_backend(key)?;
+        let alg = key
+            .get("alg")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("key {kid} missing alg"))?;
         if signing_algorithm_from_name(alg).is_none() {
             anyhow::bail!("key {kid} has unsupported alg {alg}");
         }
@@ -117,6 +131,7 @@ pub(crate) fn validate_keyset_json(value: &Value) -> anyhow::Result<()> {
         if purposes.is_some() && backend != "local-pem" {
             anyhow::bail!("purpose-scoped key {kid} must use local-pem backend");
         }
+        key_entry_created_at(key)?;
         let retire_at = key_entry_retire_at(key)?;
         if kid == active {
             active_exists = true;
@@ -165,26 +180,20 @@ fn validate_external_public_jwk_metadata(key: &Value, kid: &str, alg: &str) -> a
         .get("public_jwk")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("key {kid} missing public_jwk"))?;
-    if public_jwk
-        .get("kid")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value != kid)
-    {
-        anyhow::bail!("key {kid} public_jwk kid mismatch");
+    match public_jwk.get("kid").and_then(Value::as_str) {
+        Some(value) if value == kid => {}
+        Some(_) => anyhow::bail!("key {kid} public_jwk kid mismatch"),
+        None => anyhow::bail!("key {kid} public_jwk missing kid"),
     }
-    if public_jwk
-        .get("alg")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value != alg)
-    {
-        anyhow::bail!("key {kid} public_jwk alg mismatch");
+    match public_jwk.get("alg").and_then(Value::as_str) {
+        Some(value) if value == alg => {}
+        Some(_) => anyhow::bail!("key {kid} public_jwk alg mismatch"),
+        None => anyhow::bail!("key {kid} public_jwk missing alg"),
     }
-    if public_jwk
-        .get("use")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value != "sig")
-    {
-        anyhow::bail!("key {kid} public_jwk use must be sig");
+    match public_jwk.get("use").and_then(Value::as_str) {
+        Some("sig") => {}
+        Some(_) => anyhow::bail!("key {kid} public_jwk use must be sig"),
+        None => anyhow::bail!("key {kid} public_jwk missing use"),
     }
     reject_private_jwk_members(public_jwk)?;
     let algorithm = signing_algorithm_from_name(alg)
@@ -467,19 +476,19 @@ pub fn signing_algorithm_from_name(value: &str) -> Option<jsonwebtoken::Algorith
 }
 
 pub(crate) fn key_entry_algorithm(entry: &Value) -> anyhow::Result<jsonwebtoken::Algorithm> {
-    entry
+    let value = entry
         .get("alg")
         .and_then(Value::as_str)
-        .map(signing_algorithm_from_name)
-        .unwrap_or(Some(jsonwebtoken::Algorithm::EdDSA))
-        .ok_or_else(|| anyhow!("unsupported signing alg"))
+        .ok_or_else(|| anyhow!("key entry missing alg"))?;
+    signing_algorithm_from_name(value)
+        .ok_or_else(|| anyhow!("key entry has unsupported alg {value}"))
 }
 
-pub(crate) fn key_entry_backend(entry: &Value) -> &str {
+pub(crate) fn key_entry_backend(entry: &Value) -> anyhow::Result<&str> {
     entry
         .get("backend")
         .and_then(Value::as_str)
-        .unwrap_or("local-pem")
+        .ok_or_else(|| anyhow!("key entry missing backend"))
 }
 
 pub(crate) fn reject_private_jwk_members(
@@ -502,35 +511,38 @@ pub(crate) fn external_public_jwk(entry: &Value) -> anyhow::Result<Value> {
         .get("kid")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("key entry missing kid"))?;
-    let alg = entry.get("alg").and_then(Value::as_str).unwrap_or("EdDSA");
+    let alg = entry
+        .get("alg")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("key {kid} missing alg"))?;
     let jwk = entry
         .get("public_jwk")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("public_jwk must be an object"))?;
     reject_private_jwk_members(jwk)?;
-    let mut jwk = Value::Object(jwk.clone());
+    let jwk = Value::Object(jwk.clone());
     match jwk.get("kid").and_then(Value::as_str) {
         Some(value) if value != kid => anyhow::bail!("public_jwk kid does not match key entry"),
         Some(_) => {}
-        None => jwk["kid"] = json!(kid),
+        None => anyhow::bail!("public_jwk missing kid"),
     }
     match jwk.get("alg").and_then(Value::as_str) {
         Some(value) if value != alg => anyhow::bail!("public_jwk alg does not match key entry"),
         Some(_) => {}
-        None => jwk["alg"] = json!(alg),
+        None => anyhow::bail!("public_jwk missing alg"),
     }
     match jwk.get("use").and_then(Value::as_str) {
         Some("sig") => {}
         Some(_) => anyhow::bail!("public_jwk use must be sig"),
-        None => jwk["use"] = json!("sig"),
+        None => anyhow::bail!("public_jwk missing use"),
     }
     Ok(jwk)
 }
 
 pub(crate) fn key_entry_retire_at(entry: &Value) -> anyhow::Result<Option<DateTime<Utc>>> {
-    let Some(value) = entry.get("retire_at") else {
-        return Ok(None);
-    };
+    let value = entry
+        .get("retire_at")
+        .ok_or_else(|| anyhow!("key entry missing retire_at"))?;
     if value.is_null() {
         return Ok(None);
     }
@@ -543,20 +555,17 @@ pub(crate) fn key_entry_retire_at(entry: &Value) -> anyhow::Result<Option<DateTi
     Ok(Some(retire_at))
 }
 
-pub(crate) fn key_entry_created_at(entry: &Value) -> anyhow::Result<Option<DateTime<Utc>>> {
-    let Some(value) = entry.get("created_at") else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
+pub(crate) fn key_entry_created_at(entry: &Value) -> anyhow::Result<DateTime<Utc>> {
+    let value = entry
+        .get("created_at")
+        .ok_or_else(|| anyhow!("key entry missing created_at"))?;
     let raw = value
         .as_str()
-        .ok_or_else(|| anyhow!("created_at must be RFC3339 or null"))?;
+        .ok_or_else(|| anyhow!("created_at must be RFC3339"))?;
     let created_at = DateTime::parse_from_rfc3339(raw)
         .with_context(|| format!("created_at is not RFC3339: {raw}"))?
         .with_timezone(&Utc);
-    Ok(Some(created_at))
+    Ok(created_at)
 }
 
 pub(crate) fn ed25519_pkcs8_private_der(seed: &[u8; 32]) -> Vec<u8> {

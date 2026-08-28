@@ -20,8 +20,9 @@ use crate::{
         request_object_encryption_jwk,
     },
     serialization::{
-        external_public_jwk, key_entry_algorithm, key_entry_backend, key_entry_created_at,
-        key_entry_purposes, key_entry_retire_at, write_json_atomic,
+        KEYSET_SCHEMA_VERSION, external_public_jwk, key_entry_algorithm, key_entry_backend,
+        key_entry_created_at, key_entry_purposes, key_entry_retire_at, validate_keyset_json,
+        write_json_atomic,
     },
 };
 
@@ -96,49 +97,42 @@ pub(crate) async fn maintain_keyset_lifecycle(
         .with_context(|| format!("failed to read {}", keyset_path.display()))?;
     let mut payload = serde_json::from_str::<Value>(&raw)
         .with_context(|| format!("failed to parse {}", keyset_path.display()))?;
+    validate_keyset_json(&payload)
+        .with_context(|| format!("failed to validate {}", keyset_path.display()))?;
     let now = Utc::now();
-    let Some(active_kid) = payload
+    let active_kid = payload
         .get("active_kid")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-    else {
-        return Ok(());
-    };
-    let Some(active_index) = payload
+        .ok_or_else(|| anyhow!("keyset.json missing active_kid"))?;
+    let active_index = payload
         .get("keys")
         .and_then(Value::as_array)
         .and_then(|keys| {
             keys.iter()
                 .position(|entry| entry.get("kid").and_then(Value::as_str) == Some(&active_kid))
         })
-    else {
-        return Ok(());
-    };
+        .ok_or_else(|| anyhow!("keyset.json active key {active_kid} does not exist"))?;
     let mut changed = false;
     let mut new_active_kid = None;
     let (active_alg, active_backend) = {
-        let Some(keys) = payload.get_mut("keys").and_then(Value::as_array_mut) else {
-            return Ok(());
-        };
+        let keys = payload
+            .get_mut("keys")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("keyset.json missing keys array"))?;
         let active_entry = &mut keys[active_index];
-        if key_entry_created_at(active_entry)?.is_none() {
-            active_entry["created_at"] = json!(timestamp(now));
-            changed = true;
-        }
-        let active_created_at = key_entry_created_at(&keys[active_index])?
-            .ok_or_else(|| anyhow!("active key created_at could not be determined"))?;
+        let active_created_at = key_entry_created_at(active_entry)?;
         let current_active_alg = key_entry_algorithm(&keys[active_index])?;
-        let active_backend = key_entry_backend(&keys[active_index]).to_owned();
+        let active_backend = key_entry_backend(&keys[active_index])?.to_owned();
         let rotation_interval = settings.rotation_interval;
         let prepublish_window = settings.prepublish_window;
         let rotation_due_at = active_created_at + rotation_interval;
         let prepublish_due_at = rotation_due_at - prepublish_window;
         let candidate_index =
-            find_prepublished_candidate(settings, keys, &active_kid, current_active_alg, now)?;
+            find_prepublished_candidate(settings, keys, &active_kid, current_active_alg)?;
         if now >= rotation_due_at {
             if let Some(candidate_index) = candidate_index {
-                let candidate_created_at = key_entry_created_at(&keys[candidate_index])?
-                    .ok_or_else(|| anyhow!("prepublished key missing created_at"))?;
+                let candidate_created_at = key_entry_created_at(&keys[candidate_index])?;
                 if candidate_created_at + prepublish_window <= now {
                     let next_kid = keys[candidate_index]
                         .get("kid")
@@ -167,9 +161,10 @@ pub(crate) async fn maintain_keyset_lifecycle(
         (current_active_alg, active_backend)
     };
     if active_backend == "local-pem" {
-        let Some(keys) = payload.get_mut("keys").and_then(Value::as_array_mut) else {
-            return Ok(());
-        };
+        let keys = payload
+            .get_mut("keys")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("keyset.json missing keys array"))?;
         for algorithm in [
             jsonwebtoken::Algorithm::RS256,
             jsonwebtoken::Algorithm::PS256,
@@ -177,19 +172,6 @@ pub(crate) async fn maintain_keyset_lifecycle(
             if algorithm != active_alg && !has_live_protocol_key_for_alg(keys, algorithm, now)? {
                 let entry = create_protocol_signing_key_entry(settings, algorithm, now).await?;
                 keys.push(entry);
-                changed = true;
-            }
-        }
-    }
-    if let Some(keys) = payload.get_mut("keys").and_then(Value::as_array_mut) {
-        for entry in keys {
-            let Some(purposes) = entry.get_mut("purposes").and_then(Value::as_array_mut) else {
-                continue;
-            };
-            let protocol_response_key = purposes.iter().any(|value| value == "id_token")
-                && purposes.iter().any(|value| value == "jarm");
-            if protocol_response_key && !purposes.iter().any(|value| value == "introspection") {
-                purposes.push(json!("introspection"));
                 changed = true;
             }
         }
@@ -209,7 +191,6 @@ fn find_prepublished_candidate(
     keys: &[Value],
     active_kid: &str,
     active_alg: jsonwebtoken::Algorithm,
-    now: DateTime<Utc>,
 ) -> anyhow::Result<Option<usize>> {
     let mut candidate = None;
     for (index, entry) in keys.iter().enumerate() {
@@ -222,14 +203,14 @@ fn find_prepublished_candidate(
         if key_entry_retire_at(entry)?.is_some() || key_entry_algorithm(entry)? != active_alg {
             continue;
         }
-        let backend = key_entry_backend(entry);
+        let backend = key_entry_backend(entry)?;
         if backend == "external-command" && settings.external_command.is_empty() {
             continue;
         }
         if backend != "local-pem" && backend != "external-command" {
             continue;
         }
-        let created_at = key_entry_created_at(entry)?.unwrap_or(now);
+        let created_at = key_entry_created_at(entry)?;
         match candidate {
             Some((_, selected_created_at)) if selected_created_at <= created_at => {}
             _ => candidate = Some((index, created_at)),
@@ -247,7 +228,7 @@ fn has_live_protocol_key_for_alg(
         let purposes = key_entry_purposes(entry)?;
         if !purposes.as_ref().is_some_and(|purposes| {
             purposes.contains(&SigningPurpose::IdToken) && purposes.contains(&SigningPurpose::Jarm)
-        }) || key_entry_backend(entry) != "local-pem"
+        }) || key_entry_backend(entry)? != "local-pem"
             || key_entry_algorithm(entry)? != alg
             || !entry
                 .get("file")
@@ -296,6 +277,7 @@ pub(crate) async fn create_prepublished_local_key_entry(
     Ok(json!({
         "kid": kid,
         "alg": alg_name,
+        "backend": "local-pem",
         "file": file_name,
         "created_at": timestamp(now),
         "retire_at": null
@@ -336,10 +318,8 @@ pub(crate) async fn try_load_keyset(
     };
     let payload = serde_json::from_str::<Value>(&raw)
         .with_context(|| format!("failed to parse {}", keyset_path.display()))?;
-    // A loaded keyset must be immediately usable for every advertised key
-    // capability. Existing installations predate the dedicated Request Object
-    // recipient key, so loading is also the atomic upgrade boundary.
-    ensure_request_object_encryption_key(settings).await?;
+    validate_keyset_json(&payload)
+        .with_context(|| format!("failed to validate {}", keyset_path.display()))?;
     let active_kid = payload
         .get("active_kid")
         .and_then(Value::as_str)
@@ -376,7 +356,7 @@ pub(crate) async fn try_load_keyset(
 
         let alg = key_entry_algorithm(entry)
             .with_context(|| format!("keyset entry {kid} has unsupported alg"))?;
-        let backend = key_entry_backend(entry);
+        let backend = key_entry_backend(entry)?;
         let explicit_purposes = key_entry_purposes(entry)
             .with_context(|| format!("keyset entry {kid} has invalid purposes"))?;
         let (public_jwk, signing_key, handle) = match backend {
@@ -491,10 +471,12 @@ pub(crate) async fn create_new_keyset(settings: &KeySettings) -> anyhow::Result<
     let ps256 =
         create_protocol_signing_key_entry(settings, jsonwebtoken::Algorithm::PS256, now).await?;
     let payload = json!({
+        "schema_version": KEYSET_SCHEMA_VERSION,
         "active_kid": active_kid,
         "keys": [rs256, ps256]
     });
     let keyset_path = settings.keys_dir.join("keyset.json");
+    ensure_request_object_encryption_key(settings).await?;
     write_json_atomic(&keyset_path, &payload).await?;
     try_load_keyset(settings, &keyset_path)
         .await?

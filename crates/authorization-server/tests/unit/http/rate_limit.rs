@@ -154,7 +154,7 @@ async fn eval_rate_limit_key_ttl(state: &TestInfrastructure, key: &str) -> i64 {
     valkey_eval_string(
         &state.valkey,
         "return tostring(redis.call('TTL', KEYS[1]))",
-        vec![key.to_owned()],
+        vec![nazo_valkey::test_support::state_storage_key(key)],
         Vec::new(),
     )
     .await
@@ -167,7 +167,7 @@ async fn set_rate_limit_key_without_ttl(state: &TestInfrastructure, key: &str, v
     valkey_eval_string(
         &state.valkey,
         "redis.call('SET', KEYS[1], ARGV[1]); return 'OK'",
-        vec![key.to_owned()],
+        vec![nazo_valkey::test_support::state_storage_key(key)],
         vec![value.to_owned()],
     )
     .await
@@ -239,7 +239,7 @@ async fn corrupt_rate_limit_counter_fails_closed_as_server_error() {
     );
     valkey_set_ex(
         &state.valkey,
-        key,
+        nazo_valkey::test_support::state_storage_key(key),
         "not-an-integer".to_owned(),
         state.settings.identity.rate_limit.window_seconds,
     )
@@ -271,9 +271,12 @@ async fn rate_limit_counter_is_created_with_window_ttl() {
         RateLimitPolicy::Token,
         &rate_limit_subject(&req, &state.settings),
     );
-    valkey_del(&state.valkey, key.clone())
-        .await
-        .expect("rate limit key cleanup should succeed");
+    valkey_del(
+        &state.valkey,
+        nazo_valkey::test_support::state_storage_key(&key),
+    )
+    .await
+    .expect("rate limit key cleanup should succeed");
 
     enforce_rate_limit(&state, &req, RateLimitPolicy::Token)
         .await
@@ -298,9 +301,12 @@ async fn rate_limit_counter_without_ttl_is_repaired() {
         RateLimitPolicy::Token,
         &rate_limit_subject(&req, &state.settings),
     );
-    valkey_del(&state.valkey, key.clone())
-        .await
-        .expect("rate limit key cleanup should succeed");
+    valkey_del(
+        &state.valkey,
+        nazo_valkey::test_support::state_storage_key(&key),
+    )
+    .await
+    .expect("rate limit key cleanup should succeed");
     set_rate_limit_key_without_ttl(&state, &key, "0").await;
     assert_eq!(eval_rate_limit_key_ttl(&state, &key).await, -1);
 

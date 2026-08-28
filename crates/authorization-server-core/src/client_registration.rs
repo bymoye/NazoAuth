@@ -147,9 +147,8 @@ pub struct ValidatedClientRegistration {
     pub authorization_signed_response_alg: Option<String>,
     pub authorization_encrypted_response_alg: Option<String>,
     pub authorization_encrypted_response_enc: Option<String>,
-    /// Explicit per-client policy. `None` is reserved for clients created
-    /// before composable policy and delegates to the legacy deployment profile.
-    pub security_policy: Option<ClientSecurityPolicy>,
+    /// Explicit per-client policy; every persisted client has exactly one.
+    pub security_policy: ClientSecurityPolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

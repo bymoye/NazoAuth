@@ -2,8 +2,8 @@ use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
 use diesel_async::RunQueryDsl;
 use nazo_identity::ports::RepositoryError;
 use nazo_runtime_modules::{
-    DesiredMode, DesiredStateRecord, ModuleEventPage, ModuleEventRecord, ModuleEventState,
-    ModuleEventType, ModuleRevision,
+    DesiredMode, DesiredStateRecord, HistoricalDesiredMode, ModuleEventPage, ModuleEventRecord,
+    ModuleEventState, ModuleEventType, ModuleRevision,
 };
 use uuid::Uuid;
 
@@ -50,7 +50,7 @@ pub(super) async fn page_events(
 
 pub(super) fn desired_event(
     next: &DesiredStateRecord,
-    before: DesiredMode,
+    before: HistoricalDesiredMode,
     revision: ModuleRevision,
     outcome_code: Option<String>,
 ) -> ModuleEventRecord {
@@ -63,7 +63,10 @@ pub(super) fn desired_event(
         actor_id: next.actor_id.clone(),
         reason: next.reason.clone(),
         before: Some(ModuleEventState::Desired(before)),
-        after: Some(ModuleEventState::Desired(next.mode)),
+        after: Some(ModuleEventState::Desired(match next.mode {
+            DesiredMode::Enabled => HistoricalDesiredMode::Enabled,
+            DesiredMode::Disabled => HistoricalDesiredMode::Disabled,
+        })),
         outcome_code,
         occurred_at: next.updated_at,
     }

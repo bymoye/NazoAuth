@@ -96,9 +96,9 @@ fn prompt_none_payload() -> ConsentPayload {
         mtls_x5t_s256: None,
         pushed_request_uri: None,
         pushed_request_digest: None,
-        signed_authorization_response_required: None,
-        session_management_allowed: None,
-        authorization_code_ttl_seconds: None,
+        signed_authorization_response_required: Some(false),
+        session_management_allowed: Some(false),
+        authorization_code_ttl_seconds: Some(60),
         issued_at: now,
         expires_at: now + Duration::seconds(60),
     }

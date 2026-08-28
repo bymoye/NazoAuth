@@ -775,9 +775,7 @@ export function mtls_client_credentials() {
       scope: 'profile',
     }),
     formHeaders({
-      'x-ssl-client-verify': 'SUCCESS',
-      'x-forwarded-tls-client-cert-sha256': secrets.mtls_thumbprint,
-      'x-ssl-client-subject-dn': 'CN=perf-mtls',
+      'client-cert': `:${secrets.mtls_x5c}:`,
     }, requestTags('mtls_client_credentials', {
       endpoint: '/token',
       grant_type: 'client_credentials',

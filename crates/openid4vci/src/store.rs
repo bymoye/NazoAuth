@@ -148,14 +148,6 @@ pub trait CredentialStorePort: Send + Sync {
         nonce: &'a NonceRecord,
     ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
-    /// Legacy one-step operation retained for older adapters. New issuance
-    /// code must use claim/finalize/release so transient failures are retryable.
-    fn consume_nonce<'a>(
-        &'a self,
-        nonce_hash: &'a str,
-        now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
-
     /// Lease a nonce for one issuance attempt. A lease may be reclaimed after
     /// its expiry; finalization is the only transition that makes the nonce
     /// permanently single-use.
@@ -207,24 +199,14 @@ pub trait CredentialStorePort: Send + Sync {
         handle: &'a NotificationHandle,
         response: &'a StoredCredentialResponse,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
-        Box::pin(async move {
-            let _ = (nonce_hash, claim_id, handle, response, now);
-            Err(CredentialStoreError::Unavailable)
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
 
     fn store_response_with_notification<'a>(
         &'a self,
         handle: &'a NotificationHandle,
         response: &'a StoredCredentialResponse,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
-        Box::pin(async move {
-            let _ = (handle, response, now);
-            Err(CredentialStoreError::Unavailable)
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
     fn resolve_access<'a>(
         &'a self,
@@ -255,33 +237,14 @@ pub trait CredentialStorePort: Send + Sync {
         claim_id: &'a str,
         response: &'a StoredCredentialResponse,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
-        Box::pin(async move {
-            let _ = (credential, nonce_hash, claim_id, response, now);
-            Err(CredentialStoreError::Unavailable)
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
     fn store_deferred_with_response<'a>(
         &'a self,
         credential: &'a DeferredCredential,
         response: &'a StoredCredentialResponse,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>> {
-        Box::pin(async move {
-            let _ = (credential, response, now);
-            Err(CredentialStoreError::Unavailable)
-        })
-    }
-
-    /// Legacy one-step operation retained for older adapters. New deferred
-    /// issuance code must use claim/finalize/release around signing.
-    fn consume_ready_deferred<'a>(
-        &'a self,
-        transaction_hash: &'a str,
-        token_id: Uuid,
-        now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<Option<DeferredCredential>, CredentialStoreError>>;
+    ) -> CredentialStoreFuture<'a, Result<(), CredentialStoreError>>;
 
     fn claim_ready_deferred<'a>(
         &'a self,
@@ -327,12 +290,7 @@ pub trait CredentialStorePort: Send + Sync {
         handle: &'a NotificationHandle,
         response: &'a StoredCredentialResponse,
         now: DateTime<Utc>,
-    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>> {
-        Box::pin(async move {
-            let _ = (transaction_hash, token_id, claim_id, handle, response, now);
-            Err(CredentialStoreError::Unavailable)
-        })
-    }
+    ) -> CredentialStoreFuture<'a, Result<bool, CredentialStoreError>>;
 
     fn record_notification<'a>(
         &'a self,

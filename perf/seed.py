@@ -16,7 +16,10 @@ import psycopg
 import redis
 from blake3 import blake3
 from argon2 import PasswordHasher
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.x509.oid import NameOID
 from psycopg.types.json import Jsonb
 
 
@@ -30,7 +33,6 @@ CLIENT_SECRET_PEPPER = os.environ.get(
     "CLIENT_SECRET_PEPPER", "perf-client-secret-pepper-000000000000000001"
 )
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", "2592000"))
-MTLS_THUMBPRINT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 REDIRECT_URI = "https://client.example/callback"
 CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 CIBA_GRANT_TYPE = "urn:openid:params:grant-type:ciba"
@@ -49,6 +51,24 @@ def b64url_uint(value: int) -> str:
 
 def random_token(byte_count: int = 32) -> str:
     return b64url(secrets.token_bytes(byte_count))
+
+
+def mtls_certificate() -> tuple[str, str]:
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "perf-mtls")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=30))
+        .sign(key, hashes.SHA256())
+    )
+    der = certificate.public_bytes(serialization.Encoding.DER)
+    return base64.b64encode(der).decode("ascii"), b64url(hashlib.sha256(der).digest())
 
 
 def pkce_pair() -> tuple[str, str]:
@@ -212,6 +232,7 @@ def upsert_client(
     require_mtls: bool = False,
     require_par_request_object: bool = False,
     tls_thumbprint: str | None = None,
+    tls_subject_dn: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -220,14 +241,15 @@ def upsert_client(
             client_secret_hash, redirect_uris, post_logout_redirect_uris,
             scopes, allowed_audiences, grant_types, token_endpoint_auth_method,
             require_dpop_bound_tokens, require_mtls_bound_tokens,
-            tls_client_auth_cert_sha256, allow_client_assertion_audience_array,
+            tls_client_auth_cert_sha256, tls_client_auth_subject_dn,
+            allow_client_assertion_audience_array,
             allow_client_assertion_endpoint_audience, require_par_request_object,
             jwks, is_active
         )
         VALUES (
             %s::uuid, %s::uuid, %s::uuid, %s, %s, 'confidential',
             %s, %s, '[]'::jsonb, %s, %s, %s, %s,
-            %s, %s, %s, FALSE, FALSE, %s, %s, TRUE
+            %s, %s, %s, %s, FALSE, FALSE, %s, %s, TRUE
         )
         ON CONFLICT (tenant_id, client_id) DO UPDATE SET
             client_name = EXCLUDED.client_name,
@@ -241,6 +263,7 @@ def upsert_client(
             require_dpop_bound_tokens = EXCLUDED.require_dpop_bound_tokens,
             require_mtls_bound_tokens = EXCLUDED.require_mtls_bound_tokens,
             tls_client_auth_cert_sha256 = EXCLUDED.tls_client_auth_cert_sha256,
+            tls_client_auth_subject_dn = EXCLUDED.tls_client_auth_subject_dn,
             require_par_request_object = EXCLUDED.require_par_request_object,
             jwks = EXCLUDED.jwks,
             is_active = TRUE,
@@ -261,6 +284,7 @@ def upsert_client(
             require_dpop,
             require_mtls,
             tls_thumbprint,
+            tls_subject_dn,
             require_par_request_object,
             Jsonb(jwks) if jwks else None,
         ),
@@ -436,6 +460,7 @@ def seed() -> None:
     ec_key = ec.generate_private_key(ec.SECP256R1())
     dpop_jwk = ec_public_jwk(ec_key, "perf-dpop-es256")
     dpop_jkt = jwk_thumbprint(dpop_jwk)
+    mtls_x5c, mtls_thumbprint = mtls_certificate()
     jwks = {"keys": [rsa_jwk, ps256_jwk]}
     secret_hash = hash_client_secret(CLIENT_SECRET)
 
@@ -484,7 +509,8 @@ def seed() -> None:
             secret_hash=None,
             jwks=None,
             require_mtls=True,
-            tls_thumbprint=MTLS_THUMBPRINT,
+            tls_thumbprint=mtls_thumbprint,
+            tls_subject_dn="CN=perf-mtls",
         )
         upsert_client(
             conn,
@@ -511,7 +537,7 @@ def seed() -> None:
         "client_assertion_type": CLIENT_ASSERTION_TYPE,
         "client_secret": CLIENT_SECRET,
         "oidc_refresh_tokens": oidc_refresh_tokens,
-        "mtls_thumbprint": MTLS_THUMBPRINT,
+        "mtls_x5c": mtls_x5c,
         "clients": {
             "client_credentials": "perf-client-credentials",
             "oidc": "perf-oidc-client",

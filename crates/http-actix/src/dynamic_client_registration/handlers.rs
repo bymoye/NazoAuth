@@ -192,7 +192,7 @@ pub async fn client_configuration_put(
         &endpoint,
         registration,
         &registration_access_token,
-        current.security_policy.as_ref(),
+        Some(&current.security_policy),
     )
     .await
     {

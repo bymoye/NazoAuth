@@ -67,7 +67,7 @@ pub(super) struct OAuthClientRecord {
     subject_type: String,
     sector_identifier_uri: Option<String>,
     sector_identifier_host: Option<String>,
-    security_policy: Option<Value>,
+    security_policy: Value,
 }
 
 pub(super) fn registered_logout_client(client: OAuthClient) -> RegisteredLogoutClient {
@@ -182,27 +182,19 @@ impl OAuthClientRecord {
     }
 }
 
-fn client_security_policy(
-    value: Option<Value>,
-) -> Result<Option<ClientSecurityPolicy>, RepositoryError> {
-    value
-        .map(|value| {
-            serde_json::from_value::<ClientSecurityPolicy>(value)
-                .map_err(|error| {
-                    RepositoryError::Unexpected(format!(
-                        "invalid OAuth client security_policy: {error}"
-                    ))
-                })
-                .and_then(|policy| {
-                    policy.validate().map_err(|error| {
-                        RepositoryError::Unexpected(format!(
-                            "invalid OAuth client security_policy: {error}"
-                        ))
-                    })?;
-                    Ok(policy)
-                })
+fn client_security_policy(value: Value) -> Result<ClientSecurityPolicy, RepositoryError> {
+    serde_json::from_value::<ClientSecurityPolicy>(value)
+        .map_err(|error| {
+            RepositoryError::Unexpected(format!("invalid OAuth client security_policy: {error}"))
         })
-        .transpose()
+        .and_then(|policy| {
+            policy.validate().map_err(|error| {
+                RepositoryError::Unexpected(format!(
+                    "invalid OAuth client security_policy: {error}"
+                ))
+            })?;
+            Ok(policy)
+        })
 }
 
 pub(super) fn string_array(value: Value, field: &str) -> Result<Vec<String>, RepositoryError> {

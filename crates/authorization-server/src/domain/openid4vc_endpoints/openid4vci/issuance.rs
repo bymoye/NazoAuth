@@ -65,7 +65,7 @@ impl ServerCredentialIssuerOperations {
             };
             let pending = self
                 .service
-                .issue_pending_with_identity(
+                .issue_pending(
                     &access,
                     &request,
                     &CredentialIssuance {

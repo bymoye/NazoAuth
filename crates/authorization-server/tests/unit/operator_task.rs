@@ -187,14 +187,15 @@ fn resume_ownership_table_pins_every_closed_variant() {
         // Read-only operations have no side effect to duplicate.
         (ControlOperationPayload::KeysList, true),
         (ControlOperationPayload::KeysValidate, true),
-        // keyset.json dedupes the exact (alg, purposes) registration and an
-        // identical external registration respectively.
+        // Local key generation can persist a private key before publishing
+        // keyset.json, so a crash leaves an ambiguous side effect. External
+        // registration is idempotent for an identical registration.
         (
             ControlOperationPayload::KeysGenerateLocal {
                 alg: "ES256".to_owned(),
                 purposes: vec!["credential".to_owned()],
             },
-            true,
+            false,
         ),
         (
             ControlOperationPayload::KeysRegisterExternal {
@@ -213,29 +214,109 @@ fn resume_ownership_table_pins_every_closed_variant() {
             },
             true,
         ),
-        // Serviced through the shared CAS engine since H07.  Re-entry stays
-        // fail closed because this driver writes no `tenant_resource_operations`
-        // replay row: an ambiguous crash window cannot prove whether the
-        // transaction committed, so it must never be re-run or reported as
-        // failed.
+        // The current ControlOperation replay ledger returns the exact typed
+        // outcome for an identical operation id and request hash.
         (
             ControlOperationPayload::TenantResourceApply {
                 tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
                 resources: Vec::new(),
             },
-            false,
+            true,
         ),
         (
             ControlOperationPayload::TenantResourceRevoke {
                 tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
                 resources: Vec::new(),
             },
-            false,
+            true,
+        ),
+        // The recovery invalidation transaction persists the exact operation
+        // outcome before replay can return it.
+        (
+            ControlOperationPayload::RecoveryInvalidate {
+                state_epoch: "019c8ca2-30a6-7000-8000-00000000e001".to_owned(),
+            },
+            true,
         ),
     ];
     for (payload, allowed) in cases {
         assert_eq!(execution::resume_allowed(&payload), allowed, "{payload:?}");
     }
+}
+
+#[test]
+fn recovery_authority_conflict_is_terminal_while_unavailable_database_is_retryable() {
+    assert!(matches!(
+        execution::map_recovery_persistence_error(nazo_identity::ports::RepositoryError::Conflict),
+        control_journal::SideEffectError::Terminal(_)
+    ));
+    assert!(matches!(
+        execution::map_recovery_persistence_error(
+            nazo_identity::ports::RepositoryError::Unavailable
+        ),
+        control_journal::SideEffectError::Retryable(_)
+    ));
+}
+
+#[test]
+fn tenant_resource_executor_error_taxonomy_is_closed_and_explicit() {
+    use crate::tenant_resource_executor::TenantResourceExecutorError;
+
+    for error in [
+        TenantResourceExecutorError::Conflict,
+        TenantResourceExecutorError::Rejected,
+        TenantResourceExecutorError::InvalidPayload("invalid payload"),
+        TenantResourceExecutorError::TooLarge,
+    ] {
+        assert!(matches!(
+            execution::map_engine_error(error),
+            control_journal::SideEffectError::Terminal(_)
+        ));
+    }
+    assert!(matches!(
+        execution::map_engine_error(TenantResourceExecutorError::Unavailable),
+        control_journal::SideEffectError::Retryable(_)
+    ));
+}
+
+#[tokio::test]
+async fn tenant_resource_unavailable_does_not_publish_a_terminal_failure() {
+    use crate::tenant_resource_executor::TenantResourceExecutorError;
+
+    let directory = temporary_directory();
+    let mut tenant_operation = operation("019c8ca2-30a6-7000-8000-00000000a006");
+    tenant_operation.operation = ControlOperationPayload::TenantResourceEnumerate {
+        tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
+        selectors: Vec::new(),
+    };
+    let request_hash = "b".repeat(64);
+    let snapshot = control_journal::AuthorizationSnapshot {
+        controller_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
+        kid: "kid-controller-test-key-0000000000000000000".to_owned(),
+        accepted_at: 1_000,
+    };
+
+    let error = control_journal::run_journaled_operation(
+        &directory,
+        &tenant_operation,
+        &request_hash,
+        &snapshot,
+        execution::resume_allowed(&tenant_operation.operation),
+        &|_| {},
+        || async {
+            Err::<Option<nazo_operator_protocol::ControlResultData>, _>(
+                execution::map_engine_error(TenantResourceExecutorError::Unavailable),
+            )
+        },
+    )
+    .await
+    .expect_err("transient tenant-resource unavailability must remain resumable");
+    assert!(matches!(
+        error,
+        control_journal::JournalFlowError::RetryableExecution(_)
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -325,36 +406,79 @@ fn apply_change_sets_are_digest_bound_to_the_signed_identities() {
 #[test]
 fn j1_target_identity_binds_operations_to_this_binary() {
     let this = identity::control_build_identity();
+    let directory = temporary_directory();
+    let executable = directory.join("nazoauth");
+    fs::write(&executable, b"exact executing binary bytes").unwrap();
+    let executable_sha256: String = Sha256::digest(fs::read(&executable).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
 
     let matching = ControlTarget::HostBinary {
+        sha256: executable_sha256.clone(),
+        embedded: this.clone(),
+    };
+    identity::validate_embedded_target_identity_at(&matching, &executable, None).unwrap();
+
+    let wrong_host_digest = ControlTarget::HostBinary {
         sha256: "a".repeat(64),
         embedded: this.clone(),
     };
-    identity::validate_embedded_target_identity(&matching).unwrap();
+    assert!(
+        identity::validate_embedded_target_identity_at(&wrong_host_digest, &executable, None)
+            .is_err()
+    );
 
+    let image_digest = format!("sha256:{}", "b".repeat(64));
     let oci_matching = ControlTarget::OciImage {
-        image_digest: format!("sha256:{}", "b".repeat(64)),
+        image_digest: image_digest.clone(),
         embedded: this.clone(),
     };
-    identity::validate_embedded_target_identity(&oci_matching).unwrap();
+    identity::validate_embedded_target_identity_at(&oci_matching, &executable, Some(&image_digest))
+        .unwrap();
+    assert!(
+        identity::validate_embedded_target_identity_at(&oci_matching, &executable, None).is_err()
+    );
+    assert!(
+        identity::validate_embedded_target_identity_at(
+            &oci_matching,
+            &executable,
+            Some("sha256:not-a-digest"),
+        )
+        .is_err()
+    );
+    assert!(
+        identity::validate_embedded_target_identity_at(
+            &oci_matching,
+            &executable,
+            Some(&format!("sha256:{}", "c".repeat(64))),
+        )
+        .is_err()
+    );
 
     let wrong_version = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
+        sha256: executable_sha256.clone(),
         embedded: ControlBuildIdentity {
             version: "other-release".to_owned(),
             ..this.clone()
         },
     };
-    assert!(identity::validate_embedded_target_identity(&wrong_version).is_err());
+    assert!(
+        identity::validate_embedded_target_identity_at(&wrong_version, &executable, None).is_err()
+    );
 
     let wrong_product = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
+        sha256: executable_sha256,
         embedded: ControlBuildIdentity {
             product: "counterfeit".to_owned(),
             ..this
         },
     };
-    assert!(identity::validate_embedded_target_identity(&wrong_product).is_err());
+    assert!(
+        identity::validate_embedded_target_identity_at(&wrong_product, &executable, None).is_err()
+    );
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -586,10 +710,12 @@ fn mounted_external_jwk_material_is_digest_bound() {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    assert_eq!(
-        execution::verify_public_jwk_at(&jwk_sha256, jwk_path.clone()).unwrap(),
-        jwk_path
-    );
+    let verified = execution::verify_public_jwk_at(&jwk_sha256, jwk_path.clone()).unwrap();
+    assert_eq!(verified, br#"{"kty":"EC","kid":"external-1"}"#);
+    fs::write(&jwk_path, br#"{"kty":"EC","kid":"replaced"}"#).unwrap();
+    assert_eq!(verified, br#"{"kty":"EC","kid":"external-1"}"#);
+    assert!(execution::verify_public_jwk_at(&"0".repeat(64), jwk_path.clone()).is_err());
+    fs::write(&jwk_path, vec![b'x'; 64 * 1024 + 1]).unwrap();
     assert!(execution::verify_public_jwk_at(&"0".repeat(64), jwk_path.clone()).is_err());
     assert!(execution::verify_public_jwk_at(&jwk_sha256, directory.join("missing.jwk")).is_err());
     fs::remove_dir_all(directory).unwrap();

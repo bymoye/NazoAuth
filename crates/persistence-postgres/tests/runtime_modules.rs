@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use diesel::{QueryableByName, sql_query, sql_types::BigInt};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection as _};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_postgres::{RuntimeModuleRepository, create_pool};
 use nazo_runtime_modules::{
     ActiveModuleSnapshot, CasOutcome, CatalogDurations, DesiredMode, DesiredRevisionGuard,
@@ -13,10 +13,6 @@ use nazo_runtime_modules::{
     ReconcileOutcome, RuntimeModuleRegistry,
 };
 use uuid::Uuid;
-
-mod support;
-
-use support::{run_isolated_application_migrations, schema_database_url};
 
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_TEST_DATABASE_URL")
@@ -165,185 +161,15 @@ async fn clear_module(database_url: &str, module_id: &str) {
             .await
             .expect("runtime module fixture should clear");
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn composable_default_policy_migration_materializes_legacy_and_missing_rows_once() {
-    let Some(database_url) = database_url() else {
-        return;
-    };
-    let schema = format!("runtime_policy_{}", Uuid::now_v7().simple());
-    let mut coordinator = AsyncPgConnection::establish(&database_url)
-        .await
-        .expect("test database should connect");
-    coordinator
-        .batch_execute(&format!("CREATE SCHEMA \"{schema}\";"))
-        .await
-        .expect("isolated schema should create");
-    let isolated_url = schema_database_url(&database_url, &schema);
-    run_isolated_application_migrations(&isolated_url).await;
-    let mut fixture = AsyncPgConnection::establish(&isolated_url)
-        .await
-        .expect("isolated fixture database should connect");
-    fixture
-        .batch_execute(
-            "INSERT INTO runtime_module_desired_states
-                 (module_id, desired_mode, revision, reason)
-             VALUES
-                 ('request_objects', 'inherit', 7, 'legacy inherited fixture'),
-                 ('jarm', 'enabled', 9, 'explicit legacy fixture');",
-        )
-        .await
-        .expect("legacy policy fixture should insert");
-
-    let repository = RuntimeModuleRepository::new(
-        create_pool(isolated_url.clone(), 4).expect("isolated pool should create"),
-    );
-    let legacy_enabled = BTreeSet::from([ModuleId::RequestObjects, ModuleId::DeviceAuthorization]);
-    let migration = repository
-        .migrate_composable_default_policy(&legacy_enabled)
-        .await
-        .expect("legacy policy should materialize");
-    assert_eq!(migration.previous_version, 1);
-    assert_eq!(migration.current_version, 2);
-    assert_eq!(
-        migration.materialized_inherited_rows,
-        ModuleId::ALL.len() - 1
-    );
-    assert!(!migration.initialized_empty_state);
-
-    let records = repository.read_all_desired().await.unwrap();
-    let record = |module_id| {
-        records
-            .iter()
-            .find(|record| record.module_id == module_id)
-            .expect("every module should be materialized")
-    };
-    assert_eq!(record(ModuleId::RequestObjects).mode, DesiredMode::Enabled);
-    assert_eq!(
-        record(ModuleId::RequestObjects).revision,
-        ModuleRevision::new(8)
-    );
-    assert_eq!(record(ModuleId::Jarm).mode, DesiredMode::Enabled);
-    assert_eq!(record(ModuleId::Jarm).revision, ModuleRevision::new(9));
-    assert_eq!(
-        record(ModuleId::DeviceAuthorization).mode,
-        DesiredMode::Enabled
-    );
-    assert_eq!(record(ModuleId::TokenExchange).mode, DesiredMode::Disabled);
-
-    let repeated = repository
-        .migrate_composable_default_policy(&BTreeSet::new())
-        .await
-        .expect("the policy migration should be idempotent");
-    assert_eq!(repeated.previous_version, 2);
-    assert_eq!(repeated.current_version, 2);
-    assert_eq!(repeated.materialized_inherited_rows, 0);
-    assert!(!repeated.initialized_empty_state);
-
-    drop(repository);
-    drop(fixture);
-    coordinator
-        .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE;"))
-        .await
-        .expect("isolated schema should drop");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bulk_management_reads_return_domain_records_and_isolate_instances() {
-    let Some(database_url) = database_url() else {
-        return;
-    };
-    nazo_postgres::run_pending_migrations(&database_url)
-        .await
-        .expect("migrations should apply");
-    let repository = RuntimeModuleRepository::new(create_pool(&database_url, 4).unwrap());
-    let instance_id = format!("runtime-bulk-{}", Uuid::now_v7());
-    let other_instance_id = format!("runtime-bulk-other-{}", Uuid::now_v7());
-    let fixtures = [
-        (ModuleId::RequestObjects, DesiredMode::Enabled),
-        (ModuleId::Jarm, DesiredMode::Disabled),
-    ];
-
-    for (module_id, mode) in fixtures {
-        let current = repository.read_desired(module_id).await.unwrap();
-        let revision = current.as_ref().map_or(ModuleRevision::new(1), |record| {
-            ModuleRevision::new(record.revision.get() + 1)
-        });
-        let applied = repository
-            .compare_and_set_desired(DesiredStateChange {
-                expected_revision: current.map(|record| record.revision),
-                next: desired(module_id, mode, revision.get()),
-            })
-            .await
-            .unwrap();
-        let CasOutcome::Applied(applied) = applied else {
-            panic!("single-threaded bulk fixture desired update must apply");
-        };
-        let revision = applied.revision;
-        let state = instance(
-            &instance_id,
-            module_id,
-            ModuleState::Enabled,
-            revision.get(),
-        );
-        repository
-            .compare_and_set_instance(
-                revision,
-                instance_mutation(
-                    InstanceStateChange {
-                        expected_revision: None,
-                        next: state,
-                    },
-                    ModuleEventType::TransitionCompleted,
-                    Uuid::now_v7(),
-                ),
-            )
-            .await
-            .unwrap();
-    }
-
-    let other_module = ModuleId::RequestObjects;
-    let desired = repository
-        .read_desired(other_module)
-        .await
-        .unwrap()
-        .unwrap();
-    repository
-        .compare_and_set_instance(
-            desired.revision,
-            instance_mutation(
-                InstanceStateChange {
-                    expected_revision: None,
-                    next: instance(
-                        &other_instance_id,
-                        other_module,
-                        ModuleState::Enabled,
-                        desired.revision.get(),
-                    ),
-                },
-                ModuleEventType::TransitionCompleted,
-                Uuid::now_v7(),
-            ),
-        )
-        .await
-        .unwrap();
-
-    let desired_records = repository.read_all_desired().await.unwrap();
-    for (module_id, mode) in fixtures {
-        assert!(
-            desired_records
-                .iter()
-                .any(|record| record.module_id == module_id && record.mode == mode)
-        );
-    }
-    let instances = repository.read_all_instances(&instance_id).await.unwrap();
-    assert_eq!(instances.len(), fixtures.len());
-    assert!(
-        instances
-            .iter()
-            .all(|record| record.instance_id == instance_id)
-    );
+    sql_query(
+        "INSERT INTO runtime_module_desired_states \
+         (module_id, desired_mode, revision, actor_id, reason, updated_at) \
+         VALUES ($1, 'enabled', 1, NULL, 'explicit test fixture', CURRENT_TIMESTAMP)",
+    )
+    .bind::<diesel::sql_types::Text, _>(module_id)
+    .execute(&mut connection)
+    .await
+    .expect("runtime module fixture should create an explicit desired state");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -364,7 +190,7 @@ async fn guarded_desired_changes_are_serialized_across_database_connections() {
     for module_id in [first, second] {
         repository
             .compare_and_set_desired(DesiredStateChange {
-                expected_revision: None,
+                expected_revision: Some(ModuleRevision::new(1)),
                 next: desired(module_id, DesiredMode::Enabled, 1),
             })
             .await
@@ -444,23 +270,20 @@ async fn registry_generated_transition_events_are_postgresql_compatible() {
     let module_id = ModuleId::AuthorizationDetails;
     repository
         .compare_and_set_desired(DesiredStateChange {
-            expected_revision: None,
+            expected_revision: Some(ModuleRevision::new(1)),
             next: desired(module_id, DesiredMode::Enabled, 1),
         })
         .await
         .expect("desired state should persist");
     let short = Duration::from_secs(1);
-    let catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: short,
-            ciba: short,
-            authorization_code: short,
-            refresh_token: short,
-            session: short,
-            scim_security_events: short,
-        },
-        BTreeSet::new(),
-    )
+    let catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: short,
+        ciba: short,
+        authorization_code: short,
+        refresh_token: short,
+        session: short,
+        scim_security_events: short,
+    })
     .expect("fixed module catalog should be valid");
     let registry = RuntimeModuleRegistry::new(
         Arc::clone(&repository),
@@ -523,7 +346,7 @@ async fn desired_state_cas_is_atomic_stale_safe_and_noop_audited() {
 
     let applied = repository
         .compare_and_set_desired(DesiredStateChange {
-            expected_revision: None,
+            expected_revision: Some(ModuleRevision::new(1)),
             next: desired(module_id, DesiredMode::Enabled, 1),
         })
         .await
@@ -579,8 +402,8 @@ async fn runtime_event_page_returns_typed_newest_first_records() {
         .expect("migrations should apply");
     clear_module(&database_url, "session_management").await;
     let repository = RuntimeModuleRepository::new(create_pool(&database_url, 4).unwrap());
-    for (revision, mode) in [(1, DesiredMode::Enabled), (2, DesiredMode::Disabled)] {
-        let expected_revision = (revision > 1).then(|| ModuleRevision::new(revision - 1));
+    for (revision, mode) in [(1_u64, DesiredMode::Enabled), (2, DesiredMode::Disabled)] {
+        let expected_revision = Some(ModuleRevision::new(revision.saturating_sub(1).max(1)));
         repository
             .compare_and_set_desired(DesiredStateChange {
                 expected_revision,
@@ -606,11 +429,11 @@ async fn runtime_event_page_returns_typed_newest_first_records() {
     );
     assert_eq!(
         session_events[0].after,
-        Some(ModuleEventState::Desired(DesiredMode::Disabled))
+        Some(ModuleEventState::Desired(DesiredMode::Disabled.into()))
     );
     assert_eq!(
         session_events[1].after,
-        Some(ModuleEventState::Desired(DesiredMode::Enabled))
+        Some(ModuleEventState::Desired(DesiredMode::Enabled.into()))
     );
     assert!(page.total >= 2);
 }
@@ -629,7 +452,7 @@ async fn instance_completion_cannot_overwrite_a_newer_transition_revision() {
     let module_id = ModuleId::TokenExchange;
     repository
         .compare_and_set_desired(DesiredStateChange {
-            expected_revision: None,
+            expected_revision: Some(ModuleRevision::new(1)),
             next: desired(module_id, DesiredMode::Enabled, 1),
         })
         .await
@@ -763,7 +586,7 @@ async fn desired_revision_change_commits_before_old_completion_and_forces_stale_
     let base_repository = RuntimeModuleRepository::new(create_pool(&database_url, 2).unwrap());
     base_repository
         .compare_and_set_desired(DesiredStateChange {
-            expected_revision: None,
+            expected_revision: Some(ModuleRevision::new(1)),
             next: desired(module_id, DesiredMode::Enabled, 1),
         })
         .await
@@ -887,7 +710,7 @@ async fn instance_event_insert_failure_rolls_back_state_mutation() {
     let module_id = ModuleId::DeviceAuthorization;
     repository
         .compare_and_set_desired(DesiredStateChange {
-            expected_revision: None,
+            expected_revision: Some(ModuleRevision::new(1)),
             next: desired(module_id, DesiredMode::Enabled, 1),
         })
         .await
@@ -946,7 +769,7 @@ async fn audit_persistence_accepts_every_closed_event_kind() {
     let module_id = ModuleId::JwtBearerGrant;
     repository
         .compare_and_set_desired(DesiredStateChange {
-            expected_revision: None,
+            expected_revision: Some(ModuleRevision::new(1)),
             next: desired(module_id, DesiredMode::Enabled, 1),
         })
         .await

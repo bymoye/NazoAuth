@@ -68,7 +68,7 @@ fn form_request() -> HttpRequest {
 }
 
 fn device_client() -> ClientRow {
-    client_row! {
+    let mut client = client_row! {
         id: Uuid::now_v7(),
         tenant_id: DEFAULT_TENANT_ID,
         realm_id: DEFAULT_REALM_ID,
@@ -111,13 +111,14 @@ fn device_client() -> ClientRow {
         subject_type: "public".to_owned(),
         sector_identifier_uri: None,
         sector_identifier_host: None,
-    }
+    };
+    client.security_policy.allow_cross_device_flows = true;
+    client
 }
 
-fn enabled_settings() -> Settings {
+fn device_settings() -> Settings {
     let mut settings =
         Settings::from_config(&crate::config::ConfigSource::default()).expect("settings");
-    settings.modules.enable_device_authorization_grant = true;
     settings.device.device_authorization_ttl_seconds = 600;
     settings.device.device_authorization_poll_interval_seconds = 5;
     settings
@@ -200,7 +201,7 @@ async fn live_device_replay_state() -> Option<TestInfrastructure> {
     Some(TestInfrastructure {
         diesel_db: create_pool(database_url, 2).expect("device test database should build"),
         valkey,
-        settings: Arc::new(enabled_settings()),
+        settings: Arc::new(device_settings()),
         keyset: crate::test_support::test_key_manager(),
     })
 }
@@ -243,7 +244,7 @@ async fn store_device_session(state: &TestInfrastructure, session_id: &str, user
     };
     valkey_set_ex(
         &state.valkey,
-        format!("oauth:session:{session_id}"),
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{session_id}")),
         serde_json::to_string(&payload).expect("device session should serialize"),
         state.settings.session.session_ttl_seconds,
     )
@@ -343,10 +344,9 @@ fn device_authorization_request_rejects_disabled_or_unregistered_client_grant() 
         client_assertion_type: None,
         client_assertion: None,
     };
-    let mut settings = enabled_settings();
+    let settings = device_settings();
     let client = device_client();
 
-    settings.modules.enable_device_authorization_grant = false;
     assert!(matches!(
         device_authorization_request_payload(
             &DeviceHttpConfig::from(&settings),
@@ -357,7 +357,6 @@ fn device_authorization_request_rejects_disabled_or_unregistered_client_grant() 
         Err(DeviceAuthorizationRequestError::Disabled)
     ));
 
-    settings.modules.enable_device_authorization_grant = true;
     let mut client = client;
     client.grant_types = vec!["authorization_code".to_owned()];
     assert!(matches!(
@@ -373,7 +372,7 @@ fn device_authorization_request_rejects_disabled_or_unregistered_client_grant() 
 
 #[test]
 fn device_authorization_request_binds_scope_audience_ttl_and_poll_interval() {
-    let settings = enabled_settings();
+    let settings = device_settings();
     let client = device_client();
     let form = DeviceAuthorizationForm {
         client_id: Some("device-client".to_owned()),
@@ -461,7 +460,7 @@ fn device_code_polling_enforces_pending_slow_down_denied_and_expired_results() {
 
 #[test]
 fn device_authorization_verification_uri_targets_frontend_device_page() {
-    let mut settings = enabled_settings();
+    let mut settings = device_settings();
     settings.endpoint.frontend_base_url = "https://auth.example.test/ui/".to_owned();
 
     assert_eq!(
@@ -478,7 +477,7 @@ fn device_user_code_normalization_is_case_insensitive_and_separator_safe() {
 
 #[actix_web::test]
 async fn legacy_device_verification_path_redirects_to_frontend_without_html() {
-    let config = DeviceHttpConfig::from(&enabled_settings());
+    let config = DeviceHttpConfig::from(&device_settings());
     let response = redirect_to_device_verification_ui(&config, "ABCD 1234");
 
     assert_eq!(response.status(), StatusCode::FOUND);
@@ -599,12 +598,12 @@ async fn device_denial_consumes_pending_request_after_audited_user_decision() {
 
 #[actix_web::test]
 async fn device_token_rejects_client_policy_before_polling_state() {
-    let state = Data::new(state_with_settings(enabled_settings()));
+    let state = Data::new(state_with_settings(device_settings()));
     let mut client = device_client();
-    client.security_policy = Some(nazo_auth::ClientSecurityPolicy {
+    client.security_policy = nazo_auth::ClientSecurityPolicy {
         allow_cross_device_flows: false,
         ..nazo_auth::ClientSecurityPolicy::default()
-    });
+    };
     let connection = state.valkey_connection();
     let token_service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),

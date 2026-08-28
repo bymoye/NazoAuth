@@ -4,9 +4,10 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use super::{
-    RECOVERY_CHALLENGE_ACTION, RECOVERY_KDF_ID, RECOVERY_SECRET_PREFIX, RecoveryProposal,
-    RecoveryRootRotation, derive_recovery_seed, format_recovery_secret, hkdf_sha256_v1,
-    parse_recovery_secret, recovery_kid, recovery_public_key_bytes,
+    RECOVERY_CHALLENGE_ACTION, RECOVERY_CHALLENGE_ALLOCATION_ACTION, RECOVERY_KDF_ID,
+    RECOVERY_SECRET_PREFIX, RecoveryProposal, RecoveryRootRotation, derive_recovery_seed,
+    format_recovery_secret, hkdf_sha256_v1, parse_recovery_secret, recovery_kid,
+    recovery_public_key_bytes,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -137,7 +138,68 @@ fn kdf_identifier_is_stable_and_challenge_action_is_frozen() {
     // contract change, never a silent reinterpretation.
     assert_eq!(RECOVERY_KDF_ID, "hkdf-sha256-v1");
     assert_eq!(RECOVERY_CHALLENGE_ACTION, "controller-recovery");
+    assert_eq!(
+        RECOVERY_CHALLENGE_ALLOCATION_ACTION,
+        "controller-recovery-allocate"
+    );
     assert_eq!(super::RECOVERY_ROOT_ROTATE_ACTION, "recovery-root-rotate");
+}
+
+#[test]
+fn allocation_proof_binds_nonce_deployment_and_complete_proposal() {
+    let controller_public_key = recovery_public_key_bytes(&[21; 32]);
+    let recovery_public_key = recovery_public_key_bytes(&[22; 32]);
+    let proposal = RecoveryProposal {
+        deployment_id: "deployment-a".to_owned(),
+        controller_label: "recovered-primary".to_owned(),
+        controller_kid: recovery_kid(&controller_public_key),
+        controller_public_key,
+        recovery_kid: recovery_kid(&recovery_public_key),
+        recovery_public_key,
+    };
+    proposal.validate().expect("proposal should be well formed");
+    let current_seed = derive_recovery_seed(&[0x33u8; 32], "deployment-a");
+    let current_public_key = recovery_public_key_bytes(&current_seed);
+    let allocation_nonce = [0x44u8; 32];
+    let signature = proposal.sign_allocation(&allocation_nonce, &current_seed);
+
+    assert!(proposal.verify_allocation_signature(
+        &allocation_nonce,
+        &current_public_key,
+        &signature
+    ));
+
+    let mut other_nonce = allocation_nonce;
+    other_nonce[0] ^= 1;
+    assert!(!proposal.verify_allocation_signature(&other_nonce, &current_public_key, &signature));
+    assert!(!proposal.verify_allocation_signature(
+        &allocation_nonce,
+        &recovery_public_key_bytes(&[0x55u8; 32]),
+        &signature
+    ));
+
+    let mut mutations = Vec::new();
+    let mut changed = proposal.clone();
+    changed.deployment_id = "deployment-b".to_owned();
+    mutations.push(changed);
+    let mut changed = proposal.clone();
+    changed.controller_label = "different".to_owned();
+    mutations.push(changed);
+    let mut changed = proposal.clone();
+    changed.controller_public_key = recovery_public_key_bytes(&[23; 32]);
+    changed.controller_kid = recovery_kid(&changed.controller_public_key);
+    mutations.push(changed);
+    let mut changed = proposal.clone();
+    changed.recovery_public_key = recovery_public_key_bytes(&[24; 32]);
+    changed.recovery_kid = recovery_kid(&changed.recovery_public_key);
+    mutations.push(changed);
+    for changed in mutations {
+        assert!(!changed.verify_allocation_signature(
+            &allocation_nonce,
+            &current_public_key,
+            &signature
+        ));
+    }
 }
 
 #[test]

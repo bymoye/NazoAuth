@@ -105,7 +105,7 @@ fn registration() -> ValidatedClientRegistration {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
-        security_policy: Some(ClientSecurityPolicy::default()),
+        security_policy: ClientSecurityPolicy::default(),
     }
 }
 

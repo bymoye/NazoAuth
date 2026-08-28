@@ -9,11 +9,9 @@
 //! | `migrate-apply`             | `cli::run_migrations` (Diesel runner)    | `__diesel_schema_migrations` ledger deduplicates re-entry → `true` |
 //! | `keys-list`                 | `keyctl::operator_list`                  | read-only; no side effect to duplicate → `true` |
 //! | `keys-validate`             | `keyctl::operator_validate`              | read-only; no side effect to duplicate → `true` |
-//! | `keys-generate-local`       | `keyctl::operator_generate_local`        | keyset store dedupes the exact `(alg, purposes)` registration and returns the existing kid → `true` |
+//! | `keys-generate-local`       | `keyctl::operator_generate_local`        | private-key write may precede keyset publication; crash is ambiguous → `false` |
 //! | `keys-register-external`    | `keyctl::operator_register_external`     | keyset store is documented idempotent for an identical kid/alg/key_ref/JWK registration and fails closed on drift → `true` |
-//! | `tenant-resource-enumerate` | shared tenant-resource CAS engine        | read-only authoritative state read → `true` |
-//! | `tenant-resource-apply`     | shared tenant-resource CAS engine (H07)  | fail closed → `false`: this driver deliberately writes no `tenant_resource_operations` replay row, so a crash that leaves the journal `executing` cannot prove whether the transaction committed; re-entry must not guess |
-//! | `tenant-resource-revoke`    | same engine as apply (H07)               | same as apply → `false` |
+//! | `tenant-resource-*`         | shared tenant-resource CAS engine        | exact operation-id/request-hash outcome ledger → `true` |
 //!
 //! The mapping table above is normative for [`resume_allowed`]: re-entering a
 //! checkpoint marked `true` is safe because its owner ledger provably
@@ -21,24 +19,29 @@
 //! guessing.  Output is only ever the journaled
 //! [`nazo_operator_protocol::ControlResult`] — engines' rich return values
 //! have exactly one wire channel, the closed typed
-//! [`nazo_operator_protocol::ControlResultData`] (enumerate only).
+//! [`nazo_operator_protocol::ControlResultData`].
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self, File},
+    io::Read as _,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context as _, bail};
+use chrono::{Duration, Utc};
 use sha2::{Digest as _, Sha256};
+use uuid::Uuid;
 
 use crate::adapters::security::constant_time_eq;
 use crate::tenant_resource_executor::{
-    ControlTenantResourceOutcome, PostgresTenantResourceExecutor,
-};
-use crate::tenant_resource_provider::{
-    PreparedTenantResource, TenantResourceExecutorError, decode_change_set_payloads,
+    ControlTenantResourceOutcome, PostgresTenantResourceExecutor, PreparedTenantResource,
+    TenantResourceAction, TenantResourceExecutorError, decode_change_set_payloads,
 };
 use nazo_operator_protocol::{
-    ControlOperationPayload, ControlResultData, TenantResourceIdentity, TenantResourceOperation,
-    TenantResourceSelector,
+    ControlOperationPayload, ControlResultData, TenantResourceIdentity, TenantResourceSelector,
 };
+
+use super::control_journal::SideEffectError;
 
 /// Per-run provenance handed to engines whose durable records name the
 /// accepted operation (audit events only; never an authorization input).
@@ -59,32 +62,33 @@ pub(super) fn resume_allowed(operation: &ControlOperationPayload) -> bool {
     match operation {
         ControlOperationPayload::MigrateApply => true,
         ControlOperationPayload::KeysList | ControlOperationPayload::KeysValidate => true,
-        ControlOperationPayload::KeysGenerateLocal { .. }
-        | ControlOperationPayload::KeysRegisterExternal { .. } => true,
-        ControlOperationPayload::TenantResourceEnumerate { .. } => true,
-        // Serviced through the shared CAS engine since H07, but without a DB
-        // replay ledger behind them (see the module table): an ambiguous
-        // crash window must fail closed rather than risk a duplicate
-        // mutation or a false failure report.
+        ControlOperationPayload::KeysGenerateLocal { .. } => false,
+        ControlOperationPayload::KeysRegisterExternal { .. } => true,
         ControlOperationPayload::TenantResourceApply { .. }
-        | ControlOperationPayload::TenantResourceRevoke { .. } => false,
+        | ControlOperationPayload::TenantResourceEnumerate { .. }
+        | ControlOperationPayload::TenantResourceRevoke { .. }
+        | ControlOperationPayload::RecoveryInvalidate { .. } => true,
     }
 }
 
 pub(super) async fn execute(
     operation: &ControlOperationPayload,
     context: &ExecutionContext<'_>,
-) -> anyhow::Result<Option<ControlResultData>> {
+) -> Result<Option<ControlResultData>, SideEffectError> {
     match operation {
-        ControlOperationPayload::MigrateApply => crate::cli::run_migrations().await.map(|_| None),
-        ControlOperationPayload::KeysList => crate::keyctl::operator_list().await.map(|_| None),
+        ControlOperationPayload::MigrateApply => {
+            Ok(crate::cli::run_migrations().await.map(|_| None)?)
+        }
+        ControlOperationPayload::KeysList => {
+            Ok(crate::keyctl::operator_list().await.map(|_| None)?)
+        }
         ControlOperationPayload::KeysValidate => {
-            crate::keyctl::operator_validate().await.map(|_| None)
+            Ok(crate::keyctl::operator_validate().await.map(|_| None)?)
         }
         ControlOperationPayload::KeysGenerateLocal { alg, purposes } => {
-            crate::keyctl::operator_generate_local(alg, purposes)
+            Ok(crate::keyctl::operator_generate_local(alg, purposes)
                 .await
-                .map(|_| None)
+                .map(|_| None)?)
         }
         ControlOperationPayload::KeysRegisterExternal {
             kid,
@@ -95,42 +99,45 @@ pub(super) async fn execute(
             // The mounted JWK is payload material, not an identity envelope:
             // its bytes must hash exactly to the signed `public_jwk_sha256`
             // claim before registration proceeds.
-            let path = verify_public_jwk(public_jwk_sha256)?;
-            crate::keyctl::operator_register_external(kid, alg, key_ref, path)
-                .await
-                .map(|_| None)
+            let public_jwk = verify_public_jwk(public_jwk_sha256)?;
+            Ok(
+                crate::keyctl::operator_register_external(kid, alg, key_ref, &public_jwk)
+                    .await
+                    .map(|_| None)?,
+            )
         }
         ControlOperationPayload::TenantResourceEnumerate {
             tenant_id,
             selectors,
         } => {
             let outcome = run_tenant_resource_operation(
-                TenantResourceOperation::Enumerate,
+                TenantResourceAction::Enumerate,
                 tenant_id,
                 Vec::new(),
                 selectors,
                 context,
             )
             .await?;
-            Ok(Some(ControlResultData::TenantResourceEnumerate {
-                revision: outcome.revision,
-                resources: outcome.resources,
-            }))
+            Ok(Some(
+                outcome.control_result_data(TenantResourceAction::Enumerate),
+            ))
         }
         ControlOperationPayload::TenantResourceApply {
             tenant_id,
             resources,
         } => {
             let prepared = prepare_apply_change_set(resources)?;
-            run_tenant_resource_operation(
-                TenantResourceOperation::Apply,
+            let outcome = run_tenant_resource_operation(
+                TenantResourceAction::Apply,
                 tenant_id,
                 prepared,
                 &[],
                 context,
             )
-            .await
-            .map(|_| None)
+            .await?;
+            Ok(Some(
+                outcome.control_result_data(TenantResourceAction::Apply),
+            ))
         }
         ControlOperationPayload::TenantResourceRevoke {
             tenant_id,
@@ -144,34 +151,119 @@ pub(super) async fn execute(
                     payload: None,
                 })
                 .collect();
-            run_tenant_resource_operation(
-                TenantResourceOperation::Revoke,
+            let outcome = run_tenant_resource_operation(
+                TenantResourceAction::Revoke,
                 tenant_id,
                 prepared,
                 &[],
                 context,
             )
-            .await
-            .map(|_| None)
+            .await?;
+            Ok(Some(
+                outcome.control_result_data(TenantResourceAction::Revoke),
+            ))
+        }
+        ControlOperationPayload::RecoveryInvalidate { state_epoch } => {
+            run_recovery_invalidation(state_epoch, context)
+                .await
+                .map(Some)
         }
     }
 }
 
-/// Run one tenant-resource frame through the shared PostgreSQL CAS engine,
-/// reusing every server-side ownership check of the HTTP provider path.
+/// The state epoch is selected before the candidate starts; this operation
+/// durably records the post-restore boundary in that restored database and
+/// revokes all its refresh tokens. It never claims to revoke stateless JWTs:
+/// ctl keeps ingress closed until the returned absolute deadline has passed.
+async fn run_recovery_invalidation(
+    state_epoch: &str,
+    context: &ExecutionContext<'_>,
+) -> Result<ControlResultData, SideEffectError> {
+    let config = crate::config::ConfigSource::load_for_migrations()?;
+    let configured_epoch = Uuid::parse_str(&config.required_string("VALKEY_STATE_EPOCH")?)
+        .context("VALKEY_STATE_EPOCH must be a UUID")?;
+    if configured_epoch.is_nil() || configured_epoch.to_string() != state_epoch {
+        return Err(anyhow::anyhow!(
+            "recovery operation state epoch does not match the running candidate"
+        )
+        .into());
+    }
+    let active_tenant: Uuid = config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?;
+    let access_token_ttl = crate::settings::bounded_access_token_ttl_seconds(&config)?;
+    let id_token_ttl = crate::settings::bounded_id_token_ttl_seconds(&config)?;
+    let completed_at = Utc::now();
+    let not_before = completed_at
+        + Duration::seconds(
+            access_token_ttl
+                .max(id_token_ttl)
+                .saturating_add(crate::settings::RECOVERY_ACCESS_TOKEN_CLOCK_SKEW_SECONDS)
+                .saturating_add(1),
+        );
+    let pool = super::operator_database().await.map_err(|error| {
+        SideEffectError::Retryable(
+            error.context("recovery invalidation requires the restored application database"),
+        )
+    })?;
+    let outcome = nazo_postgres::TokenRepository::new(pool)
+        .invalidate_after_restore(
+            Uuid::parse_str(context.operation_id).context("operation id is invalid")?,
+            context.request_hash,
+            active_tenant,
+            configured_epoch,
+            not_before,
+            completed_at,
+        )
+        .await
+        .map_err(map_recovery_persistence_error)?;
+    Ok(ControlResultData::RecoveryInvalidation {
+        state_epoch: outcome.state_epoch.to_string(),
+        not_before: outcome.not_before.timestamp(),
+        revoked_refresh_tokens: outcome.revoked_refresh_tokens,
+    })
+}
+
+pub(super) fn map_recovery_persistence_error(
+    error: nazo_identity::ports::RepositoryError,
+) -> SideEffectError {
+    match error {
+        // This is the durable unique (tenant_id, state_epoch) outcome owned
+        // by a different operation. Retrying cannot change it.
+        nazo_identity::ports::RepositoryError::Conflict
+        | nazo_identity::ports::RepositoryError::Consistency(_) => SideEffectError::Terminal(
+            anyhow::anyhow!("recovery invalidation conflicts with durable authority"),
+        ),
+        nazo_identity::ports::RepositoryError::Unavailable
+        | nazo_identity::ports::RepositoryError::Unexpected(_) => SideEffectError::Retryable(
+            anyhow::anyhow!("recovery invalidation persistence is unavailable"),
+        ),
+        nazo_identity::ports::RepositoryError::NotFound
+        | nazo_identity::ports::RepositoryError::AlreadyProcessed => SideEffectError::Terminal(
+            anyhow::anyhow!("recovery invalidation persistence rejected the operation"),
+        ),
+    }
+}
+
+/// Run one tenant-resource frame through the PostgreSQL CAS engine that owns
+/// all server-side tenant-resource validation and mutation.
 async fn run_tenant_resource_operation(
-    operation: TenantResourceOperation,
+    operation: TenantResourceAction,
     tenant_id: &str,
     resources: Vec<PreparedTenantResource>,
     selectors: &[TenantResourceSelector],
     context: &ExecutionContext<'_>,
-) -> anyhow::Result<ControlTenantResourceOutcome> {
-    let pool = super::operator_database()
-        .await
-        .context("tenant-resource operations require the application database")?;
+) -> Result<ControlTenantResourceOutcome, SideEffectError> {
+    let pool = super::operator_database().await.map_err(|error| {
+        SideEffectError::Retryable(
+            error.context("tenant-resource operations require the application database"),
+        )
+    })?;
     let composed = crate::tenant_resource_preparation::control_plane_resources(pool.clone())
         .await
-        .context("tenant-resource registration policy bridge is unavailable")?;
+        .map_err(|error| {
+            SideEffectError::Retryable(
+                error.context("tenant-resource registration policy bridge is unavailable"),
+            )
+        })?;
     let executor = PostgresTenantResourceExecutor::new(
         nazo_postgres::TenantResourceRepository::new(pool),
         composed.tenant,
@@ -200,17 +292,26 @@ async fn run_tenant_resource_operation(
         .map_err(map_engine_error)
 }
 
-fn map_engine_error(error: TenantResourceExecutorError) -> anyhow::Error {
+pub(super) fn map_engine_error(error: TenantResourceExecutorError) -> SideEffectError {
     match error {
-        TenantResourceExecutorError::Conflict => {
-            anyhow::anyhow!("tenant-resource operation lost its consistency fence")
+        TenantResourceExecutorError::Conflict => SideEffectError::Terminal(anyhow::anyhow!(
+            "tenant-resource operation lost its consistency fence"
+        )),
+        TenantResourceExecutorError::Rejected => SideEffectError::Terminal(anyhow::anyhow!(
+            "tenant-resource operation was rejected by policy"
+        )),
+        TenantResourceExecutorError::InvalidPayload(message) => {
+            SideEffectError::Terminal(anyhow::anyhow!(message))
         }
-        TenantResourceExecutorError::Rejected => {
-            anyhow::anyhow!("tenant-resource operation was rejected by policy")
+        TenantResourceExecutorError::TooLarge => {
+            SideEffectError::Terminal(anyhow::anyhow!("tenant-resource payload is too large"))
         }
-        TenantResourceExecutorError::Unavailable => {
-            anyhow::anyhow!("tenant-resource persistence is unavailable")
-        }
+        // This includes a lost transaction-commit response. Re-entering the
+        // same operation id and request hash is safe because the transaction
+        // committed its typed outcome in the durable replay ledger.
+        TenantResourceExecutorError::Unavailable => SideEffectError::Retryable(anyhow::anyhow!(
+            "tenant-resource persistence is unavailable"
+        )),
     }
 }
 
@@ -255,28 +356,47 @@ pub(super) fn prepare_change_set_material(
             bail!("signed resource identities must be unique");
         }
     }
-    decode_change_set_payloads(raw_manifest, None, &authorized).map_err(anyhow::Error::new)
+    decode_change_set_payloads(raw_manifest, &authorized).map_err(anyhow::Error::new)
 }
 
 pub(super) fn read_regular_bounded_file(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    read_regular_file_bounded(path, MAX_CHANGE_SET_BYTES, "operator change-set material")
+}
+
+fn read_regular_file_bounded(
+    path: &Path,
+    max_bytes: usize,
+    material: &str,
+) -> anyhow::Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("operator change-set material must be a regular non-symlink file");
+        bail!("{material} must be a regular non-symlink file");
     }
-    if metadata.len() > MAX_CHANGE_SET_BYTES as u64 {
-        bail!("operator change-set material exceeds the maximum size");
+    if metadata.len() > max_bytes as u64 {
+        bail!("{material} exceeds the maximum size");
     }
-    let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    if raw.is_empty() || raw.len() > MAX_CHANGE_SET_BYTES {
-        bail!("operator change-set material is empty or oversized");
+    let file = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect opened file {}", path.display()))?;
+    if !opened_metadata.is_file() || opened_metadata.len() > max_bytes as u64 {
+        bail!("{material} is not a bounded regular file");
+    }
+    let mut raw = Vec::with_capacity((opened_metadata.len() as usize).min(max_bytes));
+    file.take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if raw.is_empty() || raw.len() > max_bytes {
+        bail!("{material} is empty or oversized");
     }
     Ok(raw)
 }
 
 const EXTERNAL_PUBLIC_JWK_PATH: &str = "/run/nazauth-operator/public.jwk";
+const MAX_EXTERNAL_PUBLIC_JWK_BYTES: usize = 64 * 1024;
 
-fn verify_public_jwk(expected_sha256: &str) -> anyhow::Result<PathBuf> {
+fn verify_public_jwk(expected_sha256: &str) -> anyhow::Result<Vec<u8>> {
     let path = super::configured_path(
         "NAZOAUTH_OPERATOR_PUBLIC_JWK_FILE",
         EXTERNAL_PUBLIC_JWK_PATH,
@@ -287,14 +407,16 @@ fn verify_public_jwk(expected_sha256: &str) -> anyhow::Result<PathBuf> {
 pub(super) fn verify_public_jwk_at(
     expected_sha256: &str,
     path: PathBuf,
-) -> anyhow::Result<PathBuf> {
-    let bytes = fs::read(&path).context("external public JWK was not mounted")?;
-    let actual: String = Sha256::digest(bytes)
+) -> anyhow::Result<Vec<u8>> {
+    let bytes =
+        read_regular_file_bounded(&path, MAX_EXTERNAL_PUBLIC_JWK_BYTES, "external public JWK")
+            .context("external public JWK was not mounted")?;
+    let actual: String = Sha256::digest(&bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
     if !constant_time_eq(actual.as_bytes(), expected_sha256.as_bytes()) {
         bail!("external public JWK digest mismatch");
     }
-    Ok(path)
+    Ok(bytes)
 }

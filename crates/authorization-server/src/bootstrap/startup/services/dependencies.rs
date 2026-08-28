@@ -12,8 +12,6 @@ pub(super) struct CoreServices {
         web::Data<nazo_http_actix::DynamicRegistrationEndpoint>,
     pub(super) admin_client_config: web::Data<AdminClientConfig>,
     pub(super) admin_client_service: web::Data<ServerAdminClientService>,
-    pub(super) tenant_resource_provider:
-        Option<web::Data<crate::tenant_resource_provider::TenantResourceProvider>>,
     pub(super) scim_endpoint: web::Data<nazo_http_actix::ScimEndpoint>,
     pub(super) authorization_service: web::Data<ServerAuthorizationService>,
     pub(super) token_service: web::Data<crate::http::token::ServerTokenService>,
@@ -102,8 +100,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         ServerAdminClientCrypto::new(keyset.clone()),
         admin_client_policy(&startup.settings),
     ));
-    let tenant_resource_provider =
-        super::tenant_resource::build(startup, admin_client_service.get_ref().clone()).await?;
     let scim_endpoint_settings = &startup.settings.endpoint;
     let scim_protocol = &startup.settings.protocol;
     let scim_storage = &startup.settings.storage;
@@ -250,7 +246,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         dynamic_registration_handles,
         admin_client_config,
         admin_client_service,
-        tenant_resource_provider,
         scim_endpoint,
         authorization_service,
         token_service,

@@ -336,18 +336,14 @@ impl ModuleStateRepository for TestRepository {
 fn management(
     repository: Arc<TestRepository>,
 ) -> RuntimeModuleManagement<TestRepository, NoopModuleLifecycle> {
-    let inherited = BTreeSet::from([ModuleId::Ciba]);
-    let catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(60),
-            ciba: Duration::from_secs(120),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(300),
-            session: Duration::from_secs(600),
-            scim_security_events: Duration::from_secs(600),
-        },
-        inherited.clone(),
-    )
+    let catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(60),
+        ciba: Duration::from_secs(120),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(300),
+        session: Duration::from_secs(600),
+        scim_security_events: Duration::from_secs(600),
+    })
     .unwrap();
     let registry = Arc::new(RuntimeModuleRegistry::new(
         repository.clone(),
@@ -356,7 +352,7 @@ fn management(
         "instance-a".to_owned(),
         ActiveModuleSnapshot {
             revision: ModuleRevision::new(3),
-            accepting: inherited,
+            accepting: BTreeSet::from([ModuleId::Ciba]),
             draining: BTreeSet::new(),
         },
     ));
@@ -374,6 +370,21 @@ fn desired(revision: u64, mode: DesiredMode) -> DesiredStateRecord {
     }
 }
 
+fn remaining_explicit_desired_states() -> Vec<DesiredStateRecord> {
+    ModuleId::ALL
+        .into_iter()
+        .filter(|module_id| *module_id != ModuleId::Ciba)
+        .map(|module_id| DesiredStateRecord {
+            module_id,
+            mode: DesiredMode::Disabled,
+            revision: ModuleRevision::new(1),
+            actor_id: Some("admin-a".to_owned()),
+            reason: Some("initial".to_owned()),
+            updated_at: SystemTime::UNIX_EPOCH,
+        })
+        .collect()
+}
+
 fn instance() -> InstanceStateRecord {
     InstanceStateRecord {
         instance_id: "instance-a".to_owned(),
@@ -387,18 +398,15 @@ fn instance() -> InstanceStateRecord {
     }
 }
 
-fn fixed_catalog(inherited: BTreeSet<ModuleId>) -> ModuleCatalog {
-    ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(60),
-            ciba: Duration::from_secs(120),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(300),
-            session: Duration::from_secs(600),
-            scim_security_events: Duration::from_secs(600),
-        },
-        inherited,
-    )
+fn fixed_catalog() -> ModuleCatalog {
+    ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(60),
+        ciba: Duration::from_secs(120),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(300),
+        session: Duration::from_secs(600),
+        scim_security_events: Duration::from_secs(600),
+    })
     .unwrap()
 }
 
@@ -458,7 +466,7 @@ fn reconcile_covers_no_change_and_initial_enable_disable_transitions() {
     }
     let no_change = registry(
         no_change_repository,
-        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        fixed_catalog(),
         BTreeSet::from([ModuleId::Ciba]),
     );
     assert_eq!(
@@ -473,11 +481,7 @@ fn reconcile_covers_no_change_and_initial_enable_disable_transitions() {
         .unwrap()
         .desired
         .push(desired(1, DesiredMode::Enabled));
-    let enabling = registry(
-        enable_repository,
-        fixed_catalog(BTreeSet::new()),
-        BTreeSet::new(),
-    );
+    let enabling = registry(enable_repository, fixed_catalog(), BTreeSet::new());
     assert_eq!(
         block_on(enabling.reconcile_once(ModuleId::Ciba)).unwrap(),
         ReconcileOutcome::Enabled
@@ -493,7 +497,7 @@ fn reconcile_covers_no_change_and_initial_enable_disable_transitions() {
         .push(desired(1, DesiredMode::Disabled));
     let disabling = registry(
         disable_repository,
-        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        fixed_catalog(),
         BTreeSet::from([ModuleId::Ciba]),
     );
     assert_eq!(
@@ -519,7 +523,7 @@ fn reconcile_reports_missing_disabled_and_active_dependency_boundaries() {
             reason: None,
             updated_at: SystemTime::UNIX_EPOCH,
         });
-    let dependent_catalog = fixed_catalog(BTreeSet::new())
+    let dependent_catalog = fixed_catalog()
         .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
         .unwrap();
     let missing = registry(
@@ -608,6 +612,7 @@ fn list_uses_two_bulk_reads_and_preserves_typed_state() {
     {
         let mut state = repository.state.lock().unwrap();
         state.desired.push(desired(3, DesiredMode::Disabled));
+        state.desired.extend(remaining_explicit_desired_states());
         state.instances.push(instance());
     }
     let views = block_on(management(repository.clone()).list()).unwrap();
@@ -676,24 +681,18 @@ fn repository_failure_remains_distinct_from_policy_and_catalog_errors() {
 #[test]
 fn management_view_reports_the_security_profiles_effective_disable_policy() {
     let repository = Arc::new(TestRepository::default());
-    repository
-        .state
-        .lock()
-        .unwrap()
-        .desired
-        .push(desired(1, DesiredMode::Enabled));
-    let inherited = BTreeSet::from([ModuleId::Ciba]);
-    let catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(60),
-            ciba: Duration::from_secs(120),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(300),
-            session: Duration::from_secs(600),
-            scim_security_events: Duration::from_secs(600),
-        },
-        inherited.clone(),
-    )
+    repository.state.lock().unwrap().desired.extend(
+        std::iter::once(desired(1, DesiredMode::Enabled))
+            .chain(remaining_explicit_desired_states()),
+    );
+    let catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(60),
+        ciba: Duration::from_secs(120),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(300),
+        session: Duration::from_secs(600),
+        scim_security_events: Duration::from_secs(600),
+    })
     .unwrap()
     .with_runtime_disable_blocked([ModuleId::Ciba]);
     let registry = Arc::new(RuntimeModuleRegistry::new(
@@ -703,7 +702,7 @@ fn management_view_reports_the_security_profiles_effective_disable_policy() {
         "instance-a".to_owned(),
         ActiveModuleSnapshot {
             revision: ModuleRevision::new(1),
-            accepting: inherited,
+            accepting: BTreeSet::from([ModuleId::Ciba]),
             draining: BTreeSet::new(),
         },
     ));
@@ -775,17 +774,14 @@ fn concurrent_dependency_disable_and_dependent_enable_cannot_both_commit() {
             },
         ]);
     }
-    let catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(60),
-            ciba: Duration::from_secs(120),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(300),
-            session: Duration::from_secs(600),
-            scim_security_events: Duration::from_secs(600),
-        },
-        BTreeSet::from([ModuleId::RequestObjects]),
-    )
+    let catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(60),
+        ciba: Duration::from_secs(120),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(300),
+        session: Duration::from_secs(600),
+        scim_security_events: Duration::from_secs(600),
+    })
     .unwrap()
     .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
     .unwrap();
@@ -896,17 +892,14 @@ fn snapshot_revision_exhaustion_returns_instead_of_spinning() {
         .unwrap()
         .desired
         .push(desired(1, DesiredMode::Disabled));
-    let catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(60),
-            ciba: Duration::from_secs(120),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(300),
-            session: Duration::from_secs(600),
-            scim_security_events: Duration::from_secs(600),
-        },
-        BTreeSet::from([ModuleId::Ciba]),
-    )
+    let catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(60),
+        ciba: Duration::from_secs(120),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(300),
+        session: Duration::from_secs(600),
+        scim_security_events: Duration::from_secs(600),
+    })
     .unwrap();
     let registry = RuntimeModuleRegistry::new(
         repository,
@@ -950,17 +943,14 @@ fn dependency_loss_during_initialize_is_rechecked_and_fails_closed() {
             },
         ]);
     }
-    let catalog = ModuleCatalog::fixed(
-        CatalogDurations {
-            device_authorization: Duration::from_secs(60),
-            ciba: Duration::from_secs(120),
-            authorization_code: Duration::from_secs(30),
-            refresh_token: Duration::from_secs(300),
-            session: Duration::from_secs(600),
-            scim_security_events: Duration::from_secs(600),
-        },
-        BTreeSet::from([ModuleId::RequestObjects, ModuleId::Jarm]),
-    )
+    let catalog = ModuleCatalog::fixed(CatalogDurations {
+        device_authorization: Duration::from_secs(60),
+        ciba: Duration::from_secs(120),
+        authorization_code: Duration::from_secs(30),
+        refresh_token: Duration::from_secs(300),
+        session: Duration::from_secs(600),
+        scim_security_events: Duration::from_secs(600),
+    })
     .unwrap()
     .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
     .unwrap();
@@ -1027,7 +1017,7 @@ fn dependency_enabled_but_not_admitted_is_unavailable() {
             updated_at: SystemTime::UNIX_EPOCH,
         },
     ]);
-    let catalog = fixed_catalog(BTreeSet::new())
+    let catalog = fixed_catalog()
         .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
         .unwrap();
     let registry = registry(repository, catalog, BTreeSet::from([ModuleId::Jarm]));
@@ -1063,7 +1053,7 @@ fn snapshot_admission_marks_a_disabled_dependent_as_active_for_policy_checks() {
             updated_at: SystemTime::UNIX_EPOCH,
         },
     ]);
-    let catalog = fixed_catalog(BTreeSet::new())
+    let catalog = fixed_catalog()
         .with_dependencies(ModuleId::Jarm, [ModuleId::RequestObjects])
         .unwrap();
     let registry = registry(
@@ -1093,7 +1083,7 @@ fn reconcile_propagates_desired_state_repository_failures() {
     repository
         .fail_single_desired
         .store(true, Ordering::Relaxed);
-    let registry = registry(repository, fixed_catalog(BTreeSet::new()), BTreeSet::new());
+    let registry = registry(repository, fixed_catalog(), BTreeSet::new());
 
     assert!(matches!(
         block_on(registry.reconcile_once(ModuleId::Ciba)),
@@ -1115,12 +1105,7 @@ fn enable_lifecycle_failure_is_persisted_as_failed() {
             code: "initialize_failed",
         })),
     );
-    let registry = registry_with_lifecycle(
-        repository,
-        lifecycle,
-        fixed_catalog(BTreeSet::new()),
-        BTreeSet::new(),
-    );
+    let registry = registry_with_lifecycle(repository, lifecycle, fixed_catalog(), BTreeSet::new());
 
     assert_eq!(
         block_on(registry.reconcile_once(ModuleId::Ciba)).unwrap(),
@@ -1156,7 +1141,7 @@ fn enable_stale_final_cas_withdraws_admission() {
     let registry = registry_with_lifecycle(
         repository,
         Arc::new(ScriptedLifecycle::default()),
-        fixed_catalog(BTreeSet::new()),
+        fixed_catalog(),
         BTreeSet::new(),
     );
 
@@ -1198,7 +1183,7 @@ fn disable_drains_stored_transactions_before_stopping() {
     let registry = registry_with_lifecycle(
         repository,
         Arc::new(ScriptedLifecycle::default().with_drain(Ok(true))),
-        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        fixed_catalog(),
         BTreeSet::from([ModuleId::Ciba]),
     );
 
@@ -1228,7 +1213,7 @@ fn disable_drain_deadline_failure_is_persisted() {
     let registry = registry_with_lifecycle(
         repository,
         Arc::new(ScriptedLifecycle::default().with_drain(Ok(false))),
-        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        fixed_catalog(),
         BTreeSet::from([ModuleId::Ciba]),
     );
 
@@ -1260,7 +1245,7 @@ fn disable_drain_lifecycle_error_is_persisted() {
                 code: "drain_failed",
             })),
         ),
-        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        fixed_catalog(),
         BTreeSet::from([ModuleId::Ciba]),
     );
 
@@ -1294,7 +1279,7 @@ fn disable_stop_failure_is_persisted_after_drain() {
                     code: "stop_failed",
                 })),
         ),
-        fixed_catalog(BTreeSet::from([ModuleId::Ciba])),
+        fixed_catalog(),
         BTreeSet::from([ModuleId::Ciba]),
     );
 

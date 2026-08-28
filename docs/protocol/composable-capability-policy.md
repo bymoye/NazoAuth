@@ -14,9 +14,8 @@ Server support is therefore not equivalent to client authorization. Stable,
 non-conflicting handlers can be active together while client grant allowlists
 and `security_policy` continue to deny use by default.
 
-`AUTHORIZATION_SERVER_PROFILE` remains a compatibility preset for clients
-created before versioned per-client policy existed. New clients receive an
-explicit policy and do not depend on that global preset.
+Every client carries an explicit versioned `security_policy`. A missing policy
+is rejected; no global process setting reconstructs or substitutes one.
 
 ## New-install server defaults
 
@@ -95,20 +94,20 @@ Unknown policy versions and fields are rejected.
 
 ## Upgrade behavior
 
-The runtime default-policy version and client policy are persisted.
+Runtime desired state and client policy are explicit persisted authorities.
 
 - On a **new database**, the composable defaults above are seeded.
-- On an **existing database**, every inherited runtime-module state is
-  atomically materialized as an explicit enabled/disabled row using the
-  current composable defaults. This gives the database one authoritative
-  policy source after the upgrade.
-- Existing clients with no stored `security_policy` retain the old
-  `AUTHORIZATION_SERVER_PROFILE` behavior as a compatibility fallback.
+- On an **existing database**, every catalog module must already have exactly
+  one explicit `enabled` or `disabled` desired row. Missing rows and `inherit`
+  stop migration instead of guessing the deployment's prior configuration.
+- Every existing client must already have an explicit, valid version-1
+  `security_policy`. A missing policy stops migration; the global
+  `AUTHORIZATION_SERVER_PROFILE` is never used to infer per-client state.
 - Any newly created client receives an explicit version-1 baseline policy.
 
-After migration, runtime module administration is authoritative. The removed
-legacy stable-module `ENABLE_*` flags are not accepted by the configuration
-loader and are not a second competing source of truth.
+After migration, runtime module administration is the only authority. The
+default-policy table, `inherit`, and the removed stable-module `ENABLE_*` flags
+do not exist as runtime inputs.
 
 ## Discovery semantics
 

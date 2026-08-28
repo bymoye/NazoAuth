@@ -547,10 +547,7 @@ pub(crate) async fn insert_client(
                 .eq(&prepared.authorization_encrypted_response_alg),
             oauth_clients::authorization_encrypted_response_enc
                 .eq(&prepared.authorization_encrypted_response_enc),
-            oauth_clients::security_policy.eq(prepared
-                .security_policy
-                .as_ref()
-                .map(|policy| json!(policy))),
+            oauth_clients::security_policy.eq(json!(&prepared.security_policy)),
             oauth_clients::is_active.eq(true),
         ))
         .returning((oauth_clients::id, oauth_clients::client_id))

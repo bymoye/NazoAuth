@@ -33,7 +33,7 @@ deployment can satisfy.
 | PAR | Supported, not globally required by default |
 | JAR | Supported only as an asymmetric signed Request Object; `alg=none` is rejected |
 | JARM | Supported as `response_mode=jwt` when negotiated; per-client metadata may select signing and nested JWE protection |
-| RAR | RFC 9396-style `authorization_details` accepted on authorization, PAR, and signed request object inputs only when `ENABLE_AUTHORIZATION_DETAILS=true` |
+| RAR | RFC 9396-style `authorization_details` accepted on authorization, PAR, and signed request object inputs only while the explicit persisted `authorization_details` runtime module is enabled |
 | Refresh policy | Rotation by default for refresh-token grants |
 | Token TTLs | Authorization code <= configured `AUTH_CODE_TTL_SECONDS`; access token <= configured `ACCESS_TOKEN_TTL_SECONDS` |
 | Metadata | Generated as the union of active server capabilities; mTLS capabilities are advertised only when trusted proxy CIDRs are configured; client policy is enforced after discovery |
@@ -216,7 +216,7 @@ official OIDF profile named `FAPI2-CIBA`.
 
 | Profile | Policy |
 | --- | --- |
-| `fapi-ciba-id1` | Preserves the OIDF FAPI-CIBA ID1 plain FAPI behavior across `private_key_jwt / mTLS` × `poll / ping`: signed backchannel authentication requests, endpoint-audience compatibility where explicitly registered, mTLS holder-of-key tokens, and authenticated ping carrying only `auth_req_id`. The former poll-specific value remains a migration alias. |
+| `fapi-ciba-id1` | Implements the OIDF FAPI-CIBA ID1 behavior across `private_key_jwt / mTLS` × `poll / ping`: signed backchannel authentication requests, endpoint-audience policy where explicitly registered, mTLS holder-of-key tokens, and authenticated ping carrying only `auth_req_id`. Other profile names are rejected. |
 | `fapi2-ciba` | Requires confidential clients, `private_key_jwt` or mTLS client authentication, issuer-only private_key_jwt audience policy, signed backchannel authentication requests, strong CIBA JWT algorithms, and DPoP or mTLS sender-constrained access tokens. |
 
 The internal `fapi2-ciba` profile applies only CIBA-applicable FAPI2 Security
@@ -335,7 +335,7 @@ endpoint-specific CORS. The final RFC requires a separate delta audit before
 any final-standard claim.
 
 FAPI HTTP Signatures is the second bounded M8 implementation candidate. It is
-available only through `ENABLE_FAPI_HTTP_SIGNATURES=true` on `/fapi/resource`;
+available only while the persisted `http_message_signatures` module is enabled on `/fapi/resource`;
 it is not an authorization-server profile, emits no metadata, and leaves every
 existing profile unchanged while disabled. The implementation is pinned to the
 OIDF working draft built 2026-06-26 and the RFC 9421/RFC 9530 primitives listed

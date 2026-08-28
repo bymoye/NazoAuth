@@ -1,6 +1,6 @@
 use diesel::{
     QueryableByName, sql_query,
-    sql_types::{BigInt, Text, Uuid as SqlUuid},
+    sql_types::{BigInt, Jsonb, Text, Uuid as SqlUuid},
 };
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use nazo_auth::IdempotentBackchannelLogoutDelivery;
@@ -73,12 +73,12 @@ async fn insert_client(
         "INSERT INTO oauth_clients (\
              tenant_id, realm_id, organization_id, client_id, client_name, client_type,\
              redirect_uris, scopes, grant_types, token_endpoint_auth_method, is_active,\
-             backchannel_logout_uri\
+             backchannel_logout_uri, security_policy\
          ) VALUES (\
              $1, $2, $3, $4, 'OIDC Logout Contract', 'confidential',\
              '[\"https://client.example/callback\"]'::jsonb, '[\"openid\"]'::jsonb,\
              '[\"authorization_code\"]'::jsonb, 'client_secret_basic', $5,\
-             'https://client.example/backchannel-logout'\
+             'https://client.example/backchannel-logout', $6\
          ) RETURNING id",
     )
     .bind::<SqlUuid, _>(tenant_id)
@@ -86,6 +86,10 @@ async fn insert_client(
     .bind::<SqlUuid, _>(organization_id)
     .bind::<Text, _>(format!("logout-client-{suffix}"))
     .bind::<diesel::sql_types::Bool, _>(active)
+    .bind::<Jsonb, _>(
+        serde_json::to_value(nazo_auth::ClientSecurityPolicy::default())
+            .expect("current client security policy should serialize"),
+    )
     .get_result::<IdRow>(connection)
     .await
     .expect("logout client fixture should insert")

@@ -48,6 +48,8 @@ struct NativeSsoIdTokenClaims {
     aud: Value,
     ds_hash: String,
     sid: String,
+    auth_time: i64,
+    amr: Vec<String>,
 }
 
 pub(crate) fn native_sso_requested(scopes: &[String]) -> bool {
@@ -394,8 +396,8 @@ pub(crate) async fn token_native_sso_exchange(
             authorization_details: json!([]),
             audiences: vec![issuance.config.default_audience().to_owned()],
             nonce: None,
-            auth_time: None,
-            amr: vec!["native_sso".to_owned()],
+            auth_time: Some(claims.auth_time),
+            amr: claims.amr,
             oidc_sid: Some(secret.sid),
             acr: None,
             userinfo_claims: Vec::new(),

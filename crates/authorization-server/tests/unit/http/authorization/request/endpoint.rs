@@ -43,9 +43,6 @@ fn endpoint_state(require_par: bool) -> TestInfrastructure {
     let mut settings =
         Settings::from_config(&ConfigSource::default()).expect("default settings should load");
     settings.protocol.require_pushed_authorization_requests = require_par;
-    settings.modules.enable_request_object = true;
-    settings.modules.enable_par_request_object = true;
-    settings.modules.enable_authorization_details = true;
     settings.endpoint.issuer = "https://issuer.example".to_owned();
     settings.endpoint.frontend_base_url = "https://app.example".to_owned();
     settings.protocol.auth_code_ttl_seconds = 60;
@@ -139,9 +136,6 @@ impl LiveAuthorizationFixture {
         ]);
         let mut settings = Settings::from_config(&config).expect("test settings should load");
         settings.protocol.require_pushed_authorization_requests = false;
-        settings.modules.enable_request_object = true;
-        settings.modules.enable_par_request_object = true;
-        settings.modules.enable_authorization_details = true;
 
         let mut valkey_builder = ValkeyBuilder::from_config(
             ValkeyConfig::from_url(&valkey_url).expect("VALKEY_URL should parse"),
@@ -244,7 +238,7 @@ impl LiveAuthorizationFixture {
                 tls_client_auth_san_ip, tls_client_auth_san_email,
                 allow_client_assertion_audience_array,
                 allow_client_assertion_endpoint_audience, require_par_request_object,
-                is_active,
+                is_active, security_policy,
                 post_logout_redirect_uris, backchannel_logout_session_required
             )
             VALUES (
@@ -256,6 +250,7 @@ impl LiveAuthorizationFixture {
                 false,
                 false, false,
                 $7,
+                '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
                 '[]'::jsonb, true
             )
             "#,
@@ -336,7 +331,7 @@ impl LiveAuthorizationFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -416,10 +411,13 @@ impl LiveAuthorizationFixture {
     }
 
     async fn stored_consent_payload(&self, request_id: &str) -> ConsentPayload {
-        let raw = valkey_get(&self.state.valkey, format!("oauth:consent:{request_id}"))
-            .await
-            .expect("consent lookup should succeed")
-            .expect("consent payload should exist");
+        let raw = valkey_get(
+            &self.state.valkey,
+            nazo_valkey::test_support::state_storage_key(format!("oauth:consent:{request_id}")),
+        )
+        .await
+        .expect("consent lookup should succeed")
+        .expect("consent payload should exist");
         serde_json::from_str(&raw).expect("consent payload should deserialize")
     }
 }
@@ -544,18 +542,21 @@ async fn authorization_get_requires_par_before_untrusted_runtime_parameters() {
 
 #[actix_web::test]
 async fn authorization_request_rejects_disabled_request_object_parameters_before_client_lookup() {
-    let mut state = endpoint_state(false);
-    Arc::get_mut(&mut state.settings)
-        .expect("test state owns its settings")
+    let state = endpoint_state(false);
+    let dependencies =
+        crate::http::authorization::test_support::TestAuthorizationDependencies::new(&state);
+    let mut context = dependencies.context();
+    context
         .modules
-        .enable_request_object = false;
-    let state = Data::new(state);
+        .accepting
+        .remove(&nazo_runtime_modules::ModuleId::RequestObjects);
     let req = actix_web::test::TestRequest::get()
         .uri("/authorize?request=jwt")
         .to_http_request();
     let mut q = query(&[("request", "jwt")]);
 
-    let (status, body) = json_body(authorize_request(state, req, &mut q).await).await;
+    let (status, body) =
+        json_body(authorize_request_with_context(&context, req, &mut q).await).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
@@ -691,11 +692,7 @@ async fn authorization_request_rejects_unregistered_external_request_uri() {
 
 #[actix_web::test]
 async fn authorization_request_rejects_disabled_authorization_details_before_client_lookup() {
-    let mut state = endpoint_state(false);
-    Arc::get_mut(&mut state.settings)
-        .expect("test state owns its settings")
-        .modules
-        .enable_authorization_details = false;
+    let state = endpoint_state(false);
     let state = Data::new(state);
     let req = actix_web::test::TestRequest::get()
         .uri("/authorize?authorization_details=%5B%5D")
@@ -1050,6 +1047,13 @@ async fn fapi_authorization_rejects_external_request_uri_and_direct_authorizatio
             true,
         )
         .await;
+    fixture
+        .set_client_security_policy(
+            &client_id,
+            serde_json::to_value(nazo_auth::ClientSecurityPolicy::fapi2())
+                .expect("FAPI2 security policy should serialize"),
+        )
+        .await;
     let state =
         fixture.state_with_authorization_server_profile(AuthorizationServerProfile::Fapi2Security);
 
@@ -1107,7 +1111,12 @@ async fn composable_policy_requires_a_signed_authorization_request_without_fapi_
             json!({
                 "version": 1,
                 "assurance": "baseline",
-                "require_signed_authorization_request": true
+                "require_signed_authorization_request": true,
+                "require_signed_authorization_response": false,
+                "require_signed_introspection_response": false,
+                "session_management": false,
+                "allow_cross_device_flows": false,
+                "allow_confidential_oidc_without_pkce": false
             }),
         )
         .await;
@@ -1995,7 +2004,15 @@ async fn authorization_request_redirects_invalid_authorization_details_for_authe
         ("state", "bad-details"),
     ]);
 
-    let response = authorize_request(fixture.state.clone(), req, &mut q).await;
+    let dependencies = crate::http::authorization::test_support::TestAuthorizationDependencies::new(
+        &fixture.state,
+    );
+    let mut context = dependencies.context();
+    context
+        .modules
+        .accepting
+        .insert(nazo_runtime_modules::ModuleId::AuthorizationDetails);
+    let response = authorize_request_with_context(&context, req, &mut q).await;
 
     assert_authorization_error_redirect(response, "invalid_request", Some("bad-details"));
 }
@@ -2287,28 +2304,6 @@ async fn authorization_response_redirect_emits_signed_jarm_response() {
     assert_eq!(claims["aud"], "client-jarm");
     assert_eq!(claims["code"], "code-123");
     assert_eq!(claims["state"], "state-123");
-}
-
-#[actix_web::test]
-async fn authorization_response_policy_without_client_id_uses_the_legacy_plain_contract() {
-    let state = endpoint_state(false);
-
-    let response = authorization_response_redirect(
-        &state,
-        AuthorizationResponseRedirect {
-            redirect_uri: "https://client.example/callback",
-            client_id: "",
-            response_mode: None,
-            code: None,
-            error: Some("login_required"),
-            state: Some("state-legacy"),
-            oidc_sid: None,
-            client_policy: None,
-        },
-    )
-    .await;
-
-    assert_authorization_error_redirect(response, "login_required", Some("state-legacy"));
 }
 
 #[actix_web::test]

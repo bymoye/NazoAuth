@@ -172,7 +172,12 @@ class ReleaseGovernanceTests(unittest.TestCase):
 
         for path in (ROOT / "README.md", ROOT / "README.zh-CN.md"):
             source = path.read_text(encoding="utf-8")
-            self.assertIn("nazoauthctl install --runtime auto", source)
+            self.assertIn(
+                "nazoauthctl install --host production-host --name production",
+                source,
+            )
+            self.assertIn("--runtime podman", source)
+            self.assertNotIn("--runtime auto", source)
             self.assertIn("nazoauthctl doctor", source)
             self.assertIn("compose.yml", source)
             self.assertRegex(source.lower(), r"development|开发")
@@ -199,21 +204,22 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}",
             source,
         )
-        self.assertNotIn("ci_operator_task", source)
-        self.assertIn("automation_operator_task prepare", source)
-        self.assertIn("--deployment-id development-compose", source)
-        self.assertIn("--actor-id docker-compose", source)
-        self.assertIn("--embedded-release", source)
-        self.assertIn("--embedded-revision", source)
-        self.assertIn("--embedded-build-id", source)
-        self.assertIn("$$(cat /run/nazoauth-secrets/revision)", source)
+        self.assertIn('command: ["nazoauth", "migrate"]', source)
+        self.assertIn(
+            "VALKEY_STATE_EPOCH: ${NAZOAUTH_VALKEY_STATE_EPOCH:?",
+            source,
+        )
+        self.assertIn(
+            'VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e101"',
+            (ROOT / ".env.yaml.example").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            'VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e103"',
+            (ROOT / "perf" / "env.yaml").read_text(encoding="utf-8"),
+        )
         self.assertIn('generate_hex_secret "$secret_dir/revision"', (
             ROOT / "deploy" / "compose" / "initialize-secrets.sh"
         ).read_text(encoding="utf-8"))
-        self.assertNotIn(
-            "ci_operator_task",
-            (ROOT / "docker-compose.perf.yml").read_text(encoding="utf-8"),
-        )
         self.assertIn(
             '"${NAZOAUTH_BIND_ADDRESS:-127.0.0.1}:${NAZOAUTH_PORT:-8000}:8000"',
             source,
@@ -383,6 +389,22 @@ class ReleaseGovernanceTests(unittest.TestCase):
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
+        protocol_source = (
+            ROOT / "crates" / "operator-protocol" / "src" / "lib.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "pub const PROTOCOL_VERSION: u32 = 2;",
+            protocol_source,
+        )
+        self.assertIn(
+            "$protocolSource = Get-Content "
+            '"crates/operator-protocol/src/lib.rs" -Raw',
+            release,
+        )
+        self.assertIn(
+            "$identity.protocol -ne [int]$protocolMatch.Groups[1].Value",
+            release,
+        )
         targets = {
             "x86_64-unknown-linux-gnu",
             "aarch64-unknown-linux-gnu",
@@ -534,20 +556,23 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("sha256sum --check nazo-oauth-service.tar.sha256", conformance)
         self.assertIn("docker load --input target/ci-service-image/nazo-oauth-service.tar", conformance)
 
-    def test_conformance_operator_task_mounts_secret_revision_authority(self) -> None:
+    def test_conformance_migrates_with_the_built_service_image(self) -> None:
         conformance = (
             ROOT / ".github" / "workflows" / "conformance-security.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('secret_revision=ci-secret-revision', conformance)
         self.assertIn(
-            'printf \'%s\' "$secret_revision" >runtime/e2e/operator/secret-revision',
+            "docker run --rm --name nazo-oauth-e2e-migrate",
             conformance,
         )
-        self.assertIn("chmod 0400 runtime/e2e/operator/secret-revision", conformance)
+        self.assertIn("nazo-oauth-e2e:latest nazoauth migrate", conformance)
+
+        runtime_config = conformance.split(
+            "cat > runtime/e2e/.env.yaml <<'YAML'", 1
+        )[1].split("\n          YAML", 1)[0]
         self.assertIn(
-            "operator/secret-revision:/run/nazoauth-operator/secret-revision:ro",
-            conformance,
+            'VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e104"',
+            runtime_config,
         )
 
     def test_official_suite_is_never_patched(self) -> None:

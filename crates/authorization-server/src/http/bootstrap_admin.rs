@@ -26,11 +26,9 @@ pub(crate) struct InitialAdminBootstrapEndpoint {
     repository: nazo_postgres::InitialAdminBootstrapRepository,
     expected_token_hash: Arc<RwLock<Option<String>>>,
     token_path: PathBuf,
-    /// Deployment identity this server instance was started with. When set,
-    /// every bootstrap claim must name exactly this deployment, binding the
-    /// single-use capability to one managed deployment instead of any replica
-    /// that happens to share the token file.
-    expected_deployment_id: Option<String>,
+    /// Persistent deployment identity from control discovery. Every bootstrap
+    /// claim must name exactly this deployment.
+    expected_deployment_id: String,
 }
 
 impl InitialAdminBootstrapEndpoint {
@@ -38,7 +36,7 @@ impl InitialAdminBootstrapEndpoint {
         pool: nazo_postgres::DbPool,
         data_dir: &std::path::Path,
         issuer: &str,
-        deployment_id: Option<&str>,
+        deployment_id: &str,
         tenant: nazo_identity::TenantContext,
     ) -> anyhow::Result<Self> {
         let (token_path, token) =
@@ -61,7 +59,7 @@ impl InitialAdminBootstrapEndpoint {
             repository,
             expected_token_hash: Arc::new(RwLock::new(expected_token_hash)),
             token_path,
-            expected_deployment_id: deployment_id.map(str::to_owned),
+            expected_deployment_id: deployment_id.to_owned(),
         })
     }
 
@@ -75,10 +73,7 @@ impl InitialAdminBootstrapEndpoint {
     fn deployment_id_matches(&self, presented: &str) -> bool {
         // Exact bytes: a deployment identity is an identifier, not free text,
         // and the binding must not be loosened by incidental whitespace.
-        match &self.expected_deployment_id {
-            Some(expected) => constant_time_eq(expected.as_bytes(), presented.as_bytes()),
-            None => presented.is_empty(),
-        }
+        constant_time_eq(self.expected_deployment_id.as_bytes(), presented.as_bytes())
     }
 
     fn close(&self) {
@@ -159,9 +154,7 @@ pub(crate) struct InitialAdminClaimRequest {
     request_id: String,
     token: String,
     /// Deployment identity the caller believes it is claiming against. Must
-    /// equal this server's `DEPLOYMENT_ID` when one is configured, and must be
-    /// absent/empty otherwise.
-    #[serde(default)]
+    /// equal the persistent control-discovery deployment identity.
     deployment_id: String,
     email: String,
     password: String,

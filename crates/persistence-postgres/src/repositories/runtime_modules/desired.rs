@@ -1,15 +1,11 @@
-use std::collections::BTreeSet;
-use std::time::SystemTime;
-
 use chrono::{DateTime, Utc};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use nazo_identity::ports::RepositoryError;
 use nazo_runtime_modules::{
     CasOutcome, DesiredMode, DesiredRevisionGuard, DesiredStateChange, DesiredStateRecord,
-    ModuleId, ModuleRevision,
+    HistoricalDesiredMode, ModuleId, ModuleRevision,
 };
-use uuid::Uuid;
 
 use crate::{
     repositories::audit::{append_runtime_event, desired_mode, map_error, module_id, revision},
@@ -18,168 +14,10 @@ use crate::{
 };
 
 use super::{
-    RuntimeDefaultPolicyMigration, RuntimeModuleRepository, events,
+    RuntimeModuleRepository, events,
     mapping::{self, parse_optional_uuid},
     transaction::{RuntimeTransactionError, lock_key},
 };
-
-const COMPOSABLE_DEFAULT_POLICY_VERSION: i32 = 2;
-
-#[derive(diesel::QueryableByName)]
-struct RuntimeDefaultPolicyVersionRow {
-    #[diesel(sql_type = diesel::sql_types::Integer)]
-    version: i32,
-}
-
-pub(super) async fn migrate_composable_default_policy(
-    repository: &RuntimeModuleRepository,
-    legacy_inherited_enabled: &BTreeSet<ModuleId>,
-) -> Result<RuntimeDefaultPolicyMigration, RepositoryError> {
-    let mut connection = repository.connection().await?;
-    connection
-        .transaction::<RuntimeDefaultPolicyMigration, RuntimeTransactionError, _>(
-            async |connection| {
-                let policy = diesel::sql_query(
-                    "SELECT version
-                     FROM runtime_module_default_policy
-                     WHERE singleton = TRUE
-                     FOR UPDATE",
-                )
-                .get_result::<RuntimeDefaultPolicyVersionRow>(connection)
-                .await?;
-                if policy.version == COMPOSABLE_DEFAULT_POLICY_VERSION {
-                    return Ok(RuntimeDefaultPolicyMigration {
-                        previous_version: policy.version,
-                        current_version: policy.version,
-                        materialized_inherited_rows: 0,
-                        initialized_empty_state: false,
-                    });
-                }
-                if policy.version != 1 {
-                    return Err(RuntimeTransactionError::Repository(
-                        RepositoryError::Consistency(format!(
-                            "unsupported runtime module default policy version: {}",
-                            policy.version
-                        )),
-                    ));
-                }
-
-                let current_rows = runtime_module_desired_states::table
-                    .select(DesiredStateRow::as_select())
-                    .for_update()
-                    .load::<DesiredStateRow>(connection)
-                    .await?;
-                let initialized_empty_state = current_rows.is_empty();
-                let mut materialized_inherited_rows = 0;
-                let mut existing_modules = BTreeSet::new();
-                for row in current_rows {
-                    let current = mapping::desired_from_row(row)
-                        .map_err(RuntimeTransactionError::Repository)?;
-                    existing_modules.insert(current.module_id);
-                    if current.mode != DesiredMode::Inherit {
-                        continue;
-                    }
-                    let next_revision = next_desired_revision(Some(current.revision))
-                        .map_err(RuntimeTransactionError::Repository)?;
-                    let next = DesiredStateRecord {
-                        module_id: current.module_id,
-                        mode: if legacy_inherited_enabled.contains(&current.module_id) {
-                            DesiredMode::Enabled
-                        } else {
-                            DesiredMode::Disabled
-                        },
-                        revision: ModuleRevision::new(next_revision),
-                        actor_id: None,
-                        reason: Some(
-                            "materialized legacy inherited default before policy v2".to_owned(),
-                        ),
-                        updated_at: SystemTime::now(),
-                    };
-                    diesel::update(
-                        runtime_module_desired_states::table.find(module_id(current.module_id)),
-                    )
-                    .set((
-                        runtime_module_desired_states::desired_mode.eq(desired_mode(next.mode)),
-                        runtime_module_desired_states::revision
-                            .eq(revision(next.revision)
-                                .map_err(RuntimeTransactionError::Repository)?),
-                        runtime_module_desired_states::actor_id.eq(Option::<Uuid>::None),
-                        runtime_module_desired_states::reason.eq(next.reason.as_deref()),
-                        runtime_module_desired_states::updated_at
-                            .eq(DateTime::<Utc>::from(next.updated_at)),
-                    ))
-                    .execute(connection)
-                    .await?;
-                    let event =
-                        events::desired_event(&next, DesiredMode::Inherit, next.revision, None);
-                    append_runtime_event(connection, &event)
-                        .await
-                        .map_err(RuntimeTransactionError::Repository)?;
-                    materialized_inherited_rows += 1;
-                }
-                if !initialized_empty_state {
-                    for module_id_value in ModuleId::ALL {
-                        if existing_modules.contains(&module_id_value) {
-                            continue;
-                        }
-                        let next = DesiredStateRecord {
-                            module_id: module_id_value,
-                            mode: if legacy_inherited_enabled.contains(&module_id_value) {
-                                DesiredMode::Enabled
-                            } else {
-                                DesiredMode::Disabled
-                            },
-                            revision: ModuleRevision::new(1),
-                            actor_id: None,
-                            reason: Some(
-                                "materialized missing legacy default before policy v2".to_owned(),
-                            ),
-                            updated_at: SystemTime::now(),
-                        };
-                        diesel::insert_into(runtime_module_desired_states::table)
-                            .values((
-                                runtime_module_desired_states::module_id
-                                    .eq(module_id(next.module_id)),
-                                runtime_module_desired_states::desired_mode
-                                    .eq(desired_mode(next.mode)),
-                                runtime_module_desired_states::revision.eq(revision(next.revision)
-                                    .map_err(RuntimeTransactionError::Repository)?),
-                                runtime_module_desired_states::actor_id.eq(Option::<Uuid>::None),
-                                runtime_module_desired_states::reason.eq(next.reason.as_deref()),
-                                runtime_module_desired_states::updated_at
-                                    .eq(DateTime::<Utc>::from(next.updated_at)),
-                            ))
-                            .execute(connection)
-                            .await?;
-                        let event =
-                            events::desired_event(&next, DesiredMode::Inherit, next.revision, None);
-                        append_runtime_event(connection, &event)
-                            .await
-                            .map_err(RuntimeTransactionError::Repository)?;
-                        materialized_inherited_rows += 1;
-                    }
-                }
-
-                diesel::sql_query(
-                    "UPDATE runtime_module_default_policy
-                     SET version = $1, updated_at = now()
-                     WHERE singleton = TRUE",
-                )
-                .bind::<diesel::sql_types::Integer, _>(COMPOSABLE_DEFAULT_POLICY_VERSION)
-                .execute(connection)
-                .await?;
-
-                Ok(RuntimeDefaultPolicyMigration {
-                    previous_version: policy.version,
-                    current_version: COMPOSABLE_DEFAULT_POLICY_VERSION,
-                    materialized_inherited_rows,
-                    initialized_empty_state,
-                })
-            },
-        )
-        .await
-        .map_err(RuntimeTransactionError::into_repository)
-}
 
 pub(super) async fn read_desired(
     repository: &RuntimeModuleRepository,
@@ -241,8 +79,15 @@ pub(super) async fn compare_and_set_desired(
                     .map(mapping::desired_from_row)
                     .transpose()
                     .map_err(RuntimeTransactionError::Repository)?;
-                if current.as_ref().map(|record| record.revision) != change.expected_revision {
-                    return Ok(CasOutcome::Stale { current });
+                let current = current.ok_or_else(|| {
+                    RuntimeTransactionError::Repository(RepositoryError::Consistency(
+                        "runtime desired state is missing".to_owned(),
+                    ))
+                })?;
+                if Some(current.revision) != change.expected_revision {
+                    return Ok(CasOutcome::Stale {
+                        current: Some(current),
+                    });
                 }
                 for guard in &required_revisions {
                     let guarded_revision = runtime_module_desired_states::table
@@ -255,23 +100,26 @@ pub(super) async fn compare_and_set_desired(
                         .transpose()
                         .map_err(RuntimeTransactionError::Repository)?;
                     if guarded_revision != guard.expected_revision {
-                        return Ok(CasOutcome::Stale { current });
+                        return Ok(CasOutcome::Stale {
+                            current: Some(current),
+                        });
                     }
                 }
 
-                if let Some(current) = current.as_ref()
-                    && current.mode == change.next.mode
-                {
+                if current.mode == change.next.mode {
                     let event = events::desired_event(
                         &change.next,
-                        current.mode,
+                        match current.mode {
+                            DesiredMode::Enabled => HistoricalDesiredMode::Enabled,
+                            DesiredMode::Disabled => HistoricalDesiredMode::Disabled,
+                        },
                         current.revision,
                         Some("noop".to_owned()),
                     );
                     append_runtime_event(connection, &event)
                         .await
                         .map_err(RuntimeTransactionError::Repository)?;
-                    return Ok(CasOutcome::Applied(current.clone()));
+                    return Ok(CasOutcome::Applied(current));
                 }
 
                 if change.next.revision.get() != expected_next {
@@ -283,43 +131,25 @@ pub(super) async fn compare_and_set_desired(
                 }
                 let actor_id = parse_optional_uuid(change.next.actor_id.as_deref(), "actor")?;
                 let updated_at = DateTime::<Utc>::from(change.next.updated_at);
-                if current.is_some() {
-                    diesel::update(
-                        runtime_module_desired_states::table.find(module_id(change.next.module_id)),
-                    )
-                    .set((
-                        runtime_module_desired_states::desired_mode
-                            .eq(desired_mode(change.next.mode)),
-                        runtime_module_desired_states::revision.eq(revision(change.next.revision)
-                            .map_err(RuntimeTransactionError::Repository)?),
-                        runtime_module_desired_states::actor_id.eq(actor_id),
-                        runtime_module_desired_states::reason.eq(change.next.reason.as_deref()),
-                        runtime_module_desired_states::updated_at.eq(updated_at),
-                    ))
-                    .execute(connection)
-                    .await?;
-                } else {
-                    diesel::insert_into(runtime_module_desired_states::table)
-                        .values((
-                            runtime_module_desired_states::module_id
-                                .eq(module_id(change.next.module_id)),
-                            runtime_module_desired_states::desired_mode
-                                .eq(desired_mode(change.next.mode)),
-                            runtime_module_desired_states::revision
-                                .eq(revision(change.next.revision)
-                                    .map_err(RuntimeTransactionError::Repository)?),
-                            runtime_module_desired_states::actor_id.eq(actor_id),
-                            runtime_module_desired_states::reason.eq(change.next.reason.as_deref()),
-                            runtime_module_desired_states::updated_at.eq(updated_at),
-                        ))
-                        .execute(connection)
-                        .await?;
-                }
+                diesel::update(
+                    runtime_module_desired_states::table.find(module_id(change.next.module_id)),
+                )
+                .set((
+                    runtime_module_desired_states::desired_mode.eq(desired_mode(change.next.mode)),
+                    runtime_module_desired_states::revision.eq(revision(change.next.revision)
+                        .map_err(RuntimeTransactionError::Repository)?),
+                    runtime_module_desired_states::actor_id.eq(actor_id),
+                    runtime_module_desired_states::reason.eq(change.next.reason.as_deref()),
+                    runtime_module_desired_states::updated_at.eq(updated_at),
+                ))
+                .execute(connection)
+                .await?;
                 let event = events::desired_event(
                     &change.next,
-                    current
-                        .as_ref()
-                        .map_or(DesiredMode::Inherit, |record| record.mode),
+                    match current.mode {
+                        DesiredMode::Enabled => HistoricalDesiredMode::Enabled,
+                        DesiredMode::Disabled => HistoricalDesiredMode::Disabled,
+                    },
                     change.next.revision,
                     None,
                 );

@@ -1,7 +1,5 @@
 use crate::domain::tenancy::{DEFAULT_ORGANIZATION_ID, DEFAULT_REALM_ID, DEFAULT_TENANT_ID};
 
-use crate::settings::Settings;
-
 use actix_web::http::header;
 
 use actix_web::http::header::HeaderValue;
@@ -9,12 +7,6 @@ use actix_web::http::header::HeaderValue;
 use serde_json::json;
 
 use uuid::Uuid;
-
-fn merge_sorted_unique(target: &mut Vec<String>, incoming: Vec<String>) {
-    target.extend(incoming);
-    target.sort();
-    target.dedup();
-}
 
 use super::*;
 use actix_web::test::TestRequest;
@@ -24,6 +16,7 @@ use rcgen::{
 };
 
 struct TestCertificate {
+    der: Vec<u8>,
     x5c: String,
     thumbprint: String,
 }
@@ -128,10 +121,7 @@ fn mtls_certificate_source_requires_explicit_supported_mode() {
         MtlsCertificateSourceMode::from_config(Some("disabled")).unwrap(),
         MtlsCertificateSourceMode::Disabled
     );
-    assert_eq!(
-        MtlsCertificateSourceMode::from_config(Some("legacy-verified-headers")).unwrap(),
-        MtlsCertificateSourceMode::LegacyVerifiedHeaders
-    );
+    assert!(MtlsCertificateSourceMode::from_config(Some("legacy-verified-headers")).is_err());
     assert!(MtlsCertificateSourceMode::from_config(Some("direct")).is_err());
 }
 
@@ -144,6 +134,58 @@ fn disabled_certificate_source_cannot_fall_back_to_forwarded_headers() {
         .insert_header(("x-ssl-client-verify", "SUCCESS"))
         .to_http_request();
     assert!(request_mtls_client_certificate_from_configured_source(&disabled, &[]).is_none());
+}
+
+#[test]
+fn rfc9440_source_accepts_only_a_trusted_peer() {
+    let certificate = test_certificate("rfc9440-request", -60, 3600);
+    let source = Data::new(MtlsCertificateSource::new(
+        MtlsCertificateSourceMode::Rfc9440,
+    ));
+    let trusted_proxy = [IpCidr::parse("192.0.2.0/24").expect("trusted proxy CIDR")];
+    let header_value = format!(":{}:", certificate.x5c);
+
+    let trusted = TestRequest::default()
+        .app_data(source.clone())
+        .peer_addr("192.0.2.10:443".parse().expect("trusted peer address"))
+        .insert_header(("client-cert", header_value.as_str()))
+        .to_http_request();
+    assert_eq!(
+        request_mtls_client_certificate_from_configured_source(&trusted, &trusted_proxy)
+            .and_then(|certificate| certificate.thumbprint)
+            .as_deref(),
+        Some(certificate.thumbprint.as_str())
+    );
+
+    let untrusted = TestRequest::default()
+        .app_data(source)
+        .peer_addr("198.51.100.10:443".parse().expect("untrusted peer address"))
+        .insert_header(("client-cert", header_value.as_str()))
+        .to_http_request();
+    assert!(
+        request_mtls_client_certificate_from_configured_source(&untrusted, &trusted_proxy)
+            .is_none()
+    );
+}
+
+#[test]
+fn rfc9440_source_ignores_removed_nonstandard_headers() {
+    let request = TestRequest::default()
+        .app_data(Data::new(MtlsCertificateSource::new(
+            MtlsCertificateSourceMode::Rfc9440,
+        )))
+        .peer_addr("192.0.2.10:443".parse().expect("trusted peer address"))
+        .insert_header(("x-ssl-client-verify", "SUCCESS"))
+        .insert_header((
+            "x-forwarded-tls-client-cert-sha256",
+            "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8",
+        ))
+        .to_http_request();
+    let trusted_proxy = [IpCidr::parse("192.0.2.0/24").expect("trusted proxy CIDR")];
+
+    assert!(
+        request_mtls_client_certificate_from_configured_source(&request, &trusted_proxy).is_none()
+    );
 }
 
 fn test_certificate(
@@ -160,13 +202,6 @@ fn test_certificate(
     params.not_before = now + time::Duration::seconds(not_before_offset);
     params.not_after = now + time::Duration::seconds(not_after_offset);
     finish_test_certificate(params)
-}
-
-fn certificate_pem(certificate: &TestCertificate) -> String {
-    format!(
-        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
-        certificate.x5c
-    )
 }
 
 fn test_certificate_with_sans() -> TestCertificate {
@@ -224,22 +259,10 @@ fn finish_test_certificate(params: CertificateParams) -> TestCertificate {
         .der()
         .to_vec();
     TestCertificate {
+        der: der.clone(),
         x5c: STANDARD.encode(&der),
         thumbprint: URL_SAFE_NO_PAD.encode(Sha256::digest(&der)),
     }
-}
-
-fn trusted_proxy_settings() -> Settings {
-    let mut settings =
-        Settings::from_config(&crate::config::ConfigSource::default()).expect("settings");
-    settings.endpoint.issuer = "https://issuer.example".to_owned();
-    settings.endpoint.mtls_endpoint_base_url = "https://issuer.example".to_owned();
-    settings.endpoint.frontend_base_url = "https://app.example".to_owned();
-    settings.endpoint.cors_allowed_origins = vec!["https://app.example".to_owned()];
-    settings.endpoint.trusted_proxy_cidrs =
-        vec![IpCidr::parse("192.0.2.0/24").expect("trusted proxy CIDR")];
-    settings.session.cookie_secure = true;
-    settings
 }
 
 #[test]
@@ -261,65 +284,18 @@ fn rejects_invalid_sha256_thumbprints() {
 }
 
 #[test]
-fn rejects_unverified_proxy_certificate_headers() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-sha256"),
-        HeaderValue::from_static("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8"),
-    );
+fn certificate_der_identity_rejects_trailing_data() {
+    let certificate = test_certificate("client-trailing-data", -60, 3600);
+    let mut der = STANDARD.decode(certificate.x5c).unwrap();
+    der.extend_from_slice(b"trailing-data");
 
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
+    assert!(certificate_der_identity(&der).is_none());
 }
 
 #[test]
-fn rejects_conflicting_forwarded_certificate_headers() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-sha256"),
-        HeaderValue::from_static("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-        HeaderValue::from_static("__________________________________________8"),
-    );
-
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
-}
-
-#[test]
-fn rejects_successful_verification_without_binding_material() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
-}
-
-#[test]
-fn certificate_pem_identity_accepts_escaped_forwarded_pem() {
-    let certificate = test_certificate("client-pem", -60, 3600);
-    let escaped = certificate_pem(&certificate).replace('\n', "\\n");
-    let parsed = certificate_pem_identity(&escaped).expect("forwarded PEM should parse");
-
-    assert_eq!(
-        parsed.thumbprint.as_deref(),
-        Some(certificate.thumbprint.as_str())
-    );
-    assert_eq!(parsed.subject_dn.as_deref(), Some("CN=client-pem"));
-    assert!(parsed.verified_certificate_expiry);
-}
-
-#[test]
-fn certificate_pem_identity_extracts_san_values_and_escapes_subject_dn() {
+fn certificate_der_identity_extracts_san_values_and_escapes_subject_dn() {
     let certificate = test_certificate_with_sans();
-    let parsed = certificate_pem_identity(&certificate_pem(&certificate))
-        .expect("forwarded PEM with SAN should parse");
+    let parsed = certificate_der_identity(&certificate.der).expect("certificate should parse");
 
     assert_eq!(
         parsed.subject_dn.as_deref(),
@@ -338,10 +314,9 @@ fn certificate_pem_identity_extracts_san_values_and_escapes_subject_dn() {
 }
 
 #[test]
-fn certificate_pem_identity_extracts_full_subject_dn_names() {
+fn certificate_der_identity_extracts_full_subject_dn_names() {
     let certificate = test_certificate_with_full_subject();
-    let parsed =
-        certificate_pem_identity(&certificate_pem(&certificate)).expect("certificate should parse");
+    let parsed = certificate_der_identity(&certificate.der).expect("certificate should parse");
 
     assert_eq!(
         parsed.subject_dn.as_deref(),
@@ -350,214 +325,12 @@ fn certificate_pem_identity_extracts_full_subject_dn_names() {
 }
 
 #[test]
-fn certificate_pem_identity_rejects_reversed_pem_markers() {
-    assert!(
-        certificate_pem_identity("-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\ninvalid")
-            .is_none()
-    );
-}
-
-#[test]
-fn certificate_pem_identity_rejects_future_and_expired_certificates() {
+fn certificate_der_identity_rejects_future_and_expired_certificates() {
     let future = test_certificate("client-future", 3600, 7200);
+    assert!(certificate_der_identity(&future.der).is_none());
+
     let expired = test_certificate("client-expired", -7200, -3600);
-
-    assert!(certificate_pem_identity(&certificate_pem(&future)).is_none());
-    assert!(certificate_pem_identity(&certificate_pem(&expired)).is_none());
-}
-
-#[test]
-fn certificate_der_identity_rejects_trailing_data() {
-    let certificate = test_certificate("client-trailing-data", -60, 3600);
-    let mut der = STANDARD.decode(certificate.x5c).unwrap();
-    der.extend_from_slice(b"trailing-data");
-
-    assert!(certificate_der_identity(&der).is_none());
-}
-
-#[test]
-fn accepts_duplicate_matching_forwarded_certificate_headers() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-sha256"),
-        HeaderValue::from_static("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-        HeaderValue::from_static("00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff"),
-    );
-
-    assert_eq!(
-        request_mtls_client_certificate_from_headers(&headers)
-            .and_then(|certificate| certificate.thumbprint)
-            .as_deref(),
-        Some("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8")
-    );
-}
-
-#[test]
-fn rejects_conflicting_forwarded_pem_and_direct_thumbprint() {
-    let certificate = test_certificate("client-pem", -60, 3600);
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-sha256"),
-        HeaderValue::from_static("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert"),
-        HeaderValue::from_str(&urlencoding::encode(&certificate_pem(&certificate))).unwrap(),
-    );
-
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
-}
-
-#[test]
-fn accepts_matching_forwarded_pem_and_direct_identity_material() {
-    let certificate = test_certificate_with_sans();
-    let parsed = certificate_pem_identity(&certificate_pem(&certificate))
-        .expect("test certificate should parse");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-sha256"),
-        HeaderValue::from_str(parsed.thumbprint.as_deref().unwrap()).unwrap(),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-subject-dn"),
-        HeaderValue::from_str(parsed.subject_dn.as_deref().unwrap()).unwrap(),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert"),
-        HeaderValue::from_str(&urlencoding::encode(&certificate_pem(&certificate))).unwrap(),
-    );
-
-    let merged =
-        request_mtls_client_certificate_from_headers(&headers).expect("matching material accepted");
-    assert_eq!(merged.thumbprint, parsed.thumbprint);
-    assert_eq!(merged.subject_dn, parsed.subject_dn);
-    assert_eq!(merged.san_dns, parsed.san_dns);
-    assert_eq!(merged.san_uri, parsed.san_uri);
-    assert_eq!(merged.san_ip, parsed.san_ip);
-    assert_eq!(merged.san_email, parsed.san_email);
-    assert!(merged.verified_certificate_expiry);
-}
-
-#[test]
-fn rejects_conflicting_forwarded_pem_and_san_header() {
-    let certificate = test_certificate_with_sans();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-dns"),
-        HeaderValue::from_static("victim.example"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert"),
-        HeaderValue::from_str(&urlencoding::encode(&certificate_pem(&certificate))).unwrap(),
-    );
-
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
-}
-
-#[test]
-fn accepts_matching_forwarded_pem_and_san_headers() {
-    let certificate = test_certificate_with_sans();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-dns"),
-        HeaderValue::from_static("client.example, api.client.example"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-uri"),
-        HeaderValue::from_static("urn:client:one"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-ip"),
-        HeaderValue::from_static("2001:db8::44, 192.0.2.44"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-email"),
-        HeaderValue::from_static("client@example.com"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert"),
-        HeaderValue::from_str(&urlencoding::encode(&certificate_pem(&certificate))).unwrap(),
-    );
-
-    let parsed = certificate_pem_identity(&certificate_pem(&certificate))
-        .expect("test certificate should parse");
-    let merged = request_mtls_client_certificate_from_headers(&headers)
-        .expect("matching SAN material accepted");
-
-    assert_eq!(merged.san_dns, parsed.san_dns);
-    assert_eq!(merged.san_uri, parsed.san_uri);
-    assert_eq!(merged.san_ip, parsed.san_ip);
-    assert_eq!(merged.san_email, parsed.san_email);
-}
-
-#[test]
-fn rejects_conflicting_duplicate_forwarded_san_headers() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-dns"),
-        HeaderValue::from_static("client.example"),
-    );
-    headers.append(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-dns"),
-        HeaderValue::from_static("victim.example"),
-    );
-
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
-}
-
-#[test]
-fn mtls_identity_merge_helpers_are_fail_closed() {
-    let mut current = None;
-    assert_eq!(merge_matching(&mut current, None), Some(()));
-    assert_eq!(current, None);
-
-    assert_eq!(
-        merge_matching(&mut current, Some("CN=client".to_owned())),
-        Some(())
-    );
-    assert_eq!(current.as_deref(), Some("CN=client"));
-    assert_eq!(
-        merge_matching(&mut current, Some("CN=client".to_owned())),
-        Some(())
-    );
-    assert_eq!(
-        merge_matching(&mut current, Some("CN=other".to_owned())),
-        None
-    );
-
-    let mut values = vec!["b.example".to_owned()];
-    merge_sorted_unique(
-        &mut values,
-        vec!["a.example".to_owned(), "b.example".to_owned()],
-    );
-    assert_eq!(values, vec!["a.example".to_owned(), "b.example".to_owned()]);
+    assert!(certificate_der_identity(&expired.der).is_none());
 }
 
 #[test]
@@ -768,107 +541,6 @@ fn self_signed_client_certificate_rejects_expired_x5c() {
 }
 
 #[test]
-fn rejects_conflicting_forwarded_subject_dn_headers() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-subject-dn"),
-        HeaderValue::from_static("CN=client-1,O=Example"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-subject-dn"),
-        HeaderValue::from_static("CN=client-2,O=Example"),
-    );
-
-    assert!(request_mtls_client_certificate_from_headers(&headers).is_none());
-}
-
-#[test]
-fn extracts_forwarded_subject_dn_and_san_values() {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("x-ssl-client-verify"),
-        HeaderValue::from_static("SUCCESS"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-subject-dn"),
-        HeaderValue::from_static("CN=client-1,O=Example"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-dns"),
-        HeaderValue::from_static("client.example, api.client.example"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-uri"),
-        HeaderValue::from_static("urn:client:1"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-ip"),
-        HeaderValue::from_static("192.0.2.44"),
-    );
-    headers.insert(
-        header::HeaderName::from_static("x-forwarded-tls-client-cert-san-email"),
-        HeaderValue::from_static("client@example.com"),
-    );
-
-    let certificate =
-        request_mtls_client_certificate_from_headers(&headers).expect("certificate identity");
-    assert_eq!(
-        certificate.subject_dn.as_deref(),
-        Some("CN=client-1,O=Example")
-    );
-    assert_eq!(
-        certificate.san_dns,
-        vec!["api.client.example".to_owned(), "client.example".to_owned()]
-    );
-    assert_eq!(certificate.san_uri, vec!["urn:client:1".to_owned()]);
-    assert_eq!(certificate.san_ip, vec!["192.0.2.44".to_owned()]);
-    assert_eq!(certificate.san_email, vec!["client@example.com".to_owned()]);
-}
-
-#[test]
 fn mtls_ipaddress_parser_rejects_invalid_san_lengths() {
     assert!(ipaddress_to_string(&[192, 0, 2]).is_none());
-}
-
-#[test]
-fn ignores_forwarded_certificate_headers_from_untrusted_peer() {
-    let settings = trusted_proxy_settings();
-    let req = TestRequest::default()
-        .app_data(Data::new(MtlsCertificateSource::new(
-            MtlsCertificateSourceMode::LegacyVerifiedHeaders,
-        )))
-        .peer_addr("198.51.100.10:443".parse().unwrap())
-        .insert_header(("x-ssl-client-verify", "SUCCESS"))
-        .insert_header((
-            "x-forwarded-tls-client-cert-sha256",
-            "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8",
-        ))
-        .to_http_request();
-
-    assert!(request_mtls_thumbprint(&req, &settings.endpoint.trusted_proxy_cidrs).is_none());
-}
-
-#[test]
-fn accepts_forwarded_certificate_headers_from_trusted_peer() {
-    let settings = trusted_proxy_settings();
-    let req = TestRequest::default()
-        .app_data(Data::new(MtlsCertificateSource::new(
-            MtlsCertificateSourceMode::LegacyVerifiedHeaders,
-        )))
-        .peer_addr("192.0.2.10:443".parse().unwrap())
-        .insert_header(("x-ssl-client-verify", "SUCCESS"))
-        .insert_header((
-            "x-forwarded-tls-client-cert-sha256",
-            "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8",
-        ))
-        .to_http_request();
-
-    assert_eq!(
-        request_mtls_thumbprint(&req, &settings.endpoint.trusted_proxy_cidrs).as_deref(),
-        Some("ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8")
-    );
 }

@@ -281,7 +281,7 @@ impl LiveAdminClientUpdateFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -437,7 +437,7 @@ fn empty_patch() -> PatchClientRequest {
         authorization_signed_response_alg: None,
         authorization_encrypted_response_alg: None,
         authorization_encrypted_response_enc: None,
-        security_policy: None,
+        security_policy: Some(nazo_auth::ClientSecurityPolicy::default()),
         is_active: None,
         subject_type: None,
         sector_identifier_uri: None,
@@ -547,7 +547,7 @@ async fn patch_can_explicitly_clear_every_optional_response_crypto_setting() {
     assert!(prepared.authorization_encrypted_response_enc.is_none());
     assert_eq!(
         prepared.security_policy,
-        Some(nazo_auth::ClientSecurityPolicy::default())
+        nazo_auth::ClientSecurityPolicy::default()
     );
 }
 

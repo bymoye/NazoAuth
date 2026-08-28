@@ -152,7 +152,7 @@ where
         client.authorization_encrypted_response_enc = trim_optional_string(Some(value));
     }
     if let Some(value) = request.security_policy {
-        client.security_policy = Some(value);
+        client.security_policy = value;
     }
     if let Some(value) = request.is_active {
         client.is_active = value;
@@ -221,19 +221,17 @@ where
         &crypto.response_signing_algorithms(),
         crypto,
     )?;
-    if let Some(effective_policy) = client.security_policy.as_ref() {
-        validate_composable_security_policy(
-            effective_policy,
-            ClientSecurityPolicyContext {
-                client_type: &client.client_type,
-                authentication_method: &client.token_endpoint_auth_method,
-                require_dpop_bound_tokens: client.require_dpop_bound_tokens,
-                require_mtls_bound_tokens: client.require_mtls_bound_tokens,
-                jwks_uri: client.jwks_uri.as_deref(),
-                jwks: client.jwks.as_ref(),
-            },
-            crypto,
-        )?;
-    }
+    validate_composable_security_policy(
+        &client.security_policy,
+        ClientSecurityPolicyContext {
+            client_type: &client.client_type,
+            authentication_method: &client.token_endpoint_auth_method,
+            require_dpop_bound_tokens: client.require_dpop_bound_tokens,
+            require_mtls_bound_tokens: client.require_mtls_bound_tokens,
+            jwks_uri: client.jwks_uri.as_deref(),
+            jwks: client.jwks.as_ref(),
+        },
+        crypto,
+    )?;
     Ok(client)
 }

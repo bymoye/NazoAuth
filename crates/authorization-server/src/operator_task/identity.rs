@@ -20,18 +20,22 @@
 use std::{io::Cursor, path::Path};
 
 use anyhow::{Context as _, bail};
+use sha2::{Digest as _, Sha256};
 use yaml_serde::Value as YamlValue;
 
 use super::*;
+use crate::adapters::security::constant_time_eq;
 use crate::control_discovery::read_identifier;
 use nazo_operator_protocol::ControlOperationPayload;
+
+const OCI_IMAGE_DIGEST_ENVIRONMENT: &str = "NAZOAUTH_OPERATOR_OCI_IMAGE_DIGEST";
 
 /// J1: the operation must name exactly this executing binary's build.
 ///
 /// The frozen contract expresses build identity as
 /// [`nazo_operator_protocol::ControlBuildIdentity`] `{product, version,
 /// commit}`; this runtime maps it onto the same build environment as the
-/// legacy embedded identity: `product` is the fixed workspace product name
+/// runtime build identity: `product` is the fixed workspace product name
 /// (`CONTROL_DISCOVERY_PRODUCT`), `version` comes from
 /// `NAZOAUTH_BUILD_RELEASE`, and `commit` from `NAZOAUTH_BUILD_REVISION`.
 /// ctl must construct `target.embedded` from exactly these values (see the
@@ -39,9 +43,48 @@ use nazo_operator_protocol::ControlOperationPayload;
 pub(super) fn validate_embedded_target_identity(
     target: &nazo_operator_protocol::ControlTarget,
 ) -> anyhow::Result<()> {
+    let executable = env::current_exe()
+        .context("failed to resolve the executing binary for artifact identity validation")?;
+    let oci_image_digest = match target {
+        nazo_operator_protocol::ControlTarget::OciImage { .. } => Some(
+            env::var(OCI_IMAGE_DIGEST_ENVIRONMENT)
+                .context("operator OCI image digest authority is unavailable")?,
+        ),
+        nazo_operator_protocol::ControlTarget::HostBinary { .. } => None,
+    };
+    validate_embedded_target_identity_at(target, &executable, oci_image_digest.as_deref())
+}
+
+pub(super) fn validate_embedded_target_identity_at(
+    target: &nazo_operator_protocol::ControlTarget,
+    executable: &Path,
+    oci_image_digest: Option<&str>,
+) -> anyhow::Result<()> {
     let actual = control_build_identity();
     if *target.embedded() != actual {
         bail!("embedded build identity does not match the executing runtime");
+    }
+    match target {
+        nazo_operator_protocol::ControlTarget::HostBinary { sha256, .. } => {
+            let executable = fs::read(executable)
+                .context("failed to measure the executing host binary artifact")?;
+            let actual: String = Sha256::digest(executable)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            if !constant_time_eq(actual.as_bytes(), sha256.as_bytes()) {
+                bail!("host binary artifact digest does not match the executing runtime");
+            }
+        }
+        nazo_operator_protocol::ControlTarget::OciImage { image_digest, .. } => {
+            let actual =
+                oci_image_digest.context("operator OCI image digest authority is unavailable")?;
+            nazo_operator_protocol::validate_oci_image_digest(actual)
+                .context("operator OCI image digest authority is invalid")?;
+            if !constant_time_eq(actual.as_bytes(), image_digest.as_bytes()) {
+                bail!("OCI image artifact digest does not match the executing runtime");
+            }
+        }
     }
     Ok(())
 }

@@ -4,12 +4,12 @@ use chrono::{TimeZone, Utc};
 use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
 use nazo_auth::{AuthorizationCodeState, CodePayload, ConsentPayload, PushedAuthorizationRequest};
-use nazo_valkey::{AuthorizationCodeBegin, AuthorizationStore, ValkeyConnection};
+use nazo_valkey::{AuthorizationCodeBegin, AuthorizationStore};
 use serde_json::json;
 
 async fn setup() -> Option<(AuthorizationStore, fred::prelude::Client)> {
     let url = std::env::var("VALKEY_URL").ok()?;
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .expect("an explicitly configured Valkey must be available");
     let inspector = Builder::from_config(Config::from_url(&url).unwrap())
@@ -92,10 +92,10 @@ async fn par_preserves_exact_hashed_key_json_ttl_and_one_time_take() {
         return;
     };
     let request_uri = format!("urn:ietf:params:oauth:request_uri:{}", uuid::Uuid::now_v7());
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:par:{}",
         blake3::hash(request_uri.as_bytes()).to_hex()
-    );
+    ));
     let payload = PushedAuthorizationRequest {
         client_id: "client-a".to_owned(),
         params: HashMap::from([("scope".to_owned(), "openid".to_owned())]),
@@ -292,10 +292,10 @@ async fn par_compare_delete_accepts_semantically_equal_reordered_multi_parameter
         issued_at: Utc.timestamp_opt(1_000, 0).unwrap(),
         expires_at: Utc.timestamp_opt(1_030, 0).unwrap(),
     };
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:par:{}",
         blake3::hash(request_uri.as_bytes()).to_hex()
-    );
+    ));
     let reordered = format!(
         r#"{{"expires_at":{},"params":{{"scope":{},"redirect_uri":{}}},"client_id":{},"issued_at":{}}}"#,
         serde_json::to_string(&observed.expires_at).unwrap(),
@@ -324,7 +324,7 @@ async fn consent_json_compare_is_nested_order_independent_but_preserves_array_ob
         return;
     };
     let request_id = uuid::Uuid::now_v7().to_string();
-    let key = format!("oauth:consent:{request_id}");
+    let key = nazo_valkey::test_support::state_storage_key(format!("oauth:consent:{request_id}"));
     let mut observed = consent_payload(&request_id, uuid::Uuid::from_u128(1));
     observed.authorization_details = json!([{
         "type": "payment_initiation",
@@ -371,7 +371,7 @@ async fn malformed_json_compare_delete_fails_closed_without_deleting() {
         return;
     };
     let request_id = uuid::Uuid::now_v7().to_string();
-    let key = format!("oauth:consent:{request_id}");
+    let key = nazo_valkey::test_support::state_storage_key(format!("oauth:consent:{request_id}"));
     let expected = consent_payload(&request_id, uuid::Uuid::from_u128(1));
     inspector
         .set::<(), _, _>(&key, "{", None, None, false)

@@ -3,7 +3,7 @@ use nazo_auth::{
     CibaStateStorePort, CibaStoredRequest,
 };
 use serde::Deserialize;
-use serde_json::{Number, Value};
+use serde_json::Value;
 
 use crate::{Error, ValkeyConnection, command, keys};
 
@@ -261,12 +261,7 @@ impl CibaStore {
             .get("expire_at")
             .and_then(Value::as_i64)
             .ok_or_else(|| Error::protocol("missing CIBA snapshot deadline"))?;
-        let mut object: Value = serde_json::from_str(&raw).map_err(serialization_error)?;
-        if object.get("retention_expires_at").is_none() {
-            object["retention_expires_at"] = Value::Number(Number::from(deadline));
-        }
-        let value: CibaRequestState =
-            serde_json::from_value(object).map_err(serialization_error)?;
+        let value: CibaRequestState = serde_json::from_str(&raw).map_err(serialization_error)?;
         if value.retention_expires_at != deadline {
             return Err(Error::protocol(
                 "CIBA retention deadline disagrees with EXPIRETIME",
@@ -370,7 +365,7 @@ impl CibaStore {
                 now.to_string(),
                 lock_until.to_string(),
                 limit.to_string(),
-                "oauth:ciba:".to_owned(),
+                format!("{}oauth:ciba:", self.connection.state_prefix()),
             ],
         )
         .await?;

@@ -4,8 +4,19 @@ pub(crate) fn runtime_module_registry_for_test(
     pool: DbPool,
     settings: &Settings,
 ) -> anyhow::Result<Arc<ServerRuntimeModuleRegistry>> {
-    let inherited_enabled = inherited_enabled(settings);
-    let catalog = module_catalog(settings, inherited_enabled.clone())?;
+    runtime_module_registry_with_modules_for_test(
+        pool,
+        settings,
+        crate::test_support::persisted_runtime_modules_fixture(),
+    )
+}
+
+pub(crate) fn runtime_module_registry_with_modules_for_test(
+    pool: DbPool,
+    settings: &Settings,
+    active_modules: BTreeSet<ModuleId>,
+) -> anyhow::Result<Arc<ServerRuntimeModuleRegistry>> {
+    let catalog = module_catalog(settings)?;
     let repository = Arc::new(RuntimeModuleRepository::new(pool));
     let lifecycle = Arc::new(ServerModuleLifecycle {
         repository: repository.clone(),
@@ -17,7 +28,7 @@ pub(crate) fn runtime_module_registry_for_test(
         "token-test".to_owned(),
         ActiveModuleSnapshot {
             revision: ModuleRevision::new(0),
-            accepting: inherited_enabled,
+            accepting: active_modules,
             draining: BTreeSet::new(),
         },
     )))

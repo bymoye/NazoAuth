@@ -1,7 +1,9 @@
 use std::time::Duration;
 
-use nazo_identity::{DEFAULT_TENANT_ID, TenantId};
-use nazo_valkey::{ErrorKind, ValkeyConnection};
+use nazo_identity::TenantId;
+use nazo_identity::{UserId, session::SessionRecord};
+use nazo_valkey::test_support::KeysInterface;
+use nazo_valkey::{ErrorKind, SessionStore, ValkeyConnection};
 use url::Url;
 use uuid::Uuid;
 
@@ -12,7 +14,7 @@ fn isolated_database_url(database: u8) -> Option<String> {
 }
 
 async fn connect(url: &str) -> Option<ValkeyConnection> {
-    ValkeyConnection::connect(url, Duration::from_secs(1))
+    nazo_valkey::test_support::scoped_connect(url, Duration::from_secs(1))
         .await
         .ok()
 }
@@ -63,7 +65,7 @@ async fn non_default_tenant_claims_empty_database_and_rejects_other_tenants() {
 }
 
 #[tokio::test]
-async fn default_tenant_adopts_legacy_state_without_weakening_owner_binding() {
+async fn unmarked_nonempty_database_fails_closed_for_every_tenant() {
     use nazo_valkey::test_support::KeysInterface;
 
     let Some(url) = isolated_database_url(15) else {
@@ -82,20 +84,74 @@ async fn default_tenant_adopts_legacy_state_without_weakening_owner_binding() {
     let error = connection
         .bind_tenant_owner(first)
         .await
-        .expect_err("non-default tenant must not adopt unmarked state");
+        .expect_err("an unmarked nonempty database must never be adopted");
     assert_eq!(error.kind(), ErrorKind::UnexpectedResult);
-
-    let legacy = TenantId::new(DEFAULT_TENANT_ID).expect("default tenant id");
-    connection
-        .bind_tenant_owner(legacy)
-        .await
-        .expect("default tenant may adopt legacy state during upgrade");
-    connection
-        .bind_tenant_owner(legacy)
-        .await
-        .expect("same tenant claim should be idempotent");
-    connection
+    let error = connection
         .bind_tenant_owner(other)
         .await
-        .expect_err("legacy adoption must still bind the database");
+        .expect_err("every tenant must reject legacy unmarked state");
+    assert_eq!(error.kind(), ErrorKind::UnexpectedResult);
+    let _: i64 = raw
+        .del("legacy-state")
+        .await
+        .expect("remove only this test fixture key");
+}
+
+#[tokio::test]
+async fn raw_inspector_proves_deployment_and_epoch_are_physical_key_boundaries() {
+    let Some(url) = isolated_database_url(15) else {
+        return;
+    };
+    let epoch_a = Uuid::from_u128(0x301);
+    let epoch_b = Uuid::from_u128(0x302);
+    let connection_a =
+        ValkeyConnection::connect(&url, Duration::from_secs(1), "deployment-a", epoch_a)
+            .await
+            .ok();
+    let connection_b =
+        ValkeyConnection::connect(&url, Duration::from_secs(1), "deployment-b", epoch_b)
+            .await
+            .ok();
+    let (Some(connection_a), Some(connection_b)) = (connection_a, connection_b) else {
+        return;
+    };
+    let raw = raw_client(&url).await.expect("raw Valkey client");
+    let session_id = format!("namespace-{}", Uuid::now_v7());
+    let record = SessionRecord::new(
+        UserId::new(Uuid::from_u128(0x303)).expect("user id"),
+        1_000,
+        vec!["password".to_owned()],
+        false,
+        None,
+    );
+    SessionStore::new(&connection_a)
+        .store(&session_id, &record, 30)
+        .await
+        .expect("store in first explicit namespace");
+    assert!(
+        SessionStore::new(&connection_b)
+            .load(&session_id)
+            .await
+            .expect("load second namespace")
+            .is_none()
+    );
+    let business_key = format!("oauth:session:{session_id}");
+    let first_key = nazo_valkey::test_support::storage_key("deployment-a", epoch_a, &business_key)
+        .expect("valid first physical key");
+    let second_key = nazo_valkey::test_support::storage_key("deployment-b", epoch_b, &business_key)
+        .expect("valid second physical key");
+    assert_ne!(first_key, second_key);
+    assert!(
+        raw.get::<Option<String>, _>(&first_key)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        raw.get::<Option<String>, _>(&second_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let _: i64 = raw.del(&first_key).await.expect("remove only fixture key");
 }

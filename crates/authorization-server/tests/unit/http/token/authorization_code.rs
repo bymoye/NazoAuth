@@ -282,7 +282,7 @@ impl LiveAuthorizationCodeFixture {
             ("FRONTEND_BASE_URL", "https://app.example"),
             ("TRANSPORT_MODE", "trusted-proxy"),
             ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
-            ("MTLS_CERTIFICATE_SOURCE", "legacy-verified-headers"),
+            ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
             ("COOKIE_SECURE", "true"),
             ("TOKEN_RATE_LIMIT_MAX_REQUESTS", "100000"),
         ]);
@@ -342,7 +342,7 @@ impl LiveAuthorizationCodeFixture {
                 tls_client_auth_san_dns, tls_client_auth_san_uri, tls_client_auth_san_ip,
                 tls_client_auth_san_email, allow_client_assertion_audience_array,
                 allow_client_assertion_endpoint_audience, require_par_request_object,
-                is_active, jwks,
+                is_active, jwks, security_policy,
                 post_logout_redirect_uris, backchannel_logout_uri,
                 backchannel_logout_session_required, subject_type, sector_identifier_uri,
                 sector_identifier_host
@@ -356,6 +356,7 @@ impl LiveAuthorizationCodeFixture {
                 '[]'::jsonb, false,
                 false, false,
                 $16, NULL,
+                '{"version":1,"assurance":"baseline","require_signed_authorization_request":false,"require_signed_authorization_response":false,"require_signed_introspection_response":false,"session_management":false,"allow_cross_device_flows":false,"allow_confidential_oidc_without_pkce":false}'::jsonb,
                 '[]'::jsonb, NULL,
                 true, $17, $18, $19
             )
@@ -452,12 +453,23 @@ impl LiveAuthorizationCodeFixture {
             r#"
             INSERT INTO oauth_tokens (
                 id, tenant_id, refresh_token_blake3, token_family_id, rotated_from_id,
-                client_id, user_id, scopes, authorization_details, issued_at, expires_at,
+                client_id, user_id, scopes, audience, oidc_auth_context,
+                authorization_details, issued_at, expires_at,
                 revoked_at, reuse_detected_at, subject, dpop_jkt, mtls_x5t_s256
             )
             VALUES (
                 $1, $2, $3, $4, NULL,
-                $5, $6, '["openid","offline_access"]'::jsonb, '[]'::jsonb, now(),
+                $5, $6, '["openid","offline_access"]'::jsonb,
+                '["resource://default"]'::jsonb,
+                jsonb_build_object(
+                    'version', 1, 'issuer', 'https://issuer.example.test',
+                    'audience', $7, 'auth_time', floor(extract(epoch from now()))::bigint,
+                    'amr', '["pwd"]'::jsonb, 'oidc_sid', NULL, 'id_token_sid', NULL,
+                    'acr', NULL, 'nonce', NULL, 'userinfo_claims', '[]'::jsonb,
+                    'userinfo_claim_requests', '[]'::jsonb, 'id_token_claims', '[]'::jsonb,
+                    'id_token_claim_requests', '[]'::jsonb
+                ),
+                '[]'::jsonb, now(),
                 now() + interval '1 day', NULL, NULL, 'subject-1', NULL, NULL
             )
             "#,
@@ -468,6 +480,7 @@ impl LiveAuthorizationCodeFixture {
         .bind::<SqlUuid, _>(family_id)
         .bind::<SqlUuid, _>(client.id)
         .bind::<Nullable<SqlUuid>, _>(None::<Uuid>)
+        .bind::<Text, _>(client.client_id.as_str())
         .execute(&mut conn)
         .await
         .expect("refresh token row should insert");
@@ -1309,27 +1322,17 @@ async fn token_authorization_code_enforces_client_mtls_policy_before_consumption
             },
         )
         .await;
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
+    let certificate =
+        crate::test_support::rfc9440_certificate_fixture("authorization-code-mtls-policy");
     let verified_req = actix_web::test::TestRequest::post()
         .uri("/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            thumbprint,
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=authorization-code-mtls-policy",
-        ))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
 
     let bound_response = token_authorization_code(
@@ -1358,10 +1361,10 @@ async fn token_authorization_code_accepts_matching_mtls_bound_code_before_issuin
     let client = live_client(&format!("client-mtls-bound-{}", Uuid::now_v7()));
     fixture.insert_client(&client).await;
     let user = fixture.insert_user().await;
-    let thumbprint = "REREREREREREREREREREREREREREREREREREREREREQ";
+    let certificate = crate::test_support::rfc9440_certificate_fixture("authorization-code-actual");
     let mut payload = payload_for_client(&client);
     payload.user_id = user.id;
-    payload.mtls_x5t_s256 = Some(thumbprint.to_owned());
+    payload.mtls_x5t_s256 = Some(certificate.thumbprint.clone());
     payload.scopes = vec!["accounts".to_owned()];
     let code = format!("code-{}", Uuid::now_v7());
     fixture
@@ -1371,22 +1374,11 @@ async fn token_authorization_code_accepts_matching_mtls_bound_code_before_issuin
         .uri("/token")
         .app_data(actix_web::web::Data::new(
             crate::http::mtls::MtlsCertificateSource::new(
-                crate::http::mtls::MtlsCertificateSourceMode::LegacyVerifiedHeaders,
+                crate::http::mtls::MtlsCertificateSourceMode::Rfc9440,
             ),
         ))
         .peer_addr("127.0.0.1:12345".parse().expect("peer addr should parse"))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-verify"),
-            "SUCCESS",
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-cert-sha256"),
-            thumbprint,
-        ))
-        .insert_header((
-            header::HeaderName::from_static("x-ssl-client-subject-dn"),
-            "CN=authorization-code-actual",
-        ))
+        .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
 
     let response =

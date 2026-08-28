@@ -642,8 +642,8 @@ impl Openid4vpRepository {
         let Some(row) = row else {
             return Ok(None);
         };
-        if row.create_request_sha256.as_deref() != Some(idempotency.request_sha256)
-            || row.create_request_canonical_json.as_deref() != Some(idempotency.canonical_request)
+        if row.create_request_sha256 != idempotency.request_sha256
+            || row.create_request_canonical_json != idempotency.canonical_request
         {
             return Err(PresentationStoreError::IdempotencyConflict);
         }
@@ -703,7 +703,7 @@ impl PresentationStorePort for Openid4vpRepository {
             let row = load_presentation(&mut connection, self.tenant_id, transaction_id, now)
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            row.map(|value| value.transaction_with_key(&self.data_key, self.tenant_id, now))
+            row.map(|value| value.transaction_with_key(&self.data_key, self.tenant_id))
                 .transpose()
         })
     }
@@ -750,7 +750,7 @@ impl PresentationStorePort for Openid4vpRepository {
                 return Ok(None);
             }
             row.request = encoded;
-            row.transaction_with_key(&self.data_key, self.tenant_id, now)
+            row.transaction_with_key(&self.data_key, self.tenant_id)
                 .map(Some)
         })
     }
@@ -861,7 +861,7 @@ impl PresentationStorePort for Openid4vpRepository {
             let row = load_presentation(&mut connection, self.tenant_id, transaction_id, now)
                 .await
                 .map_err(|_| PresentationStoreError::Unavailable)?;
-            row.map(|value| value.stored(&self.data_key, self.tenant_id, now))
+            row.map(|value| value.stored(&self.data_key, self.tenant_id))
                 .transpose()
         })
     }
@@ -879,12 +879,10 @@ struct PresentationRow {
     response_mode: String,
     #[diesel(sql_type = sql_types::Text)]
     wallet_authorization_endpoint: String,
-    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
-    create_request_jti: Option<String>,
-    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
-    create_request_sha256: Option<String>,
-    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
-    create_request_canonical_json: Option<String>,
+    #[diesel(sql_type = sql_types::Text)]
+    create_request_sha256: String,
+    #[diesel(sql_type = sql_types::Text)]
+    create_request_canonical_json: String,
     #[diesel(sql_type = sql_types::Jsonb)]
     request: serde_json::Value,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
@@ -1047,7 +1045,6 @@ impl VerificationIntentRow {
                 issuance_request_jti: None,
             }),
             &self.result_ciphertext,
-            false,
         )?;
         let result: PresentationResult = serde_json::from_slice(&result)
             .map_err(|_| PresentationStoreError::InvalidTransition)?;
@@ -1245,7 +1242,6 @@ impl VerificationEvidenceRow {
                 issuance_request_jti: None,
             }),
             &self.result_ciphertext,
-            false,
         )?;
         let result: PresentationResult = serde_json::from_slice(&result)
             .map_err(|_| PresentationStoreError::InvalidTransition)?;
@@ -1458,9 +1454,7 @@ impl PresentationRow {
         &self,
         data_key: &[u8; 32],
         tenant_id: Uuid,
-        now: DateTime<Utc>,
     ) -> Result<PresentationTransaction, PresentationStoreError> {
-        let allow_legacy = self.legacy_transaction_aad_eligible(now);
         let mut transaction = self.transaction()?;
         transaction.response_encryption_private_key = self
             .ephemeral_private_key_ciphertext
@@ -1473,7 +1467,6 @@ impl PresentationRow {
                     self.id,
                     None,
                     value,
-                    allow_legacy,
                 )
             })
             .transpose()?;
@@ -1483,9 +1476,7 @@ impl PresentationRow {
         self,
         data_key: &[u8; 32],
         tenant_id: Uuid,
-        now: DateTime<Utc>,
     ) -> Result<StoredPresentation, PresentationStoreError> {
-        let legacy_aad_eligible = self.legacy_transaction_aad_eligible(now);
         let intent_sha256 = self
             .verification_intent_jws
             .as_deref()
@@ -1520,7 +1511,6 @@ impl PresentationRow {
                     self.id,
                     verification_binding,
                     value,
-                    legacy_aad_eligible,
                 )
             })
             .transpose()?;
@@ -1541,7 +1531,6 @@ impl PresentationRow {
                     self.id,
                     None,
                     value,
-                    legacy_aad_eligible,
                 )
             })
             .transpose()?;
@@ -1559,16 +1548,6 @@ impl PresentationRow {
             completed,
         })
     }
-
-    fn legacy_transaction_aad_eligible(&self, now: DateTime<Utc>) -> bool {
-        self.create_request_jti.is_none()
-            && self.create_request_sha256.is_none()
-            && self.create_request_canonical_json.is_none()
-            && self.verification_context_sha256.is_none()
-            && self.verification_intent_jws.is_none()
-            && self.verification_presentation_request_sha256.is_none()
-            && self.expires_at > now
-    }
 }
 
 async fn load_presentation(
@@ -1579,7 +1558,7 @@ async fn load_presentation(
 ) -> Result<Option<PresentationRow>, diesel::result::Error> {
     sql_query(
         "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
-         create_request_jti, create_request_sha256, create_request_canonical_json, \
+         create_request_sha256, create_request_canonical_json, \
          request, request_object, request_uri, openid4vc_trust_policy_binding_id, \
          openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest, \
          verification_context_sha256, verification_intent_jws, \
@@ -1605,7 +1584,7 @@ async fn load_presentation_by_create_request(
 ) -> Result<Option<PresentationRow>, diesel::result::Error> {
     sql_query(
         "SELECT id, client_id_prefix, request_method, response_mode, wallet_authorization_endpoint, \
-         create_request_jti, create_request_sha256, create_request_canonical_json, \
+         create_request_sha256, create_request_canonical_json, \
          request, request_object, request_uri, openid4vc_trust_policy_binding_id, \
          openid4vc_trust_policy_resource_id, openid4vc_trust_policy_digest, \
          verification_context_sha256, verification_intent_jws, \
@@ -1816,7 +1795,6 @@ fn unprotect_payload(
     transaction_id: Uuid,
     verification_binding: Option<PayloadVerificationBinding<'_>>,
     protected: &[u8],
-    allow_legacy_transaction_aad: bool,
 ) -> Result<Vec<u8>, PresentationStoreError> {
     let (nonce, ciphertext) = protected
         .split_at_checked(12)
@@ -1826,25 +1804,15 @@ fn unprotect_payload(
         .map_err(|_| PresentationStoreError::InvalidTransition)?;
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| PresentationStoreError::Unavailable)?;
     let aad = payload_aad(domain, tenant_id, transaction_id, verification_binding);
-    match cipher.decrypt(
-        nonce.into(),
-        Payload {
-            msg: ciphertext,
-            aad: &aad,
-        },
-    ) {
-        Ok(value) => Ok(value),
-        Err(_) if allow_legacy_transaction_aad => cipher
-            .decrypt(
-                nonce.into(),
-                Payload {
-                    msg: ciphertext,
-                    aad: transaction_id.as_bytes(),
-                },
-            )
-            .map_err(|_| PresentationStoreError::InvalidTransition),
-        Err(_) => Err(PresentationStoreError::InvalidTransition),
-    }
+    cipher
+        .decrypt(
+            nonce.into(),
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| PresentationStoreError::InvalidTransition)
 }
 
 fn unprotect_verification_capability(
@@ -1884,7 +1852,6 @@ fn unprotect_verification_capability(
             issuance_request_jti: Some(context.issuance_request_jti),
         }),
         protected,
-        false,
     )?;
     String::from_utf8(plaintext).map_err(|_| PresentationStoreError::InvalidTransition)
 }

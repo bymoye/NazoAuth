@@ -20,7 +20,7 @@ use crate::domain::client_policy::parse_scope;
 use crate::domain::tenancy::DEFAULT_TENANT_ID;
 
 use crate::domain::{ClientRow, RefreshTokenPolicy, TokenIssue};
-use crate::settings::{AuthorizationServerProfile, Settings};
+use crate::settings::Settings;
 use actix_web::http::StatusCode;
 use actix_web::http::header;
 use actix_web::http::header::{HeaderMap, HeaderValue};

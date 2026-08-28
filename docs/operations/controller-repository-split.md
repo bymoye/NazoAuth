@@ -28,16 +28,14 @@ standard provenance, signing evidence, and publication. It never builds or
 publishes NazoAuthCtl. Cross-repository integration downloads signed server
 Release/OCI artifacts and does not rebuild the server.
 
-The legacy `crates/nazoauthctl` directory was removed only after NazoAuthCtl PR
-[#1](https://github.com/nazozero/NazoAuthCtl/pull/1) passed controller-only CI,
-the signed current/previous server matrix, and real Docker, Podman, and systemd
-recovery scenarios, and after independent NazoAuthCtl `v0.1.20` publication.
-The NazoAuth `v0.1.20` tag retains the pre-removal source and remains the exact
-review/rollback point. Coupled server/ctl publication must not be reintroduced.
+The server repository contains no controller implementation, controller release
+job, controller state, or alternate command surface. NazoAuthCtl is built and
+published from its own repository. Cross-repository verification selects one
+exact controller commit and one exact supported server Release; coupled
+publication must not be reintroduced.
 
-Recovery commands are not application operations. Rollback, backup recovery,
-interrupted-update recovery, identity recovery, and previous trusted activation
-must work with the HTTP service stopped and without executing the current server
-binary, current OCI image, or operator-task. Whole-machine loss remains an
-off-host recovery-package boundary; a controller stored only on the lost machine
-cannot satisfy it.
+Recovery commands are not application operations. Backup recovery,
+interrupted-update recovery, and identity recovery must work with the HTTP
+service stopped and without trusting execution of the failed server runtime.
+Whole-machine loss remains an off-host recovery-package boundary; a controller
+and backup stored only on the lost machine cannot satisfy it.

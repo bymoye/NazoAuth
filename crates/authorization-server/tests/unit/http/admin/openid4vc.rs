@@ -24,7 +24,7 @@ use nazo_digital_credentials::{
     CertificateRevocationPolicy, CredentialFormat, VcIssuerTrustPolicy,
 };
 use nazo_http_actix::OAuthJsonErrorFields;
-use nazo_key_management::KeyManager;
+use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
 use nazo_openid4vci::CredentialConfiguration;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256,
@@ -43,7 +43,7 @@ use crate::{
         sessions::{AdminSessionHandles, SessionHttpConfig, SessionPayload},
         token::ServerTokenService,
     },
-    runtime_modules::test_support::runtime_module_registry_for_test,
+    runtime_modules::test_support::runtime_module_registry_with_modules_for_test,
     settings::Settings,
     test_support::{
         DatabaseUserFixture, TestInfrastructure, initialize_audit_dependencies,
@@ -147,10 +147,7 @@ impl LiveOpenid4vcAdminFixture {
         let key_dir =
             std::env::temp_dir().join(format!("nazo-openid4vc-admin-{}", Uuid::now_v7().simple()));
         std::fs::create_dir_all(&key_dir).expect("credential key directory should be created");
-        let (keyset, chain_pem, anchors_pem) = credential_key_material(&key_dir);
-        let key_manager = KeyManager::load_or_create(keyset)
-            .await
-            .expect("credential test keyset should load");
+        let (key_manager, chain_pem, anchors_pem) = credential_key_material(&key_dir).await;
         let crypto = Openid4vcCredentialCrypto::new_with_policies(
             key_manager.clone(),
             chain_pem.as_bytes(),
@@ -176,8 +173,17 @@ impl LiveOpenid4vcAdminFixture {
             nazo_valkey::AuthorizationStateAdapter::new(&state.valkey_connection()),
             key_manager.clone(),
         ));
-        let runtime = runtime_module_registry_for_test(diesel_db.clone(), &settings)
-            .expect("runtime module fixture should build");
+        let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
+        active_modules.extend([
+            nazo_runtime_modules::ModuleId::Openid4vciIssuer,
+            nazo_runtime_modules::ModuleId::AuthorizationDetails,
+        ]);
+        let runtime = runtime_module_registry_with_modules_for_test(
+            diesel_db.clone(),
+            &settings,
+            active_modules,
+        )
+        .expect("runtime module fixture should build");
         let proof_validator = Openid4vcProofValidator::new(json!({"keys": []}))
             .expect("proof validator fixture should build");
         let operations = Arc::new(
@@ -256,7 +262,7 @@ impl LiveOpenid4vcAdminFixture {
         };
         valkey_set_ex(
             &self.state.valkey,
-            format!("oauth:session:{sid}"),
+            nazo_valkey::test_support::state_storage_key(format!("oauth:session:{sid}")),
             serde_json::to_string(&payload).expect("session should serialize"),
             self.state.settings.session.session_ttl_seconds,
         )
@@ -321,8 +327,19 @@ impl LiveOpenid4vcAdminFixture {
             nazo_valkey::AuthorizationStateAdapter::new(&self.state.valkey_connection()),
             self.state.keyset.clone(),
         ));
-        let runtime = runtime_module_registry_for_test(self.state.diesel_db.clone(), &settings)
-            .expect("runtime module fixture should build");
+        let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
+        if enabled {
+            active_modules.extend([
+                nazo_runtime_modules::ModuleId::Openid4vciIssuer,
+                nazo_runtime_modules::ModuleId::AuthorizationDetails,
+            ]);
+        }
+        let runtime = runtime_module_registry_with_modules_for_test(
+            self.state.diesel_db.clone(),
+            &settings,
+            active_modules,
+        )
+        .expect("runtime module fixture should build");
         let proof_validator = Openid4vcProofValidator::new(json!({"keys": []}))
             .expect("proof validator fixture should build");
         let operations = ServerCredentialIssuerOperations::new(
@@ -345,29 +362,43 @@ impl LiveOpenid4vcAdminFixture {
     }
 }
 
-fn credential_key_material(
-    key_dir: &std::path::Path,
-) -> (nazo_key_management::KeySettings, String, String) {
-    let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf key");
-    let leaf_pem = leaf_key.serialize_pem();
-    std::fs::write(key_dir.join("credential-test.pem"), leaf_pem)
-        .expect("credential private key should be written");
-    std::fs::write(
-        key_dir.join("keyset.json"),
-        serde_json::to_vec_pretty(&json!({
-            "active_kid": "credential-test",
-            "keys": [{
-                "kid": "credential-test",
-                "alg": "ES256",
-                "file": "credential-test.pem",
-                "created_at": Utc::now().to_rfc3339(),
-                "retire_at": Value::Null,
-                "purposes": ["credential", "presentation_request"]
-            }]
-        }))
-        .expect("credential keyset should serialize"),
+async fn credential_key_material(key_dir: &std::path::Path) -> (KeyManager, String, String) {
+    let settings = KeySettings {
+        keys_dir: key_dir.to_owned(),
+        external_command: Vec::new(),
+        external_timeout: StdDuration::from_secs(1),
+        rotation_interval: chrono::Duration::days(1),
+        prepublish_window: chrono::Duration::hours(1),
+        verification_grace: chrono::Duration::hours(1),
+    };
+    KeyManager::load_or_create(settings.clone())
+        .await
+        .expect("credential keyset should initialize");
+    let kid = KeyManager::register_local(
+        &settings,
+        LocalKeyRegistration {
+            algorithm: jsonwebtoken::Algorithm::ES256,
+            purposes: [
+                nazo_auth::SigningPurpose::Credential,
+                nazo_auth::SigningPurpose::PresentationRequest,
+            ]
+            .into_iter()
+            .collect(),
+        },
     )
-    .expect("credential keyset should be written");
+    .await
+    .expect("credential key should register");
+    let record = KeyManager::list_keys(&settings)
+        .await
+        .expect("credential keys should list")
+        .into_iter()
+        .find(|record| record.kid == kid)
+        .expect("registered credential key should be listed");
+    assert_eq!(record.backend, "local-pem");
+    assert!(!record.locator.is_empty());
+    let leaf_pem = std::fs::read_to_string(key_dir.join(record.locator))
+        .expect("credential private key should be readable");
+    let leaf_key = KeyPair::from_pem(&leaf_pem).expect("credential private key should parse");
 
     let root_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("root key");
     let mut root_params = CertificateParams::default();
@@ -381,14 +412,9 @@ fn credential_key_material(
     let chain_pem = format!("{}{}", leaf.pem(), root.pem());
     let anchors_pem = root.pem();
     (
-        nazo_key_management::KeySettings {
-            keys_dir: key_dir.to_owned(),
-            external_command: Vec::new(),
-            external_timeout: StdDuration::from_secs(1),
-            rotation_interval: chrono::Duration::days(1),
-            prepublish_window: chrono::Duration::hours(1),
-            verification_grace: chrono::Duration::hours(1),
-        },
+        KeyManager::load_or_create(settings)
+            .await
+            .expect("credential keyset should reload"),
         chain_pem,
         anchors_pem,
     )

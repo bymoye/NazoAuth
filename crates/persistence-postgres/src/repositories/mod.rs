@@ -73,15 +73,14 @@ pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;
 pub use tenancy::ActiveTenantBoundaryRepository;
 pub use tenant_resources::{
-    NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, NewTenantResourceOperation,
-    Openid4vcTrustPolicyClientBind, Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke,
-    Openid4vcTrustPolicyWrite, StoredOpenid4vcTrustPolicy, TenantResourceBinding,
-    TenantResourceBindingDeactivate, TenantResourceOperationRecord, TenantResourceOperationWrite,
+    NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, Openid4vcTrustPolicyClientBind,
+    Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke, Openid4vcTrustPolicyWrite,
+    StoredOpenid4vcTrustPolicy, TenantResourceBinding, TenantResourceBindingDeactivate,
     TenantResourceRepository, TenantResourceState, TenantResourceStateCas,
 };
 pub use token_issuance::TokenIssuanceRepository;
 pub use token_issuance::{TokenIssuanceResponseKeyError, TokenIssuanceResponseKeyRing};
-pub use tokens::TokenRepository;
+pub use tokens::{RecoveryInvalidation, TokenRepository};
 pub use users::{
     UserInsert, UserRepository, disable_user_on_connection, insert_user_on_connection,
 };

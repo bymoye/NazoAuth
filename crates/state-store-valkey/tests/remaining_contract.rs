@@ -16,7 +16,7 @@ use serde_json::json;
 
 async fn setup() -> Option<(ValkeyConnection, fred::prelude::Client)> {
     let url = std::env::var("VALKEY_URL").ok()?;
-    let connection = ValkeyConnection::connect(&url, Duration::from_secs(1))
+    let connection = nazo_valkey::test_support::scoped_connect(&url, Duration::from_secs(1))
         .await
         .unwrap();
     let inspector = Builder::from_config(Config::from_url(&url).unwrap())
@@ -56,10 +56,10 @@ async fn authentication_short_state_preserves_exact_keys_and_one_time_semantics(
             .unwrap()
     );
     let email_digest = blake3::hash(email.as_bytes()).to_hex();
-    let send_key = format!(
+    let send_key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:email_verify:{}:send:{email_digest}",
         tenant_id.as_uuid()
-    );
+    ));
     assert_eq!(inspector.get::<String, _>(&send_key).await.unwrap(), "1");
     assert!(!send_key.contains(&email));
     store
@@ -511,14 +511,9 @@ async fn login_session_replacement_atomically_invalidates_the_previous_session()
             .value(),
         &replacement
     );
-    assert!(
-        (1..=60).contains(
-            &inspector
-                .ttl::<i64, _>(format!("oauth:session:{replacement_id}"))
-                .await
-                .unwrap()
-        )
-    );
+    let replacement_key =
+        nazo_valkey::test_support::state_storage_key(format!("oauth:session:{replacement_id}"));
+    assert!((1..=60).contains(&inspector.ttl::<i64, _>(replacement_key).await.unwrap()));
 }
 
 #[tokio::test]
@@ -533,10 +528,10 @@ async fn concurrent_rate_counters_are_atomic_and_preserve_first_window_ttl() {
     let mut counts = results.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
     counts.sort_unstable();
     assert_eq!(counts, (1..=20).collect::<Vec<_>>());
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:rate:token:{}",
         blake3::hash(subject.as_bytes()).to_hex()
-    );
+    ));
     assert!((1..=30).contains(&inspector.ttl::<i64, _>(&key).await.unwrap()));
 }
 
@@ -569,10 +564,10 @@ async fn mfa_failure_budget_is_session_bound_and_clears_after_success() {
         }
     );
     let subject = format!("{}:{}:{session}", tenant.as_uuid(), user.as_uuid());
-    let key = format!(
+    let key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:mfa_failure:{}",
         blake3::hash(subject.as_bytes()).to_hex()
-    );
+    ));
     assert!((1..=30).contains(&inspector.ttl::<i64, _>(&key).await.unwrap()));
 
     store.clear_attempts(tenant, user, &session).await.unwrap();
@@ -611,10 +606,10 @@ async fn token_state_preserves_subject_and_native_sso_key_contracts() {
         store.load_access_token_subject(tenant, &jti).await.unwrap(),
         Some(user)
     );
-    let subject_key = format!(
+    let subject_key = nazo_valkey::test_support::state_storage_key(format!(
         "oauth:access_token:subject:{tenant}:{}",
         blake3::hash(jti.as_bytes()).to_hex()
-    );
+    ));
     assert_eq!(
         inspector.get::<String, _>(&subject_key).await.unwrap(),
         user.to_string()
