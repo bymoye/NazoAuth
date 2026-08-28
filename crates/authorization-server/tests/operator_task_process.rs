@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -179,17 +179,44 @@ fn run_operator_task(root: &Path, compact: &str, extra_env: Vec<(&str, String)>)
     .unwrap()
 }
 
-fn wait_for_marker(path: &Path) {
-    for _ in 0..500 {
+fn wait_for_marker(mut child: Child, path: &Path) -> Child {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
         if path.is_file() {
-            return;
+            return child;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "operator test process exited before reaching failpoint {}: {status}; stdout: {}; stderr: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "operator test process status failed before reaching failpoint {}: {error}",
+                    path.display()
+                );
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "operator test failpoint was not reached before the 30-second deadline: {}; stdout: {}; stderr: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!(
-        "operator test failpoint was not reached: {}",
-        path.display()
-    );
 }
 
 fn build_identity() -> ControlBuildIdentity {
@@ -346,7 +373,7 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
     let compact = sign_control_operation(&op, &controller).unwrap();
 
     let marker = root.join("before-side-effect.marker");
-    let mut killed = spawn_operator_task(
+    let killed = spawn_operator_task(
         &root,
         &compact,
         SpawnOptions {
@@ -354,7 +381,7 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
             failpoint: Some(("control-journal-before-side-effect", marker.clone())),
         },
     );
-    wait_for_marker(&marker);
+    let mut killed = wait_for_marker(killed, &marker);
     killed.kill().unwrap();
     assert!(!killed.wait().unwrap().success());
 
