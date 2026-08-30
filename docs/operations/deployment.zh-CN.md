@@ -161,7 +161,7 @@ nazoauthctl operation --instance production --limit 20
 正式发布的独立安装使用同一个生命周期入口：
 
 ```sh
-nazoauthctl update --instance production --yes
+nazoauthctl update --instance production
 ```
 
 该命令校验标签级 Sigstore 身份和不可变制品摘要，在同一签名事务中执行迁移与

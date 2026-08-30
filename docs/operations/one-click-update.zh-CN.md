@@ -62,8 +62,8 @@ printf '%s' '{"email":"admin@example.com","password":"..."}' | \
 ## 更新与回滚
 
 ```sh
-nazoauthctl update --instance production --to v0.2.3 --yes
-nazoauthctl rollback --instance production --yes
+nazoauthctl update --instance production --to v0.2.6
+nazoauthctl rollback --instance production
 ```
 
 更新只解析并验证一个不可变制品，签发一个 canonical `ControlOperation`，并在激活前通过目标机 journaled lifecycle 执行迁移。durable `ControlResult` 必须同时绑定 operation ID、request hash、typed payload、目标制品与配置 revision。响应丢失只会重放同一操作。
@@ -86,13 +86,13 @@ snapshot 将 PostgreSQL custom-format dump、deployment data、secrets、配置�
 ## 灾难恢复
 
 ```sh
-nazoauthctl recover --instance production --yes
+nazoauthctl recover --instance production
 ```
 
-只有恢复后的 Controller Registry 明确返回 `CONTROLLER_KEY_UNTRUSTED` 或 `CONTROLLER_KEY_EXPIRED`，Ctl 才会读取 owner-only Recovery Secret 文件并进入 break-glass ceremony：
+只有恢复后的 Controller Registry 返回 `CONTROLLER_KEY_UNAUTHORIZED`，Ctl 才会读取 owner-only Recovery Secret 文件并进入 break-glass ceremony：
 
 ```sh
-nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret --yes
+nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret
 ```
 
 网络错误、5xx、unknown outcome 和其他拒绝码都不会降级为恢复。恢复流程会停止原 runtime，恢复已验证 snapshot，启动仅 loopback 可达的候选，并通过进程独占的目标侧本地通道访问 `/controller-recovery/challenges` 与 `/controller-recovery/recover`；该通道不发送 Cookie/CSRF，也不开放公网入口。

@@ -194,7 +194,7 @@ nazoauthctl operation --instance production --limit 20
 For a released standalone installation, the normal upgrade is:
 
 ```sh
-nazoauthctl update --instance production --yes
+nazoauthctl update --instance production
 ```
 
 This verifies the tag-specific Sigstore identity and immutable artifact

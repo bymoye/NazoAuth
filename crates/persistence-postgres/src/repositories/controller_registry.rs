@@ -971,8 +971,7 @@ impl ControllerRegistryRepository {
 
     /// Single-kid admission lookup used to verify one presented envelope key.
     /// Returns `None` for unknown, revoked, and expired keys alike; callers map
-    /// the outcome onto their closed error taxonomy
-    /// (`CONTROLLER_KEY_UNTRUSTED` / `CONTROLLER_KEY_EXPIRED`).
+    /// the outcome onto the single controller-key authorization rejection.
     pub async fn admitted_controller_by_kid(
         &self,
         deployment_id: &str,

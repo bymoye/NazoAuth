@@ -95,8 +95,8 @@ nor the token enter argv, ordinary environment variables, Registry, or logs.
 ## Update and rollback
 
 ```sh
-nazoauthctl update --instance production --to v0.2.3 --yes
-nazoauthctl rollback --instance production --yes
+nazoauthctl update --instance production --to v0.2.6
+nazoauthctl rollback --instance production
 ```
 
 Update resolves and verifies one immutable artifact, signs one canonical
@@ -136,15 +136,15 @@ evidence.
 ## Disaster recovery
 
 ```sh
-nazoauthctl recover --instance production --yes
+nazoauthctl recover --instance production
 ```
 
-If the restored Controller Registry rejects the current key with the exact
-`CONTROLLER_KEY_UNTRUSTED` or `CONTROLLER_KEY_EXPIRED` code, provide the offline
-secret through an owner-only file:
+If the restored Controller Registry rejects the current key with
+`CONTROLLER_KEY_UNAUTHORIZED`, provide the offline secret through an owner-only
+file:
 
 ```sh
-nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret --yes
+nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret
 ```
 
 The secret is read only after that stable identity rejection. Network errors,
