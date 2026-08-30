@@ -119,10 +119,10 @@ pub(super) fn spawn_ciba_ping_worker(
 
 #[cfg(not(test))]
 pub(super) fn spawn_backchannel_logout_worker(
-    logout_deliveries: nazo_postgres::AuditRepository,
+    logout_deliveries: Arc<dyn nazo_persistence::BackchannelLogoutDeliveryStore>,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    spawn_backchannel_logout_delivery_worker(BackchannelLogoutWorker::new(
+    spawn_backchannel_logout_delivery_worker(BackchannelLogoutWorker::from_port(
         logout_deliveries,
         &settings.modules.backchannel_logout_private_origins,
     )?);

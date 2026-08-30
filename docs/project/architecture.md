@@ -29,11 +29,13 @@ package names retain the `nazo-` namespace and do not determine directory names.
 | `resource-server` | `nazo-resource-server` | Standalone JWT access-token and sender-constraint verification. It is independent of the authorization server, identity, and every Web framework. |
 | `http-signatures` | `nazo-http-signatures` | Reusable HTTP Message Signatures, structured-field, content-digest, signing, and verification primitives. Authorization-server FAPI policy remains in `nazo-auth`. |
 | `key-management` | `nazo-key-management` | Key generation, purpose-specific lifecycle, rotation, JWKS material, signing implementations, external-command signing, and future KMS/HSM integration. |
+| `persistence` | `nazo-persistence` | Database-neutral semantic persistence contracts and application-facing records. It contains no SQL, connection, transaction, or driver API. |
 | `persistence-postgres` | `nazo-postgres` | Durable persistence adapter: Diesel schema and rows, pool, queries, repository implementations, explicit row/domain conversion, migrations, and PostgreSQL transaction boundaries. Rows never leave this crate. |
 | `state-store-valkey` | `nazo-valkey` | Atomic state-store adapter: Fred connection handling, stable keys and payloads, TTL, Lua operations, replay/session/short-lived protocol state, and rate-limit storage. It owns storage mechanics, not protocol or identity policy. |
 | `http-actix` | `nazo-http-actix` | Actix extraction, request context, CORS, middleware, security headers, protocol response presentation, and Actix-specific integration. It does not query Diesel or Fred and does not construct token claims. |
 | `runtime-capabilities` | `nazo-runtime-modules` | Runtime-controllable protocol capability identifiers, desired and actual lifecycle state, revision rules, immutable active snapshots, dependency checks, disable policy, request leases, and audit event types. It is not a generic plugin or miscellaneous-module crate. |
-| `authorization-server` | `nazo-oauth-server` | Deployable authorization-server application and composition root: validates configuration, creates focused services and adapters, starts background tasks, registers static routes, and starts Actix. Ordinary handlers must receive only the focused handles they use. |
+| `authorization-server` | `nazo-oauth-server` | Database-neutral authorization-server application library: validates configuration, creates focused services from semantic persistence bindings, starts background tasks, registers static routes, and starts Actix. Ordinary handlers receive only the focused handles they use. |
+| `authorization-server-postgres` | `nazo-oauth-server-postgres` | PostgreSQL composition root and the production `nazoauth` executable. This is the only application package that links `nazo-postgres`. |
 
 The historical Axum/Tower and tonic adapters are removed. Only Actix transport
 integration is maintained. The generic resource-server core may use the
@@ -48,12 +50,15 @@ the only package expected to see all concrete implementations.
 ```text
 authorization-server-core -> identity, runtime-capabilities
 key-management            -> authorization-server-core
-persistence-postgres       -> authorization-server-core, identity,
+persistence                -> authorization-server-core, identity,
+                              resource-server, runtime-capabilities
+persistence-postgres       -> persistence, authorization-server-core, identity,
                               resource-server, runtime-capabilities
 state-store-valkey         -> authorization-server-core, identity, resource-server
 http-actix                 -> authorization-server-core, http-signatures, identity,
                               resource-server, runtime-capabilities
-authorization-server       -> all concrete crates required for composition
+authorization-server       -> persistence, domain and transport crates; no database adapter
+authorization-server-postgres -> authorization-server, persistence-postgres
 
 identity, resource-server, runtime-capabilities and http-signatures
                             -> no other NazoAuth crate

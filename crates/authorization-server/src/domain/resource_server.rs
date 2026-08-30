@@ -41,11 +41,11 @@ mod production {
     use nazo_http_signatures::VerifiedInput;
     use nazo_key_management::{HttpSigningLease, KeySnapshot};
     use nazo_resource_server::{
-        ConfirmationPolicy, DpopNoncePolicy as ResourceDpopNoncePolicy, DpopProofVerifier,
-        DpopProofVerifierConfig, ProtectedResourceAuthorizationContext,
-        ProtectedResourceAuthorizationRequest, ProtectedResourceAuthorizationResult,
-        ProtectedResourceAuthorizationService, ResourceServerVerifier,
-        ResourceServerVerifierConfig,
+        AccessTokenRevocationLookup, ConfirmationPolicy,
+        DpopNoncePolicy as ResourceDpopNoncePolicy, DpopProofVerifier, DpopProofVerifierConfig,
+        ProtectedResourceAuthorizationContext, ProtectedResourceAuthorizationRequest,
+        ProtectedResourceAuthorizationResult, ProtectedResourceAuthorizationService,
+        ResourceServerVerifier, ResourceServerVerifierConfig,
     };
     use nazo_runtime_modules::ModuleId;
 
@@ -57,7 +57,7 @@ mod production {
     use super::ResourceServerConfig;
 
     type ServerResourceAuthorizationService = ProtectedResourceAuthorizationService<
-        nazo_postgres::TokenRepository,
+        Arc<dyn AccessTokenRevocationLookup>,
         nazo_valkey::ReplayStore,
     >;
 
@@ -79,16 +79,16 @@ mod production {
     pub(crate) struct ServerFapiResourceAuthorizer {
         config: ResourceServerConfig,
         keyset: nazo_key_management::KeyManager,
-        tokens: nazo_postgres::TokenRepository,
+        tokens: Arc<dyn AccessTokenRevocationLookup>,
         replay: nazo_valkey::ReplayStore,
         service_cache: Arc<Mutex<Option<CachedResourceAuthorizationService>>>,
     }
 
     impl ServerFapiResourceAuthorizer {
-        pub(crate) fn new(
+        pub(crate) fn from_port(
             config: ResourceServerConfig,
             keyset: nazo_key_management::KeyManager,
-            tokens: nazo_postgres::TokenRepository,
+            tokens: Arc<dyn AccessTokenRevocationLookup>,
             replay: nazo_valkey::ReplayStore,
         ) -> Self {
             Self {
@@ -202,7 +202,7 @@ mod production {
 
     #[derive(Clone)]
     pub(crate) struct ServerFapiHttpMessageSignatures {
-        clients: nazo_postgres::OAuthClientRepository,
+        clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
         replay: nazo_valkey::ReplayStore,
         keyset: nazo_key_management::KeyManager,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
@@ -210,8 +210,28 @@ mod production {
     }
 
     impl ServerFapiHttpMessageSignatures {
-        pub(crate) fn new(
-            clients: nazo_postgres::OAuthClientRepository,
+        #[cfg(test)]
+        pub(crate) fn new<C>(
+            clients: C,
+            replay: nazo_valkey::ReplayStore,
+            keyset: nazo_key_management::KeyManager,
+            runtime_modules: Arc<ServerRuntimeModuleRegistry>,
+            max_age_seconds: i64,
+        ) -> Self
+        where
+            C: nazo_auth::AdminClientRepositoryPort + 'static,
+        {
+            Self::from_port(
+                Arc::new(clients),
+                replay,
+                keyset,
+                runtime_modules,
+                max_age_seconds,
+            )
+        }
+
+        pub(crate) fn from_port(
+            clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
             replay: nazo_valkey::ReplayStore,
             keyset: nazo_key_management::KeyManager,
             runtime_modules: Arc<ServerRuntimeModuleRegistry>,

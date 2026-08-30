@@ -316,7 +316,7 @@ pub(crate) fn mfa_totp_key_ring(
 /// constructing the token repository.
 pub(crate) fn token_issuance_response_key_ring(
     config: &ConfigSource,
-) -> anyhow::Result<nazo_postgres::TokenIssuanceResponseKeyRing> {
+) -> anyhow::Result<nazo_persistence::TokenIssuanceResponseKeyRing> {
     let current_key = parse_required_32_byte_key(config, "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")?;
     let current_id = config.required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID")?;
     let previous_key =
@@ -328,7 +328,7 @@ pub(crate) fn token_issuance_response_key_ring(
         );
     }
     let previous = previous_key.zip(previous_id).map(|(key, id)| (id, key));
-    nazo_postgres::TokenIssuanceResponseKeyRing::new(current_id, current_key, previous)
+    nazo_persistence::TokenIssuanceResponseKeyRing::new(current_id, current_key, previous)
         .map_err(anyhow::Error::from)
 }
 

@@ -151,7 +151,7 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
 
 pub(crate) fn dynamic_registration_endpoint(
     config: DynamicRegistrationConfig,
-    clients: nazo_postgres::OAuthClientRepository,
+    clients: Arc<dyn nazo_auth::DynamicRegistrationClientStore>,
     rate_limits: nazo_valkey::RateLimitStore,
     keyset: nazo_key_management::KeyManager,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
@@ -179,7 +179,7 @@ pub(crate) fn dynamic_registration_endpoint(
             request_object_encryption_algs: vec!["RSA-OAEP-256"],
             request_object_encryption_encs: vec!["A256GCM"],
         },
-        Arc::new(clients),
+        clients,
         Arc::new(ServerSectorIdentifierResolver),
         nazo_http_actix::DynamicRegistrationSecurityServices::new(
             remote_client_documents,

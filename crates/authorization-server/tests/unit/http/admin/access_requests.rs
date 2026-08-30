@@ -30,7 +30,7 @@ use crate::test_support::{DatabaseUserFixture, TestInfrastructure};
 use chrono::Utc;
 use diesel::prelude::*;
 use nazo_identity::AccessRequestStatus;
-use nazo_postgres::{create_pool, get_conn};
+use nazo_postgres::{AccessRequestRepository, create_pool, get_conn};
 
 async fn profile_access_requests_from_state(
     state: Data<TestInfrastructure>,
@@ -116,7 +116,7 @@ fn test_state() -> TestInfrastructure {
 
 struct TestAdminAccessRequestDependencies {
     admin_sessions: Data<AdminSessionHandles>,
-    repository: Data<AccessRequestRepository>,
+    repository: Data<dyn nazo_persistence::AdminAccessRequestStore>,
     delivery_store: Data<DeliveryStore>,
     client_service: Data<ServerAdminClientService>,
     config: Data<AdminAccessRequestConfig>,
@@ -141,10 +141,15 @@ fn admin_access_request_dependencies(
                 session.cookie_secure,
             ),
         )),
-        repository: Data::new(AccessRequestRepository::new(state.diesel_db.clone())),
+        repository: Data::from(
+            Arc::new(AccessRequestRepository::new(state.diesel_db.clone()))
+                as Arc<dyn nazo_persistence::AdminAccessRequestStore>,
+        ),
         delivery_store: Data::new(DeliveryStore::new(&state.valkey_connection())),
         client_service: Data::new(ServerAdminClientService::new(
-            nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone()),
+            Arc::new(nazo_postgres::OAuthClientRepository::new(
+                state.diesel_db.clone(),
+            )) as Arc<dyn nazo_auth::AdminClientRepositoryPort>,
             ServerSectorIdentifierResolver,
             ServerAdminClientCrypto::new(state.keyset.clone()),
             admin_client_policy(&state.settings),

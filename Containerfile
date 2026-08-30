@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=nazoauth-cargo-registry,target=/usr/local/cargo/regist
     --mount=type=cache,id=nazoauth-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=nazoauth-target,target=/app/target,sharing=locked \
     cargo build --release --locked \
-      --package nazo-oauth-server --bin nazoauth \
+      --package nazo-oauth-server-postgres --bin nazoauth \
     && install -Dm755 target/release/nazoauth /out/nazoauth
 
 FROM docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base

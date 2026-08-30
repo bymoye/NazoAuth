@@ -1,4 +1,5 @@
 use super::*;
+use nazo_postgres::{DbPool, RuntimeModuleRepository};
 
 pub(crate) fn runtime_module_registry_for_test(
     pool: DbPool,
@@ -17,7 +18,8 @@ pub(crate) fn runtime_module_registry_with_modules_for_test(
     active_modules: BTreeSet<ModuleId>,
 ) -> anyhow::Result<Arc<ServerRuntimeModuleRegistry>> {
     let catalog = module_catalog(settings)?;
-    let repository = Arc::new(RuntimeModuleRepository::new(pool));
+    let store = Arc::new(RuntimeModuleRepository::new(pool));
+    let repository = Arc::new(PersistenceRuntimeModuleRepository::new(store));
     let lifecycle = Arc::new(ServerModuleLifecycle {
         repository: repository.clone(),
     });

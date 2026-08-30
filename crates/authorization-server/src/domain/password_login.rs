@@ -2,29 +2,24 @@ use nazo_http_actix::{PasswordLoginFuture, PasswordLoginOperations};
 use nazo_identity::{
     AuthenticatePasswordError, AuthenticatePasswordInput, AuthenticationService,
     authentication::PasswordLoginResult,
-    ports::{
-        AuthenticationAuditPort, LoginAccountRepositoryPort, LoginSessionPort, LoginThrottlePort,
-        RememberedMfaDevicePort, SecretVerifyPort,
-    },
+    ports::{AuthenticationAuditPort, LoginSessionPort, LoginThrottlePort, SecretVerifyPort},
 };
 
 #[derive(Clone)]
-pub(crate) struct ServerPasswordLoginOperations<A, T, V, M, S, U> {
-    service: AuthenticationService<A, T, V, M, S, U>,
+pub(crate) struct ServerPasswordLoginOperations<T, V, S, U> {
+    service: AuthenticationService<T, V, S, U>,
 }
 
-impl<A, T, V, M, S, U> ServerPasswordLoginOperations<A, T, V, M, S, U> {
-    pub(crate) fn new(service: AuthenticationService<A, T, V, M, S, U>) -> Self {
+impl<T, V, S, U> ServerPasswordLoginOperations<T, V, S, U> {
+    pub(crate) fn new(service: AuthenticationService<T, V, S, U>) -> Self {
         Self { service }
     }
 }
 
-impl<A, T, V, M, S, U> PasswordLoginOperations for ServerPasswordLoginOperations<A, T, V, M, S, U>
+impl<T, V, S, U> PasswordLoginOperations for ServerPasswordLoginOperations<T, V, S, U>
 where
-    A: LoginAccountRepositoryPort + 'static,
     T: LoginThrottlePort + 'static,
     V: SecretVerifyPort + 'static,
-    M: RememberedMfaDevicePort + 'static,
     S: LoginSessionPort + 'static,
     U: AuthenticationAuditPort + 'static,
 {

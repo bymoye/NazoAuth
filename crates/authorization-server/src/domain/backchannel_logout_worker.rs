@@ -11,7 +11,7 @@ use futures_util::{StreamExt as _, stream};
 use nazo_auth::BackchannelLogoutDelivery;
 use nazo_auth::MAX_CIBA_LOGOUT_URI_BYTES;
 #[cfg(not(test))]
-use nazo_postgres::AuditRepository;
+use nazo_persistence::BackchannelLogoutDeliveryStore;
 use url::Url;
 
 use super::sector_identifier::is_blocked_ip;
@@ -40,14 +40,27 @@ enum BackchannelPostOutcome {
 #[cfg(not(test))]
 #[derive(Clone)]
 pub(crate) struct BackchannelLogoutWorker {
-    deliveries: AuditRepository,
+    deliveries: Arc<dyn BackchannelLogoutDeliveryStore>,
     private_network_origins: Arc<HashSet<String>>,
 }
 
 #[cfg(not(test))]
 impl BackchannelLogoutWorker {
-    pub(crate) fn new(
-        deliveries: AuditRepository,
+    #[cfg(test)]
+    pub(crate) fn new<D>(deliveries: D, private_network_origins: &[String]) -> anyhow::Result<Self>
+    where
+        D: BackchannelLogoutDeliveryStore + 'static,
+    {
+        Ok(Self {
+            deliveries: Arc::new(deliveries),
+            private_network_origins: Arc::new(parse_private_network_origins(
+                private_network_origins,
+            )?),
+        })
+    }
+
+    pub(crate) fn from_port(
+        deliveries: Arc<dyn BackchannelLogoutDeliveryStore>,
         private_network_origins: &[String],
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -61,7 +74,7 @@ impl BackchannelLogoutWorker {
     pub(crate) async fn process_due_batch(&self) -> anyhow::Result<usize> {
         let deliveries = self
             .deliveries
-            .claim_due_backchannel_logout(DELIVERY_BATCH_SIZE, LOCK_TIMEOUT_SECONDS)
+            .claim_due(DELIVERY_BATCH_SIZE, LOCK_TIMEOUT_SECONDS)
             .await
             .context("failed to claim back-channel logout deliveries")?;
         let processed = deliveries.len();
@@ -86,7 +99,7 @@ impl BackchannelLogoutWorker {
         {
             Ok(BackchannelPostOutcome::Delivered) => self
                 .deliveries
-                .complete_backchannel_logout(delivery.id, delivery.attempts)
+                .complete(delivery.id, delivery.attempts)
                 .await
                 .context("failed to complete back-channel logout delivery"),
             outcome => {
@@ -103,12 +116,7 @@ impl BackchannelLogoutWorker {
                     "back-channel logout delivery failed"
                 );
                 self.deliveries
-                    .fail_backchannel_logout(
-                        delivery.id,
-                        delivery.attempts,
-                        next_attempt_at,
-                        &last_error,
-                    )
+                    .fail(delivery.id, delivery.attempts, next_attempt_at, &last_error)
                     .await
                     .context("failed to record back-channel logout delivery failure")
             }

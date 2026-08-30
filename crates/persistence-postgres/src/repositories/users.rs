@@ -815,6 +815,46 @@ impl nazo_identity::ports::SessionAccountPort for UserRepository {
     }
 }
 
+impl nazo_persistence::CibaAccountStore for UserRepository {
+    fn by_email<'a>(
+        &'a self,
+        tenant_id: nazo_identity::TenantId,
+        email: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Option<nazo_identity::PublicAccount>, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(
+            async move { UserRepository::public_account_by_email(self, tenant_id, email).await },
+        )
+    }
+
+    fn by_id(
+        &self,
+        tenant_id: nazo_identity::TenantId,
+        user_id: nazo_identity::UserId,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<Option<nazo_identity::PublicAccount>, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(
+            async move { UserRepository::public_account_by_id(self, tenant_id, user_id).await },
+        )
+    }
+}
+
+impl nazo_persistence::Openid4vcSubjectStore for UserRepository {
+    fn is_active(
+        &self,
+        tenant_id: TenantId,
+        subject_id: UserId,
+    ) -> futures_util::future::BoxFuture<'_, Result<bool, RepositoryError>> {
+        Box::pin(async move {
+            UserRepository::is_active_by_tenant_id(self, tenant_id, subject_id).await
+        })
+    }
+}
+
 impl nazo_identity::ports::PasskeyAccountRepositoryPort for UserRepository {
     fn by_email<'a>(
         &'a self,

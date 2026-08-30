@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use coset::{CborSerializable, CoseKeyBuilder, iana};
@@ -1442,7 +1444,7 @@ async fn client_attestation_trust_policy_constructor_and_lookup_fail_closed_with
             "https://attester.example".to_owned(),
             json!({"keys": [attester_jwk.clone()]}),
         )),
-        repository,
+        Arc::new(repository),
         uuid::Uuid::nil(),
     )
     .expect("static trust plus ordinary policy repository should configure");
@@ -1480,7 +1482,7 @@ async fn client_attestation_trust_policy_constructor_and_lookup_fail_closed_with
 
     let dynamic = Openid4vcClientAttestationValidator::with_trust_policies(
         None,
-        nazo_postgres::TenantResourceRepository::new(pool),
+        Arc::new(nazo_postgres::TenantResourceRepository::new(pool)),
         uuid::Uuid::nil(),
     )
     .expect("ordinary policy-only validator should configure");

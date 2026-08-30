@@ -1,4 +1,5 @@
 use super::*;
+use nazo_postgres::UserRepository;
 
 use crate::test_support::TestInfrastructure;
 

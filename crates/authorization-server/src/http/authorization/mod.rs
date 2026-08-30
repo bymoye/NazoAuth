@@ -20,7 +20,6 @@ use crate::runtime_modules::ServerRuntimeModuleRegistry;
 pub(crate) use config::AuthorizationHttpConfig;
 
 pub(crate) type ServerAuthorizationService = nazo_auth::AuthorizationService<
-    nazo_postgres::AuthorizationFlowRepository,
     nazo_valkey::AuthorizationStateAdapter,
     nazo_key_management::KeyManager,
 >;

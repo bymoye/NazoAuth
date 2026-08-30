@@ -501,6 +501,90 @@ impl MtlsTrustAnchorRepository {
     }
 }
 
+impl nazo_identity::ports::MtlsTrustAnchorStore for MtlsTrustAnchorRepository {
+    fn create_for_owned_client(
+        &self,
+        request: NewMtlsTrustAnchorRequest,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, MtlsTrustAnchorRequest> {
+        Box::pin(
+            async move { MtlsTrustAnchorRepository::create_for_owned_client(self, request).await },
+        )
+    }
+
+    fn list_for_user(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, Vec<MtlsTrustAnchorRequest>> {
+        Box::pin(
+            async move { MtlsTrustAnchorRepository::list_for_user(self, tenant_id, user_id).await },
+        )
+    }
+
+    fn page(
+        &self,
+        tenant_id: TenantId,
+        status: Option<MtlsTrustAnchorStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, MtlsTrustAnchorRequestPage> {
+        Box::pin(async move {
+            MtlsTrustAnchorRepository::page(self, tenant_id, status, limit, offset).await
+        })
+    }
+
+    fn by_id(
+        &self,
+        tenant_id: TenantId,
+        id: Uuid,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, Option<MtlsTrustAnchorRequest>> {
+        Box::pin(async move { MtlsTrustAnchorRepository::by_id(self, tenant_id, id).await })
+    }
+
+    fn approve(
+        &self,
+        tenant_id: TenantId,
+        id: Uuid,
+        actor: UserId,
+        note: Option<String>,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, MtlsTrustAnchorRequest> {
+        Box::pin(async move {
+            MtlsTrustAnchorRepository::approve(self, tenant_id, id, actor, note).await
+        })
+    }
+
+    fn reject(
+        &self,
+        tenant_id: TenantId,
+        id: Uuid,
+        actor: UserId,
+        note: Option<String>,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, MtlsTrustAnchorRequest> {
+        Box::pin(async move {
+            MtlsTrustAnchorRepository::reject(self, tenant_id, id, actor, note).await
+        })
+    }
+
+    fn revoke(
+        &self,
+        tenant_id: TenantId,
+        id: Uuid,
+        actor: UserId,
+        note: String,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, MtlsTrustAnchorRequest> {
+        Box::pin(async move {
+            MtlsTrustAnchorRepository::revoke(self, tenant_id, id, actor, note).await
+        })
+    }
+
+    fn active_bundle(
+        &self,
+        tenant_id: TenantId,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, String> {
+        Box::pin(async move { MtlsTrustAnchorRepository::active_bundle(self, tenant_id).await })
+    }
+}
+
 /// Input for an already-approved operator-managed mTLS trust anchor.  The
 /// operator task is the authority for this mutation; no administrator or
 /// browser requester is synthesized.  `requester_user_id` remains optional so

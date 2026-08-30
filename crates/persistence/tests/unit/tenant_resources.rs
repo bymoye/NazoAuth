@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_operator_protocol::{
     MAX_TENANT_RESOURCE_IDENTITIES, TenantResourceIdentity, TenantResourceKind,
+    TenantResourceMapping,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -161,12 +162,10 @@ fn executor_rejects_an_outcome_that_the_journal_cannot_publish() {
         resource_manifest_sha256: "a".repeat(64),
     };
 
-    assert!(matches!(
-        validate_wire_outcome(TenantResourceAction::Apply, &outcome),
-        Err(ExecutorTransactionError::Executor(
-            TenantResourceExecutorError::TooLarge
-        ))
-    ));
+    assert_eq!(
+        validate_control_outcome(TenantResourceAction::Apply, &outcome),
+        Err(TenantResourceExecutorError::TooLarge)
+    );
 }
 
 #[test]

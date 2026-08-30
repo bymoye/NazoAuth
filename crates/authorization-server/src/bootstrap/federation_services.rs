@@ -94,7 +94,6 @@ impl nazo_identity::ports::FederationAuditPort for TracingFederationAudit {
 }
 
 pub(crate) type LocalFederationService = nazo_identity::FederationService<
-    nazo_postgres::FederationRepository,
     nazo_valkey::AuthenticationStore,
     FederationBootstrapPasswordHasher,
     nazo_valkey::SessionStore,

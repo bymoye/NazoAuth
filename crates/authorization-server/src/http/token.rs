@@ -39,7 +39,6 @@ use refresh::token_refresh_with_service;
 use token_exchange::{TOKEN_EXCHANGE_GRANT_TYPE, token_exchange};
 
 pub(crate) type ServerTokenService = nazo_auth::TokenService<
-    nazo_postgres::TokenIssuanceRepository,
     nazo_valkey::TokenIssuanceStateAdapter,
     nazo_key_management::KeyManager,
 >;

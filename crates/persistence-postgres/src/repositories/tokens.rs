@@ -27,12 +27,7 @@ pub struct TokenRepository {
 /// Durable outcome of one post-restore invalidation. The operation id and
 /// request hash make a crash/retry return the original authority boundary
 /// rather than revoking a newly issued token set a second time.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecoveryInvalidation {
-    pub state_epoch: Uuid,
-    pub not_before: DateTime<Utc>,
-    pub revoked_refresh_tokens: u64,
-}
+pub use nazo_persistence::RecoveryInvalidation;
 
 impl TokenRepository {
     #[must_use]
@@ -406,6 +401,31 @@ impl TokenRepository {
             .get()
             .await
             .map_err(|_| RepositoryError::Unavailable)
+    }
+}
+
+impl nazo_persistence::RecoveryInvalidationStore for TokenRepository {
+    fn invalidate_after_restore<'a>(
+        &'a self,
+        operation_id: Uuid,
+        request_hash: &'a str,
+        tenant_id: Uuid,
+        state_epoch: Uuid,
+        not_before: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+    ) -> nazo_persistence::OperatorPersistenceFuture<'a, RecoveryInvalidation> {
+        Box::pin(async move {
+            TokenRepository::invalidate_after_restore(
+                self,
+                operation_id,
+                request_hash,
+                tenant_id,
+                state_epoch,
+                not_before,
+                completed_at,
+            )
+            .await
+        })
     }
 }
 

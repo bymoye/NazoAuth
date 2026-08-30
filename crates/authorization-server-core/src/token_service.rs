@@ -64,7 +64,7 @@ pub struct IssuedAccessToken {
 }
 
 /// Durable state for one logical token grant.  A grant may cross several
-/// storage systems (signer, PostgreSQL and Valkey), so the token endpoint
+/// storage systems (signer, durable persistence and Valkey), so the token endpoint
 /// records this state before it can return credentials.  The response body is
 /// opaque to the core crate and is encrypted by the persistence adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -300,6 +300,10 @@ pub struct RecordTokenIssuanceSigned<'a> {
 }
 
 pub trait TokenRepositoryPort: Send + Sync {
+    /// Verify that every configured encrypted-response key id is present in
+    /// durable state before token traffic is admitted.
+    fn validate_response_key_ring(&self) -> TokenFuture<'_, ()>;
+
     fn prepare_token_issuance<'a>(
         &'a self,
         input: PrepareTokenIssuance,
@@ -462,19 +466,33 @@ pub trait TokenSignerPort: Send + Sync {
     ) -> TokenFuture<'a, String>;
 }
 
-pub struct TokenService<R, S, K> {
-    repository: R,
+pub struct TokenService<S, K> {
+    repository: std::sync::Arc<dyn TokenRepositoryPort>,
     state: S,
     signer: K,
 }
 
-impl<R, S, K> TokenService<R, S, K>
+impl<S, K> TokenService<S, K>
 where
-    R: TokenRepositoryPort,
     S: TokenStateStorePort,
     K: TokenSignerPort,
 {
-    pub const fn new(repository: R, state: S, signer: K) -> Self {
+    pub fn new<R>(repository: R, state: S, signer: K) -> Self
+    where
+        R: TokenRepositoryPort + 'static,
+    {
+        Self {
+            repository: std::sync::Arc::new(repository),
+            state,
+            signer,
+        }
+    }
+
+    pub fn from_port(
+        repository: std::sync::Arc<dyn TokenRepositoryPort>,
+        state: S,
+        signer: K,
+    ) -> Self {
         Self {
             repository,
             state,

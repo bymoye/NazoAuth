@@ -74,6 +74,15 @@ impl ActiveTenantBoundaryRepository {
     }
 }
 
+impl nazo_persistence::ActiveTenantBoundaryStore for ActiveTenantBoundaryRepository {
+    fn preflight(
+        &self,
+        context: TenantContext,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), RepositoryError>> {
+        Box::pin(async move { ActiveTenantBoundaryRepository::preflight(self, context).await })
+    }
+}
+
 fn map_query_error(error: diesel::result::Error) -> RepositoryError {
     match error {
         diesel::result::Error::NotFound => RepositoryError::NotFound,

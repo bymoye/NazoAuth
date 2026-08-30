@@ -64,14 +64,14 @@ impl From<&Settings> for CibaHttpConfig {
 
 pub(crate) struct CibaTokenHandles {
     pub(crate) service: Data<ServerCibaService>,
-    pub(crate) users: Data<nazo_postgres::UserRepository>,
+    pub(crate) users: Data<dyn nazo_persistence::CibaAccountStore>,
     pub(crate) config: Data<CibaHttpConfig>,
 }
 
 impl CibaTokenHandles {
     pub(crate) fn new(
         service: Data<ServerCibaService>,
-        users: Data<nazo_postgres::UserRepository>,
+        users: Data<dyn nazo_persistence::CibaAccountStore>,
         config: Data<CibaHttpConfig>,
     ) -> Self {
         Self {

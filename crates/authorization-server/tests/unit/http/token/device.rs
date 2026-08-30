@@ -553,10 +553,10 @@ async fn device_denial_consumes_pending_request_after_audited_user_decision() {
     let handles = Data::new(DeviceDecisionHandles::new(
         device_authorization_service(&state_data),
         Data::new(device_service),
-        Data::new(nazo_postgres::AuthorizationFlowRepository::new(
+        Data::from(Arc::new(nazo_postgres::AuthorizationFlowRepository::new(
             state.diesel_db.clone(),
             DEFAULT_TENANT_ID,
-        )),
+        )) as Arc<dyn nazo_auth::DeviceGrantRepositoryPort>),
         Data::new(crate::http::sessions::test_support::profile_session_handles(&state)),
         Data::new(DeviceHttpConfig::from(state.settings.as_ref())),
         Data::from(runtime),

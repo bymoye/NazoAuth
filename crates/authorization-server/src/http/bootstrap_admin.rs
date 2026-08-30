@@ -9,6 +9,9 @@ use actix_web::{
     web::{Data, Json},
 };
 use nazo_identity::{email::normalize_email_address, ports::SecretHashPort as _};
+use nazo_persistence::{
+    InitialAdminBootstrapState, InitialAdminBootstrapStore, InitialAdminClaimOutcome,
+};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -20,7 +23,7 @@ use crate::{
 
 #[derive(Clone)]
 pub(crate) struct InitialAdminBootstrapEndpoint {
-    repository: nazo_postgres::InitialAdminBootstrapRepository,
+    repository: Arc<dyn InitialAdminBootstrapStore>,
     expected_token_hash: Arc<RwLock<Option<String>>>,
     token_path: PathBuf,
     /// Persistent deployment identity from control discovery. Every bootstrap
@@ -30,11 +33,10 @@ pub(crate) struct InitialAdminBootstrapEndpoint {
 
 impl InitialAdminBootstrapEndpoint {
     pub(crate) async fn initialize(
-        pool: nazo_postgres::DbPool,
+        repository: Arc<dyn InitialAdminBootstrapStore>,
         data_dir: &std::path::Path,
         issuer: &str,
         deployment_id: &str,
-        tenant: nazo_identity::TenantContext,
     ) -> anyhow::Result<Self> {
         let (token_path, token) =
             read_or_create_runtime_secret(data_dir, "bootstrap/initial-admin-token")?;
@@ -44,7 +46,6 @@ impl InitialAdminBootstrapEndpoint {
             );
         }
         let token_hash = hash_token(&token);
-        let repository = nazo_postgres::InitialAdminBootstrapRepository::new(pool, tenant);
         let state = repository.load_state().await?;
         let expected_token_hash = bootstrap_token_state(state, &token_path, issuer, token_hash);
         Ok(Self {
@@ -77,17 +78,17 @@ impl InitialAdminBootstrapEndpoint {
 }
 
 fn bootstrap_token_state(
-    state: nazo_postgres::InitialAdminBootstrapState,
+    state: InitialAdminBootstrapState,
     token_path: &std::path::Path,
     issuer: &str,
     token_hash: String,
 ) -> Option<String> {
     match state {
-        nazo_postgres::InitialAdminBootstrapState::Closed => {
+        InitialAdminBootstrapState::Closed => {
             remove_consumed_token(token_path);
             None
         }
-        nazo_postgres::InitialAdminBootstrapState::Ready => {
+        InitialAdminBootstrapState::Ready => {
             tracing::warn!(
                 issuer = %issuer.trim_end_matches('/'),
                 token_file = %token_path.display(),
@@ -95,7 +96,7 @@ fn bootstrap_token_state(
             );
             Some(token_hash)
         }
-        nazo_postgres::InitialAdminBootstrapState::Claimed {
+        InitialAdminBootstrapState::Claimed {
             expected_token_hash,
         } => {
             if expected_token_hash != token_hash {
@@ -189,10 +190,10 @@ pub(crate) async fn claim_initial_admin(
 
 fn claim_outcome_response(
     endpoint: &InitialAdminBootstrapEndpoint,
-    outcome: nazo_postgres::InitialAdminClaimOutcome,
+    outcome: InitialAdminClaimOutcome,
 ) -> HttpResponse {
     match outcome {
-        nazo_postgres::InitialAdminClaimOutcome::Created {
+        InitialAdminClaimOutcome::Created {
             request_id,
             id,
             email,
@@ -203,15 +204,15 @@ fn claim_outcome_response(
             "role": "admin",
             "next": "/ui/auth"
         })),
-        nazo_postgres::InitialAdminClaimOutcome::Closed => {
+        InitialAdminClaimOutcome::Closed => {
             endpoint.close();
             remove_consumed_token(&endpoint.token_path);
             bootstrap_error(StatusCode::GONE, "bootstrap_closed")
         }
-        nazo_postgres::InitialAdminClaimOutcome::EmailConflict => {
+        InitialAdminClaimOutcome::EmailConflict => {
             bootstrap_error(StatusCode::CONFLICT, "email_conflict")
         }
-        nazo_postgres::InitialAdminClaimOutcome::IdempotencyConflict => {
+        InitialAdminClaimOutcome::IdempotencyConflict => {
             bootstrap_error(StatusCode::CONFLICT, "bootstrap_request_conflict")
         }
     }

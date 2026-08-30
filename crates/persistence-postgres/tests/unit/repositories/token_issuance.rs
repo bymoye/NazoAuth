@@ -125,7 +125,7 @@ fn previous_key_decrypts_but_removed_key_fails_closed() {
     let previous_key = rotating_ring
         .key_for(&previous_id)
         .expect("previous key is in the overlap ring");
-    let cipher = Aes256Gcm::new_from_slice(&previous_key.key).expect("key is valid");
+    let cipher = Aes256Gcm::new_from_slice(previous_key).expect("key is valid");
     let mut nonce = [0_u8; RESPONSE_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
     let ciphertext = cipher

@@ -17,6 +17,9 @@ use nazo_auth::{
     TokenIssuanceTransitionResult,
 };
 use nazo_identity::{SubjectClaims, TenantId, UserId, ports::RepositoryError};
+#[cfg(test)]
+use nazo_persistence::TokenIssuanceResponseKeyError;
+use nazo_persistence::TokenIssuanceResponseKeyRing;
 use rand::Rng;
 use uuid::Uuid;
 
@@ -181,101 +184,6 @@ pub(crate) async fn revoke_access_tokens_for_owner_on_connection(
         .do_nothing()
         .execute(connection)
         .await
-}
-
-#[derive(Clone)]
-pub struct TokenIssuanceResponseKeyRing {
-    current: TokenIssuanceResponseKey,
-    previous: Option<TokenIssuanceResponseKey>,
-}
-
-impl std::fmt::Debug for TokenIssuanceResponseKeyRing {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TokenIssuanceResponseKeyRing")
-            .field("current_id", &self.current.id)
-            .field(
-                "previous_id",
-                &self.previous.as_ref().map(|key| key.id.as_str()),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone)]
-struct TokenIssuanceResponseKey {
-    id: String,
-    key: [u8; 32],
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TokenIssuanceResponseKeyError {
-    EmptyId,
-    IdTooLong,
-    DuplicateId,
-}
-
-impl std::fmt::Display for TokenIssuanceResponseKeyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::EmptyId => "token issuance response encryption key id must not be empty",
-            Self::IdTooLong => {
-                "token issuance response encryption key id must be at most 128 bytes"
-            }
-            Self::DuplicateId => "token issuance response current and previous key ids must differ",
-        })
-    }
-}
-
-impl std::error::Error for TokenIssuanceResponseKeyError {}
-
-impl TokenIssuanceResponseKeyRing {
-    pub fn new(
-        current_id: impl Into<String>,
-        current_key: [u8; 32],
-        previous: Option<(String, [u8; 32])>,
-    ) -> Result<Self, TokenIssuanceResponseKeyError> {
-        let current = TokenIssuanceResponseKey::new(current_id.into(), current_key)?;
-        let previous = previous
-            .map(|(id, key)| TokenIssuanceResponseKey::new(id, key))
-            .transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|candidate| candidate.id == current.id)
-        {
-            return Err(TokenIssuanceResponseKeyError::DuplicateId);
-        }
-        Ok(Self { current, previous })
-    }
-
-    #[must_use]
-    pub fn current_id(&self) -> &str {
-        &self.current.id
-    }
-
-    fn current(&self) -> &TokenIssuanceResponseKey {
-        &self.current
-    }
-
-    fn key_for(&self, id: &str) -> Option<&TokenIssuanceResponseKey> {
-        if self.current.id == id {
-            Some(&self.current)
-        } else {
-            self.previous.as_ref().filter(|key| key.id == id)
-        }
-    }
-}
-
-impl TokenIssuanceResponseKey {
-    fn new(id: String, key: [u8; 32]) -> Result<Self, TokenIssuanceResponseKeyError> {
-        if id.trim().is_empty() {
-            return Err(TokenIssuanceResponseKeyError::EmptyId);
-        }
-        if id.len() > 128 {
-            return Err(TokenIssuanceResponseKeyError::IdTooLong);
-        }
-        Ok(Self { id, key })
-    }
 }
 
 struct ResponseEnvelopeContext<'a> {
@@ -548,8 +456,8 @@ fn seal_response(
     response_body: &[u8],
 ) -> Result<Vec<u8>, RepositoryError> {
     let response_keys = response_keys.ok_or(RepositoryError::Unavailable)?;
-    let key = response_keys.current();
-    let cipher = Aes256Gcm::new_from_slice(&key.key)
+    let key = response_keys.current_key();
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| RepositoryError::Consistency("invalid issuance response key".to_owned()))?;
     let mut nonce = [0_u8; RESPONSE_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
@@ -596,7 +504,7 @@ fn unseal_response(
     let nonce: &[u8; 12] = nonce.try_into().map_err(|_| {
         RepositoryError::Consistency("token issuance response nonce is malformed".to_owned())
     })?;
-    let plaintext = Aes256Gcm::new_from_slice(&key.key)
+    let plaintext = Aes256Gcm::new_from_slice(key)
         .map_err(|_| RepositoryError::Consistency("invalid issuance response key".to_owned()))?
         .decrypt(
             nonce.into(),
@@ -617,6 +525,14 @@ fn unseal_response(
 }
 
 impl TokenRepositoryPort for TokenIssuanceRepository {
+    fn validate_response_key_ring(&self) -> TokenFuture<'_, ()> {
+        Box::pin(async move {
+            TokenIssuanceRepository::validate_response_key_ring(self)
+                .await
+                .map_err(map_repository_error)
+        })
+    }
+
     fn prepare_token_issuance<'a>(
         &'a self,
         input: PrepareTokenIssuance,

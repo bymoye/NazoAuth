@@ -203,7 +203,7 @@ fn recovery_authority_conflict_is_terminal_while_unavailable_database_is_retryab
 
 #[test]
 fn tenant_resource_executor_error_taxonomy_is_closed_and_explicit() {
-    use crate::tenant_resource_executor::TenantResourceExecutorError;
+    use nazo_persistence::tenant_resources::TenantResourceExecutorError;
 
     for error in [
         TenantResourceExecutorError::Conflict,
@@ -224,7 +224,7 @@ fn tenant_resource_executor_error_taxonomy_is_closed_and_explicit() {
 
 #[tokio::test]
 async fn tenant_resource_unavailable_does_not_publish_a_terminal_failure() {
-    use crate::tenant_resource_executor::TenantResourceExecutorError;
+    use nazo_persistence::tenant_resources::TenantResourceExecutorError;
 
     let directory = temporary_directory();
     let mut tenant_operation = operation("019c8ca2-30a6-7000-8000-00000000a006");

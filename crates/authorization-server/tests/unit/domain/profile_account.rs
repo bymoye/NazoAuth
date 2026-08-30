@@ -114,8 +114,7 @@ impl AuthorizedApplicationRepositoryPort for FixedApplications {
     }
 }
 
-type Operations =
-    ServerProfileAccountOperations<StoredProfile, FixedGrantSummary, FixedApplications>;
+type Operations = ServerProfileAccountOperations;
 
 fn account() -> PublicAccount {
     let now = Utc::now();

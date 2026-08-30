@@ -8,7 +8,7 @@
 //! touch signatures — key material is not known yet.
 //!
 //! Stage 2 resolves the controller kid/public key **by deployment_id** from
-//! the D01/D02 Controller Registry (PostgreSQL). NazoAuth is the only
+//! the D01/D02 Controller Registry persistence port. NazoAuth is the only
 //! authority that answers whether this controller key is currently admitted.
 //! Stage 4 falls out of the same lookup, because admission requires an
 //! `active` slot with `expires_at > now`.
@@ -21,7 +21,7 @@ use nazo_operator_protocol::{
     ControlOperation, MAX_COMPACT_JWS_BYTES, MAX_CONTROL_OPERATION_BYTES,
     validate_control_operation,
 };
-use nazo_postgres::{AdmittedController, ControllerRegistryRepository};
+use nazo_persistence::{AdmittedController, ControllerRegistryPort};
 
 /// Stage 1: bounded, strict parse of the presented operation.
 ///
@@ -81,7 +81,7 @@ pub(super) enum AdmissionError {
 
 /// Stage 2+4: resolve and admit the presenting controller key by deployment.
 pub(super) async fn admit_controller(
-    repository: &ControllerRegistryRepository,
+    repository: &dyn ControllerRegistryPort,
     deployment_id: &str,
     kid: &str,
     now: DateTime<Utc>,

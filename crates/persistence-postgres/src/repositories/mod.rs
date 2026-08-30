@@ -79,7 +79,6 @@ pub use tenant_resources::{
     TenantResourceRepository, TenantResourceState, TenantResourceStateCas,
 };
 pub use token_issuance::TokenIssuanceRepository;
-pub use token_issuance::{TokenIssuanceResponseKeyError, TokenIssuanceResponseKeyRing};
 pub use tokens::{RecoveryInvalidation, TokenRepository};
 pub use users::{
     UserInsert, UserRepository, disable_user_on_connection, insert_user_on_connection,

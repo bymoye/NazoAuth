@@ -16,9 +16,8 @@ use super::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use nazo_identity::ports::{RepositoryError, RepositoryFuture};
-use nazo_postgres::{
-    AuditLedgerRepository, SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery,
-};
+use nazo_persistence::{SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery};
+use nazo_postgres::AuditLedgerRepository;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -133,6 +132,10 @@ impl ScriptedRepository {
 }
 
 impl AuditAnchorRepository for ScriptedRepository {
+    fn check_available(&self) -> RepositoryFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn anchor_health(&self) -> RepositoryFuture<'_, SecurityAuditAnchorHealth> {
         Box::pin(async move {
             self.health

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use diesel::{OptionalExtension, QueryableByName, sql_query, sql_types};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use nazo_identity::ports::RepositoryError;
+use nazo_persistence::{ClientTrustPolicy, Openid4vcTrustPolicyRecord, Openid4vcTrustPolicyStore};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -577,6 +578,24 @@ impl TenantResourceRepository {
         }))
     }
 
+    pub async fn active_openid4vc_trust_policy_for_origin(
+        &self,
+        tenant_id: Uuid,
+        resource_id: &str,
+        wallet_origin: &str,
+        expected_digest: &str,
+    ) -> Result<Option<StoredOpenid4vcTrustPolicy>, RepositoryError> {
+        let mut connection = self.connection().await?;
+        Self::active_openid4vc_trust_policy_for_origin_on_connection(
+            &mut connection,
+            tenant_id,
+            resource_id,
+            wallet_origin,
+            expected_digest,
+        )
+        .await
+    }
+
     pub async fn active_openid4vc_trust_policy_binding_on_connection(
         connection: &mut AsyncPgConnection,
         tenant_id: Uuid,
@@ -649,6 +668,20 @@ impl TenantResourceRepository {
             Some(policy) => Ok(Openid4vcTrustPolicyForClient::Active(policy)),
             None => Ok(Openid4vcTrustPolicyForClient::BoundInactive),
         }
+    }
+
+    pub async fn openid4vc_trust_policy_for_client(
+        &self,
+        tenant_id: Uuid,
+        public_client_id: &str,
+    ) -> Result<Openid4vcTrustPolicyForClient, RepositoryError> {
+        let mut connection = self.connection().await?;
+        Self::openid4vc_trust_policy_for_client_on_connection(
+            &mut connection,
+            tenant_id,
+            public_client_id,
+        )
+        .await
     }
 
     /// Install one validated public trust policy. The protocol/provider layer
@@ -942,6 +975,91 @@ async fn active_openid4vc_trust_policy_for_internal_client_on_connection(
         .next()
         .map(StoredOpenid4vcTrustPolicy::try_from)
         .transpose()
+}
+
+impl Openid4vcTrustPolicyStore for TenantResourceRepository {
+    fn for_client<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        public_client_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<ClientTrustPolicy, RepositoryError>> {
+        Box::pin(async move {
+            match self
+                .openid4vc_trust_policy_for_client(tenant_id, public_client_id)
+                .await?
+            {
+                Openid4vcTrustPolicyForClient::Unbound => Ok(ClientTrustPolicy::Unbound),
+                Openid4vcTrustPolicyForClient::BoundInactive => {
+                    Ok(ClientTrustPolicy::BoundInactive)
+                }
+                Openid4vcTrustPolicyForClient::Active(policy) => {
+                    let material =
+                        serde_json::from_value(policy.public_material).map_err(|_| {
+                            RepositoryError::Consistency(
+                                "stored OpenID4VC trust policy is invalid".to_owned(),
+                            )
+                        })?;
+                    nazo_operator_protocol::validate_openid4vc_trust_policy(&material).map_err(
+                        |_| {
+                            RepositoryError::Consistency(
+                                "stored OpenID4VC trust policy is invalid".to_owned(),
+                            )
+                        },
+                    )?;
+                    Ok(ClientTrustPolicy::Active(Box::new(
+                        Openid4vcTrustPolicyRecord {
+                            id: policy.id,
+                            resource_id: policy.resource_id,
+                            resource_digest: policy.resource_digest,
+                            material,
+                        },
+                    )))
+                }
+            }
+        })
+    }
+
+    fn active_for_origin<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        resource_id: &'a str,
+        wallet_origin: &'a str,
+        expected_digest: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Option<Openid4vcTrustPolicyRecord>, RepositoryError>,
+    > {
+        Box::pin(async move {
+            self.active_openid4vc_trust_policy_for_origin(
+                tenant_id,
+                resource_id,
+                wallet_origin,
+                expected_digest,
+            )
+            .await?
+            .map(|policy| {
+                let material = serde_json::from_value(policy.public_material).map_err(|_| {
+                    RepositoryError::Consistency(
+                        "stored OpenID4VC trust policy is invalid".to_owned(),
+                    )
+                })?;
+                nazo_operator_protocol::validate_openid4vc_trust_policy(&material).map_err(
+                    |_| {
+                        RepositoryError::Consistency(
+                            "stored OpenID4VC trust policy is invalid".to_owned(),
+                        )
+                    },
+                )?;
+                Ok(Openid4vcTrustPolicyRecord {
+                    id: policy.id,
+                    resource_id: policy.resource_id,
+                    resource_digest: policy.resource_digest,
+                    material,
+                })
+            })
+            .transpose()
+        })
+    }
 }
 
 async fn lock_operation_jti_on_connection(

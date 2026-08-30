@@ -16,11 +16,11 @@ pub(super) struct CoreServices {
     pub(super) authorization_service: web::Data<ServerAuthorizationService>,
     pub(super) token_service: web::Data<crate::http::token::ServerTokenService>,
     pub(super) ciba_service: web::Data<ServerCibaService>,
-    pub(super) ciba_users: web::Data<nazo_postgres::UserRepository>,
+    pub(super) ciba_users: web::Data<dyn nazo_persistence::CibaAccountStore>,
     pub(super) ciba_config: web::Data<CibaHttpConfig>,
     pub(super) token_issuance_config: web::Data<TokenIssuanceConfig>,
     pub(super) device_service: web::Data<ServerDeviceGrantService>,
-    pub(super) device_grants: web::Data<nazo_postgres::AuthorizationFlowRepository>,
+    pub(super) device_grants: web::Data<dyn nazo_auth::DeviceGrantRepositoryPort>,
     pub(super) device_config: web::Data<DeviceHttpConfig>,
     pub(super) userinfo_endpoint: web::Data<nazo_http_actix::UserinfoEndpoint>,
     pub(super) authorization_config: web::Data<AuthorizationHttpConfig>,
@@ -36,7 +36,7 @@ pub(super) struct CoreServices {
 
 pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<CoreServices> {
     let settings = startup.settings.as_ref();
-    let diesel_db = startup.diesel_db.clone();
+    let persistence = startup.persistence.provider();
     let valkey_connection = startup.valkey_connection.clone();
     let keyset = startup.keyset.clone();
     let runtime_registry = startup.runtime_modules.registry.clone();
@@ -59,17 +59,17 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     );
     let resource_server_http_data = {
         let replay = nazo_valkey::ReplayStore::new(&resource_replay_connection);
-        let authorizer = Arc::new(ServerFapiResourceAuthorizer::new(
+        let authorizer = Arc::new(ServerFapiResourceAuthorizer::from_port(
             resource_server_config.clone(),
             keyset.clone(),
-            nazo_postgres::TokenRepository::new(diesel_db.clone()),
+            persistence.access_token_revocations(),
             replay.clone(),
         ));
         let mtls = Arc::new(ServerFapiMtlsResolver::new(
             resource_server_config.trusted_proxy_cidrs.clone(),
         ));
-        let signatures = Arc::new(ServerFapiHttpMessageSignatures::new(
-            nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
+        let signatures = Arc::new(ServerFapiHttpMessageSignatures::from_port(
+            persistence.admin_clients(),
             replay,
             keyset.clone(),
             runtime_registry.clone(),
@@ -87,7 +87,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let dynamic_registration_config = DynamicRegistrationConfig::from(settings);
     let dynamic_registration_handles = web::Data::new(dynamic_registration_endpoint(
         dynamic_registration_config,
-        nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
+        persistence.dynamic_registration_clients(),
         nazo_valkey::RateLimitStore::new(&valkey_connection),
         keyset.clone(),
         runtime_registry.clone(),
@@ -95,7 +95,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     ));
     let admin_client_config = web::Data::new(AdminClientConfig::from_settings(&startup.settings));
     let admin_client_service = web::Data::new(ServerAdminClientService::new(
-        nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
+        persistence.admin_clients(),
         ServerSectorIdentifierResolver,
         ServerAdminClientCrypto::new(keyset.clone()),
         admin_client_policy(&startup.settings),
@@ -104,11 +104,8 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let scim_protocol = &startup.settings.protocol;
     let scim_storage = &startup.settings.storage;
     let scim_service = nazo_identity::scim::ScimService::new(
-        Arc::new(nazo_postgres::ScimRepository::with_event_retention_seconds(
-            diesel_db.clone(),
-            scim_storage.scim_event_retention_seconds,
-        )),
-        Arc::new(nazo_postgres::AuditRepository::new(diesel_db.clone())),
+        persistence.scim_repository(scim_storage.scim_event_retention_seconds),
+        persistence.scim_credential_audit(),
     );
     let scim_client_ip = ClientIpConfig::new(
         &scim_endpoint_settings.trusted_proxy_cidrs,
@@ -128,32 +125,26 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
             )?),
             Arc::new(ServerScimBootstrapPasswordProvider),
         )
-        .with_security_events(Arc::new(nazo_scim_events::EventPublisher::new(
-            nazo_postgres::ScimEventRepository::new(diesel_db.clone()),
+        .with_security_events(Arc::new(nazo_scim_events::EventPublisher::from_port(
+            persistence.scim_event_store(),
             ServerScimEventSigner::new(keyset.clone()),
             startup.settings.endpoint.issuer.clone(),
         ))),
     );
-    let authorization_service = web::Data::new(ServerAuthorizationService::new(
-        nazo_postgres::AuthorizationFlowRepository::new(
-            diesel_db.clone(),
-            settings.tenant.context.tenant_id.as_uuid(),
-        ),
+    let authorization_service = web::Data::new(ServerAuthorizationService::from_port(
+        persistence.authorization_repository(settings.tenant.context.tenant_id.as_uuid()),
         nazo_valkey::AuthorizationStateAdapter::new(&valkey_connection),
         keyset.clone(),
     ));
     let token_issuance_repository =
-        nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
-            diesel_db.clone(),
-            startup.token_issuance_response_keys.clone(),
-        );
+        persistence.token_repository(startup.token_issuance_response_keys.clone());
     token_issuance_repository
         .validate_response_key_ring()
         .await
         .map_err(|error| {
             anyhow::anyhow!("token issuance response key-ring preflight failed: {error}")
         })?;
-    let token_service = web::Data::new(crate::http::token::ServerTokenService::new(
+    let token_service = web::Data::new(crate::http::token::ServerTokenService::from_port(
         token_issuance_repository,
         nazo_valkey::TokenIssuanceStateAdapter::new(&valkey_connection),
         keyset.clone(),
@@ -167,16 +158,16 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         &startup.settings,
         startup.runtime_modules.get_ref(),
     )?;
-    let ciba_users = web::Data::new(nazo_postgres::UserRepository::new(diesel_db.clone()));
+    let ciba_users: web::Data<dyn nazo_persistence::CibaAccountStore> =
+        web::Data::from(persistence.ciba_accounts());
     let ciba_config = web::Data::new(CibaHttpConfig::from(settings));
     let token_issuance_config = web::Data::new(TokenIssuanceConfig::from(settings));
     let device_service = web::Data::new(ServerDeviceGrantService::new(
         nazo_valkey::DeviceStore::new(&valkey_connection),
     ));
-    let device_grants = web::Data::new(nazo_postgres::AuthorizationFlowRepository::new(
-        diesel_db.clone(),
-        settings.tenant.context.tenant_id.as_uuid(),
-    ));
+    let device_grants: web::Data<dyn nazo_auth::DeviceGrantRepositoryPort> = web::Data::from(
+        persistence.device_grant_repository(settings.tenant.context.tenant_id.as_uuid()),
+    );
     let device_config = web::Data::new(DeviceHttpConfig::from(settings));
     let userinfo_handles = UserinfoHandles::new(
         nazo_valkey::ReplayStore::new(&valkey_connection),
@@ -207,7 +198,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
 
     let openid4vc = openid4vc::build(
         startup,
-        &diesel_db,
         &token_service,
         &authorization_service,
         runtime_registry,

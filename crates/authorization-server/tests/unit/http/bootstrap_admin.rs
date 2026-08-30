@@ -25,10 +25,10 @@ fn endpoint_with_deployment(
     let pool =
         nazo_postgres::create_pool("postgresql://unused:unused@127.0.0.1:1/unused", 1).unwrap();
     InitialAdminBootstrapEndpoint {
-        repository: nazo_postgres::InitialAdminBootstrapRepository::new(
+        repository: Arc::new(nazo_postgres::InitialAdminBootstrapRepository::new(
             pool,
             nazo_identity::TenantContext::default_system(),
-        ),
+        )),
         expected_token_hash: Arc::new(RwLock::new(expected_token_hash)),
         token_path,
         expected_deployment_id: expected_deployment_id.to_owned(),
@@ -248,11 +248,13 @@ async fn initialization_persists_a_retryable_token_before_database_ownership_is_
     .unwrap();
 
     let error = match InitialAdminBootstrapEndpoint::initialize(
-        pool,
+        Arc::new(nazo_postgres::InitialAdminBootstrapRepository::new(
+            pool,
+            nazo_identity::TenantContext::default_system(),
+        )),
         &root,
         "https://auth.example",
         "deploy-abc123",
-        nazo_identity::TenantContext::default_system(),
     )
     .await
     {
@@ -307,7 +309,7 @@ fn repository_bootstrap_states_control_token_lifetime() {
     fs::write(&ready_path, "token").unwrap();
     assert_eq!(
         bootstrap_token_state(
-            nazo_postgres::InitialAdminBootstrapState::Ready,
+            InitialAdminBootstrapState::Ready,
             &ready_path,
             "https://auth.example/",
             "hash".to_owned(),
@@ -320,7 +322,7 @@ fn repository_bootstrap_states_control_token_lifetime() {
     fs::write(&claimed_path, "new-token").unwrap();
     assert_eq!(
         bootstrap_token_state(
-            nazo_postgres::InitialAdminBootstrapState::Claimed {
+            InitialAdminBootstrapState::Claimed {
                 expected_token_hash: "persisted-hash".to_owned(),
             },
             &claimed_path,
@@ -335,7 +337,7 @@ fn repository_bootstrap_states_control_token_lifetime() {
     fs::write(&closed_path, "token").unwrap();
     assert_eq!(
         bootstrap_token_state(
-            nazo_postgres::InitialAdminBootstrapState::Closed,
+            InitialAdminBootstrapState::Closed,
             &closed_path,
             "https://auth.example",
             "hash".to_owned(),

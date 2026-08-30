@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use nazo_digital_credentials::{CredentialPayload, CredentialSignInput, CredentialSignerPort};
@@ -11,6 +11,268 @@ use crate::{
     CredentialResponse, CredentialStorePort, IssuedCredential, ProofError, ProofValidatorPort,
     StoredCredentialResponse,
 };
+
+impl<T> CredentialStorePort for Arc<T>
+where
+    T: CredentialStorePort + ?Sized,
+{
+    fn upsert_access<'a>(
+        &'a self,
+        token_hash: &'a str,
+        access: &'a CredentialAccess,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref().upsert_access(token_hash, access)
+    }
+
+    fn offer<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<
+        'a,
+        Result<Option<crate::StoredCredentialOffer>, crate::CredentialStoreError>,
+    > {
+        self.as_ref().offer(tenant_id, id, now)
+    }
+
+    fn consume_pre_authorized_offer<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        code_hash: &'a str,
+        tx_code: Option<&'a str>,
+        client_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<
+        'a,
+        Result<Option<crate::CredentialAuthorization>, crate::CredentialStoreError>,
+    > {
+        self.as_ref()
+            .consume_pre_authorized_offer(tenant_id, code_hash, tx_code, client_id, now)
+    }
+
+    fn issue_nonce<'a>(
+        &'a self,
+        nonce: &'a crate::NonceRecord,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref().issue_nonce(nonce)
+    }
+
+    fn claim_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref().claim_nonce(nonce_hash, claim_id, now)
+    }
+
+    fn finalize_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref().finalize_nonce(nonce_hash, claim_id, now)
+    }
+
+    fn release_nonce<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref().release_nonce(nonce_hash, claim_id, now)
+    }
+
+    fn finalize_nonce_with_notification<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        handle: &'a crate::NotificationHandle,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref()
+            .finalize_nonce_with_notification(nonce_hash, claim_id, handle, now)
+    }
+
+    fn find_response<'a>(
+        &'a self,
+        issuance_id: Uuid,
+        token_id: Uuid,
+        request_digest: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<
+        'a,
+        Result<Option<StoredCredentialResponse>, crate::CredentialStoreError>,
+    > {
+        self.as_ref()
+            .find_response(issuance_id, token_id, request_digest, now)
+    }
+
+    fn finalize_nonce_with_notification_and_response<'a>(
+        &'a self,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        handle: &'a crate::NotificationHandle,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref().finalize_nonce_with_notification_and_response(
+            nonce_hash, claim_id, handle, response, now,
+        )
+    }
+
+    fn store_response_with_notification<'a>(
+        &'a self,
+        handle: &'a crate::NotificationHandle,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref()
+            .store_response_with_notification(handle, response, now)
+    }
+
+    fn resolve_access<'a>(
+        &'a self,
+        token_hash: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<
+        'a,
+        Result<Option<CredentialAccess>, crate::CredentialStoreError>,
+    > {
+        self.as_ref().resolve_access(token_hash, now)
+    }
+
+    fn store_deferred<'a>(
+        &'a self,
+        credential: &'a crate::DeferredCredential,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref().store_deferred(credential)
+    }
+
+    fn store_deferred_and_finalize_nonce<'a>(
+        &'a self,
+        credential: &'a crate::DeferredCredential,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref()
+            .store_deferred_and_finalize_nonce(credential, nonce_hash, claim_id, now)
+    }
+
+    fn store_deferred_and_finalize_nonce_with_response<'a>(
+        &'a self,
+        credential: &'a crate::DeferredCredential,
+        nonce_hash: &'a str,
+        claim_id: &'a str,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref()
+            .store_deferred_and_finalize_nonce_with_response(
+                credential, nonce_hash, claim_id, response, now,
+            )
+    }
+
+    fn store_deferred_with_response<'a>(
+        &'a self,
+        credential: &'a crate::DeferredCredential,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref()
+            .store_deferred_with_response(credential, response, now)
+    }
+
+    fn claim_ready_deferred<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<
+        'a,
+        Result<Option<crate::DeferredCredentialClaim>, crate::CredentialStoreError>,
+    > {
+        self.as_ref()
+            .claim_ready_deferred(transaction_hash, token_id, claim_id, now)
+    }
+
+    fn finalize_deferred<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref()
+            .finalize_deferred(transaction_hash, token_id, claim_id, now)
+    }
+
+    fn release_deferred<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref()
+            .release_deferred(transaction_hash, token_id, claim_id, now)
+    }
+
+    fn finalize_deferred_with_notification<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        handle: &'a crate::NotificationHandle,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref().finalize_deferred_with_notification(
+            transaction_hash,
+            token_id,
+            claim_id,
+            handle,
+            now,
+        )
+    }
+
+    fn finalize_deferred_with_notification_and_response<'a>(
+        &'a self,
+        transaction_hash: &'a str,
+        token_id: Uuid,
+        claim_id: &'a str,
+        handle: &'a crate::NotificationHandle,
+        response: &'a StoredCredentialResponse,
+        now: DateTime<Utc>,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref()
+            .finalize_deferred_with_notification_and_response(
+                transaction_hash,
+                token_id,
+                claim_id,
+                handle,
+                response,
+                now,
+            )
+    }
+
+    fn record_notification<'a>(
+        &'a self,
+        notification: &'a crate::IssuanceNotification,
+    ) -> crate::CredentialStoreFuture<'a, Result<bool, crate::CredentialStoreError>> {
+        self.as_ref().record_notification(notification)
+    }
+
+    fn issue_notification_handle<'a>(
+        &'a self,
+        handle: &'a crate::NotificationHandle,
+    ) -> crate::CredentialStoreFuture<'a, Result<(), crate::CredentialStoreError>> {
+        self.as_ref().issue_notification_handle(handle)
+    }
+}
 
 pub trait CredentialDatasetPort: Send + Sync {
     fn dataset<'a>(

@@ -71,7 +71,6 @@ impl LiveFixture {
     fn operations(
         &self,
     ) -> ServerLocalRegistrationOperations<
-        nazo_postgres::UserRepository,
         nazo_valkey::AuthenticationStore,
         crate::bootstrap::RegistrationSecretHasher,
         crate::adapters::email::SmtpVerificationEmailDelivery,

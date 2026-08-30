@@ -40,7 +40,8 @@ pub(crate) fn admin_client_service(
     settings: &Settings,
 ) -> actix_web::web::Data<ServerAdminClientService> {
     actix_web::web::Data::new(ServerAdminClientService::new(
-        nazo_postgres::OAuthClientRepository::new(database),
+        std::sync::Arc::new(nazo_postgres::OAuthClientRepository::new(database))
+            as std::sync::Arc<dyn nazo_auth::AdminClientRepositoryPort>,
         ServerSectorIdentifierResolver,
         ServerAdminClientCrypto::new(keyset),
         admin_client_policy(settings),

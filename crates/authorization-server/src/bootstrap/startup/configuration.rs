@@ -9,10 +9,10 @@ use crate::config::DEFAULT_DATA_DIR;
 pub(super) struct StartupConfiguration {
     pub(super) config: ConfigSource,
     pub(super) perf_metrics_enabled: bool,
-    pub(super) diesel_db: nazo_postgres::DbPool,
+    pub(super) persistence: super::super::ServerPersistenceBindings,
     pub(super) valkey_connection: nazo_valkey::ValkeyConnection,
     pub(super) settings: Arc<Settings>,
-    pub(super) token_issuance_response_keys: nazo_postgres::TokenIssuanceResponseKeyRing,
+    pub(super) token_issuance_response_keys: nazo_persistence::TokenIssuanceResponseKeyRing,
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
     pub(super) mtls_certificate_source: web::Data<crate::http::mtls::MtlsCertificateSource>,
     pub(super) readiness_dependencies: web::Data<crate::http::well_known::ReadinessDependencies>,
@@ -24,7 +24,10 @@ pub(super) struct StartupConfiguration {
     pub(super) keyset: nazo_key_management::KeyManager,
 }
 
-pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfiguration> {
+pub(super) async fn load(
+    config: ConfigSource,
+    persistence: super::super::ServerPersistenceBindings,
+) -> anyhow::Result<StartupConfiguration> {
     let perf_metrics_enabled = config.bool("PERF_METRICS_ENABLED", false)?;
     let password_hash_max_concurrency = config.parse::<usize>(
         "PASSWORD_HASH_MAX_CONCURRENCY",
@@ -42,7 +45,6 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
 
     // 配置只在启动阶段读取；运行期只向 handler 注入其所需的 focused handles。
     let settings = Arc::new(Settings::from_config(&config)?);
-    let database_url = database_url(&config);
     let audit_anchor_data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
         crate::adapters::audit_anchor::preflight_config_from_source(
@@ -76,17 +78,20 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     }
     let valkey_command_timeout = Duration::from_millis(valkey_command_timeout_ms);
 
-    // 数据库和 Valkey 客户端在 server factory 外创建，避免每个 worker 重复初始化。
-    let diesel_db = create_pool(database_url.clone(), database_max_connections(&config)?)?;
-    nazo_postgres::ActiveTenantBoundaryRepository::new(diesel_db.clone())
+    // Persistence and Valkey clients are created outside the Actix worker
+    // factory.  The launcher selected the concrete database adapter before
+    // entering this application boundary.
+    persistence
+        .provider()
+        .active_tenant_boundary()
         .preflight(settings.tenant.context)
         .await
         .map_err(|error| anyhow::anyhow!("active tenant boundary preflight failed: {error}"))?;
     let require_audit_least_privilege =
         config.bool("SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE", true)?;
-    let audit_repository = nazo_postgres::AuditLedgerRepository::new(diesel_db.clone());
+    let audit_repository = persistence.provider().security_audit_ledger();
     audit_repository
-        .check_available_with_policy(require_audit_least_privilege)
+        .check_available(require_audit_least_privilege)
         .await
         .map_err(|error| anyhow::anyhow!("security audit writer preflight failed: {error}"))?;
     crate::adapters::audit::install_persistent_audit_sink(
@@ -113,17 +118,18 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
     let readiness_dependencies =
         web::Data::new(crate::http::well_known::ReadinessDependencies::new(
-            diesel_db.clone(),
+            persistence.provider().database_health(),
             valkey_connection.clone(),
             keyset.clone(),
         ));
     let initial_admin_bootstrap = web::Data::new(
         crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint::initialize(
-            diesel_db.clone(),
+            persistence
+                .provider()
+                .initial_admin_bootstrap(settings.tenant.context),
             &settings.storage.data_dir,
             &settings.endpoint.issuer,
             control_discovery.deployment_id(),
-            settings.tenant.context,
         )
         .await?,
     );
@@ -135,7 +141,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     );
     let runtime_modules = web::Data::new(
         RuntimeModules::initialize(
-            diesel_db.clone(),
+            persistence.provider().runtime_modules(),
             &settings,
             control_discovery.runtime_instance_id(),
         )
@@ -148,7 +154,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     Ok(StartupConfiguration {
         config,
         perf_metrics_enabled,
-        diesel_db,
+        persistence,
         valkey_connection,
         settings,
         token_issuance_response_keys,

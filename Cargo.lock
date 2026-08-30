@@ -2735,6 +2735,7 @@ dependencies = [
  "nazo-openid4vci",
  "nazo-openid4vp",
  "nazo-operator-protocol",
+ "nazo-persistence",
  "nazo-postgres",
  "nazo-resource-server",
  "nazo-runtime-modules",
@@ -2770,6 +2771,23 @@ dependencies = [
  "x509-cert 0.3.0",
  "x509-parser",
  "yaml_serde",
+]
+
+[[package]]
+name = "nazo-oauth-server-postgres"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "nazo-auth",
+ "nazo-identity",
+ "nazo-oauth-server",
+ "nazo-openid4vci",
+ "nazo-persistence",
+ "nazo-postgres",
+ "nazo-resource-server",
+ "nazo-scim-events",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2838,6 +2856,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nazo-persistence"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "futures-util",
+ "nazo-auth",
+ "nazo-identity",
+ "nazo-openid4vci",
+ "nazo-openid4vp",
+ "nazo-operator-protocol",
+ "nazo-runtime-modules",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "uuid",
+]
+
+[[package]]
 name = "nazo-postgres"
 version = "0.2.6"
 dependencies = [
@@ -2858,6 +2896,7 @@ dependencies = [
  "nazo-openid4vci",
  "nazo-openid4vp",
  "nazo-operator-protocol",
+ "nazo-persistence",
  "nazo-resource-server",
  "nazo-runtime-modules",
  "nazo-scim-events",

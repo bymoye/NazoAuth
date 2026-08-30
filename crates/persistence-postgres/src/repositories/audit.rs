@@ -345,6 +345,48 @@ impl BackchannelLogoutOutboxPort for AuditRepository {
     }
 }
 
+impl nazo_persistence::BackchannelLogoutDeliveryStore for AuditRepository {
+    fn claim_due(
+        &self,
+        limit: i64,
+        lock_timeout_seconds: i32,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<BackchannelLogoutDelivery>, RepositoryError>>
+    {
+        Box::pin(async move {
+            AuditRepository::claim_due_backchannel_logout(self, limit, lock_timeout_seconds).await
+        })
+    }
+
+    fn complete(
+        &self,
+        delivery_id: Uuid,
+        expected_attempts: i32,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), RepositoryError>> {
+        Box::pin(async move {
+            AuditRepository::complete_backchannel_logout(self, delivery_id, expected_attempts).await
+        })
+    }
+
+    fn fail<'a>(
+        &'a self,
+        delivery_id: Uuid,
+        expected_attempts: i32,
+        next_attempt_at: Option<DateTime<Utc>>,
+        last_error: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), RepositoryError>> {
+        Box::pin(async move {
+            AuditRepository::fail_backchannel_logout(
+                self,
+                delivery_id,
+                expected_attempts,
+                next_attempt_at,
+                last_error,
+            )
+            .await
+        })
+    }
+}
+
 impl ScimCredentialAuditPort for AuditRepository {
     fn active_credential<'a>(
         &'a self,

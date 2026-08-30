@@ -20,8 +20,9 @@ use crate::http::admin::clients::{
     admin_client_policy,
 };
 use crate::settings::Settings;
-use crate::tenant_resource_executor::{
-    PreparedOAuthClient, TenantResourcePreparation, TenantResourcePreparationError,
+use nazo_persistence::tenant_resources::{
+    PreparedMtlsTrustAnchor, PreparedOAuthClient, TenantResourcePreparation,
+    TenantResourcePreparationError,
 };
 
 /// Bridges onto [`ServerAdminClientService`] (client registration policy) and
@@ -95,6 +96,23 @@ impl TenantResourcePreparation for ServerTenantResourcePreparation {
             })
         })
     }
+
+    fn prepare_mtls_trust_anchor<'a>(
+        &'a self,
+        certificate_pem: String,
+    ) -> BoxFuture<'a, Result<PreparedMtlsTrustAnchor, TenantResourcePreparationError>> {
+        Box::pin(async move {
+            let prepared = nazo_key_management::validate_mtls_trust_anchor(&certificate_pem)
+                .map_err(|_| TenantResourcePreparationError::Rejected)?;
+            Ok(PreparedMtlsTrustAnchor {
+                certificate_pem: prepared.certificate_pem,
+                certificate_sha256: prepared.certificate_sha256,
+                subject_dn: prepared.subject_dn,
+                not_before: prepared.not_before,
+                not_after: prepared.not_after,
+            })
+        })
+    }
 }
 
 pub(crate) fn map_admin_client_error(error: AdminClientError) -> TenantResourcePreparationError {
@@ -109,9 +127,8 @@ pub(crate) fn map_admin_client_error(error: AdminClientError) -> TenantResourceP
     }
 }
 
-/// Everything the one-shot pipeline needs to drive
-/// [`crate::tenant_resource_executor::PostgresTenantResourceExecutor`] with
-/// the running server's own policy inputs.
+/// Everything the one-shot pipeline needs to drive a tenant-resource
+/// persistence adapter with the running server's own policy inputs.
 pub(crate) struct ControlPlaneTenantResources {
     pub(crate) preparation: Arc<dyn TenantResourcePreparation>,
     pub(crate) tenant: nazo_identity::TenantContext,
@@ -120,10 +137,10 @@ pub(crate) struct ControlPlaneTenantResources {
 
 /// Composition for the one-shot ControlOperation pipeline (H07): builds the
 /// same registration-policy bridge and tenant/data-key inputs as the running
-/// server, from the same full configuration source.  `pool` must already be a
-/// working application database pool.
+/// server, from the same full configuration source. The launcher supplies the
+/// backend-specific client repository behind the semantic port.
 pub(crate) async fn control_plane_resources(
-    pool: nazo_postgres::DbPool,
+    clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
 ) -> anyhow::Result<ControlPlaneTenantResources> {
     let config = crate::config::ConfigSource::load()
         .context("tenant-resource operations require the application configuration")?;
@@ -131,7 +148,7 @@ pub(crate) async fn control_plane_resources(
         .context("tenant-resource operations require valid application settings")?;
     let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
     let service = ServerAdminClientService::new(
-        nazo_postgres::OAuthClientRepository::new(pool),
+        clients,
         ServerSectorIdentifierResolver,
         ServerAdminClientCrypto::new(keyset),
         admin_client_policy(&settings),

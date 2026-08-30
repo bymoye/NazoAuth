@@ -1,7 +1,7 @@
 //! Recovery Root service layer (04A D10/D11/D12).
 //!
-//! Typed surface between the admin HTTP plane and the PostgreSQL recovery
-//! repository.  This module owns request-shape validation (identifier
+//! Typed surface between the admin HTTP plane and the selected recovery
+//! persistence adapter. This module owns request-shape validation (identifier
 //! formats, key-material decoding, kid/key binding through the shared
 //! `nazo-operator-protocol` validators) before anything reaches storage.
 //!
@@ -22,12 +22,14 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
-pub use nazo_postgres::{MAX_RECOVERY_CHALLENGE_ATTEMPTS, RECOVERY_CHALLENGE_TTL_SECONDS};
+pub use nazo_persistence::control_plane::{
+    MAX_RECOVERY_CHALLENGE_ATTEMPTS, RECOVERY_CHALLENGE_TTL_SECONDS,
+};
 
 use nazo_operator_protocol::{RecoveryProposal, RecoveryRootRotation};
-use nazo_postgres::{
+use nazo_persistence::control_plane::{
     IssuedIdentityApproval, NewRecoveryChallenge, NewRecoveryRoot, RecoveredSlotCommit,
-    RecoveryRootError, RecoveryRootRepository, RecoveryRotationError, RecoverySubmission,
+    RecoveryRootError, RecoveryRootPort, RecoveryRotationError, RecoverySubmission,
     StoredRecoveryRoot,
 };
 
@@ -108,12 +110,12 @@ pub struct IssuedRotationApprovalView {
 /// Service facade over the recovery repository.  Cheap to clone.
 #[derive(Clone)]
 pub struct RecoveryRootService {
-    repository: Arc<RecoveryRootRepository>,
+    repository: Arc<dyn RecoveryRootPort>,
 }
 
 impl RecoveryRootService {
     #[must_use]
-    pub fn new(repository: Arc<RecoveryRootRepository>) -> Self {
+    pub fn new(repository: Arc<dyn RecoveryRootPort>) -> Self {
         Self { repository }
     }
 
@@ -187,7 +189,8 @@ impl RecoveryRootService {
         &self,
         request: &RecoveryChallengeRequest,
         now: DateTime<Utc>,
-    ) -> Result<nazo_postgres::IssuedRecoveryChallenge, RecoveryRootServiceError> {
+    ) -> Result<nazo_persistence::control_plane::IssuedRecoveryChallenge, RecoveryRootServiceError>
+    {
         let proposal = validate_challenge_request(request)?;
         let next_material = self
             .repository

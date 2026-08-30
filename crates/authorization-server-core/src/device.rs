@@ -583,7 +583,7 @@ where
         mut current_time: F,
     ) -> Result<(), DeviceDecisionFailure>
     where
-        R: DeviceGrantRepositoryPort,
+        R: DeviceGrantRepositoryPort + ?Sized,
         F: FnMut() -> DateTime<Utc>,
     {
         let claim_id = Uuid::now_v7();

@@ -135,6 +135,9 @@ jobs:
       - name: Verify compatibility contracts
         run: python scripts/verify_static_contracts.py --check
 
+      - name: Verify persistence dependency isolation
+        run: python scripts/check_persistence_dependency_graph.py
+
       - name: Format
         run: cargo fmt --check
 

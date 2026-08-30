@@ -163,7 +163,7 @@ fn dotenv_file_is_rejected() {
 fn first_server_run_creates_the_local_configuration_once() {
     let path = temp_config_dir("first_server_run");
 
-    let result = prepare_server_config_in(&path).unwrap();
+    let result = prepare_server_config_in(&path, "adapter://runtime/database").unwrap();
     let config_path = path.join(CONFIG_FILE);
 
     assert_eq!(
@@ -171,13 +171,14 @@ fn first_server_run_creates_the_local_configuration_once() {
         ServerConfigPreparation::Created(config_path.clone())
     );
     let persisted = std::fs::read_to_string(&config_path).unwrap();
-    assert!(persisted.starts_with(INITIAL_CONFIG));
+    assert!(persisted.starts_with(INITIAL_CONFIG_PREFIX));
+    assert!(persisted.contains("DATABASE_URL: \"adapter://runtime/database\""));
     let source = ConfigSource::load_from_dir(&path).unwrap();
     let epoch = uuid::Uuid::parse_str(&source.required_string("VALKEY_STATE_EPOCH").unwrap())
         .expect("fresh config epoch must be a UUID");
     assert_eq!(epoch.get_version_num(), 7);
     assert_eq!(
-        prepare_server_config_in(&path).unwrap(),
+        prepare_server_config_in(&path, "adapter://runtime/database").unwrap(),
         ServerConfigPreparation::Ready
     );
     let _ = std::fs::remove_dir_all(&path);
@@ -189,7 +190,7 @@ fn existing_server_config_is_never_overwritten() {
     let config_path = path.join(CONFIG_FILE);
     std::fs::write(&config_path, "PUBLIC_BASE_URL: https://auth.example\n").unwrap();
 
-    let result = prepare_server_config_in(&path).unwrap();
+    let result = prepare_server_config_in(&path, "adapter://runtime/database").unwrap();
 
     assert_eq!(result, ServerConfigPreparation::Ready);
     assert_eq!(
@@ -203,8 +204,8 @@ fn existing_server_config_is_never_overwritten() {
 fn fresh_server_configs_persist_distinct_valkey_epochs() {
     let first = temp_config_dir("first_epoch");
     let second = temp_config_dir("second_epoch");
-    prepare_server_config_in(&first).unwrap();
-    prepare_server_config_in(&second).unwrap();
+    prepare_server_config_in(&first, "adapter://runtime/database").unwrap();
+    prepare_server_config_in(&second, "adapter://runtime/database").unwrap();
 
     let first_epoch = ConfigSource::load_from_dir(&first)
         .unwrap()
@@ -218,7 +219,7 @@ fn fresh_server_configs_persist_distinct_valkey_epochs() {
 
     let first_contents = std::fs::read_to_string(first.join(CONFIG_FILE)).unwrap();
     assert_eq!(
-        prepare_server_config_in(&first).unwrap(),
+        prepare_server_config_in(&first, "adapter://runtime/database").unwrap(),
         ServerConfigPreparation::Ready
     );
     assert_eq!(
@@ -279,15 +280,19 @@ fn first_server_run_creates_the_overridden_configuration_file() {
     std::fs::create_dir(config_dir.join("mounted")).unwrap();
     let override_path = config_dir.join("mounted").join("app-config.yaml");
 
-    let result =
-        prepare_server_config_at(&config_dir, Some(override_path.to_str().unwrap())).unwrap();
+    let result = prepare_server_config_at(
+        &config_dir,
+        Some(override_path.to_str().unwrap()),
+        "adapter://runtime/database",
+    )
+    .unwrap();
 
     assert_eq!(
         result,
         ServerConfigPreparation::Created(override_path.clone())
     );
     let persisted = std::fs::read_to_string(&override_path).unwrap();
-    assert!(persisted.starts_with(INITIAL_CONFIG));
+    assert!(persisted.starts_with(INITIAL_CONFIG_PREFIX));
     let source = ConfigSource::load_from_dir_with_config_file_override(
         &config_dir,
         Some(override_path.to_str().unwrap()),
@@ -569,7 +574,10 @@ fn explicit_yaml_scalar_overrides_environment_secret_file_fallback() {
     )
     .unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://yaml.example/oauth");
+    assert_eq!(
+        database_url(&source).unwrap(),
+        "postgresql://yaml.example/oauth"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -589,7 +597,10 @@ fn environment_secret_file_supplies_an_absent_scalar() {
     )
     .unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert_eq!(
+        database_url(&source).unwrap(),
+        "postgresql://file.example/oauth"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -609,7 +620,10 @@ fn yaml_secret_file_path_is_resolved_and_trimmed() {
 
     let source = ConfigSource::load_from_dir(&path).unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert_eq!(
+        database_url(&source).unwrap(),
+        "postgresql://file.example/oauth"
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -725,7 +739,10 @@ fn migration_config_does_not_materialize_unrelated_application_secrets() {
     )
     .unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert_eq!(
+        database_url(&source).unwrap(),
+        "postgresql://file.example/oauth"
+    );
     assert!(!path.join("state").exists());
     assert!(source.get("CLIENT_SECRET_PEPPER").is_none());
     let _ = std::fs::remove_dir_all(&path);
@@ -1079,7 +1096,7 @@ fn invalid_environment_type_is_error() {
 fn database_url_uses_documented_default_when_unset() {
     let source = ConfigSource::default();
 
-    assert_eq!(database_url(&source), DEFAULT_DATABASE_URL);
+    assert!(database_url(&source).is_err());
     assert_eq!(
         database_max_connections(&source).unwrap(),
         DEFAULT_DATABASE_MAX_CONNECTIONS
@@ -1100,7 +1117,7 @@ fn database_url_uses_whitelisted_environment_value() {
         .unwrap();
 
     assert_eq!(
-        database_url(&source),
+        database_url(&source).unwrap(),
         "postgresql://nazo:secret@db.internal:5432/oauth"
     );
     assert_eq!(database_max_connections(&source).unwrap(), 48);
@@ -1126,7 +1143,7 @@ fn database_url_does_not_rewrite_unsupported_legacy_driver_scheme() {
     )]);
 
     assert_eq!(
-        database_url(&source),
+        database_url(&source).unwrap(),
         "postgresql+psycopg://nazo:secret@db.internal:5432/oauth"
     );
 }

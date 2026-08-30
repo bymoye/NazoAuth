@@ -21,7 +21,7 @@ use actix_web::web::{Data, Json, Query};
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
 use nazo_http_actix::{csrf_error, has_valid_csrf_token_for_cookies, json_response, oauth_error};
-use nazo_postgres::{
+use nazo_persistence::control_plane::{
     ControllerIdentityAction, ControllerSlotStatus, IdentityApprovalError,
     MAX_ACTIVE_CONTROLLER_SLOTS, StoredControllerSlot,
 };

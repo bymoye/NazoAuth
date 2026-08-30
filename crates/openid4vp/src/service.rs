@@ -4,11 +4,90 @@ use nazo_digital_credentials::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::{
     AuthorizationResponse, PresentationCompletionBinding, PresentationError, PresentationResult,
     PresentationStoreError, PresentationStorePort, PresentationTransaction, ResponseMode,
 };
+
+impl<T> PresentationStorePort for Arc<T>
+where
+    T: PresentationStorePort + ?Sized,
+{
+    fn create<'a>(
+        &'a self,
+        transaction: &'a PresentationTransaction,
+        idempotency: crate::PresentationCreateIdempotency<'a>,
+    ) -> crate::PresentationStoreFuture<
+        'a,
+        Result<crate::PresentationCreateOutcome, PresentationStoreError>,
+    > {
+        self.as_ref().create(transaction, idempotency)
+    }
+
+    fn find_by_create_request<'a>(
+        &'a self,
+        idempotency: crate::PresentationCreateIdempotency<'a>,
+    ) -> crate::PresentationStoreFuture<
+        'a,
+        Result<Option<PresentationTransaction>, PresentationStoreError>,
+    > {
+        self.as_ref().find_by_create_request(idempotency)
+    }
+
+    fn request<'a>(
+        &'a self,
+        transaction_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> crate::PresentationStoreFuture<
+        'a,
+        Result<Option<PresentationTransaction>, PresentationStoreError>,
+    > {
+        self.as_ref().request(transaction_id, now)
+    }
+
+    fn bind_wallet_nonce<'a>(
+        &'a self,
+        transaction_id: uuid::Uuid,
+        wallet_nonce: &'a str,
+        now: DateTime<Utc>,
+    ) -> crate::PresentationStoreFuture<
+        'a,
+        Result<Option<PresentationTransaction>, PresentationStoreError>,
+    > {
+        self.as_ref()
+            .bind_wallet_nonce(transaction_id, wallet_nonce, now)
+    }
+
+    fn complete<'a>(
+        &'a self,
+        transaction_id: uuid::Uuid,
+        state_hash: &'a str,
+        result: &'a PresentationResult,
+        verification_binding: Option<crate::PresentationCompletionBinding<'a>>,
+        now: DateTime<Utc>,
+    ) -> crate::PresentationStoreFuture<'a, Result<bool, PresentationStoreError>> {
+        self.as_ref().complete(
+            transaction_id,
+            state_hash,
+            result,
+            verification_binding,
+            now,
+        )
+    }
+
+    fn result<'a>(
+        &'a self,
+        transaction_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> crate::PresentationStoreFuture<
+        'a,
+        Result<Option<crate::StoredPresentation>, PresentationStoreError>,
+    > {
+        self.as_ref().result(transaction_id, now)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedPresentation {

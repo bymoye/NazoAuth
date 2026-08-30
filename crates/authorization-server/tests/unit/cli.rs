@@ -1,5 +1,39 @@
 use super::*;
 
+struct UnusedLauncher;
+
+impl PersistenceLauncher for UnusedLauncher {
+    fn default_database_url(&self) -> &'static str {
+        "adapter://unused"
+    }
+
+    fn server_bindings<'a>(
+        &'a self,
+        _config: &'a ConfigSource,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerPersistenceBindings> {
+        unreachable!("help and release identity do not initialize persistence")
+    }
+
+    fn operator_persistence<'a>(
+        &'a self,
+        _config: &'a ConfigSource,
+    ) -> LauncherFuture<'a, Arc<dyn crate::operator_task::OperatorPersistence>> {
+        unreachable!("help and release identity do not initialize persistence")
+    }
+
+    fn audit_exporter<'a>(
+        &'a self,
+        _database_url: &'a str,
+        _database_max_connections: usize,
+    ) -> LauncherFuture<'a, Arc<dyn nazo_persistence::SecurityAuditExporter>> {
+        unreachable!("help and release identity do not initialize persistence")
+    }
+}
+
+fn unused_launcher() -> Arc<dyn PersistenceLauncher> {
+    Arc::new(UnusedLauncher)
+}
+
 fn parse(args: &[&str]) -> anyhow::Result<Command> {
     Command::parse(args.iter().map(|value| (*value).to_owned()))
 }
@@ -34,16 +68,22 @@ fn help_is_available_without_starting_a_runtime() {
 
 #[tokio::test]
 async fn public_help_command_completes_without_loading_runtime_configuration() {
-    run(["nazoauth".to_owned(), "help".to_owned()])
-        .await
-        .unwrap();
+    run(
+        ["nazoauth".to_owned(), "help".to_owned()],
+        unused_launcher(),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn release_identity_completes_without_loading_runtime_configuration() {
-    run(["nazoauth".to_owned(), "release-identity".to_owned()])
-        .await
-        .unwrap();
+    run(
+        ["nazoauth".to_owned(), "release-identity".to_owned()],
+        unused_launcher(),
+    )
+    .await
+    .unwrap();
 }
 
 #[test]

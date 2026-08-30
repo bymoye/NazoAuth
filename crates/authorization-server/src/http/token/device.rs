@@ -40,7 +40,7 @@ use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use nazo_auth::{
     CapabilityAdmission, ClientAuthenticationContext, DeviceAuthorizationApproval,
     DeviceAuthorizationPayload, DeviceAuthorizationRequestError, DeviceAuthorizationRequestPolicy,
-    DeviceDecisionFailure, DeviceGrantService,
+    DeviceDecisionFailure, DeviceGrantRepositoryPort, DeviceGrantService,
 };
 use nazo_valkey::DeviceStore;
 
@@ -50,7 +50,7 @@ pub(crate) type ServerDeviceGrantService = DeviceGrantService<DeviceStore>;
 pub(crate) struct DeviceDecisionHandles {
     authorization_service: Data<ServerAuthorizationService>,
     device_service: Data<ServerDeviceGrantService>,
-    grant_repository: Data<nazo_postgres::AuthorizationFlowRepository>,
+    grant_repository: Data<dyn DeviceGrantRepositoryPort>,
     sessions: Data<SessionProfileHandles>,
     config: Data<DeviceHttpConfig>,
     runtime: Data<ServerRuntimeModuleRegistry>,
@@ -60,7 +60,7 @@ impl DeviceDecisionHandles {
     pub(crate) fn new(
         authorization_service: Data<ServerAuthorizationService>,
         device_service: Data<ServerDeviceGrantService>,
-        grant_repository: Data<nazo_postgres::AuthorizationFlowRepository>,
+        grant_repository: Data<dyn DeviceGrantRepositoryPort>,
         sessions: Data<SessionProfileHandles>,
         config: Data<DeviceHttpConfig>,
         runtime: Data<ServerRuntimeModuleRegistry>,
@@ -591,7 +591,7 @@ pub(crate) async fn device_decision(
         }
         _ => unreachable!("validated device decision must be approve or deny"),
     };
-    // The required intent is persisted before the Valkey/PostgreSQL decision
+    // The required intent is persisted before the Valkey/database decision
     // saga. The committed outcome remains best-effort because those stores
     // cannot atomically include the audit ledger.
     match result {

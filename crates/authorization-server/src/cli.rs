@@ -1,23 +1,56 @@
 //! Unified NazoAuth command-line entry point.
 
+use std::{future::Future, pin::Pin, sync::Arc};
+
 use anyhow::bail;
 
-use crate::config::{ConfigSource, ServerConfigPreparation, database_url};
-
-const MIGRATION_RUNTIME_ROLE_ENV: &str = "NAZOAUTH_MIGRATION_RUNTIME_ROLE";
+use crate::config::{ConfigSource, ServerConfigPreparation};
 
 const USAGE: &str =
     "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate>";
 
-pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
+pub type LauncherFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+
+/// Database-specific lifecycle supplied by a statically linked launcher.
+/// Application commands only receive semantic capability bundles.
+pub trait PersistenceLauncher: Send + Sync {
+    fn default_database_url(&self) -> &'static str;
+
+    fn server_bindings<'a>(
+        &'a self,
+        config: &'a ConfigSource,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerPersistenceBindings>;
+
+    fn operator_persistence<'a>(
+        &'a self,
+        config: &'a ConfigSource,
+    ) -> LauncherFuture<'a, Arc<dyn crate::operator_task::OperatorPersistence>>;
+
+    fn audit_exporter<'a>(
+        &'a self,
+        database_url: &'a str,
+        database_max_connections: usize,
+    ) -> LauncherFuture<'a, Arc<dyn nazo_persistence::SecurityAuditExporter>>;
+}
+
+pub async fn run(
+    args: impl IntoIterator<Item = String>,
+    launcher: Arc<dyn PersistenceLauncher>,
+) -> anyhow::Result<()> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let usage = usage_for_args(&args);
     match Command::parse(args)? {
         Command::Help => {
-            println!("{USAGE}");
+            println!("{usage}");
             Ok(())
         }
-        Command::Server => run_server().await,
-        Command::OperatorTask => crate::operator_task::run().await,
-        Command::AuditAnchorWorker => run_audit_anchor_worker().await,
+        Command::Server => run_server(launcher.as_ref()).await,
+        Command::OperatorTask => {
+            let config = ConfigSource::load_for_migrations()?;
+            let persistence = launcher.operator_persistence(&config).await?;
+            crate::operator_task::run(persistence).await
+        }
+        Command::AuditAnchorWorker => run_audit_anchor_worker(launcher.as_ref()).await,
         Command::ReleaseIdentity => {
             println!(
                 "{}",
@@ -26,18 +59,24 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Migrate => {
-            run_migrations().await?;
+            let config = ConfigSource::load_for_migrations()?;
+            launcher
+                .operator_persistence(&config)
+                .await?
+                .run_migrations()
+                .await?;
             Ok(())
         }
     }
 }
 
-async fn run_audit_anchor_worker() -> anyhow::Result<()> {
+async fn run_audit_anchor_worker(launcher: &dyn PersistenceLauncher) -> anyhow::Result<()> {
     let config = ConfigSource::load_for_audit_anchor_worker()?;
     let (database_url, database_max_connections, worker_config) =
         crate::adapters::audit_anchor::worker_config_from_source(&config)?;
-    let pool = nazo_postgres::create_pool(database_url, database_max_connections)?;
-    let repository = nazo_postgres::AuditLedgerRepository::new(pool);
+    let repository = launcher
+        .audit_exporter(&database_url, database_max_connections)
+        .await?;
     tokio::select! {
         result = crate::adapters::audit_anchor::run_worker(repository, worker_config) => result,
         signal = tokio::signal::ctrl_c() => {
@@ -47,8 +86,8 @@ async fn run_audit_anchor_worker() -> anyhow::Result<()> {
     }
 }
 
-async fn run_server() -> anyhow::Result<()> {
-    match crate::config::prepare_server_config()? {
+async fn run_server(launcher: &dyn PersistenceLauncher) -> anyhow::Result<()> {
+    match crate::config::prepare_server_config(launcher.default_database_url())? {
         ServerConfigPreparation::Ready => {}
         ServerConfigPreparation::Created(path) => {
             eprintln!(
@@ -57,21 +96,9 @@ async fn run_server() -> anyhow::Result<()> {
             );
         }
     }
-    crate::bootstrap::run().await
-}
-
-pub(crate) async fn run_migrations() -> anyhow::Result<bool> {
-    // Migration ownership needs only the database secret. Materializing unrelated
-    // application secrets here would couple a least-privilege one-shot task to the
-    // long-running runtime's writable data directories.
-    let config = ConfigSource::load_for_migrations()?;
-    let database_url = database_url(&config);
-    let runtime_role = std::env::var(MIGRATION_RUNTIME_ROLE_ENV)
-        .map_err(|_| anyhow::anyhow!("{MIGRATION_RUNTIME_ROLE_ENV} is required"))?;
-    let applied = nazo_postgres::run_pending_migrations(&database_url).await?;
-    nazo_postgres::configure_runtime_role(&database_url, runtime_role.trim()).await?;
-    nazo_postgres::cleanup_expired_security_state(&database_url).await?;
-    Ok(applied)
+    let config = ConfigSource::load()?;
+    let bindings = launcher.server_bindings(&config).await?;
+    crate::bootstrap::run(config, bindings).await
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -86,10 +113,12 @@ enum Command {
 
 impl Command {
     fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
+        let args = args.into_iter().collect::<Vec<_>>();
+        let usage = usage_for_args(&args);
         let mut args = args.into_iter();
         let _program = args.next();
         let Some(command) = args.next() else {
-            bail!("{USAGE}");
+            bail!(usage);
         };
         match command.as_str() {
             "-h" | "--help" | "help" => {
@@ -116,9 +145,22 @@ impl Command {
                 ensure_no_extra_args(args, "migrate")?;
                 Ok(Self::Migrate)
             }
-            _ => bail!("unknown command {command}\n{USAGE}"),
+            _ => bail!("unknown command {command}\n{usage}"),
         }
     }
+}
+
+fn usage_for_args(args: &[String]) -> String {
+    let program = args
+        .first()
+        .and_then(|value| std::path::Path::new(value).file_name())
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("nazoauth");
+    if program == "nazoauth" {
+        return USAGE.to_owned();
+    }
+    format!("usage: {program} <server|operator-task|audit-anchor-worker|release-identity|migrate>")
 }
 
 fn ensure_no_extra_args(

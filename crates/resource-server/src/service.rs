@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -57,6 +57,18 @@ pub trait AccessTokenRevocationLookup: Send + Sync {
         &'a self,
         key: RevocationLookupKey<'a>,
     ) -> ResourceServerPortFuture<'a, Result<bool, ProtectedResourceDependencyError>>;
+}
+
+impl<T> AccessTokenRevocationLookup for Arc<T>
+where
+    T: AccessTokenRevocationLookup + ?Sized,
+{
+    fn is_revoked<'a>(
+        &'a self,
+        key: RevocationLookupKey<'a>,
+    ) -> ResourceServerPortFuture<'a, Result<bool, ProtectedResourceDependencyError>> {
+        self.as_ref().is_revoked(key)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

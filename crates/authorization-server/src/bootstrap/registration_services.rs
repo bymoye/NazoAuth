@@ -51,7 +51,6 @@ impl nazo_identity::ports::SecretHashPort for RegistrationSecretHasher {
 }
 
 pub(crate) type LocalRegistrationService = nazo_identity::RegistrationService<
-    nazo_postgres::UserRepository,
     nazo_valkey::AuthenticationStore,
     RegistrationSecretHasher,
     SmtpVerificationEmailDelivery,

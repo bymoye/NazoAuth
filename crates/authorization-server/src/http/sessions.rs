@@ -6,6 +6,7 @@ use chrono::Utc;
 use nazo_http_actix::oauth_error;
 use nazo_identity::PublicAccount;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use uuid::Uuid;
 // 只处理从请求 Cookie 到当前用户/管理员身份的解析。
@@ -15,7 +16,7 @@ use nazo_http_actix::{
     with_cookie_headers,
 };
 
-use nazo_postgres::UserRepository;
+use nazo_identity::ports::SessionAccountPort;
 use nazo_valkey::SessionStore;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -50,7 +51,7 @@ const AUTH_TIME_CLOCK_SKEW_SECONDS: i64 = 30;
 /// application database pool, Valkey connection, or complete server settings to HTTP handlers.
 pub(crate) struct AdminSessionHandles {
     sessions: SessionStore,
-    users: UserRepository,
+    users: Arc<dyn SessionAccountPort>,
     tenant_id: nazo_identity::TenantId,
     http: SessionHttpConfig,
 }
@@ -63,7 +64,7 @@ pub(crate) struct AdminSessionHandles {
 #[derive(Clone)]
 pub(crate) struct SessionProfileHandles {
     sessions: SessionStore,
-    users: UserRepository,
+    users: Arc<dyn SessionAccountPort>,
     tenant_id: nazo_identity::TenantId,
     http: SessionHttpConfig,
 }
@@ -102,9 +103,27 @@ impl SessionHttpConfig {
 }
 
 impl AdminSessionHandles {
-    pub(crate) fn new(
+    #[cfg(test)]
+    pub(crate) fn new<U>(
         sessions: SessionStore,
-        users: UserRepository,
+        users: U,
+        tenant_id: nazo_identity::TenantId,
+        http: SessionHttpConfig,
+    ) -> Self
+    where
+        U: SessionAccountPort + 'static,
+    {
+        Self {
+            sessions,
+            users: Arc::new(users),
+            tenant_id,
+            http,
+        }
+    }
+
+    pub(crate) fn from_port(
+        sessions: SessionStore,
+        users: Arc<dyn SessionAccountPort>,
         tenant_id: nazo_identity::TenantId,
         http: SessionHttpConfig,
     ) -> Self {
@@ -126,7 +145,7 @@ impl AdminSessionHandles {
     ) -> anyhow::Result<Option<CurrentSession>> {
         current_session_from_handles(
             &self.sessions,
-            &self.users,
+            self.users.as_ref(),
             self.tenant_id,
             self.http.session_cookie_name(),
             req,
@@ -151,9 +170,27 @@ impl AdminSessionHandles {
 }
 
 impl SessionProfileHandles {
-    pub(crate) fn new(
+    #[cfg(test)]
+    pub(crate) fn new<U>(
         sessions: SessionStore,
-        users: UserRepository,
+        users: U,
+        tenant_id: nazo_identity::TenantId,
+        http: SessionHttpConfig,
+    ) -> Self
+    where
+        U: SessionAccountPort + 'static,
+    {
+        Self {
+            sessions,
+            users: Arc::new(users),
+            tenant_id,
+            http,
+        }
+    }
+
+    pub(crate) fn from_port(
+        sessions: SessionStore,
+        users: Arc<dyn SessionAccountPort>,
         tenant_id: nazo_identity::TenantId,
         http: SessionHttpConfig,
     ) -> Self {
@@ -230,8 +267,13 @@ impl SessionProfileHandles {
         &self,
         session_id: &str,
     ) -> anyhow::Result<Option<CurrentSession>> {
-        current_session_by_id_from_handles(&self.sessions, &self.users, self.tenant_id, session_id)
-            .await
+        current_session_by_id_from_handles(
+            &self.sessions,
+            self.users.as_ref(),
+            self.tenant_id,
+            session_id,
+        )
+        .await
     }
 
     pub(crate) async fn current_session(
@@ -259,7 +301,7 @@ impl SessionPayload {
 
 pub(crate) async fn current_session_from_handles(
     sessions: &SessionStore,
-    users: &UserRepository,
+    users: &dyn SessionAccountPort,
     tenant_id: nazo_identity::TenantId,
     session_cookie_name: &str,
     req: &HttpRequest,
@@ -272,7 +314,7 @@ pub(crate) async fn current_session_from_handles(
 
 async fn current_session_by_id_from_handles(
     sessions: &SessionStore,
-    users: &UserRepository,
+    users: &dyn SessionAccountPort,
     tenant_id: nazo_identity::TenantId,
     session_id: &str,
 ) -> anyhow::Result<Option<CurrentSession>> {
@@ -314,7 +356,7 @@ async fn current_session_by_id_from_handles(
 
 async fn session_from_payload(
     sessions: &SessionStore,
-    users: &UserRepository,
+    users: &dyn SessionAccountPort,
     tenant_id: nazo_identity::TenantId,
     session_id: &str,
     payload: SessionPayload,

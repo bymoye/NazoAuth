@@ -253,7 +253,7 @@ async fn disabled_dynamic_client_registration_keeps_the_static_route_contract() 
     );
     let dynamic_registration_endpoint = web::Data::new(dynamic_registration_endpoint(
         DynamicRegistrationConfig::from(settings.as_ref()),
-        nazo_postgres::OAuthClientRepository::new(pool.clone()),
+        Arc::new(nazo_postgres::OAuthClientRepository::new(pool.clone())),
         nazo_valkey::RateLimitStore::new(&valkey),
         crate::test_support::test_key_manager(),
         runtime_modules,

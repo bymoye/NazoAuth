@@ -333,7 +333,7 @@ impl ServerCredentialIssuerOperations {
                 .map_err(|_| vci_error(400, "invalid_request", "Credential subject is invalid."))?;
             if !self
                 .users
-                .is_active_by_tenant_id(tenant, subject)
+                .is_active(tenant, subject)
                 .await
                 .map_err(|_| vci_error(503, "server_error", "Credential subject lookup failed."))?
             {

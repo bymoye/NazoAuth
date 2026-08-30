@@ -146,9 +146,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazoauth.cdx
+          cargo cyclonedx --manifest-path crates/authorization-server-postgres/Cargo.toml --format json --override-filename nazoauth.cdx
           mkdir -p target/release-evidence/sbom
-          mv crates/authorization-server/nazoauth.cdx.json target/release-evidence/sbom/nazoauth.cdx.json
+          mv crates/authorization-server-postgres/nazoauth.cdx.json target/release-evidence/sbom/nazoauth.cdx.json
       - name: Upload internal supply-chain evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -290,7 +290,7 @@ jobs:
       - name: Build the server binary once for this platform
         run: >-
           cargo build --release --locked --target ${{ matrix.target }}
-          --package nazo-oauth-server --bin nazoauth
+          --package nazo-oauth-server-postgres --bin nazoauth
       - name: Smoke the server binary and verify release identity
         shell: pwsh
         run: |
@@ -301,7 +301,7 @@ jobs:
           $identity = (& $server release-identity | ConvertFrom-Json)
           if ($LASTEXITCODE -ne 0) { throw "nazoauth release identity smoke failed" }
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-          $serverPackage = $metadata.packages | Where-Object { $_.name -eq "nazo-oauth-server" }
+          $serverPackage = $metadata.packages | Where-Object { $_.name -eq "nazo-oauth-server-postgres" }
           if ($identity.release -ne "v$($serverPackage.version)") { throw "embedded release mismatch" }
           $protocolSource = Get-Content "crates/operator-protocol/src/lib.rs" -Raw
           $protocolMatch = [regex]::Match($protocolSource, 'pub const PROTOCOL_VERSION: u32 = (\d+);')

@@ -23,20 +23,20 @@ async fn lifecycle_documents_are_closed() {
 
 #[actix_web::test]
 async fn readiness_reports_each_dependency_without_leaking_errors() {
-    for (postgresql, valkey, status, expected) in [
+    for (database, valkey, status, expected) in [
         (true, true, StatusCode::OK, "ready"),
         (false, true, StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
         (true, false, StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
         (false, false, StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
     ] {
-        let response = readiness_response(postgresql, valkey, true);
+        let response = readiness_response(database, valkey, true);
         assert_eq!(response.status(), status);
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
         assert_eq!(body["status"], expected);
         assert_eq!(
-            body["checks"]["postgresql"]["status"],
-            if postgresql { "up" } else { "down" }
+            body["checks"]["database"]["status"],
+            if database { "up" } else { "down" }
         );
         assert_eq!(
             body["checks"]["valkey"]["status"],
@@ -73,7 +73,7 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
     let client = builder.build().expect("test Valkey client should build");
     let connection = nazo_valkey::test_support::scoped_connection(client);
     let dependencies = Data::new(ReadinessDependencies::new(
-        database,
+        Arc::new(nazo_postgres::PostgresHealthCheck::new(database)),
         connection,
         nazo_key_management::KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA),
     ));
@@ -84,7 +84,7 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
     assert_eq!(body["status"], "not_ready");
-    assert_eq!(body["checks"]["postgresql"]["status"], "down");
+    assert_eq!(body["checks"]["database"]["status"], "down");
     assert_eq!(body["checks"]["valkey"]["status"], "down");
     assert_eq!(body["checks"]["signing_keys"]["status"], "up");
     assert_eq!(body.as_object().unwrap().len(), 2);

@@ -138,7 +138,7 @@ pub(crate) fn token_issuance_repository(
     initialize_audit_dependencies(&pool);
     nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
         pool,
-        nazo_postgres::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
+        nazo_persistence::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
             .expect("test response key ring is valid"),
     )
 }
@@ -171,7 +171,9 @@ pub(crate) fn initialize_audit_dependencies(_pool: &nazo_postgres::DbPool) {
     )
     .expect("test audit anchor preflight config is valid");
     crate::adapters::audit::install_persistent_audit_sink(
-        nazo_postgres::AuditLedgerRepository::new(audit_pool.clone()),
+        std::sync::Arc::new(nazo_postgres::AuditLedgerRepository::new(
+            audit_pool.clone(),
+        )),
         false,
         preflight,
     )

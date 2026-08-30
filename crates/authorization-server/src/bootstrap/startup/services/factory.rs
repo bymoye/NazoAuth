@@ -70,6 +70,8 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse()?;
     let direct_tls = crate::bootstrap::direct_tls_listeners(&config, &settings)?;
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
+    let database_pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort> =
+        web::Data::from(startup.persistence.provider().database_pool_metrics());
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
     let server = HttpServer::new(move || {
@@ -115,6 +117,7 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
         let app = app.app_data(core.userinfo_endpoint.clone());
         let app = app
             .app_data(mtls_certificate_source.clone())
+            .app_data(database_pool_metrics.clone())
             .app_data(readiness_dependencies.clone())
             .app_data(control_discovery.clone())
             .app_data(initial_admin_bootstrap.clone())

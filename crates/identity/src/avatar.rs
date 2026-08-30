@@ -86,20 +86,36 @@ pub enum DeleteAvatarError {
 }
 
 #[derive(Clone)]
-pub struct AvatarService<R, G, S> {
-    avatars: R,
-    grants: G,
+pub struct AvatarService<S> {
+    avatars: std::sync::Arc<dyn AvatarRepositoryPort>,
+    grants: std::sync::Arc<dyn GrantSummaryRepositoryPort>,
     storage: S,
     max_bytes: usize,
 }
 
-impl<R, G, S> AvatarService<R, G, S>
+impl<S> AvatarService<S>
 where
-    R: AvatarRepositoryPort,
-    G: GrantSummaryRepositoryPort,
     S: AvatarStoragePort,
 {
-    pub fn new(avatars: R, grants: G, storage: S, max_bytes: usize) -> Self {
+    pub fn new<R, G>(avatars: R, grants: G, storage: S, max_bytes: usize) -> Self
+    where
+        R: AvatarRepositoryPort + 'static,
+        G: GrantSummaryRepositoryPort + 'static,
+    {
+        Self {
+            avatars: std::sync::Arc::new(avatars),
+            grants: std::sync::Arc::new(grants),
+            storage,
+            max_bytes,
+        }
+    }
+
+    pub fn from_ports(
+        avatars: std::sync::Arc<dyn AvatarRepositoryPort>,
+        grants: std::sync::Arc<dyn GrantSummaryRepositoryPort>,
+        storage: S,
+        max_bytes: usize,
+    ) -> Self {
         Self {
             avatars,
             grants,

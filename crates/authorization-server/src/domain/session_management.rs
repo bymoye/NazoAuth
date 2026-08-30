@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use nazo_auth::{CapabilityAdmission, module_admissible};
+use nazo_auth::{AdminClientRepositoryPort, CapabilityAdmission, module_admissible};
 use nazo_http_actix::{
     SessionManagementAvailability, SessionManagementError, SessionManagementFuture,
     SessionManagementOperations, SessionManagementOriginFuture,
 };
-use nazo_postgres::OAuthClientRepository;
 use nazo_runtime_modules::ModuleId;
 
 use crate::http::sessions::SessionProfileHandles;
@@ -19,14 +18,14 @@ use crate::runtime_modules::ServerRuntimeModuleRegistry;
 #[derive(Clone)]
 pub(crate) struct ServerSessionManagementOperations {
     sessions: SessionProfileHandles,
-    clients: OAuthClientRepository,
+    clients: Arc<dyn AdminClientRepositoryPort>,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
 }
 
 impl ServerSessionManagementOperations {
     pub(crate) fn new(
         sessions: SessionProfileHandles,
-        clients: OAuthClientRepository,
+        clients: Arc<dyn AdminClientRepositoryPort>,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     ) -> Self {
         Self {

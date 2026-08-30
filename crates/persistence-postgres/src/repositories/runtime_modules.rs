@@ -107,6 +107,85 @@ impl ModuleStateRepository for RuntimeModuleRepository {
     }
 }
 
+impl nazo_persistence::RuntimeModuleStore for RuntimeModuleRepository {
+    fn read_desired(
+        &self,
+        module_id: ModuleId,
+    ) -> futures_util::future::BoxFuture<'_, Result<Option<DesiredStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { desired::read_desired(self, module_id).await })
+    }
+
+    fn read_all_desired(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<DesiredStateRecord>, RepositoryError>> {
+        Box::pin(async move { desired::read_all_desired(self).await })
+    }
+
+    fn compare_and_set_desired(
+        &self,
+        change: DesiredStateChange,
+    ) -> futures_util::future::BoxFuture<'_, Result<CasOutcome<DesiredStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { desired::compare_and_set_desired(self, change, Vec::new()).await })
+    }
+
+    fn compare_and_set_desired_guarded(
+        &self,
+        change: DesiredStateChange,
+        required_revisions: Vec<DesiredRevisionGuard>,
+    ) -> futures_util::future::BoxFuture<'_, Result<CasOutcome<DesiredStateRecord>, RepositoryError>>
+    {
+        Box::pin(
+            async move { desired::compare_and_set_desired(self, change, required_revisions).await },
+        )
+    }
+
+    fn read_instance<'a>(
+        &'a self,
+        instance_id: &'a str,
+        module_id: ModuleId,
+    ) -> futures_util::future::BoxFuture<'a, Result<Option<InstanceStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { instance::read_instance(self, instance_id, module_id).await })
+    }
+
+    fn read_all_instances<'a>(
+        &'a self,
+        instance_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<Vec<InstanceStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { instance::read_all_instances(self, instance_id).await })
+    }
+
+    fn page_events(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> futures_util::future::BoxFuture<'_, Result<ModuleEventPage, RepositoryError>> {
+        Box::pin(async move { events::page_events(self, offset, limit).await })
+    }
+
+    fn compare_and_set_instance(
+        &self,
+        required_desired_revision: ModuleRevision,
+        mutation: InstanceStateMutation,
+    ) -> futures_util::future::BoxFuture<'_, Result<CasOutcome<InstanceStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move {
+            instance::compare_and_set_instance(self, required_desired_revision, mutation).await
+        })
+    }
+
+    fn validate_revision(
+        &self,
+        module_id: ModuleId,
+        expected: ModuleRevision,
+    ) -> futures_util::future::BoxFuture<'_, Result<bool, RepositoryError>> {
+        Box::pin(async move { desired::validate_revision(self, module_id, expected).await })
+    }
+}
+
 // The focused unit test is intentionally mounted here so the production
 // module remains the stable test boundary while implementation files evolve.
 #[cfg(test)]

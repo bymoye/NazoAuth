@@ -47,7 +47,10 @@ pub(crate) async fn token(
     let ciba_service = Data::new(super::super::ciba::ServerCibaService::new(
         nazo_valkey::CibaStore::new(&connection),
     ));
-    let ciba_users = Data::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()));
+    let ciba_users: Data<dyn nazo_persistence::CibaAccountStore> = Data::from(Arc::new(
+        nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+    )
+        as Arc<dyn nazo_persistence::CibaAccountStore>);
     let ciba_config = Data::new(super::super::ciba::CibaHttpConfig::from(
         state.settings.as_ref(),
     ));

@@ -50,6 +50,8 @@ use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
+use nazo_persistence::control_plane as contract;
+
 use nazo_operator_protocol::RECOVERY_KDF_ID;
 
 use super::controller_registry::{
@@ -71,12 +73,12 @@ struct CountRow {
     count: i64,
 }
 
-pub const RECOVERY_CHALLENGE_TTL_SECONDS: i64 = 600;
+pub const RECOVERY_CHALLENGE_TTL_SECONDS: i64 = contract::RECOVERY_CHALLENGE_TTL_SECONDS;
 
 /// Maximum number of failed submissions per challenge before it is dead.
 /// The 256-bit secret makes brute force hopeless anyway; the cap exists so
 /// the unauthenticated endpoint cannot be used as an oracle or noise source.
-pub const MAX_RECOVERY_CHALLENGE_ATTEMPTS: i32 = 5;
+pub const MAX_RECOVERY_CHALLENGE_ATTEMPTS: i32 = contract::MAX_RECOVERY_CHALLENGE_ATTEMPTS;
 
 /// Recovery Root/challenge mutations take the SHARED per-deployment identity
 /// lock (`controller_registry::DEPLOYMENT_IDENTITY_LOCK_SEED`) so they
@@ -1185,5 +1187,199 @@ impl RecoveryRootRepository {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+fn contract_root(root: StoredRecoveryRoot) -> contract::StoredRecoveryRoot {
+    contract::StoredRecoveryRoot {
+        deployment_id: root.deployment_id,
+        recovery_kid: root.recovery_kid,
+        recovery_public_key: root.recovery_public_key,
+        kdf: root.kdf,
+        generation: root.generation,
+        created_at: root.created_at,
+        updated_at: root.updated_at,
+    }
+}
+
+fn contract_recovery_error(error: RecoveryRootError) -> contract::RecoveryRootError {
+    match error {
+        RecoveryRootError::ControllersStillAdmitted(items) => {
+            contract::RecoveryRootError::ControllersStillAdmitted(
+                items
+                    .into_iter()
+                    .map(|item| contract::AdmittedControllerSummary {
+                        controller_id: item.controller_id,
+                        kid: item.kid,
+                        expires_at: item.expires_at,
+                    })
+                    .collect(),
+            )
+        }
+        RecoveryRootError::ChallengePending => contract::RecoveryRootError::ChallengePending,
+        RecoveryRootError::InvalidAllocationProof => {
+            contract::RecoveryRootError::InvalidAllocationProof
+        }
+        RecoveryRootError::AllocationProofReplayed => {
+            contract::RecoveryRootError::AllocationProofReplayed
+        }
+        RecoveryRootError::ChallengeUnknown => contract::RecoveryRootError::ChallengeUnknown,
+        RecoveryRootError::ChallengeExpired => contract::RecoveryRootError::ChallengeExpired,
+        RecoveryRootError::ChallengeExhausted => contract::RecoveryRootError::ChallengeExhausted,
+        RecoveryRootError::ChallengeReplayed => contract::RecoveryRootError::ChallengeReplayed,
+        RecoveryRootError::NonceMismatch => contract::RecoveryRootError::NonceMismatch,
+        RecoveryRootError::InvalidSignature => contract::RecoveryRootError::InvalidSignature,
+        RecoveryRootError::RootMissing => contract::RecoveryRootError::RootMissing,
+        RecoveryRootError::InvalidIdentity(reason) => {
+            contract::RecoveryRootError::InvalidIdentity(reason)
+        }
+        RecoveryRootError::Transport(error) => contract::RecoveryRootError::Transport(error),
+    }
+}
+
+fn contract_rotation_error(error: RecoveryRotationError) -> contract::RecoveryRotationError {
+    match error {
+        RecoveryRotationError::Approval(error) => contract::RecoveryRotationError::Approval(
+            super::controller_registry::contract_approval_error(error),
+        ),
+        RecoveryRotationError::Mutation(error) => {
+            contract::RecoveryRotationError::Mutation(contract_recovery_error(error))
+        }
+        RecoveryRotationError::Transport(error) => {
+            contract::RecoveryRotationError::Transport(error)
+        }
+    }
+}
+
+impl contract::RecoveryRootPort for RecoveryRootRepository {
+    fn current_root<'a>(
+        &'a self,
+        deployment_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Option<contract::StoredRecoveryRoot>, contract::RecoveryRootError>,
+    > {
+        Box::pin(async move {
+            RecoveryRootRepository::current_root(self, deployment_id)
+                .await
+                .map(|root| root.map(contract_root))
+                .map_err(contract_recovery_error)
+        })
+    }
+
+    fn issue_rotation_approval<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        action_sha256: &'a str,
+        admin_user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<contract::IssuedIdentityApproval, contract::RecoveryRotationError>,
+    > {
+        Box::pin(async move {
+            RecoveryRootRepository::issue_rotation_approval(
+                self,
+                deployment_id,
+                action_sha256,
+                admin_user_id,
+                now,
+            )
+            .await
+            .map(super::controller_registry::contract_approval)
+            .map_err(contract_rotation_error)
+        })
+    }
+
+    fn commit_rotation<'a>(
+        &'a self,
+        approval_token: &'a str,
+        expected_deployment_id: &'a str,
+        expected_action_sha256: &'a str,
+        root: contract::NewRecoveryRoot,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<contract::StoredRecoveryRoot, contract::RecoveryRotationError>,
+    > {
+        Box::pin(async move {
+            RecoveryRootRepository::commit_rotation(
+                self,
+                approval_token,
+                expected_deployment_id,
+                expected_action_sha256,
+                NewRecoveryRoot {
+                    deployment_id: root.deployment_id,
+                    kid: root.kid,
+                    public_key: root.public_key,
+                },
+                now,
+            )
+            .await
+            .map(contract_root)
+            .map_err(contract_rotation_error)
+        })
+    }
+
+    fn issue_recovery_challenge(
+        &self,
+        challenge: contract::NewRecoveryChallenge,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<contract::IssuedRecoveryChallenge, contract::RecoveryRootError>,
+    > {
+        Box::pin(async move {
+            RecoveryRootRepository::issue_recovery_challenge(
+                self,
+                NewRecoveryChallenge {
+                    deployment_id: challenge.deployment_id,
+                    controller_label: challenge.controller_label,
+                    controller_kid: challenge.controller_kid,
+                    controller_public_key: challenge.controller_public_key,
+                    recovery_kid: challenge.recovery_kid,
+                    recovery_public_key: challenge.recovery_public_key,
+                    allocation_nonce: challenge.allocation_nonce,
+                    allocation_signature: challenge.allocation_signature,
+                },
+                now,
+            )
+            .await
+            .map(|issued| contract::IssuedRecoveryChallenge {
+                challenge_id: issued.challenge_id,
+                deployment_id: issued.deployment_id,
+                nonce: issued.nonce,
+                expires_at: issued.expires_at,
+            })
+            .map_err(contract_recovery_error)
+        })
+    }
+
+    fn submit_recovery_challenge(
+        &self,
+        submission: contract::RecoverySubmission,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<contract::RecoveredSlotCommit, contract::RecoveryRootError>,
+    > {
+        Box::pin(async move {
+            RecoveryRootRepository::submit_recovery_challenge(
+                self,
+                RecoverySubmission {
+                    deployment_id: submission.deployment_id,
+                    challenge_id: submission.challenge_id,
+                    nonce: submission.nonce,
+                    signature: submission.signature,
+                },
+                now,
+            )
+            .await
+            .map(|commit| contract::RecoveredSlotCommit {
+                slot: super::controller_registry::contract_slot(commit.slot),
+                recovery_generation: commit.recovery_generation,
+            })
+            .map_err(contract_recovery_error)
+        })
     }
 }

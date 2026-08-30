@@ -651,6 +651,216 @@ impl Openid4vpRepository {
     }
 }
 
+fn persistence_attachment(
+    attachment: StoredOpenid4vpVerificationAttachment,
+) -> nazo_persistence::StoredOpenid4vpVerificationAttachment {
+    nazo_persistence::StoredOpenid4vpVerificationAttachment {
+        transaction_id: attachment.transaction_id,
+        context: attachment.context,
+        context_sha256: attachment.context_sha256,
+        intent_jws: attachment.intent_jws,
+        presentation_binding: attachment.presentation_binding,
+        created_at: attachment.created_at,
+        expires_at: attachment.expires_at,
+    }
+}
+
+fn persistence_evidence(
+    evidence: StoredOpenid4vpVerificationEvidence,
+) -> nazo_persistence::StoredOpenid4vpVerificationEvidence {
+    nazo_persistence::StoredOpenid4vpVerificationEvidence {
+        receipt_id: evidence.receipt_id,
+        transaction_id: evidence.transaction_id,
+        context: evidence.context,
+        capability_sha256: evidence.capability_sha256,
+        issuance_request_jti: evidence.issuance_request_jti,
+        intent_jws: evidence.intent_jws,
+        receipt_jws: evidence.receipt_jws,
+        presentation_binding: evidence.presentation_binding,
+        completed_at: evidence.completed_at,
+        issued_at: evidence.issued_at,
+        expires_at: evidence.expires_at,
+    }
+}
+
+impl nazo_persistence::Openid4vpStore for Openid4vpRepository {
+    fn verification_attachment_state(
+        &self,
+        transaction_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<
+            Option<nazo_persistence::Openid4vpVerificationAttachmentState>,
+            PresentationStoreError,
+        >,
+    > {
+        Box::pin(async move {
+            Openid4vpRepository::verification_attachment_state(self, transaction_id, now)
+                .await
+                .map(|state| {
+                    state.map(|state| match state {
+                        Openid4vpVerificationAttachmentState::Pending {
+                            transaction_id,
+                            created_at,
+                            expires_at,
+                        } => nazo_persistence::Openid4vpVerificationAttachmentState::Pending {
+                            transaction_id,
+                            created_at,
+                            expires_at,
+                        },
+                        Openid4vpVerificationAttachmentState::Attached(attachment) => {
+                            nazo_persistence::Openid4vpVerificationAttachmentState::Attached(
+                                Box::new(persistence_attachment(*attachment)),
+                            )
+                        }
+                        Openid4vpVerificationAttachmentState::Conflict => {
+                            nazo_persistence::Openid4vpVerificationAttachmentState::Conflict
+                        }
+                    })
+                })
+        })
+    }
+
+    fn attach_verification_evidence(
+        &self,
+        transaction_id: Uuid,
+        evidence: nazo_persistence::NewOpenid4vpVerificationAttachment,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<
+            Option<nazo_persistence::StoredOpenid4vpVerificationAttachment>,
+            PresentationStoreError,
+        >,
+    > {
+        Box::pin(async move {
+            Openid4vpRepository::attach_verification_evidence(
+                self,
+                transaction_id,
+                NewOpenid4vpVerificationAttachment {
+                    context: &evidence.context,
+                    context_sha256: &evidence.context_sha256,
+                    intent_jws: &evidence.intent_jws,
+                    presentation_request_sha256: &evidence.presentation_request_sha256,
+                },
+                now,
+            )
+            .await
+            .map(|attachment| attachment.map(persistence_attachment))
+        })
+    }
+
+    fn verification_attachment_for_completion(
+        &self,
+        transaction_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<
+            Option<nazo_persistence::StoredOpenid4vpVerificationAttachment>,
+            PresentationStoreError,
+        >,
+    > {
+        Box::pin(async move {
+            Openid4vpRepository::verification_attachment_for_completion(self, transaction_id, now)
+                .await
+                .map(|attachment| attachment.map(persistence_attachment))
+        })
+    }
+
+    fn prepare_verification_evidence(
+        &self,
+        transaction_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<
+            Option<nazo_persistence::PreparedOpenid4vpVerificationEvidence>,
+            PresentationStoreError,
+        >,
+    > {
+        Box::pin(async move {
+            Openid4vpRepository::prepare_verification_evidence(self, transaction_id, now)
+                .await
+                .map(|prepared| {
+                    prepared.map(|prepared| {
+                        nazo_persistence::PreparedOpenid4vpVerificationEvidence {
+                            transaction_id: prepared.transaction_id,
+                            context: prepared.context,
+                            context_sha256: prepared.context_sha256,
+                            intent_jws: prepared.intent_jws,
+                            presentation_binding: prepared.presentation_binding,
+                            completed_at: prepared.completed_at,
+                            issuance_expires_at: prepared.issuance_expires_at,
+                        }
+                    })
+                })
+        })
+    }
+
+    fn issue_verification_evidence(
+        &self,
+        issuance: nazo_persistence::NewOpenid4vpVerificationEvidence,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<
+            Option<nazo_persistence::IssuedOpenid4vpVerificationEvidence>,
+            PresentationStoreError,
+        >,
+    > {
+        Box::pin(async move {
+            Openid4vpRepository::issue_verification_evidence(
+                self,
+                NewOpenid4vpVerificationEvidence {
+                    transaction_id: issuance.transaction_id,
+                    receipt_id: issuance.receipt_id,
+                    issuance_request_jti: &issuance.issuance_request_jti,
+                    capability: &issuance.capability,
+                    capability_sha256: &issuance.capability_sha256,
+                    receipt_jws: &issuance.receipt_jws,
+                    expected_intent_jws: &issuance.expected_intent_jws,
+                    expected_context_sha256: &issuance.expected_context_sha256,
+                    expected_presentation_binding: &issuance.expected_presentation_binding,
+                    issued_at: issuance.issued_at,
+                    requested_expires_at: issuance.requested_expires_at,
+                },
+            )
+            .await
+            .map(|issued| {
+                issued.map(
+                    |issued| nazo_persistence::IssuedOpenid4vpVerificationEvidence {
+                        evidence: persistence_evidence(issued.evidence),
+                        capability: issued.capability,
+                    },
+                )
+            })
+        })
+    }
+
+    fn verification_evidence_by_capability_sha256<'a>(
+        &'a self,
+        capability_sha256: &'a str,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<
+            Option<nazo_persistence::StoredOpenid4vpVerificationEvidence>,
+            PresentationStoreError,
+        >,
+    > {
+        Box::pin(async move {
+            Openid4vpRepository::verification_evidence_by_capability_sha256(
+                self,
+                capability_sha256,
+                now,
+            )
+            .await
+            .map(|evidence| evidence.map(persistence_evidence))
+        })
+    }
+}
+
 impl PresentationStorePort for Openid4vpRepository {
     fn create<'a>(
         &'a self,

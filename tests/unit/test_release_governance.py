@@ -247,22 +247,43 @@ class ReleaseGovernanceTests(unittest.TestCase):
         server_manifest = (
             ROOT / "crates" / "authorization-server" / "Cargo.toml"
         ).read_text(encoding="utf-8")
+        launcher_manifest = (
+            ROOT / "crates" / "authorization-server-postgres" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
         ctl_manifest = ROOT / "crates" / "nazoauthctl" / "Cargo.toml"
-        self.assertEqual(server_manifest.count("[[bin]]"), 1)
-        self.assertIn('name = "nazoauth"', server_manifest)
+        self.assertNotIn("[[bin]]", server_manifest)
+        self.assertEqual(launcher_manifest.count("[[bin]]"), 1)
+        self.assertIn('name = "nazoauth"', launcher_manifest)
         self.assertFalse(ctl_manifest.exists())
 
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("cargo build --release --locked --target ${{ matrix.target }}", release)
-        self.assertIn("--package nazo-oauth-server --bin nazoauth", release)
+        self.assertIn("--package nazo-oauth-server-postgres --bin nazoauth", release)
+        self.assertIn(
+            "--manifest-path crates/authorization-server-postgres/Cargo.toml",
+            release,
+        )
         self.assertNotIn("--package nazoauthctl --bin nazoauthctl", release)
         self.assertIn("nazoauth-${{ matrix.target }}", release)
         self.assertNotIn("nazoauthctl-${{ matrix.target }}", release)
         self.assertNotRegex(
             release,
             r"target/release/nazo-oauth-(?:server|migrate|keyctl)",
+        )
+
+        containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "--package nazo-oauth-server-postgres --bin nazoauth", containerfile
+        )
+
+        conformance = (
+            ROOT / ".github" / "workflows" / "conformance-security.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "--manifest-path crates/authorization-server-postgres/Cargo.toml",
+            conformance,
         )
 
     def test_tag_release_requires_the_exact_workspace_package_version(self) -> None:

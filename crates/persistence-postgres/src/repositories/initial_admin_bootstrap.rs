@@ -4,6 +4,8 @@ use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
+pub use nazo_persistence::{InitialAdminBootstrapState, InitialAdminClaimOutcome};
+
 use crate::{
     DbPool, get_conn,
     schema::{identity_security_events, initial_admin_bootstrap_receipts, users},
@@ -168,25 +170,6 @@ impl InitialAdminBootstrapRepository {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InitialAdminBootstrapState {
-    Closed,
-    Ready,
-    Claimed { expected_token_hash: String },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InitialAdminClaimOutcome {
-    Created {
-        request_id: String,
-        id: Uuid,
-        email: String,
-    },
-    Closed,
-    EmailConflict,
-    IdempotencyConflict,
-}
-
 fn hash_value(value: &str) -> String {
     let mut encoded = String::with_capacity(64);
     for byte in Sha256::digest(value.as_bytes()) {
@@ -219,4 +202,42 @@ async fn lock_initial_admin_bootstrap(
         .execute(connection)
         .await?;
     Ok(())
+}
+
+impl nazo_persistence::InitialAdminBootstrapStore for InitialAdminBootstrapRepository {
+    fn load_state(
+        &self,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<InitialAdminBootstrapState, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(async {
+            InitialAdminBootstrapRepository::load_state(self)
+                .await
+                .map_err(|_| nazo_identity::ports::RepositoryError::Unavailable)
+        })
+    }
+
+    fn claim<'a>(
+        &'a self,
+        request_id: &'a str,
+        token_hash: &'a str,
+        email: &'a str,
+        password_hash: nazo_identity::ports::PasswordHashInput,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<InitialAdminClaimOutcome, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(async move {
+            InitialAdminBootstrapRepository::claim(
+                self,
+                request_id,
+                token_hash,
+                email,
+                password_hash,
+            )
+            .await
+            .map_err(|_| nazo_identity::ports::RepositoryError::Unavailable)
+        })
+    }
 }

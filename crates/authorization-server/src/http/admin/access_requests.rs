@@ -21,7 +21,7 @@ use nazo_auth::{AdminClientError, CreateClientRequest};
 use nazo_http_actix::{ClientIpConfig, client_ip_with_config};
 use nazo_http_actix::{csrf_error, has_valid_csrf_token_for_cookies};
 use nazo_http_actix::{json_response, oauth_error};
-use nazo_postgres::AccessRequestRepository;
+use nazo_persistence::AdminAccessRequestStore;
 use nazo_valkey::DeliveryStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -43,7 +43,7 @@ impl AdminAccessRequestConfig {
 }
 
 type ApprovalDependencies = (
-    Data<AccessRequestRepository>,
+    Data<dyn AdminAccessRequestStore>,
     Data<DeliveryStore>,
     Data<ServerAdminClientService>,
     Data<AdminAccessRequestConfig>,
@@ -52,7 +52,7 @@ type ApprovalDependencies = (
 
 pub(crate) async fn admin_access_requests(
     admin_sessions: Data<AdminSessionHandles>,
-    repository: Data<AccessRequestRepository>,
+    repository: Data<dyn AdminAccessRequestStore>,
     req: HttpRequest,
     Query(q): Query<HashMap<String, String>>,
 ) -> HttpResponse {
@@ -360,7 +360,7 @@ pub(crate) struct RejectAccessRequest {
 
 pub(crate) async fn admin_reject_access_request(
     admin_sessions: Data<AdminSessionHandles>,
-    repository: Data<AccessRequestRepository>,
+    repository: Data<dyn AdminAccessRequestStore>,
     req: HttpRequest,
     path: actix_web::web::Path<Uuid>,
     Json(payload): Json<RejectAccessRequest>,

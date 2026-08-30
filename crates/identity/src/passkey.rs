@@ -187,31 +187,58 @@ pub enum PasskeyError {
 }
 
 #[derive(Clone)]
-pub struct PasskeyService<A, R, C, M, S, U> {
-    accounts: A,
-    credentials: R,
+pub struct PasskeyService<C, S, U> {
+    accounts: std::sync::Arc<dyn PasskeyAccountRepositoryPort>,
+    credentials: std::sync::Arc<dyn PasskeyRepositoryPort>,
     ceremonies: C,
-    remembered_mfa: M,
+    remembered_mfa: std::sync::Arc<dyn RememberedMfaDevicePort>,
     sessions: S,
     audit: U,
     webauthn: Webauthn,
     config: PasskeyServiceConfig,
 }
 
-impl<A, R, C, M, S, U> PasskeyService<A, R, C, M, S, U>
+impl<C, S, U> PasskeyService<C, S, U>
 where
-    A: PasskeyAccountRepositoryPort,
-    R: PasskeyRepositoryPort,
     C: PasskeyCeremonyPort,
-    M: RememberedMfaDevicePort,
     S: LoginSessionPort,
     U: PasskeyAuditPort,
 {
-    pub fn new(
+    pub fn new<A, R, M>(
         accounts: A,
         credentials: R,
         ceremonies: C,
         remembered_mfa: M,
+        sessions: S,
+        audit: U,
+        config: PasskeyServiceConfig,
+    ) -> Self
+    where
+        A: PasskeyAccountRepositoryPort + 'static,
+        R: PasskeyRepositoryPort + 'static,
+        M: RememberedMfaDevicePort + 'static,
+    {
+        let webauthn = Webauthn::new(&config.rp_id, &config.rp_name, &config.origin)
+            .require_user_verification(config.require_user_verification)
+            .require_user_handle(config.require_user_handle)
+            .strict_base64(config.strict_base64);
+        Self {
+            accounts: std::sync::Arc::new(accounts),
+            credentials: std::sync::Arc::new(credentials),
+            ceremonies,
+            remembered_mfa: std::sync::Arc::new(remembered_mfa),
+            sessions,
+            audit,
+            webauthn,
+            config,
+        }
+    }
+
+    pub fn from_ports(
+        accounts: std::sync::Arc<dyn PasskeyAccountRepositoryPort>,
+        credentials: std::sync::Arc<dyn PasskeyRepositoryPort>,
+        ceremonies: C,
+        remembered_mfa: std::sync::Arc<dyn RememberedMfaDevicePort>,
         sessions: S,
         audit: U,
         config: PasskeyServiceConfig,

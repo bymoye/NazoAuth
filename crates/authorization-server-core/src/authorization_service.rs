@@ -320,19 +320,33 @@ pub trait AuthorizationResponseSignerPort: Send + Sync {
     ) -> AuthorizationFuture<'a, String>;
 }
 
-pub struct AuthorizationService<R, S, K> {
-    repository: R,
+pub struct AuthorizationService<S, K> {
+    repository: std::sync::Arc<dyn AuthorizationRepositoryPort>,
     state: S,
     signer: K,
 }
 
-impl<R, S, K> AuthorizationService<R, S, K>
+impl<S, K> AuthorizationService<S, K>
 where
-    R: AuthorizationRepositoryPort,
     S: AuthorizationStateStorePort,
     K: AuthorizationResponseSignerPort,
 {
-    pub const fn new(repository: R, state: S, signer: K) -> Self {
+    pub fn new<R>(repository: R, state: S, signer: K) -> Self
+    where
+        R: AuthorizationRepositoryPort + 'static,
+    {
+        Self {
+            repository: std::sync::Arc::new(repository),
+            state,
+            signer,
+        }
+    }
+
+    pub fn from_port(
+        repository: std::sync::Arc<dyn AuthorizationRepositoryPort>,
+        state: S,
+        signer: K,
+    ) -> Self {
         Self {
             repository,
             state,

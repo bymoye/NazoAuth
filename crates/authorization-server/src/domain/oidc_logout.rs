@@ -2,14 +2,14 @@ use std::{future::Future, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use nazo_auth::{
-    BackchannelLogoutClaimsInput, LogoutDependencyError, LogoutInput, LogoutService,
-    LogoutServiceError, LogoutSession, LogoutTokenSignerPort, RpLogoutRequest,
+    BackchannelLogoutClaimsInput, BackchannelLogoutOutboxPort, LogoutClientRepositoryPort,
+    LogoutDependencyError, LogoutInput, LogoutService, LogoutServiceError, LogoutSession,
+    LogoutTokenSignerPort, RpLogoutRequest,
 };
 use nazo_http_actix::{
     OidcLogoutCommand, OidcLogoutError, OidcLogoutFuture, OidcLogoutOperations, OidcLogoutSuccess,
 };
 use nazo_key_management::KeyManager;
-use nazo_postgres::{AuditRepository, OAuthClientRepository};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -54,15 +54,15 @@ pub(crate) struct OidcLogoutHandles {
 impl OidcLogoutHandles {
     pub(crate) fn new(
         sessions: SessionProfileHandles,
-        clients: OAuthClientRepository,
-        deliveries: AuditRepository,
+        clients: Arc<dyn LogoutClientRepositoryPort>,
+        deliveries: Arc<dyn BackchannelLogoutOutboxPort>,
         keys: KeyManager,
         config: OidcLogoutConfig,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     ) -> Self {
         let service = LogoutService::new(
-            Arc::new(clients.clone()),
-            Arc::new(deliveries.clone()),
+            clients,
+            deliveries,
             Arc::new(ServerLogoutTokenSigner {
                 keys: keys.clone(),
                 issuer: config.issuer.clone(),

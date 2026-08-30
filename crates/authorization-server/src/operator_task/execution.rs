@@ -6,7 +6,7 @@
 //!
 //! | variant                     | engine                                   | resumable state owner (resume_allowed) |
 //! |-----------------------------|------------------------------------------|----------------------------------------|
-//! | `migrate-apply`             | `cli::run_migrations` (Diesel runner)    | `__diesel_schema_migrations` ledger deduplicates re-entry → `true` |
+//! | `migrate-apply`             | selected adapter migration runner       | the adapter's migration ledger deduplicates re-entry → `true` |
 //! | `keys-list`                 | `keyctl::operator_list`                  | read-only; no side effect to duplicate → `true` |
 //! | `keys-validate`             | `keyctl::operator_validate`              | read-only; no side effect to duplicate → `true` |
 //! | `keys-generate-local`       | `keyctl::operator_generate_local`        | private-key write may precede keyset publication; crash is ambiguous → `false` |
@@ -32,16 +32,15 @@ use chrono::{Duration, Utc};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
+use super::{OperatorPersistence, control_journal::SideEffectError};
 use crate::adapters::security::constant_time_eq;
-use crate::tenant_resource_executor::{
-    ControlTenantResourceOutcome, PostgresTenantResourceExecutor, PreparedTenantResource,
-    TenantResourceAction, TenantResourceExecutorError, decode_change_set_payloads,
-};
 use nazo_operator_protocol::{
     ControlOperationPayload, ControlResultData, TenantResourceIdentity, TenantResourceSelector,
 };
-
-use super::control_journal::SideEffectError;
+use nazo_persistence::tenant_resources::{
+    ControlTenantResourceFrame, ControlTenantResourceOutcome, PreparedTenantResource,
+    TenantResourceAction, TenantResourceExecutorError, decode_change_set_payloads,
+};
 
 /// Per-run provenance handed to engines whose durable records name the
 /// accepted operation (audit events only; never an authorization input).
@@ -71,13 +70,31 @@ pub(super) fn resume_allowed(operation: &ControlOperationPayload) -> bool {
     }
 }
 
+pub(super) async fn execute_with_persistence(
+    operation: &ControlOperationPayload,
+    context: &ExecutionContext<'_>,
+    persistence: &dyn OperatorPersistence,
+) -> Result<Option<ControlResultData>, SideEffectError> {
+    execute_inner(operation, context, Some(persistence)).await
+}
+
+#[cfg(test)]
 pub(super) async fn execute(
     operation: &ControlOperationPayload,
     context: &ExecutionContext<'_>,
 ) -> Result<Option<ControlResultData>, SideEffectError> {
+    execute_inner(operation, context, None).await
+}
+
+async fn execute_inner(
+    operation: &ControlOperationPayload,
+    context: &ExecutionContext<'_>,
+    persistence: Option<&dyn OperatorPersistence>,
+) -> Result<Option<ControlResultData>, SideEffectError> {
     match operation {
         ControlOperationPayload::MigrateApply => {
-            Ok(crate::cli::run_migrations().await.map(|_| None)?)
+            let persistence = require_persistence(persistence)?;
+            Ok(persistence.run_migrations().await.map(|_| None)?)
         }
         ControlOperationPayload::KeysList => {
             Ok(crate::keyctl::operator_list().await.map(|_| None)?)
@@ -110,12 +127,14 @@ pub(super) async fn execute(
             tenant_id,
             selectors,
         } => {
+            let persistence = require_persistence(persistence)?;
             let outcome = run_tenant_resource_operation(
                 TenantResourceAction::Enumerate,
                 tenant_id,
                 Vec::new(),
                 selectors,
                 context,
+                persistence,
             )
             .await?;
             Ok(Some(
@@ -127,12 +146,14 @@ pub(super) async fn execute(
             resources,
         } => {
             let prepared = prepare_apply_change_set(resources)?;
+            let persistence = require_persistence(persistence)?;
             let outcome = run_tenant_resource_operation(
                 TenantResourceAction::Apply,
                 tenant_id,
                 prepared,
                 &[],
                 context,
+                persistence,
             )
             .await?;
             Ok(Some(
@@ -151,12 +172,14 @@ pub(super) async fn execute(
                     payload: None,
                 })
                 .collect();
+            let persistence = require_persistence(persistence)?;
             let outcome = run_tenant_resource_operation(
                 TenantResourceAction::Revoke,
                 tenant_id,
                 prepared,
                 &[],
                 context,
+                persistence,
             )
             .await?;
             Ok(Some(
@@ -164,11 +187,22 @@ pub(super) async fn execute(
             ))
         }
         ControlOperationPayload::RecoveryInvalidate { state_epoch } => {
-            run_recovery_invalidation(state_epoch, context)
+            let persistence = require_persistence(persistence)?;
+            run_recovery_invalidation(state_epoch, context, persistence)
                 .await
                 .map(Some)
         }
     }
+}
+
+fn require_persistence(
+    persistence: Option<&dyn OperatorPersistence>,
+) -> Result<&dyn OperatorPersistence, SideEffectError> {
+    persistence.ok_or_else(|| {
+        SideEffectError::Retryable(anyhow::anyhow!(
+            "operator persistence adapter is unavailable"
+        ))
+    })
 }
 
 /// The state epoch is selected before the candidate starts; this operation
@@ -178,6 +212,7 @@ pub(super) async fn execute(
 async fn run_recovery_invalidation(
     state_epoch: &str,
     context: &ExecutionContext<'_>,
+    persistence: &dyn OperatorPersistence,
 ) -> Result<ControlResultData, SideEffectError> {
     let config = crate::config::ConfigSource::load_for_migrations()?;
     let configured_epoch = Uuid::parse_str(&config.required_string("VALKEY_STATE_EPOCH")?)
@@ -199,12 +234,8 @@ async fn run_recovery_invalidation(
                 .saturating_add(crate::settings::RECOVERY_ACCESS_TOKEN_CLOCK_SKEW_SECONDS)
                 .saturating_add(1),
         );
-    let pool = super::operator_database().await.map_err(|error| {
-        SideEffectError::Retryable(
-            error.context("recovery invalidation requires the restored application database"),
-        )
-    })?;
-    let outcome = nazo_postgres::TokenRepository::new(pool)
+    let outcome = persistence
+        .recovery_invalidations()
         .invalidate_after_restore(
             Uuid::parse_str(context.operation_id).context("operation id is invalid")?,
             context.request_hash,
@@ -243,29 +274,25 @@ pub(super) fn map_recovery_persistence_error(
     }
 }
 
-/// Run one tenant-resource frame through the PostgreSQL CAS engine that owns
-/// all server-side tenant-resource validation and mutation.
+/// Run one tenant-resource frame through the selected adapter's CAS engine,
+/// which owns all server-side tenant-resource validation and mutation.
 async fn run_tenant_resource_operation(
     operation: TenantResourceAction,
     tenant_id: &str,
     resources: Vec<PreparedTenantResource>,
     selectors: &[TenantResourceSelector],
     context: &ExecutionContext<'_>,
+    persistence: &dyn OperatorPersistence,
 ) -> Result<ControlTenantResourceOutcome, SideEffectError> {
-    let pool = super::operator_database().await.map_err(|error| {
-        SideEffectError::Retryable(
-            error.context("tenant-resource operations require the application database"),
-        )
-    })?;
-    let composed = crate::tenant_resource_preparation::control_plane_resources(pool.clone())
-        .await
-        .map_err(|error| {
-            SideEffectError::Retryable(
-                error.context("tenant-resource registration policy bridge is unavailable"),
-            )
-        })?;
-    let executor = PostgresTenantResourceExecutor::new(
-        nazo_postgres::TenantResourceRepository::new(pool),
+    let composed =
+        crate::tenant_resource_preparation::control_plane_resources(persistence.admin_clients())
+            .await
+            .map_err(|error| {
+                SideEffectError::Retryable(
+                    error.context("tenant-resource registration policy bridge is unavailable"),
+                )
+            })?;
+    let executor = persistence.tenant_resource_executor(
         composed.tenant,
         composed.data_encryption_key,
         composed.preparation,
@@ -276,18 +303,16 @@ async fn run_tenant_resource_operation(
         "kid": context.kid,
     });
     executor
-        .execute_control_operation(
-            crate::tenant_resource_executor::ControlTenantResourceFrame {
-                deployment_id: context.deployment_id,
-                jti: context.operation_id,
-                request_sha256: context.request_hash,
-                actor: &actor,
-                operation,
-                tenant_id,
-                resources,
-                selectors,
-            },
-        )
+        .execute_control_operation(ControlTenantResourceFrame {
+            deployment_id: context.deployment_id,
+            jti: context.operation_id,
+            request_sha256: context.request_hash,
+            actor: &actor,
+            operation,
+            tenant_id,
+            resources,
+            selectors,
+        })
         .await
         .map_err(map_engine_error)
 }

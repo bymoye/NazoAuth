@@ -22,24 +22,31 @@ const CONFIG_FILE: &str = ".env.yaml";
 /// whitelisted as a non-config NazoAuth environment variable.
 const CONFIG_FILE_OVERRIDE_ENV: &str = "NAZOAUTH_SERVER_CONFIG_FILE";
 const UNSUPPORTED_DOTENV_FILE: &str = ".env";
-const INITIAL_CONFIG: &str = r#"# Generated local NazoAuth configuration.
+const INITIAL_CONFIG_PREFIX: &str = r#"# Generated local NazoAuth configuration.
 BIND: "0.0.0.0:8000"
 PUBLIC_BASE_URL: "http://127.0.0.1:8000"
 TRANSPORT_MODE: "loopback-http"
-DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:5432/oauth"
+"#;
+const INITIAL_CONFIG_SUFFIX: &str = r#"
 DATABASE_MAX_CONNECTIONS: 32
 VALKEY_URL: "redis://127.0.0.1:6379/0"
 DATA_DIR: "runtime"
 RUST_LOG: "info"
 "#;
 
-fn fresh_initial_config() -> String {
-    format!(
-        "{INITIAL_CONFIG}VALKEY_STATE_EPOCH: \"{}\"\n",
+fn fresh_initial_config(default_database_url: &str) -> anyhow::Result<String> {
+    if default_database_url.is_empty()
+        || default_database_url
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n' | '"'))
+    {
+        anyhow::bail!("launcher default database URL is not safe for generated YAML");
+    }
+    Ok(format!(
+        "{INITIAL_CONFIG_PREFIX}DATABASE_URL: \"{default_database_url}\"{INITIAL_CONFIG_SUFFIX}VALKEY_STATE_EPOCH: \"{}\"\n",
         uuid::Uuid::now_v7()
-    )
+    ))
 }
-pub const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@127.0.0.1:5432/oauth";
 pub const DEFAULT_DATABASE_MAX_CONNECTIONS: usize = 32;
 const GENERATED_SECRET_BYTES: usize = 48;
 const GENERATED_SECRETS_DIR: &str = "secrets";
@@ -293,17 +300,27 @@ pub enum ServerConfigPreparation {
     Created(PathBuf),
 }
 
-pub fn prepare_server_config() -> anyhow::Result<ServerConfigPreparation> {
-    prepare_server_config_in(".")
+pub fn prepare_server_config(
+    default_database_url: &str,
+) -> anyhow::Result<ServerConfigPreparation> {
+    prepare_server_config_in(".", default_database_url)
 }
 
-fn prepare_server_config_in(path: impl AsRef<Path>) -> anyhow::Result<ServerConfigPreparation> {
-    prepare_server_config_at(path, config_file_override_from_env().as_deref())
+fn prepare_server_config_in(
+    path: impl AsRef<Path>,
+    default_database_url: &str,
+) -> anyhow::Result<ServerConfigPreparation> {
+    prepare_server_config_at(
+        path,
+        config_file_override_from_env().as_deref(),
+        default_database_url,
+    )
 }
 
 fn prepare_server_config_at(
     path: impl AsRef<Path>,
     config_file_override: Option<&str>,
+    default_database_url: &str,
 ) -> anyhow::Result<ServerConfigPreparation> {
     let config_path = resolve_config_file(path.as_ref(), config_file_override);
     if config_path.exists() {
@@ -324,7 +341,7 @@ fn prepare_server_config_at(
                 .with_context(|| format!("failed to create initial {}", config_path.display()));
         }
     };
-    let initial_config = fresh_initial_config();
+    let initial_config = fresh_initial_config(default_database_url)?;
     file.write_all(initial_config.as_bytes())
         .with_context(|| format!("failed to write initial {}", config_path.display()))?;
     file.sync_all()
@@ -990,8 +1007,8 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-pub fn database_url(source: &ConfigSource) -> String {
-    source.string("DATABASE_URL", DEFAULT_DATABASE_URL)
+pub fn database_url(source: &ConfigSource) -> anyhow::Result<String> {
+    source.required_string("DATABASE_URL")
 }
 
 pub fn database_max_connections(source: &ConfigSource) -> anyhow::Result<usize> {

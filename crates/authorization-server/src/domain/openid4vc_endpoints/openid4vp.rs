@@ -17,6 +17,12 @@ use nazo_openid4vp::{
     PresentationStoreError, PresentationStorePort, PresentationTransaction, RequestMethod,
     ResponseMode,
 };
+use nazo_persistence::{
+    NewOpenid4vpVerificationAttachment, NewOpenid4vpVerificationEvidence,
+    Openid4vcTrustPolicyRecord, Openid4vcTrustPolicyStore, Openid4vpStore,
+    Openid4vpVerificationAttachmentState, StoredOpenid4vpVerificationAttachment,
+    StoredOpenid4vpVerificationEvidence,
+};
 use nazo_runtime_modules::ModuleId;
 use serde_json::json;
 use uuid::Uuid;
@@ -27,9 +33,9 @@ use crate::{
 };
 
 pub(crate) struct ServerPresentationOperations {
-    store: nazo_postgres::Openid4vpRepository,
-    trust_policies: nazo_postgres::TenantResourceRepository,
-    service: PresentationService<nazo_postgres::Openid4vpRepository, Openid4vcCredentialCrypto>,
+    store: Arc<dyn Openid4vpStore>,
+    trust_policies: Arc<dyn Openid4vcTrustPolicyStore>,
+    service: PresentationService<Arc<dyn Openid4vpStore>, Openid4vcCredentialCrypto>,
     crypto: Openid4vcCredentialCrypto,
     runtime: Arc<ServerRuntimeModuleRegistry>,
     issuer: String,
@@ -49,18 +55,17 @@ impl ServerPresentationOperations {
     const VERIFICATION_RECEIPT_TTL_SECONDS: i64 = 600;
 
     pub(crate) fn new(
-        pool: nazo_postgres::DbPool,
+        store: Arc<dyn Openid4vpStore>,
         tenant_id: Uuid,
-        data_key: [u8; 32],
         crypto: Openid4vcCredentialCrypto,
         runtime: Arc<ServerRuntimeModuleRegistry>,
+        trust_policies: Arc<dyn Openid4vcTrustPolicyStore>,
         config: PresentationVerifierConfig,
     ) -> Self {
-        let store = nazo_postgres::Openid4vpRepository::new(pool.clone(), tenant_id, data_key);
         let service = PresentationService::new(store.clone(), crypto.clone());
         Self {
             store,
-            trust_policies: nazo_postgres::TenantResourceRepository::new(pool),
+            trust_policies,
             service,
             crypto,
             runtime,
@@ -137,7 +142,7 @@ impl ServerPresentationOperations {
     }
 
     fn attachment_response(
-        attachment: &nazo_postgres::StoredOpenid4vpVerificationAttachment,
+        attachment: &StoredOpenid4vpVerificationAttachment,
     ) -> Result<nazo_operator_protocol::Openid4vpAttachEvidenceResponse, PresentationHttpError>
     {
         let presentation_binding_sha256 =
@@ -257,7 +262,7 @@ impl ServerPresentationOperations {
 
     fn verified_projection(
         &self,
-        evidence: &nazo_postgres::StoredOpenid4vpVerificationEvidence,
+        evidence: &StoredOpenid4vpVerificationEvidence,
         now: i64,
     ) -> Result<PresentationVerificationProjection, PresentationHttpError> {
         let signer = self.verification_signer.as_ref().ok_or_else(|| {
@@ -415,37 +420,18 @@ impl ServerPresentationOperations {
         resource_id: &str,
         wallet_origin: &str,
         digest: &str,
-    ) -> Result<Option<nazo_postgres::StoredOpenid4vcTrustPolicy>, PresentationHttpError> {
-        let mut connection = self.trust_policies.connection().await.map_err(|_| {
-            vp_error(
-                503,
-                "server_error",
-                "OpenID4VC trust policy state is unavailable.",
-            )
-        })?;
-        let policy = nazo_postgres::TenantResourceRepository::active_openid4vc_trust_policy_for_origin_on_connection(
-            &mut connection,
-            self.tenant_id,
-            resource_id,
-            wallet_origin,
-            digest,
-        )
-        .await
-        .map_err(|_| {
-            vp_error(
-                503,
-                "server_error",
-                "OpenID4VC trust policy state is unavailable.",
-            )
-        })?;
-        if let Some(policy) = &policy {
-            let material: nazo_operator_protocol::Openid4vcTrustPolicy =
-                serde_json::from_value(policy.public_material.clone()).map_err(|_| {
-                    vp_error(503, "server_error", "OpenID4VC trust policy is invalid.")
-                })?;
-            nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
-                .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
-        }
+    ) -> Result<Option<Openid4vcTrustPolicyRecord>, PresentationHttpError> {
+        let policy = self
+            .trust_policies
+            .active_for_origin(self.tenant_id, resource_id, wallet_origin, digest)
+            .await
+            .map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "OpenID4VC trust policy state is unavailable.",
+                )
+            })?;
         Ok(policy)
     }
 
@@ -488,19 +474,16 @@ impl ServerPresentationOperations {
                 "Presentation transaction is invalid.",
             ));
         }
-        let material: nazo_operator_protocol::Openid4vcTrustPolicy =
-            serde_json::from_value(policy.public_material)
-                .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
-        nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
-            .map_err(|_| vp_error(503, "server_error", "OpenID4VC trust policy is invalid."))?;
-        crate::domain::parse_scoped_credential_trust_anchors(&material.credential_trust_anchor_pem)
-            .map_err(|_| {
-                vp_error(
-                    503,
-                    "server_error",
-                    "OpenID4VC credential trust anchor is invalid.",
-                )
-            })
+        crate::domain::parse_scoped_credential_trust_anchors(
+            &policy.material.credential_trust_anchor_pem,
+        )
+        .map_err(|_| {
+            vp_error(
+                503,
+                "server_error",
+                "OpenID4VC credential trust anchor is invalid.",
+            )
+        })
     }
 }
 
@@ -1132,9 +1115,7 @@ impl PresentationOperations for ServerPresentationOperations {
                     )
                 })?;
             let attachment = match state {
-                nazo_postgres::Openid4vpVerificationAttachmentState::Pending {
-                    expires_at, ..
-                } => {
+                Openid4vpVerificationAttachmentState::Pending { expires_at, .. } => {
                     let signer = self.verification_signer.as_ref().ok_or_else(|| {
                         vp_error(
                             503,
@@ -1181,12 +1162,13 @@ impl PresentationOperations for ServerPresentationOperations {
                     self.store
                         .attach_verification_evidence(
                             transaction_id,
-                            nazo_postgres::NewOpenid4vpVerificationAttachment {
-                                context: &request.evidence_context,
-                                context_sha256: &context_sha256,
-                                intent_jws: &intent_jws,
-                                presentation_request_sha256: &presentation_binding
-                                    .presentation_request_sha256,
+                            NewOpenid4vpVerificationAttachment {
+                                context: request.evidence_context.clone(),
+                                context_sha256: context_sha256.clone(),
+                                intent_jws: intent_jws.clone(),
+                                presentation_request_sha256: presentation_binding
+                                    .presentation_request_sha256
+                                    .clone(),
                             },
                             now,
                         )
@@ -1212,7 +1194,7 @@ impl PresentationOperations for ServerPresentationOperations {
                             )
                         })?
                 }
-                nazo_postgres::Openid4vpVerificationAttachmentState::Attached(attachment)
+                Openid4vpVerificationAttachmentState::Attached(attachment)
                     if attachment.context == request.evidence_context
                         && attachment.context_sha256 == context_sha256 =>
                 {
@@ -1378,16 +1360,16 @@ impl PresentationOperations for ServerPresentationOperations {
                 })?;
             let evidence = self
                 .store
-                .issue_verification_evidence(nazo_postgres::NewOpenid4vpVerificationEvidence {
+                .issue_verification_evidence(NewOpenid4vpVerificationEvidence {
                     transaction_id,
                     receipt_id,
-                    issuance_request_jti: &request.issuance_request_jti,
-                    capability: &capability,
-                    capability_sha256: &capability_sha256,
-                    receipt_jws: &receipt_jws,
-                    expected_intent_jws: &prepared.intent_jws,
-                    expected_context_sha256: &prepared.context_sha256,
-                    expected_presentation_binding: &prepared.presentation_binding,
+                    issuance_request_jti: request.issuance_request_jti.clone(),
+                    capability,
+                    capability_sha256,
+                    receipt_jws,
+                    expected_intent_jws: prepared.intent_jws.clone(),
+                    expected_context_sha256: prepared.context_sha256.clone(),
+                    expected_presentation_binding: prepared.presentation_binding.clone(),
                     issued_at,
                     requested_expires_at: expires_at,
                 })

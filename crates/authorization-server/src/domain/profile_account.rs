@@ -3,28 +3,19 @@ use nazo_http_actix::{
 };
 use nazo_identity::{
     AccountProfileService, AccountProfileView, AuthorizedApplicationsView, ProfilePatch, SessionId,
-    SessionResolution, SessionService, ports::AuthorizedApplicationRepositoryPort,
-    ports::GrantSummaryRepositoryPort, ports::ProfileRepositoryPort,
+    SessionResolution, SessionService,
 };
 
 #[derive(Clone)]
-pub(crate) struct ServerProfileAccountOperations<P, G, A> {
+pub(crate) struct ServerProfileAccountOperations {
     sessions: SessionService,
-    profiles: AccountProfileService<P, G, A>,
+    profiles: AccountProfileService,
 }
 
-impl<P, G, A> ServerProfileAccountOperations<P, G, A> {
-    pub(crate) fn new(sessions: SessionService, profiles: AccountProfileService<P, G, A>) -> Self {
+impl ServerProfileAccountOperations {
+    pub(crate) fn new(sessions: SessionService, profiles: AccountProfileService) -> Self {
         Self { sessions, profiles }
     }
-}
-
-impl<P, G, A> ServerProfileAccountOperations<P, G, A>
-where
-    P: ProfileRepositoryPort,
-    G: GrantSummaryRepositoryPort,
-    A: AuthorizedApplicationRepositoryPort,
-{
     async fn active_account(
         &self,
         session_id: &SessionId,
@@ -131,12 +122,7 @@ where
     }
 }
 
-impl<P, G, A> ProfileAccountOperations for ServerProfileAccountOperations<P, G, A>
-where
-    P: ProfileRepositoryPort + 'static,
-    G: GrantSummaryRepositoryPort + 'static,
-    A: AuthorizedApplicationRepositoryPort + 'static,
-{
+impl ProfileAccountOperations for ServerProfileAccountOperations {
     fn me(&self, session_id: SessionId) -> ProfileAccountFuture<'_, ProfileMe> {
         Box::pin(async move { Self::me(self, session_id).await })
     }

@@ -1,34 +1,28 @@
-//! PostgreSQL-backed executor for the tenant-resource protocol.
-//!
-//! The ControlOperation admission path owns the wire and signature boundary.
-//! This module owns the database transaction and keeps that boundary separate:
-//! expensive preparation (password hashing, registration policy, and
-//! certificate validation) happens before the mutation transaction, while
-//! resource rows, revision state, the audit chain, and the typed operation
-//! outcome are committed as one unit.
+//! PostgreSQL implementation of the atomic tenant-resource persistence capability.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use diesel::{OptionalExtension as _, QueryableByName, sql_query, sql_types};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl as _};
 use futures_util::future::BoxFuture;
-use nazo_auth::{CreateClientRequest, OAuthClient};
 use nazo_identity::ports::RepositoryError;
 use nazo_identity::{TenantContext, TenantId};
-use nazo_key_management::validate_mtls_trust_anchor;
 use nazo_operator_protocol::{
-    ControlResultData, Openid4vcTrustPolicy, ProtocolError, TenantResourceIdentity,
-    TenantResourceKind, TenantResourceMapping, TenantResourceSelector,
-    canonical_tenant_resource_manifest_sha256, validate_control_result_data_for_wire,
-    validate_openid4vc_trust_policy,
+    TenantResourceIdentity, TenantResourceKind, TenantResourceMapping, TenantResourceSelector,
+    canonical_tenant_resource_manifest_sha256, validate_openid4vc_trust_policy,
 };
-use nazo_postgres::{
+use nazo_persistence::tenant_resources::{
+    ControlTenantResourceFrame, ControlTenantResourceOutcome, PreparedMtlsTrustAnchor,
+    PreparedOAuthClient, PreparedTenantResource, TenantResourceAction, TenantResourceExecutorError,
+    TenantResourceExecutorPort, TenantResourcePayload, TenantResourcePreparation,
+    TenantResourcePreparationError, UserProfileFields, empty_manifest_sha256, operation_name,
+    validate_control_outcome,
+};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use crate::{
     NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, Openid4vcTrustPolicyClientBind,
     Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke, Openid4vcTrustPolicyWrite,
     OperatorManagedTrustAnchor, TenantResourceBinding, TenantResourceBindingDeactivate,
@@ -40,418 +34,6 @@ use nazo_postgres::{
     protect_dataset_claims, revoke_operator_managed_trust_anchor_on_connection,
     upsert_operator_managed_dataset_on_connection,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
-use uuid::Uuid;
-
-const APPLY_MANIFEST_SCHEMA: u32 = 1;
-const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RESOURCE_PAYLOAD_BYTES: usize = 512 * 1024;
-const MAX_RESOURCE_PAYLOAD_TOTAL_BYTES: usize = 4 * 1024 * 1024;
-const MAX_USERNAME_BYTES: usize = 150;
-const MAX_EMAIL_BYTES: usize = 254;
-const MAX_PASSWORD_BYTES: usize = 512;
-const MAX_CLIENT_SECRET_BYTES: usize = 512;
-const MAX_CONFIGURATION_ID_BYTES: usize = 255;
-const MAX_PROFILE_BYTES: usize = 128 * 1024;
-const MAX_CERTIFICATE_BYTES: usize = 256 * 1024;
-const MAX_DATASET_CLAIMS_BYTES: usize = 256 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TenantResourceAction {
-    Apply,
-    Enumerate,
-    Revoke,
-}
-
-/// Typed, already validated resource payload handed to the persistence layer.
-#[derive(Clone)]
-pub enum TenantResourcePayload {
-    User(UserResourcePayload),
-    OauthClient(Box<OauthClientResourcePayload>),
-    MtlsTrustAnchor(MtlsTrustAnchorResourcePayload),
-    Openid4vcDataset(Openid4vcDatasetResourcePayload),
-    Openid4vcTrustPolicy(Box<Openid4vcTrustPolicyResourcePayload>),
-}
-
-#[derive(Clone)]
-pub struct UserResourcePayload {
-    pub username: String,
-    pub email: String,
-    pub password: String,
-    pub email_verified: bool,
-    pub profile: Option<Value>,
-}
-
-#[derive(Clone)]
-pub struct OauthClientResourcePayload {
-    pub request: CreateClientRequest,
-    pub supplied_secret: Option<String>,
-    pub trust_policy_resource_id: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct MtlsTrustAnchorResourcePayload {
-    pub client_resource_id: String,
-    pub certificate_pem: String,
-}
-
-#[derive(Clone)]
-pub struct Openid4vcDatasetResourcePayload {
-    pub user_resource_id: String,
-    pub configuration_id: String,
-    pub claims: Value,
-}
-
-#[derive(Clone)]
-pub struct Openid4vcTrustPolicyResourcePayload {
-    pub public_material: Openid4vcTrustPolicy,
-}
-
-#[derive(Clone)]
-pub struct PreparedTenantResource {
-    pub identity: TenantResourceIdentity,
-    /// Apply carries one payload; Revoke and Enumerate do not.
-    pub payload: Option<TenantResourcePayload>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TenantResourceExecutorError {
-    Conflict,
-    Unavailable,
-    Rejected,
-    InvalidPayload(&'static str),
-    TooLarge,
-}
-
-impl fmt::Display for TenantResourceExecutorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Conflict => "tenant-resource consistency conflict",
-            Self::Unavailable => "tenant-resource persistence unavailable",
-            Self::Rejected => "tenant-resource operation rejected",
-            Self::InvalidPayload(message) => message,
-            Self::TooLarge => "tenant-resource payload too large",
-        })
-    }
-}
-
-impl std::error::Error for TenantResourceExecutorError {}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApplyManifest {
-    schema: u32,
-    resources: Vec<ManifestResource>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ManifestResource {
-    kind: TenantResourceKind,
-    resource_id: String,
-    payload_base64url: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UserManifestPayload {
-    username: String,
-    email: String,
-    password: String,
-    email_verified: bool,
-    #[serde(default)]
-    profile: Option<Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OauthClientManifestPayload {
-    request: CreateClientRequest,
-    #[serde(default)]
-    supplied_secret: Option<String>,
-    #[serde(default)]
-    trust_policy_resource_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MtlsTrustAnchorManifestPayload {
-    client_resource_id: String,
-    certificate_pem: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Openid4vcDatasetManifestPayload {
-    user_resource_id: String,
-    configuration_id: String,
-    claims: Value,
-}
-
-/// Change-set decoder for the current ControlOperation pipeline.
-/// `raw_manifest` carries the decoded Apply-manifest JSON.
-/// Every manifest resource must be pre-authorized by the signed identity set
-/// (`authorized`), and each per-resource payload must hash exactly to its
-/// signed digest — the same material binding as the external public JWK.
-pub(crate) fn decode_change_set_payloads(
-    raw_manifest: &[u8],
-    authorized: &BTreeMap<(TenantResourceKind, String), TenantResourceIdentity>,
-) -> Result<Vec<PreparedTenantResource>, TenantResourceExecutorError> {
-    if raw_manifest.is_empty() {
-        return Err(TenantResourceExecutorError::InvalidPayload(
-            "manifest is empty",
-        ));
-    }
-    if raw_manifest.len() > MAX_MANIFEST_BYTES {
-        return Err(TenantResourceExecutorError::TooLarge);
-    }
-    let manifest: ApplyManifest = serde_json::from_slice(raw_manifest)
-        .map_err(|_| TenantResourceExecutorError::InvalidPayload("invalid resource manifest"))?;
-    if manifest.schema != APPLY_MANIFEST_SCHEMA
-        || manifest.resources.is_empty()
-        || manifest.resources.len() > nazo_operator_protocol::MAX_TENANT_RESOURCE_IDENTITIES
-    {
-        return Err(TenantResourceExecutorError::InvalidPayload(
-            "unsupported resource manifest",
-        ));
-    }
-    let mut seen_identities = BTreeSet::new();
-    let mut payload_total = 0usize;
-    let mut prepared = Vec::with_capacity(manifest.resources.len());
-    for resource in manifest.resources {
-        validate_resource_id(&resource.resource_id)?;
-        if !seen_identities.insert((resource.kind, resource.resource_id.clone())) {
-            return Err(TenantResourceExecutorError::InvalidPayload(
-                "resource identities must be unique",
-            ));
-        }
-        let payload = URL_SAFE_NO_PAD
-            .decode(&resource.payload_base64url)
-            .map_err(|_| {
-                TenantResourceExecutorError::InvalidPayload(
-                    "resource payload is not valid base64url",
-                )
-            })?;
-        if payload.is_empty() || payload.len() > MAX_RESOURCE_PAYLOAD_BYTES {
-            return Err(if payload.len() > MAX_RESOURCE_PAYLOAD_BYTES {
-                TenantResourceExecutorError::TooLarge
-            } else {
-                TenantResourceExecutorError::InvalidPayload("resource payload is empty")
-            });
-        }
-        payload_total = payload_total
-            .checked_add(payload.len())
-            .ok_or(TenantResourceExecutorError::TooLarge)?;
-        if payload_total > MAX_RESOURCE_PAYLOAD_TOTAL_BYTES {
-            return Err(TenantResourceExecutorError::TooLarge);
-        }
-        let identity = authorized
-            .get(&(resource.kind, resource.resource_id.clone()))
-            .ok_or(TenantResourceExecutorError::InvalidPayload(
-                "manifest resource is not authorized by task",
-            ))?;
-        if sha256_hex(&payload) != identity.digest {
-            return Err(TenantResourceExecutorError::InvalidPayload(
-                "resource payload digest does not match task",
-            ));
-        }
-        let typed = decode_payload(resource.kind, &payload)?;
-        prepared.push(PreparedTenantResource {
-            identity: identity.clone(),
-            payload: Some(typed),
-        });
-    }
-    if prepared.len() != authorized.len() {
-        return Err(TenantResourceExecutorError::InvalidPayload(
-            "manifest resources do not match task",
-        ));
-    }
-    Ok(prepared)
-}
-
-fn decode_payload(
-    kind: TenantResourceKind,
-    payload: &[u8],
-) -> Result<TenantResourcePayload, TenantResourceExecutorError> {
-    match kind {
-        TenantResourceKind::User => {
-            let value: UserManifestPayload = serde_json::from_slice(payload)
-                .map_err(|_| TenantResourceExecutorError::InvalidPayload("invalid user payload"))?;
-            validate_text(&value.username, MAX_USERNAME_BYTES)?;
-            validate_text(&value.email, MAX_EMAIL_BYTES)?;
-            validate_text(&value.password, MAX_PASSWORD_BYTES)?;
-            if let Some(profile) = &value.profile {
-                let size = serde_json::to_vec(profile)
-                    .map_err(|_| {
-                        TenantResourceExecutorError::InvalidPayload("invalid user profile")
-                    })?
-                    .len();
-                if size > MAX_PROFILE_BYTES {
-                    return Err(TenantResourceExecutorError::TooLarge);
-                }
-            }
-            Ok(TenantResourcePayload::User(UserResourcePayload {
-                username: value.username,
-                email: value.email,
-                password: value.password,
-                email_verified: value.email_verified,
-                profile: value.profile,
-            }))
-        }
-        TenantResourceKind::OauthClient => {
-            let value: OauthClientManifestPayload =
-                serde_json::from_slice(payload).map_err(|_| {
-                    TenantResourceExecutorError::InvalidPayload("invalid oauth client payload")
-                })?;
-            if let Some(secret) = &value.supplied_secret {
-                validate_text(secret, MAX_CLIENT_SECRET_BYTES)?;
-            }
-            Ok(TenantResourcePayload::OauthClient(Box::new(
-                OauthClientResourcePayload {
-                    request: value.request,
-                    supplied_secret: value.supplied_secret,
-                    trust_policy_resource_id: value
-                        .trust_policy_resource_id
-                        .map(|resource_id| validate_resource_id(&resource_id).map(|()| resource_id))
-                        .transpose()?,
-                },
-            )))
-        }
-        TenantResourceKind::MtlsTrustAnchor => {
-            let value: MtlsTrustAnchorManifestPayload =
-                serde_json::from_slice(payload).map_err(|_| {
-                    TenantResourceExecutorError::InvalidPayload("invalid mTLS trust anchor payload")
-                })?;
-            validate_resource_id(&value.client_resource_id)?;
-            if value.certificate_pem.len() > MAX_CERTIFICATE_BYTES
-                || !value
-                    .certificate_pem
-                    .contains("-----BEGIN CERTIFICATE-----")
-                || !value.certificate_pem.contains("-----END CERTIFICATE-----")
-            {
-                return Err(TenantResourceExecutorError::InvalidPayload(
-                    "invalid mTLS trust anchor certificate",
-                ));
-            }
-            Ok(TenantResourcePayload::MtlsTrustAnchor(
-                MtlsTrustAnchorResourcePayload {
-                    client_resource_id: value.client_resource_id,
-                    certificate_pem: value.certificate_pem,
-                },
-            ))
-        }
-        TenantResourceKind::Openid4vcDataset => {
-            let value: Openid4vcDatasetManifestPayload =
-                serde_json::from_slice(payload).map_err(|_| {
-                    TenantResourceExecutorError::InvalidPayload("invalid OpenID4VC dataset payload")
-                })?;
-            validate_resource_id(&value.user_resource_id)?;
-            validate_text(&value.configuration_id, MAX_CONFIGURATION_ID_BYTES)?;
-            if !value.claims.is_object() {
-                return Err(TenantResourceExecutorError::InvalidPayload(
-                    "OpenID4VC dataset claims must be an object",
-                ));
-            }
-            let size = serde_json::to_vec(&value.claims)
-                .map_err(|_| TenantResourceExecutorError::InvalidPayload("invalid dataset claims"))?
-                .len();
-            if size > MAX_DATASET_CLAIMS_BYTES {
-                return Err(TenantResourceExecutorError::TooLarge);
-            }
-            Ok(TenantResourcePayload::Openid4vcDataset(
-                Openid4vcDatasetResourcePayload {
-                    user_resource_id: value.user_resource_id,
-                    configuration_id: value.configuration_id,
-                    claims: value.claims,
-                },
-            ))
-        }
-        TenantResourceKind::Openid4vcTrustPolicy => {
-            let public_material: Openid4vcTrustPolicy =
-                serde_json::from_slice(payload).map_err(|_| {
-                    TenantResourceExecutorError::InvalidPayload(
-                        "invalid OpenID4VC trust policy payload",
-                    )
-                })?;
-            validate_openid4vc_trust_policy(&public_material).map_err(|_| {
-                TenantResourceExecutorError::InvalidPayload("invalid OpenID4VC trust policy")
-            })?;
-            Ok(TenantResourcePayload::Openid4vcTrustPolicy(Box::new(
-                Openid4vcTrustPolicyResourcePayload { public_material },
-            )))
-        }
-    }
-}
-
-fn validate_resource_id(value: &str) -> Result<(), TenantResourceExecutorError> {
-    nazo_operator_protocol::validate_file_identifier_value(value)
-        .map_err(|_| TenantResourceExecutorError::InvalidPayload("invalid resource identifier"))
-}
-
-fn validate_text(value: &str, max_bytes: usize) -> Result<(), TenantResourceExecutorError> {
-    if value.trim().is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
-        return Err(TenantResourceExecutorError::InvalidPayload(
-            "invalid resource text",
-        ));
-    }
-    Ok(())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-/// The result of registration-policy preparation.  The adapter constructing
-/// this value is responsible for using the deployment's existing client
-/// policy and secret hashing implementation; the executor never invents a
-/// parallel policy.
-pub struct PreparedOAuthClient {
-    pub client: OAuthClient,
-    pub client_secret_hash: Option<String>,
-}
-
-impl fmt::Debug for PreparedOAuthClient {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedOAuthClient")
-            .field("client_id", &self.client.client_id)
-            .field("client_secret_hash", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// Preparation failures are intentionally coarse.  In particular, a
-/// registration secret, password, or certificate body is never included in
-/// an error string that could reach logs or an HTTP response.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TenantResourcePreparationError {
-    Rejected,
-    Unavailable,
-}
-
-/// Focused bridge to the existing authorization-server registration services.
-/// Implementations normally delegate to `ServerAdminClientService` and the
-/// configured password/secret hasher.  Keeping this small trait here avoids
-/// bypassing those policy services or duplicating their rules in the
-/// persistence executor.
-pub trait TenantResourcePreparation: Send + Sync {
-    fn hash_user_password<'a>(
-        &'a self,
-        password: String,
-    ) -> BoxFuture<'a, Result<String, TenantResourcePreparationError>>;
-
-    fn prepare_oauth_client<'a>(
-        &'a self,
-        request: CreateClientRequest,
-        supplied_secret: Option<String>,
-        tenant: TenantContext,
-    ) -> BoxFuture<'a, Result<PreparedOAuthClient, TenantResourcePreparationError>>;
-}
 
 /// PostgreSQL tenant-resource executor and authoritative state source.
 pub struct PostgresTenantResourceExecutor {
@@ -505,8 +87,7 @@ impl PostgresTenantResourceExecutor {
                     PreparedApplyPayload::User(Box::new(PreparedUser {
                         identity: resource.identity.clone(),
                         password_hash,
-                        profile: profile_fields(value.profile.as_ref())
-                            .map_err(|_| TenantResourceExecutorError::Rejected)?,
+                        profile: value.profile,
                         username: value.username,
                         email: value.email,
                         email_verified: value.email_verified,
@@ -525,16 +106,25 @@ impl PostgresTenantResourceExecutor {
                     }))
                 }
                 TenantResourcePayload::MtlsTrustAnchor(value) => {
-                    let parsed = validate_mtls_trust_anchor(&value.certificate_pem)
-                        .map_err(|_| TenantResourceExecutorError::Rejected)?;
+                    let PreparedMtlsTrustAnchor {
+                        certificate_pem,
+                        certificate_sha256,
+                        subject_dn,
+                        not_before,
+                        not_after,
+                    } = self
+                        .preparation
+                        .prepare_mtls_trust_anchor(value.certificate_pem)
+                        .await
+                        .map_err(map_preparation_error)?;
                     PreparedApplyPayload::Mtls(Box::new(PreparedMtls {
                         identity: resource.identity.clone(),
                         client_resource_id: value.client_resource_id,
-                        certificate_pem: parsed.certificate_pem,
-                        certificate_sha256: parsed.certificate_sha256,
-                        subject_dn: parsed.subject_dn,
-                        not_before: parsed.not_before,
-                        not_after: parsed.not_after,
+                        certificate_pem,
+                        certificate_sha256,
+                        subject_dn,
+                        not_before,
+                        not_after,
                     }))
                 }
                 TenantResourcePayload::Openid4vcDataset(value) => {
@@ -639,7 +229,7 @@ impl PostgresTenantResourceExecutor {
                             .map_err(ExecutorTransactionError::Repository)?;
                     let (current_revision, current_manifest) = match current {
                         Some(state) => (state.revision, state.resource_manifest_sha256),
-                        None => (0, Self::empty_manifest_sha256()),
+                        None => (0, empty_manifest_sha256()),
                     };
 
                     let frame = match operation {
@@ -817,7 +407,7 @@ enum PreparedApplyPayload {
 struct PreparedUser {
     identity: TenantResourceIdentity,
     password_hash: String,
-    profile: ProfileFields,
+    profile: UserProfileFields,
     username: String,
     email: String,
     email_verified: bool,
@@ -861,57 +451,11 @@ fn payload_sort_key(payload: &PreparedApplyPayload) -> (u8, &str) {
     }
 }
 
-/// Authoritative outcome of one control-operation tenant-resource frame (H07).
-/// This is the entire data surface handed back to the ControlResult channel;
-/// richer executor internals have no wire representation.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ControlTenantResourceOutcome {
-    /// CAS revision this read/mutation is consistent with.
-    pub revision: u64,
-    /// Sorted identity set selected by the operation.
-    pub resources: Vec<TenantResourceIdentity>,
-    /// Apply-only public identifiers assigned by authoritative services.
-    pub resource_mappings: Vec<TenantResourceMapping>,
-    /// Digest of the complete active tenant-resource identity set.
-    pub resource_manifest_sha256: String,
-}
-
-impl ControlTenantResourceOutcome {
-    pub(crate) fn control_result_data(&self, operation: TenantResourceAction) -> ControlResultData {
-        match operation {
-            TenantResourceAction::Apply => ControlResultData::TenantResourceApply {
-                revision: self.revision,
-                resources: self.resources.clone(),
-                resource_mappings: self.resource_mappings.clone(),
-                resource_manifest_sha256: self.resource_manifest_sha256.clone(),
-            },
-            TenantResourceAction::Enumerate => ControlResultData::TenantResourceEnumerate {
-                revision: self.revision,
-                resources: self.resources.clone(),
-                resource_manifest_sha256: self.resource_manifest_sha256.clone(),
-            },
-            TenantResourceAction::Revoke => ControlResultData::TenantResourceRevoke {
-                revision: self.revision,
-                resources: self.resources.clone(),
-                resource_manifest_sha256: self.resource_manifest_sha256.clone(),
-            },
-        }
-    }
-}
-
 fn validate_wire_outcome(
     operation: TenantResourceAction,
     outcome: &ControlTenantResourceOutcome,
 ) -> Result<(), ExecutorTransactionError> {
-    validate_control_result_data_for_wire(&outcome.control_result_data(operation)).map_err(
-        |error| {
-            ExecutorTransactionError::Executor(match error {
-                ProtocolError::TooLarge => TenantResourceExecutorError::TooLarge,
-                _ => TenantResourceExecutorError::Rejected,
-            })
-        },
-    )
+    validate_control_outcome(operation, outcome).map_err(ExecutorTransactionError::Executor)
 }
 
 #[derive(QueryableByName)]
@@ -987,28 +531,6 @@ async fn record_control_outcome_on_connection(
         return Err(transaction_conflict("control_operation_record"));
     }
     Ok(())
-}
-
-/// One accepted control operation's tenant-resource frame (H07): provenance,
-/// scope, and typed inputs in a single closed parameter surface.
-pub(crate) struct ControlTenantResourceFrame<'a> {
-    /// Signed deployment binding that proved local at admission.
-    pub deployment_id: &'a str,
-    /// Accepted operation id (`operation_id`, doubles as jti).
-    pub jti: &'a str,
-    /// Canonical request hash of the accepted operation (audit provenance).
-    pub request_sha256: &'a str,
-    /// Non-secret controller descriptor recorded on the audit event.
-    pub actor: &'a Value,
-    pub operation: TenantResourceAction,
-    /// Tenant scope claimed by the signed payload; must equal the configured
-    /// tenant or the executor rejects the frame outright.
-    pub tenant_id: &'a str,
-    /// Apply/revoke delta.  Apply entries carry digest-bound typed payloads;
-    /// revoke entries are payload-less.
-    pub resources: Vec<PreparedTenantResource>,
-    /// Enumerate selectors; ignored by the other variants.
-    pub selectors: &'a [TenantResourceSelector],
 }
 
 /// Typed input of one shared tenant-resource frame.
@@ -2037,109 +1559,6 @@ fn sort_identities(mut identities: Vec<TenantResourceIdentity>) -> Vec<TenantRes
     identities
 }
 
-#[derive(Clone, Default, Eq, PartialEq)]
-struct ProfileFields {
-    display_name: Option<String>,
-    given_name: Option<String>,
-    family_name: Option<String>,
-    middle_name: Option<String>,
-    nickname: Option<String>,
-    profile_url: Option<String>,
-    avatar_url: Option<String>,
-    website_url: Option<String>,
-    gender: Option<String>,
-    birthdate: Option<String>,
-    zoneinfo: Option<String>,
-    locale: Option<String>,
-    address_formatted: Option<String>,
-    address_street_address: Option<String>,
-    address_locality: Option<String>,
-    address_region: Option<String>,
-    address_postal_code: Option<String>,
-    address_country: Option<String>,
-    phone_number: Option<String>,
-    phone_number_verified: bool,
-}
-
-fn profile_fields(value: Option<&Value>) -> Result<ProfileFields, ()> {
-    let Some(value) = value else {
-        return Ok(ProfileFields::default());
-    };
-    let Some(object) = value.as_object() else {
-        return Err(());
-    };
-    if object.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "display_name"
-                | "given_name"
-                | "family_name"
-                | "middle_name"
-                | "nickname"
-                | "profile_url"
-                | "avatar_url"
-                | "website_url"
-                | "gender"
-                | "birthdate"
-                | "zoneinfo"
-                | "locale"
-                | "address_formatted"
-                | "address_street_address"
-                | "address_locality"
-                | "address_region"
-                | "address_postal_code"
-                | "address_country"
-                | "phone_number"
-                | "phone_number_verified"
-        )
-    }) {
-        return Err(());
-    }
-    let mut fields = ProfileFields::default();
-    macro_rules! text {
-        ($name:ident, $max:expr) => {
-            fields.$name = profile_text(object.get(stringify!($name)), $max)?;
-        };
-    }
-    text!(display_name, 80);
-    text!(given_name, 80);
-    text!(family_name, 80);
-    text!(middle_name, 80);
-    text!(nickname, 80);
-    text!(profile_url, 512);
-    text!(avatar_url, 512);
-    text!(website_url, 512);
-    text!(gender, 40);
-    text!(birthdate, 10);
-    text!(zoneinfo, 64);
-    text!(locale, 35);
-    text!(address_formatted, 512);
-    text!(address_street_address, 256);
-    text!(address_locality, 128);
-    text!(address_region, 128);
-    text!(address_postal_code, 64);
-    text!(address_country, 64);
-    text!(phone_number, 32);
-    if let Some(value) = object.get("phone_number_verified") {
-        fields.phone_number_verified = value.as_bool().ok_or(())?;
-    }
-    Ok(fields)
-}
-
-fn profile_text(value: Option<&Value>, max_bytes: usize) -> Result<Option<String>, ()> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let text = value.as_str().ok_or(())?;
-    if text.is_empty() || text.len() > max_bytes || text.chars().any(char::is_control) {
-        return Err(());
-    }
-    Ok(Some(text.to_owned()))
-}
-
 /// Build the append-only security-audit event for one executed tenant-resource
 /// frame. Explicit fields keep the audit shape independent from the wire type.
 #[allow(clippy::too_many_arguments)]
@@ -2153,8 +1572,8 @@ fn tenant_resource_audit_event(
     expected_revision: u64,
     resource_manifest_sha256: &str,
     resources: &[TenantResourceIdentity],
-) -> nazo_postgres::SecurityAuditEvent {
-    nazo_postgres::SecurityAuditEvent {
+) -> crate::SecurityAuditEvent {
+    crate::SecurityAuditEvent {
         event_id: Uuid::now_v7(),
         event_type: format!("tenant_resource_{}", operation_name(operation)),
         event_category: "tenant_resource".to_owned(),
@@ -2170,14 +1589,6 @@ fn tenant_resource_audit_event(
             "resources": resources,
         }),
         occurred_at: Utc::now(),
-    }
-}
-
-fn operation_name(operation: TenantResourceAction) -> &'static str {
-    match operation {
-        TenantResourceAction::Apply => "apply",
-        TenantResourceAction::Enumerate => "enumerate",
-        TenantResourceAction::Revoke => "revoke",
     }
 }
 
@@ -2258,6 +1669,13 @@ fn is_lower_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[cfg(test)]
-#[path = "../tests/unit/tenant_resource_executor.rs"]
-mod tests;
+impl TenantResourceExecutorPort for PostgresTenantResourceExecutor {
+    fn execute_control_operation<'a>(
+        &'a self,
+        frame: ControlTenantResourceFrame<'a>,
+    ) -> BoxFuture<'a, Result<ControlTenantResourceOutcome, TenantResourceExecutorError>> {
+        Box::pin(PostgresTenantResourceExecutor::execute_control_operation(
+            self, frame,
+        ))
+    }
+}

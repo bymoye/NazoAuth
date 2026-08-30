@@ -143,12 +143,18 @@ async fn operations_with_crypto(
             active_modules,
         )
         .expect("fixture runtime module registry should load");
+    let store: Arc<dyn nazo_persistence::Openid4vpStore> =
+        Arc::new(nazo_postgres::Openid4vpRepository::new(
+            pool.clone(),
+            crate::domain::tenancy::DEFAULT_TENANT_ID,
+            [0x42; 32],
+        ));
     ServerPresentationOperations::new(
-        pool,
+        store,
         crate::domain::tenancy::DEFAULT_TENANT_ID,
-        [0x42; 32],
         crypto,
         runtime,
+        Arc::new(nazo_postgres::TenantResourceRepository::new(pool)),
         PresentationVerifierConfig {
             issuer: "https://issuer.example".to_owned(),
             wallet_origins: vec!["https://wallet.example".to_owned()],
@@ -1100,11 +1106,12 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         (400, "invalid_request")
     );
 
-    let broken_store = nazo_postgres::Openid4vpRepository::new(
-        invalid_pool(),
-        crate::domain::tenancy::DEFAULT_TENANT_ID,
-        [0x42; 32],
-    );
+    let broken_store: Arc<dyn nazo_persistence::Openid4vpStore> =
+        Arc::new(nazo_postgres::Openid4vpRepository::new(
+            invalid_pool(),
+            crate::domain::tenancy::DEFAULT_TENANT_ID,
+            [0x42; 32],
+        ));
     let store_error_operations = ServerPresentationOperations {
         store: broken_store.clone(),
         trust_policies: operations.trust_policies.clone(),
@@ -1279,11 +1286,15 @@ async fn create_and_request_cover_url_query_signed_get_and_signed_post_modes() {
         .await
         .expect("cross-tenant fixture should be inserted");
     let cross_tenant = ServerPresentationOperations::new(
-        pool.clone(),
+        Arc::new(nazo_postgres::Openid4vpRepository::new(
+            pool.clone(),
+            other_tenant,
+            [0x43; 32],
+        )),
         other_tenant,
-        [0x43; 32],
         operations.crypto.clone(),
         operations.runtime.clone(),
+        Arc::new(nazo_postgres::TenantResourceRepository::new(pool.clone())),
         PresentationVerifierConfig {
             issuer: operations.issuer.clone(),
             wallet_origins: operations.wallet_origins.clone(),

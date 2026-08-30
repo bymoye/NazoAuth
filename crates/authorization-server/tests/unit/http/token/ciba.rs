@@ -377,7 +377,9 @@ async fn call_ciba_token_with_modules_for_test(
     };
     let handles = CibaTokenHandles::new(
         Data::new(ciba_service),
-        Data::new(users),
+        Data::from(
+            std::sync::Arc::new(users) as std::sync::Arc<dyn nazo_persistence::CibaAccountStore>
+        ),
         Data::new(ciba_config),
     );
     token_ciba(

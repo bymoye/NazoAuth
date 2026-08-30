@@ -7,13 +7,14 @@ use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use nazo_digital_credentials::decode_compact_jwt;
 use nazo_openid4vci::{ProofError, ProofValidatorPort, Proofs, ValidatedProof};
 use nazo_operator_protocol::Openid4vcTrustPolicy;
+use nazo_persistence::{ClientTrustPolicy, Openid4vcTrustPolicyStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Clone)]
 pub(crate) struct Openid4vcProofValidator {
     pub(super) key_attestation_jwks: Arc<Value>,
-    trust_policies: Option<(nazo_postgres::TenantResourceRepository, uuid::Uuid)>,
+    trust_policies: Option<(Arc<dyn Openid4vcTrustPolicyStore>, uuid::Uuid)>,
 }
 
 #[derive(Clone, Copy)]
@@ -39,7 +40,7 @@ impl Openid4vcProofValidator {
 
     pub(crate) fn with_trust_policies(
         mut self,
-        repository: nazo_postgres::TenantResourceRepository,
+        repository: Arc<dyn Openid4vcTrustPolicyStore>,
         tenant_id: uuid::Uuid,
     ) -> Self {
         self.trust_policies = Some((repository, tenant_id));
@@ -51,28 +52,17 @@ impl Openid4vcProofValidator {
         client_id: &str,
     ) -> Result<Arc<Value>, ProofError> {
         if let Some((repository, tenant_id)) = &self.trust_policies {
-            let mut connection = repository
-                .connection()
+            match repository
+                .for_client(*tenant_id, client_id)
                 .await
-                .map_err(|_| ProofError::InvalidKeyAttestation)?;
-            match nazo_postgres::TenantResourceRepository::openid4vc_trust_policy_for_client_on_connection(
-                &mut connection,
-                *tenant_id,
-                client_id,
-            )
-            .await
-            .map_err(|_| ProofError::InvalidKeyAttestation)?
+                .map_err(|_| ProofError::InvalidKeyAttestation)?
             {
-                nazo_postgres::Openid4vcTrustPolicyForClient::Unbound => {}
-                nazo_postgres::Openid4vcTrustPolicyForClient::BoundInactive => {
+                ClientTrustPolicy::Unbound => {}
+                ClientTrustPolicy::BoundInactive => {
                     return Err(ProofError::InvalidKeyAttestation);
                 }
-                nazo_postgres::Openid4vcTrustPolicyForClient::Active(policy) => {
-                    let material: Openid4vcTrustPolicy =
-                        serde_json::from_value(policy.public_material)
-                            .map_err(|_| ProofError::InvalidKeyAttestation)?;
-                    nazo_operator_protocol::validate_openid4vc_trust_policy(&material)
-                        .map_err(|_| ProofError::InvalidKeyAttestation)?;
+                ClientTrustPolicy::Active(policy) => {
+                    let material: Openid4vcTrustPolicy = policy.material;
                     return Ok(Arc::new(material.key_attestation_jwks));
                 }
             }

@@ -211,7 +211,7 @@ async fn operations_with_inputs_and_attestation(
     let token_service = Arc::new(ServerTokenService::new(
         nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
             pool.clone(),
-            nazo_postgres::TokenIssuanceResponseKeyRing::new("unit-current", [0x42; 32], None)
+            nazo_persistence::TokenIssuanceResponseKeyRing::new("unit-current", [0x42; 32], None)
                 .expect("response key ring fixture should be valid"),
         ),
         nazo_valkey::TokenIssuanceStateAdapter::new(&valkey_connection),
@@ -235,8 +235,18 @@ async fn operations_with_inputs_and_attestation(
     let proof_validator = Openid4vcProofValidator::new(json!({ "keys": [] }))
         .expect("proof validator fixture should build");
     let crypto = fixture_crypto().await;
+    let store: Arc<dyn nazo_persistence::Openid4vciStore> = Arc::new(
+        nazo_postgres::Openid4vciRepository::new(pool.clone(), [0x51; 32]),
+    );
+    let users: Arc<dyn nazo_persistence::Openid4vcSubjectStore> =
+        Arc::new(nazo_postgres::UserRepository::new(pool.clone()));
+    let datasets: Arc<dyn nazo_persistence::Openid4vciDatasetStore> = Arc::new(
+        nazo_postgres::Openid4vciDatasetRepository::new(pool, [0x51; 32]),
+    );
     ServerCredentialIssuerOperations::new(
-        pool,
+        store,
+        users,
+        datasets,
         DEFAULT_TENANT_ID,
         [0x51; 32],
         token_service,
@@ -421,12 +431,12 @@ impl LiveEndpointFixture {
         let claims = json!({"given_name":"OpenID4VC Live Fixture", "sub": subject_id});
         let inserted = issuer
             .datasets
-            .upsert_managed_dataset(nazo_postgres::ManagedCredentialDatasetWrite {
+            .upsert_managed_dataset(nazo_persistence::ManagedCredentialDatasetWrite {
                 tenant_id: DEFAULT_TENANT_ID,
                 actor_user_id: admin_id,
                 subject_id,
-                credential_configuration_id: configuration_id,
-                claims: &claims,
+                credential_configuration_id: configuration_id.to_owned(),
+                claims,
                 valid_from: None,
                 valid_until: None,
             })

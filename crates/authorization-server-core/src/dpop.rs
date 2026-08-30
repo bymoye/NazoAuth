@@ -8,10 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::{
-    AuthorizationRepositoryPort, AuthorizationResponseSignerPort, AuthorizationService,
-    AuthorizationStateStorePort,
-};
+use crate::{AuthorizationResponseSignerPort, AuthorizationService, AuthorizationStateStorePort};
 
 pub const DPOP_REPLAY_TTL_SECONDS: u64 = 300;
 pub const DPOP_CLOCK_SKEW_SECONDS: i64 = 30;
@@ -124,9 +121,8 @@ impl DpopProofVerifier {
     }
 }
 
-impl<R, S, K> DpopStateStorePort for AuthorizationService<R, S, K>
+impl<S, K> DpopStateStorePort for AuthorizationService<S, K>
 where
-    R: AuthorizationRepositoryPort,
     S: AuthorizationStateStorePort,
     K: AuthorizationResponseSignerPort,
 {

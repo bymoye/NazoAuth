@@ -62,7 +62,7 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `TENANT_ID` | `00000000-0000-0000-0000-000000000001` | Process-wide active tenant; the row must exist and have `active` status |
 | `REALM_ID` | `00000000-0000-0000-0000-000000000002` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
 | `ORGANIZATION_ID` | `00000000-0000-0000-0000-000000000003` | Default identity placement; it must be active and belong to `TENANT_ID`, but it is not a request-routing or authorization partition |
-| `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/oauth` | PostgreSQL connection string |
+| `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/oauth` | PostgreSQL connection string for the current `nazoauth` launcher |
 | `DATABASE_MAX_CONNECTIONS` | `32` | Maximum PostgreSQL pool size per NazoAuth process |
 | `VALKEY_URL` | `redis://127.0.0.1:6379/0` | Valkey connection string; startup rejects an unmarked nonempty database rather than adopting historical keys |
 | `VALKEY_STATE_EPOCH` | none (required UUIDv7) | Deployment state boundary. Every transient business key is physically namespaced as `nazo:state:v1:<deployment>:<epoch>:`. Set a fresh UUIDv7 before a restored candidate starts; never reuse a prior epoch. |

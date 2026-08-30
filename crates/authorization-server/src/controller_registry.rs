@@ -3,7 +3,7 @@
 //! NazoAuth is the single authority for Controller Public Keys, their fixed
 //! 30-day lifetime, the three-slot bound, and the fresh-2FA approvals that
 //! authorize every identity change.  This module is the typed surface between
-//! the admin HTTP plane and the PostgreSQL registry repository; it owns
+//! the admin HTTP plane and the selected persistence adapter; it owns
 //!
 //! * request-shape validation (identifier formats, key material decoding,
 //!   `kid`/key binding) before anything reaches storage;
@@ -26,15 +26,14 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-pub use nazo_postgres::{
+pub use nazo_persistence::control_plane::{
     CONTROLLER_KEY_TTL_SECONDS, IDENTITY_APPROVAL_TTL_SECONDS, MAX_ACTIVE_CONTROLLER_SLOTS,
 };
 
-use nazo_postgres::{
+use nazo_persistence::control_plane::{
     AdmittedController, CommitWithApprovalError, ControllerIdentityAction, ControllerRegistryError,
-    ControllerRegistryRepository, ControllerSlotSummary, IdentityApprovalError,
-    IssuedIdentityApproval, NewControllerSlot, NewRecoveryRoot, RotateControllerKey,
-    StoredControllerSlot,
+    ControllerRegistryPort, ControllerSlotSummary, IdentityApprovalError, IssuedIdentityApproval,
+    NewControllerSlot, NewRecoveryRoot, RotateControllerKey, StoredControllerSlot,
 };
 
 /// Fixed 7-day pre-expiry warning threshold (04 §2).
@@ -371,12 +370,12 @@ pub struct IssuedApprovalView {
 /// Service facade over the registry repository.  Cheap to clone.
 #[derive(Clone)]
 pub struct ControllerRegistryService {
-    repository: Arc<ControllerRegistryRepository>,
+    repository: Arc<dyn ControllerRegistryPort>,
 }
 
 impl ControllerRegistryService {
     #[must_use]
-    pub fn new(repository: Arc<ControllerRegistryRepository>) -> Self {
+    pub fn new(repository: Arc<dyn ControllerRegistryPort>) -> Self {
         Self { repository }
     }
 

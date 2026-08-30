@@ -11,16 +11,23 @@ pub(super) struct Openid4vcServices {
 
 pub(super) async fn build(
     startup: &StartupConfiguration,
-    diesel_db: &nazo_postgres::DbPool,
     token_service: &web::Data<crate::http::token::ServerTokenService>,
     authorization_service: &web::Data<ServerAuthorizationService>,
     runtime_registry: Arc<ServerRuntimeModuleRegistry>,
     keyset: &nazo_key_management::KeyManager,
 ) -> anyhow::Result<Openid4vcServices> {
     let settings = startup.settings.as_ref();
-    let openid4vc_crypto = if settings.modules.enable_openid4vci_issuer
-        || settings.modules.enable_openid4vp_verifier
-    {
+    let persistence = startup.persistence.provider();
+    let openid4vc_enabled =
+        settings.modules.enable_openid4vci_issuer || settings.modules.enable_openid4vp_verifier;
+    let data_key = openid4vc_enabled.then(|| {
+        settings
+            .openid4vc
+            .data_encryption_key
+            .expect("enabled OpenID4VC modules require a data encryption key")
+    });
+    let trust_policy_store = data_key.map(|key| persistence.openid4vc_trust_policies(key));
+    let openid4vc_crypto = if openid4vc_enabled {
         let revocation_policy =
             super::super::super::background::load_revocation_policy(&settings.openid4vc).await?;
         let certificate_chain = tokio::fs::read(
@@ -98,7 +105,9 @@ pub(super) async fn build(
         .then(|| {
             Openid4vcClientAttestationValidator::with_trust_policies(
                 static_client_attestation,
-                nazo_postgres::TenantResourceRepository::new(diesel_db.clone()),
+                trust_policy_store
+                    .clone()
+                    .expect("enabled OpenID4VCI requires a trust policy store"),
                 settings.tenant.context.tenant_id.as_uuid(),
             )
             .map(Arc::new)
@@ -106,10 +115,10 @@ pub(super) async fn build(
         .transpose()?;
     let (credential_issuer_endpoint, credential_dataset_admin) =
         if settings.modules.enable_openid4vci_issuer {
-            let data_key = settings
-                .openid4vc
-                .data_encryption_key
-                .expect("enabled OpenID4VCI requires a data encryption key");
+            let data_key = data_key.expect("enabled OpenID4VCI requires a data encryption key");
+            let issuance_store = persistence.openid4vci_store(data_key);
+            let subject_store = persistence.openid4vc_subjects();
+            let dataset_store = persistence.openid4vci_datasets(data_key);
             let proof_validator = Openid4vcProofValidator::new(
                 settings
                     .openid4vc
@@ -118,11 +127,15 @@ pub(super) async fn build(
                     .unwrap_or_else(|| serde_json::json!({"keys": []})),
             )?
             .with_trust_policies(
-                nazo_postgres::TenantResourceRepository::new(diesel_db.clone()),
+                trust_policy_store
+                    .clone()
+                    .expect("enabled OpenID4VCI requires a trust policy store"),
                 settings.tenant.context.tenant_id.as_uuid(),
             );
             let operations = Arc::new(ServerCredentialIssuerOperations::new(
-                diesel_db.clone(),
+                issuance_store,
+                subject_store,
+                dataset_store,
                 settings.tenant.context.tenant_id.as_uuid(),
                 data_key,
                 token_service.clone().into_inner(),
@@ -166,20 +179,20 @@ pub(super) async fn build(
             (None, None)
         };
     let presentation_endpoint = if settings.modules.enable_openid4vp_verifier {
+        let data_key = data_key.expect("enabled OpenID4VP requires a data encryption key");
+        let presentation_store =
+            persistence.openid4vp_store(settings.tenant.context.tenant_id.as_uuid(), data_key);
         Some(web::Data::new(PresentationEndpoint::new(
             Arc::new(
                 ServerPresentationOperations::new(
-                    diesel_db.clone(),
+                    presentation_store,
                     settings.tenant.context.tenant_id.as_uuid(),
-                    settings
-                        .openid4vc
-                        .data_encryption_key
-                        .expect("enabled OpenID4VP requires a data encryption key"),
                     openid4vc_crypto
                         .as_ref()
                         .expect("enabled OpenID4VP requires crypto")
                         .clone(),
                     runtime_registry,
+                    trust_policy_store.expect("enabled OpenID4VP requires a trust policy store"),
                     PresentationVerifierConfig {
                         issuer: settings.endpoint.issuer.clone(),
                         wallet_origins: settings.openid4vc.wallet_authorization_origins.clone(),

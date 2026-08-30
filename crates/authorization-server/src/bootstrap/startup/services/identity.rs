@@ -26,7 +26,7 @@ pub(super) struct IdentityServices {
     pub(super) admin_user_registration:
         web::Data<dyn nazo_identity::ports::RegistrationAccountRepositoryPort>,
     pub(super) admin_grants: web::Data<dyn nazo_auth::AdminGrantRepositoryPort>,
-    pub(super) admin_access_requests: web::Data<nazo_postgres::AccessRequestRepository>,
+    pub(super) admin_access_requests: web::Data<dyn nazo_persistence::AdminAccessRequestStore>,
     pub(super) controller_registry:
         web::Data<crate::controller_registry::ControllerRegistryService>,
     pub(super) recovery_root: web::Data<crate::recovery_root::RecoveryRootService>,
@@ -50,7 +50,7 @@ pub(super) async fn build(
     core: &CoreServices,
 ) -> anyhow::Result<IdentityServices> {
     let settings = startup.settings.as_ref();
-    let diesel_db = startup.diesel_db.clone();
+    let persistence = startup.persistence.provider();
     let valkey_connection = startup.valkey_connection.clone();
     let runtime_registry = startup.runtime_modules.registry.clone();
     let keyset = startup.keyset.clone();
@@ -68,7 +68,7 @@ pub(super) async fn build(
     );
     let identity_session_service = nazo_identity::SessionService::new(
         Arc::new(nazo_valkey::SessionStore::new(&valkey_connection)),
-        Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone())),
+        persistence.session_accounts(),
         settings.tenant.context.tenant_id,
     );
     let profile_logout_endpoint = web::Data::new(SessionLogoutEndpoint::new(
@@ -81,9 +81,9 @@ pub(super) async fn build(
         session_cookie_config.clone(),
         startup.runtime_modules.administration(),
     ));
-    let admin_sessions = web::Data::new(AdminSessionHandles::new(
+    let admin_sessions = web::Data::new(AdminSessionHandles::from_port(
         nazo_valkey::SessionStore::new(&valkey_connection),
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
+        persistence.session_accounts(),
         settings.tenant.context.tenant_id,
         session_http_config.clone(),
     ));
@@ -96,38 +96,37 @@ pub(super) async fn build(
         keyset.clone(),
         settings.tenant.context.tenant_id.as_uuid(),
         if settings.modules.enable_openid4vci_issuer {
-            Some(Arc::new(nazo_postgres::Openid4vciRepository::new(
-                diesel_db.clone(),
-                settings
-                    .openid4vc
-                    .data_encryption_key
-                    .expect("enabled OpenID4VCI requires a data encryption key"),
-            ))
-                as Arc<dyn nazo_openid4vci::AuthorizationOfferPort>)
+            Some(
+                persistence.openid4vci_authorization_offers(
+                    settings
+                        .openid4vc
+                        .data_encryption_key
+                        .expect("enabled OpenID4VCI requires a data encryption key"),
+                ),
+            )
         } else {
             None
         },
     ));
     let admin_federation = web::Data::new(AdminFederationConfig::from_settings(&startup.settings));
     #[cfg(not(test))]
-    let session_profiles = web::Data::new(SessionProfileHandles::new(
+    let session_profiles = web::Data::new(SessionProfileHandles::from_port(
         nazo_valkey::SessionStore::new(&valkey_connection),
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
+        persistence.session_accounts(),
         settings.tenant.context.tenant_id,
         session_http_config.clone(),
     ));
     #[cfg(test)]
-    let session_profiles = web::Data::new(SessionProfileHandles::new(
+    let session_profiles = web::Data::new(SessionProfileHandles::from_port(
         nazo_valkey::SessionStore::new(&valkey_connection),
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
+        persistence.session_accounts(),
         settings.tenant.context.tenant_id,
         session_http_config.clone(),
     ));
-    let client_repository = nazo_postgres::OAuthClientRepository::new(diesel_db.clone());
     let session_management_endpoint = web::Data::new(SessionManagementEndpoint::new(
         Arc::new(ServerSessionManagementOperations::new(
             session_profiles.get_ref().clone(),
-            client_repository.clone(),
+            persistence.admin_clients(),
             runtime_registry.clone(),
         )),
         SessionManagementConfig::new(
@@ -143,11 +142,12 @@ pub(super) async fn build(
         core.device_config.clone(),
         core.authorization_runtime.clone(),
     ));
-    let logout_deliveries = nazo_postgres::AuditRepository::new(diesel_db.clone());
+    #[cfg(not(test))]
+    let logout_deliveries = persistence.logout_delivery_store();
     let oidc_logout_operations = OidcLogoutHandles::new(
         session_profiles.get_ref().clone(),
-        client_repository,
-        logout_deliveries.clone(),
+        persistence.logout_clients(),
+        persistence.logout_outbox(),
         keyset.clone(),
         OidcLogoutConfig::from(settings),
         runtime_registry.clone(),
@@ -165,10 +165,10 @@ pub(super) async fn build(
         session.session_ttl_seconds,
         session.cookie_secure,
     ));
-    let account_profile_service = AccountProfileService::new(
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
-        nazo_postgres::GrantRepository::new(diesel_db.clone()),
-        nazo_postgres::OAuthClientRepository::new(diesel_db.clone()),
+    let account_profile_service = AccountProfileService::from_ports(
+        persistence.profiles(),
+        persistence.grant_summaries(),
+        persistence.authorized_applications(),
     );
     let profile_account_endpoint = web::Data::new(ProfileAccountEndpoint::new(
         Arc::new(ServerProfileAccountOperations::new(
@@ -178,55 +178,45 @@ pub(super) async fn build(
         session_cookie_config.clone(),
     ));
     let account_profiles = web::Data::new(account_profile_service);
-    let avatar_profiles = web::Data::new(AvatarProfileService::new(
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
-        nazo_postgres::GrantRepository::new(diesel_db.clone()),
+    let avatar_profiles = web::Data::new(AvatarProfileService::from_ports(
+        persistence.avatars(),
+        persistence.grant_summaries(),
         crate::adapters::avatar_files::LocalAvatarStorage::new(
             settings.storage.avatar_storage_dir.clone(),
         ),
         settings.storage.avatar_max_bytes,
     ));
     let profile_delivery_store = nazo_valkey::DeliveryStore::new(&valkey_connection);
-    let profile_access_requests = web::Data::new(ClientAccessProfileService::new(
-        nazo_postgres::AccessRequestRepository::new(diesel_db.clone()),
+    let profile_access_requests = web::Data::new(ClientAccessProfileService::from_port(
+        persistence.access_requests(),
         profile_delivery_store,
         &settings.protocol.client_secret_pepper,
     ));
-    let profile_federation = web::Data::new(FederationProfileService::new(
-        nazo_postgres::FederationRepository::new(diesel_db.clone()),
+    let profile_federation = web::Data::new(FederationProfileService::from_port(
+        persistence.federation_links(),
     ));
-    let admin_users: web::Data<dyn nazo_identity::ports::AdminUserRepositoryPort> = web::Data::from(
-        Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()))
-            as Arc<dyn nazo_identity::ports::AdminUserRepositoryPort>,
-    );
+    let admin_users: web::Data<dyn nazo_identity::ports::AdminUserRepositoryPort> =
+        web::Data::from(persistence.admin_users());
     let admin_user_registration: web::Data<
         dyn nazo_identity::ports::RegistrationAccountRepositoryPort,
-    > = web::Data::from(
-        Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()))
-            as Arc<dyn nazo_identity::ports::RegistrationAccountRepositoryPort>,
-    );
-    let admin_grants: web::Data<dyn nazo_auth::AdminGrantRepositoryPort> = web::Data::from(
-        Arc::new(nazo_postgres::GrantRepository::new(diesel_db.clone()))
-            as Arc<dyn nazo_auth::AdminGrantRepositoryPort>,
-    );
-    let admin_access_requests = web::Data::new(nazo_postgres::AccessRequestRepository::new(
-        diesel_db.clone(),
-    ));
+    > = web::Data::from(persistence.registration_accounts());
+    let admin_grants: web::Data<dyn nazo_auth::AdminGrantRepositoryPort> =
+        web::Data::from(persistence.admin_grants());
+    let admin_access_requests: web::Data<dyn nazo_persistence::AdminAccessRequestStore> =
+        web::Data::from(persistence.admin_access_requests());
     // D01/D02/D05: authoritative controller registry behind fresh-2FA
     // approvals.  Built once here so handlers only ever see the typed facade.
-    let controller_registry = web::Data::new(
-        crate::controller_registry::ControllerRegistryService::new(std::sync::Arc::new(
-            nazo_postgres::ControllerRegistryRepository::new(diesel_db.clone()),
-        )),
-    );
+    let controller_registry =
+        web::Data::new(crate::controller_registry::ControllerRegistryService::new(
+            persistence.controller_registry(),
+        ));
     // 04A D10/D11/D12: Recovery Root anchor, break-glass challenges and
     // approved rotations share the registry's database authority.
     let recovery_root = web::Data::new(crate::recovery_root::RecoveryRootService::new(
-        std::sync::Arc::new(nazo_postgres::RecoveryRootRepository::new(
-            diesel_db.clone(),
-        )),
+        persistence.recovery_root(),
     ));
-    let mtls_trust_anchors = web::Data::new(MtlsTrustAnchorService::new(diesel_db.clone()));
+    let mtls_trust_anchors: web::Data<MtlsTrustAnchorService> =
+        web::Data::from(persistence.mtls_trust_anchors());
     let admin_access_delivery = web::Data::new(nazo_valkey::DeliveryStore::new(&valkey_connection));
     let protocol = &settings.protocol;
     let storage = &settings.storage;
@@ -265,8 +255,8 @@ pub(super) async fn build(
     ));
     let email_delivery =
         SmtpVerificationEmailDelivery::from_delivery(&identity_settings.email.delivery);
-    let registration = LocalRegistrationService::new(
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
+    let registration = LocalRegistrationService::from_port(
+        persistence.registration_accounts(),
         nazo_valkey::AuthenticationStore::new(&valkey_connection),
         RegistrationSecretHasher,
         email_delivery,
@@ -286,14 +276,10 @@ pub(super) async fn build(
     let mfa_attempt_throttle: Arc<dyn nazo_identity::ports::MfaAttemptThrottlePort> =
         Arc::new(nazo_valkey::RateLimitStore::new(&valkey_connection));
     let mfa_totp_keys = mfa_totp_key_ring(&startup.config)?;
-    let mfa_repository =
-        nazo_postgres::MfaRepository::with_totp_key_ring(diesel_db.clone(), mfa_totp_keys.clone());
+    let mfa_repository = persistence.mfa_repository(mfa_totp_keys.clone());
     let mfa_profiles = web::Data::new(MfaProfileEndpoint::new(
         Arc::new(ServerMfaProfileOperations::new(
-            nazo_identity::MfaService::new(
-                Arc::new(mfa_repository.clone()),
-                Arc::new(ServerMfaSecretHasher),
-            ),
+            nazo_identity::MfaService::new(mfa_repository.clone(), Arc::new(ServerMfaSecretHasher)),
             identity_session_service.clone(),
             authentication_rate_limit.clone(),
             mfa_attempt_throttle,
@@ -319,11 +305,11 @@ pub(super) async fn build(
         client_ip_config.get_ref().clone(),
         identity_settings.email_code_dev_response_enabled,
     ));
-    let authentication = LocalAuthenticationService::new(
-        nazo_postgres::UserRepository::new(diesel_db.clone()),
+    let authentication = LocalAuthenticationService::from_ports(
+        persistence.login_accounts(),
         nazo_valkey::RateLimitStore::new(&valkey_connection),
         LoginPasswordVerifier,
-        mfa_repository.clone(),
+        persistence.remembered_mfa_devices(mfa_totp_keys.clone()),
         nazo_valkey::SessionStore::new(&valkey_connection),
         TracingAuthenticationAudit,
         nazo_identity::AuthenticationServiceConfig {
@@ -353,11 +339,11 @@ pub(super) async fn build(
     ));
     let passkey = &identity_settings.passkey;
     let passkey_operations = Arc::new(PasskeyOperationsProvider::new(
-        LocalPasskeyService::new(
-            nazo_postgres::UserRepository::new(diesel_db.clone()),
-            nazo_postgres::PasskeyRepository::new(diesel_db.clone()),
+        LocalPasskeyService::from_ports(
+            persistence.passkey_accounts(),
+            persistence.passkeys(),
             nazo_valkey::AuthenticationStore::new(&valkey_connection),
-            mfa_repository.clone(),
+            persistence.remembered_mfa_devices(mfa_totp_keys),
             nazo_valkey::SessionStore::new(&valkey_connection),
             TracingPasskeyAudit,
             nazo_identity::PasskeyServiceConfig {
@@ -394,8 +380,8 @@ pub(super) async fn build(
             session.cookie_secure,
         ),
     ));
-    let federation = web::Data::new(LocalFederationService::new(
-        nazo_postgres::FederationRepository::new(diesel_db.clone()),
+    let federation = web::Data::new(LocalFederationService::from_port(
+        persistence.federation_logins(),
         nazo_valkey::AuthenticationStore::new(&valkey_connection),
         FederationBootstrapPasswordHasher,
         nazo_valkey::SessionStore::new(&valkey_connection),
