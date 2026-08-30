@@ -30,5 +30,5 @@ Linux `x86_64` 与 Linux `aarch64`。其他操作系统或 CPU 架构会在创�
 `linux/arm64` platform manifest digest。最终状态、operator task 和审计收据绑定的
 是实际平台 manifest 或宿主机二进制 digest，而不是笼统的 OCI index。
 
-浏览器 UI 不嵌入后端二进制。schema-5 Release 绑定独立签名的 NazoAuthWeb
+浏览器 UI 不嵌入后端二进制。schema-6 Release 绑定独立签名的 NazoAuthWeb
 descriptor，应用启动时下载并校验对应 UI 制品。

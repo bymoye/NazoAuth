@@ -28,8 +28,6 @@ NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
 NAZOAUTH_TRANSPORT_MODE=trusted-proxy \
 NAZOAUTH_TRUSTED_PROXY_CIDRS=<NazoAuth实际看到的入口代理CIDR> \
 NAZOAUTH_MTLS_CERTIFICATE_SOURCE=disabled \
-NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
-NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
 docker compose up -d --build
 ```
 
@@ -45,8 +43,8 @@ docker compose up -d --build
 Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务，并用
 短生命周期的开发 operator identity 通过同一个签名 `nazoauth operator-task` 入口执行
 迁移。该 identity 明确不是生产信任根。任务把本地自动化 actor 标识为
-`docker-compose`，并把预期 embedded release、revision 和 build ID 绑定到编译镜像时使用的
-同一组值；它不会联系或冒充 GitHub Actions。可直接打开：
+`docker-compose`；签名操作直接绑定候选镜像摘要，不要求先产生 Git commit 或 CI build
+identity，也不会联系或冒充 GitHub Actions。可直接打开：
 
 - `http://127.0.0.1:8000/health`：依赖就绪探针
 - `http://127.0.0.1:8000/live`：进程存活探针
@@ -144,7 +142,7 @@ cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执�
 
 满足以下条件后才算启用：
 
-1. `nazoauthctl status` 报告签名 Release 和双层 target identity；
+1. `nazoauthctl status` 报告签名 Release 和内容寻址 target；
 2. `nazoauthctl doctor` 验证审计、readiness、target digest 和 runtime DDL 边界；
 3. `/health` 返回 HTTP 200；
 4. `/.well-known/openid-configuration` 返回配置的 issuer；

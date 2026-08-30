@@ -200,10 +200,9 @@ class ReleaseGovernanceTests(unittest.TestCase):
             "PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}",
             source,
         )
-        self.assertIn(
-            "NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}",
-            source,
-        )
+        self.assertNotIn("NAZOAUTH_BUILD_REVISION", source)
+        self.assertNotIn("NAZOAUTH_BUILD_ID", source)
+        self.assertNotIn("NAZOAUTH_BUILD_RELEASE", source)
         self.assertIn('command: ["nazoauth", "migrate"]', source)
         self.assertIn(
             "VALKEY_STATE_EPOCH: ${NAZOAUTH_VALKEY_STATE_EPOCH:?",
@@ -393,7 +392,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
             ROOT / "crates" / "operator-protocol" / "src" / "lib.rs"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "pub const PROTOCOL_VERSION: u32 = 2;",
+            "pub const PROTOCOL_VERSION: u32 = 3;",
             protocol_source,
         )
         self.assertIn(
@@ -427,7 +426,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
         ):
             self.assertIn(f"runner: {runner}", release)
         self.assertNotIn("cargo test --locked --package nazoauthctl --all-targets", release)
-        self.assertIn("& $server build-identity | ConvertFrom-Json", release)
+        self.assertIn("& $server release-identity | ConvertFrom-Json", release)
         self.assertIn("Verify Linux single-file native dependency boundary", release)
         self.assertIn("Bind musl builds to the native musl compiler", release)
         self.assertIn('echo "$cc_variable=musl-gcc"', release)
@@ -435,7 +434,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertIn("platforms: linux/amd64,linux/arm64", release)
         self.assertIn(
             "outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,"
-            "name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }},"
+            "name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_IMAGE_VERSION }},"
             "oci-artifact=true",
             release,
         )

@@ -95,7 +95,6 @@ fn frontend_descriptor_policy_rejects_each_untrusted_binding() {
         |value: &mut FrontendDescriptor| value.schema = 2,
         |value: &mut FrontendDescriptor| value.repository = "other/repository".to_owned(),
         |value: &mut FrontendDescriptor| value.version = "latest".to_owned(),
-        |value: &mut FrontendDescriptor| value.commit = "A".repeat(40),
         |value: &mut FrontendDescriptor| {
             value.release_identity = "https://example.invalid".to_owned()
         },

@@ -31,10 +31,6 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
-      args:
-        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
-        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
-        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     restart: unless-stopped
     environment:
       DATA_DIR: /var/lib/nazo_oauth
@@ -75,16 +71,9 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
-      args:
-        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
-        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
-        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     environment:
       DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
       PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
-      NAZOAUTH_EXPECTED_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
-      NAZOAUTH_EXPECTED_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
-      NAZOAUTH_EXPECTED_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     volumes:
       - runtime_secrets:/run/nazoauth-secrets:ro
       - operator_state:/var/lib/nazoauth/operator-state

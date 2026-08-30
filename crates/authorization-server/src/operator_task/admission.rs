@@ -124,7 +124,7 @@ pub(super) async fn admit_controller(
             )
         })?;
     if let Some(admitted) = admitted {
-        return build_identity(admitted).map_err(AdmissionError::Transport);
+        return decode_admitted_identity(admitted).map_err(AdmissionError::Transport);
     }
     // Not admissible right now.  One more authoritative read separates "the
     // key aged out of its fixed 30-day window" from "never trusted / revoked"
@@ -141,7 +141,9 @@ pub(super) async fn admit_controller(
     Err(AdmissionError::Rejected(failure))
 }
 
-fn build_identity(admitted: AdmittedController) -> anyhow::Result<AdmittedControllerIdentity> {
+fn decode_admitted_identity(
+    admitted: AdmittedController,
+) -> anyhow::Result<AdmittedControllerIdentity> {
     let bytes: [u8; 32] =
         admitted.public_key.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!("controller registry holds an invalid public key length")

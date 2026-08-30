@@ -6,7 +6,7 @@ and a fresh 32-byte base64url nonce. The response contains an Ed25519 compact
 JWS with type `nazoauth-control-discovery+jwt` plus the instance public key.
 
 The signed statement binds the nonce, issuer, immutable deployment ID,
-runtime-instance ID, embedded build identity, and supported control and
+runtime-instance ID, release version, and supported control and
 operator protocol versions. It contains no database or Valkey URL, credential,
 administrator data, Controller key material, Recovery Secret material, or privileged
 operation.
@@ -40,7 +40,7 @@ closed.
 
 The one-shot `operator-task` executor validates a signed canonical
 `ControlOperation` before it claims a request: the Controller Registry key,
-deployment ID, target digest and embedded build identity must all match local
+deployment ID and target digest must match local
 facts. When `DATA_DIR/instance/deployment-id` already exists, it must agree with
 `DEPLOYMENT_ID` in the mounted server configuration.
 The operator-state mount also persists the same identity for one-shot
@@ -54,8 +54,8 @@ check is local and does not make the recovery controller a runtime dependency.
 
 The wire DTOs, JWS types, signing/verification policy, strict parsing,
 and fixed vectors live only in `crates/operator-protocol`. Controllers consume
-that crate at an exact version and source revision; they do not copy protocol
-code.
+the protocol version shipped by the supported NazoAuth release; they do not
+copy protocol code.
 
 The management OpenID4VP create request carries a caller-generated,
 non-secret `create_request_jti` in canonical lowercase UUID form. The caller

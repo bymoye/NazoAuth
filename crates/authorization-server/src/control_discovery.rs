@@ -17,7 +17,7 @@ use nazo_operator_protocol::{
     sign_discovery_statement, validate_discovery_request, verify_deployment_statement,
 };
 
-use crate::{config::read_or_create_instance_identity_key, operator_task::embedded_identity};
+use crate::{config::read_or_create_instance_identity_key, operator_task::release_identity};
 
 const INSTANCE_DIRECTORY: &str = "instance";
 const IDENTITY_KEY_FILE: &str = "identity.key";
@@ -83,7 +83,7 @@ impl ControlDiscoveryEndpoint {
         let public_key = encode_instance_public_key(&signing_key.verifying_key());
         publish_public_key(&identity_dir.join(IDENTITY_PUBLIC_FILE), &public_key)?;
         let key_id = instance_key_id(&signing_key.verifying_key());
-        let embedded = embedded_identity();
+        let embedded = release_identity();
         let deployment = DeploymentStatement {
             schema: CONTROL_DISCOVERY_SCHEMA,
             product: CONTROL_DISCOVERY_PRODUCT.to_owned(),
@@ -91,8 +91,6 @@ impl ControlDiscoveryEndpoint {
             runtime_instance_id,
             issuer: issuer.to_owned(),
             release: embedded.release,
-            revision: embedded.revision,
-            build_id: embedded.build_id,
             control_protocol_versions: vec![CONTROL_DISCOVERY_SCHEMA],
             operator_protocol_versions: vec![PROTOCOL_VERSION],
             instance_key_id: key_id.clone(),
@@ -163,8 +161,6 @@ impl ControlDiscoveryEndpoint {
             runtime_instance_id: deployment.runtime_instance_id.clone(),
             issuer: deployment.issuer.clone(),
             release: deployment.release.clone(),
-            revision: deployment.revision.clone(),
-            build_id: deployment.build_id.clone(),
             control_protocol_versions: deployment.control_protocol_versions.clone(),
             operator_protocol_versions: deployment.operator_protocol_versions.clone(),
             instance_key_id: deployment.instance_key_id.clone(),
@@ -274,8 +270,6 @@ fn deployment_identity_matches(left: &DeploymentStatement, right: &DeploymentSta
         && left.runtime_instance_id == right.runtime_instance_id
         && left.issuer == right.issuer
         && left.release == right.release
-        && left.revision == right.revision
-        && left.build_id == right.build_id
         && left.control_protocol_versions == right.control_protocol_versions
         && left.operator_protocol_versions == right.operator_protocol_versions
         && left.instance_key_id == right.instance_key_id

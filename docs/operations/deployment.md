@@ -31,8 +31,6 @@ NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
 NAZOAUTH_TRANSPORT_MODE=trusted-proxy \
 NAZOAUTH_TRUSTED_PROXY_CIDRS=<exact-ingress-peer-cidr> \
 NAZOAUTH_MTLS_CERTIFICATE_SOURCE=disabled \
-NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
-NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
 docker compose up -d --build
 ```
 
@@ -53,9 +51,9 @@ Compose generates private PostgreSQL and Valkey credentials in a named volume,
 starts both services, and uses a short-lived development operator identity to
 run the same signed `nazoauth operator-task` migration entry point before the
 server accepts traffic. This identity is deliberately not a production trust
-root. The task identifies its local automation actor as `docker-compose` and
-binds the expected embedded release, revision, and build ID to the same values
-used to compile the image; it does not contact or impersonate GitHub Actions.
+root. The task identifies its local automation actor as `docker-compose`; its
+signed operation binds directly to the candidate image digest and does not
+require a Git commit or CI build identity.
 Open:
 
 - `http://127.0.0.1:8000/health` for dependency readiness
@@ -177,7 +175,7 @@ any check fails.
 
 Activation requires all of these checks:
 
-1. `nazoauthctl status` reports the signed Release and both target identities;
+1. `nazoauthctl status` reports the signed Release and content-addressed target;
 2. `nazoauthctl doctor` verifies audit, readiness, target digest, and the runtime DDL boundary;
 3. `/health` returns HTTP 200;
 4. `/.well-known/openid-configuration` returns the configured issuer;

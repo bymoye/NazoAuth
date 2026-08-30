@@ -7,7 +7,7 @@ use crate::config::{ConfigSource, ServerConfigPreparation, database_url};
 const MIGRATION_RUNTIME_ROLE_ENV: &str = "NAZOAUTH_MIGRATION_RUNTIME_ROLE";
 
 const USAGE: &str =
-    "usage: nazoauth <server|operator-task|audit-anchor-worker|build-identity|migrate>";
+    "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate>";
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     match Command::parse(args)? {
@@ -18,10 +18,10 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
         Command::Server => run_server().await,
         Command::OperatorTask => crate::operator_task::run().await,
         Command::AuditAnchorWorker => run_audit_anchor_worker().await,
-        Command::BuildIdentity => {
+        Command::ReleaseIdentity => {
             println!(
                 "{}",
-                serde_json::to_string(&crate::operator_task::embedded_identity())?
+                serde_json::to_string(&crate::operator_task::release_identity())?
             );
             Ok(())
         }
@@ -80,7 +80,7 @@ enum Command {
     Server,
     OperatorTask,
     AuditAnchorWorker,
-    BuildIdentity,
+    ReleaseIdentity,
     Migrate,
 }
 
@@ -108,9 +108,9 @@ impl Command {
                 ensure_no_extra_args(args, "audit-anchor-worker")?;
                 Ok(Self::AuditAnchorWorker)
             }
-            "build-identity" => {
-                ensure_no_extra_args(args, "build-identity")?;
-                Ok(Self::BuildIdentity)
+            "release-identity" => {
+                ensure_no_extra_args(args, "release-identity")?;
+                Ok(Self::ReleaseIdentity)
             }
             "migrate" => {
                 ensure_no_extra_args(args, "migrate")?;

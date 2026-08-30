@@ -1,6 +1,6 @@
 //! E04/E05 unit coverage for the reworked one-shot operator entry:
 //! presentation strictness, Controller Registry admission classification,
-//! J1 target identity, config_revision fencing, deployment anchors, the E05
+//! artifact target identity, config_revision fencing, deployment anchors, the E05
 //! resume-ownership table, and dispatch precondition mapping.  Database-backed
 //! end-to-end behavior (including crash/failpoint evidence) lives in
 //! `tests/operator_task_process.rs`.
@@ -9,8 +9,8 @@ use std::{fs, path::PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_operator_protocol::{
-    CONTROL_OPERATION_SCHEMA, ControlBuildIdentity, ControlOperation, ControlOperationPayload,
-    ControlTarget, MAX_CONTROL_OPERATION_BYTES,
+    CONTROL_OPERATION_SCHEMA, ControlOperation, ControlOperationPayload, ControlTarget,
+    MAX_CONTROL_OPERATION_BYTES,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -25,14 +25,6 @@ fn temporary_directory() -> PathBuf {
     path
 }
 
-fn build_identity() -> ControlBuildIdentity {
-    ControlBuildIdentity {
-        product: "nazauth".to_owned(),
-        version: "v9.9.9-test".to_owned(),
-        commit: "c".repeat(40),
-    }
-}
-
 fn operation(operation_id: &str) -> ControlOperation {
     ControlOperation {
         schema: CONTROL_OPERATION_SCHEMA,
@@ -42,7 +34,6 @@ fn operation(operation_id: &str) -> ControlOperation {
         deployment_id: "deployment-test".to_owned(),
         target: ControlTarget::HostBinary {
             sha256: "a".repeat(64),
-            embedded: build_identity(),
         },
         config_revision: "config-revision-1".to_owned(),
         operation: ControlOperationPayload::MigrateApply,
@@ -119,7 +110,7 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
 
     // Oversized payloads hit the size gate regardless of validity.
     let giant = format!(
-        "{{\"schema\":1,\"operation_id\":\"019c8ca2-30a6-7000-8000-00000000a002\",\"kid\":\"{}\",\"deployment_id\":\"d\",\"target\":{{\"kind\":\"host-binary\",\"sha256\":\"{}\",\"embedded\":{{\"product\":\"p\",\"version\":\"v\",\"commit\":\"c\"}}}},\"config_revision\":\"r\",\"operation\":{{\"name\":\"keys-validate\",\"filler\":\"{}\"}}}}",
+        "{{\"schema\":1,\"operation_id\":\"019c8ca2-30a6-7000-8000-00000000a002\",\"kid\":\"{}\",\"deployment_id\":\"d\",\"target\":{{\"kind\":\"host-binary\",\"sha256\":\"{}\"}},\"config_revision\":\"r\",\"operation\":{{\"name\":\"keys-validate\",\"filler\":\"{}\"}}}}",
         "k".repeat(43),
         "a".repeat(64),
         "x".repeat(MAX_CONTROL_OPERATION_BYTES),
@@ -404,8 +395,7 @@ fn apply_change_sets_are_digest_bound_to_the_signed_identities() {
 }
 
 #[test]
-fn j1_target_identity_binds_operations_to_this_binary() {
-    let this = identity::control_build_identity();
+fn target_artifact_identity_binds_operations_to_this_binary() {
     let directory = temporary_directory();
     let executable = directory.join("nazoauth");
     fs::write(&executable, b"exact executing binary bytes").unwrap();
@@ -416,66 +406,35 @@ fn j1_target_identity_binds_operations_to_this_binary() {
 
     let matching = ControlTarget::HostBinary {
         sha256: executable_sha256.clone(),
-        embedded: this.clone(),
     };
-    identity::validate_embedded_target_identity_at(&matching, &executable, None).unwrap();
+    identity::validate_target_artifact_at(&matching, &executable, None).unwrap();
 
     let wrong_host_digest = ControlTarget::HostBinary {
         sha256: "a".repeat(64),
-        embedded: this.clone(),
     };
-    assert!(
-        identity::validate_embedded_target_identity_at(&wrong_host_digest, &executable, None)
-            .is_err()
-    );
+    assert!(identity::validate_target_artifact_at(&wrong_host_digest, &executable, None).is_err());
 
     let image_digest = format!("sha256:{}", "b".repeat(64));
     let oci_matching = ControlTarget::OciImage {
         image_digest: image_digest.clone(),
-        embedded: this.clone(),
     };
-    identity::validate_embedded_target_identity_at(&oci_matching, &executable, Some(&image_digest))
-        .unwrap();
+    identity::validate_target_artifact_at(&oci_matching, &executable, Some(&image_digest)).unwrap();
+    assert!(identity::validate_target_artifact_at(&oci_matching, &executable, None).is_err());
     assert!(
-        identity::validate_embedded_target_identity_at(&oci_matching, &executable, None).is_err()
-    );
-    assert!(
-        identity::validate_embedded_target_identity_at(
+        identity::validate_target_artifact_at(
             &oci_matching,
             &executable,
-            Some("sha256:not-a-digest"),
+            Some("sha256:not-a-digest")
         )
         .is_err()
     );
     assert!(
-        identity::validate_embedded_target_identity_at(
+        identity::validate_target_artifact_at(
             &oci_matching,
             &executable,
             Some(&format!("sha256:{}", "c".repeat(64))),
         )
         .is_err()
-    );
-
-    let wrong_version = ControlTarget::HostBinary {
-        sha256: executable_sha256.clone(),
-        embedded: ControlBuildIdentity {
-            version: "other-release".to_owned(),
-            ..this.clone()
-        },
-    };
-    assert!(
-        identity::validate_embedded_target_identity_at(&wrong_version, &executable, None).is_err()
-    );
-
-    let wrong_product = ControlTarget::HostBinary {
-        sha256: executable_sha256,
-        embedded: ControlBuildIdentity {
-            product: "counterfeit".to_owned(),
-            ..this
-        },
-    };
-    assert!(
-        identity::validate_embedded_target_identity_at(&wrong_product, &executable, None).is_err()
     );
 
     fs::remove_dir_all(directory).unwrap();
@@ -524,7 +483,8 @@ fn local_deployment_identity_binds_to_every_available_anchor() {
     let state_directory = directory.join("state");
     fs::create_dir_all(&state_directory).unwrap();
 
-    // Non-bootstrap operations require the operator-state anchor first.
+    // Bootstrap may derive the deployment identity before the operator-state
+    // anchor exists, then persist that auxiliary anchor after admission.
     let bootstrap = ControlOperationPayload::MigrateApply;
     assert!(
         identity::validate_local_operation_identity_at(
@@ -625,16 +585,16 @@ fn local_deployment_identity_rejects_missing_or_conflicting_bootstrap_sources() 
     fs::write(&persisted_identity, b"deployment-test\n").unwrap();
     let state_directory = directory.join("state");
     fs::create_dir_all(&state_directory).unwrap();
-    assert!(
+    assert_eq!(
         identity::validate_local_operation_identity_at(
             &regular,
             &config_path,
             None,
             Some(&state_directory)
         )
-        .unwrap_err()
-        .to_string()
-        .contains("operator state deployment identity is unavailable")
+        .unwrap(),
+        "deployment-test",
+        "the persisted deployment identity is sufficient to rebuild a missing operator-state anchor"
     );
 
     fs::remove_file(&persisted_identity).unwrap();

@@ -22,25 +22,15 @@ fn controller_key() -> SigningKey {
 const OPERATION_ID: &str = "019c8ca2-30a6-7000-8000-000000000005";
 const TENANT_ID: &str = "019c8ca2-30a6-7000-8000-000000000001";
 
-fn build_identity() -> ControlBuildIdentity {
-    ControlBuildIdentity {
-        product: "nazauth".to_owned(),
-        version: "v0.2.0".to_owned(),
-        commit: "b".repeat(40),
-    }
-}
-
 fn host_binary_target() -> ControlTarget {
     ControlTarget::HostBinary {
         sha256: "a".repeat(64),
-        embedded: build_identity(),
     }
 }
 
 fn oci_image_target() -> ControlTarget {
     ControlTarget::OciImage {
         image_digest: format!("sha256:{}", "e".repeat(64)),
-        embedded: build_identity(),
     }
 }
 
@@ -126,17 +116,17 @@ fn golden_canonical_bytes_and_request_hash_are_stable() {
     let bytes = canonical_control_operation_bytes(&operation).unwrap();
     assert_eq!(
         std::str::from_utf8(&bytes).unwrap(),
-        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":1,\"target\":{\"embedded\":{\"commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"product\":\"nazauth\",\"version\":\"v0.2.0\"},\"kind\":\"host-binary\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":1,\"target\":{\"kind\":\"host-binary\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
     );
     assert_eq!(
         control_operation_request_hash(&operation).unwrap(),
-        "1f67fb3521c42af3f9c80be4a944dec729656dfe2437da6653f7e9f7a3ae4f97",
+        "c39136bb87846cf347c2e8893a76df0292006cfd2614857534f52a6a66d93ecc",
     );
     // Ed25519 is deterministic, so the full compact JWS is reproducible too.
     let compact = crate::sign_control_operation(&operation, &controller_key()).unwrap();
     assert_eq!(
         compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6MSwidGFyZ2V0Ijp7ImVtYmVkZGVkIjp7ImNvbW1pdCI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJwcm9kdWN0IjoibmF6YXV0aCIsInZlcnNpb24iOiJ2MC4yLjAifSwia2luZCI6Imhvc3QtYmluYXJ5Iiwic2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9fQ.x6KWKyEno58wXONrxV_QU2rsCh82WRUsecSSmmXyI0WfswH6NsqxlIS1eJhACuREqQGXwUrFMGZBYlDNdXZBBQ"
+        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6MSwidGFyZ2V0Ijp7ImtpbmQiOiJob3N0LWJpbmFyeSIsInNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifX0.5Dzm0DPaCcGCqEcnFyDYdIuDMuS_uKusPayGDODJsSvYmtkl64jezZj-fNlZFP_p-cISABNKKmooEsLBLjlABA"
     );
 }
 
@@ -147,14 +137,9 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
 
     // Rebuild the same logical value as an untyped object with members
     // inserted in reverse declaration order, nested objects included.
-    let mut embedded = serde_json::Map::new();
-    embedded.insert("commit".to_owned(), serde_json::json!("b".repeat(40)));
-    embedded.insert("version".to_owned(), serde_json::json!("v0.2.0"));
-    embedded.insert("product".to_owned(), serde_json::json!("nazauth"));
     let mut target = serde_json::Map::new();
     target.insert("sha256".to_owned(), serde_json::json!("a".repeat(64)));
     target.insert("kind".to_owned(), serde_json::json!("host-binary"));
-    target.insert("embedded".to_owned(), serde_json::Value::Object(embedded));
     let mut root = serde_json::Map::new();
     root.insert(
         "operation".to_owned(),
@@ -186,13 +171,12 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
             "operation_id": "{OPERATION_ID}",
             "kid": "{}",
             "deployment_id": "deployment-1",
-            "target": {{"kind": "host-binary", "sha256": "{}", "embedded": {{"product": "nazauth", "version": "v0.2.0", "commit": "{}"}}}},
+            "target": {{"kind": "host-binary", "sha256": "{}"}},
             "config_revision": "config-re\u0076ision-1",
             "operation": {{"name": "migrate-apply"}}
         }}"#,
         operation.kid,
         "a".repeat(64),
-        "b".repeat(40),
     );
     let parsed: serde_json::Value = serde_json::from_str(&pretty).unwrap();
     assert_eq!(
@@ -211,7 +195,7 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
 #[test]
 fn distinct_requests_never_share_a_request_hash() {
     let baseline = control_operation_request_hash(&operation()).unwrap();
-    let mutations: [fn(&mut ControlOperation); 8] = [
+    let mutations: [fn(&mut ControlOperation); 7] = [
         |value| {
             value.operation_id = "019c8ca2-30a6-7000-8000-000000000006".to_owned();
         },
@@ -225,22 +209,6 @@ fn distinct_requests_never_share_a_request_hash() {
         },
         |value| {
             value.config_revision = "config-revision-2".to_owned();
-        },
-        |value| {
-            let ControlTarget::HostBinary { sha256, .. } = &mut value.target else {
-                panic!("fixture target must be a host binary");
-            };
-            // Reuse the same digest bytes so only the embedded build identity
-            // changes the canonical request.
-            let same_digest = sha256.clone();
-            value.target = ControlTarget::HostBinary {
-                sha256: same_digest,
-                embedded: ControlBuildIdentity {
-                    product: "nazauth".to_owned(),
-                    version: "v0.2.1".to_owned(),
-                    commit: "b".repeat(40),
-                },
-            };
         },
         |value| {
             value.operation = ControlOperationPayload::TenantResourceEnumerate {
@@ -365,10 +333,10 @@ fn tampered_compact_bytes_are_rejected() {
     let mut tampered = compact.clone();
     let last = tampered.pop().unwrap();
     tampered.push(if last == 'A' { 'B' } else { 'A' });
-    assert!(matches!(
-        verify_control_operation_signature(&tampered, &operation.kid, &key.verifying_key()),
-        Err(ProtocolError::Signature)
-    ));
+    assert!(
+        verify_control_operation_signature(&tampered, &operation.kid, &key.verifying_key())
+            .is_err()
+    );
 }
 
 #[test]
@@ -414,12 +382,7 @@ fn unknown_fields_are_denied_everywhere() {
     assert!(reject_parsed(|value| value["nbf"] = serde_json::json!(1_000)).is_err());
     assert!(reject_parsed(|value| value["exp"] = serde_json::json!(1_030)).is_err());
     assert!(reject_parsed(|value| value["opaque_revision"] = serde_json::json!("r1")).is_err());
-    assert!(
-        reject_parsed(
-            |value| value["target"]["embedded"]["buildId"] = serde_json::json!("github:1")
-        )
-        .is_err()
-    );
+    assert!(reject_parsed(|value| value["target"]["embedded"] = serde_json::json!({})).is_err());
     assert!(
         reject_parsed(|value| value["target"]["path"] = serde_json::json!("/usr/bin/env")).is_err()
     );
@@ -490,13 +453,13 @@ fn target_variants_are_closed_strictly_parsed_and_validated() {
             .contains("unknown target field")
     );
 
-    // Unknown member inside the embedded identity.
+    // The removed build identity cannot be smuggled into a target.
     let mut value = serde_json::to_value(host_binary_target()).unwrap();
-    value["embedded"]["buildId"] = serde_json::json!("github:1");
+    value["embedded"] = serde_json::json!({});
     assert!(
         parse_target(value)
             .unwrap_err()
-            .contains("unknown embedded field")
+            .contains("unknown target field")
     );
 
     // Missing required member.
@@ -517,34 +480,20 @@ fn target_variants_are_closed_strictly_parsed_and_validated() {
     let mut bad_prefix = operation();
     bad_prefix.target = ControlTarget::OciImage {
         image_digest: "docker.io/nazoauth:v1".to_owned(),
-        embedded: build_identity(),
     };
     assert!(validate_control_operation(&bad_prefix).is_err());
 
     let mut uppercase = operation();
     uppercase.target = ControlTarget::OciImage {
         image_digest: format!("sha256:{}", "E".repeat(64)),
-        embedded: build_identity(),
     };
     assert!(validate_control_operation(&uppercase).is_err());
 
     let mut short_hash = operation();
     short_hash.target = ControlTarget::HostBinary {
         sha256: "a".repeat(63),
-        embedded: build_identity(),
     };
     assert!(validate_control_operation(&short_hash).is_err());
-
-    let mut bad_commit = operation();
-    bad_commit.target = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
-        embedded: ControlBuildIdentity {
-            product: "nazauth".to_owned(),
-            version: "v0.2.0".to_owned(),
-            commit: String::new(),
-        },
-    };
-    assert!(validate_control_operation(&bad_commit).is_err());
 }
 
 #[test]

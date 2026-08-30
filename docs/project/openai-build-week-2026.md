@@ -33,8 +33,8 @@ conformance baseline. Judges should evaluate only the following extension.
 - Runtime capabilities gained revision-safe transitions, immutable snapshots,
   dependency validation, disable policies, stale-transition rejection, and
   auditable management behavior.
-- The deployment path now verifies exact backend and frontend commits, hashes
-  the UI artifact, preserves rollback state, runs migrations, and checks the
+- The deployment path now verifies backend and frontend Release identities and
+  artifact digests, preserves rollback state, runs migrations, and checks the
   public UI and discovery surface before committing a release.
 
 ### New protocol and product capabilities

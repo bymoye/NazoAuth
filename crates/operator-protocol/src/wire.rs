@@ -61,11 +61,9 @@ pub struct TenantResourceSelector {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmbeddedIdentity {
+pub struct ReleaseIdentity {
     pub release: String,
-    pub revision: String,
     pub protocol: u32,
-    pub build_id: String,
 }
 
 /// Unauthenticated, bounded challenge for the read-only control discovery endpoint.
@@ -96,8 +94,6 @@ pub struct DiscoveryStatement {
     pub runtime_instance_id: String,
     pub issuer: String,
     pub release: String,
-    pub revision: String,
-    pub build_id: String,
     pub control_protocol_versions: Vec<u32>,
     pub operator_protocol_versions: Vec<u32>,
     pub instance_key_id: String,
@@ -121,8 +117,6 @@ pub struct DeploymentStatement {
     pub runtime_instance_id: String,
     pub issuer: String,
     pub release: String,
-    pub revision: String,
-    pub build_id: String,
     pub control_protocol_versions: Vec<u32>,
     pub operator_protocol_versions: Vec<u32>,
     pub instance_key_id: String,

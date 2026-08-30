@@ -22,9 +22,8 @@ use diesel_async::{
 };
 use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
-    CONTROL_OPERATION_SCHEMA, ControlBuildIdentity, ControlOperation, ControlOperationPayload,
-    ControlOutcome, ControlTarget, controller_key_id, decode_control_result,
-    sign_control_operation,
+    CONTROL_OPERATION_SCHEMA, ControlOperation, ControlOperationPayload, ControlOutcome,
+    ControlTarget, controller_key_id, decode_control_result, sign_control_operation,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -150,11 +149,6 @@ fn spawn_operator_task(root: &Path, compact: &str, options: SpawnOptions<'_>) ->
         )
         .env("NAZOAUTH_OPERATOR_STATE_DIRECTORY", root.join("state"))
         .env("JWK_KEYS_DIR", root.join("keys"))
-        // Admission pins task.embedded to the executing runtime identity; the
-        // fixtures below sign operations whose embedded facts are exactly the
-        // development fallbacks.
-        .env("NAZOAUTH_BUILD_RELEASE", "development")
-        .env("NAZOAUTH_BUILD_REVISION", "development")
         .env("NAZOAUTH_MIGRATION_RUNTIME_ROLE", MIGRATION_RUNTIME_ROLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -239,18 +233,6 @@ fn wait_for_marker(mut child: Child, path: &Path) -> Child {
     }
 }
 
-fn build_identity() -> ControlBuildIdentity {
-    ControlBuildIdentity {
-        product: nazo_operator_protocol::CONTROL_DISCOVERY_PRODUCT.to_owned(),
-        version: option_env!("NAZOAUTH_BUILD_RELEASE")
-            .unwrap_or("development")
-            .to_owned(),
-        commit: option_env!("NAZOAUTH_BUILD_REVISION")
-            .unwrap_or("development")
-            .to_owned(),
-    }
-}
-
 fn server_binary_sha256() -> String {
     Sha256::digest(fs::read(env!("CARGO_BIN_EXE_nazoauth")).unwrap())
         .iter()
@@ -266,7 +248,6 @@ fn operation(operation_id: &str, kid: &str, payload: ControlOperationPayload) ->
         deployment_id: DEPLOYMENT.to_owned(),
         target: ControlTarget::HostBinary {
             sha256: server_binary_sha256(),
-            embedded: build_identity(),
         },
         config_revision: CONFIG_REVISION.to_owned(),
         operation: payload,
@@ -598,19 +579,14 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
     let forged_compact = format!("{signing_input}.{forged_signature}");
     assert_rejection(&run(forged_compact, env()), "authorization");
 
-    // Wrong embedded build identity (J1).
+    // Wrong host binary artifact digest.
     let mut wrong_target = operation(
         "019c8ca2-30a6-7000-8000-00000000b008",
         &kid,
         ControlOperationPayload::KeysValidate,
     );
     wrong_target.target = ControlTarget::HostBinary {
-        sha256: server_binary_sha256(),
-        embedded: ControlBuildIdentity {
-            product: "nazauth".to_owned(),
-            version: "counterfeit".to_owned(),
-            commit: "development".to_owned(),
-        },
+        sha256: "a".repeat(64),
     };
     assert_rejection(&run(signed(&wrong_target, &controller), env()), "target");
 

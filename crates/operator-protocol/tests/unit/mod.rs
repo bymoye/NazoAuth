@@ -17,8 +17,6 @@ fn discovery_statement() -> DiscoveryStatement {
         runtime_instance_id: "runtime-1".to_owned(),
         issuer: "https://auth.example".to_owned(),
         release: "v0.2.0".to_owned(),
-        revision: "a".repeat(40),
-        build_id: "github:123".to_owned(),
         control_protocol_versions: vec![CONTROL_DISCOVERY_SCHEMA],
         operator_protocol_versions: vec![PROTOCOL_VERSION],
         instance_key_id: "instance-1".to_owned(),
@@ -37,8 +35,6 @@ fn deployment_statement() -> DeploymentStatement {
         runtime_instance_id: online.runtime_instance_id,
         issuer: online.issuer,
         release: online.release,
-        revision: online.revision,
-        build_id: online.build_id,
         control_protocol_versions: online.control_protocol_versions,
         operator_protocol_versions: online.operator_protocol_versions,
         instance_key_id: online.instance_key_id,
@@ -52,7 +48,7 @@ fn golden_control_discovery_vector_is_stable_and_nonce_bound() {
     let compact = sign_discovery_statement(&discovery_statement(), "instance-1", &key).unwrap();
     assert_eq!(
         compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6Imluc3RhbmNlLTEiLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLWRpc2NvdmVyeStqd3QifQ.eyJzY2hlbWEiOjEsInByb2R1Y3QiOiJuYXpvYXV0aCIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJydW50aW1lX2luc3RhbmNlX2lkIjoicnVudGltZS0xIiwiaXNzdWVyIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUiLCJyZWxlYXNlIjoidjAuMi4wIiwicmV2aXNpb24iOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiYnVpbGRfaWQiOiJnaXRodWI6MTIzIiwiY29udHJvbF9wcm90b2NvbF92ZXJzaW9ucyI6WzFdLCJvcGVyYXRvcl9wcm90b2NvbF92ZXJzaW9ucyI6WzJdLCJpbnN0YW5jZV9rZXlfaWQiOiJpbnN0YW5jZS0xIiwibm9uY2UiOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4IiwiaXNzdWVkX2F0IjoxMDAwLCJleHBpcmVzX2F0IjoxMDYwfQ.dBwSPMlQi8ay79aKXwhJiXFRRiRQdLDu-yQTtKMSRJDPy0B3tRoLE5q8pvYy4_OUxpWtFnQJvx1EcjOeLor4Dg"
+        "eyJhbGciOiJFZERTQSIsImtpZCI6Imluc3RhbmNlLTEiLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLWRpc2NvdmVyeStqd3QifQ.eyJzY2hlbWEiOjEsInByb2R1Y3QiOiJuYXpvYXV0aCIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJydW50aW1lX2luc3RhbmNlX2lkIjoicnVudGltZS0xIiwiaXNzdWVyIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUiLCJyZWxlYXNlIjoidjAuMi4wIiwiY29udHJvbF9wcm90b2NvbF92ZXJzaW9ucyI6WzFdLCJvcGVyYXRvcl9wcm90b2NvbF92ZXJzaW9ucyI6WzNdLCJpbnN0YW5jZV9rZXlfaWQiOiJpbnN0YW5jZS0xIiwibm9uY2UiOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4IiwiaXNzdWVkX2F0IjoxMDAwLCJleHBpcmVzX2F0IjoxMDYwfQ.u7a6Zn89VAuWukazjCsMLGct5k1yXV7UzHM-QWb_kpuZAK3XMvPWXvn5vduXgtpUnutSeRYJEOIZKDRvYQWXCg"
     );
     assert_eq!(
         verify_discovery_statement(

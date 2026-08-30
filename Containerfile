@@ -19,13 +19,6 @@ COPY release/frontend.json ./release/frontend.json
 
 FROM build-base AS product-builder
 
-ARG NAZOAUTH_BUILD_RELEASE=development
-ARG NAZOAUTH_BUILD_REVISION=development
-ARG NAZOAUTH_BUILD_ID=local:development
-ENV NAZOAUTH_BUILD_RELEASE=${NAZOAUTH_BUILD_RELEASE} \
-    NAZOAUTH_BUILD_REVISION=${NAZOAUTH_BUILD_REVISION} \
-    NAZOAUTH_BUILD_ID=${NAZOAUTH_BUILD_ID}
-
 RUN --mount=type=cache,id=nazoauth-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=nazoauth-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=nazoauth-target,target=/app/target,sharing=locked \

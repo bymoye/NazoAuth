@@ -81,7 +81,7 @@ nazoauthctl backup copy --instance production --to-host recovery-host
 nazoauthctl backup show --instance production
 ```
 
-snapshot 将 PostgreSQL custom-format dump、deployment data、secrets、配置、runtime 制品/build identity、schema、MFA/JWKS 事实与数据库 sentinel 绑定到同一个不可变 manifest。restore-test 使用隔离数据库和 runtime。`require` 会在该精确 manifest 缺失、未通过 restore-test 或超过最大时效时阻断更新。off-host copy 在两端使用同一 ExecutionTarget 抽象，因此任一端都可以是本地或 SSH 注册主机；两端必须是不同主机，并各自持久化字节级校验 receipt。同机文件不算异机证据。
+snapshot 将 PostgreSQL custom-format dump、deployment data、secrets、配置、runtime 制品摘要、release 版本、schema、MFA/JWKS 事实与数据库 sentinel 绑定到同一个不可变 manifest。restore-test 使用隔离数据库和 runtime。`require` 会在该精确 manifest 缺失、未通过 restore-test 或超过最大时效时阻断更新。off-host copy 在两端使用同一 ExecutionTarget 抽象，因此任一端都可以是本地或 SSH 注册主机；两端必须是不同主机，并各自持久化字节级校验 receipt。同机文件不算异机证据。
 
 ## 灾难恢复
 
@@ -103,7 +103,7 @@ nazoauthctl recover --instance production --recovery-secret-file ./recovery-secr
 
 ## 信任边界
 
-激活前必须验证 Release bytes、attestation、Sigstore identity、manifest 与 OCI digest。应用独立验证签名 ControlOperation 和 embedded build target；Ctl 负责真实 runtime digest observation。双方都不声称自己无法产生的证明。
+激活前必须验证 Release bytes、attestation、Sigstore identity、manifest 与 OCI digest。应用直接用正在执行的二进制或镜像摘要验证签名 ControlOperation，Ctl 从 runtime 观测同一个内容身份。
 
 公网引导对经过 attestation 验证的 Release reader 采取失败关闭，并且只接受公开非草稿 Release。操作端必须具备 GitHub CLI、`python3`、`sha256sum` 与 `install`；缺少 reader 或验证工具时直接失败，不允许退回到未验证制品。
 

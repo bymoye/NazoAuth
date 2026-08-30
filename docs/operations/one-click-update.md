@@ -124,7 +124,7 @@ nazoauthctl backup show --instance production
 ```
 
 A snapshot binds the PostgreSQL custom-format dump, deployment data, secrets,
-configuration, runtime artifact/build identity, schema, MFA/JWKS facts, and a
+configuration, runtime artifact digest, release version, schema, MFA/JWKS facts, and a
 database sentinel in one immutable manifest. A restore test uses an isolated
 database and runtime. `require` blocks update unless the exact restore-tested
 manifest remains present and is no older than the configured maximum. Off-host
@@ -173,9 +173,8 @@ writer manually or flush shared Valkey.
 
 Release bytes, attestations, Sigstore identity, manifest metadata, and the OCI
 digest are verified before activation. The application independently validates
-the signed ControlOperation and embedded build target, while NazoAuthCtl owns
-the actual runtime digest observation. Neither side claims a proof it cannot
-produce.
+the signed ControlOperation against the executing binary or image digest, while
+NazoAuthCtl observes the same content identity from the runtime.
 
 Public bootstrap is fail-closed on the attested Release reader and accepts only
 a public non-draft Release. The operator host therefore needs GitHub CLI plus

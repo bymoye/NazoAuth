@@ -1,6 +1,6 @@
 //! Closed, non-secret wire protocol for privileged NazoAuth operator tasks.
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const CONTROL_DISCOVERY_JWS_TYPE: &str = "nazoauth-control-discovery+jwt";
 pub const DEPLOYMENT_STATEMENT_JWS_TYPE: &str = "nazoauth-deployment-statement+jwt";
 pub const OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE: &str =

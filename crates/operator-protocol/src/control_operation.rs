@@ -87,9 +87,9 @@ pub struct ControlOperation {
     /// Audience binding: exactly one target deployment.
     pub deployment_id: String,
     /// Artifact identity the operation was authorized for (05 §2): the OCI or
-    /// host-binary artifact whose executing runtime must equal the embedded
-    /// build identity at admission.  This prevents "authorized for artifact A,
-    /// executed on runtime B" without duplicating a release attestation.
+    /// host-binary artifact whose executing runtime must equal this digest at
+    /// admission.  This prevents "authorized for artifact A, executed on
+    /// runtime B" without duplicating a release attestation.
     pub target: ControlTarget,
     /// Opaque configuration revision of the deployment state this operation
     /// was constructed against.  Carried verbatim into the operation journal;
@@ -115,16 +115,11 @@ pub enum ControlTarget {
     OciImage {
         /// Immutable image/manifest identifier: `sha256:` + 64 lowercase hex.
         image_digest: String,
-        /// Build identity embedded in the executing runtime (J1 semantics);
-        /// equality with the running binary is enforced at admission.
-        embedded: ControlBuildIdentity,
     },
     /// Host binary identified by content hash.
     HostBinary {
         /// SHA-256 of the binary bytes: 64 lowercase hex.
         sha256: String,
-        /// Build identity embedded in the executing runtime (J1 semantics).
-        embedded: ControlBuildIdentity,
     },
 }
 
@@ -142,13 +137,9 @@ impl<'de> Deserialize<'de> for ControlTarget {
             "oci-image" => ControlTarget::OciImage {
                 image_digest: take_string_member(&mut members, "image_digest")
                     .map_err(serde::de::Error::custom)?,
-                embedded: take_build_identity_member(&mut members)
-                    .map_err(serde::de::Error::custom)?,
             },
             "host-binary" => ControlTarget::HostBinary {
                 sha256: take_string_member(&mut members, "sha256")
-                    .map_err(serde::de::Error::custom)?,
-                embedded: take_build_identity_member(&mut members)
                     .map_err(serde::de::Error::custom)?,
             },
             other => {
@@ -164,39 +155,6 @@ impl<'de> Deserialize<'de> for ControlTarget {
         }
         Ok(target)
     }
-}
-
-fn take_build_identity_member(
-    members: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<ControlBuildIdentity, String> {
-    let value = match members.remove("embedded") {
-        Some(value) => value,
-        None => return Err("target requires field 'embedded'".to_owned()),
-    };
-    let mut fields = match value {
-        serde_json::Value::Object(fields) => fields,
-        _ => return Err("target field 'embedded' must be an object".to_owned()),
-    };
-    let embedded = ControlBuildIdentity {
-        product: take_string_member(&mut fields, "product")?,
-        version: take_string_member(&mut fields, "version")?,
-        commit: take_string_member(&mut fields, "commit")?,
-    };
-    if let Some(member) = fields.keys().next() {
-        return Err(format!("unknown embedded field '{member}'"));
-    }
-    Ok(embedded)
-}
-
-/// Embedded build identity carried by every control operation (J1
-/// semantics).  The equality check against the executing binary belongs to
-/// the server-side verifier boundary; this type only freezes the wire shape.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ControlBuildIdentity {
-    pub product: String,
-    pub version: String,
-    pub commit: String,
 }
 
 /// Closed operation names seeded from E05's naming, each carrying its typed
@@ -682,10 +640,6 @@ fn validate_control_target(target: &ControlTarget) -> Result<(), ProtocolError> 
         ControlTarget::OciImage { image_digest, .. } => validate_oci_image_digest(image_digest)?,
         ControlTarget::HostBinary { sha256, .. } => validate_lower_hex(sha256, 64)?,
     }
-    let embedded = target.embedded();
-    for value in [&embedded.product, &embedded.version, &embedded.commit] {
-        validate_identifier(value)?;
-    }
     Ok(())
 }
 
@@ -697,17 +651,6 @@ pub fn validate_oci_image_digest(image_digest: &str) -> Result<(), ProtocolError
         .strip_prefix("sha256:")
         .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
     validate_lower_hex(digest, 64)
-}
-
-impl ControlTarget {
-    /// Build identity embedded in either artifact class; the admission
-    /// boundary compares it against the executing runtime.
-    pub fn embedded(&self) -> &ControlBuildIdentity {
-        match self {
-            ControlTarget::OciImage { embedded, .. }
-            | ControlTarget::HostBinary { embedded, .. } => embedded,
-        }
-    }
 }
 
 fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), ProtocolError> {

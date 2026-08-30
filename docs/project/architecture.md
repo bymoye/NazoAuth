@@ -10,7 +10,7 @@ RPC, an event bus, a command bus, or layers whose only job is forwarding.
 
 The root manifest is a virtual workspace with resolver 3. This repository
 releases the `nazoauth` application composition root; its `server`,
-`operator-task`, and `build-identity` subcommands keep version-coupled domain
+`operator-task`, and `release-identity` subcommands keep version-coupled domain
 execution in the target runtime. The independently released host lifecycle
 controller lives in [`nazozero/NazoAuthCtl`](https://github.com/nazozero/NazoAuthCtl)
 and consumes the exact versioned `nazo-operator-protocol` contract from this
@@ -145,24 +145,25 @@ The administration UI lives in a separate sibling repository named
 repository root, unless an explicit worktree path is supplied. Documentation
 and scripts must never embed a workstation-specific absolute path.
 
-Before any coordinated build or deployment, resolve and verify both worktrees:
+Before a coordinated candidate build or deployment, resolve both worktrees:
 
 1. Resolve each repository with `git rev-parse --show-toplevel` and reject a
    path that is not a Git worktree.
 2. Verify the normalized `origin` URL is the expected NazoAuth or NazoAuthWeb
    repository; do not accept a same-named unrelated directory.
-3. Verify the expected branch, or an explicitly supplied immutable commit for
-   detached release worktrees.
-4. Verify `HEAD` equals the requested full commit SHA.
-5. Verify `git status --porcelain` is empty, including untracked files.
-6. Select the frontend package manager from its committed lockfile and execute
+3. Build the current working-tree contents, including intentional uncommitted
+   changes, and identify the produced server/UI artifacts by their content
+   digests. Candidate validation must not require a commit or a clean worktree.
+4. Select the frontend package manager from its lockfile and execute
    the scripts that actually exist in `package.json`. Do not assume an
    `npm test` script. Missing required lint, unit, browser-security, delivery,
    or build coverage is a repository defect to fix, not a check to silently
    skip.
 
-The live deployment script applies these checks before producing an artifact;
-see [deployment.md](../operations/deployment.md).
+Official release tagging and CI happen only after this candidate has passed the
+real deployment and functional matrix. The live deployment wrapper consumes
+released artifacts and never builds source; see
+[deployment.md](../operations/deployment.md).
 
 ## Compatibility and Verification
 

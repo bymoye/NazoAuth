@@ -11,8 +11,7 @@
 //! 3. verify the Ed25519 signature over the canonical bytes
 //! 4. key expiry/revocation at first admission (the registry lookup only
 //!    returns active, unexpired slots)
-//! 5. deployment binding, embedded build identity (J1), and config_revision
-//!    fencing
+//! 5. deployment binding, artifact digest, and config_revision fencing
 //! 6. enter the operation journal accept checkpoint (E03)
 //! 7. execute strictly per journal checkpoints; internal steps never
 //!    re-authenticate
@@ -53,7 +52,7 @@ mod control_journal;
 mod execution;
 mod identity;
 
-pub(crate) use identity::embedded_identity;
+pub(crate) use identity::release_identity;
 
 const CONFIG_REVISION_PATH: &str = "/run/nazauth-operator/config-revision";
 const STATE_DIRECTORY: &str = "/var/lib/nazauth/operator-state";
@@ -163,11 +162,11 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
         RejectionClass::Authorization,
     )?;
 
-    // (5) Fencing: this binary is the authorized target artifact (J1), the
-    // operation names this local deployment, and its config_revision matches
-    // the local revision marker.
+    // (5) Fencing: this process is executing the authorized target artifact,
+    // the operation names this local deployment, and its config_revision
+    // matches the local revision marker.
     reject(
-        identity::validate_embedded_target_identity(&verified.target),
+        identity::validate_target_artifact(&verified.target),
         RejectionClass::Target,
     )?;
     let local_deployment_id = reject(

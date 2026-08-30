@@ -325,8 +325,6 @@ pub(crate) fn validate_discovery_statement(
         &statement.runtime_instance_id,
         &statement.issuer,
         &statement.release,
-        &statement.revision,
-        &statement.build_id,
         &statement.control_protocol_versions,
         &statement.operator_protocol_versions,
         &statement.instance_key_id,
@@ -357,8 +355,6 @@ pub(crate) fn validate_deployment_statement(
         &statement.runtime_instance_id,
         &statement.issuer,
         &statement.release,
-        &statement.revision,
-        &statement.build_id,
         &statement.control_protocol_versions,
         &statement.operator_protocol_versions,
         &statement.instance_key_id,
@@ -379,8 +375,6 @@ fn validate_discovery_identity(
     runtime_instance_id: &str,
     issuer: &str,
     release: &str,
-    revision: &str,
-    build_id: &str,
     control_protocol_versions: &[u32],
     operator_protocol_versions: &[u32],
     instance_key_id: &str,
@@ -398,7 +392,7 @@ fn validate_discovery_identity(
     validate_file_identifier(deployment_id)?;
     validate_file_identifier(runtime_instance_id)?;
     validate_file_identifier(instance_key_id)?;
-    for value in [issuer, release, revision, build_id] {
+    for value in [issuer, release] {
         validate_identifier(value)?;
     }
     validate_protocol_versions(

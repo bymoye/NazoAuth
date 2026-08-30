@@ -98,7 +98,7 @@ CTL executable and had no consumer for a configured path.
 | `NAZOAUTHCTL_CONFIG_ROOT`, `NAZOAUTHCTL_STATE_ROOT`, `NAZOAUTHCTL_BREAK_GLASS_ROOT`, `NAZOAUTH_UPDATE_CONFIG`, `NAZOAUTH_BINARY_INSTALL_PATH`, `NAZOAUTH_BINARY_RELEASES`, `NAZOAUTH_SYSTEMD_UNIT_DIR` | **保留**. They locate durable state or the selected artifact/runtime boundary. |
 | `NAZOAUTHCTL_LOCK`, `NAZOAUTHCTL_RECOVERY_OPERATION` | **保留（受限）**. Lock/recovery markers are process-safety transport, not application configuration. |
 | `NAZOAUTH_OPERATOR_STATE_DIRECTORY`, `NAZOAUTH_OPERATOR_PUBLIC_JWK_FILE`, `NAZOAUTH_OPERATOR_CHANGE_SET_FILE`, `NAZOAUTH_SERVER_CONFIG_FILE` | **保留（内部传输）**. One-shot operator tasks receive only the current protocol's bounded file references; these are not user options. |
-| `NAZOAUTHCTL_TESTING`, `NAZOAUTH_BUILD_*`, server-side `NAZOAUTH_OPERATOR_DEPLOYMENT_ID_FILE`, `NAZOAUTH_OPERATOR_TEST_FAILPOINT`, `NAZOAUTH_OPERATOR_TEST_FAILPOINT_MARKER` | **测试/构建专用**. Never enable them in a production environment. |
+| `NAZOAUTHCTL_TESTING`, server-side `NAZOAUTH_OPERATOR_DEPLOYMENT_ID_FILE`, `NAZOAUTH_OPERATOR_TEST_FAILPOINT`, `NAZOAUTH_OPERATOR_TEST_FAILPOINT_MARKER` | **测试专用**. Never enable them in a production environment. |
 
 ### Install and operation flags
 

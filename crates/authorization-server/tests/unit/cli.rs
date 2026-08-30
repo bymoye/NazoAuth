@@ -21,8 +21,8 @@ fn parses_all_product_commands() {
         Command::AuditAnchorWorker
     );
     assert_eq!(
-        parse(&["nazoauth", "build-identity"]).unwrap(),
-        Command::BuildIdentity
+        parse(&["nazoauth", "release-identity"]).unwrap(),
+        Command::ReleaseIdentity
     );
     assert_eq!(parse(&["nazoauth", "migrate"]).unwrap(), Command::Migrate);
 }
@@ -40,8 +40,8 @@ async fn public_help_command_completes_without_loading_runtime_configuration() {
 }
 
 #[tokio::test]
-async fn build_identity_completes_without_loading_runtime_configuration() {
-    run(["nazoauth".to_owned(), "build-identity".to_owned()])
+async fn release_identity_completes_without_loading_runtime_configuration() {
+    run(["nazoauth".to_owned(), "release-identity".to_owned()])
         .await
         .unwrap();
 }
