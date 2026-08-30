@@ -351,11 +351,12 @@ async fn dpop_authorization_consumes_replay_marker_atomically_async() {
         None,
         None,
     );
+    let replay: Arc<dyn ProtectedResourceDpopStateStore> = Arc::new(AtomicReplayStore::default());
     let service = ProtectedResourceAuthorizationService::new(
         fixture.verifier,
         DpopProofVerifier::new(DpopProofVerifierConfig::default()),
         TestRevocations::returning(Ok(false)),
-        AtomicReplayStore::default(),
+        replay,
     );
 
     service

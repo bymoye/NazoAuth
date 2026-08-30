@@ -41,7 +41,6 @@ nazo-persistence.workspace = true
 nazo-digital-credentials.workspace = true
 nazo-identity.workspace = true
 nazo-key-management.workspace = true
-nazo-valkey.workspace = true
 nazo-resource-server.workspace = true
 nazo-runtime-modules.workspace = true
 nazo-scim-events.workspace = true
@@ -80,6 +79,7 @@ diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "
 diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 diesel_migrations.workspace = true
 nazo-postgres.workspace = true
+nazo-valkey.workspace = true
 fred = { workspace = true, features = ["i-scripts"] }
 pkcs8.workspace = true
 proptest.workspace = true

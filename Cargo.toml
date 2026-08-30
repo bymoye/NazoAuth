@@ -10,6 +10,8 @@ members = [
     "crates/persistence-postgres",
     "crates/authorization-server",
     "crates/authorization-server-postgres",
+    "crates/authorization-server-valkey",
+    "crates/nazoauth",
     "crates/operator-protocol",
     "crates/http-signatures",
     "crates/http-actix",
@@ -20,8 +22,7 @@ members = [
     "crates/state-store-valkey",
 ]
 default-members = [
-    "crates/authorization-server",
-    "crates/authorization-server-postgres",
+    "crates/nazoauth",
 ]
 resolver = "3"
 exclude = ["fuzz"]
@@ -72,6 +73,8 @@ nazo-openid4vci = { version = "0.2.0", path = "crates/openid4vci" }
 nazo-openid4vp = { version = "0.2.0", path = "crates/openid4vp" }
 nazo-openid4vc-http-actix = { version = "0.2.0", path = "crates/openid4vc-http-actix" }
 nazo-oauth-server = { version = "0.2.0", path = "crates/authorization-server" }
+nazo-oauth-server-postgres = { version = "0.2.0", path = "crates/authorization-server-postgres" }
+nazo-oauth-server-valkey = { version = "0.2.0", path = "crates/authorization-server-valkey" }
 nazo-operator-protocol = { version = "0.2.0", path = "crates/operator-protocol" }
 nazo-persistence = { version = "0.2.0", path = "crates/persistence" }
 nazo-postgres = { version = "0.2.0", path = "crates/persistence-postgres" }

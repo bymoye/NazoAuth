@@ -51,7 +51,7 @@ impl nazo_identity::ports::SecretHashPort for RegistrationSecretHasher {
 }
 
 pub(crate) type LocalRegistrationService = nazo_identity::RegistrationService<
-    nazo_valkey::AuthenticationStore,
+    std::sync::Arc<dyn nazo_identity::ports::EmailVerificationStorePort>,
     RegistrationSecretHasher,
     SmtpVerificationEmailDelivery,
 >;

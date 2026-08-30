@@ -9,6 +9,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SERVER = ROOT / "crates" / "authorization-server"
 CONTRACTS = ROOT / "crates" / "persistence"
 POSTGRES_LAUNCHER = ROOT / "crates" / "authorization-server-postgres"
+VALKEY_LAUNCHER = ROOT / "crates" / "authorization-server-valkey"
+DISTRIBUTION = ROOT / "crates" / "nazoauth"
 
 
 class PersistenceBoundaryTests(unittest.TestCase):
@@ -19,23 +21,38 @@ class PersistenceBoundaryTests(unittest.TestCase):
         self.assertNotIn("diesel-async", dependencies)
         self.assertNotIn("nazo-postgres", dependencies)
 
-    def test_postgres_launcher_is_the_only_current_adapter_composition_root(self) -> None:
+    def test_default_distribution_composes_independent_storage_launchers(self) -> None:
         postgres = tomllib.loads(
             (POSTGRES_LAUNCHER / "Cargo.toml").read_text(encoding="utf-8")
         )
         postgres_dependencies = postgres.get("dependencies", {})
         self.assertIn("nazo-postgres", postgres_dependencies)
-        self.assertEqual(postgres["bin"][0]["name"], "nazoauth")
+        self.assertNotIn("nazo-oauth-server-valkey", postgres_dependencies)
+        self.assertNotIn("bin", postgres)
+
+        valkey = tomllib.loads(
+            (VALKEY_LAUNCHER / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        valkey_dependencies = valkey.get("dependencies", {})
+        self.assertIn("nazo-valkey", valkey_dependencies)
+        self.assertNotIn("nazo-oauth-server-postgres", valkey_dependencies)
+        self.assertNotIn("nazo-postgres", valkey_dependencies)
+        self.assertNotIn("bin", valkey)
+
+        distribution = tomllib.loads(
+            (DISTRIBUTION / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        distribution_dependencies = distribution.get("dependencies", {})
+        self.assertIn("nazo-oauth-server-postgres", distribution_dependencies)
+        self.assertIn("nazo-oauth-server-valkey", distribution_dependencies)
+        self.assertEqual(distribution["bin"][0]["name"], "nazoauth")
 
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))[
             "workspace"
         ]
         self.assertEqual(
             set(workspace["default-members"]),
-            {
-                "crates/authorization-server",
-                "crates/authorization-server-postgres",
-            },
+            {"crates/nazoauth"},
         )
 
     def test_dependency_graph_gate_is_run_by_ci(self) -> None:

@@ -12,19 +12,19 @@ use serde_json::{Value, json};
 #[derive(Clone)]
 pub(crate) struct ReadinessDependencies {
     database: Arc<dyn DatabaseHealthPort>,
-    valkey: nazo_valkey::ValkeyConnection,
+    transient_state: Arc<dyn crate::bootstrap::TransientStateHealthPort>,
     keyset: nazo_key_management::KeyManager,
 }
 
 impl ReadinessDependencies {
     pub(crate) fn new(
         database: Arc<dyn DatabaseHealthPort>,
-        valkey: nazo_valkey::ValkeyConnection,
+        transient_state: Arc<dyn crate::bootstrap::TransientStateHealthPort>,
         keyset: nazo_key_management::KeyManager,
     ) -> Self {
         Self {
             database,
-            valkey,
+            transient_state,
             keyset,
         }
     }
@@ -44,7 +44,7 @@ struct ReadinessResponse {
 #[derive(Serialize)]
 struct ReadinessChecks {
     database: DependencyCheck,
-    valkey: DependencyCheck,
+    transient_state: DependencyCheck,
     signing_keys: DependencyCheck,
 }
 
@@ -59,27 +59,31 @@ pub(crate) async fn startup() -> Json<Value> {
 }
 
 pub(crate) async fn ready(dependencies: Data<ReadinessDependencies>) -> HttpResponse {
-    let (database, valkey) = tokio::join!(
+    let (database, transient_state) = tokio::join!(
         dependencies.database.check(),
-        dependencies.valkey.health_check()
+        dependencies.transient_state.check()
     );
     let database_up = database.is_ok();
-    let valkey_up = valkey.is_ok();
+    let transient_state_up = transient_state.is_ok();
     let signing_keys_up = dependencies.keyset.is_healthy();
     if let Err(error) = database {
         tracing::warn!(%error, "readiness database probe failed");
     }
-    if let Err(error) = valkey {
-        tracing::warn!(%error, "readiness Valkey probe failed");
+    if let Err(error) = transient_state {
+        tracing::warn!(%error, "readiness transient-state probe failed");
     }
     if !signing_keys_up {
         tracing::warn!("readiness signing-key lifecycle is unhealthy");
     }
-    readiness_response(database_up, valkey_up, signing_keys_up)
+    readiness_response(database_up, transient_state_up, signing_keys_up)
 }
 
-fn readiness_response(database_up: bool, valkey_up: bool, signing_keys_up: bool) -> HttpResponse {
-    let ready = database_up && valkey_up && signing_keys_up;
+fn readiness_response(
+    database_up: bool,
+    transient_state_up: bool,
+    signing_keys_up: bool,
+) -> HttpResponse {
+    let ready = database_up && transient_state_up && signing_keys_up;
     HttpResponse::build(if ready {
         StatusCode::OK
     } else {
@@ -91,8 +95,8 @@ fn readiness_response(database_up: bool, valkey_up: bool, signing_keys_up: bool)
             database: DependencyCheck {
                 status: if database_up { "up" } else { "down" },
             },
-            valkey: DependencyCheck {
-                status: if valkey_up { "up" } else { "down" },
+            transient_state: DependencyCheck {
+                status: if transient_state_up { "up" } else { "down" },
             },
             signing_keys: DependencyCheck {
                 status: if signing_keys_up { "up" } else { "down" },

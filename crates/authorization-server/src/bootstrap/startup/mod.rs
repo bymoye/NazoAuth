@@ -15,8 +15,9 @@ pub(crate) use background::{load_revocation_policy, read_revocation_snapshot};
 pub async fn run(
     config: ConfigSource,
     persistence: super::ServerPersistenceBindings,
+    transient_state: &dyn crate::cli::TransientStateLauncher,
 ) -> anyhow::Result<()> {
     let _observability = observability::init(&config)?;
-    let startup = configuration::load(config, persistence).await?;
+    let startup = configuration::load(config, persistence, transient_state).await?;
     services::run(startup).await
 }

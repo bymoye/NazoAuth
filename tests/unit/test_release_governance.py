@@ -186,11 +186,13 @@ class ReleaseGovernanceTests(unittest.TestCase):
     def test_compose_quick_start_is_self_contained_and_project_scoped(self) -> None:
         source = (ROOT / "compose.yml").read_text(encoding="utf-8")
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-        self.assertNotIn("./deploy/compose/initialize-secrets.sh:", source)
         self.assertNotIn("${NAZOAUTH_CONFIG:-./.env.yaml.example}", source)
-        self.assertIn("target: compose-secrets-init", source)
+        self.assertNotIn("secrets-init", source)
+        self.assertNotIn("runtime_secrets", source)
+        self.assertNotIn("_URL_FILE", source)
+        self.assertIn("target: compose-postgres", source)
         self.assertIn(
-            "COPY --chmod=0555 deploy/compose/initialize-secrets.sh", containerfile
+            "COPY --chmod=0555 deploy/compose/initialize-postgres.sh", containerfile
         )
         self.assertIn(
             "COPY --from=product-builder /app/.env.yaml.example /app/.env.yaml",
@@ -216,9 +218,14 @@ class ReleaseGovernanceTests(unittest.TestCase):
             'VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e103"',
             (ROOT / "perf" / "env.yaml").read_text(encoding="utf-8"),
         )
-        self.assertIn('generate_hex_secret "$secret_dir/revision"', (
-            ROOT / "deploy" / "compose" / "initialize-secrets.sh"
-        ).read_text(encoding="utf-8"))
+        self.assertFalse((ROOT / "deploy" / "compose" / "initialize-secrets.sh").exists())
+        postgres_init = (
+            ROOT / "deploy" / "compose" / "initialize-postgres.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CREATE ROLE nazoauth", postgres_init)
+        self.assertIn("NAZOAUTH_MIGRATION_RUNTIME_ROLE: nazoauth", source)
+        self.assertIn("DATABASE_URL:", source)
+        self.assertIn("VALKEY_URL:", source)
         self.assertIn(
             '"${NAZOAUTH_BIND_ADDRESS:-127.0.0.1}:${NAZOAUTH_PORT:-8000}:8000"',
             source,
@@ -247,22 +254,30 @@ class ReleaseGovernanceTests(unittest.TestCase):
         server_manifest = (
             ROOT / "crates" / "authorization-server" / "Cargo.toml"
         ).read_text(encoding="utf-8")
-        launcher_manifest = (
+        distribution_manifest = (
+            ROOT / "crates" / "nazoauth" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        postgres_manifest = (
             ROOT / "crates" / "authorization-server-postgres" / "Cargo.toml"
+        ).read_text(encoding="utf-8")
+        valkey_manifest = (
+            ROOT / "crates" / "authorization-server-valkey" / "Cargo.toml"
         ).read_text(encoding="utf-8")
         ctl_manifest = ROOT / "crates" / "nazoauthctl" / "Cargo.toml"
         self.assertNotIn("[[bin]]", server_manifest)
-        self.assertEqual(launcher_manifest.count("[[bin]]"), 1)
-        self.assertIn('name = "nazoauth"', launcher_manifest)
+        self.assertNotIn("[[bin]]", postgres_manifest)
+        self.assertNotIn("[[bin]]", valkey_manifest)
+        self.assertEqual(distribution_manifest.count("[[bin]]"), 1)
+        self.assertIn('name = "nazoauth"', distribution_manifest)
         self.assertFalse(ctl_manifest.exists())
 
         release = (
             ROOT / ".github" / "workflows" / "release-security.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("cargo build --release --locked --target ${{ matrix.target }}", release)
-        self.assertIn("--package nazo-oauth-server-postgres --bin nazoauth", release)
+        self.assertIn("--package nazoauth --bin nazoauth", release)
         self.assertIn(
-            "--manifest-path crates/authorization-server-postgres/Cargo.toml",
+            "--manifest-path crates/nazoauth/Cargo.toml",
             release,
         )
         self.assertNotIn("--package nazoauthctl --bin nazoauthctl", release)
@@ -274,15 +289,13 @@ class ReleaseGovernanceTests(unittest.TestCase):
         )
 
         containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-        self.assertIn(
-            "--package nazo-oauth-server-postgres --bin nazoauth", containerfile
-        )
+        self.assertIn("--package nazoauth --bin nazoauth", containerfile)
 
         conformance = (
             ROOT / ".github" / "workflows" / "conformance-security.yml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "--manifest-path crates/authorization-server-postgres/Cargo.toml",
+            "--manifest-path crates/nazoauth/Cargo.toml",
             conformance,
         )
 

@@ -18,7 +18,9 @@ pub(crate) fn ciba_grant_key(
     format!("ciba:{}", blake3_hex(&binding.to_string()))
 }
 
-pub(crate) type ServerCibaService = CibaService<CibaStore>;
+pub(crate) type ServerCibaService = CibaService<
+    std::sync::Arc<dyn nazo_auth::CibaStateStorePort<Version = nazo_auth::CibaStateVersion>>,
+>;
 
 #[derive(Clone)]
 pub(crate) struct CibaHttpConfig {

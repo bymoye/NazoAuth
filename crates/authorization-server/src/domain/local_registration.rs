@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use nazo_auth::{RequestRateLimitBucket, RequestRateLimitPort};
 use nazo_http_actix::{
     AuthenticationRateLimit, AuthenticationRateLimitError, LocalRegistrationFuture,
     LocalRegistrationOperations,
@@ -64,20 +67,20 @@ where
     }
 }
 
-/// Infrastructure adapter for the authentication fixed-window limiter.
+/// Application adapter for the authentication fixed-window limiter.
 ///
-/// Business-independent Valkey failures and counters are converted to a small
-/// typed boundary; HTTP rendering remains in `nazo-http-actix`.
+/// Backend failures and counters are converted to the HTTP-facing typed
+/// boundary; response rendering remains in `nazo-http-actix`.
 #[derive(Clone)]
 pub(crate) struct ServerAuthenticationRateLimit {
-    store: nazo_valkey::RateLimitStore,
+    store: Arc<dyn RequestRateLimitPort>,
     window_seconds: u64,
     max_requests: u64,
 }
 
 impl ServerAuthenticationRateLimit {
     pub(crate) fn new(
-        store: nazo_valkey::RateLimitStore,
+        store: Arc<dyn RequestRateLimitPort>,
         window_seconds: u64,
         max_requests: u64,
     ) -> Self {
@@ -98,7 +101,7 @@ impl AuthenticationRateLimit for ServerAuthenticationRateLimit {
             let count = self
                 .store
                 .increment(
-                    nazo_valkey::RateDimension::Auth,
+                    RequestRateLimitBucket::Authentication,
                     subject,
                     self.window_seconds,
                 )

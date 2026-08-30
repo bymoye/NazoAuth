@@ -9,7 +9,7 @@ pub(crate) fn test_authorization_service(
             state.diesel_db.clone(),
             state.settings.tenant.context.tenant_id.as_uuid(),
         ),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     )
 }

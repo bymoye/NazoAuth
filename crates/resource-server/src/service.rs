@@ -96,6 +96,21 @@ pub trait DpopReplayConsumption: Send + Sync {
     >;
 }
 
+impl<T> DpopReplayConsumption for Arc<T>
+where
+    T: DpopReplayConsumption + ?Sized,
+{
+    fn consume<'a>(
+        &'a self,
+        key: DpopReplayKey<'a>,
+    ) -> ResourceServerPortFuture<
+        'a,
+        Result<DpopReplayConsumptionResult, ProtectedResourceDependencyError>,
+    > {
+        self.as_ref().consume(key)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DpopNoncePolicy {
     Optional,
@@ -126,6 +141,41 @@ pub trait DpopNonceStorage: Send + Sync {
         'a,
         Result<DpopNonceValidationResult, ProtectedResourceDependencyError>,
     >;
+}
+
+impl<T> DpopNonceStorage for Arc<T>
+where
+    T: DpopNonceStorage + ?Sized,
+{
+    fn issue_nonce<'a>(
+        &'a self,
+        nonce: &'a str,
+        expires_at: i64,
+    ) -> ResourceServerPortFuture<'a, Result<(), ProtectedResourceDependencyError>> {
+        self.as_ref().issue_nonce(nonce, expires_at)
+    }
+
+    fn validate_nonce<'a>(
+        &'a self,
+        nonce: &'a str,
+    ) -> ResourceServerPortFuture<
+        'a,
+        Result<DpopNonceValidationResult, ProtectedResourceDependencyError>,
+    > {
+        self.as_ref().validate_nonce(nonce)
+    }
+}
+
+/// Complete short-lived DPoP state required by protected-resource admission.
+///
+/// This composite exists only to permit one backend-neutral trait object at
+/// the server assembly boundary. The individual replay and nonce operations
+/// remain narrow so their atomicity and failure modes stay explicit.
+pub trait ProtectedResourceDpopStateStore: DpopReplayConsumption + DpopNonceStorage {}
+
+impl<T> ProtectedResourceDpopStateStore for T where
+    T: DpopReplayConsumption + DpopNonceStorage + ?Sized
+{
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

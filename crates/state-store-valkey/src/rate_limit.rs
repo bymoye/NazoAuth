@@ -109,6 +109,26 @@ impl RateLimitStore {
     }
 }
 
+impl nazo_auth::RequestRateLimitPort for RateLimitStore {
+    fn increment<'a>(
+        &'a self,
+        bucket: nazo_auth::RequestRateLimitBucket,
+        subject: &'a str,
+        window_seconds: u64,
+    ) -> nazo_auth::RequestRateLimitFuture<'a> {
+        let dimension = match bucket {
+            nazo_auth::RequestRateLimitBucket::Authentication => RateDimension::Auth,
+            nazo_auth::RequestRateLimitBucket::Token => RateDimension::Token,
+            nazo_auth::RequestRateLimitBucket::TokenManagement => RateDimension::TokenManagement,
+        };
+        Box::pin(async move {
+            RateLimitStore::increment(self, dimension, subject, window_seconds)
+                .await
+                .map_err(|_| nazo_auth::RequestRateLimitError)
+        })
+    }
+}
+
 impl nazo_identity::ports::LoginThrottlePort for RateLimitStore {
     fn failure_count<'a>(
         &'a self,

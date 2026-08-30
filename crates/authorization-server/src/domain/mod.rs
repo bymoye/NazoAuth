@@ -69,6 +69,10 @@ pub(crate) use passkey::PasskeyOperationsProvider;
 pub(crate) use password_login::ServerPasswordLoginOperations;
 pub(crate) use profile_account::ServerProfileAccountOperations;
 pub(crate) use resource_server::ResourceServerConfig;
+pub use resource_server::{
+    FapiHttpSignatureReplayConsumption, FapiHttpSignatureReplayStore,
+    FapiHttpSignatureReplayStoreError,
+};
 pub(crate) use resource_server::{
     ServerFapiHttpMessageSignatures, ServerFapiMtlsResolver, ServerFapiResourceAuthorizer,
 };

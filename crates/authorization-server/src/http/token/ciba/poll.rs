@@ -56,7 +56,7 @@ struct CibaPollIssueRequest<'a, 'issuance> {
     issuance: &'a TokenIssuanceContext<'issuance>,
     client: &'a ClientRow,
     auth_req_id: &'a str,
-    initial: nazo_auth::CibaStoredRequest<nazo_valkey::StoredCibaRequest>,
+    initial: nazo_auth::CibaStoredRequest<nazo_auth::CibaStateVersion>,
     ciba_grant_key: String,
     dpop_jkt: Option<String>,
     mtls_x5t_s256: Option<String>,

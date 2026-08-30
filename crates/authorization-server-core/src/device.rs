@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -220,6 +220,24 @@ pub struct StoredDeviceAuthorization<V> {
     version: V,
 }
 
+/// Opaque compare-and-swap token for a persisted device authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceStateVersion {
+    comparison_token: String,
+}
+
+impl DeviceStateVersion {
+    #[must_use]
+    pub const fn new(comparison_token: String) -> Self {
+        Self { comparison_token }
+    }
+
+    #[must_use]
+    pub fn comparison_token(&self) -> &str {
+        &self.comparison_token
+    }
+}
+
 impl<V> StoredDeviceAuthorization<V> {
     #[must_use]
     pub const fn new(state: DeviceAuthorizationState, version: V) -> Self {
@@ -229,6 +247,16 @@ impl<V> StoredDeviceAuthorization<V> {
     #[must_use]
     pub const fn state(&self) -> &DeviceAuthorizationState {
         &self.state
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> &V {
+        &self.version
+    }
+
+    #[must_use]
+    pub fn into_state(self) -> DeviceAuthorizationState {
+        self.state
     }
 }
 
@@ -289,6 +317,88 @@ pub trait DeviceStateStorePort: Send + Sync {
         user_code: &'a str,
         device_hash: &'a str,
     ) -> DeviceStateFuture<'a, DeviceAtomicResult>;
+}
+
+impl<T> DeviceStateStorePort for Arc<T>
+where
+    T: DeviceStateStorePort + ?Sized,
+{
+    type Version = T::Version;
+
+    fn create<'a>(
+        &'a self,
+        device_code: &'a str,
+        user_code: &'a str,
+        state: &'a DeviceAuthorizationState,
+        ttl_seconds: u64,
+    ) -> DeviceStateFuture<'a, DeviceCreateResult> {
+        (**self).create(device_code, user_code, state, ttl_seconds)
+    }
+
+    fn load_by_device_code<'a>(
+        &'a self,
+        device_code: &'a str,
+    ) -> DeviceStateFuture<'a, Option<StoredDeviceAuthorization<Self::Version>>> {
+        (**self).load_by_device_code(device_code)
+    }
+
+    fn load_by_device_hash<'a>(
+        &'a self,
+        device_hash: &'a str,
+    ) -> DeviceStateFuture<'a, Option<StoredDeviceAuthorization<Self::Version>>> {
+        (**self).load_by_device_hash(device_hash)
+    }
+
+    fn resolve_user_code<'a>(
+        &'a self,
+        user_code: &'a str,
+    ) -> DeviceStateFuture<'a, Option<String>> {
+        (**self).resolve_user_code(user_code)
+    }
+
+    fn replace_by_device_code<'a>(
+        &'a self,
+        device_code: &'a str,
+        version: &'a Self::Version,
+        replacement: &'a DeviceAuthorizationState,
+    ) -> DeviceStateFuture<'a, DeviceAtomicResult> {
+        (**self).replace_by_device_code(device_code, version, replacement)
+    }
+
+    fn replace_by_device_hash<'a>(
+        &'a self,
+        device_hash: &'a str,
+        version: &'a Self::Version,
+        replacement: &'a DeviceAuthorizationState,
+    ) -> DeviceStateFuture<'a, DeviceAtomicResult> {
+        (**self).replace_by_device_hash(device_hash, version, replacement)
+    }
+
+    fn complete_decision<'a>(
+        &'a self,
+        device_hash: &'a str,
+        user_code: &'a str,
+        version: &'a Self::Version,
+        replacement: &'a DeviceAuthorizationState,
+    ) -> DeviceStateFuture<'a, DeviceAtomicResult> {
+        (**self).complete_decision(device_hash, user_code, version, replacement)
+    }
+
+    fn consume_by_device_code<'a>(
+        &'a self,
+        device_code: &'a str,
+        version: &'a Self::Version,
+    ) -> DeviceStateFuture<'a, DeviceAtomicResult> {
+        (**self).consume_by_device_code(device_code, version)
+    }
+
+    fn delete_user_code_if_matches<'a>(
+        &'a self,
+        user_code: &'a str,
+        device_hash: &'a str,
+    ) -> DeviceStateFuture<'a, DeviceAtomicResult> {
+        (**self).delete_user_code_if_matches(user_code, device_hash)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

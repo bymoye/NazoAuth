@@ -1,7 +1,7 @@
 use nazo_auth::DeviceAuthorizationState;
 use nazo_auth::{
     DeviceAtomicResult, DeviceCreateResult as AuthDeviceCreateResult, DeviceStatePortError,
-    DeviceStateStorePort, StoredDeviceAuthorization,
+    DeviceStateStorePort, DeviceStateVersion, StoredDeviceAuthorization,
 };
 
 use crate::{Error, ValkeyConnection, command, keys};
@@ -75,18 +75,9 @@ pub enum DeviceCreateResult {
     UserCodeCollision,
 }
 
-#[derive(Clone, Debug)]
-pub struct StoredDeviceState {
-    value: DeviceAuthorizationState,
-    raw: String,
-}
-
-impl StoredDeviceState {
-    #[must_use]
-    pub const fn value(&self) -> &DeviceAuthorizationState {
-        &self.value
-    }
-}
+/// Backwards-compatible name for the device-flow CAS token now owned by the
+/// core state-store contract.
+pub type StoredDeviceState = DeviceStateVersion;
 
 #[derive(Clone, Debug)]
 pub struct DeviceStore {
@@ -136,7 +127,7 @@ impl DeviceStore {
     ) -> Result<Option<DeviceAuthorizationState>, Error> {
         self.load_snapshot(keys::device_code(device_code))
             .await
-            .map(|stored| stored.map(|stored| stored.value))
+            .map(|stored| stored.map(StoredDeviceAuthorization::into_state))
     }
     pub async fn load_by_device_hash(
         &self,
@@ -144,12 +135,15 @@ impl DeviceStore {
     ) -> Result<Option<DeviceAuthorizationState>, Error> {
         self.load_snapshot(keys::device_code_hash(device_hash))
             .await
-            .map(|stored| stored.map(|stored| stored.value))
+            .map(|stored| stored.map(StoredDeviceAuthorization::into_state))
     }
     pub async fn resolve_user_code(&self, user_code: &str) -> Result<Option<String>, Error> {
         command::get(&self.connection, keys::device_user_code(user_code)).await
     }
-    async fn load_snapshot(&self, key: String) -> Result<Option<StoredDeviceState>, Error> {
+    async fn load_snapshot(
+        &self,
+        key: String,
+    ) -> Result<Option<StoredDeviceAuthorization<DeviceStateVersion>>, Error> {
         let reply =
             command::eval_string(&self.connection, SNAPSHOT_DEVICE_SCRIPT, vec![key], vec![])
                 .await?;
@@ -175,7 +169,10 @@ impl DeviceStore {
         }
         let value = serde_json::from_str(&raw)
             .map_err(|error| Error::protocol(format!("malformed device state: {error}")))?;
-        Ok(Some(StoredDeviceState { value, raw }))
+        Ok(Some(StoredDeviceAuthorization::new(
+            value,
+            DeviceStateVersion::new(raw),
+        )))
     }
     async fn replace_snapshot(
         &self,
@@ -190,7 +187,7 @@ impl DeviceStore {
             &self.connection,
             COMPARE_SET_DEVICE_SCRIPT,
             vec![key],
-            vec![expected.raw.clone(), replacement],
+            vec![expected.comparison_token().to_owned(), replacement],
         )
         .await?;
         parse_atomic_result(&reply)
@@ -213,7 +210,11 @@ impl DeviceStore {
                 keys::device_code_hash(device_hash),
                 keys::device_user_code(user_code),
             ],
-            vec![expected.raw.clone(), replacement, device_hash.to_owned()],
+            vec![
+                expected.comparison_token().to_owned(),
+                replacement,
+                device_hash.to_owned(),
+            ],
         )
         .await?;
         parse_atomic_result(&reply)
@@ -228,7 +229,7 @@ impl DeviceStore {
             &self.connection,
             COMPARE_DELETE_DEVICE_SCRIPT,
             vec![keys::device_code(device_code)],
-            vec![expected.raw.clone()],
+            vec![expected.comparison_token().to_owned()],
         )
         .await?;
         parse_atomic_result(&reply)
@@ -236,7 +237,7 @@ impl DeviceStore {
 }
 
 impl DeviceStateStorePort for DeviceStore {
-    type Version = StoredDeviceState;
+    type Version = DeviceStateVersion;
 
     fn create<'a>(
         &'a self,
@@ -268,11 +269,6 @@ impl DeviceStateStorePort for DeviceStore {
         Box::pin(async move {
             self.load_snapshot(keys::device_code(device_code))
                 .await
-                .map(|stored| {
-                    stored.map(|version| {
-                        StoredDeviceAuthorization::new(version.value().clone(), version)
-                    })
-                })
                 .map_err(port_error)
         })
     }
@@ -284,11 +280,6 @@ impl DeviceStateStorePort for DeviceStore {
         Box::pin(async move {
             self.load_snapshot(keys::device_code_hash(device_hash))
                 .await
-                .map(|stored| {
-                    stored.map(|version| {
-                        StoredDeviceAuthorization::new(version.value().clone(), version)
-                    })
-                })
                 .map_err(port_error)
         })
     }

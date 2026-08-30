@@ -57,10 +57,28 @@ pub trait PersistenceLauncher: Send + Sync {
     ) -> LauncherFuture<'a, Arc<dyn nazo_persistence::AdminProvisionStore>>;
 }
 
+/// KV/transient-state lifecycle supplied independently from persistence.
+///
+/// Implementations own backend configuration, connection topology,
+/// namespace/epoch policy, and tenant binding. They return semantic state
+/// capabilities rather than a generic key/value client.
+pub trait TransientStateLauncher: Send + Sync {
+    fn server_config_extension(&self) -> crate::config::ServerConfigExtension;
+
+    fn server_bindings<'a>(
+        &'a self,
+        config: &'a ConfigSource,
+        deployment_id: &'a str,
+        tenant_id: nazo_identity::TenantId,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerTransientStateBindings>;
+}
+
 pub async fn run(
     args: impl IntoIterator<Item = String>,
-    launcher: Arc<dyn PersistenceLauncher>,
+    persistence: Arc<dyn PersistenceLauncher>,
+    transient_state: Arc<dyn TransientStateLauncher>,
 ) -> anyhow::Result<()> {
+    crate::config::install_server_config_extension(transient_state.server_config_extension())?;
     let args = args.into_iter().collect::<Vec<_>>();
     let usage = usage_for_args(&args);
     match Command::parse(args)? {
@@ -68,13 +86,13 @@ pub async fn run(
             println!("{usage}");
             Ok(())
         }
-        Command::Server => run_server(launcher.as_ref()).await,
+        Command::Server => run_server(persistence.as_ref(), transient_state.as_ref()).await,
         Command::OperatorTask => {
             let config = ConfigSource::load_for_migrations()?;
-            let persistence = launcher.operator_persistence(&config).await?;
-            crate::operator_task::run(persistence).await
+            let operator_persistence = persistence.operator_persistence(&config).await?;
+            crate::operator_task::run(operator_persistence).await
         }
-        Command::AuditAnchorWorker => run_audit_anchor_worker(launcher.as_ref()).await,
+        Command::AuditAnchorWorker => run_audit_anchor_worker(persistence.as_ref()).await,
         Command::ReleaseIdentity => {
             println!(
                 "{}",
@@ -84,14 +102,14 @@ pub async fn run(
         }
         Command::Migrate => {
             let config = ConfigSource::load_for_migrations()?;
-            launcher
+            persistence
                 .operator_persistence(&config)
                 .await?
                 .run_migrations()
                 .await?;
             Ok(())
         }
-        Command::AdminProvision => run_admin_provision(launcher.as_ref()).await,
+        Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
     }
 }
 
@@ -283,8 +301,11 @@ async fn run_audit_anchor_worker(launcher: &dyn PersistenceLauncher) -> anyhow::
     }
 }
 
-async fn run_server(launcher: &dyn PersistenceLauncher) -> anyhow::Result<()> {
-    match crate::config::prepare_server_config(launcher.default_database_url())? {
+async fn run_server(
+    persistence: &dyn PersistenceLauncher,
+    transient_state: &dyn TransientStateLauncher,
+) -> anyhow::Result<()> {
+    match crate::config::prepare_server_config(persistence.default_database_url())? {
         ServerConfigPreparation::Ready => {}
         ServerConfigPreparation::Created(path) => {
             eprintln!(
@@ -294,8 +315,8 @@ async fn run_server(launcher: &dyn PersistenceLauncher) -> anyhow::Result<()> {
         }
     }
     let config = ConfigSource::load()?;
-    let bindings = launcher.server_bindings(&config).await?;
-    crate::bootstrap::run(config, bindings).await
+    let bindings = persistence.server_bindings(&config).await?;
+    crate::bootstrap::run(config, bindings, transient_state).await
 }
 
 #[derive(Debug, Eq, PartialEq)]

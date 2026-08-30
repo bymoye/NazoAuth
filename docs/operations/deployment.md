@@ -14,15 +14,26 @@ Requirements:
 From the repository root:
 
 ```sh
+export NAZOAUTH_POSTGRES_PASSWORD='replace-with-a-unique-runtime-password'
+export NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD='replace-with-a-different-lifecycle-password'
+export NAZOAUTH_VALKEY_PASSWORD='replace-with-a-unique-valkey-password'
+export NAZOAUTH_VALKEY_STATE_EPOCH='replace-with-a-new-uuid'
 docker compose up -d --build
 docker compose ps
 ```
 
-Compose bakes the secret initializer and safe default configuration into images
-through the build context, so the Docker daemon does not need direct access to
-the CLI host's absolute source paths. Do not add a manual secret initialization
-step when using a remote Docker context or a containerized Web IDE. To change
-both the host port and the public origin seen by browsers, run:
+Replace every placeholder before starting Compose. Passwords are embedded in
+connection URLs, so restrict them to RFC 3986 unreserved characters
+(`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, and `~`). Use a distinct lifecycle
+password: the lifecycle role owns migrations, while the server connects as the
+non-superuser runtime role. Compose passes `DATABASE_URL` and `VALKEY_URL`
+directly to NazoAuth; it does not create application-specific URL or password
+files. The PostgreSQL image creates the runtime role only when initializing a
+new `postgres_data` volume, so changing these variables does not rotate an
+existing database's credentials.
+
+To change both the host port and the public origin seen by browsers, keep the
+four variables above exported and run:
 
 ```sh
 NAZOAUTH_PORT=443 \
@@ -47,13 +58,10 @@ Replace `<exact-ingress-peer-cidr>` with the address NazoAuth observes for the
 TLS terminator. The Compose path is a trusted-proxy deployment; it does not
 mount the server certificate and client-CA files required by direct TLS.
 
-Compose generates private PostgreSQL and Valkey credentials in a named volume,
-starts both services, and uses a short-lived development operator identity to
-run the same signed `nazoauth operator-task` migration entry point before the
-server accepts traffic. This identity is deliberately not a production trust
-root. The task identifies its local automation actor as `docker-compose`; its
-signed operation binds directly to the candidate image digest and does not
-require a Git commit or CI build identity.
+Compose starts PostgreSQL and Valkey with the explicitly supplied credentials,
+runs migrations through the lifecycle PostgreSQL role, and then starts the
+server with the separate runtime role. Migration startup depends only on
+PostgreSQL; Valkey readiness is required only by the server.
 Open:
 
 - `http://127.0.0.1:8000/health` for dependency readiness
@@ -64,7 +72,7 @@ The first source build requires network access to download Rust dependencies.
 Later builds reuse the local container cache.
 
 The default is a loopback-only evaluation deployment. PostgreSQL, Valkey, and
-application state—including signing keys, avatars, generated secrets,
+application state—including signing keys, avatars, generated application secrets,
 administrator-provisioning receipts, and the UI release cache—use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
@@ -220,7 +228,9 @@ migrations may be forward-only.
 The bundled topology is a single-node deployment. Before relying on it for
 production:
 
-- back up Compose-generated database, Valkey, and application secrets or use an external secret manager;
+- back up the Compose database, Valkey state, and generated application secrets;
+- retain the explicitly configured PostgreSQL and Valkey credentials in an
+  appropriate secret manager;
 - define backup and restore procedures;
 - monitor PostgreSQL, Valkey, disk usage, and `/health`; use `/live` only for
   process restart decisions;

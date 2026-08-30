@@ -22,6 +22,7 @@ use fred::prelude::{
 };
 use nazo_http_actix::IpCidr;
 use serde_json::Value;
+use std::sync::Arc;
 use uuid::Uuid;
 
 async fn par(fixture: &ParTestFixture, req: HttpRequest, body: Bytes) -> HttpResponse {
@@ -308,13 +309,13 @@ impl ParTestFixture {
                     database.clone(),
                     settings.tenant.context.tenant_id.as_uuid(),
                 ),
-                nazo_valkey::AuthorizationStateAdapter::new(&connection),
+                std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
                 keyset.clone(),
             ),
             AuthorizationHttpConfig::from(&settings),
-            AdminSessionHandles::new(
-                nazo_valkey::SessionStore::new(&connection),
-                nazo_postgres::UserRepository::new(database.clone()),
+            AdminSessionHandles::from_port(
+                Arc::new(nazo_valkey::SessionStore::new(&connection)),
+                Arc::new(nazo_postgres::UserRepository::new(database.clone())),
                 settings.tenant.context.tenant_id,
                 crate::http::sessions::SessionHttpConfig::new(
                     &session.session_cookie_name,

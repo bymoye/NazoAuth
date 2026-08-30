@@ -1,0 +1,33 @@
+[package]
+name = "nazoauth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "nazoauth"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+anyhow.workspace = true
+nazo-oauth-server.workspace = true
+nazo-oauth-server-postgres.workspace = true
+nazo-oauth-server-valkey.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+base64.workspace = true
+chrono.workspace = true
+diesel = { workspace = true, features = ["postgres_backend"] }
+diesel-async = { workspace = true, features = ["postgres"] }
+ed25519-dalek.workspace = true
+nazo-operator-protocol.workspace = true
+nazo-postgres.workspace = true
+rand.workspace = true
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true

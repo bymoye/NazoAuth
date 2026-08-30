@@ -214,12 +214,16 @@ async fn operations_with_inputs_and_attestation(
             nazo_persistence::TokenIssuanceResponseKeyRing::new("unit-current", [0x42; 32], None)
                 .expect("response key ring fixture should be valid"),
         ),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&valkey_connection),
+        Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &valkey_connection,
+        )),
         keyset.clone(),
     ));
     let authorization = Arc::new(ServerAuthorizationService::new(
         nazo_postgres::AuthorizationFlowRepository::new(pool.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&valkey_connection),
+        Arc::new(nazo_valkey::AuthorizationStateAdapter::new(
+            &valkey_connection,
+        )),
         keyset.clone(),
     ));
     let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();

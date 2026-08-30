@@ -121,6 +121,20 @@ fn identity_record(stored: StoredDelivery) -> nazo_identity::ports::DeliveryReco
 }
 
 impl nazo_identity::ports::DeliveryStorePort for DeliveryStore {
+    fn store<'a>(
+        &'a self,
+        user_id: UserId,
+        token: &'a str,
+        payload: &'a Value,
+        ttl_seconds: u64,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, ()> {
+        Box::pin(async move {
+            DeliveryStore::store(self, user_id, token, payload, ttl_seconds)
+                .await
+                .map_err(crate::identity_repository_error)
+        })
+    }
+
     fn load<'a>(
         &'a self,
         user_id: UserId,

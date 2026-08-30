@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use actix_web::HttpRequest;
-use nazo_auth::{Claims, OAuthClient, token_audience_contains};
+use nazo_auth::{Claims, DpopStateStorePort, OAuthClient, token_audience_contains};
 use nazo_http_actix::{
     AccessTokenAuthScheme, UserinfoDpopError, UserinfoError, UserinfoFuture, UserinfoOperations,
     UserinfoRepresentation, UserinfoSuccess,
@@ -56,7 +56,7 @@ impl UserinfoConfig {
 /// this handle only owns DPoP replay state, response signing, and focused policy.
 #[derive(Clone)]
 pub(crate) struct UserinfoHandles {
-    replay: nazo_valkey::ReplayStore,
+    dpop_state: Arc<dyn DpopStateStorePort>,
     keys: KeyManager,
     config: UserinfoConfig,
 }
@@ -312,12 +312,12 @@ fn map_dpop_error(error: DpopError) -> UserinfoError {
 
 impl UserinfoHandles {
     pub(crate) fn new(
-        replay: nazo_valkey::ReplayStore,
+        dpop_state: Arc<dyn DpopStateStorePort>,
         keys: KeyManager,
         config: UserinfoConfig,
     ) -> Self {
         Self {
-            replay,
+            dpop_state,
             keys,
             config,
         }
@@ -338,7 +338,7 @@ impl UserinfoHandles {
         expected_jkt: Option<&str>,
     ) -> Result<Option<String>, DpopError> {
         validate_dpop_proof_with_store(
-            &self.replay,
+            self.dpop_state.as_ref(),
             self.issuer(),
             &self.config.mtls_endpoint_base_url,
             self.config.dpop_nonce_policy,
@@ -350,7 +350,7 @@ impl UserinfoHandles {
     }
 
     pub(crate) async fn issue_dpop_nonce(&self) -> Result<String, DpopError> {
-        crate::http::dpop::issue_dpop_nonce_with_store(&self.replay).await
+        crate::http::dpop::issue_dpop_nonce_with_store(self.dpop_state.as_ref()).await
     }
 
     pub(crate) fn request_mtls_thumbprint(&self, req: &HttpRequest) -> Option<String> {

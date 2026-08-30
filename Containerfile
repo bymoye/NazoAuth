@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=nazoauth-cargo-registry,target=/usr/local/cargo/regist
     --mount=type=cache,id=nazoauth-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=nazoauth-target,target=/app/target,sharing=locked \
     cargo build --release --locked \
-      --package nazo-oauth-server-postgres --bin nazoauth \
+      --package nazoauth --bin nazoauth \
     && install -Dm755 target/release/nazoauth /out/nazoauth
 
 FROM docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base
@@ -55,11 +55,9 @@ FROM runtime AS development-runtime
 
 COPY --from=product-builder /app/.env.yaml.example /app/.env.yaml
 
-FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS compose-secrets-init
+FROM docker.io/library/postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941 AS compose-postgres
 
-COPY --chmod=0555 deploy/compose/initialize-secrets.sh /usr/local/libexec/nazoauth-initialize-secrets.sh
-
-ENTRYPOINT ["/bin/sh", "/usr/local/libexec/nazoauth-initialize-secrets.sh"]
+COPY --chmod=0555 deploy/compose/initialize-postgres.sh /docker-entrypoint-initdb.d/initialize-nazoauth-runtime.sh
 
 FROM development-runtime AS perf-runtime
 

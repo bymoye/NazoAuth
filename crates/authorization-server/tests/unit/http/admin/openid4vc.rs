@@ -165,12 +165,16 @@ impl LiveOpenid4vcAdminFixture {
         });
         let token_service = Arc::new(ServerTokenService::new(
             crate::test_support::token_issuance_repository(diesel_db.clone()),
-            nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+            Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+                &state.valkey_connection(),
+            )),
             key_manager.clone(),
         ));
         let authorization = Arc::new(ServerAuthorizationService::new(
             nazo_postgres::AuthorizationFlowRepository::new(diesel_db.clone(), DEFAULT_TENANT_ID),
-            nazo_valkey::AuthorizationStateAdapter::new(&state.valkey_connection()),
+            Arc::new(nazo_valkey::AuthorizationStateAdapter::new(
+                &state.valkey_connection(),
+            )),
             key_manager.clone(),
         ));
         let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
@@ -282,9 +286,13 @@ impl LiveOpenid4vcAdminFixture {
 
     fn sessions(&self) -> Data<AdminSessionHandles> {
         let session = &self.state.settings.session;
-        Data::new(AdminSessionHandles::new(
-            nazo_valkey::SessionStore::new(&self.state.valkey_connection()),
-            nazo_postgres::UserRepository::new(self.state.diesel_db.clone()),
+        Data::new(AdminSessionHandles::from_port(
+            Arc::new(nazo_valkey::SessionStore::new(
+                &self.state.valkey_connection(),
+            )),
+            Arc::new(nazo_postgres::UserRepository::new(
+                self.state.diesel_db.clone(),
+            )),
             self.state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
@@ -326,7 +334,9 @@ impl LiveOpenid4vcAdminFixture {
         settings.modules.enable_openid4vci_issuer = enabled;
         let token_service = Arc::new(ServerTokenService::new(
             crate::test_support::token_issuance_repository(self.state.diesel_db.clone()),
-            nazo_valkey::TokenIssuanceStateAdapter::new(&self.state.valkey_connection()),
+            Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+                &self.state.valkey_connection(),
+            )),
             self.state.keyset.clone(),
         ));
         let authorization = Arc::new(ServerAuthorizationService::new(
@@ -334,7 +344,9 @@ impl LiveOpenid4vcAdminFixture {
                 self.state.diesel_db.clone(),
                 DEFAULT_TENANT_ID,
             ),
-            nazo_valkey::AuthorizationStateAdapter::new(&self.state.valkey_connection()),
+            Arc::new(nazo_valkey::AuthorizationStateAdapter::new(
+                &self.state.valkey_connection(),
+            )),
             self.state.keyset.clone(),
         ));
         let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();

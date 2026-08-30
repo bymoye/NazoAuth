@@ -48,7 +48,7 @@ where
 
 /// Owns the Actix worker factory, middleware, route registration, and
 /// listener setup.  All application data is assembled before entering this
-/// function so worker creation cannot repeat database/Valkey initialization.
+/// function so worker creation cannot repeat persistence/provider initialization.
 pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
     let ServiceAssembly {
         startup,

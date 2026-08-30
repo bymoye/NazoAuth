@@ -97,6 +97,45 @@ pub trait PasskeyCeremonyPort: Send + Sync {
     ) -> RepositoryFuture<'a, Option<crate::passkey::StoredPasskeyAuthentication>>;
 }
 
+impl<T> PasskeyCeremonyPort for std::sync::Arc<T>
+where
+    T: PasskeyCeremonyPort + ?Sized,
+{
+    fn store_registration<'a>(
+        &'a self,
+        ceremony_id: &'a str,
+        ceremony: &'a crate::passkey::StoredPasskeyRegistration,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref()
+            .store_registration(ceremony_id, ceremony, ttl_seconds)
+    }
+
+    fn take_registration<'a>(
+        &'a self,
+        ceremony_id: &'a str,
+    ) -> RepositoryFuture<'a, Option<crate::passkey::StoredPasskeyRegistration>> {
+        self.as_ref().take_registration(ceremony_id)
+    }
+
+    fn store_authentication<'a>(
+        &'a self,
+        ceremony_id: &'a str,
+        ceremony: &'a crate::passkey::StoredPasskeyAuthentication,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref()
+            .store_authentication(ceremony_id, ceremony, ttl_seconds)
+    }
+
+    fn take_authentication<'a>(
+        &'a self,
+        ceremony_id: &'a str,
+    ) -> RepositoryFuture<'a, Option<crate::passkey::StoredPasskeyAuthentication>> {
+        self.as_ref().take_authentication(ceremony_id)
+    }
+}
+
 pub trait PasskeyAuditPort: Send + Sync {
     fn record(&self, event: crate::passkey::PasskeyAuditEvent);
 }

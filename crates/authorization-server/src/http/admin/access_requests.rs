@@ -21,8 +21,8 @@ use nazo_auth::{AdminClientError, CreateClientRequest};
 use nazo_http_actix::{ClientIpConfig, client_ip_with_config};
 use nazo_http_actix::{csrf_error, has_valid_csrf_token_for_cookies};
 use nazo_http_actix::{json_response, oauth_error};
+use nazo_identity::ports::DeliveryStorePort;
 use nazo_persistence::AdminAccessRequestStore;
-use nazo_valkey::DeliveryStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ impl AdminAccessRequestConfig {
 
 type ApprovalDependencies = (
     Data<dyn AdminAccessRequestStore>,
-    Data<DeliveryStore>,
+    Data<dyn DeliveryStorePort>,
     Data<ServerAdminClientService>,
     Data<AdminAccessRequestConfig>,
     Data<ClientIpConfig>,
@@ -179,7 +179,7 @@ pub(crate) async fn admin_approve_access_request(
     {
         Ok(Some(row)) if row.status == nazo_identity::AccessRequestStatus::Pending => row,
         Ok(Some(row)) if row.status == nazo_identity::AccessRequestStatus::Approved => {
-            match resume_staged_client_delivery(&delivery_store, &config, &row).await {
+            match resume_staged_client_delivery(delivery_store.get_ref(), &config, &row).await {
                 Ok(true) => return json_response(access_request_json(row)),
                 Ok(false) => return access_request_already_approved_response(),
                 Err(error) => {
@@ -325,7 +325,7 @@ pub(crate) async fn admin_approve_access_request(
 }
 
 async fn resume_staged_client_delivery(
-    store: &DeliveryStore,
+    store: &dyn DeliveryStorePort,
     config: &AdminAccessRequestConfig,
     request: &nazo_identity::AccessRequest,
 ) -> anyhow::Result<bool> {
@@ -335,10 +335,10 @@ async fn resume_staged_client_delivery(
     let user = request.user_id;
     let user_id = user.as_uuid();
     let token = access_delivery_token(&config.client_secret_pepper, user_id, request.id);
-    let Some(stored) = DeliveryStore::load(store, user, &token).await? else {
+    let Some(stored) = store.load(user, &token).await? else {
         return Ok(false);
     };
-    let mut payload = stored.value().clone();
+    let mut payload = stored.value;
     if payload["delivery_state"] != "staged"
         || payload["request_id"] != json!(request.id)
         || payload["user_id"] != json!(user_id)

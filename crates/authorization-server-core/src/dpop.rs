@@ -74,6 +74,28 @@ pub trait DpopStateStorePort: Send + Sync {
     fn validate_nonce<'a>(&'a self, nonce: &'a str) -> DpopStateFuture<'a, bool>;
 }
 
+impl<T> DpopStateStorePort for std::sync::Arc<T>
+where
+    T: DpopStateStorePort + ?Sized,
+{
+    fn consume_replay<'a>(
+        &'a self,
+        jkt: &'a str,
+        jti: &'a str,
+        ttl_seconds: u64,
+    ) -> DpopStateFuture<'a, bool> {
+        self.as_ref().consume_replay(jkt, jti, ttl_seconds)
+    }
+
+    fn issue_nonce<'a>(&'a self, nonce: &'a str, ttl_seconds: u64) -> DpopStateFuture<'a, ()> {
+        self.as_ref().issue_nonce(nonce, ttl_seconds)
+    }
+
+    fn validate_nonce<'a>(&'a self, nonce: &'a str) -> DpopStateFuture<'a, bool> {
+        self.as_ref().validate_nonce(nonce)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedDpopProof {
     pub jkt: String,

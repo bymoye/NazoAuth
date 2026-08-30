@@ -207,8 +207,7 @@ async fn run_recovery_invalidation(
     persistence: &dyn OperatorPersistence,
 ) -> Result<ControlResultData, SideEffectError> {
     let config = crate::config::ConfigSource::load_for_migrations()?;
-    let configured_epoch = Uuid::parse_str(&config.required_string("VALKEY_STATE_EPOCH")?)
-        .context("VALKEY_STATE_EPOCH must be a UUID")?;
+    let configured_epoch = config.transient_state_epoch()?;
     if configured_epoch.is_nil() || configured_epoch.to_string() != state_epoch {
         return Err(anyhow::anyhow!(
             "recovery operation state epoch does not match the running candidate"

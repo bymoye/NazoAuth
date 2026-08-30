@@ -275,7 +275,7 @@ mkdir -p runtime/codecov/avatars runtime/codecov/keys \
 export LLVM_PROFILE_FILE="$(profile_path 'cargo-%p-%m.profraw')"
 cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
-cargo build --locked --workspace --all-features --bin nazoauth
+cargo build --locked --workspace --all-features --package nazoauth --bin nazoauth
 
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
 LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$SERVER_BIN" server &

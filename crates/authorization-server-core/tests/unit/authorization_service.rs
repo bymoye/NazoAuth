@@ -423,6 +423,13 @@ fn service(
 }
 
 #[test]
+fn arc_trait_object_is_an_authorization_state_store() {
+    fn assert_state_store<T: AuthorizationStateStorePort>() {}
+
+    assert_state_store::<Arc<dyn AuthorizationStateStorePort>>();
+}
+
+#[test]
 fn ciba_request_object_replay_is_delegated_to_the_state_store() {
     let accepted = futures_executor::block_on(
         service(FakeRepository::default(), FakeStore::default()).consume_ciba_request_object(

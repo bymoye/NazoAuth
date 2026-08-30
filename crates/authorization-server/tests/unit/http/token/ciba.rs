@@ -360,11 +360,11 @@ async fn call_ciba_token_with_modules_for_test(
     modules: nazo_runtime_modules::ActiveModuleSnapshot,
 ) -> HttpResponse {
     let connection = state.valkey_connection();
-    let ciba_service = ServerCibaService::new(CibaStore::new(&connection));
+    let ciba_service = ServerCibaService::new(std::sync::Arc::new(CibaStore::new(&connection)));
     let users = nazo_postgres::UserRepository::new(state.diesel_db.clone());
     let token_service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     let issuance_config = TokenIssuanceConfig::from(state.settings.as_ref());
@@ -516,7 +516,7 @@ async fn ciba_backchannel_fails_closed_before_client_state_access() {
                 super::super::issue::test_support::test_authorization_service(&state),
             ))
             .app_data(actix_web::web::Data::new(ServerCibaService::new(
-                CibaStore::new(&state.valkey_connection()),
+                std::sync::Arc::new(CibaStore::new(&state.valkey_connection())),
             )))
             .app_data(actix_web::web::Data::from(
                 Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()))
@@ -590,8 +590,8 @@ async fn ciba_backchannel_validates_request_object_and_creates_bound_state() {
         &settings,
     )
     .expect("CIBA runtime registry should initialize");
-    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(CibaStore::new(
-        &state.valkey_connection(),
+    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(std::sync::Arc::new(
+        CibaStore::new(&state.valkey_connection()),
     )));
     let app = actix_web::test::init_service(
         actix_web::App::new()
@@ -687,7 +687,7 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
                 super::super::issue::test_support::test_authorization_service(&state),
             ))
             .app_data(actix_web::web::Data::new(ServerCibaService::new(
-                CibaStore::new(&state.valkey_connection()),
+                std::sync::Arc::new(CibaStore::new(&state.valkey_connection())),
             )))
             .app_data(actix_web::web::Data::from(
                 Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()))
@@ -1712,8 +1712,8 @@ async fn ciba_verification_loads_the_bound_user_and_rejects_a_session_mismatch()
         &settings,
     )
     .expect("CIBA runtime registry should initialize");
-    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(CibaStore::new(
-        &state.valkey_connection(),
+    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(std::sync::Arc::new(
+        CibaStore::new(&state.valkey_connection()),
     )));
     let app = actix_web::test::init_service(
         actix_web::App::new()
@@ -1773,7 +1773,7 @@ async fn ciba_browser_decision_rejects_invalid_csrf_before_session_lookup() {
     let app = actix_web::test::init_service(
         actix_web::App::new()
             .app_data(actix_web::web::Data::new(ServerCibaService::new(
-                CibaStore::new(&state.valkey_connection()),
+                std::sync::Arc::new(CibaStore::new(&state.valkey_connection())),
             )))
             .app_data(actix_web::web::Data::new(
                 crate::http::sessions::test_support::admin_session_handles(&state),
@@ -1832,8 +1832,8 @@ async fn ciba_browser_decision_commits_user_context_and_rejects_replay() {
         &settings,
     )
     .expect("CIBA runtime registry should initialize");
-    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(CibaStore::new(
-        &state.valkey_connection(),
+    let ciba_service = actix_web::web::Data::new(ServerCibaService::new(std::sync::Arc::new(
+        CibaStore::new(&state.valkey_connection()),
     )));
     let app = actix_web::test::init_service(
         actix_web::App::new()
@@ -2743,3 +2743,4 @@ fn ciba_token_profile_covers_fapi2_client_and_sender_constraints() {
     validate_ciba_token_request_profile(&client, "private_key_jwt")
         .expect("FAPI2 CIBA should accept constrained private_key_jwt clients");
 }
+use nazo_valkey::CibaStore;

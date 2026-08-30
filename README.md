@@ -53,7 +53,8 @@ path. The live demo is available at <https://auth.nazo.run/ui/auth>.
 | Item | Value |
 | --- | --- |
 | Application package | `nazo-oauth-server` (database-neutral library) |
-| PostgreSQL executable | `nazo-oauth-server-postgres` / `nazoauth` |
+| Default distribution package | `nazoauth` (PostgreSQL + Valkey) |
+| Storage adapters | `nazo-oauth-server-postgres`, `nazo-oauth-server-valkey` |
 | Workspace version | `0.2.3` |
 | License | AGPL-3.0-or-later |
 | Language | Rust 2024 |

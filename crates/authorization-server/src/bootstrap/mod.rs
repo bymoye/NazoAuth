@@ -11,6 +11,7 @@ mod profile_services;
 mod registration_services;
 pub(crate) mod routes;
 mod startup;
+mod transient_state;
 mod transport;
 mod ui_release;
 pub(crate) use authentication_services::{
@@ -31,6 +32,11 @@ pub(crate) use registration_services::{LocalRegistrationService, RegistrationSec
 pub use startup::run;
 #[cfg(test)]
 pub(crate) use startup::{load_revocation_policy, read_revocation_snapshot};
+pub use transient_state::{
+    CibaPingDelivery, CibaPingDeliveryPort, CibaPingFinishOutcome, CibaPingFinishResult,
+    ServerTransientStateBindings, ServerTransientStateProvider, TransientStateError,
+    TransientStateFuture, TransientStateHealthPort,
+};
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

@@ -1,11 +1,21 @@
-use std::time::Duration;
-
 use actix_web::{body::to_bytes, http::StatusCode, web::Data};
-use fred::prelude::{
-    Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
-};
 
 use super::*;
+
+struct TestTransientStateHealth(bool);
+
+impl crate::bootstrap::TransientStateHealthPort for TestTransientStateHealth {
+    fn check(&self) -> crate::bootstrap::TransientStateFuture<'_, ()> {
+        let healthy = self.0;
+        Box::pin(async move {
+            if healthy {
+                Ok(())
+            } else {
+                Err(crate::bootstrap::TransientStateError::Unavailable)
+            }
+        })
+    }
+}
 
 #[actix_web::test]
 async fn lifecycle_documents_are_closed() {
@@ -39,7 +49,7 @@ async fn readiness_reports_each_dependency_without_leaking_errors() {
             if database { "up" } else { "down" }
         );
         assert_eq!(
-            body["checks"]["valkey"]["status"],
+            body["checks"]["transient_state"]["status"],
             if valkey { "up" } else { "down" }
         );
     }
@@ -59,22 +69,9 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
         1,
     )
     .unwrap();
-    let mut builder = ValkeyBuilder::from_config(
-        ValkeyConfig::from_url("redis://127.0.0.1:1").expect("test Valkey URL should parse"),
-    );
-    builder.with_performance_config(|performance: &mut PerformanceConfig| {
-        performance.default_command_timeout = Duration::from_millis(50);
-    });
-    builder.with_connection_config(|connection: &mut ConnectionConfig| {
-        connection.connection_timeout = Duration::from_millis(50);
-        connection.internal_command_timeout = Duration::from_millis(50);
-        connection.max_command_attempts = 1;
-    });
-    let client = builder.build().expect("test Valkey client should build");
-    let connection = nazo_valkey::test_support::scoped_connection(client);
     let dependencies = Data::new(ReadinessDependencies::new(
         Arc::new(nazo_postgres::PostgresHealthCheck::new(database)),
-        connection,
+        Arc::new(TestTransientStateHealth(false)),
         nazo_key_management::KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA),
     ));
 
@@ -85,7 +82,7 @@ async fn readiness_probes_both_unavailable_dependencies_and_returns_only_closed_
         serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
     assert_eq!(body["status"], "not_ready");
     assert_eq!(body["checks"]["database"]["status"], "down");
-    assert_eq!(body["checks"]["valkey"]["status"], "down");
+    assert_eq!(body["checks"]["transient_state"]["status"], "down");
     assert_eq!(body["checks"]["signing_keys"]["status"], "up");
     assert_eq!(body.as_object().unwrap().len(), 2);
 }

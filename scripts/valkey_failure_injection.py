@@ -41,7 +41,7 @@ def main() -> int:
         "checks": {
             "database": {"status": "up"},
             "signing_keys": {"status": "up"},
-            "valkey": {"status": "down"},
+            "transient_state": {"status": "down"},
         },
     }:
         fail("health_without_valkey", health_payload)

@@ -1,5 +1,8 @@
 use super::*;
-use nazo_auth::DynamicRegistrationSecretPort;
+use nazo_auth::{
+    DynamicRegistrationSecretPort, RequestRateLimitBucket, RequestRateLimitError,
+    RequestRateLimitFuture, RequestRateLimitPort,
+};
 use nazo_http_actix::{DynamicRegistrationRateLimitError, DynamicRegistrationRequestGuard};
 
 use crate::{
@@ -8,9 +11,23 @@ use crate::{
     settings::Settings,
 };
 
-use fred::prelude::{
-    Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
-};
+#[derive(Clone, Copy)]
+struct FakeRateLimiter(Result<u64, RequestRateLimitError>);
+
+impl RequestRateLimitPort for FakeRateLimiter {
+    fn increment<'a>(
+        &'a self,
+        bucket: RequestRateLimitBucket,
+        _subject: &'a str,
+        window_seconds: u64,
+    ) -> RequestRateLimitFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(bucket, RequestRateLimitBucket::TokenManagement);
+            assert!(window_seconds > 0);
+            self.0
+        })
+    }
+}
 
 #[test]
 fn dynamic_registration_secret_port_hashes_and_compares_without_plaintext_reuse() {
@@ -65,9 +82,10 @@ fn dynamic_registration_config_copies_security_and_rate_limit_settings() {
     assert_eq!(dynamic.trusted_proxy_cidrs.len(), 1);
 }
 
-fn unavailable_dynamic_registration_guard(
+fn dynamic_registration_guard(
     settings: &Settings,
     enabled: bool,
+    rate_limit_result: Result<u64, RequestRateLimitError>,
 ) -> ServerDynamicRegistrationRequestGuard {
     let pool = nazo_postgres::create_pool(
         "postgres://dynamic-registration-test:dynamic-registration-test@127.0.0.1:1/nazo"
@@ -82,21 +100,8 @@ fn unavailable_dynamic_registration_guard(
     let runtime =
         runtime_module_registry_with_modules_for_test(pool.clone(), settings, active_modules)
             .expect("runtime module fixture should build");
-    let mut builder = ValkeyBuilder::from_config(
-        ValkeyConfig::from_url("redis://127.0.0.1:1").expect("unavailable Valkey URL"),
-    );
-    builder.with_performance_config(|performance: &mut PerformanceConfig| {
-        performance.default_command_timeout = std::time::Duration::from_millis(100);
-    });
-    builder.with_connection_config(|connection: &mut ConnectionConfig| {
-        connection.connection_timeout = std::time::Duration::from_millis(100);
-        connection.internal_command_timeout = std::time::Duration::from_millis(100);
-        connection.max_command_attempts = 1;
-    });
-    let valkey = builder.build().expect("Valkey client should build");
-    let valkey = nazo_valkey::test_support::scoped_connection(valkey);
     ServerDynamicRegistrationRequestGuard::new(
-        nazo_valkey::RateLimitStore::new(&valkey),
+        Arc::new(FakeRateLimiter(rate_limit_result)),
         &DynamicRegistrationConfig::from(settings),
         runtime,
     )
@@ -109,7 +114,7 @@ async fn dynamic_registration_guard_fails_closed_for_unavailable_dependencies() 
         "initial-token",
     )]);
     let settings = Settings::from_config(&config).expect("enabled dynamic registration settings");
-    let guard = unavailable_dynamic_registration_guard(&settings, true);
+    let guard = dynamic_registration_guard(&settings, true, Err(RequestRateLimitError));
 
     assert!(guard.accepts_new_requests());
     assert_eq!(
@@ -121,7 +126,24 @@ async fn dynamic_registration_guard_fails_closed_for_unavailable_dependencies() 
 #[test]
 fn dynamic_registration_guard_rejects_new_requests_when_module_is_disabled() {
     let settings = Settings::from_config(&ConfigSource::default()).expect("settings");
-    let guard = unavailable_dynamic_registration_guard(&settings, false);
+    let guard = dynamic_registration_guard(&settings, false, Ok(1));
 
     assert!(!guard.accepts_new_requests());
+}
+
+#[tokio::test]
+async fn dynamic_registration_guard_preserves_fixed_window_threshold() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS", "1"),
+        ("RATE_LIMIT_WINDOW_SECONDS", "37"),
+    ]);
+    let settings = Settings::from_config(&config).expect("dynamic registration settings");
+    let guard = dynamic_registration_guard(&settings, true, Ok(2));
+
+    assert_eq!(
+        guard.enforce_rate_limit("203.0.113.77").await,
+        Err(DynamicRegistrationRateLimitError::Limited {
+            retry_after_seconds: 37,
+        })
+    );
 }

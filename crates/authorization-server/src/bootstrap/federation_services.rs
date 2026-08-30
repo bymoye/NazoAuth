@@ -94,8 +94,8 @@ impl nazo_identity::ports::FederationAuditPort for TracingFederationAudit {
 }
 
 pub(crate) type LocalFederationService = nazo_identity::FederationService<
-    nazo_valkey::AuthenticationStore,
+    std::sync::Arc<dyn nazo_identity::ports::FederationStatePort>,
     FederationBootstrapPasswordHasher,
-    nazo_valkey::SessionStore,
+    std::sync::Arc<dyn nazo_identity::ports::LoginSessionPort>,
     TracingFederationAudit,
 >;

@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -100,6 +100,37 @@ impl std::fmt::Display for CibaStatePortError {
 
 impl std::error::Error for CibaStatePortError {}
 
+/// Opaque compare-and-swap token for a persisted CIBA request.
+///
+/// The comparison value is intentionally backend-neutral. The retention
+/// deadline travels with the same snapshot so an adapter can reject a
+/// replacement that would silently extend or shorten the request lifetime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CibaStateVersion {
+    comparison_token: String,
+    retention_expires_at: i64,
+}
+
+impl CibaStateVersion {
+    #[must_use]
+    pub const fn new(comparison_token: String, retention_expires_at: i64) -> Self {
+        Self {
+            comparison_token,
+            retention_expires_at,
+        }
+    }
+
+    #[must_use]
+    pub fn comparison_token(&self) -> &str {
+        &self.comparison_token
+    }
+
+    #[must_use]
+    pub const fn retention_expires_at(&self) -> i64 {
+        self.retention_expires_at
+    }
+}
+
 #[derive(Debug)]
 pub struct CibaStoredRequest<V> {
     state: CibaRequestState,
@@ -115,6 +146,11 @@ impl<V> CibaStoredRequest<V> {
     #[must_use]
     pub const fn state(&self) -> &CibaRequestState {
         &self.state
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> &V {
+        &self.version
     }
 
     #[must_use]
@@ -184,6 +220,78 @@ pub trait CibaStateStorePort: Send + Sync {
         _authorization_deadline: Option<i64>,
     ) -> CibaStateFuture<'a, CibaAtomicResult> {
         self.delete(auth_req_id, version)
+    }
+}
+
+impl<T> CibaStateStorePort for Arc<T>
+where
+    T: CibaStateStorePort + ?Sized,
+{
+    type Version = T::Version;
+
+    fn load<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+    ) -> CibaStateFuture<'a, Option<CibaStoredRequest<Self::Version>>> {
+        (**self).load(auth_req_id)
+    }
+
+    fn create<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        state: &'a CibaRequestState,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        (**self).create(auth_req_id, state)
+    }
+
+    fn create_with_authorization_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        state: &'a CibaRequestState,
+        authorization_deadline: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        (**self).create_with_authorization_deadline(auth_req_id, state, authorization_deadline)
+    }
+
+    fn replace<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        state: &'a CibaRequestState,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        (**self).replace(auth_req_id, version, state)
+    }
+
+    fn replace_with_authorization_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        state: &'a CibaRequestState,
+        authorization_deadline: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        (**self).replace_with_authorization_deadline(
+            auth_req_id,
+            version,
+            state,
+            authorization_deadline,
+        )
+    }
+
+    fn delete<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        (**self).delete(auth_req_id, version)
+    }
+
+    fn delete_with_authorization_deadline<'a>(
+        &'a self,
+        auth_req_id: &'a str,
+        version: &'a Self::Version,
+        authorization_deadline: Option<i64>,
+    ) -> CibaStateFuture<'a, CibaAtomicResult> {
+        (**self).delete_with_authorization_deadline(auth_req_id, version, authorization_deadline)
     }
 }
 

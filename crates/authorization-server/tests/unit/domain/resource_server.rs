@@ -17,8 +17,41 @@ use nazo_postgres::{DbPool, create_pool, get_conn};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::production::{ServerFapiHttpMessageSignatures, same_key_generation};
+use super::production::{
+    FapiHttpSignatureReplayConsumption, FapiHttpSignatureReplayStore,
+    FapiHttpSignatureReplayStoreError, ServerFapiHttpMessageSignatures, same_key_generation,
+};
 use crate::{config::ConfigSource, settings::Settings};
+
+struct TestFapiHttpSignatureReplayStore(nazo_valkey::ReplayStore);
+
+impl FapiHttpSignatureReplayStore for TestFapiHttpSignatureReplayStore {
+    fn consume<'a>(
+        &'a self,
+        tenant_id: nazo_identity::TenantId,
+        fingerprint: &'a [u8],
+        ttl_seconds: i64,
+    ) -> nazo_http_actix::FapiFuture<
+        'a,
+        Result<FapiHttpSignatureReplayConsumption, FapiHttpSignatureReplayStoreError>,
+    > {
+        Box::pin(async move {
+            let fingerprint = <&[u8; 32]>::try_from(fingerprint)
+                .map_err(|_| FapiHttpSignatureReplayStoreError)?;
+            self.0
+                .consume_fapi_http_signature(tenant_id, fingerprint, ttl_seconds)
+                .await
+                .map(|accepted| {
+                    if accepted {
+                        FapiHttpSignatureReplayConsumption::Accepted
+                    } else {
+                        FapiHttpSignatureReplayConsumption::Replay
+                    }
+                })
+                .map_err(|_| FapiHttpSignatureReplayStoreError)
+        })
+    }
+}
 
 fn database_url_with_search_path(base: &str, schema: &str) -> String {
     let separator = if base.contains('?') { "&" } else { "?" };
@@ -137,9 +170,11 @@ async fn production_signature_verifier_binds_replay_to_the_scoped_client_tenant(
         &settings,
     )
     .expect("test runtime module registry should build");
-    let verifier = ServerFapiHttpMessageSignatures::new(
-        nazo_postgres::OAuthClientRepository::new(pool.clone()),
-        nazo_valkey::ReplayStore::new(&replay_connection),
+    let verifier = ServerFapiHttpMessageSignatures::from_port(
+        Arc::new(nazo_postgres::OAuthClientRepository::new(pool.clone())),
+        Arc::new(TestFapiHttpSignatureReplayStore(
+            nazo_valkey::ReplayStore::new(&replay_connection),
+        )),
         crate::test_support::test_key_manager(),
         runtime_modules,
         60,

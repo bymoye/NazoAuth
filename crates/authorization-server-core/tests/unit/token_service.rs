@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use serde_json::json;
 
 use crate::{Claims, ConfirmationClaims};
 
-use super::{TokenInspection, TokenPortError, access_token_type, validate_sender_constraint};
+use super::{
+    TokenInspection, TokenPortError, TokenStateStorePort, access_token_type,
+    validate_sender_constraint,
+};
 
 fn access_claims(confirmation: Option<ConfirmationClaims>) -> Claims {
     Claims {
@@ -25,6 +30,13 @@ fn access_claims(confirmation: Option<ConfirmationClaims>) -> Claims {
         userinfo_claims: Vec::new(),
         userinfo_claim_requests: Vec::new(),
     }
+}
+
+#[test]
+fn arc_trait_object_is_a_token_state_store() {
+    fn assert_state_store<T: TokenStateStorePort>() {}
+
+    assert_state_store::<Arc<dyn TokenStateStorePort>>();
 }
 
 #[test]

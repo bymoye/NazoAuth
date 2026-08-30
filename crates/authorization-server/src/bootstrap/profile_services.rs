@@ -6,7 +6,7 @@ pub(crate) type AvatarProfileService =
     nazo_identity::AvatarService<crate::adapters::avatar_files::LocalAvatarStorage>;
 
 pub(crate) type ClientAccessProfileService =
-    nazo_identity::ClientAccessService<nazo_valkey::DeliveryStore>;
+    nazo_identity::ClientAccessService<std::sync::Arc<dyn nazo_identity::ports::DeliveryStorePort>>;
 
 pub(crate) type FederationProfileService = nazo_identity::FederationLinksService;
 

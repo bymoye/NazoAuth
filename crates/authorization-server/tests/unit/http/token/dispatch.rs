@@ -35,18 +35,20 @@ pub(crate) async fn token(
 ) -> HttpResponse {
     let service = Data::new(ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     ));
     let connection = state.valkey_connection();
     let authorization_service = Data::new(ServerAuthorizationService::new(
         nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     ));
-    let ciba_service = Data::new(super::super::ciba::ServerCibaService::new(
+    let ciba_service = Data::new(super::super::ciba::ServerCibaService::new(Arc::new(
         nazo_valkey::CibaStore::new(&connection),
-    ));
+    )));
     let ciba_users: Data<dyn nazo_persistence::CibaAccountStore> = Data::from(Arc::new(
         nazo_postgres::UserRepository::new(state.diesel_db.clone()),
     )
@@ -56,7 +58,7 @@ pub(crate) async fn token(
     ));
     let issuance_config = Data::new(TokenIssuanceConfig::from(state.settings.as_ref()));
     let device_service = Data::new(super::super::device::ServerDeviceGrantService::new(
-        nazo_valkey::DeviceStore::new(&connection),
+        Arc::new(nazo_valkey::DeviceStore::new(&connection)),
     ));
     let runtime_modules = Data::from(
         crate::runtime_modules::test_support::runtime_module_registry_for_test(
@@ -123,7 +125,7 @@ fn authorization_service(state: &TestInfrastructure) -> Data<ServerAuthorization
     let connection = state.valkey_connection();
     Data::new(ServerAuthorizationService::new(
         nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     ))
 }
@@ -131,7 +133,9 @@ fn authorization_service(state: &TestInfrastructure) -> Data<ServerAuthorization
 fn token_service(state: &TestInfrastructure) -> Data<ServerTokenService> {
     Data::new(ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     ))
 }
@@ -140,7 +144,7 @@ async fn userinfo(state: Data<TestInfrastructure>, req: HttpRequest, body: Bytes
     let connection = state.valkey_connection();
     let token_service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     let endpoint = Data::new(UserinfoEndpoint::new(Arc::new(

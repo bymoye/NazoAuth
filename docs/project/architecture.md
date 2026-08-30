@@ -35,7 +35,9 @@ package names retain the `nazo-` namespace and do not determine directory names.
 | `http-actix` | `nazo-http-actix` | Actix extraction, request context, CORS, middleware, security headers, protocol response presentation, and Actix-specific integration. It does not query Diesel or Fred and does not construct token claims. |
 | `runtime-capabilities` | `nazo-runtime-modules` | Runtime-controllable protocol capability identifiers, desired and actual lifecycle state, revision rules, immutable active snapshots, dependency checks, disable policy, request leases, and audit event types. It is not a generic plugin or miscellaneous-module crate. |
 | `authorization-server` | `nazo-oauth-server` | Database-neutral authorization-server application library: validates configuration, creates focused services from semantic persistence bindings, starts background tasks, registers static routes, and starts Actix. Ordinary handlers receive only the focused handles they use. |
-| `authorization-server-postgres` | `nazo-oauth-server-postgres` | PostgreSQL composition root and the production `nazoauth` executable. This is the only application package that links `nazo-postgres`. |
+| `authorization-server-postgres` | `nazo-oauth-server-postgres` | PostgreSQL launcher adapter. It binds PostgreSQL repositories to the server persistence ports and has no KV dependency or executable target. |
+| `authorization-server-valkey` | `nazo-oauth-server-valkey` | Valkey launcher adapter. It owns Valkey configuration, connection setup, namespace binding, and transient-state port composition, with no persistent-database dependency. |
+| `nazoauth` | `nazoauth` | Thin aggregate and the only production executable. It selects one persistence launcher and one transient-state launcher without owning either backend's implementation. |
 
 The historical Axum/Tower and tonic adapters are removed. Only Actix transport
 integration is maintained. The generic resource-server core may use the
@@ -59,6 +61,10 @@ http-actix                 -> authorization-server-core, http-signatures, identi
                               resource-server, runtime-capabilities
 authorization-server       -> persistence, domain and transport crates; no database adapter
 authorization-server-postgres -> authorization-server, persistence-postgres
+authorization-server-valkey   -> authorization-server, state-store-valkey
+nazoauth                       -> authorization-server,
+                                  authorization-server-postgres,
+                                  authorization-server-valkey
 
 identity, resource-server, runtime-capabilities and http-signatures
                             -> no other NazoAuth crate

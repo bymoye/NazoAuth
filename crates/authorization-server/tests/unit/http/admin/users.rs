@@ -111,9 +111,9 @@ fn admin_user_dependencies(
     let session = &state.settings.session;
     let endpoint = &state.settings.endpoint;
     (
-        Data::new(AdminSessionHandles::new(
-            nazo_valkey::SessionStore::new(&state.valkey_connection()),
-            UserRepository::new(state.diesel_db.clone()),
+        Data::new(AdminSessionHandles::from_port(
+            Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
+            Arc::new(UserRepository::new(state.diesel_db.clone())),
             state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,

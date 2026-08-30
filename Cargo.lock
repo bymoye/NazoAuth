@@ -2779,23 +2779,27 @@ name = "nazo-oauth-server-postgres"
 version = "0.2.7"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
- "chrono",
- "diesel",
- "diesel-async",
- "ed25519-dalek 3.0.0",
  "nazo-auth",
  "nazo-identity",
  "nazo-oauth-server",
  "nazo-openid4vci",
- "nazo-operator-protocol",
  "nazo-persistence",
  "nazo-postgres",
  "nazo-resource-server",
  "nazo-scim-events",
- "rand 0.10.2",
- "tokio",
  "uuid",
+]
+
+[[package]]
+name = "nazo-oauth-server-valkey"
+version = "0.2.7"
+dependencies = [
+ "anyhow",
+ "nazo-auth",
+ "nazo-identity",
+ "nazo-oauth-server",
+ "nazo-resource-server",
+ "nazo-valkey",
 ]
 
 [[package]]
@@ -2980,6 +2984,26 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "nazoauth"
+version = "0.2.7"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "diesel",
+ "diesel-async",
+ "ed25519-dalek 3.0.0",
+ "nazo-oauth-server",
+ "nazo-oauth-server-postgres",
+ "nazo-oauth-server-valkey",
+ "nazo-operator-protocol",
+ "nazo-postgres",
+ "rand 0.10.2",
+ "tokio",
  "uuid",
 ]
 

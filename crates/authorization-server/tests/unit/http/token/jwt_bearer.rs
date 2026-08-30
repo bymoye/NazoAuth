@@ -43,7 +43,7 @@ pub(crate) async fn token_jwt_bearer(
     let connection = state.valkey_connection();
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     let config = crate::http::token::issue::TokenIssuanceConfig::from(state.settings.as_ref());

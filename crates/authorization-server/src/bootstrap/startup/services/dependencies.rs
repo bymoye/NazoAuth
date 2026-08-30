@@ -37,7 +37,7 @@ pub(super) struct CoreServices {
 pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<CoreServices> {
     let settings = startup.settings.as_ref();
     let persistence = startup.persistence.provider();
-    let valkey_connection = startup.valkey_connection.clone();
+    let transient_state = startup.transient_state.provider();
     let keyset = startup.keyset.clone();
     let runtime_registry = startup.runtime_modules.registry.clone();
     let remote_client_documents = startup.remote_client_documents.clone();
@@ -50,7 +50,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
             runtime_registry.clone(),
         )),
     ));
-    let resource_replay_connection = valkey_connection.clone();
     let resource_server_config = ResourceServerConfig::from(settings);
     tracing::info!(
         dpop_nonce_policy = ?settings.protocol.dpop_nonce_policy,
@@ -58,19 +57,18 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         "loaded DPoP nonce policies"
     );
     let resource_server_http_data = {
-        let replay = nazo_valkey::ReplayStore::new(&resource_replay_connection);
         let authorizer = Arc::new(ServerFapiResourceAuthorizer::from_port(
             resource_server_config.clone(),
             keyset.clone(),
             persistence.access_token_revocations(),
-            replay.clone(),
+            transient_state.protected_resource_dpop_state(),
         ));
         let mtls = Arc::new(ServerFapiMtlsResolver::new(
             resource_server_config.trusted_proxy_cidrs.clone(),
         ));
         let signatures = Arc::new(ServerFapiHttpMessageSignatures::from_port(
             persistence.admin_clients(),
-            replay,
+            transient_state.fapi_http_signature_replay(),
             keyset.clone(),
             runtime_registry.clone(),
             resource_server_config.fapi_http_signature_max_age_seconds,
@@ -88,7 +86,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let dynamic_registration_handles = web::Data::new(dynamic_registration_endpoint(
         dynamic_registration_config,
         persistence.dynamic_registration_clients(),
-        nazo_valkey::RateLimitStore::new(&valkey_connection),
+        transient_state.request_rate_limits(),
         keyset.clone(),
         runtime_registry.clone(),
         remote_client_documents.clone(),
@@ -133,7 +131,7 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     );
     let authorization_service = web::Data::new(ServerAuthorizationService::from_port(
         persistence.authorization_repository(settings.tenant.context.tenant_id.as_uuid()),
-        nazo_valkey::AuthorizationStateAdapter::new(&valkey_connection),
+        transient_state.authorization_state(),
         keyset.clone(),
     ));
     let token_issuance_repository =
@@ -146,15 +144,13 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         })?;
     let token_service = web::Data::new(crate::http::token::ServerTokenService::from_port(
         token_issuance_repository,
-        nazo_valkey::TokenIssuanceStateAdapter::new(&valkey_connection),
+        transient_state.token_state(),
         keyset.clone(),
     ));
-    let ciba_service = web::Data::new(ServerCibaService::new(nazo_valkey::CibaStore::new(
-        &valkey_connection,
-    )));
+    let ciba_service = web::Data::new(ServerCibaService::new(transient_state.ciba_state()));
     #[cfg(not(test))]
     super::super::background::spawn_ciba_ping_worker(
-        &valkey_connection,
+        transient_state.ciba_ping_deliveries(),
         &startup.settings,
         startup.runtime_modules.get_ref(),
     )?;
@@ -163,14 +159,14 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
     let ciba_config = web::Data::new(CibaHttpConfig::from(settings));
     let token_issuance_config = web::Data::new(TokenIssuanceConfig::from(settings));
     let device_service = web::Data::new(ServerDeviceGrantService::new(
-        nazo_valkey::DeviceStore::new(&valkey_connection),
+        transient_state.device_state(),
     ));
     let device_grants: web::Data<dyn nazo_auth::DeviceGrantRepositoryPort> = web::Data::from(
         persistence.device_grant_repository(settings.tenant.context.tenant_id.as_uuid()),
     );
     let device_config = web::Data::new(DeviceHttpConfig::from(settings));
     let userinfo_handles = UserinfoHandles::new(
-        nazo_valkey::ReplayStore::new(&valkey_connection),
+        transient_state.dpop_state(),
         keyset.clone(),
         UserinfoConfig::from(settings),
     );

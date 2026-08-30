@@ -1,6 +1,6 @@
 use super::*;
 use nazo_http_actix::OAuthJsonErrorFields;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::ConfigSource;
 use crate::settings::Settings;
@@ -58,6 +58,74 @@ fn session_state() -> TestInfrastructure {
         ),
         keyset: crate::test_support::test_key_manager(),
     }
+}
+
+struct ErrorSessionStore {
+    load_error: RepositoryError,
+    deleted: Arc<Mutex<Vec<SessionId>>>,
+}
+
+impl SessionStorePort for ErrorSessionStore {
+    fn load<'a>(
+        &'a self,
+        _session_id: &'a SessionId,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, Option<nazo_identity::SessionSnapshot>> {
+        let error = self.load_error.clone();
+        Box::pin(async move { Err(error) })
+    }
+
+    fn delete<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, bool> {
+        self.deleted.lock().unwrap().push(session_id.clone());
+        Box::pin(async { Ok(true) })
+    }
+
+    fn rotate<'a>(
+        &'a self,
+        _old_session_id: &'a SessionId,
+        _expected: &'a nazo_identity::SessionSnapshot,
+        _new_session_id: &'a SessionId,
+        _replacement: &'a nazo_identity::session::SessionRecord,
+        _ttl_seconds: u64,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, nazo_identity::SessionRotationOutcome> {
+        Box::pin(async {
+            Err(RepositoryError::Unexpected(
+                "rotation is not used by session lookup tests".to_owned(),
+            ))
+        })
+    }
+
+    fn compare_and_set<'a>(
+        &'a self,
+        _session_id: &'a SessionId,
+        _expected: &'a nazo_identity::SessionSnapshot,
+        _replacement: &'a nazo_identity::session::SessionRecord,
+    ) -> nazo_identity::ports::RepositoryFuture<'a, nazo_identity::SessionUpdateOutcome> {
+        Box::pin(async {
+            Err(RepositoryError::Unexpected(
+                "compare-and-set is not used by session lookup tests".to_owned(),
+            ))
+        })
+    }
+}
+
+fn admin_sessions_with_store(
+    state: &TestInfrastructure,
+    sessions: Arc<dyn SessionStorePort>,
+) -> AdminSessionHandles {
+    let config = &state.settings.session;
+    AdminSessionHandles::from_port(
+        sessions,
+        Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
+        state.settings.tenant.context.tenant_id,
+        SessionHttpConfig::new(
+            &config.session_cookie_name,
+            &config.csrf_cookie_name,
+            config.cookie_secure,
+        ),
+    )
 }
 
 async fn live_session_state() -> Option<TestInfrastructure> {
@@ -262,6 +330,51 @@ async fn missing_session_key_is_anonymous_even_when_cookie_is_present() {
             .expect("missing session key should not be a backend failure")
             .is_none()
     );
+}
+
+#[actix_web::test]
+async fn corrupt_session_snapshot_is_deleted_and_treated_as_anonymous_through_port() {
+    let state = session_state();
+    let sid = "corrupt-session";
+    let deleted = Arc::new(Mutex::new(Vec::new()));
+    let sessions = admin_sessions_with_store(
+        &state,
+        Arc::new(ErrorSessionStore {
+            load_error: RepositoryError::Consistency("malformed session".to_owned()),
+            deleted: Arc::clone(&deleted),
+        }),
+    );
+
+    let current = sessions
+        .current_session(&session_request(&state, sid))
+        .await
+        .expect("corrupt session should be invalidated rather than fail open");
+
+    assert!(current.is_none());
+    assert_eq!(deleted.lock().unwrap().as_slice(), &[SessionId::new(sid)]);
+}
+
+#[actix_web::test]
+async fn unavailable_session_store_fails_closed_without_deleting_state() {
+    let state = session_state();
+    let deleted = Arc::new(Mutex::new(Vec::new()));
+    let sessions = admin_sessions_with_store(
+        &state,
+        Arc::new(ErrorSessionStore {
+            load_error: RepositoryError::Unavailable,
+            deleted: Arc::clone(&deleted),
+        }),
+    );
+
+    assert!(
+        sessions
+            .current_session(&session_request(&state, "unavailable-session"))
+            .await
+            .is_err(),
+        "infrastructure errors must not become anonymous sessions"
+    );
+
+    assert!(deleted.lock().unwrap().is_empty());
 }
 
 #[actix_web::test]

@@ -31,7 +31,7 @@ pub(super) struct IdentityServices {
         web::Data<crate::controller_registry::ControllerRegistryService>,
     pub(super) recovery_root: web::Data<crate::recovery_root::RecoveryRootService>,
     pub(super) mtls_trust_anchors: web::Data<MtlsTrustAnchorService>,
-    pub(super) admin_access_delivery: web::Data<nazo_valkey::DeliveryStore>,
+    pub(super) admin_access_delivery: web::Data<dyn nazo_identity::ports::DeliveryStorePort>,
     pub(super) admin_access_request_config: web::Data<AdminAccessRequestConfig>,
     pub(super) client_ip_config: web::Data<ClientIpConfig>,
     pub(super) mfa_profiles: web::Data<MfaProfileEndpoint>,
@@ -51,7 +51,7 @@ pub(super) async fn build(
 ) -> anyhow::Result<IdentityServices> {
     let settings = startup.settings.as_ref();
     let persistence = startup.persistence.provider();
-    let valkey_connection = startup.valkey_connection.clone();
+    let transient_state = startup.transient_state.provider();
     let runtime_registry = startup.runtime_modules.registry.clone();
     let keyset = startup.keyset.clone();
 
@@ -67,7 +67,7 @@ pub(super) async fn build(
         session.cookie_secure,
     );
     let identity_session_service = nazo_identity::SessionService::new(
-        Arc::new(nazo_valkey::SessionStore::new(&valkey_connection)),
+        transient_state.sessions(),
         persistence.session_accounts(),
         settings.tenant.context.tenant_id,
     );
@@ -82,7 +82,7 @@ pub(super) async fn build(
         startup.runtime_modules.administration(),
     ));
     let admin_sessions = web::Data::new(AdminSessionHandles::from_port(
-        nazo_valkey::SessionStore::new(&valkey_connection),
+        transient_state.sessions(),
         persistence.session_accounts(),
         settings.tenant.context.tenant_id,
         session_http_config.clone(),
@@ -110,7 +110,7 @@ pub(super) async fn build(
     ));
     let admin_federation = web::Data::new(AdminFederationConfig::from_settings(&startup.settings));
     let session_profiles = web::Data::new(SessionProfileHandles::from_port(
-        nazo_valkey::SessionStore::new(&valkey_connection),
+        transient_state.sessions(),
         persistence.session_accounts(),
         settings.tenant.context.tenant_id,
         session_http_config.clone(),
@@ -178,7 +178,7 @@ pub(super) async fn build(
         ),
         settings.storage.avatar_max_bytes,
     ));
-    let profile_delivery_store = nazo_valkey::DeliveryStore::new(&valkey_connection);
+    let profile_delivery_store = transient_state.delivery();
     let profile_access_requests = web::Data::new(ClientAccessProfileService::from_port(
         persistence.access_requests(),
         profile_delivery_store,
@@ -209,7 +209,8 @@ pub(super) async fn build(
     ));
     let mtls_trust_anchors: web::Data<MtlsTrustAnchorService> =
         web::Data::from(persistence.mtls_trust_anchors());
-    let admin_access_delivery = web::Data::new(nazo_valkey::DeliveryStore::new(&valkey_connection));
+    let admin_access_delivery: web::Data<dyn nazo_identity::ports::DeliveryStorePort> =
+        web::Data::from(transient_state.delivery());
     let protocol = &settings.protocol;
     let storage = &settings.storage;
     let admin_access_request_config = web::Data::new(AdminAccessRequestConfig::new(
@@ -234,13 +235,13 @@ pub(super) async fn build(
     ));
     let identity_settings = &settings.identity;
     let auth_request_limiter = web::Data::new(AuthRequestLimiter::new(
-        nazo_valkey::RateLimitStore::new(&valkey_connection),
+        transient_state.request_rate_limits(),
         identity_settings.rate_limit.window_seconds,
         identity_settings.rate_limit.auth_max_requests,
         client_ip_config.get_ref().clone(),
     ));
     let token_management_limiter = web::Data::new(TokenManagementRequestLimiter::new(
-        nazo_valkey::RateLimitStore::new(&valkey_connection),
+        transient_state.request_rate_limits(),
         identity_settings.rate_limit.window_seconds,
         identity_settings.rate_limit.token_management_max_requests,
         client_ip_config.get_ref().clone(),
@@ -249,7 +250,7 @@ pub(super) async fn build(
         SmtpVerificationEmailDelivery::from_delivery(&identity_settings.email.delivery);
     let registration = LocalRegistrationService::from_port(
         persistence.registration_accounts(),
-        nazo_valkey::AuthenticationStore::new(&valkey_connection),
+        transient_state.email_verification(),
         RegistrationSecretHasher,
         email_delivery,
         settings.tenant.context,
@@ -261,12 +262,12 @@ pub(super) async fn build(
         },
     );
     let authentication_rate_limit = Arc::new(ServerAuthenticationRateLimit::new(
-        nazo_valkey::RateLimitStore::new(&valkey_connection),
+        transient_state.request_rate_limits(),
         identity_settings.rate_limit.window_seconds,
         identity_settings.rate_limit.auth_max_requests,
     ));
     let mfa_attempt_throttle: Arc<dyn nazo_identity::ports::MfaAttemptThrottlePort> =
-        Arc::new(nazo_valkey::RateLimitStore::new(&valkey_connection));
+        transient_state.mfa_attempt_throttle();
     let mfa_totp_keys = mfa_totp_key_ring(&startup.config)?;
     let mfa_repository = persistence.mfa_repository(mfa_totp_keys.clone());
     let mfa_profiles = web::Data::new(MfaProfileEndpoint::new(
@@ -299,10 +300,10 @@ pub(super) async fn build(
     ));
     let authentication = LocalAuthenticationService::from_ports(
         persistence.login_accounts(),
-        nazo_valkey::RateLimitStore::new(&valkey_connection),
+        transient_state.login_throttle(),
         LoginPasswordVerifier,
         persistence.remembered_mfa_devices(mfa_totp_keys.clone()),
-        nazo_valkey::SessionStore::new(&valkey_connection),
+        transient_state.login_sessions(),
         TracingAuthenticationAudit,
         nazo_identity::AuthenticationServiceConfig {
             tenant_id: settings.tenant.context.tenant_id,
@@ -334,9 +335,9 @@ pub(super) async fn build(
         LocalPasskeyService::from_ports(
             persistence.passkey_accounts(),
             persistence.passkeys(),
-            nazo_valkey::AuthenticationStore::new(&valkey_connection),
+            transient_state.passkey_ceremonies(),
             persistence.remembered_mfa_devices(mfa_totp_keys),
-            nazo_valkey::SessionStore::new(&valkey_connection),
+            transient_state.login_sessions(),
             TracingPasskeyAudit,
             nazo_identity::PasskeyServiceConfig {
                 tenant_id: settings.tenant.context.tenant_id,
@@ -374,9 +375,9 @@ pub(super) async fn build(
     ));
     let federation = web::Data::new(LocalFederationService::from_port(
         persistence.federation_logins(),
-        nazo_valkey::AuthenticationStore::new(&valkey_connection),
+        transient_state.federation_state(),
         FederationBootstrapPasswordHasher,
-        nazo_valkey::SessionStore::new(&valkey_connection),
+        transient_state.login_sessions(),
         TracingFederationAudit,
         nazo_identity::FederationServiceConfig {
             tenant: settings.tenant.context,

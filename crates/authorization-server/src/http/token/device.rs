@@ -42,10 +42,11 @@ use nazo_auth::{
     DeviceAuthorizationPayload, DeviceAuthorizationRequestError, DeviceAuthorizationRequestPolicy,
     DeviceDecisionFailure, DeviceGrantRepositoryPort, DeviceGrantService,
 };
-use nazo_valkey::DeviceStore;
 
 pub(crate) const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
-pub(crate) type ServerDeviceGrantService = DeviceGrantService<DeviceStore>;
+pub(crate) type ServerDeviceGrantService = DeviceGrantService<
+    std::sync::Arc<dyn nazo_auth::DeviceStateStorePort<Version = nazo_auth::DeviceStateVersion>>,
+>;
 
 pub(crate) struct DeviceDecisionHandles {
     authorization_service: Data<ServerAuthorizationService>,
@@ -591,7 +592,7 @@ pub(crate) async fn device_decision(
         }
         _ => unreachable!("validated device decision must be approve or deny"),
     };
-    // The required intent is persisted before the Valkey/database decision
+    // The required intent is persisted before the transient-state/database decision
     // saga. The committed outcome remains best-effort because those stores
     // cannot atomically include the audit ledger.
     match result {

@@ -6,11 +6,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[[bin]]
-name = "nazoauth"
-path = "src/main.rs"
-test = false
-
 [dependencies]
 anyhow.workspace = true
 nazo-auth.workspace = true
@@ -21,14 +16,4 @@ nazo-persistence.workspace = true
 nazo-postgres.workspace = true
 nazo-resource-server.workspace = true
 nazo-scim-events.workspace = true
-tokio = { workspace = true, features = ["full"] }
 uuid.workspace = true
-
-[dev-dependencies]
-base64.workspace = true
-chrono.workspace = true
-diesel = { workspace = true, features = ["postgres_backend"] }
-diesel-async = { workspace = true, features = ["postgres"] }
-ed25519-dalek.workspace = true
-nazo-operator-protocol.workspace = true
-rand.workspace = true

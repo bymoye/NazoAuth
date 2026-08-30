@@ -27,6 +27,14 @@ GLOB_REEXPORT = re.compile(r"(?m)^\s*pub(?:\([^)]*\))?\s+use\s+[^;]*::\*\s*;")
 PRELUDE_MODULE = re.compile(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+prelude\s*;")
 EXACT_RUST_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 FORBIDDEN_CRATE_DEPENDENCIES = {
+    "authorization-server": {"fred", "nazo-valkey"},
+    "authorization-server-postgres": {"fred", "nazo-valkey"},
+    "authorization-server-valkey": {
+        "diesel",
+        "diesel-async",
+        "nazo-postgres",
+        "tokio-postgres",
+    },
     "authorization-server-core": {
         "actix-web",
         "diesel",
@@ -201,6 +209,8 @@ def check_toolchain_pins() -> None:
         raise SystemExit("Containerfile runtime base image must be pinned by digest")
     if "cargo build --release --locked" not in containerfile:
         raise SystemExit("Containerfile release build must use Cargo.lock")
+    if "--package nazoauth --bin nazoauth" not in containerfile:
+        raise SystemExit("Containerfile must build the nazoauth aggregate executable")
     if (
         "COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./"
         not in containerfile
@@ -300,6 +310,92 @@ def check_crate_dependency_boundaries() -> None:
             )
 
 
+def check_transient_state_backend_boundary() -> None:
+    server_root = ROOT / "crates" / "authorization-server" / "src"
+    forbidden = ("nazo_valkey", "ValkeyConnection", "VALKEY_")
+    violations = []
+    for path in sorted(server_root.rglob("*.rs")):
+        source = path.read_text(encoding="utf-8")
+        markers = [marker for marker in forbidden if marker in source]
+        if markers:
+            violations.append((path.relative_to(ROOT).as_posix(), markers))
+    if violations:
+        detail = ", ".join(f"{path}: {markers}" for path, markers in violations)
+        raise SystemExit(f"transient-state backend leaked into authorization server: {detail}")
+
+    postgres_root = ROOT / "crates" / "authorization-server-postgres" / "src"
+    violations = []
+    for path in sorted(postgres_root.rglob("*.rs")):
+        source = path.read_text(encoding="utf-8")
+        markers = [marker for marker in forbidden if marker in source]
+        if markers:
+            violations.append((path.relative_to(ROOT).as_posix(), markers))
+    if violations:
+        detail = ", ".join(f"{path}: {markers}" for path, markers in violations)
+        raise SystemExit(f"transient-state adapter leaked into PostgreSQL launcher: {detail}")
+
+    postgres_library = postgres_root / "lib.rs"
+    if "valkey" in postgres_library.read_text(encoding="utf-8").lower():
+        raise SystemExit("PostgreSQL launcher library must not select or reference Valkey")
+
+
+def check_aggregate_package_boundary() -> None:
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+    if workspace.get("default-members") != ["crates/nazoauth"]:
+        raise SystemExit("workspace default-members must contain only the nazoauth aggregate")
+
+    manifest_path = ROOT / "crates" / "nazoauth" / "Cargo.toml"
+    manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    dependencies = set(manifest.get("dependencies", {}))
+    expected = {
+        "anyhow",
+        "nazo-oauth-server",
+        "nazo-oauth-server-postgres",
+        "nazo-oauth-server-valkey",
+        "tokio",
+    }
+    if dependencies != expected:
+        raise SystemExit(
+            f"nazoauth aggregate dependencies must be composition-only: "
+            f"expected {sorted(expected)}, got {sorted(dependencies)}"
+        )
+
+    source = (ROOT / "crates" / "nazoauth" / "src" / "main.rs").read_text(
+        encoding="utf-8"
+    )
+    forbidden = ("nazo_postgres", "nazo_valkey", "ValkeyConnection", "DbPool")
+    leaked = [marker for marker in forbidden if marker in source]
+    if leaked:
+        raise SystemExit(f"nazoauth aggregate bypasses launcher boundaries: {leaked}")
+
+
+def check_connection_url_configuration_boundary() -> None:
+    forbidden = tuple(
+        f"{prefix}_URL_FILE"
+        for prefix in ("DATABASE", "VALKEY", "AUDIT_ANCHOR_DATABASE")
+    )
+    paths = [
+        *(ROOT / "crates").rglob("*.rs"),
+        *(ROOT / "deploy").rglob("*.yaml"),
+        *(ROOT / "deploy").rglob("*.yml"),
+        *(ROOT / "deploy").rglob("*.md"),
+        *(ROOT / "docs").rglob("*.md"),
+        ROOT / "compose.yml",
+        ROOT / ".env.yaml.example",
+    ]
+    violations = []
+    for path in paths:
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        markers = [marker for marker in forbidden if marker in source]
+        if markers:
+            violations.append((path.relative_to(ROOT).as_posix(), markers))
+    if violations:
+        detail = ", ".join(f"{path}: {markers}" for path, markers in violations)
+        raise SystemExit(f"connection URLs must be configured directly: {detail}")
+
+
 def check_workspace_package_metadata() -> None:
     workspace_manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     for member in workspace_manifest["workspace"]["members"]:
@@ -334,15 +430,7 @@ def check_rust_test_structure() -> None:
         r"(?m)^(?P<indent>[ \t]+)#\[cfg\(test\)\]\r?\n"
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
-    allowed_nested_seams = {
-        "crates/authorization-server/src/domain/resource_server.rs": (
-            "pub(crate) fn new<C>(",
-        ),
-        "crates/authorization-server/src/http/sessions.rs": (
-            "pub(crate) fn new<U>(",
-            "pub(crate) fn new<U>(",
-        ),
-    }
+    allowed_nested_seams = {}
 
     violations = []
     for crate in (ROOT / "crates").iterdir():
@@ -887,6 +975,9 @@ def main() -> None:
         check_authorization_server_import_boundaries()
         check_toolchain_pins()
         check_crate_dependency_boundaries()
+        check_transient_state_backend_boundary()
+        check_aggregate_package_boundary()
+        check_connection_url_configuration_boundary()
         check_workspace_package_metadata()
         check_rust_test_structure()
         check_rfc9967_test_boundaries()

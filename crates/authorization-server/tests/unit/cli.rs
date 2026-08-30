@@ -37,8 +37,37 @@ impl PersistenceLauncher for UnusedLauncher {
     }
 }
 
+struct UnusedTransientStateLauncher;
+
+impl TransientStateLauncher for UnusedTransientStateLauncher {
+    fn server_config_extension(&self) -> crate::config::ServerConfigExtension {
+        crate::config::ServerConfigExtension::new(
+            "VALKEY_URL: \"redis://127.0.0.1:6379/0\"\n".to_owned(),
+            vec![
+                "VALKEY_COMMAND_TIMEOUT_MS",
+                "VALKEY_STATE_EPOCH",
+                "VALKEY_URL",
+            ],
+            "VALKEY_STATE_EPOCH",
+        )
+    }
+
+    fn server_bindings<'a>(
+        &'a self,
+        _config: &'a ConfigSource,
+        _deployment_id: &'a str,
+        _tenant_id: nazo_identity::TenantId,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerTransientStateBindings> {
+        unreachable!("help and release identity do not initialize transient state")
+    }
+}
+
 fn unused_launcher() -> Arc<dyn PersistenceLauncher> {
     Arc::new(UnusedLauncher)
+}
+
+fn unused_transient_state_launcher() -> Arc<dyn TransientStateLauncher> {
+    Arc::new(UnusedTransientStateLauncher)
 }
 
 fn parse(args: &[&str]) -> anyhow::Result<Command> {
@@ -82,6 +111,7 @@ async fn public_help_command_completes_without_loading_runtime_configuration() {
     run(
         ["nazoauth".to_owned(), "help".to_owned()],
         unused_launcher(),
+        unused_transient_state_launcher(),
     )
     .await
     .unwrap();
@@ -92,6 +122,7 @@ async fn release_identity_completes_without_loading_runtime_configuration() {
     run(
         ["nazoauth".to_owned(), "release-identity".to_owned()],
         unused_launcher(),
+        unused_transient_state_launcher(),
     )
     .await
     .unwrap();

@@ -32,6 +32,33 @@ pub trait LoginThrottlePort: Send + Sync {
     fn clear_failure<'a>(&'a self, email: &'a str, source_ip: &'a str) -> RepositoryFuture<'a, ()>;
 }
 
+impl<T> LoginThrottlePort for std::sync::Arc<T>
+where
+    T: LoginThrottlePort + ?Sized,
+{
+    fn failure_count<'a>(
+        &'a self,
+        email: &'a str,
+        source_ip: &'a str,
+    ) -> RepositoryFuture<'a, u64> {
+        self.as_ref().failure_count(email, source_ip)
+    }
+
+    fn record_failure<'a>(
+        &'a self,
+        email: &'a str,
+        source_ip: &'a str,
+        window_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref()
+            .record_failure(email, source_ip, window_seconds)
+    }
+
+    fn clear_failure<'a>(&'a self, email: &'a str, source_ip: &'a str) -> RepositoryFuture<'a, ()> {
+        self.as_ref().clear_failure(email, source_ip)
+    }
+}
+
 /// Atomic budget for MFA factor attempts on one authenticated login session.
 ///
 /// The session-bound subject deliberately avoids a global email/account lock:

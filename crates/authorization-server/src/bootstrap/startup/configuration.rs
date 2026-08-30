@@ -1,16 +1,15 @@
 use super::*;
-use uuid::Uuid;
-
 use crate::config::DEFAULT_DATA_DIR;
 
 /// Values initialized once for the process and shared by all service
-/// adapters.  The pool, Valkey client, settings, runtime registry, and keyset
-/// have one owner here; service assembly borrows or clones their handles.
+/// adapters.  The persistence and transient-state providers, settings,
+/// runtime registry, and keyset have one owner here; service assembly only
+/// requests focused semantic handles.
 pub(super) struct StartupConfiguration {
     pub(super) config: ConfigSource,
     pub(super) perf_metrics_enabled: bool,
     pub(super) persistence: super::super::ServerPersistenceBindings,
-    pub(super) valkey_connection: nazo_valkey::ValkeyConnection,
+    pub(super) transient_state: super::super::ServerTransientStateBindings,
     pub(super) settings: Arc<Settings>,
     pub(super) token_issuance_response_keys: nazo_persistence::TokenIssuanceResponseKeyRing,
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
@@ -25,6 +24,7 @@ pub(super) struct StartupConfiguration {
 pub(super) async fn load(
     config: ConfigSource,
     persistence: super::super::ServerPersistenceBindings,
+    transient_state_launcher: &dyn crate::cli::TransientStateLauncher,
 ) -> anyhow::Result<StartupConfiguration> {
     let perf_metrics_enabled = config.bool("PERF_METRICS_ENABLED", false)?;
     let password_hash_max_concurrency = config.parse::<usize>(
@@ -63,22 +63,9 @@ pub(super) async fn load(
             &settings.endpoint.issuer,
         )?,
     );
-    let valkey_state_epoch = config.required_string("VALKEY_STATE_EPOCH")?;
-    let valkey_state_epoch = Uuid::parse_str(&valkey_state_epoch)
-        .map_err(|_| anyhow::anyhow!("VALKEY_STATE_EPOCH must be a UUID"))?;
-    if valkey_state_epoch.get_version_num() != 7 {
-        anyhow::bail!("VALKEY_STATE_EPOCH must be a UUIDv7");
-    }
-    let valkey_url = config.string("VALKEY_URL", "redis://127.0.0.1:6379/0");
-    let valkey_command_timeout_ms = config.parse::<u64>("VALKEY_COMMAND_TIMEOUT_MS", 1_000)?;
-    if valkey_command_timeout_ms == 0 {
-        anyhow::bail!("VALKEY_COMMAND_TIMEOUT_MS must be greater than zero");
-    }
-    let valkey_command_timeout = Duration::from_millis(valkey_command_timeout_ms);
-
-    // Persistence and Valkey clients are created outside the Actix worker
-    // factory.  The launcher selected the concrete database adapter before
-    // entering this application boundary.
+    // The database tenant boundary must succeed before the launcher may bind
+    // its transient-state namespace. Some backends persist that ownership
+    // claim, so reversing this order could bind the wrong tenant permanently.
     persistence
         .provider()
         .active_tenant_boundary()
@@ -97,17 +84,14 @@ pub(super) async fn load(
         require_audit_least_privilege,
         audit_anchor_preflight,
     )?;
-    let valkey_connection = nazo_valkey::ValkeyConnection::connect(
-        &valkey_url,
-        valkey_command_timeout,
-        control_discovery.deployment_id(),
-        valkey_state_epoch,
-    )
-    .await?;
-    valkey_connection
-        .bind_tenant_owner(settings.tenant.context.tenant_id)
+    let transient_state = transient_state_launcher
+        .server_bindings(
+            &config,
+            control_discovery.deployment_id(),
+            settings.tenant.context.tenant_id,
+        )
         .await
-        .map_err(|error| anyhow::anyhow!("Valkey tenant ownership preflight failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("transient-state preflight failed: {error}"))?;
 
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
     let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
@@ -117,7 +101,7 @@ pub(super) async fn load(
     let readiness_dependencies =
         web::Data::new(crate::http::well_known::ReadinessDependencies::new(
             persistence.provider().database_health(),
-            valkey_connection.clone(),
+            transient_state.provider().health(),
             keyset.clone(),
         ));
     let remote_client_documents = Arc::new(
@@ -142,7 +126,7 @@ pub(super) async fn load(
         config,
         perf_metrics_enabled,
         persistence,
-        valkey_connection,
+        transient_state,
         settings,
         token_issuance_response_keys,
         control_discovery,

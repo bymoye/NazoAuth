@@ -41,7 +41,7 @@ impl From<&Settings> for OidcLogoutConfig {
 /// OIDC logout dependencies assembled once at the composition root.
 ///
 /// Transport code can resolve the current session and invoke logout operations,
-/// but cannot obtain the database pool, Valkey connection, or complete settings.
+/// but cannot obtain backend connections or complete settings.
 #[derive(Clone)]
 pub(crate) struct OidcLogoutHandles {
     sessions: SessionProfileHandles,

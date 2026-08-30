@@ -15,6 +15,20 @@ GRAPHS = {
         "diesel-async",
         "pq-sys",
         "tokio-postgres",
+        "fred",
+        "nazo-valkey",
+    ),
+    "nazo-oauth-server-valkey": (
+        "nazo-postgres",
+        "diesel",
+        "diesel-async",
+        "pq-sys",
+        "tokio-postgres",
+    ),
+    "nazo-oauth-server-postgres": (
+        "fred",
+        "nazo-valkey",
+        "nazo-oauth-server-valkey",
     ),
 }
 
@@ -59,7 +73,7 @@ def main() -> int:
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
-    print("persistence dependency isolation passed")
+    print("persistence and transient-state dependency isolation passed")
     return 0
 
 

@@ -21,7 +21,8 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 | 项目 | 值 |
 | --- | --- |
 | 应用库 | `nazo-oauth-server`（不依赖具体数据库） |
-| PostgreSQL 可执行包 | `nazo-oauth-server-postgres` / `nazoauth` |
+| 默认发行总包 | `nazoauth`（PostgreSQL + Valkey） |
+| 存储适配包 | `nazo-oauth-server-postgres`、`nazo-oauth-server-valkey` |
 | Workspace 版本 | `0.2.3` |
 | 许可证 | AGPL-3.0-or-later |
 | 语言 | Rust 2024 |

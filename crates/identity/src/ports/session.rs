@@ -31,6 +31,31 @@ pub trait LoginSessionPort: Send + Sync {
     ) -> RepositoryFuture<'a, LoginSessionCreate>;
 }
 
+impl<T> LoginSessionPort for std::sync::Arc<T>
+where
+    T: LoginSessionPort + ?Sized,
+{
+    fn create<'a>(
+        &'a self,
+        session_id: &'a str,
+        record: &'a crate::session::SessionRecord,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, LoginSessionCreate> {
+        self.as_ref().create(session_id, record, ttl_seconds)
+    }
+
+    fn create_replacing<'a>(
+        &'a self,
+        previous_session_id: Option<&'a str>,
+        session_id: &'a str,
+        record: &'a crate::session::SessionRecord,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, LoginSessionCreate> {
+        self.as_ref()
+            .create_replacing(previous_session_id, session_id, record, ttl_seconds)
+    }
+}
+
 /// Reads the minimum account projection required to resolve an authenticated session.
 pub trait SessionAccountPort: Send + Sync {
     fn public_account_by_id(
@@ -73,4 +98,50 @@ pub trait SessionStorePort: Send + Sync {
         expected: &'a crate::session::SessionSnapshot,
         replacement: &'a crate::session::SessionRecord,
     ) -> RepositoryFuture<'a, crate::session::SessionUpdateOutcome>;
+}
+
+impl<T> SessionStorePort for std::sync::Arc<T>
+where
+    T: SessionStorePort + ?Sized,
+{
+    fn load<'a>(
+        &'a self,
+        session_id: &'a crate::session::SessionId,
+    ) -> RepositoryFuture<'a, Option<crate::session::SessionSnapshot>> {
+        self.as_ref().load(session_id)
+    }
+
+    fn delete<'a>(
+        &'a self,
+        session_id: &'a crate::session::SessionId,
+    ) -> RepositoryFuture<'a, bool> {
+        self.as_ref().delete(session_id)
+    }
+
+    fn rotate<'a>(
+        &'a self,
+        old_session_id: &'a crate::session::SessionId,
+        expected: &'a crate::session::SessionSnapshot,
+        new_session_id: &'a crate::session::SessionId,
+        replacement: &'a crate::session::SessionRecord,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, crate::session::SessionRotationOutcome> {
+        self.as_ref().rotate(
+            old_session_id,
+            expected,
+            new_session_id,
+            replacement,
+            ttl_seconds,
+        )
+    }
+
+    fn compare_and_set<'a>(
+        &'a self,
+        session_id: &'a crate::session::SessionId,
+        expected: &'a crate::session::SessionSnapshot,
+        replacement: &'a crate::session::SessionRecord,
+    ) -> RepositoryFuture<'a, crate::session::SessionUpdateOutcome> {
+        self.as_ref()
+            .compare_and_set(session_id, expected, replacement)
+    }
 }

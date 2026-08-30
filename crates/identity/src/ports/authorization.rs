@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AccessRequest, NewAccessRequest, TenantId, UserId};
@@ -63,6 +64,14 @@ pub enum DeliveryConsume {
 }
 
 pub trait DeliveryStorePort: Send + Sync {
+    fn store<'a>(
+        &'a self,
+        user_id: UserId,
+        token: &'a str,
+        payload: &'a Value,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()>;
+
     fn load<'a>(
         &'a self,
         user_id: UserId,
@@ -82,4 +91,47 @@ pub trait DeliveryStorePort: Send + Sync {
         token: &'a str,
         expected: &'a DeliveryRecord,
     ) -> RepositoryFuture<'a, DeliveryConsume>;
+}
+
+impl<T> DeliveryStorePort for Arc<T>
+where
+    T: DeliveryStorePort + ?Sized,
+{
+    fn store<'a>(
+        &'a self,
+        user_id: UserId,
+        token: &'a str,
+        payload: &'a Value,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref().store(user_id, token, payload, ttl_seconds)
+    }
+
+    fn load<'a>(
+        &'a self,
+        user_id: UserId,
+        token: &'a str,
+    ) -> RepositoryFuture<'a, Option<DeliveryRecord>> {
+        self.as_ref().load(user_id, token)
+    }
+
+    fn load_many<'a>(
+        &'a self,
+        lookups: &'a [(UserId, &'a str)],
+    ) -> RepositoryFuture<'a, Vec<Option<DeliveryRecord>>> {
+        self.as_ref().load_many(lookups)
+    }
+
+    fn delete<'a>(&'a self, user_id: UserId, token: &'a str) -> RepositoryFuture<'a, ()> {
+        self.as_ref().delete(user_id, token)
+    }
+
+    fn consume<'a>(
+        &'a self,
+        user_id: UserId,
+        token: &'a str,
+        expected: &'a DeliveryRecord,
+    ) -> RepositoryFuture<'a, DeliveryConsume> {
+        self.as_ref().consume(user_id, token, expected)
+    }
 }

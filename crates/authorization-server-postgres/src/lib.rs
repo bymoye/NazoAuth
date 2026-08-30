@@ -315,7 +315,7 @@ impl OperatorPersistence for PostgresOperatorPersistence {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct PostgresLauncher;
+pub struct PostgresLauncher;
 
 impl PersistenceLauncher for PostgresLauncher {
     fn default_database_url(&self) -> &'static str {
@@ -375,9 +375,4 @@ impl PersistenceLauncher for PostgresLauncher {
                 as Arc<dyn nazo_persistence::AdminProvisionStore>)
         })
     }
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    nazo_oauth_server::cli::run(std::env::args(), Arc::new(PostgresLauncher)).await
 }

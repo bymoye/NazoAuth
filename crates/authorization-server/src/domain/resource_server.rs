@@ -45,7 +45,7 @@ mod production {
         DpopNoncePolicy as ResourceDpopNoncePolicy, DpopProofVerifier, DpopProofVerifierConfig,
         ProtectedResourceAuthorizationContext, ProtectedResourceAuthorizationRequest,
         ProtectedResourceAuthorizationResult, ProtectedResourceAuthorizationService,
-        ResourceServerVerifier, ResourceServerVerifierConfig,
+        ProtectedResourceDpopStateStore, ResourceServerVerifier, ResourceServerVerifierConfig,
     };
     use nazo_runtime_modules::ModuleId;
 
@@ -58,8 +58,34 @@ mod production {
 
     type ServerResourceAuthorizationService = ProtectedResourceAuthorizationService<
         Arc<dyn AccessTokenRevocationLookup>,
-        nazo_valkey::ReplayStore,
+        Arc<dyn ProtectedResourceDpopStateStore>,
     >;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FapiHttpSignatureReplayConsumption {
+        Accepted,
+        Replay,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FapiHttpSignatureReplayStoreError;
+
+    /// Atomic replay-fingerprint consumption for FAPI HTTP Message Signatures.
+    ///
+    /// Implementations must reserve a fingerprint at most once within the
+    /// requested validity window. Backend failures are distinct from replay so
+    /// the protocol adapter can fail closed with `ReplayUnavailable`.
+    pub trait FapiHttpSignatureReplayStore: Send + Sync {
+        fn consume<'a>(
+            &'a self,
+            tenant_id: nazo_identity::TenantId,
+            fingerprint: &'a [u8],
+            ttl_seconds: i64,
+        ) -> FapiFuture<
+            'a,
+            Result<FapiHttpSignatureReplayConsumption, FapiHttpSignatureReplayStoreError>,
+        >;
+    }
 
     struct CachedResourceAuthorizationService {
         keys: Arc<KeySnapshot>,
@@ -80,7 +106,7 @@ mod production {
         config: ResourceServerConfig,
         keyset: nazo_key_management::KeyManager,
         tokens: Arc<dyn AccessTokenRevocationLookup>,
-        replay: nazo_valkey::ReplayStore,
+        dpop_state: Arc<dyn ProtectedResourceDpopStateStore>,
         service_cache: Arc<Mutex<Option<CachedResourceAuthorizationService>>>,
     }
 
@@ -89,13 +115,13 @@ mod production {
             config: ResourceServerConfig,
             keyset: nazo_key_management::KeyManager,
             tokens: Arc<dyn AccessTokenRevocationLookup>,
-            replay: nazo_valkey::ReplayStore,
+            dpop_state: Arc<dyn ProtectedResourceDpopStateStore>,
         ) -> Self {
             Self {
                 config,
                 keyset,
                 tokens,
-                replay,
+                dpop_state,
                 service_cache: Arc::new(Mutex::new(None)),
             }
         }
@@ -148,7 +174,7 @@ mod production {
                         required_nonce: None,
                     }),
                     self.tokens.clone(),
-                    self.replay.clone(),
+                    self.dpop_state.clone(),
                 )
                 .with_dpop_nonce_policy(match self.config.dpop_nonce_policy {
                     DpopNoncePolicy::Required => ResourceDpopNoncePolicy::Required,
@@ -203,36 +229,16 @@ mod production {
     #[derive(Clone)]
     pub(crate) struct ServerFapiHttpMessageSignatures {
         clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
-        replay: nazo_valkey::ReplayStore,
+        replay: Arc<dyn FapiHttpSignatureReplayStore>,
         keyset: nazo_key_management::KeyManager,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
         max_age_seconds: i64,
     }
 
     impl ServerFapiHttpMessageSignatures {
-        #[cfg(test)]
-        pub(crate) fn new<C>(
-            clients: C,
-            replay: nazo_valkey::ReplayStore,
-            keyset: nazo_key_management::KeyManager,
-            runtime_modules: Arc<ServerRuntimeModuleRegistry>,
-            max_age_seconds: i64,
-        ) -> Self
-        where
-            C: nazo_auth::AdminClientRepositoryPort + 'static,
-        {
-            Self::from_port(
-                Arc::new(clients),
-                replay,
-                keyset,
-                runtime_modules,
-                max_age_seconds,
-            )
-        }
-
         pub(crate) fn from_port(
             clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
-            replay: nazo_valkey::ReplayStore,
+            replay: Arc<dyn FapiHttpSignatureReplayStore>,
             keyset: nazo_key_management::KeyManager,
             runtime_modules: Arc<ServerRuntimeModuleRegistry>,
             max_age_seconds: i64,
@@ -294,15 +300,17 @@ mod production {
                 .map_err(|_| FapiSignatureVerificationError::Invalid)?;
                 match self
                     .replay
-                    .consume_fapi_http_signature(
+                    .consume(
                         client_tenant_id,
                         input.replay_fingerprint(),
                         self.max_age_seconds,
                     )
                     .await
                 {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(FapiSignatureVerificationError::Replay),
+                    Ok(FapiHttpSignatureReplayConsumption::Accepted) => Ok(()),
+                    Ok(FapiHttpSignatureReplayConsumption::Replay) => {
+                        Err(FapiSignatureVerificationError::Replay)
+                    }
                     Err(_) => Err(FapiSignatureVerificationError::ReplayUnavailable),
                 }
             })
@@ -348,6 +356,10 @@ mod production {
 #[path = "../../tests/unit/domain/resource_server.rs"]
 mod tests;
 
+pub use production::{
+    FapiHttpSignatureReplayConsumption, FapiHttpSignatureReplayStore,
+    FapiHttpSignatureReplayStoreError,
+};
 pub(crate) use production::{
     ServerFapiHttpMessageSignatures, ServerFapiMtlsResolver, ServerFapiResourceAuthorizer,
 };

@@ -24,6 +24,11 @@ mod schema;
 mod settings;
 mod tenant_resource_preparation;
 
+pub use domain::{
+    FapiHttpSignatureReplayConsumption, FapiHttpSignatureReplayStore,
+    FapiHttpSignatureReplayStoreError,
+};
+
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 pub(crate) mod test_support;

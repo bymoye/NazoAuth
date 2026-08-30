@@ -117,7 +117,7 @@ fn test_state() -> TestInfrastructure {
 struct TestAdminAccessRequestDependencies {
     admin_sessions: Data<AdminSessionHandles>,
     repository: Data<dyn nazo_persistence::AdminAccessRequestStore>,
-    delivery_store: Data<DeliveryStore>,
+    delivery_store: Data<dyn nazo_identity::ports::DeliveryStorePort>,
     client_service: Data<ServerAdminClientService>,
     config: Data<AdminAccessRequestConfig>,
     client_ip_config: Data<ClientIpConfig>,
@@ -131,9 +131,9 @@ fn admin_access_request_dependencies(
     let storage = &state.settings.storage;
     let endpoint = &state.settings.endpoint;
     TestAdminAccessRequestDependencies {
-        admin_sessions: Data::new(AdminSessionHandles::new(
-            nazo_valkey::SessionStore::new(&state.valkey_connection()),
-            nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+        admin_sessions: Data::new(AdminSessionHandles::from_port(
+            Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
+            Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
             state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
@@ -145,7 +145,10 @@ fn admin_access_request_dependencies(
             Arc::new(AccessRequestRepository::new(state.diesel_db.clone()))
                 as Arc<dyn nazo_persistence::AdminAccessRequestStore>,
         ),
-        delivery_store: Data::new(DeliveryStore::new(&state.valkey_connection())),
+        delivery_store: Data::from(Arc::new(nazo_valkey::DeliveryStore::new(
+            &state.valkey_connection(),
+        ))
+            as Arc<dyn nazo_identity::ports::DeliveryStorePort>),
         client_service: Data::new(ServerAdminClientService::new(
             Arc::new(nazo_postgres::OAuthClientRepository::new(
                 state.diesel_db.clone(),

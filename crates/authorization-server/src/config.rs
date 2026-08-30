@@ -7,6 +7,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::{Context, bail};
@@ -29,10 +30,64 @@ TRANSPORT_MODE: "loopback-http"
 "#;
 const INITIAL_CONFIG_SUFFIX: &str = r#"
 DATABASE_MAX_CONNECTIONS: 32
-VALKEY_URL: "redis://127.0.0.1:6379/0"
 DATA_DIR: "runtime"
 RUST_LOG: "info"
 "#;
+
+/// Configuration schema contributed by the statically selected state backend.
+///
+/// The generic server validates and loads these keys without knowing their
+/// concrete names or transport meaning.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerConfigExtension {
+    initial_config_fragment: String,
+    config_keys: Vec<&'static str>,
+    state_epoch_key: Option<&'static str>,
+}
+
+impl ServerConfigExtension {
+    #[must_use]
+    pub fn new(
+        initial_config_fragment: String,
+        config_keys: Vec<&'static str>,
+        state_epoch_key: &'static str,
+    ) -> Self {
+        Self {
+            initial_config_fragment,
+            config_keys,
+            state_epoch_key: Some(state_epoch_key),
+        }
+    }
+
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            initial_config_fragment: String::new(),
+            config_keys: Vec::new(),
+            state_epoch_key: None,
+        }
+    }
+}
+
+static SERVER_CONFIG_EXTENSION: OnceLock<ServerConfigExtension> = OnceLock::new();
+
+pub fn install_server_config_extension(extension: ServerConfigExtension) -> anyhow::Result<()> {
+    if let Some(installed) = SERVER_CONFIG_EXTENSION.get() {
+        if installed == &extension {
+            return Ok(());
+        }
+        anyhow::bail!("server configuration extension is already installed");
+    }
+    match SERVER_CONFIG_EXTENSION.set(extension.clone()) {
+        Ok(()) => Ok(()),
+        Err(_) if SERVER_CONFIG_EXTENSION.get() == Some(&extension) => Ok(()),
+        Err(_) => anyhow::bail!("server configuration extension installation raced"),
+    }
+}
+
+fn server_config_extension() -> Option<&'static ServerConfigExtension> {
+    SERVER_CONFIG_EXTENSION.get()
+}
 
 fn fresh_initial_config(default_database_url: &str) -> anyhow::Result<String> {
     if default_database_url.is_empty()
@@ -42,9 +97,15 @@ fn fresh_initial_config(default_database_url: &str) -> anyhow::Result<String> {
     {
         anyhow::bail!("launcher default database URL is not safe for generated YAML");
     }
+    let extension = server_config_extension()
+        .map(|extension| extension.initial_config_fragment.as_str())
+        .unwrap_or_default();
+    let state_epoch = server_config_extension()
+        .and_then(|extension| extension.state_epoch_key)
+        .map(|key| format!("{key}: \"{}\"\n", uuid::Uuid::now_v7()))
+        .unwrap_or_default();
     Ok(format!(
-        "{INITIAL_CONFIG_PREFIX}DATABASE_URL: \"{default_database_url}\"{INITIAL_CONFIG_SUFFIX}VALKEY_STATE_EPOCH: \"{}\"\n",
-        uuid::Uuid::now_v7()
+        "{INITIAL_CONFIG_PREFIX}DATABASE_URL: \"{default_database_url}\"{INITIAL_CONFIG_SUFFIX}{extension}{state_epoch}"
     ))
 }
 pub const DEFAULT_DATABASE_MAX_CONNECTIONS: usize = 32;
@@ -72,9 +133,11 @@ const NON_CONFIG_NAZOAUTH_ENV_KEYS: &[&str] = &[
     "NAZOAUTH_MIGRATION_RUNTIME_ROLE",
     "NAZOAUTH_SERVER_CONFIG_FILE",
 ];
+// File aliases are reserved for secret material that benefits from mounted-secret
+// rotation and access controls. Ordinary scalar configuration (including URLs,
+// endpoints, identifiers, flags, and limits) must be supplied directly.
 const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
     ("CLIENT_SECRET_PEPPER", "CLIENT_SECRET_PEPPER_FILE"),
-    ("DATABASE_URL", "DATABASE_URL_FILE"),
     (
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
         "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
@@ -105,7 +168,6 @@ const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
         "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN_FILE",
     ),
     ("PAIRWISE_SUBJECT_SECRET", "PAIRWISE_SUBJECT_SECRET_FILE"),
-    ("VALKEY_URL", "VALKEY_URL_FILE"),
 ];
 const ENV_CONFIG_KEYS: &[&str] = &[
     "ACCESS_TOKEN_TTL_SECONDS",
@@ -115,7 +177,6 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "AUDIT_ANCHOR_BATCH_SIZE",
     "AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS",
     "AUDIT_ANCHOR_DATABASE_URL",
-    "AUDIT_ANCHOR_DATABASE_URL_FILE",
     "AUDIT_ANCHOR_FRESHNESS_SECONDS",
     "AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS",
     "AUDIT_ANCHOR_MAX_LAG_SECONDS",
@@ -143,7 +204,6 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "CORS_ALLOWED_ORIGINS",
     "CSRF_COOKIE_NAME",
     "DATABASE_URL",
-    "DATABASE_URL_FILE",
     "DATABASE_MAX_CONNECTIONS",
     "DATA_DIR",
     "DEFAULT_AUDIENCE",
@@ -257,11 +317,12 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "TRUSTED_PROXY_CIDRS",
     "UI_CACHE_DIR",
     "UI_STATIC_DIR",
-    "VALKEY_COMMAND_TIMEOUT_MS",
-    "VALKEY_STATE_EPOCH",
-    "VALKEY_URL",
-    "VALKEY_URL_FILE",
 ];
+
+fn is_known_config_key(key: &str) -> bool {
+    ENV_CONFIG_KEYS.contains(&key)
+        || server_config_extension().is_some_and(|extension| extension.config_keys.contains(&key))
+}
 // The server may share one allowlisted `.env.yaml` with the sidecar, but it
 // must not materialize the sidecar's database URL, endpoint, or HMAC secret.
 // `ConfigSource::load_for_audit_anchor_worker` deliberately opts into these
@@ -270,7 +331,6 @@ const AUDIT_ANCHOR_WORKER_CONFIG_KEYS: &[&str] = &[
     "AUDIT_ANCHOR_BATCH_SIZE",
     "AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS",
     "AUDIT_ANCHOR_DATABASE_URL",
-    "AUDIT_ANCHOR_DATABASE_URL_FILE",
     "AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS",
     "AUDIT_ANCHOR_POLL_INTERVAL_SECONDS",
     "AUDIT_ANCHOR_REQUEST_TIMEOUT_SECONDS",
@@ -368,13 +428,7 @@ impl ConfigSource {
         let config_dir = source.config_dir.clone();
         source.merge_secret_file_inputs(
             &config_dir,
-            &[
-                (
-                    "AUDIT_ANCHOR_DATABASE_URL",
-                    "AUDIT_ANCHOR_DATABASE_URL_FILE",
-                ),
-                ("AUDIT_ANCHOR_TOKEN", "AUDIT_ANCHOR_TOKEN_FILE"),
-            ],
+            &[("AUDIT_ANCHOR_TOKEN", "AUDIT_ANCHOR_TOKEN_FILE")],
         )?;
         Ok(source)
     }
@@ -387,11 +441,7 @@ impl ConfigSource {
         path: impl AsRef<Path>,
         env: impl IntoIterator<Item = (String, String)>,
     ) -> anyhow::Result<Self> {
-        let path = path.as_ref();
-        let mut source = Self::load_from_dir_with_env_mode(path, env, false, false)?;
-        let config_dir = source.config_dir.clone();
-        source.merge_secret_file_inputs(&config_dir, &[("DATABASE_URL", "DATABASE_URL_FILE")])?;
-        Ok(source)
+        Self::load_from_dir_with_env_mode(path, env, false, false)
     }
 
     fn load_from_dir_with_env_mode(
@@ -475,6 +525,19 @@ impl ConfigSource {
             bail!("{key} is required");
         };
         Ok(value)
+    }
+
+    /// Recovery boundary selected by the statically installed state backend.
+    pub fn transient_state_epoch(&self) -> anyhow::Result<uuid::Uuid> {
+        let key = server_config_extension()
+            .and_then(|extension| extension.state_epoch_key)
+            .ok_or_else(|| anyhow::anyhow!("transient-state epoch configuration is unavailable"))?;
+        let epoch = uuid::Uuid::parse_str(&self.required_string(key)?)
+            .map_err(|_| anyhow::anyhow!("transient-state epoch must be a UUID"))?;
+        if epoch.get_version_num() != 7 {
+            anyhow::bail!("transient-state epoch must be a UUIDv7");
+        }
+        Ok(epoch)
     }
 
     pub fn optional_string(&self, key: &str) -> Option<String> {
@@ -564,7 +627,7 @@ impl ConfigSource {
             let Some(key) = key.as_str().map(str::trim).filter(|key| !key.is_empty()) else {
                 bail!("{} contains a non-string or empty key", path.display());
             };
-            if !ENV_CONFIG_KEYS.contains(&key) {
+            if !is_known_config_key(key) {
                 bail!("{} contains unknown config key {key}", path.display());
             }
             if !include_worker_config && AUDIT_ANCHOR_WORKER_CONFIG_KEYS.contains(&key) {
@@ -582,7 +645,7 @@ impl ConfigSource {
         include_worker_config: bool,
     ) -> anyhow::Result<()> {
         for (key, value) in env {
-            if !ENV_CONFIG_KEYS.contains(&key.as_str()) {
+            if !is_known_config_key(&key) {
                 if is_unknown_nazoauth_environment_key(&key) {
                     bail!("unknown NazoAuth environment config key {key}");
                 }

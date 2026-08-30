@@ -317,6 +317,13 @@ impl DpopStateStorePort for AtomicDpopState {
 }
 
 #[test]
+fn arc_trait_object_is_a_dpop_state_store() {
+    fn assert_state_store<T: DpopStateStorePort>() {}
+
+    assert_state_store::<Arc<dyn DpopStateStorePort>>();
+}
+
+#[test]
 fn concurrent_replay_consumption_has_exactly_one_winner() {
     futures_executor::block_on(concurrent_replay_consumption_has_exactly_one_winner_async());
 }

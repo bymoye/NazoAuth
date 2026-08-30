@@ -100,7 +100,7 @@ pub(super) fn spawn_key_lifecycle(keyset: nazo_key_management::KeyManager) {
 
 #[cfg(not(test))]
 pub(super) fn spawn_ciba_ping_worker(
-    valkey_connection: &nazo_valkey::ValkeyConnection,
+    deliveries: Arc<dyn crate::bootstrap::CibaPingDeliveryPort>,
     settings: &Settings,
     runtime_modules: &RuntimeModules,
 ) -> anyhow::Result<()> {
@@ -110,7 +110,7 @@ pub(super) fn spawn_ciba_ping_worker(
         nazo_auth::CapabilityAdmission::NewRequest,
     ) {
         spawn_ciba_ping_delivery_worker(CibaPingDeliveryWorker::new(
-            nazo_valkey::CibaStore::new(valkey_connection),
+            deliveries,
             &settings.ciba.ciba_notification_private_origins,
         )?);
     }

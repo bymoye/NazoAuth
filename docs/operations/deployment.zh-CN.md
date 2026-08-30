@@ -13,13 +13,22 @@ NazoAuth 提供两条明确的部署契约：源码开发使用 Compose；独立
 在仓库根目录执行：
 
 ```sh
+export NAZOAUTH_POSTGRES_PASSWORD='请替换为唯一的runtime密码'
+export NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD='请替换为不同的lifecycle密码'
+export NAZOAUTH_VALKEY_PASSWORD='请替换为唯一的Valkey密码'
+export NAZOAUTH_VALKEY_STATE_EPOCH='请替换为新生成的UUID'
 docker compose up -d --build
 docker compose ps
 ```
 
-Compose 将初始化脚本和安全默认配置随构建上下文放入镜像，不要求 Docker daemon
-能够直接读取 CLI 所在主机的源码绝对路径。使用远端 Docker context 或容器化 WebIDE
-时仍不得添加手工秘密初始化步骤。需要改变宿主机端口和浏览器看到的公开 origin 时执行：
+启动前必须替换全部占位值。密码会嵌入连接 URL，因此只能使用 RFC 3986
+unreserved 字符（`A-Z`、`a-z`、`0-9`、`-`、`.`、`_`、`~`）。lifecycle
+密码必须与 runtime 密码不同：lifecycle role 负责迁移，服务端只使用非超级用户
+runtime role。Compose 直接向 NazoAuth 传入 `DATABASE_URL` 和 `VALKEY_URL`，不会生成
+应用专用的 URL 文件或密码文件。PostgreSQL 只会在首次初始化新的 `postgres_data`
+卷时创建 runtime role，因此修改这些环境变量不会自动轮换已有数据库的凭据。
+
+需要改变宿主机端口和浏览器看到的公开 origin 时，保留上述四个变量并执行：
 
 ```sh
 NAZOAUTH_PORT=443 \
@@ -40,11 +49,9 @@ docker compose up -d --build
 必须把 `<NazoAuth实际看到的入口代理CIDR>` 替换为 TLS 终止入口的精确地址。Compose
 路径属于 trusted-proxy 部署，不会挂载 Direct TLS 所需的服务端证书和客户端 CA 文件。
 
-Compose 会先在私有命名卷中生成 PostgreSQL 和 Valkey 凭据，再启动两项服务，并用
-短生命周期的开发 operator identity 通过同一个签名 `nazoauth operator-task` 入口执行
-迁移。该 identity 明确不是生产信任根。任务把本地自动化 actor 标识为
-`docker-compose`；签名操作直接绑定候选镜像摘要，不要求先产生 Git commit 或 CI build
-identity，也不会联系或冒充 GitHub Actions。可直接打开：
+Compose 使用显式提供的凭据启动 PostgreSQL 和 Valkey，通过 lifecycle PostgreSQL
+role 执行迁移，再使用独立的 runtime role 启动服务。迁移启动只依赖 PostgreSQL；
+只有服务端需要等待 Valkey 就绪。可直接打开：
 
 - `http://127.0.0.1:8000/health`：依赖就绪探针
 - `http://127.0.0.1:8000/live`：进程存活探针
@@ -53,7 +60,7 @@ identity，也不会联系或冒充 GitHub Actions。可直接打开：
 首次源码构建需要联网下载 Rust 依赖；后续构建会复用本地容器缓存。
 
 默认配置只用于 loopback 本地体验。PostgreSQL、Valkey 和应用状态（包括签名密钥、头像、
-生成的秘密、管理员创建 receipt 及 UI release 缓存）均使用命名卷，执行
+生成的应用秘密、管理员创建 receipt 及 UI release 缓存）均使用命名卷，执行
 `docker compose down` 后仍会保留。除非明确要删除全部本地数据，不要执行
 `docker compose down -v`。
 
@@ -182,7 +189,8 @@ snapshot 恢复。完整边界见[一键安装与升级](one-click-update.zh-CN.
 
 仓库内置的是单节点拓扑。用于生产前还需要：
 
-- 备份 Compose 自动生成的数据库、Valkey 和应用秘密，或接入外部秘密管理；
+- 备份 Compose 数据库、Valkey 状态和生成的应用秘密；
+- 在适当的秘密管理系统中保存显式配置的 PostgreSQL 与 Valkey 凭据；
 - 建立可验证的备份和恢复流程；
 - 监控 PostgreSQL、Valkey、磁盘空间和 `/health`；仅用 `/live` 判断是否应重启进程；
 - 将签名密钥和头像放在持久存储上；

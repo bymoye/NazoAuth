@@ -1,9 +1,12 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use fred::interfaces::{ClientLike, KeysInterface};
 use fred::prelude::{Builder, Config};
-use nazo_identity::UserId;
-use nazo_valkey::{DeliveryConsume, DeliveryStore};
+use nazo_identity::{
+    UserId,
+    ports::{DeliveryConsume as PortDeliveryConsume, DeliveryStorePort},
+};
+use nazo_valkey::DeliveryStore;
 use serde_json::json;
 
 async fn setup() -> Option<(DeliveryStore, fred::prelude::Client)> {
@@ -59,6 +62,7 @@ async fn concurrent_client_delivery_consume_has_exactly_one_winner() {
     let Some((store, _)) = setup().await else {
         return;
     };
+    let store: Arc<dyn DeliveryStorePort> = Arc::new(store);
     let user_id = UserId::new(uuid::Uuid::from_u128(9)).unwrap();
     let token = format!("token-{}", uuid::Uuid::now_v7());
     let payload = json!({"delivery_state":"committed", "client_id":"client-a"});
@@ -72,7 +76,7 @@ async fn concurrent_client_delivery_consume_has_exactly_one_winner() {
     );
     let winners = [first.unwrap(), second.unwrap()]
         .into_iter()
-        .filter(|result| matches!(result, DeliveryConsume::Consumed(_)))
+        .filter(|result| matches!(result, PortDeliveryConsume::Consumed(_)))
         .count();
     assert_eq!(winners, 1);
     assert!(store.load(user_id, &token).await.unwrap().is_none());
