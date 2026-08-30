@@ -1869,7 +1869,7 @@ fn access_request_boundary_has_no_server_diesel_or_forwarding_support_layer() {
 }
 
 #[test]
-fn oauth_client_queries_use_the_focused_postgres_repository_without_a_server_facade() {
+fn oauth_client_queries_cross_the_persistence_port_without_a_server_postgres_dependency() {
     fn function_bodies(source: &str) -> Vec<&str> {
         let mut bodies = Vec::new();
         let mut offset = 0;
@@ -1959,9 +1959,9 @@ fn oauth_client_queries_use_the_focused_postgres_repository_without_a_server_fac
         "OAuth client query facades are forbidden:\n{}",
         violations.join("\n")
     );
-    assert!(
-        direct_repository_calls > 0,
-        "the server must call the focused OAuth client repository directly"
+    assert_eq!(
+        direct_repository_calls, 0,
+        "the database-neutral server must not construct the PostgreSQL OAuth client repository"
     );
     let client_policy = std::fs::read_to_string(
         manifest.join("../authorization-server/src/domain/client_policy.rs"),
