@@ -17,6 +17,18 @@ use crate::domain::{DynamicRegistrationConfig, dynamic_registration_endpoint};
 
 struct ContractProfileOperations;
 
+struct ZeroDatabasePoolMetrics;
+
+impl nazo_persistence::DatabasePoolMetricsPort for ZeroDatabasePoolMetrics {
+    fn snapshot(&self) -> nazo_persistence::DatabasePoolMetrics {
+        nazo_persistence::DatabasePoolMetrics {
+            acquire_count: 0,
+            wait_nanos_total: 0,
+            wait_nanos_max: 0,
+        }
+    }
+}
+
 impl ProfileAccountOperations for ContractProfileOperations {
     fn me(&self, _session_id: SessionId) -> ProfileAccountFuture<'_, ProfileMe> {
         Box::pin(async { Ok(ProfileMe::Active(Box::new(contract_profile()))) })
@@ -404,9 +416,15 @@ async fn perf_metrics_route_is_controlled_by_the_typed_startup_flag() {
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    let enabled =
-        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, true)))
-            .await;
+    let pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort> = web::Data::from(
+        Arc::new(ZeroDatabasePoolMetrics) as Arc<dyn nazo_persistence::DatabasePoolMetricsPort>,
+    );
+    let enabled = test::init_service(
+        App::new()
+            .app_data(pool_metrics)
+            .configure(|cfg| routes::configure(cfg, &settings, true)),
+    )
+    .await;
     let response = test::call_service(
         &enabled,
         test::TestRequest::get().uri("/__perf/metrics").to_request(),

@@ -518,8 +518,9 @@ async fn ciba_backchannel_fails_closed_before_client_state_access() {
             .app_data(actix_web::web::Data::new(ServerCibaService::new(
                 CibaStore::new(&state.valkey_connection()),
             )))
-            .app_data(actix_web::web::Data::new(
-                nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+            .app_data(actix_web::web::Data::from(
+                Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()))
+                    as Arc<dyn nazo_persistence::CibaAccountStore>,
             ))
             .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
                 settings.as_ref(),
@@ -598,8 +599,9 @@ async fn ciba_backchannel_validates_request_object_and_creates_bound_state() {
                 super::super::issue::test_support::test_authorization_service(&state),
             ))
             .app_data(ciba_service.clone())
-            .app_data(actix_web::web::Data::new(
-                nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+            .app_data(actix_web::web::Data::from(
+                Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()))
+                    as Arc<dyn nazo_persistence::CibaAccountStore>,
             ))
             .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
                 settings.as_ref(),
@@ -687,8 +689,9 @@ async fn ciba_backchannel_rejects_invalid_request_object_claims_before_user_look
             .app_data(actix_web::web::Data::new(ServerCibaService::new(
                 CibaStore::new(&state.valkey_connection()),
             )))
-            .app_data(actix_web::web::Data::new(
-                nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+            .app_data(actix_web::web::Data::from(
+                Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone()))
+                    as Arc<dyn nazo_persistence::CibaAccountStore>,
             ))
             .app_data(actix_web::web::Data::new(CibaHttpConfig::from(
                 settings.as_ref(),
