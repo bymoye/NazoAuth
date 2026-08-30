@@ -56,7 +56,7 @@ use crate::wire::{
 use crate::{MAX_COMPACT_JWS_BYTES, MAX_TENANT_RESOURCE_IDENTITIES, ProtocolError};
 
 /// Wire schema tag for [`ControlOperation`].
-pub const CONTROL_OPERATION_SCHEMA: u32 = 1;
+pub const CONTROL_OPERATION_SCHEMA: u32 = 2;
 /// Wire schema tag for [`ControlResult`].
 pub const CONTROL_RESULT_SCHEMA: u32 = 1;
 /// Fixed JWS media type for signed control operations.  Not caller-chosen.
@@ -70,8 +70,8 @@ const CONTROLLER_KID_LENGTH: usize = 43;
 
 /// The single signed envelope for one top-level application-level operation
 /// (05 §2).  The field set is closed and exhaustive:
-/// `schema`, `operation_id`, `kid`, `deployment_id`, `target`,
-/// `config_revision`, `operation`.
+/// `schema`, `operation_id`, `kid`, `deployment_id`, `config_revision`,
+/// `operation`.
 ///
 /// `operation_id` is a UUIDv7 and doubles as the journal idempotency key:
 /// same id + same request hash resumes or returns the recorded outcome; same
@@ -86,11 +86,6 @@ pub struct ControlOperation {
     pub kid: String,
     /// Audience binding: exactly one target deployment.
     pub deployment_id: String,
-    /// Artifact identity the operation was authorized for (05 §2): the OCI or
-    /// host-binary artifact whose executing runtime must equal this digest at
-    /// admission.  This prevents "authorized for artifact A, executed on
-    /// runtime B" without duplicating a release attestation.
-    pub target: ControlTarget,
     /// Opaque configuration revision of the deployment state this operation
     /// was constructed against.  Carried verbatim into the operation journal;
     /// CAS comparison semantics land with F05 — until then the only consumer
@@ -100,61 +95,6 @@ pub struct ControlOperation {
     /// Closed operation set with typed payloads.  Unknown operations are a
     /// protocol change and must be rejected by older consumers.
     pub operation: ControlOperationPayload,
-}
-
-/// Artifact classes a control operation can be authorized against (05 §2).
-///
-/// Deserialization is hand-written like [`ControlOperationPayload`]: serde
-/// silently ignores `deny_unknown_fields` for internally tagged enums, so a
-/// derived implementation would accept unknown members inside either variant.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum ControlTarget {
-    /// Immutable OCI artifact.  The manifest digest is the image identity;
-    /// mutable tags are never carried.
-    OciImage {
-        /// Immutable image/manifest identifier: `sha256:` + 64 lowercase hex.
-        image_digest: String,
-    },
-    /// Host binary identified by content hash.
-    HostBinary {
-        /// SHA-256 of the binary bytes: 64 lowercase hex.
-        sha256: String,
-    },
-}
-
-impl<'de> Deserialize<'de> for ControlTarget {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut members = match serde_json::Value::deserialize(deserializer)? {
-            serde_json::Value::Object(members) => members,
-            _ => return Err(serde::de::Error::custom("target must be a JSON object")),
-        };
-        let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
-        let target = match kind.as_str() {
-            "oci-image" => ControlTarget::OciImage {
-                image_digest: take_string_member(&mut members, "image_digest")
-                    .map_err(serde::de::Error::custom)?,
-            },
-            "host-binary" => ControlTarget::HostBinary {
-                sha256: take_string_member(&mut members, "sha256")
-                    .map_err(serde::de::Error::custom)?,
-            },
-            other => {
-                return Err(serde::de::Error::custom(format!(
-                    "unknown target kind '{other}'"
-                )));
-            }
-        };
-        if let Some(member) = members.keys().next() {
-            return Err(serde::de::Error::custom(format!(
-                "unknown target field '{member}'"
-            )));
-        }
-        Ok(target)
-    }
 }
 
 /// Closed operation names seeded from E05's naming, each carrying its typed
@@ -630,27 +570,8 @@ pub fn validate_control_operation(operation: &ControlOperation) -> Result<(), Pr
     validate_uuidv7(&operation.operation_id)?;
     validate_controller_kid(&operation.kid)?;
     validate_file_identifier(&operation.deployment_id)?;
-    validate_control_target(&operation.target)?;
     validate_identifier(&operation.config_revision)?;
     validate_control_payload(&operation.operation)
-}
-
-fn validate_control_target(target: &ControlTarget) -> Result<(), ProtocolError> {
-    match target {
-        ControlTarget::OciImage { image_digest, .. } => validate_oci_image_digest(image_digest)?,
-        ControlTarget::HostBinary { sha256, .. } => validate_lower_hex(sha256, 64)?,
-    }
-    Ok(())
-}
-
-/// Validate the immutable OCI artifact identity carried by a control target.
-/// Runtime admission uses this same protocol authority for the digest injected
-/// by the one-shot launcher before comparing the two exact values.
-pub fn validate_oci_image_digest(image_digest: &str) -> Result<(), ProtocolError> {
-    let digest = image_digest
-        .strip_prefix("sha256:")
-        .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
-    validate_lower_hex(digest, 64)
 }
 
 fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), ProtocolError> {

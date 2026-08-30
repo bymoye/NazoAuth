@@ -11,7 +11,7 @@
 //! 3. verify the Ed25519 signature over the canonical bytes
 //! 4. key expiry/revocation at first admission (the registry lookup only
 //!    returns active, unexpired slots)
-//! 5. deployment binding, artifact digest, and config_revision fencing
+//! 5. deployment binding and config_revision fencing
 //! 6. enter the operation journal accept checkpoint (E03)
 //! 7. execute strictly per journal checkpoints; internal steps never
 //!    re-authenticate
@@ -139,12 +139,9 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
     .await
     {
         Ok(admitted) => admitted,
-        Err(admission::AdmissionError::Rejected(failure)) => {
-            rejection_line(match failure {
-                admission::KeyAdmissionFailure::Expired => RejectionClass::Expired,
-                admission::KeyAdmissionFailure::Untrusted => RejectionClass::Authorization,
-            });
-            bail!("controller key admission failed: {failure:?}");
+        Err(admission::AdmissionError::Unauthorized) => {
+            rejection_line(RejectionClass::Authorization);
+            bail!("controller key admission rejected");
         }
         Err(admission::AdmissionError::Transport(error)) => {
             rejection_line(RejectionClass::Unavailable);
@@ -162,13 +159,8 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
         RejectionClass::Authorization,
     )?;
 
-    // (5) Fencing: this process is executing the authorized target artifact,
-    // the operation names this local deployment, and its config_revision
-    // matches the local revision marker.
-    reject(
-        identity::validate_target_artifact(&verified.target),
-        RejectionClass::Target,
-    )?;
+    // (5) Fencing: the operation names this local deployment and its
+    // config_revision matches the local revision marker.
     let local_deployment_id = reject(
         identity::validate_local_operation_identity(&verified.operation),
         RejectionClass::Deployment,
@@ -265,9 +257,7 @@ pub(super) async fn operator_database() -> anyhow::Result<nazo_postgres::DbPool>
 enum RejectionClass {
     Request,
     Authorization,
-    Expired,
     Deployment,
-    Target,
     Revision,
     Conflict,
     Unavailable,
@@ -278,9 +268,7 @@ impl RejectionClass {
         match self {
             Self::Request => "request",
             Self::Authorization => "authorization",
-            Self::Expired => "expired",
             Self::Deployment => "deployment",
-            Self::Target => "target",
             Self::Revision => "revision",
             Self::Conflict => "conflict",
             Self::Unavailable => "unavailable",

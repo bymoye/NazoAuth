@@ -344,21 +344,25 @@ fn publish_replaceable_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
     ));
     publish_new_file(&temporary, contents)?;
     if path.exists() {
-        let previous = parent.join("deployment-statement.previous.jws");
-        if previous.exists() {
-            fs::remove_file(&previous).with_context(|| {
-                format!("failed to remove stale statement {}", previous.display())
-            })?;
-        }
-        fs::rename(path, &previous)
-            .with_context(|| format!("failed to preserve previous statement {}", path.display()))?;
+        // Windows cannot replace an existing file with `rename`. Move the
+        // current statement to a unique temporary name first so the new
+        // statement can be activated with the same atomic rename sequence.
+        // The old statement is only a rollback temporary; it is never a
+        // second persisted deployment identity.
+        let rollback = parent.join(format!(
+            ".deployment-statement.{}.rollback.tmp",
+            URL_SAFE_NO_PAD.encode(rand::random::<[u8; 12]>()),
+        ));
+        fs::rename(path, &rollback)
+            .with_context(|| format!("failed to stage deployment statement {}", path.display()))?;
         if let Err(error) = fs::rename(&temporary, path) {
-            let _ = fs::rename(&previous, path);
+            let _ = fs::rename(&rollback, path);
             let _ = fs::remove_file(&temporary);
             return Err(error).with_context(|| {
                 format!("failed to activate deployment statement {}", path.display())
             });
         }
+        let _ = fs::remove_file(&rollback);
         return Ok(());
     }
     fs::rename(&temporary, path)

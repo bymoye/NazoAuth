@@ -23,9 +23,8 @@ use diesel_async::{
 use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
     CONTROL_OPERATION_SCHEMA, ControlOperation, ControlOperationPayload, ControlOutcome,
-    ControlTarget, controller_key_id, decode_control_result, sign_control_operation,
+    controller_key_id, decode_control_result, sign_control_operation,
 };
-use sha2::{Digest as _, Sha256};
 
 const DEPLOYMENT: &str = "deployment-process";
 const CONFIG_REVISION: &str = "config-revision-process";
@@ -233,22 +232,12 @@ fn wait_for_marker(mut child: Child, path: &Path) -> Child {
     }
 }
 
-fn server_binary_sha256() -> String {
-    Sha256::digest(fs::read(env!("CARGO_BIN_EXE_nazoauth")).unwrap())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn operation(operation_id: &str, kid: &str, payload: ControlOperationPayload) -> ControlOperation {
     ControlOperation {
         schema: CONTROL_OPERATION_SCHEMA,
         operation_id: operation_id.to_owned(),
         kid: kid.to_owned(),
         deployment_id: DEPLOYMENT.to_owned(),
-        target: ControlTarget::HostBinary {
-            sha256: server_binary_sha256(),
-        },
         config_revision: CONFIG_REVISION.to_owned(),
         operation: payload,
     }
@@ -417,8 +406,8 @@ async fn killed_before_side_effect_resumes_without_duplicating_the_mutation() {
 }
 
 /// Admission failures against real registry state: expired, revoked, unknown,
-/// cross-deployment, forged signature, wrong target, wrong revision, and the
-/// refused tenant-resource mutations.
+/// cross-deployment, forged signature, wrong revision, and the refused
+/// tenant-resource mutations.
 #[tokio::test]
 async fn admission_refuses_every_forged_or_unservicable_operation_class() {
     let Some((database_url, registry)) = isolated_registry("admission").await else {
@@ -512,7 +501,9 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
         "authorization",
     );
 
-    // Expired key.
+    // Expired keys are the same authorization rejection as unknown and revoked
+    // keys; the operator entry does not perform a second registry read merely
+    // to expose an internal lifecycle distinction.
     assert_rejection(
         &run(
             signed(
@@ -525,7 +516,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
             ),
             env(),
         ),
-        "expired",
+        "authorization",
     );
 
     // Revoked key.
@@ -578,17 +569,6 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
     let forged_signature = FORGED_B64.encode(stranger.sign(signing_input.as_bytes()).to_bytes());
     let forged_compact = format!("{signing_input}.{forged_signature}");
     assert_rejection(&run(forged_compact, env()), "authorization");
-
-    // Wrong host binary artifact digest.
-    let mut wrong_target = operation(
-        "019c8ca2-30a6-7000-8000-00000000b008",
-        &kid,
-        ControlOperationPayload::KeysValidate,
-    );
-    wrong_target.target = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
-    };
-    assert_rejection(&run(signed(&wrong_target, &controller), env()), "target");
 
     // Stale configuration revision.
     let mut stale_revision = operation(

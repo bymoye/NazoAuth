@@ -1,6 +1,6 @@
 //! E04/E05 unit coverage for the reworked one-shot operator entry:
-//! presentation strictness, Controller Registry admission classification,
-//! artifact target identity, config_revision fencing, deployment anchors, the E05
+//! presentation strictness, Controller Registry admission, config_revision
+//! fencing, deployment anchors, the E05
 //! resume-ownership table, and dispatch precondition mapping.  Database-backed
 //! end-to-end behavior (including crash/failpoint evidence) lives in
 //! `tests/operator_task_process.rs`.
@@ -9,7 +9,7 @@ use std::{fs, path::PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_operator_protocol::{
-    CONTROL_OPERATION_SCHEMA, ControlOperation, ControlOperationPayload, ControlTarget,
+    CONTROL_OPERATION_SCHEMA, ControlOperation, ControlOperationPayload,
     MAX_CONTROL_OPERATION_BYTES,
 };
 use sha2::{Digest as _, Sha256};
@@ -32,9 +32,6 @@ fn operation(operation_id: &str) -> ControlOperation {
         // Unpadded base64url SHA-256 shape: exactly 43 characters.
         kid: "kid-controller-test-key-0000000000000000000".to_owned(),
         deployment_id: "deployment-test".to_owned(),
-        target: ControlTarget::HostBinary {
-            sha256: "a".repeat(64),
-        },
         config_revision: "config-revision-1".to_owned(),
         operation: ControlOperationPayload::MigrateApply,
     }
@@ -64,7 +61,7 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
 
     // Wrong schema tag is a protocol change, never a fallback.
     let mut schema = serde_json::to_value(&valid).unwrap();
-    schema["schema"] = serde_json::json!(2);
+    schema["schema"] = serde_json::json!(CONTROL_OPERATION_SCHEMA + 1);
     assert!(admission::present(&presented(&schema.to_string())).is_err());
 
     // Unknown closed-operation name and unknown typed-payload members are
@@ -110,9 +107,9 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
 
     // Oversized payloads hit the size gate regardless of validity.
     let giant = format!(
-        "{{\"schema\":1,\"operation_id\":\"019c8ca2-30a6-7000-8000-00000000a002\",\"kid\":\"{}\",\"deployment_id\":\"d\",\"target\":{{\"kind\":\"host-binary\",\"sha256\":\"{}\"}},\"config_revision\":\"r\",\"operation\":{{\"name\":\"keys-validate\",\"filler\":\"{}\"}}}}",
+        "{{\"schema\":{},\"operation_id\":\"019c8ca2-30a6-7000-8000-00000000a002\",\"kid\":\"{}\",\"deployment_id\":\"d\",\"config_revision\":\"r\",\"operation\":{{\"name\":\"keys-validate\",\"filler\":\"{}\"}}}}",
+        CONTROL_OPERATION_SCHEMA,
         "k".repeat(43),
-        "a".repeat(64),
         "x".repeat(MAX_CONTROL_OPERATION_BYTES),
     );
     let oversized = presented(&giant);
@@ -122,51 +119,6 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
     // Segment shape and base64url strictness.
     assert!(admission::present("a.b").is_err());
     assert!(admission::present("e30.!!!.c2ln").is_err());
-}
-
-#[test]
-fn unadmitted_controller_keys_are_classified_from_registry_state() {
-    use nazo_postgres::StoredControllerSlot;
-
-    // Unknown kid for this deployment.
-    assert_eq!(
-        admission::classify_unadmitted_key(None),
-        admission::KeyAdmissionFailure::Untrusted
-    );
-
-    // A terminally revoked slot can never admit again; it stays distinct
-    // from expiry in the rejection taxonomy but refuses identically.
-    let slot = StoredControllerSlot {
-        deployment_id: "deployment-test".to_owned(),
-        controller_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
-        label: "primary".to_owned(),
-        kid: "kid-controller-test-key-0000000000000000000".to_owned(),
-        public_key: vec![1; 32],
-        slot_index: 0,
-        issued_at: chrono::Utc::now() - chrono::Duration::days(40),
-        expires_at: chrono::Utc::now() - chrono::Duration::days(10),
-        last_used_at: None,
-        status: nazo_postgres::ControllerSlotStatus::Revoked,
-        revoked_at: Some(chrono::Utc::now() - chrono::Duration::days(1)),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
-    assert_eq!(
-        admission::classify_unadmitted_key(Some(&slot)),
-        admission::KeyAdmissionFailure::Untrusted
-    );
-
-    // An active slot that failed admission has necessarily aged out of its
-    // fixed server-side window.
-    let expired = StoredControllerSlot {
-        status: nazo_postgres::ControllerSlotStatus::Active,
-        revoked_at: None,
-        ..slot
-    };
-    assert_eq!(
-        admission::classify_unadmitted_key(Some(&expired)),
-        admission::KeyAdmissionFailure::Expired
-    );
 }
 
 #[test]
@@ -392,52 +344,6 @@ fn apply_change_sets_are_digest_bound_to_the_signed_identities() {
         execution::prepare_change_set_material(&serde_json::to_vec(&other).unwrap(), &[identity])
             .is_err()
     );
-}
-
-#[test]
-fn target_artifact_identity_binds_operations_to_this_binary() {
-    let directory = temporary_directory();
-    let executable = directory.join("nazoauth");
-    fs::write(&executable, b"exact executing binary bytes").unwrap();
-    let executable_sha256: String = Sha256::digest(fs::read(&executable).unwrap())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-
-    let matching = ControlTarget::HostBinary {
-        sha256: executable_sha256.clone(),
-    };
-    identity::validate_target_artifact_at(&matching, &executable, None).unwrap();
-
-    let wrong_host_digest = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
-    };
-    assert!(identity::validate_target_artifact_at(&wrong_host_digest, &executable, None).is_err());
-
-    let image_digest = format!("sha256:{}", "b".repeat(64));
-    let oci_matching = ControlTarget::OciImage {
-        image_digest: image_digest.clone(),
-    };
-    identity::validate_target_artifact_at(&oci_matching, &executable, Some(&image_digest)).unwrap();
-    assert!(identity::validate_target_artifact_at(&oci_matching, &executable, None).is_err());
-    assert!(
-        identity::validate_target_artifact_at(
-            &oci_matching,
-            &executable,
-            Some("sha256:not-a-digest")
-        )
-        .is_err()
-    );
-    assert!(
-        identity::validate_target_artifact_at(
-            &oci_matching,
-            &executable,
-            Some(&format!("sha256:{}", "c".repeat(64))),
-        )
-        .is_err()
-    );
-
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

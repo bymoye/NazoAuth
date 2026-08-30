@@ -1,15 +1,12 @@
 //! Local identity anchors for the one-shot operator (E04 step 5).
 //!
-//! Two independent fences run after signature verification and before
+//! Two local fences run after signature verification and before
 //! journal acceptance:
 //!
-//! 1. artifact digest equality: the signed target digest must equal the
-//!    executing host binary or OCI image, so an operation authorized for
-//!    artifact A can never execute on runtime B;
-//! 2. deployment binding: the signed `deployment_id` must match the local
+//! 1. deployment binding: the signed `deployment_id` must match the local
 //!    authoritative anchors (server config, persisted instance identity, and
 //!    the operator state anchor);
-//! 3. config_revision fencing: the signed opaque revision must equal the
+//! 2. config_revision fencing: the signed opaque revision must equal the
 //!    local revision marker, constant-time compared through the frozen
 //!    [`nazo_operator_protocol::config_revision_matches`] helper.
 //!
@@ -20,61 +17,11 @@
 use std::{io::Cursor, path::Path};
 
 use anyhow::{Context as _, bail};
-use sha2::{Digest as _, Sha256};
 use yaml_serde::Value as YamlValue;
 
 use super::*;
-use crate::adapters::security::constant_time_eq;
 use crate::control_discovery::read_identifier;
 use nazo_operator_protocol::ControlOperationPayload;
-
-const OCI_IMAGE_DIGEST_ENVIRONMENT: &str = "NAZOAUTH_OPERATOR_OCI_IMAGE_DIGEST";
-
-/// The operation must name exactly the artifact that is executing.
-pub(super) fn validate_target_artifact(
-    target: &nazo_operator_protocol::ControlTarget,
-) -> anyhow::Result<()> {
-    let executable = env::current_exe()
-        .context("failed to resolve the executing binary for artifact identity validation")?;
-    let oci_image_digest = match target {
-        nazo_operator_protocol::ControlTarget::OciImage { .. } => Some(
-            env::var(OCI_IMAGE_DIGEST_ENVIRONMENT)
-                .context("operator OCI image digest authority is unavailable")?,
-        ),
-        nazo_operator_protocol::ControlTarget::HostBinary { .. } => None,
-    };
-    validate_target_artifact_at(target, &executable, oci_image_digest.as_deref())
-}
-
-pub(super) fn validate_target_artifact_at(
-    target: &nazo_operator_protocol::ControlTarget,
-    executable: &Path,
-    oci_image_digest: Option<&str>,
-) -> anyhow::Result<()> {
-    match target {
-        nazo_operator_protocol::ControlTarget::HostBinary { sha256, .. } => {
-            let executable = fs::read(executable)
-                .context("failed to measure the executing host binary artifact")?;
-            let actual: String = Sha256::digest(executable)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            if !constant_time_eq(actual.as_bytes(), sha256.as_bytes()) {
-                bail!("host binary artifact digest does not match the executing runtime");
-            }
-        }
-        nazo_operator_protocol::ControlTarget::OciImage { image_digest, .. } => {
-            let actual =
-                oci_image_digest.context("operator OCI image digest authority is unavailable")?;
-            nazo_operator_protocol::validate_oci_image_digest(actual)
-                .context("operator OCI image digest authority is invalid")?;
-            if !constant_time_eq(actual.as_bytes(), image_digest.as_bytes()) {
-                bail!("OCI image artifact digest does not match the executing runtime");
-            }
-        }
-    }
-    Ok(())
-}
 
 pub(super) fn validate_config_revision(operation: &ControlOperation) -> anyhow::Result<()> {
     let revision_path = configured_path(

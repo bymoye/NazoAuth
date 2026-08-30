@@ -1,6 +1,6 @@
 //! E01/E02 unit coverage for the refrozen control-plane contract: canonical
 //! determinism, hashing, signing, closed enums with strict unknown-field
-//! rejection everywhere, typed targets, tenant-resource payloads, and
+//! rejection everywhere, tenant-resource payloads, and
 //! journal-entry invariants.  Per 05 §2 the envelope carries no `iss`, `aud`,
 //! `actor`, `iat`, `nbf`, or `exp`; admission-time key validity and replay
 //! defense live in E04/E03, not in this wire model.
@@ -22,25 +22,12 @@ fn controller_key() -> SigningKey {
 const OPERATION_ID: &str = "019c8ca2-30a6-7000-8000-000000000005";
 const TENANT_ID: &str = "019c8ca2-30a6-7000-8000-000000000001";
 
-fn host_binary_target() -> ControlTarget {
-    ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
-    }
-}
-
-fn oci_image_target() -> ControlTarget {
-    ControlTarget::OciImage {
-        image_digest: format!("sha256:{}", "e".repeat(64)),
-    }
-}
-
 fn operation() -> ControlOperation {
     ControlOperation {
         schema: CONTROL_OPERATION_SCHEMA,
         operation_id: OPERATION_ID.to_owned(),
         kid: controller_key_id(&controller_key().verifying_key()),
         deployment_id: "deployment-1".to_owned(),
-        target: host_binary_target(),
         config_revision: "config-revision-1".to_owned(),
         operation: ControlOperationPayload::MigrateApply,
     }
@@ -116,17 +103,17 @@ fn golden_canonical_bytes_and_request_hash_are_stable() {
     let bytes = canonical_control_operation_bytes(&operation).unwrap();
     assert_eq!(
         std::str::from_utf8(&bytes).unwrap(),
-        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":1,\"target\":{\"kind\":\"host-binary\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":2}",
     );
     assert_eq!(
         control_operation_request_hash(&operation).unwrap(),
-        "c39136bb87846cf347c2e8893a76df0292006cfd2614857534f52a6a66d93ecc",
+        "0ff7bc5850c4bde34889ddba6973889269bf15cab7e28bf9a28f7a27db7e5c23",
     );
     // Ed25519 is deterministic, so the full compact JWS is reproducible too.
     let compact = crate::sign_control_operation(&operation, &controller_key()).unwrap();
     assert_eq!(
         compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6MSwidGFyZ2V0Ijp7ImtpbmQiOiJob3N0LWJpbmFyeSIsInNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifX0.5Dzm0DPaCcGCqEcnFyDYdIuDMuS_uKusPayGDODJsSvYmtkl64jezZj-fNlZFP_p-cISABNKKmooEsLBLjlABA"
+        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6Mn0.OKo8WNyoIrZcgxxXJR9qDEwU8xu_NV1cFL_B66XxcDiSZPeWngYE_HX6cbjqY8xYIgGW7RjubUTbyeRZOtXOBg"
     );
 }
 
@@ -137,9 +124,6 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
 
     // Rebuild the same logical value as an untyped object with members
     // inserted in reverse declaration order, nested objects included.
-    let mut target = serde_json::Map::new();
-    target.insert("sha256".to_owned(), serde_json::json!("a".repeat(64)));
-    target.insert("kind".to_owned(), serde_json::json!("host-binary"));
     let mut root = serde_json::Map::new();
     root.insert(
         "operation".to_owned(),
@@ -149,14 +133,13 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
         "config_revision".to_owned(),
         serde_json::json!("config-revision-1"),
     );
-    root.insert("target".to_owned(), serde_json::Value::Object(target));
     root.insert(
         "deployment_id".to_owned(),
         serde_json::json!("deployment-1"),
     );
     root.insert("kid".to_owned(), serde_json::json!(operation.kid));
     root.insert("operation_id".to_owned(), serde_json::json!(OPERATION_ID));
-    root.insert("schema".to_owned(), serde_json::json!(1));
+    root.insert("schema".to_owned(), serde_json::json!(2));
     let reordered = canonicalize_json_value(serde_json::Value::Object(root));
     assert_eq!(
         serde_json::to_vec(&reordered).unwrap(),
@@ -167,16 +150,14 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
     // Whitespace layout and \uXXXX escape spelling are equally irrelevant.
     let pretty = format!(
         r#"{{
-            "schema": 1,
+            "schema": 2,
             "operation_id": "{OPERATION_ID}",
             "kid": "{}",
             "deployment_id": "deployment-1",
-            "target": {{"kind": "host-binary", "sha256": "{}"}},
             "config_revision": "config-re\u0076ision-1",
             "operation": {{"name": "migrate-apply"}}
         }}"#,
         operation.kid,
-        "a".repeat(64),
     );
     let parsed: serde_json::Value = serde_json::from_str(&pretty).unwrap();
     assert_eq!(
@@ -195,18 +176,11 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
 #[test]
 fn distinct_requests_never_share_a_request_hash() {
     let baseline = control_operation_request_hash(&operation()).unwrap();
-    let mutations: [fn(&mut ControlOperation); 7] = [
+    let mutations: [fn(&mut ControlOperation); 5] = [
         |value| {
             value.operation_id = "019c8ca2-30a6-7000-8000-000000000006".to_owned();
         },
         |value| value.deployment_id = "deployment-2".to_owned(),
-        |value| value.target = oci_image_target(),
-        |value| {
-            let ControlTarget::HostBinary { sha256, .. } = &mut value.target else {
-                panic!("fixture target must be a host binary");
-            };
-            *sha256 = "c".repeat(64);
-        },
         |value| {
             value.config_revision = "config-revision-2".to_owned();
         },
@@ -382,9 +356,14 @@ fn unknown_fields_are_denied_everywhere() {
     assert!(reject_parsed(|value| value["nbf"] = serde_json::json!(1_000)).is_err());
     assert!(reject_parsed(|value| value["exp"] = serde_json::json!(1_030)).is_err());
     assert!(reject_parsed(|value| value["opaque_revision"] = serde_json::json!("r1")).is_err());
-    assert!(reject_parsed(|value| value["target"]["embedded"] = serde_json::json!({})).is_err());
     assert!(
-        reject_parsed(|value| value["target"]["path"] = serde_json::json!("/usr/bin/env")).is_err()
+        reject_parsed(|value| {
+            value["target"] = serde_json::json!({
+                "kind": "host-binary",
+                "sha256": "a".repeat(64),
+            })
+        })
+        .is_err()
     );
     assert!(
         reject_parsed(|value| value["operation"]["argv"] = serde_json::json!(["sh", "-c"]))
@@ -421,87 +400,6 @@ fn unknown_fields_are_denied_everywhere() {
         verify_control_operation_signature(&forged, &operation.kid, &key.verifying_key()),
         Err(ProtocolError::Header)
     ));
-}
-
-#[test]
-fn target_variants_are_closed_strictly_parsed_and_validated() {
-    // Both classes accept their exact shape.
-    let mut host = operation();
-    validate_control_operation(&host).unwrap();
-    host.target = oci_image_target();
-    validate_control_operation(&host).unwrap();
-
-    let parse_target = |value: serde_json::Value| {
-        serde_json::from_value::<ControlTarget>(value).map_err(|error| error.to_string())
-    };
-
-    // Unknown kind.
-    let mut value = serde_json::to_value(host_binary_target()).unwrap();
-    value["kind"] = serde_json::json!("container-layer");
-    assert!(
-        parse_target(value)
-            .unwrap_err()
-            .contains("unknown target kind")
-    );
-
-    // Unknown member inside a variant.
-    let mut value = serde_json::to_value(host_binary_target()).unwrap();
-    value["argv"] = serde_json::json!(["sh"]);
-    assert!(
-        parse_target(value)
-            .unwrap_err()
-            .contains("unknown target field")
-    );
-
-    // The removed build identity cannot be smuggled into a target.
-    let mut value = serde_json::to_value(host_binary_target()).unwrap();
-    value["embedded"] = serde_json::json!({});
-    assert!(
-        parse_target(value)
-            .unwrap_err()
-            .contains("unknown target field")
-    );
-
-    // Missing required member.
-    let mut value = serde_json::to_value(host_binary_target()).unwrap();
-    value.as_object_mut().unwrap().remove("sha256");
-    assert!(
-        parse_target(value)
-            .unwrap_err()
-            .contains("requires field 'sha256'")
-    );
-
-    // Wrong scalar type.
-    let mut value = serde_json::to_value(oci_image_target()).unwrap();
-    value["image_digest"] = serde_json::json!(7);
-    assert!(parse_target(value).is_err());
-
-    // Digest formats are enforced by envelope validation.
-    let mut bad_prefix = operation();
-    bad_prefix.target = ControlTarget::OciImage {
-        image_digest: "docker.io/nazoauth:v1".to_owned(),
-    };
-    assert!(validate_control_operation(&bad_prefix).is_err());
-
-    let mut uppercase = operation();
-    uppercase.target = ControlTarget::OciImage {
-        image_digest: format!("sha256:{}", "E".repeat(64)),
-    };
-    assert!(validate_control_operation(&uppercase).is_err());
-
-    let mut short_hash = operation();
-    short_hash.target = ControlTarget::HostBinary {
-        sha256: "a".repeat(63),
-    };
-    assert!(validate_control_operation(&short_hash).is_err());
-}
-
-#[test]
-fn oci_runtime_digest_uses_the_control_target_validator() {
-    assert!(validate_oci_image_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
-    assert!(validate_oci_image_digest(&"a".repeat(64)).is_err());
-    assert!(validate_oci_image_digest(&format!("sha256:{}", "A".repeat(64))).is_err());
-    assert!(validate_oci_image_digest(&format!("sha256:{}", "a".repeat(63))).is_err());
 }
 
 #[test]

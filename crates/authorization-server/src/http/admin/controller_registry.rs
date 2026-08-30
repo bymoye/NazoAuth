@@ -45,20 +45,17 @@ fn ensure_csrf(
     }
 }
 
-/// GET /admin/controller-registry/slots?deployment_id=...
+/// GET /controller-registry/slots?deployment_id=...
 ///
 /// Authoritative answer to "which controllers exist for this deployment and
-/// when do they expire"; read-only admin view.
-pub(crate) async fn admin_controller_slots(
-    admin_sessions: Data<AdminSessionHandles>,
+/// when do they expire". The exact-deployment query returns public controller
+/// metadata only; it never returns key material, approvals, or recovery data.
+/// Identity-changing endpoints remain under `/admin` and keep their existing
+/// session, CSRF, approval, and fresh-MFA requirements.
+pub(crate) async fn controller_slots(
     registry: Data<ControllerRegistryService>,
-    req: HttpRequest,
     Query(q): Query<HashMap<String, String>>,
 ) -> HttpResponse {
-    let _admin = match require_admin_or_forbidden_with_handles(&admin_sessions, &req).await {
-        Ok(admin) => admin,
-        Err(response) => return response,
-    };
     let Some(deployment_id) = q
         .get("deployment_id")
         .map(String::as_str)
