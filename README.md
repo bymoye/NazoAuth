@@ -123,7 +123,7 @@ nazoauthctl install --host production-host --name production \
   --database-lifecycle-password-file ./database-lifecycle-password \
   --valkey-host valkey.internal --valkey-port 6379 \
   --valkey-password-file ./valkey-password
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 nazoauthctl bind --instance production --label operations \
   --output-secret-file ./production-recovery-secret
 nazoauthctl status --instance production
@@ -140,11 +140,11 @@ private boundary. Data, signing keys, generated application secrets, and
 avatars are persistent. See [managed installation, update, and recovery](docs/operations/one-click-update.md)
 for current-format import and backup policy.
 
-On a database without an administrator, `nazoauthctl bootstrap-admin` reads the
-runtime-owned one-time claim without printing it. Interactive use prompts on a
-TTY; automation supplies the closed credential document through stdin or a
-dedicated file descriptor. The token, credentials, and any token-bearing URL
-never enter argv, ordinary environment variables, logs, or audit records.
+On a database without an administrator, `nazoauthctl admin create` invokes
+the target runtime's local `nazoauth admin-provision` one-shot command. The
+closed credential document is supplied through the controller's protected
+credential path; it is never sent through an HTTP bootstrap route, argv,
+ordinary environment variables, logs, or audit records.
 
 For a public issuer, pass `--public-url https://auth.example.com`; see the
 [deployment guide](docs/operations/deployment.md) for TLS ingress requirements.

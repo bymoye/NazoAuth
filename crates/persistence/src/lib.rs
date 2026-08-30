@@ -397,36 +397,46 @@ pub trait Openid4vcTrustPolicyStore: Send + Sync {
     ) -> BoxFuture<'a, Result<Option<Openid4vcTrustPolicyRecord>, RepositoryError>>;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InitialAdminBootstrapState {
-    Closed,
-    Ready,
-    Claimed { expected_token_hash: String },
+#[derive(Clone, Debug)]
+pub struct AdminProvisionRequest {
+    pub tenant: nazo_identity::TenantContext,
+    pub operation_id: String,
+    pub deployment_id: String,
+    pub email: String,
+    pub password_hash: nazo_identity::ports::PasswordHashInput,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InitialAdminClaimOutcome {
-    Created {
-        request_id: String,
-        id: uuid::Uuid,
-        email: String,
-    },
-    Closed,
+pub struct AdminProvisionReceipt {
+    pub operation_id: String,
+    pub deployment_id: String,
+    pub user_id: uuid::Uuid,
+    pub email: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminProvisionError {
+    InvalidInput,
     EmailConflict,
-    IdempotencyConflict,
+    OperationConflict,
+    Unavailable,
+    Storage,
 }
 
-/// Atomic, idempotent initial-administrator claim capability.
-pub trait InitialAdminBootstrapStore: Send + Sync {
-    fn load_state(&self) -> BoxFuture<'_, Result<InitialAdminBootstrapState, RepositoryError>>;
+impl fmt::Display for AdminProvisionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("administrator provisioning failed")
+    }
+}
 
-    fn claim<'a>(
-        &'a self,
-        request_id: &'a str,
-        token_hash: &'a str,
-        email: &'a str,
-        password_hash: nazo_identity::ports::PasswordHashInput,
-    ) -> BoxFuture<'a, Result<InitialAdminClaimOutcome, RepositoryError>>;
+impl std::error::Error for AdminProvisionError {}
+
+/// Atomic, idempotent out-of-band administrator provisioning capability.
+pub trait AdminProvisionStore: Send + Sync {
+    fn provision(
+        &self,
+        request: AdminProvisionRequest,
+    ) -> BoxFuture<'_, Result<AdminProvisionReceipt, AdminProvisionError>>;
 }
 
 /// Account projection needed by CIBA admission and token issuance.

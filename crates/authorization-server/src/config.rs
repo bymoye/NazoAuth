@@ -63,7 +63,11 @@ const PERSISTENT_PATH_CONFIG_KEYS: &[&str] = &[
     "UI_CACHE_DIR",
     "UI_STATIC_DIR",
 ];
-const NON_CONFIG_NAZOAUTH_ENV_PREFIXES: &[&str] = &["NAZOAUTH_OPERATOR_", "NAZOAUTHCTL_"];
+const NON_CONFIG_NAZOAUTH_ENV_PREFIXES: &[&str] = &[
+    "NAZOAUTH_OPERATOR_",
+    "NAZOAUTHCTL_",
+    "NAZOAUTH_ADMIN_PROVISION_",
+];
 const NON_CONFIG_NAZOAUTH_ENV_KEYS: &[&str] = &[
     "NAZOAUTH_MIGRATION_RUNTIME_ROLE",
     "NAZOAUTH_SERVER_CONFIG_FILE",
@@ -937,15 +941,6 @@ fn read_or_create_generated_secret_with_size(
     }
     let _ = std::fs::remove_file(&temporary_path);
     read_generated_secret(path)
-}
-
-pub(crate) fn read_or_create_runtime_secret(
-    data_dir: &Path,
-    relative_path: impl AsRef<Path>,
-) -> anyhow::Result<(PathBuf, String)> {
-    let path = data_dir.join(relative_path);
-    let value = read_or_create_generated_secret(&path)?;
-    Ok((path, value))
 }
 
 pub(crate) fn read_or_create_instance_identity_key(

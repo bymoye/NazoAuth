@@ -73,6 +73,7 @@ x509-cert.workspace = true
 urlencoding.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 yaml_serde = "0.10.4"
+zeroize.workspace = true
 
 [dev-dependencies]
 diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "serde_json", "64-column-tables"] }

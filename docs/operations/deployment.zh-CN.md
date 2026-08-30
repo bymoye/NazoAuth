@@ -53,14 +53,13 @@ identity，也不会联系或冒充 GitHub Actions。可直接打开：
 首次源码构建需要联网下载 Rust 依赖；后续构建会复用本地容器缓存。
 
 默认配置只用于 loopback 本地体验。PostgreSQL、Valkey 和应用状态（包括签名密钥、头像、
-生成的秘密、bootstrap 状态及 UI release 缓存）均使用命名卷，执行
+生成的秘密、管理员创建 receipt 及 UI release 缓存）均使用命名卷，执行
 `docker compose down` 后仍会保留。除非明确要删除全部本地数据，不要执行
 `docker compose down -v`。
 
-新数据库没有管理员时，服务会在私有 bootstrap 状态中创建与部署绑定、单次使用的 token；
-该 token 在首个管理员创建前保持有效，但不会被打印，也不会出现在 URL 中。正式受管流程通过 `nazoauthctl bootstrap-admin`
-验证并读取私有的 runtime-owned 状态；授权服务器只暴露 JSON `POST /auth/bootstrap-admin` API，不再提供
-后端内嵌初始化页面。
+新数据库没有管理员时，正式受管流程通过 `nazoauthctl admin create` 调用目标 runtime
+内的 `nazoauth admin-provision` 一次性命令。凭据只通过 controller 的受保护凭据路径交付；
+授权服务器不提供 HTTP 初始化路由，也不提供后端内嵌初始化页面。
 
 ## 公开部署
 
@@ -79,7 +78,7 @@ nazoauthctl install \
   --database-lifecycle-password-file ./database-lifecycle-password \
   --valkey-host valkey.internal --valkey-port 6379 \
   --valkey-password-file ./valkey-password
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 ```
 
 runtime 必须明确选择 `podman`、`docker` 或 `host`。两套 PostgreSQL role 与

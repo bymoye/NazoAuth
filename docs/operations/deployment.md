@@ -65,16 +65,15 @@ Later builds reuse the local container cache.
 
 The default is a loopback-only evaluation deployment. PostgreSQL, Valkey, and
 application state—including signing keys, avatars, generated secrets,
-bootstrap state, and the UI release cache—use named volumes and survive
+administrator-provisioning receipts, and the UI release cache—use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
 
-When the database has no administrator, the server creates a deployment-bound,
-single-use token in its private bootstrap state. It remains valid until the
-first administrator is created. The server never prints the token or a
-token-bearing URL. The formal managed flow reads that private runtime-owned state through
-`nazoauthctl bootstrap-admin`; the authorization server exposes only the JSON
-`POST /auth/bootstrap-admin` API and does not serve an embedded setup page.
+When the database has no administrator, the managed flow invokes the target's
+local `nazoauth admin-provision` one-shot command through
+`nazoauthctl admin create`. Credentials are delivered through the
+controller's protected credential path; the authorization server exposes no
+HTTP bootstrap route or embedded setup page.
 
 ## Public deployment
 
@@ -93,7 +92,7 @@ nazoauthctl install \
   --database-lifecycle-password-file ./database-lifecycle-password \
   --valkey-host valkey.internal --valkey-port 6379 \
   --valkey-password-file ./valkey-password
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 ```
 
 Select exactly one runtime: `podman`, `docker`, or `host`. The two PostgreSQL

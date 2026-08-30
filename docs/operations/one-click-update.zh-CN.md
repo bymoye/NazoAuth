@@ -38,14 +38,14 @@ runtime 与 lifecycle PostgreSQL role 必须不同。服务进程只拿 runtime 
   --import-mfa-key-file /srv/nazoauth-import/mfa-totp-key
 ```
 
-这两个绝对目标机路径不可拆分。导入只复制当前 allowlist 内的数据、签名密钥、应用 secret 与 MFA key；旧 DeploymentState、控制端状态、bootstrap 状态、UI cache 和旧命令格式都不会被读取。
+这两个绝对目标机路径不可拆分。导入只复制当前 allowlist 内的数据、签名密钥、应用 secret 与 MFA key；旧 DeploymentState、控制端状态、管理员创建状态、UI cache 和旧命令格式都不会被读取。
 
-## Controller 绑定与初始管理员
+## Controller 绑定与管理员创建
 
 ```sh
 nazoauthctl bind --instance production --label operations \
   --output-secret-file ./production-recovery-secret
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 ```
 
 首次 bind 会在同一事务注册 Controller Key 与 Recovery Root。Recovery Secret 必须在提交前离线保存。若提交中断，owner-only pending 记录只保留这一份已交付的 proposal 与 secret，重试不会悄悄生成另一份；终态对账后立即删除。
@@ -54,10 +54,11 @@ nazoauthctl bootstrap-admin --instance production
 
 ```sh
 printf '%s' '{"email":"admin@example.com","password":"..."}' | \
-  nazoauthctl bootstrap-admin --instance production --credentials-stdin
+  nazoauthctl admin create --instance production --credentials-stdin
 ```
 
-凭据和单次 bootstrap token 不进入 argv、普通环境变量、Registry 或日志。
+命令会调用目标 runtime 内的 `nazoauth admin-provision` 一次性命令。凭据只通过
+controller 的受保护凭据路径交付，不进入 argv、普通环境变量、Registry 或日志。
 
 ## 更新与回滚
 

@@ -16,8 +16,6 @@ pub(super) struct StartupConfiguration {
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
     pub(super) mtls_certificate_source: web::Data<crate::http::mtls::MtlsCertificateSource>,
     pub(super) readiness_dependencies: web::Data<crate::http::well_known::ReadinessDependencies>,
-    pub(super) initial_admin_bootstrap:
-        web::Data<crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint>,
     pub(super) remote_client_documents:
         Arc<crate::domain::remote_client_documents::RemoteClientDocumentResolver>,
     pub(super) runtime_modules: web::Data<RuntimeModules>,
@@ -122,17 +120,6 @@ pub(super) async fn load(
             valkey_connection.clone(),
             keyset.clone(),
         ));
-    let initial_admin_bootstrap = web::Data::new(
-        crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint::initialize(
-            persistence
-                .provider()
-                .initial_admin_bootstrap(settings.tenant.context),
-            &settings.storage.data_dir,
-            &settings.endpoint.issuer,
-            control_discovery.deployment_id(),
-        )
-        .await?,
-    );
     let remote_client_documents = Arc::new(
         crate::domain::remote_client_documents::RemoteClientDocumentResolver::new(
             &settings.modules.remote_client_document_private_origins,
@@ -161,7 +148,6 @@ pub(super) async fn load(
         control_discovery,
         mtls_certificate_source,
         readiness_dependencies,
-        initial_admin_bootstrap,
         remote_client_documents,
         runtime_modules,
         keyset,

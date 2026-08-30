@@ -39,7 +39,7 @@ def main() -> int:
     if health_payload != {
         "status": "not_ready",
         "checks": {
-            "postgresql": {"status": "up"},
+            "database": {"status": "up"},
             "signing_keys": {"status": "up"},
             "valkey": {"status": "down"},
         },

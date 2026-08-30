@@ -799,76 +799,77 @@ def check_conformance_provisioning_boundaries() -> None:
         raise SystemExit("production runtime image must not contain Suite provisioning")
 
 
-def check_bootstrap_secret_log_boundary() -> None:
-    server = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "http"
-        / "bootstrap_admin.rs"
-    ).read_text(encoding="utf-8")
-    routes = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "bootstrap"
-        / "routes.rs"
-    ).read_text(encoding="utf-8")
-    repository = (
-        ROOT
-        / "crates"
-        / "persistence-postgres"
-        / "src"
-        / "repositories"
-        / "initial_admin_bootstrap.rs"
-    ).read_text(encoding="utf-8")
-    operations = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (ROOT / "docs" / "operations").glob("*.md")
+def check_admin_provision_boundary() -> None:
+    server_root = ROOT / "crates" / "authorization-server"
+    persistence_root = ROOT / "crates" / "persistence-postgres"
+    retired_http_module = "bootstrap" + "_" + "admin.rs"
+    retired_repository_module = "initial" + "_" + "admin" + "_" + "bootstrap.rs"
+    retired_paths = (
+        server_root / "src" / "http" / retired_http_module,
+        server_root / "tests" / "unit" / "http" / retired_http_module,
+        persistence_root / "src" / "repositories" / retired_repository_module,
+        persistence_root / "tests" / retired_repository_module,
     )
+    present = [str(path.relative_to(ROOT)) for path in retired_paths if path.exists()]
+    if present:
+        raise SystemExit(f"retired administrator bootstrap assets remain: {present}")
 
-    for forbidden in (
-        "initial_admin_setup_page",
-        "text/html",
-        "<!doctype html>",
-        "web::{Data, Form",
-        "web::{Data, Query",
-    ):
-        if forbidden in server or forbidden in routes:
-            raise SystemExit(
-                f"authorization server still embeds administrator setup UI: {forbidden}"
-            )
-    if 'route("/setup"' in routes:
-        raise SystemExit("authorization server still exposes the legacy setup route")
-    for source in (server, routes, operations):
-        if "/setup?token=" in source or "setup URL" in source:
-            raise SystemExit(
-                "initial administrator bootstrap exposes a query-token URL"
-            )
-    if "use the operator workflow to read the private runtime-owned token file" not in server:
-        raise SystemExit("initial administrator bootstrap lacks a non-secret recovery hint")
+    routes = (server_root / "src" / "bootstrap" / "routes.rs").read_text(
+        encoding="utf-8"
+    )
+    server_sources = "\n".join(
+        (server_root / relative).read_text(encoding="utf-8")
+        for relative in (
+            Path("src/bootstrap/routes.rs"),
+            Path("src/bootstrap/startup/configuration.rs"),
+            Path("src/bootstrap/startup/services/factory.rs"),
+            Path("src/http/mod.rs"),
+            Path("src/cli.rs"),
+        )
+    )
+    persistence_sources = "\n".join(
+        (persistence_root / relative).read_text(encoding="utf-8")
+        for relative in (
+            Path("src/schema.rs"),
+            Path("src/lib.rs"),
+            Path("src/repositories/mod.rs"),
+            Path("src/repositories/audit.rs"),
+        )
+    )
+    retired_route = 'route("/' + "bootstrap" + "-" + 'admin"'
+    if retired_route in routes:
+        raise SystemExit("authorization server still exposes the retired setup route")
+    retired_references = (
+        "bootstrap" + "_" + "admin",
+        "Initial" + "Admin" + "Bootstrap",
+        "Initial" + "Admin" + "ClaimOutcome",
+        "initial" + "_" + "admin" + "_" + "bootstrap" + "_receipts",
+        "initial" + "-" + "admin" + "-" + "token",
+    )
+    for forbidden in retired_references:
+        if forbidden in server_sources or forbidden in persistence_sources:
+            raise SystemExit(f"retired administrator bootstrap reference remains: {forbidden}")
     for marker in (
-        "request_id: String",
-        ".claim(&payload.request_id, &token_hash, &email, password_hash)",
-        '"request_id": request_id',
-        "InitialAdminClaimOutcome::IdempotencyConflict",
+        '"admin-provision"',
+        "ADMIN_PROVISION_CREDENTIAL_FILE_ENV",
+        "AdminProvisionRepository",
+        "admin_provision_receipts",
     ):
-        if marker not in server:
-            raise SystemExit(f"idempotent bootstrap API boundary is missing: {marker}")
-    created_start = server.index("InitialAdminClaimOutcome::Created")
-    created_end = server.index("InitialAdminClaimOutcome::Closed", created_start)
-    created_branch = server[created_start:created_end]
-    if "endpoint.close()" in created_branch or "remove_consumed_token" in created_branch:
-        raise SystemExit("server destroys bootstrap retry proof before ctl verifies the receipt")
-    for marker in (
-        "insert_initial_admin_created_event(",
-        "InitialAdminClaimOutcome::IdempotencyConflict",
-        "InitialAdminBootstrapState::Claimed",
-    ):
-        if marker not in repository:
-            raise SystemExit(f"database-owned bootstrap receipt boundary is missing: {marker}")
+        if marker not in server_sources + persistence_sources:
+            raise SystemExit(f"admin provisioning boundary is missing: {marker}")
+
+    migration = (
+        ROOT / "migrations" / "20260830000100_admin_user_provisioning" / "up.sql"
+    ).read_text(encoding="utf-8")
+    retired_receipts = (
+        "initial" + "_" + "admin" + "_" + "bootstrap" + "_receipts"
+    )
+    if f"DROP TABLE IF EXISTS {retired_receipts}" not in migration:
+        raise SystemExit("admin provisioning migration does not remove the retired receipt table")
+    if "admin_user_created" not in migration:
+        raise SystemExit("admin provisioning migration lacks the durable audit event type")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-migrations", action="store_true")
@@ -893,7 +894,7 @@ def main() -> None:
         check_fapi_ciba_boundaries()
         check_openid4vc_boundaries()
         check_conformance_provisioning_boundaries()
-        check_bootstrap_secret_log_boundary()
+        check_admin_provision_boundary()
 
 
 if __name__ == "__main__":

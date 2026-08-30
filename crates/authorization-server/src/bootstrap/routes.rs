@@ -63,7 +63,6 @@ use crate::http::authorization::{
     presentation::authorize_client_presentation,
     request::{authorize_get, authorize_post},
 };
-use crate::http::bootstrap_admin::claim_initial_admin;
 use crate::http::perf_metrics::perf_metrics;
 use crate::http::profile::{
     access_requests::{create_access_request, my_access_requests},
@@ -232,7 +231,6 @@ pub(crate) fn configure(
         // /auth scope — NO CORS for UI routes, cors_auth_api for /auth/me
         .service(
             web::scope("/auth")
-                .route("/bootstrap-admin", web::post().to(claim_initial_admin))
                 .route("/captcha-config", web::get().to(captcha_config))
                 .route("/send-code", web::post().to(send_code))
                 .route("/register", web::post().to(register))

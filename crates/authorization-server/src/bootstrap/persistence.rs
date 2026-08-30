@@ -11,16 +11,13 @@ use nazo_auth::{
     DeviceGrantRepositoryPort, DynamicRegistrationClientStore, LogoutClientRepositoryPort,
     TokenRepositoryPort,
 };
-use nazo_identity::{
-    TenantContext,
-    ports::{
-        AccessRequestRepositoryPort, AdminUserRepositoryPort, AuthorizedApplicationRepositoryPort,
-        AvatarRepositoryPort, FederationLinkRepositoryPort, FederationLoginRepositoryPort,
-        GrantSummaryRepositoryPort, LoginAccountRepositoryPort, MfaRepositoryPort,
-        MtlsTrustAnchorStore, PasskeyAccountRepositoryPort, PasskeyRepositoryPort,
-        ProfileRepositoryPort, RegistrationAccountRepositoryPort, RememberedMfaDevicePort,
-        ScimCredentialAuditPort, ScimRepositoryPort, SessionAccountPort,
-    },
+use nazo_identity::ports::{
+    AccessRequestRepositoryPort, AdminUserRepositoryPort, AuthorizedApplicationRepositoryPort,
+    AvatarRepositoryPort, FederationLinkRepositoryPort, FederationLoginRepositoryPort,
+    GrantSummaryRepositoryPort, LoginAccountRepositoryPort, MfaRepositoryPort,
+    MtlsTrustAnchorStore, PasskeyAccountRepositoryPort, PasskeyRepositoryPort,
+    ProfileRepositoryPort, RegistrationAccountRepositoryPort, RememberedMfaDevicePort,
+    ScimCredentialAuditPort, ScimRepositoryPort, SessionAccountPort,
 };
 
 /// All database capabilities required by one NazoAuth server process.
@@ -34,10 +31,6 @@ pub trait ServerPersistenceProvider: Send + Sync {
     fn security_audit_ledger(&self) -> Arc<dyn nazo_persistence::SecurityAuditLedger>;
     fn database_health(&self) -> Arc<dyn nazo_persistence::DatabaseHealthPort>;
     fn database_pool_metrics(&self) -> Arc<dyn nazo_persistence::DatabasePoolMetricsPort>;
-    fn initial_admin_bootstrap(
-        &self,
-        tenant: TenantContext,
-    ) -> Arc<dyn nazo_persistence::InitialAdminBootstrapStore>;
     fn runtime_modules(&self) -> Arc<dyn nazo_persistence::RuntimeModuleStore>;
 
     fn authorization_repository(

@@ -60,7 +60,7 @@ the current allowlisted data, signing keys, and application secrets plus the
 MFA key. It does not read an old DeploymentState, controller state, bootstrap
 state, UI cache, or command format.
 
-## Controller binding and initial administrator
+## Controller binding and administrator provisioning
 
 Bind a Controller Key before normal mutations:
 
@@ -78,7 +78,7 @@ operator's back.
 Create the first administrator interactively:
 
 ```sh
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 ```
 
 Automation supplies a strict JSON object containing exactly `email` and
@@ -86,11 +86,13 @@ Automation supplies a strict JSON object containing exactly `email` and
 
 ```sh
 printf '%s' '{"email":"admin@example.com","password":"..."}' | \
-  nazoauthctl bootstrap-admin --instance production --credentials-stdin
+  nazoauthctl admin create --instance production --credentials-stdin
 ```
 
-The bootstrap token is single-use and deployment-bound. Neither credentials
-nor the token enter argv, ordinary environment variables, Registry, or logs.
+The command invokes the target's local `nazoauth admin-provision` one-shot
+command. Credentials are delivered through the controller's protected
+credential path; they do not enter argv, ordinary environment variables,
+Registry, or logs.
 
 ## Update and rollback
 

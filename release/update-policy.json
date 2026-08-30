@@ -6,5 +6,5 @@
   "irreversible_migration": true,
   "minimum_supported_version": "0.2.2",
   "migration_floor": "20260828000700",
-  "rationale": "Protocol v2, durable replay, recovery invalidation, mandatory Valkey epochs, bounded signed-token expiry, and migrations 006-007 form one security boundary. Earlier releases cannot enforce tenant-bound OpenID4VP AAD, complete refresh and client policy, encrypted-only TOTP, explicit runtime state, or receipt-only initial-administrator bootstrap and must never reopen this database. Recovery requires the controller-verified pre-update database backup; artifact-only rollback is forbidden."
+  "rationale": "Protocol v2, durable replay, recovery invalidation, mandatory Valkey epochs, bounded signed-token expiry, and migrations 006-007 form one security boundary. Earlier releases cannot enforce tenant-bound OpenID4VP AAD, complete refresh and client policy, encrypted-only TOTP, explicit runtime state, or deployment-bound administrator provisioning receipts and must never reopen this database. Recovery requires the controller-verified pre-update database backup; artifact-only rollback is forbidden."
 }

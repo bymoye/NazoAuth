@@ -160,12 +160,11 @@ diesel::table! {
 }
 
 diesel::table! {
-    initial_admin_bootstrap_receipts (singleton) {
-        singleton -> Bool,
-        token_hash -> Varchar,
-        request_id -> Varchar,
-        request_email_hash -> Varchar,
-        claimed_user_id -> Uuid,
+    admin_provision_receipts (operation_id) {
+        operation_id -> Varchar,
+        deployment_id -> Varchar,
+        tenant_id -> Uuid,
+        user_id -> Uuid,
         created_at -> Timestamptz,
     }
 }
@@ -537,7 +536,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     realms,
     organizations,
     users,
-    initial_admin_bootstrap_receipts,
+    admin_provision_receipts,
     user_totp_credentials,
     user_mfa_backup_codes,
     user_mfa_remembered_devices,

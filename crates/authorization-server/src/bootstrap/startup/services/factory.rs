@@ -62,7 +62,6 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
         control_discovery,
         mtls_certificate_source,
         readiness_dependencies,
-        initial_admin_bootstrap,
         ..
     } = startup;
 
@@ -120,7 +119,6 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
             .app_data(database_pool_metrics.clone())
             .app_data(readiness_dependencies.clone())
             .app_data(control_discovery.clone())
-            .app_data(initial_admin_bootstrap.clone())
             .app_data(core.token_endpoint_handles.clone())
             .app_data(core.ciba_service.clone())
             .app_data(core.ciba_users.clone())

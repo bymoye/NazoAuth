@@ -24,14 +24,14 @@ pub use pool::{
     create_pool, db_pool_metrics, get_conn, health_check, run_pending_migrations,
 };
 pub use repositories::{
-    AccessRequestRepository, ActiveTenantBoundaryRepository, AdmittedController,
+    AccessRequestRepository, ActiveTenantBoundaryRepository, AdminProvisionError,
+    AdminProvisionReceipt, AdminProvisionRepository, AdminProvisionRequest, AdmittedController,
     AdmittedControllerSummary, AuditLedgerRepository, AuditRepository, AuthorizationFlowRepository,
     AuthorizationRepository, CONTROLLER_KEY_TTL_SECONDS, CommitWithApprovalError,
     ControllerIdentityAction, ControllerRegistryError, ControllerRegistryRepository,
     ControllerSlotStatus, ControllerSlotSummary, DEPLOYMENT_IDENTITY_LOCK_SEED,
     FederationRepository, FreshSecurityAuditReceipt, GrantAuthorization, GrantRepository,
-    IDENTITY_APPROVAL_TTL_SECONDS, IdentityApprovalError, InitialAdminBootstrapRepository,
-    InitialAdminBootstrapState, InitialAdminClaimOutcome, IssuedIdentityApproval,
+    IDENTITY_APPROVAL_TTL_SECONDS, IdentityApprovalError, IssuedIdentityApproval,
     IssuedOpenid4vpVerificationEvidence, IssuedRecoveryChallenge, MAX_ACTIVE_CONTROLLER_SLOTS,
     MAX_RECOVERY_CHALLENGE_ATTEMPTS, MAX_SECURITY_AUDIT_PAYLOAD_BYTES, ManagedCredentialDataset,
     ManagedCredentialDatasetWrite, MfaRepository, MtlsTrustAnchorRepository, NewControllerSlot,

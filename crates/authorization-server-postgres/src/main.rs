@@ -9,9 +9,9 @@ use nazo_oauth_server::{
     operator_task::{OperatorBackendFuture, OperatorPersistence},
 };
 use nazo_postgres::{
-    AccessRequestRepository, ActiveTenantBoundaryRepository, AuditLedgerRepository,
-    AuditRepository, AuthorizationFlowRepository, ControllerRegistryRepository, DbPool,
-    FederationRepository, GrantRepository, InitialAdminBootstrapRepository, MfaRepository,
+    AccessRequestRepository, ActiveTenantBoundaryRepository, AdminProvisionRepository,
+    AuditLedgerRepository, AuditRepository, AuthorizationFlowRepository,
+    ControllerRegistryRepository, DbPool, FederationRepository, GrantRepository, MfaRepository,
     MtlsTrustAnchorRepository, OAuthClientRepository, Openid4vciDatasetRepository,
     Openid4vciRepository, Openid4vpRepository, PasskeyRepository, PostgresHealthCheck,
     PostgresPoolMetrics, PostgresTenantResourceExecutor, RecoveryRootRepository,
@@ -21,6 +21,7 @@ use nazo_postgres::{
 
 const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@127.0.0.1:5432/oauth";
 const OPERATOR_DATABASE_MAX_CONNECTIONS: usize = 2;
+const ADMIN_PROVISION_DATABASE_MAX_CONNECTIONS: usize = 2;
 const MIGRATION_RUNTIME_ROLE_ENV: &str = "NAZOAUTH_MIGRATION_RUNTIME_ROLE";
 
 #[derive(Clone)]
@@ -49,16 +50,6 @@ impl ServerPersistenceProvider for PostgresProvider {
 
     fn database_pool_metrics(&self) -> Arc<dyn nazo_persistence::DatabasePoolMetricsPort> {
         Arc::new(PostgresPoolMetrics)
-    }
-
-    fn initial_admin_bootstrap(
-        &self,
-        tenant: nazo_identity::TenantContext,
-    ) -> Arc<dyn nazo_persistence::InitialAdminBootstrapStore> {
-        Arc::new(InitialAdminBootstrapRepository::new(
-            self.pool.clone(),
-            tenant,
-        ))
     }
 
     fn runtime_modules(&self) -> Arc<dyn nazo_persistence::RuntimeModuleStore> {
@@ -369,6 +360,19 @@ impl PersistenceLauncher for PostgresLauncher {
             let pool = nazo_postgres::create_pool(database_url, database_max_connections)?;
             Ok(Arc::new(AuditLedgerRepository::new(pool))
                 as Arc<dyn nazo_persistence::SecurityAuditExporter>)
+        })
+    }
+
+    fn admin_provisioner<'a>(
+        &'a self,
+        source: &'a ConfigSource,
+    ) -> LauncherFuture<'a, Arc<dyn nazo_persistence::AdminProvisionStore>> {
+        Box::pin(async move {
+            let database_url = config::database_url(source)?;
+            let pool =
+                nazo_postgres::create_pool(database_url, ADMIN_PROVISION_DATABASE_MAX_CONNECTIONS)?;
+            Ok(Arc::new(AdminProvisionRepository::new(pool))
+                as Arc<dyn nazo_persistence::AdminProvisionStore>)
         })
     }
 }

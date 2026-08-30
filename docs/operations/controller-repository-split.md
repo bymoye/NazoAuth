@@ -3,10 +3,10 @@
 NazoAuth and NazoAuthCtl are separate release and failure domains.
 
 NazoAuth owns the server, `operator-task`, migrations, production-key mutation,
-consistency leases, and the bootstrap-admin endpoint. NazoAuthCtl owns host and
+consistency leases, and the local `admin-provision` command. NazoAuthCtl owns host and
 container orchestration, Release/OCI verification, task issuance and receipt
 verification, controller audit state, backup lifecycle, recovery, diagnostics,
-the bootstrap-admin client, and controller self-update/rollback.
+the administrator-provisioning client, and controller self-update/rollback.
 
 `crates/operator-protocol` remains only in this repository. NazoAuthCtl pins a
 released package version by server tag. Tagged server Releases additionally

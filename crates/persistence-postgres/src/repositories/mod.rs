@@ -1,4 +1,5 @@
 mod access_requests;
+mod admin_provision;
 mod audit;
 mod audit_ledger;
 mod authorization;
@@ -7,7 +8,6 @@ pub(crate) mod clients;
 mod controller_registry;
 mod federation;
 mod grants;
-mod initial_admin_bootstrap;
 mod mfa;
 mod mtls_trust;
 mod openid4vc;
@@ -22,6 +22,9 @@ mod token_issuance;
 mod tokens;
 mod users;
 pub use access_requests::AccessRequestRepository;
+pub use admin_provision::{
+    AdminProvisionError, AdminProvisionReceipt, AdminProvisionRepository, AdminProvisionRequest,
+};
 pub use audit::AuditRepository;
 pub use audit_ledger::{
     AuditLedgerRepository, FreshSecurityAuditReceipt, MAX_SECURITY_AUDIT_PAYLOAD_BYTES,
@@ -43,9 +46,6 @@ pub use controller_registry::{
 };
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};
-pub use initial_admin_bootstrap::{
-    InitialAdminBootstrapRepository, InitialAdminBootstrapState, InitialAdminClaimOutcome,
-};
 pub use mfa::MfaRepository;
 pub use mtls_trust::{
     MtlsTrustAnchorRepository, OperatorManagedTrustAnchor,

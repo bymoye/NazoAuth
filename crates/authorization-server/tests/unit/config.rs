@@ -666,21 +666,6 @@ fn secret_file_inputs_fail_closed_for_empty_path_missing_file_and_empty_file() {
 }
 
 #[test]
-fn runtime_secret_helper_returns_the_stable_persisted_path_and_value() {
-    let path = temp_config_dir("runtime_secret_helper");
-    let (created_path, first) =
-        read_or_create_runtime_secret(&path, "nested/controller-key").unwrap();
-    let (same_path, second) =
-        read_or_create_runtime_secret(&path, "nested/controller-key").unwrap();
-
-    assert_eq!(created_path, path.join("nested/controller-key"));
-    assert_eq!(same_path, created_path);
-    assert_eq!(first, second);
-    assert!(first.len() >= 32);
-    let _ = std::fs::remove_dir_all(&path);
-}
-
-#[test]
 fn instance_identity_helper_persists_an_ed25519_seed_without_reusing_token_size() {
     let path = temp_config_dir("instance_identity_helper");
     let (created_path, first) =
