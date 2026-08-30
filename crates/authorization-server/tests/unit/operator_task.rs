@@ -628,17 +628,18 @@ async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database
     };
     // Unsupported signing parameters fail inside the existing engine before
     // any durable state changes.
-    let generated = execution::execute(
+    let generated = execution::execute_inner(
         &ControlOperationPayload::KeysGenerateLocal {
             alg: "unsupported-algorithm".to_owned(),
             purposes: vec!["credential".to_owned()],
         },
         &context,
+        None,
     )
     .await;
     assert!(generated.is_err());
 
-    let external = execution::execute(
+    let external = execution::execute_inner(
         &ControlOperationPayload::KeysRegisterExternal {
             kid: "external-1".to_owned(),
             alg: "ES256".to_owned(),
@@ -646,17 +647,19 @@ async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database
             public_jwk_sha256: "a".repeat(64),
         },
         &context,
+        None,
     )
     .await;
     assert!(external.is_err());
 
     // The apply delta cannot proceed without its mounted change-set material.
-    let apply = execution::execute(
+    let apply = execution::execute_inner(
         &ControlOperationPayload::TenantResourceApply {
             tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
             resources: Vec::new(),
         },
         &context,
+        None,
     )
     .await;
     assert!(apply.is_err());
@@ -664,6 +667,6 @@ async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database
     // Read-only local keyset dispatches map their typed errors without a
     // database connection; their outcome depends on ambient configuration so
     // only the Ok/Err totality is pinned here.
-    let _ = execution::execute(&ControlOperationPayload::KeysList, &context).await;
-    let _ = execution::execute(&ControlOperationPayload::KeysValidate, &context).await;
+    let _ = execution::execute_inner(&ControlOperationPayload::KeysList, &context, None).await;
+    let _ = execution::execute_inner(&ControlOperationPayload::KeysValidate, &context, None).await;
 }

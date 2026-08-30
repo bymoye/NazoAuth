@@ -335,8 +335,12 @@ def check_rust_test_structure() -> None:
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
     allowed_nested_seams = {
-        "crates/authorization-server/src/bootstrap/startup/services/identity.rs": (
-            "let session_profiles = web::Data::new(SessionProfileHandles::new(",
+        "crates/authorization-server/src/domain/resource_server.rs": (
+            "pub(crate) fn new<C>(",
+        ),
+        "crates/authorization-server/src/http/sessions.rs": (
+            "pub(crate) fn new<U>(",
+            "pub(crate) fn new<U>(",
         ),
     }
 
@@ -853,8 +857,8 @@ def check_bootstrap_secret_log_boundary() -> None:
     ):
         if marker not in server:
             raise SystemExit(f"idempotent bootstrap API boundary is missing: {marker}")
-    created_start = server.index("nazo_postgres::InitialAdminClaimOutcome::Created")
-    created_end = server.index("nazo_postgres::InitialAdminClaimOutcome::Closed", created_start)
+    created_start = server.index("InitialAdminClaimOutcome::Created")
+    created_end = server.index("InitialAdminClaimOutcome::Closed", created_start)
     created_branch = server[created_start:created_end]
     if "endpoint.close()" in created_branch or "remove_consumed_token" in created_branch:
         raise SystemExit("server destroys bootstrap retry proof before ctl verifies the receipt")

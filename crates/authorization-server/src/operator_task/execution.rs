@@ -78,15 +78,7 @@ pub(super) async fn execute_with_persistence(
     execute_inner(operation, context, Some(persistence)).await
 }
 
-#[cfg(test)]
-pub(super) async fn execute(
-    operation: &ControlOperationPayload,
-    context: &ExecutionContext<'_>,
-) -> Result<Option<ControlResultData>, SideEffectError> {
-    execute_inner(operation, context, None).await
-}
-
-async fn execute_inner(
+pub(super) async fn execute_inner(
     operation: &ControlOperationPayload,
     context: &ExecutionContext<'_>,
     persistence: Option<&dyn OperatorPersistence>,

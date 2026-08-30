@@ -109,14 +109,6 @@ pub(super) async fn build(
         },
     ));
     let admin_federation = web::Data::new(AdminFederationConfig::from_settings(&startup.settings));
-    #[cfg(not(test))]
-    let session_profiles = web::Data::new(SessionProfileHandles::from_port(
-        nazo_valkey::SessionStore::new(&valkey_connection),
-        persistence.session_accounts(),
-        settings.tenant.context.tenant_id,
-        session_http_config.clone(),
-    ));
-    #[cfg(test)]
     let session_profiles = web::Data::new(SessionProfileHandles::from_port(
         nazo_valkey::SessionStore::new(&valkey_connection),
         persistence.session_accounts(),

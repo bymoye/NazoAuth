@@ -46,19 +46,6 @@ pub(crate) struct BackchannelLogoutWorker {
 
 #[cfg(not(test))]
 impl BackchannelLogoutWorker {
-    #[cfg(test)]
-    pub(crate) fn new<D>(deliveries: D, private_network_origins: &[String]) -> anyhow::Result<Self>
-    where
-        D: BackchannelLogoutDeliveryStore + 'static,
-    {
-        Ok(Self {
-            deliveries: Arc::new(deliveries),
-            private_network_origins: Arc::new(parse_private_network_origins(
-                private_network_origins,
-            )?),
-        })
-    }
-
     pub(crate) fn from_port(
         deliveries: Arc<dyn BackchannelLogoutDeliveryStore>,
         private_network_origins: &[String],
