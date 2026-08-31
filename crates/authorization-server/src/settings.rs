@@ -61,13 +61,12 @@ pub(crate) struct Settings {
 
 /// The immutable tenant identity selected for this runtime snapshot.
 ///
-/// `Settings::from_config_all` creates one complete `Settings` value per
-/// tenant. Keeping the host beside the identity prevents request routing from
-/// consulting a second tenant registry after the snapshot has been selected.
+/// A directory binding creates one complete `Settings` value per tenant.
+/// Keeping the host beside the identity prevents request routing from consulting
+/// a second tenant registry after the snapshot has been selected.
 #[derive(Clone)]
 pub(crate) struct TenantSettings {
     pub(crate) context: nazo_identity::TenantContext,
-    pub(crate) host: String,
 }
 
 /// Canonicalizes a configured tenant host without accepting a URL, userinfo,

@@ -121,6 +121,9 @@ where
     Ok(next.call(request).await?.map_into_left_body())
 }
 
+/// Component-test assembly for one already-selected tenant. Production uses
+/// [`configure_dynamic`] so CORS and request data share the Host registry.
+#[allow(dead_code)]
 pub(crate) fn configure(
     cfg: &mut web::ServiceConfig,
     settings: &Settings,

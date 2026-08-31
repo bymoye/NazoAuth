@@ -316,6 +316,17 @@ impl OperatorPersistence for PostgresOperatorPersistence {
             Ok(applied)
         })
     }
+
+    fn initialize_tenant_directory(
+        &self,
+        binding: nazo_identity::TenantDirectoryBinding,
+    ) -> OperatorBackendFuture<'_, bool> {
+        Box::pin(async move {
+            Ok(TenantDirectoryRepository::new(self.pool.clone())
+                .initialize(binding)
+                .await?)
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

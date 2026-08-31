@@ -93,7 +93,7 @@ async fn provisioning_is_atomic_and_retries_return_the_same_receipt() {
     .await
     .unwrap();
     assert_eq!(user.role, "admin");
-    assert_eq!(user.admin_level, 1);
+    assert_eq!(user.admin_level, 2);
     assert!(user.email_verified);
     for (table, predicate) in [
         (

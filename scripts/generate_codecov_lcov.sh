@@ -237,8 +237,8 @@ export EMAIL_FROM='Nazo OAuth <no-reply@example.com>'
 export EMAIL_CODE_SEND_COOLDOWN_SECONDS='1'
 export EMAIL_CODE_PEER_COOLDOWN_SECONDS='1'
 export EMAIL_CODE_DEV_RESPONSE_ENABLED='false'
-export AVATAR_STORAGE_DIR='runtime/codecov/avatars'
-export JWK_KEYS_DIR='runtime/codecov/keys'
+export DATA_DIR='runtime/codecov'
+TENANT_KEY_DIR="$DATA_DIR/tenants/00000000-0000-0000-0000-000000000001/keys"
 export REQUIRE_PUSHED_AUTHORIZATION_REQUESTS='false'
 # Coverage owns and migrates an ephemeral database with its bootstrap
 # superuser.  Keep production's strict least-privilege default intact while
@@ -265,10 +265,10 @@ export FEDERATION_SAML_GATEWAY_AUDIENCE='nazo-oauth-codecov'
 export FEDERATION_SAML_GATEWAY_SECRET='codecov-saml-gateway-secret-000000'
 export RUST_LOG="${RUST_LOG:-warn}"
 
-mkdir -p runtime/codecov/avatars runtime/codecov/keys \
+mkdir -p "$TENANT_KEY_DIR" \
   "$PRIMARY_INSTANCE_IDENTITY_DIR" "$SIGNED_INSTANCE_IDENTITY_DIR" "$COVERAGE_DIR"
 "$PYTHON_BIN" scripts/ensure_runtime_keyset.py \
-  --key-dir "$JWK_KEYS_DIR" \
+  --key-dir "$TENANT_KEY_DIR" \
   --active-alg RS256 \
   --required-alg RS256 \
   --required-alg PS256
@@ -276,6 +276,7 @@ export LLVM_PROFILE_FILE="$(profile_path 'cargo-%p-%m.profraw')"
 cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
 cargo build --locked --workspace --all-features --package nazoauth --bin nazoauth
+"$SERVER_BIN" tenant-bootstrap
 
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
 LLVM_PROFILE_FILE="$(profile_path 'server-%p.profraw')" "$SERVER_BIN" server &

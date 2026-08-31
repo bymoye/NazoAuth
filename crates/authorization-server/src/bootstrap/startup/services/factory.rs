@@ -118,17 +118,7 @@ pub(super) async fn run(
     let database_pool_metrics = process.database_pool_metrics.clone();
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
-    if process.legacy_bootstrap
-        && route_settings.endpoint.transport_mode == crate::settings::TransportMode::DirectTls
-        && registry.load().by_host.len() > 1
-    {
-        anyhow::bail!("multi-tenant runtime currently requires trusted-proxy transport");
-    }
-    let direct_tls = if process.legacy_bootstrap {
-        crate::bootstrap::direct_tls_listeners(&config, &route_settings)?
-    } else {
-        None
-    };
+    let direct_tls = crate::bootstrap::direct_tls_listeners(&config, &route_settings)?;
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 

@@ -229,8 +229,6 @@ jobs:
           EMAIL_SMTP_PASSWORD: ""
           EMAIL_FROM: "Nazo OAuth <no-reply@example.com>"
           EMAIL_CODE_DEV_RESPONSE_ENABLED: false
-          AVATAR_STORAGE_DIR: "/var/lib/nazo_oauth/avatars"
-          JWK_KEYS_DIR: "/var/lib/nazo_oauth/keys"
           RUST_LOG: "info"
           YAML
           mfa_totp_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
@@ -272,6 +270,11 @@ jobs:
             -e NAZOAUTH_MIGRATION_RUNTIME_ROLE=nazoauth_e2e_app \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
             nazo-oauth-e2e:latest nazoauth migrate
+          docker run --rm --name nazo-oauth-e2e-tenant-bootstrap --network nazo-oauth-e2e-net \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
+            nazo-oauth-e2e:latest nazoauth tenant-bootstrap
           docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
           WITH changed AS (
               UPDATE runtime_module_desired_states
@@ -306,8 +309,8 @@ jobs:
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
-            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
-            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/keys" \
+            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
             -v "$PWD/runtime/e2e/runtime-primary:/var/lib/nazo_oauth/runtime-instance" \
@@ -318,8 +321,8 @@ jobs:
             -v "$PWD/runtime/e2e/.env-signed.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
-            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
-            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/keys" \
+            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
             -v "$PWD/runtime/e2e/runtime-signed:/var/lib/nazo_oauth/runtime-instance" \

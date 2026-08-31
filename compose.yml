@@ -47,7 +47,7 @@ services:
         condition: service_healthy
       valkey:
         condition: service_healthy
-      migrate:
+      tenant-bootstrap:
         condition: service_completed_successfully
     networks:
       nazo_oauth_net:
@@ -70,6 +70,21 @@ services:
     networks:
       nazo_oauth_net:
     command: ["nazoauth", "migrate"]
+
+  tenant-bootstrap:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: development-runtime
+    environment:
+      DATABASE_URL: "postgresql://nazoauth_lifecycle:${NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD:?set the URL-safe PostgreSQL lifecycle password using only RFC 3986 unreserved characters}@postgres:5432/oauth"
+      PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      nazo_oauth_net:
+    command: ["nazoauth", "tenant-bootstrap"]
 
   postgres:
     build:

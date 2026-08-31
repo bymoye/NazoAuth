@@ -1,14 +1,5 @@
 use super::*;
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TenantRuntimeConfig {
-    tenant_id: uuid::Uuid,
-    realm_id: uuid::Uuid,
-    organization_id: uuid::Uuid,
-    issuer: String,
-}
-
 struct TenantOverride {
     context: nazo_identity::TenantContext,
     issuer: String,
@@ -64,80 +55,21 @@ pub(crate) fn credential_configurations_from_config(
 
 impl Settings {
     pub(crate) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
-        if config.optional_string("TENANTS_JSON").is_some() {
-            bail!("TENANTS_JSON requires Settings::from_config_all");
-        }
         Self::from_config_for_tenant(config, None)
     }
 
-    pub(crate) fn from_config_all(config: &ConfigSource) -> anyhow::Result<Vec<Self>> {
-        let Some(raw) = config.optional_string("TENANTS_JSON") else {
-            return Ok(vec![Self::from_config(config)?]);
-        };
-        for legacy_key in ["TENANT_ID", "REALM_ID", "ORGANIZATION_ID", "ISSUER"] {
-            if config.get(legacy_key).is_some() {
-                bail!("{legacy_key} must not be configured together with TENANTS_JSON");
-            }
-        }
-        if config.get("JWK_KEYS_DIR").is_some() {
-            bail!(
-                "JWK_KEYS_DIR must not be configured with TENANTS_JSON; tenant key directories are derived from DATA_DIR"
-            );
-        }
-
-        let configured: Vec<TenantRuntimeConfig> = serde_json::from_str(&raw).map_err(|error| {
-            anyhow::anyhow!("TENANTS_JSON must be a JSON array of tenants: {error}")
-        })?;
-        if configured.is_empty() {
-            bail!("TENANTS_JSON must contain at least one tenant");
-        }
-
-        let mut tenant_ids = BTreeSet::new();
-        let mut issuers = BTreeSet::new();
-        let mut hosts = BTreeSet::new();
-        let mut overrides = Vec::with_capacity(configured.len());
-        for tenant in configured {
-            let context = nazo_identity::TenantContext {
-                tenant_id: nazo_identity::TenantId::new(tenant.tenant_id)?,
-                realm_id: nazo_identity::RealmId::new(tenant.realm_id)?,
-                organization_id: nazo_identity::OrganizationId::new(tenant.organization_id)?,
-            };
-            let override_ = TenantOverride::from_issuer(context, tenant.issuer)?;
-            let issuer_key = Url::parse(&override_.issuer)?.to_string();
-            if !tenant_ids.insert(tenant.tenant_id) {
-                bail!(
-                    "TENANTS_JSON contains duplicate tenant_id {}",
-                    tenant.tenant_id
-                );
-            }
-            if !issuers.insert(issuer_key) {
-                bail!(
-                    "TENANTS_JSON contains duplicate issuer {}",
-                    override_.issuer
-                );
-            }
-            if !hosts.insert(override_.host.clone()) {
-                bail!("TENANTS_JSON contains duplicate host {}", override_.host);
-            }
-            overrides.push(override_);
-        }
-
-        let multiple = overrides.len() > 1;
-        let mut settings = Vec::with_capacity(overrides.len());
-        for tenant in overrides {
-            let snapshot = Self::from_config_for_tenant(config, Some(tenant))?;
-            if multiple && snapshot.endpoint.transport_mode != TransportMode::TrustedProxy {
-                bail!("multiple tenants require TRANSPORT_MODE=trusted-proxy");
-            }
-            if multiple
-                && (snapshot.modules.enable_openid4vci_issuer
-                    || snapshot.modules.enable_openid4vp_verifier)
-            {
-                bail!("multiple tenants do not yet support OpenID4VC modules");
-            }
-            settings.push(snapshot);
-        }
-        Ok(settings)
+    pub(crate) fn initial_tenant_directory_binding(
+        config: &ConfigSource,
+    ) -> anyhow::Result<nazo_identity::TenantDirectoryBinding> {
+        let tenant = nazo_identity::TenantContext::default_system();
+        let public_base_url = config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000");
+        let override_ =
+            TenantOverride::from_issuer(tenant, config.string("ISSUER", &public_base_url))?;
+        Ok(nazo_identity::TenantDirectoryBinding {
+            tenant,
+            issuer: override_.issuer,
+            external_host: override_.host,
+        })
     }
 
     /// Builds one tenant snapshot from the authoritative runtime directory.
@@ -159,8 +91,8 @@ impl Settings {
         }
         let snapshot =
             Self::from_config_for_tenant(config, Some(TenantOverride::from_directory(binding)?))?;
-        if snapshot.endpoint.transport_mode != TransportMode::TrustedProxy {
-            bail!("directory-managed tenants require TRANSPORT_MODE=trusted-proxy");
+        if snapshot.endpoint.transport_mode == TransportMode::DirectTls {
+            bail!("directory-managed tenants do not yet support TRANSPORT_MODE=direct-tls");
         }
         if snapshot.modules.enable_openid4vci_issuer || snapshot.modules.enable_openid4vp_verifier {
             bail!("directory-managed tenants do not yet support OpenID4VC modules");
@@ -188,31 +120,10 @@ impl Settings {
         let tenant = match tenant_override {
             Some(tenant) => TenantSettings {
                 context: tenant.context,
-                host: tenant.host,
             },
-            None => {
-                let context = nazo_identity::TenantContext {
-                    tenant_id: nazo_identity::TenantId::new(
-                        config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?,
-                    )?,
-                    realm_id: nazo_identity::RealmId::new(
-                        config.parse("REALM_ID", nazo_identity::DEFAULT_REALM_ID)?,
-                    )?,
-                    organization_id: nazo_identity::OrganizationId::new(
-                        config.parse("ORGANIZATION_ID", nazo_identity::DEFAULT_ORGANIZATION_ID)?,
-                    )?,
-                };
-                let parsed = Url::parse(&issuer)?;
-                let host = match parsed.host() {
-                    Some(url::Host::Domain(domain)) => canonical_tenant_host(domain)?,
-                    Some(url::Host::Ipv4(address)) => canonical_tenant_host(&address.to_string())?,
-                    Some(url::Host::Ipv6(address)) => {
-                        canonical_tenant_host(&format!("[{address}]"))?
-                    }
-                    None => bail!("issuer must include a host"),
-                };
-                TenantSettings { context, host }
-            }
+            None => TenantSettings {
+                context: nazo_identity::TenantContext::default_system(),
+            },
         };
         let mtls_endpoint_base_url = if tenant_specific {
             issuer.clone()

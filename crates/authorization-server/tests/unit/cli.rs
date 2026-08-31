@@ -95,6 +95,10 @@ fn parses_all_product_commands() {
     );
     assert_eq!(parse(&["nazoauth", "migrate"]).unwrap(), Command::Migrate);
     assert_eq!(
+        parse(&["nazoauth", "tenant-bootstrap"]).unwrap(),
+        Command::TenantBootstrap
+    );
+    assert_eq!(
         parse(&["nazoauth", "admin-provision"]).unwrap(),
         Command::AdminProvision
     );
@@ -146,6 +150,12 @@ fn public_commands_reject_accidental_arguments() {
             .unwrap_err()
             .to_string(),
         "migrate does not accept argument now"
+    );
+    assert_eq!(
+        parse(&["nazoauth", "tenant-bootstrap", "now"])
+            .unwrap_err()
+            .to_string(),
+        "tenant-bootstrap does not accept argument now"
     );
     assert_eq!(
         parse(&["nazoauth", "admin-provision", "now"])

@@ -83,6 +83,11 @@ pub trait OperatorPersistence: Send + Sync {
     ) -> Arc<dyn nazo_persistence::tenant_resources::TenantResourceExecutorPort>;
 
     fn run_migrations(&self) -> OperatorBackendFuture<'_, bool>;
+
+    fn initialize_tenant_directory(
+        &self,
+        binding: nazo_identity::TenantDirectoryBinding,
+    ) -> OperatorBackendFuture<'_, bool>;
 }
 
 pub async fn run(persistence: Arc<dyn OperatorPersistence>) -> anyhow::Result<()> {

@@ -8,10 +8,6 @@ use nazo_postgres::{
 };
 use uuid::Uuid;
 
-mod support;
-
-use support::{run_isolated_application_migrations, schema_database_url};
-
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -45,18 +41,22 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
     let Some(database_url) = database_url() else {
         return;
     };
-    let schema = format!("tenancy_{}", Uuid::now_v7().simple());
+    let database_name = format!("tenancy_{}", Uuid::now_v7().simple());
     let mut coordinator = AsyncPgConnection::establish(&database_url)
         .await
         .expect("test database should connect");
     coordinator
-        .batch_execute(&format!("CREATE SCHEMA \"{schema}\";"))
+        .batch_execute(&format!("CREATE DATABASE \"{database_name}\";"))
         .await
-        .expect("isolated schema should create");
+        .expect("isolated database should create");
     drop(coordinator);
 
-    let isolated_url = schema_database_url(&database_url, &schema);
-    run_isolated_application_migrations(&isolated_url).await;
+    let mut isolated_url = url::Url::parse(&database_url).expect("test database URL is valid");
+    isolated_url.set_path(&format!("/{database_name}"));
+    let isolated_url = isolated_url.to_string();
+    nazo_postgres::run_pending_migrations(&isolated_url)
+        .await
+        .expect("isolated database migrations should apply");
     let pool = create_pool(isolated_url, 4).expect("pool should create");
     let repository = ActiveTenantBoundaryRepository::new(pool.clone());
     let directory = TenantDirectoryRepository::new(pool.clone());
@@ -66,21 +66,39 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
         .preflight(active)
         .await
         .expect("default active boundary should pass");
-
-    let mut connection = get_conn(&pool)
+    let fresh_directory = directory
+        .load_active()
         .await
-        .expect("pool should provide connection");
-    sql_query(
-        "INSERT INTO tenant_runtime_bindings
-            (tenant_id, realm_id, organization_id, issuer, external_host)
-         VALUES ($1, $2, $3, 'https://auth.example', 'auth.example')",
-    )
-    .bind::<sql_types::Uuid, _>(active.tenant_id.as_uuid())
-    .bind::<sql_types::Uuid, _>(active.realm_id.as_uuid())
-    .bind::<sql_types::Uuid, _>(active.organization_id.as_uuid())
-    .execute(&mut connection)
-    .await
-    .expect("active tenant directory binding should insert");
+        .expect("fresh directory should load");
+    assert_eq!(fresh_directory.revision, 0);
+    assert!(fresh_directory.tenants.is_empty());
+
+    let initial_binding = nazo_identity::TenantDirectoryBinding {
+        tenant: active,
+        issuer: "https://auth.example".to_owned(),
+        external_host: "auth.example".to_owned(),
+    };
+    let first_directory = directory.clone();
+    let second_directory = directory.clone();
+    let (first, second) = tokio::join!(
+        first_directory.initialize(initial_binding.clone()),
+        second_directory.initialize(initial_binding)
+    );
+    let mut outcomes = [
+        first.expect("first concurrent initialization should succeed"),
+        second.expect("second concurrent initialization should succeed"),
+    ];
+    outcomes.sort_unstable();
+    assert_eq!(outcomes, [false, true]);
+    let conflicting = nazo_identity::TenantDirectoryBinding {
+        tenant: active,
+        issuer: "https://other.example".to_owned(),
+        external_host: "other.example".to_owned(),
+    };
+    assert!(matches!(
+        directory.initialize(conflicting).await,
+        Err(nazo_identity::ports::RepositoryError::Consistency(_))
+    ));
     let initial_directory = directory
         .load_active()
         .await
@@ -96,6 +114,9 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
         initial_directory.revision
     );
 
+    let mut connection = get_conn(&pool)
+        .await
+        .expect("pool should provide connection");
     sql_query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
         .bind::<sql_types::Uuid, _>(active.tenant_id.as_uuid())
         .execute(&mut connection)
@@ -193,9 +214,7 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
         .await
         .expect("database should accept cleanup connection");
     coordinator
-        .batch_execute(&format!(
-            "SET search_path TO public; DROP SCHEMA \"{schema}\" CASCADE;"
-        ))
+        .batch_execute(&format!("DROP DATABASE \"{database_name}\" WITH (FORCE);"))
         .await
-        .expect("isolated schema should be removed");
+        .expect("isolated database should be removed");
 }

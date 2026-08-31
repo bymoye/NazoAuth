@@ -430,7 +430,17 @@ def check_rust_test_structure() -> None:
         r"(?m)^(?P<indent>[ \t]+)#\[cfg\(test\)\]\r?\n"
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
-    allowed_nested_seams = {}
+    allowed_nested_seams = {
+        "crates/authorization-server/src/bootstrap/startup/configuration.rs": (
+            "let backchannel_logout_worker = None;",
+        ),
+        "crates/authorization-server/src/bootstrap/startup/tenant_runtime.rs": (
+            "pub(super) fn for_test(binding: TenantDirectoryBinding) -> Arc<Self> {",
+            "pub(super) fn for_test_reusing(",
+            "pub(super) fn shares_lifecycle_with(&self, other: &Self) -> bool {",
+            "let ciba_ping_worker = None;",
+        ),
+    }
 
     violations = []
     for crate in (ROOT / "crates").iterdir():

@@ -214,7 +214,9 @@ async fn run_recovery_invalidation(
         )
         .into());
     }
-    let active_tenant: Uuid = config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?;
+    let active_tenant = nazo_identity::TenantContext::default_system()
+        .tenant_id
+        .as_uuid();
     let access_token_ttl = crate::settings::bounded_access_token_ttl_seconds(&config)?;
     let id_token_ttl = crate::settings::bounded_id_token_ttl_seconds(&config)?;
     let completed_at = Utc::now();

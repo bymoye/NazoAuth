@@ -1,5 +1,5 @@
-use diesel::{QueryableByName, sql_query, sql_types};
-use diesel_async::RunQueryDsl;
+use diesel::{OptionalExtension as _, QueryableByName, sql_query, sql_types};
+use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use nazo_identity::{
     OrganizationId, RealmId, TenantContext, TenantDirectoryBinding, TenantDirectorySnapshot,
     TenantId, ports::RepositoryError,
@@ -64,6 +64,26 @@ struct TenantDirectoryRow {
 struct TenantDirectoryRevisionRow {
     #[diesel(sql_type = sql_types::BigInt)]
     revision: i64,
+}
+
+#[derive(Debug, QueryableByName)]
+struct TenantDirectoryBindingRow {
+    #[diesel(sql_type = sql_types::Uuid)]
+    tenant_id: Uuid,
+    #[diesel(sql_type = sql_types::Uuid)]
+    realm_id: Uuid,
+    #[diesel(sql_type = sql_types::Uuid)]
+    organization_id: Uuid,
+    #[diesel(sql_type = sql_types::Text)]
+    issuer: String,
+    #[diesel(sql_type = sql_types::Text)]
+    external_host: String,
+}
+
+enum TenantDirectoryInitialization {
+    Inserted,
+    AlreadyInitialized,
+    Conflict,
 }
 
 impl ActiveTenantBoundaryRepository {
@@ -167,6 +187,75 @@ impl TenantDirectoryRepository {
         .map_err(map_query_error)?;
 
         directory_snapshot(rows)
+    }
+
+    /// Initializes the authoritative directory exactly once after migrations.
+    /// A directory with any history is never rewritten from process config.
+    pub async fn initialize(
+        &self,
+        binding: TenantDirectoryBinding,
+    ) -> Result<bool, RepositoryError> {
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        let result = connection
+            .transaction::<_, diesel::result::Error, _>(async move |connection| {
+                let state = sql_query(
+                    "SELECT revision
+                     FROM tenant_runtime_directory_state
+                     WHERE singleton
+                     FOR UPDATE",
+                )
+                .get_result::<TenantDirectoryRevisionRow>(connection)
+                .await?;
+                if state.revision != 0 {
+                    let existing = sql_query(
+                        "SELECT tenant_id, realm_id, organization_id, issuer, external_host
+                         FROM tenant_runtime_bindings
+                         WHERE tenant_id = $1",
+                    )
+                    .bind::<sql_types::Uuid, _>(binding.tenant.tenant_id.as_uuid())
+                    .get_result::<TenantDirectoryBindingRow>(connection)
+                    .await
+                    .optional()?;
+                    let matches = existing.is_some_and(|existing| {
+                        existing.tenant_id == binding.tenant.tenant_id.as_uuid()
+                            && existing.realm_id == binding.tenant.realm_id.as_uuid()
+                            && existing.organization_id == binding.tenant.organization_id.as_uuid()
+                            && existing.issuer == binding.issuer
+                            && existing.external_host == binding.external_host
+                    });
+                    return Ok(if matches {
+                        TenantDirectoryInitialization::AlreadyInitialized
+                    } else {
+                        TenantDirectoryInitialization::Conflict
+                    });
+                }
+
+                sql_query(
+                    "INSERT INTO tenant_runtime_bindings
+                        (tenant_id, realm_id, organization_id, issuer, external_host)
+                     VALUES ($1, $2, $3, $4, $5)",
+                )
+                .bind::<sql_types::Uuid, _>(binding.tenant.tenant_id.as_uuid())
+                .bind::<sql_types::Uuid, _>(binding.tenant.realm_id.as_uuid())
+                .bind::<sql_types::Uuid, _>(binding.tenant.organization_id.as_uuid())
+                .bind::<sql_types::Text, _>(binding.issuer)
+                .bind::<sql_types::Text, _>(binding.external_host)
+                .execute(connection)
+                .await?;
+                Ok(TenantDirectoryInitialization::Inserted)
+            })
+            .await
+            .map_err(map_query_error)?;
+        match result {
+            TenantDirectoryInitialization::Inserted => Ok(true),
+            TenantDirectoryInitialization::AlreadyInitialized => Ok(false),
+            TenantDirectoryInitialization::Conflict => Err(RepositoryError::Consistency(
+                "tenant runtime directory is already initialized with a different binding"
+                    .to_owned(),
+            )),
+        }
     }
 }
 

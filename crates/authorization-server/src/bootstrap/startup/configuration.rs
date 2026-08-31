@@ -58,30 +58,19 @@ pub(super) async fn load(
         .load_active()
         .await
         .map_err(|error| anyhow::anyhow!("tenant directory initial read failed: {error}"))?;
-    let database_initial = database_snapshot.revision != 0 || !database_snapshot.tenants.is_empty();
+    if database_snapshot.revision == 0 {
+        anyhow::bail!(
+            "tenant runtime directory is not initialized; run `nazoauth tenant-bootstrap` before starting the server"
+        );
+    }
 
     // This baseline is process identity only (static route set, module catalog,
     // control discovery). It never supplies request tenant settings or CORS.
     // Its issuer therefore remains stable when directory ordering changes.
-    let legacy_settings = legacy_settings(&config)?;
-    let route_settings = Arc::new(
-        legacy_settings
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("legacy baseline is empty"))?,
-    );
-    // TENANTS_JSON is a revision-zero bootstrap source only. Once PostgreSQL
-    // has any directory history, its snapshot is the complete tenant index.
-    let legacy_bootstrap = !database_initial;
-    // Deployment-global control routes must not follow directory ordering. A
-    // legacy deployment retains its configured tenant identity; a dynamic
-    // directory always reserves the fixed system tenant. If that tenant has no
-    // active binding, its host cannot reach deployment-level HTTP control.
-    let control_tenant_id = if legacy_bootstrap {
-        route_settings.tenant.context.tenant_id
-    } else {
-        nazo_identity::TenantContext::default_system().tenant_id
-    };
+    let route_settings = Arc::new(Settings::from_config(&config)?);
+    // Deployment-global control routes never follow directory ordering. The
+    // fixed system tenant is the only authority for deployment-level control.
+    let control_tenant_id = nazo_identity::TenantContext::default_system().tenant_id;
 
     let audit_anchor_data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
@@ -147,7 +136,6 @@ pub(super) async fn load(
         runtime_modules,
         database_pool_metrics,
         route_settings,
-        legacy_bootstrap,
     });
 
     let registry = TenantRuntimeRegistry::empty();
@@ -157,22 +145,8 @@ pub(super) async fn load(
         directory_cache.clone(),
         TenantRuntimeBuilder::production(process.clone()),
     ));
-    let outcome = if database_initial {
-        if process.route_settings.endpoint.transport_mode
-            == crate::settings::TransportMode::DirectTls
-        {
-            tracing::error!(
-                "tenant directory has revision history but DirectTLS cannot host a dynamic tenant index; starting with an empty last-good index"
-            );
-            TenantDirectoryRefreshOutcome::Unchanged
-        } else {
-            refresher.install_initial(database_snapshot.clone()).await?
-        }
-    } else {
-        refresher.install_legacy_initial(legacy_settings).await?
-    };
-    if database_initial
-        && matches!(outcome, TenantDirectoryRefreshOutcome::Applied { .. })
+    let outcome = refresher.install_initial(database_snapshot.clone()).await?;
+    if matches!(outcome, TenantDirectoryRefreshOutcome::Applied { .. })
         && let Err(error) = directory_cache
             .publish_authoritative(&database_snapshot)
             .await
@@ -202,8 +176,4 @@ pub(super) async fn load(
         refresher,
         backchannel_logout_worker,
     })
-}
-
-fn legacy_settings(config: &ConfigSource) -> anyhow::Result<Vec<Settings>> {
-    Settings::from_config_all(config)
 }

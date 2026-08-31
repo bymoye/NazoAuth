@@ -21,7 +21,7 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate|admin-provision>";
+const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|admin-provision>";
 const ADMIN_PROVISION_CREDENTIAL_FILE_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_FILE";
 const ADMIN_PROVISION_OPERATION_ID_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_OPERATION_ID";
 const ADMIN_PROVISION_DEPLOYMENT_ID_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_DEPLOYMENT_ID";
@@ -108,13 +108,22 @@ pub async fn run(
                 .await?;
             Ok(())
         }
+        Command::TenantBootstrap => {
+            let config = ConfigSource::load_for_migrations()?;
+            let initial_binding = Settings::initial_tenant_directory_binding(&config)?;
+            persistence
+                .operator_persistence(&config)
+                .await?
+                .initialize_tenant_directory(initial_binding)
+                .await?;
+            Ok(())
+        }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
     }
 }
 
 async fn run_admin_provision(launcher: &dyn PersistenceLauncher) -> anyhow::Result<()> {
     let config = ConfigSource::load().map_err(|_| admin_provision_input_error())?;
-    let settings = Settings::from_config(&config).map_err(|_| admin_provision_input_error())?;
     let configured_deployment_id = config
         .required_string("DEPLOYMENT_ID")
         .map_err(|_| admin_provision_input_error())?;
@@ -161,7 +170,7 @@ async fn run_admin_provision(launcher: &dyn PersistenceLauncher) -> anyhow::Resu
         .await
         .map_err(|_| admin_provision_error())?
         .provision(nazo_persistence::AdminProvisionRequest {
-            tenant: settings.tenant.context,
+            tenant: nazo_identity::TenantContext::default_system(),
             operation_id,
             deployment_id,
             email,
@@ -326,6 +335,7 @@ enum Command {
     AuditAnchorWorker,
     ReleaseIdentity,
     Migrate,
+    TenantBootstrap,
     AdminProvision,
 }
 
@@ -362,6 +372,10 @@ impl Command {
             "migrate" => {
                 ensure_no_extra_args(args, "migrate")?;
                 Ok(Self::Migrate)
+            }
+            "tenant-bootstrap" => {
+                ensure_no_extra_args(args, "tenant-bootstrap")?;
+                Ok(Self::TenantBootstrap)
             }
             "admin-provision" => {
                 ensure_no_extra_args(args, "admin-provision")?;

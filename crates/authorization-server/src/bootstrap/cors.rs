@@ -17,11 +17,15 @@ use crate::{
 };
 
 pub(super) enum CorsPolicy<'a> {
+    // Component tests use a fixed tenant graph without exercising Host
+    // resolution. Production always constructs Dynamic.
+    #[allow(dead_code)]
     Static(&'a [String]),
     Dynamic(TenantRuntimeRegistry),
 }
 
 impl<'a> CorsPolicy<'a> {
+    #[allow(dead_code)]
     pub(super) fn from_settings(settings: &'a Settings) -> Self {
         Self::Static(&settings.endpoint.cors_allowed_origins)
     }
@@ -121,26 +125,32 @@ fn origin_predicate(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn cors_well_known(settings: &Settings) -> Cors {
     CorsPolicy::from_settings(settings).well_known()
 }
 
+#[allow(dead_code)]
 pub(crate) fn cors_browser_token_management(settings: &Settings) -> Cors {
     CorsPolicy::from_settings(settings).browser_token_management()
 }
 
+#[allow(dead_code)]
 pub(crate) fn cors_browser_userinfo(settings: &Settings) -> Cors {
     CorsPolicy::from_settings(settings).browser_userinfo()
 }
 
+#[allow(dead_code)]
 pub(crate) fn cors_auth_api(settings: &Settings) -> Cors {
     CorsPolicy::from_settings(settings).auth_api()
 }
 
+#[allow(dead_code)]
 pub(crate) fn cors_admin(settings: &Settings) -> Cors {
     CorsPolicy::from_settings(settings).admin()
 }
 
+#[allow(dead_code)]
 pub(crate) fn cors_scim(settings: &Settings) -> Cors {
     CorsPolicy::from_settings(settings).scim()
 }

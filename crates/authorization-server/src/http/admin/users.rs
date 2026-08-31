@@ -83,6 +83,7 @@ pub(crate) struct SetTenantAdminRequest {
     admin_level: i32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn system_set_tenant_admin(
     admin_sessions: Data<AdminSessionHandles>,
     users: Data<dyn AdminUserRepositoryPort>,

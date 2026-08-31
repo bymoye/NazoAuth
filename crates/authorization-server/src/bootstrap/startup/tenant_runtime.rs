@@ -31,8 +31,6 @@ pub(super) struct ProcessRuntime {
     pub(super) config: ConfigSource,
     pub(super) perf_metrics_enabled: bool,
     /// The sole tenant allowed to reach deployment-global HTTP control routes.
-    /// It is selected from the legacy settings only during revision-zero
-    /// bootstrap; directory mode always uses the fixed system tenant.
     pub(super) control_tenant_id: nazo_identity::TenantId,
     pub(super) persistence: super::super::ServerPersistenceBindings,
     pub(super) state_backend: super::super::ServerStateBackendBindings,
@@ -41,7 +39,6 @@ pub(super) struct ProcessRuntime {
     pub(super) runtime_modules: web::Data<RuntimeModules>,
     pub(super) database_pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort>,
     pub(super) route_settings: Arc<Settings>,
-    pub(super) legacy_bootstrap: bool,
 }
 
 /// A completely built tenant graph. It remains immutable while published;
@@ -259,23 +256,17 @@ pub(super) trait TenantRuntimeBuildPort: Send + Sync {
 #[derive(Clone)]
 pub(super) struct TenantRuntimeBuilder {
     port: Arc<dyn TenantRuntimeBuildPort>,
-    legacy_process: Option<Arc<ProcessRuntime>>,
 }
 
 impl TenantRuntimeBuilder {
+    #[allow(dead_code)]
     pub(super) fn new(port: Arc<dyn TenantRuntimeBuildPort>) -> Self {
-        Self {
-            port,
-            legacy_process: None,
-        }
+        Self { port }
     }
 
     pub(super) fn production(process: Arc<ProcessRuntime>) -> Self {
         Self {
-            port: Arc::new(ServiceAssemblyTenantRuntimeBuilder {
-                process: process.clone(),
-            }),
-            legacy_process: Some(process),
+            port: Arc::new(ServiceAssemblyTenantRuntimeBuilder { process }),
         }
     }
 
@@ -285,19 +276,6 @@ impl TenantRuntimeBuilder {
         previous_same_tenant: Option<Arc<TenantRuntime>>,
     ) -> anyhow::Result<Arc<TenantRuntime>> {
         self.port.build(binding, previous_same_tenant).await
-    }
-
-    async fn build_legacy(
-        &self,
-        binding: TenantDirectoryBinding,
-        settings: Arc<Settings>,
-    ) -> anyhow::Result<Arc<TenantRuntime>> {
-        let process = self
-            .legacy_process
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("legacy tenant build is unavailable for this builder"))?
-            .clone();
-        build_service_runtime(process, binding, settings, None).await
     }
 }
 
@@ -454,56 +432,6 @@ impl TenantRuntimeRefresher {
             .lock()
             .expect("tenant directory refresh state mutex is not poisoned")
             .last_database_revision = snapshot.revision;
-        Ok(outcome)
-    }
-
-    /// Installs the revision-zero compatibility graph from already-parsed
-    /// legacy settings. This is intentionally the only path that preserves
-    /// legacy direct TLS, custom key paths, and OpenID4VC configuration.
-    pub(super) async fn install_legacy_initial(
-        &self,
-        settings: Vec<Settings>,
-    ) -> anyhow::Result<TenantDirectoryRefreshOutcome> {
-        let _guard = self.gate.lock().await;
-        let current = self.registry.load();
-        if current.revision != 0 || !current.by_host.is_empty() {
-            anyhow::bail!("legacy tenant graph can only install into an empty revision-zero index");
-        }
-
-        let candidates = settings
-            .into_iter()
-            .map(|settings| {
-                let binding = TenantDirectoryBinding {
-                    tenant: settings.tenant.context,
-                    issuer: settings.endpoint.issuer.clone(),
-                    external_host: settings.tenant.host.clone(),
-                };
-                (binding, Arc::new(settings))
-            })
-            .collect::<Vec<_>>();
-        let snapshot = TenantDirectorySnapshot {
-            revision: 0,
-            tenants: candidates
-                .iter()
-                .map(|(binding, _)| binding.clone())
-                .collect(),
-        };
-        validate_snapshot(&snapshot)?;
-
-        let mut by_host = HashMap::with_capacity(candidates.len());
-        let mut newly_built = Vec::with_capacity(candidates.len());
-        for (binding, settings) in candidates {
-            let runtime = self.builder.build_legacy(binding.clone(), settings).await?;
-            by_host.insert(binding.external_host, runtime.clone());
-            newly_built.push(runtime);
-        }
-        let outcome = self
-            .publish_candidate(snapshot, by_host, newly_built)
-            .await?;
-        self.state
-            .lock()
-            .expect("tenant directory refresh state mutex is not poisoned")
-            .last_database_revision = 0;
         Ok(outcome)
     }
 

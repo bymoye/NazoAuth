@@ -148,7 +148,7 @@ impl AdminProvisionRepository {
                         users::is_active.eq(true),
                         users::email_verified.eq(true),
                         users::role.eq("admin"),
-                        users::admin_level.eq(1),
+                        users::admin_level.eq(2),
                     ))
                     .execute(connection)
                     .await?;

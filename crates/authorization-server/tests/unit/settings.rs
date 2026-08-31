@@ -7,84 +7,16 @@ const KEY_ATTESTATION_JWKS: &str =
 const ATTESTATION_CREDENTIAL_CONFIGURATIONS: &str = r#"{"pid":{"format":"dc+sd-jwt","scope":"pid","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"attestation":{"proof_signing_alg_values_supported":["ES256"],"key_attestations_required":{"key_storage":["iso_18045_moderate"]}}},"vct":"https://issuer.example/credentials/pid"}}"#;
 
 #[test]
-fn active_tenant_context_is_explicit_and_rejects_nil_identifiers() {
-    let tenant_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap();
-    let realm_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap();
-    let organization_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap();
+fn process_settings_cannot_override_the_system_tenant_context() {
     let configured = ConfigSource::from_pairs_for_test([
         ("TENANT_ID", "00000000-0000-0000-0000-000000000011"),
         ("REALM_ID", "00000000-0000-0000-0000-000000000012"),
         ("ORGANIZATION_ID", "00000000-0000-0000-0000-000000000013"),
     ]);
-    let settings = Settings::from_config(&configured).expect("active tenant context should load");
-    assert!(
-        settings
-            .tenant
-            .context
-            .matches_raw(tenant_id, realm_id, organization_id)
-    );
-
-    for key in ["TENANT_ID", "REALM_ID", "ORGANIZATION_ID"] {
-        let invalid =
-            ConfigSource::from_pairs_for_test([(key, "00000000-0000-0000-0000-000000000000")]);
-        assert_eq!(
-            settings_error(&invalid, "nil tenant boundary identifier must fail").to_string(),
-            "identity ID must not be nil"
-        );
-    }
-}
-
-#[test]
-fn structured_tenants_create_isolated_runtime_snapshots() {
-    let tenants = serde_json::json!([
-        {
-            "tenant_id": "00000000-0000-0000-0000-000000000011",
-            "realm_id": "00000000-0000-0000-0000-000000000012",
-            "organization_id": "00000000-0000-0000-0000-000000000013",
-            "issuer": "https://AUTH-A.example.test"
-        },
-        {
-            "tenant_id": "00000000-0000-0000-0000-000000000021",
-            "realm_id": "00000000-0000-0000-0000-000000000022",
-            "organization_id": "00000000-0000-0000-0000-000000000023",
-            "issuer": "https://auth-b.example.test"
-        }
-    ])
-    .to_string();
-    let config = ConfigSource::from_owned_pairs_for_test([
-        ("TENANTS_JSON".to_owned(), tenants),
-        (
-            "PUBLIC_BASE_URL".to_owned(),
-            "http://127.0.0.1:8000".to_owned(),
-        ),
-        ("TRANSPORT_MODE".to_owned(), "trusted-proxy".to_owned()),
-        ("TRUSTED_PROXY_CIDRS".to_owned(), "127.0.0.1/32".to_owned()),
-        ("MTLS_CERTIFICATE_SOURCE".to_owned(), "rfc9440".to_owned()),
-        (
-            "CLIENT_SECRET_PEPPER".to_owned(),
-            "0123456789abcdef0123456789abcdef".to_owned(),
-        ),
-    ]);
-
-    let settings = Settings::from_config_all(&config).expect("tenant snapshots should load");
-    assert_eq!(settings.len(), 2);
-    assert_eq!(settings[0].tenant.host, "auth-a.example.test");
-    assert_eq!(settings[1].tenant.host, "auth-b.example.test");
-    assert_eq!(settings[0].endpoint.issuer, "https://AUTH-A.example.test");
+    let settings = Settings::from_config(&configured).expect("process settings should load");
     assert_eq!(
-        settings[0].endpoint.frontend_base_url,
-        "https://AUTH-A.example.test/ui/"
-    );
-    assert_eq!(
-        settings[1].endpoint.cors_allowed_origins,
-        ["https://auth-b.example.test"]
-    );
-    assert_ne!(settings[0].keys.jwk_keys_dir, settings[1].keys.jwk_keys_dir);
-    assert!(
-        settings[0]
-            .keys
-            .jwk_keys_dir
-            .ends_with("tenants/00000000-0000-0000-0000-000000000011/keys")
+        settings.tenant.context,
+        nazo_identity::TenantContext::default_system()
     );
 }
 
@@ -110,6 +42,24 @@ fn directory_binding(issuer: &str, external_host: &str) -> nazo_identity::Tenant
 }
 
 #[test]
+fn initial_directory_binding_uses_the_fixed_system_boundary() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("PUBLIC_BASE_URL", "https://public.example.test"),
+        ("ISSUER", "https://AUTH.example.test/issuer"),
+        ("TENANT_ID", "00000000-0000-0000-0000-000000000099"),
+    ]);
+    let binding = Settings::initial_tenant_directory_binding(&config)
+        .expect("initial directory binding should be valid");
+
+    assert_eq!(
+        binding.tenant,
+        nazo_identity::TenantContext::default_system()
+    );
+    assert_eq!(binding.issuer, "https://AUTH.example.test/issuer");
+    assert_eq!(binding.external_host, "auth.example.test");
+}
+
+#[test]
 fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
     let config = ConfigSource::from_pairs_for_test([
         ("DATA_DIR", "test-runtime/directory-tenant"),
@@ -127,7 +77,6 @@ fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
         .unwrap()
         .join("test-runtime/directory-tenant");
 
-    assert_eq!(settings.tenant.host, "auth.example.test");
     assert_eq!(
         settings.endpoint.issuer,
         "https://AUTH.example.test:8443/issuer"
@@ -174,7 +123,7 @@ fn directory_tenant_rejects_host_mismatch_and_non_dynamic_safe_modes() {
         .err()
         .expect("directory tenant must reject direct TLS")
         .to_string()
-        .contains("directory-managed tenants require TRANSPORT_MODE=trusted-proxy")
+        .contains("directory-managed tenants do not yet support TRANSPORT_MODE=direct-tls")
     );
 
     let keys = ConfigSource::from_owned_pairs_for_test([
@@ -217,119 +166,6 @@ fn directory_tenant_rejects_host_mismatch_and_non_dynamic_safe_modes() {
         .expect("directory tenant must reject shared avatar path")
         .to_string()
         .contains("AVATAR_STORAGE_DIR must not be configured")
-    );
-}
-
-#[test]
-fn structured_tenants_reject_ambiguous_identity_and_routing() {
-    let tenant = |tenant_id: &str, issuer: &str| {
-        serde_json::json!({
-            "tenant_id": tenant_id,
-            "realm_id": uuid::Uuid::now_v7(),
-            "organization_id": uuid::Uuid::now_v7(),
-            "issuer": issuer
-        })
-    };
-    let cases = [
-        (
-            serde_json::json!([
-                tenant(
-                    "00000000-0000-0000-0000-000000000011",
-                    "https://a.example.test"
-                ),
-                tenant(
-                    "00000000-0000-0000-0000-000000000011",
-                    "https://b.example.test"
-                )
-            ]),
-            "duplicate tenant_id",
-        ),
-        (
-            serde_json::json!([
-                tenant(
-                    "00000000-0000-0000-0000-000000000011",
-                    "https://a.example.test"
-                ),
-                tenant(
-                    "00000000-0000-0000-0000-000000000021",
-                    "https://a.example.test"
-                )
-            ]),
-            "duplicate issuer",
-        ),
-        (
-            serde_json::json!([
-                tenant(
-                    "00000000-0000-0000-0000-000000000011",
-                    "https://a.example.test/one"
-                ),
-                tenant(
-                    "00000000-0000-0000-0000-000000000021",
-                    "https://a.example.test/two"
-                )
-            ]),
-            "duplicate host",
-        ),
-    ];
-
-    for (tenants, expected) in cases {
-        let config = ConfigSource::from_owned_pairs_for_test([(
-            "TENANTS_JSON".to_owned(),
-            tenants.to_string(),
-        )]);
-        let error = Settings::from_config_all(&config)
-            .err()
-            .expect("ambiguity must fail closed");
-        assert!(error.to_string().contains(expected), "{error}");
-    }
-}
-
-#[test]
-fn multiple_tenants_require_trusted_proxy_and_do_not_mix_legacy_settings() {
-    let tenants = serde_json::json!([
-        {
-            "tenant_id": "00000000-0000-0000-0000-000000000011",
-            "realm_id": "00000000-0000-0000-0000-000000000012",
-            "organization_id": "00000000-0000-0000-0000-000000000013",
-            "issuer": "https://a.example.test"
-        },
-        {
-            "tenant_id": "00000000-0000-0000-0000-000000000021",
-            "realm_id": "00000000-0000-0000-0000-000000000022",
-            "organization_id": "00000000-0000-0000-0000-000000000023",
-            "issuer": "https://b.example.test"
-        }
-    ])
-    .to_string();
-    let direct = ConfigSource::from_owned_pairs_for_test([
-        ("TENANTS_JSON".to_owned(), tenants.clone()),
-        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
-        (
-            "CLIENT_SECRET_PEPPER".to_owned(),
-            "0123456789abcdef0123456789abcdef".to_owned(),
-        ),
-    ]);
-    assert!(
-        Settings::from_config_all(&direct)
-            .err()
-            .expect("direct TLS multi-tenant config must fail")
-            .to_string()
-            .contains("multiple tenants require TRANSPORT_MODE=trusted-proxy")
-    );
-
-    let mixed = ConfigSource::from_owned_pairs_for_test([
-        ("TENANTS_JSON".to_owned(), tenants),
-        (
-            "TENANT_ID".to_owned(),
-            "00000000-0000-0000-0000-000000000099".to_owned(),
-        ),
-    ]);
-    assert_eq!(
-        Settings::from_config_all(&mixed)
-            .err()
-            .expect("mixed tenant configuration must fail")
-            .to_string(),
-        "TENANT_ID must not be configured together with TENANTS_JSON"
     );
 }
 
