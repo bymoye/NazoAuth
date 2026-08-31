@@ -46,6 +46,13 @@ docker compose up -d --build
 `NAZOAUTH_BIND_ADDRESS=0.0.0.0`。如果由同一宿主机上的反向代理终止 TLS，则保留默认的
 `127.0.0.1`。只有平台或防火墙能够限制明文端口的直接访问时，才能绑定所有接口。
 
+Compose 会把宿主机上的 `${NAZOAUTH_BIND_ADDRESS}:${NAZOAUTH_PORT}` 映射到容器内服务的
+`8000` 端口。例如，`NAZOAUTH_BIND_ADDRESS=0.0.0.0 NAZOAUTH_PORT=6987` 表示宿主机
+`6987` 映射到容器 `8000`。上述示例中的宿主机 `443` 只是端口映射：当使用
+`TRANSPORT_MODE=trusted-proxy` 时，TLS 仍由反向代理终止，不由 NazoAuth 终止。长期运行的
+Compose server 使用非特权容器用户 `10001:10001`；root `runtime-init` 服务只负责准备卷的
+所有权，不得用作 server 进程。
+
 必须把 `<NazoAuth实际看到的入口代理CIDR>` 替换为 TLS 终止入口的精确地址。Compose
 路径属于 trusted-proxy 部署，不会挂载 Direct TLS 所需的服务端证书和客户端 CA 文件。
 
@@ -67,6 +74,38 @@ role 执行迁移，再使用独立的 runtime role 启动服务。迁移启动�
 新数据库没有管理员时，正式受管流程通过 `nazoauthctl admin create` 调用目标 runtime
 内的 `nazoauth admin-provision` 一次性命令。凭据只通过 controller 的受保护凭据路径交付；
 授权服务器不提供 HTTP 初始化路由，也不提供后端内嵌初始化页面。
+
+## 独立 Direct TLS
+
+不使用反向代理的独立部署，应将以下内容写入 server 工作目录中的 `.env.yaml`，并以专用的
+非特权 service account 运行 `nazoauth server`。请替换数据库和 Valkey 占位值，以及示例中的
+UUIDv7。证书必须覆盖 `auth.example.com`；私钥必须让 service account 可读，并且不能带有
+group 或 other 权限位。
+
+```yaml
+BIND: "0.0.0.0:8443"
+TLS_BIND: "0.0.0.0:9443"
+PUBLIC_BASE_URL: "https://auth.example.com:8443"
+MTLS_ENDPOINT_BASE_URL: "https://auth.example.com:9443"
+TRANSPORT_MODE: "direct-tls"
+MTLS_CERTIFICATE_SOURCE: "direct-tls"
+TLS_CERTIFICATE_FILE: "/etc/nazoauth/tls/server-chain.pem"
+TLS_PRIVATE_KEY_FILE: "/etc/nazoauth/tls/server-key.pem"
+TLS_CLIENT_CA_FILE: "/etc/nazoauth/tls/client-ca.pem"
+TLS_RELOAD_INTERVAL_SECONDS: 5
+DATABASE_URL: "postgresql://nazo_runtime:<password>@db.internal:5432/oauth"
+VALKEY_URL: "redis://default:<password>@valkey.internal:6379/0"
+VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e102"
+DATA_DIR: "/var/lib/nazoauth"
+RUST_LOG: "info"
+```
+
+`BIND` 和 `TLS_BIND` 使用大于 1024 的端口，因此长期运行的进程不需要 root 或
+`CAP_NET_BIND_SERVICE`；root 只用于准备文件和目录。如果客户端必须通过公开的 443 端口
+访问 Direct TLS，应使用外部端口转发到这些高位端口，或改用 trusted-proxy 部署。不要为了
+绑定特权端口而以 root 运行 server。`direct-tls` 下由 NazoAuth 终止两个 HTTPS listener，
+mTLS 身份直接来自 TLS session；`trusted-proxy` 下由代理终止公网 TLS，NazoAuth 只在内部
+HTTP hop 接收经过清洗且已认证的证书证据；两种模式互斥。
 
 ## 公开部署
 
