@@ -591,6 +591,12 @@ impl Settings {
                         MtlsCertificateSourceMode::Disabled
                     }
                     TransportMode::DirectTls => {
+                        if !Url::parse(&mtls_endpoint_base_url)?
+                            .scheme()
+                            .eq_ignore_ascii_case("https")
+                        {
+                            bail!("direct-tls transport requires an HTTPS MTLS_ENDPOINT_BASE_URL");
+                        }
                         if !trusted_proxy_cidrs.is_empty() {
                             bail!("direct-tls transport must not configure TRUSTED_PROXY_CIDRS");
                         }

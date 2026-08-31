@@ -1152,6 +1152,15 @@ fn transport_modes_reject_conflicting_endpoint_ownership() {
             ConfigSource::from_pairs_for_test([
                 ("PUBLIC_BASE_URL", "https://auth.example.test"),
                 ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "direct-tls"),
+                ("MTLS_ENDPOINT_BASE_URL", "http://127.0.0.1:8443"),
+            ]),
+            "direct-tls transport requires an HTTPS MTLS_ENDPOINT_BASE_URL",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
                 ("TRANSPORT_MODE", "other"),
             ]),
             "TRANSPORT_MODE must be loopback-http, direct-tls, or trusted-proxy; got other",

@@ -54,6 +54,15 @@ interface. Keep the default `127.0.0.1` when a reverse proxy on the same host
 terminates TLS. Do not bind all interfaces unless the platform or firewall
 controls direct access to the plaintext port.
 
+Compose maps `${NAZOAUTH_BIND_ADDRESS}:${NAZOAUTH_PORT}` on the host to the
+server's container port `8000`. For example, `NAZOAUTH_BIND_ADDRESS=0.0.0.0
+NAZOAUTH_PORT=6987` publishes host port `6987` to container port `8000`. A host
+port of `443` in this example is only a port mapping: with
+`TRANSPORT_MODE=trusted-proxy`, TLS is still terminated by the reverse proxy,
+not by NazoAuth. The long-running Compose server runs as the unprivileged
+container user `10001:10001`; the root `runtime-init` service only prepares
+volume ownership and must not be used as the server process.
+
 Replace `<exact-ingress-peer-cidr>` with the address NazoAuth observes for the
 TLS terminator. The Compose path is a trusted-proxy deployment; it does not
 mount the server certificate and client-CA files required by direct TLS.
@@ -82,6 +91,44 @@ local `nazoauth admin-provision` one-shot command through
 `nazoauthctl admin create`. Credentials are delivered through the
 controller's protected credential path; the authorization server exposes no
 HTTP bootstrap route or embedded setup page.
+
+## Standalone Direct TLS
+
+For a standalone deployment without a reverse proxy, write the following to
+`.env.yaml` in the server working directory and run `nazoauth server` as a
+dedicated unprivileged service account. Replace the database and Valkey
+placeholders and the example UUIDv7 with deployment values. The certificate
+must cover `auth.example.com`; the private key must be readable by the service
+account and have no group or other permission bits.
+
+```yaml
+BIND: "0.0.0.0:8443"
+TLS_BIND: "0.0.0.0:9443"
+PUBLIC_BASE_URL: "https://auth.example.com:8443"
+MTLS_ENDPOINT_BASE_URL: "https://auth.example.com:9443"
+TRANSPORT_MODE: "direct-tls"
+MTLS_CERTIFICATE_SOURCE: "direct-tls"
+TLS_CERTIFICATE_FILE: "/etc/nazoauth/tls/server-chain.pem"
+TLS_PRIVATE_KEY_FILE: "/etc/nazoauth/tls/server-key.pem"
+TLS_CLIENT_CA_FILE: "/etc/nazoauth/tls/client-ca.pem"
+TLS_RELOAD_INTERVAL_SECONDS: 5
+DATABASE_URL: "postgresql://nazo_runtime:<password>@db.internal:5432/oauth"
+VALKEY_URL: "redis://default:<password>@valkey.internal:6379/0"
+VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e102"
+DATA_DIR: "/var/lib/nazoauth"
+RUST_LOG: "info"
+```
+
+`BIND` and `TLS_BIND` use ports above 1024 so the long-running process does
+not need root or `CAP_NET_BIND_SERVICE`; the root account is only needed to
+provision files and directories. If clients must reach direct TLS on public
+port 443, use an external port forward to these high ports or choose the
+trusted-proxy deployment instead. Do not run the server as root just to bind a
+privileged port. In `direct-tls`, NazoAuth terminates both HTTPS listeners and
+gets the mTLS identity from the TLS session. In `trusted-proxy`, the proxy
+terminates public TLS and NazoAuth receives only sanitized, authenticated
+certificate evidence over the internal HTTP hop; the two modes are mutually
+exclusive.
 
 ## Public deployment
 
