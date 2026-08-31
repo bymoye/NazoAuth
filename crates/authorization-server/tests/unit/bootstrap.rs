@@ -4,6 +4,9 @@ use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, 
 use chrono::{Duration as ChronoDuration, Utc};
 use nazo_digital_credentials::CertificateRevocationSnapshot;
 
+#[path = "bootstrap/transport_mode_parity.rs"]
+mod transport_mode_parity;
+
 struct TestTlsMaterial {
     certificate_path: String,
     private_key_path: String,
