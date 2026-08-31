@@ -29,7 +29,6 @@ use tokio::{
 use uuid::Uuid;
 
 const CONVERGENCE_WINDOW: Duration = Duration::from_secs(30);
-const STARTUP_WINDOW: Duration = Duration::from_secs(90);
 const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 const DEPLOYMENT_ID: &str = "t1-convergence";
 const STATE_EPOCH: &str = "0198f7d1-0000-7000-8000-000000000001";
@@ -123,7 +122,7 @@ impl ServerProcess {
                 );
             }
             assert!(
-                started.elapsed() < STARTUP_WINDOW,
+                started.elapsed() < CONVERGENCE_WINDOW,
                 "server on port {} did not become ready within the startup window (last status {status})",
                 self.port
             );
@@ -143,6 +142,8 @@ const OVERRIDING_ENV_KEYS: &[&str] = &[
     "PUBLIC_BASE_URL",
     "BIND",
     "DATA_DIR",
+    "JWK_KEYS_DIR",
+    "AVATAR_STORAGE_DIR",
     "TRANSPORT_MODE",
     "DEPLOYMENT_ID",
     "TRUSTED_PROXY_CIDRS",
