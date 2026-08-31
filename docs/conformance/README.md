@@ -1,9 +1,8 @@
-# Conformance Records
+# Product-owned black-box records
 
-This server repository retains only product-owned protocol regression records.
-External OpenID Foundation Suite artifacts, plans, credentials, run evidence,
-and orchestration belong to NazoAuthCtl. The server exposes ordinary,
-tenant-bound management resources; it neither selects nor executes Suite plans.
+This directory contains only NazoAuth-owned protocol regression contracts.
+Third-party validators are ordinary external clients and are not represented by
+server routes, schema, configuration, credentials, orchestration, or evidence
+formats.
 
-The remaining SCIM SET matrix is a product-owned black-box regression contract,
-not a Suite artifact.
+The RFC 9967 SCIM SET matrix is a project-owned executable black-box contract.

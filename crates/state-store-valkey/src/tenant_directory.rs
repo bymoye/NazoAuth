@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::{Error, ValkeyClient};
 
-const CACHE_SCHEMA_VERSION: u8 = 1;
-const CACHE_INTEGRITY_MARKER: &str = "nazo-tenant-directory-cache-v1";
+const CACHE_SCHEMA_VERSION: u8 = 2;
+const CACHE_INTEGRITY_MARKER: &str = "nazo-tenant-directory-cache-v2";
 const SNAPSHOT_KEY: &str = "tenant-directory:snapshot";
 
 const PUBLISH_AUTHORITATIVE_SCRIPT: &str = r#"
@@ -32,8 +32,8 @@ local function valid_revision(value)
 end
 
 local function valid_snapshot(current)
-  if type(current) ~= 'table' or current.schema_version ~= 1 or
-     current.integrity ~= 'nazo-tenant-directory-cache-v1' or
+  if type(current) ~= 'table' or current.schema_version ~= 2 or
+     current.integrity ~= 'nazo-tenant-directory-cache-v2' or
      type(current.revision) ~= 'string' or not valid_revision(current.revision) or
      type(current.tenants) ~= 'table' then
     return false
@@ -44,6 +44,8 @@ local function valid_snapshot(current)
        type(tenant.tenant_id) ~= 'string' or tenant.tenant_id == '' or
        type(tenant.realm_id) ~= 'string' or tenant.realm_id == '' or
        type(tenant.organization_id) ~= 'string' or tenant.organization_id == '' or
+       type(tenant.runtime_revision) ~= 'string' or tenant.runtime_revision == '0' or
+       not valid_revision(tenant.runtime_revision) or
        type(tenant.issuer) ~= 'string' or tenant.issuer == '' or
        type(tenant.external_host) ~= 'string' or tenant.external_host == '' then
       return false
@@ -137,6 +139,7 @@ struct CachedDirectoryBinding {
     tenant_id: Uuid,
     realm_id: Uuid,
     organization_id: Uuid,
+    runtime_revision: String,
     issuer: String,
     external_host: String,
 }
@@ -154,6 +157,7 @@ fn encode_snapshot(snapshot: &TenantDirectorySnapshot) -> Result<String, Error> 
                 tenant_id: binding.tenant.tenant_id.as_uuid(),
                 realm_id: binding.tenant.realm_id.as_uuid(),
                 organization_id: binding.tenant.organization_id.as_uuid(),
+                runtime_revision: binding.runtime_revision.to_string(),
                 issuer: binding.issuer.clone(),
                 external_host: binding.external_host.clone(),
             })
@@ -189,6 +193,14 @@ fn decode_snapshot(encoded: &str) -> Result<TenantDirectorySnapshot, Error> {
         .tenants
         .into_iter()
         .map(|binding| {
+            let runtime_revision = binding.runtime_revision.parse::<u64>().map_err(|_| {
+                Error::corrupt_data("cached tenant runtime revision is not a canonical u64")
+            })?;
+            if binding.runtime_revision != runtime_revision.to_string() {
+                return Err(Error::corrupt_data(
+                    "cached tenant runtime revision is not canonical",
+                ));
+            }
             Ok(TenantDirectoryBinding {
                 tenant: TenantContext {
                     tenant_id: TenantId::new(binding.tenant_id).map_err(|_| {
@@ -205,6 +217,7 @@ fn decode_snapshot(encoded: &str) -> Result<TenantDirectorySnapshot, Error> {
                         },
                     )?,
                 },
+                runtime_revision,
                 issuer: binding.issuer,
                 external_host: binding.external_host,
             })
@@ -222,6 +235,11 @@ fn validate_bindings(
     let mut issuers = HashSet::with_capacity(tenants.len());
     let mut hosts = HashSet::with_capacity(tenants.len());
     for binding in tenants {
+        if binding.runtime_revision == 0 {
+            return Err(invalid(
+                "tenant runtime revision must be positive".to_owned(),
+            ));
+        }
         nazo_auth::validate_issuer_url(&binding.issuer)
             .map_err(|error| invalid(format!("tenant directory issuer is invalid: {error}")))?;
         let host = canonical_tenant_host(&binding.external_host).map_err(|error| {

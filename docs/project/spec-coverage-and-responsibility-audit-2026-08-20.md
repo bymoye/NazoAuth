@@ -106,7 +106,7 @@ real HTTP/TLS, containers, and the coverage runner.
   RUSTSEC-2026-0258 through both `h2` 0.3.27 and 0.4.15. The 0.4 dependency can
   move to a patched release, but Actix currently retains the unpatched 0.3 line.
   This audit neither ignores the advisory nor disables direct TLS/HTTP2.
-- External OIDF Suite evidence is owned by NazoAuthCtl and was not rerun. The
+- External interoperability evidence evidence is owned by NazoAuthCtl and was not rerun. The
   2026-08-15 local log is not a passing current-head result: its terminal summary
   is 805 passed, 65 review, 11 skipped, and 171 failed/incomplete. The historical
   146/146 CIBA result belongs to an older v0.1.29 run and must not be attributed
@@ -116,12 +116,11 @@ real HTTP/TLS, containers, and the coverage runner.
   artifact above is the reproducible local evidence.
 - Issues #127 through #130 remain open. This change does not prove public
   direct-TLS/trusted-proxy parity, tenant certificate/key controller ownership,
-  or removal of production OIDF Suite special cases.
+  or removal of production external-client special cases.
 - Additional high-value tests remain possible around complete OpenID4VP error
   branches, FAPI authorization-code concurrency, access/ID-token decode
   boundaries, and key-rotation grace/expiry. They are backlog, not hidden behind
   the current coverage percentage.
 
 This audit makes the changed invariants and evidence durable; it does not claim
-complete protocol conformance, a production deployment, or an external suite
-pass.
+complete protocol conformance or a production deployment.

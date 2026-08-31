@@ -391,7 +391,7 @@ fn direct_tls_listener_loads_a_complete_mutual_tls_identity() {
         listeners
             .snapshots
             .server_key_for(Some("unknown.test"))
-            .is_none()
+            .is_some()
     );
     assert!(listeners.snapshots.server_key_for(None).is_none());
     std::fs::remove_dir_all(root).unwrap();
@@ -982,6 +982,15 @@ async fn direct_tls_serves_real_https_and_mtls_without_trusting_forged_headers()
                     )
                 }),
             )
+            .route(
+                "/sni",
+                web::get().to(|request: HttpRequest| async move {
+                    request
+                        .conn_data::<crate::http::mtls::DirectTlsServerName>()
+                        .map(|name| name.as_str().to_owned())
+                        .unwrap_or_default()
+                }),
+            )
     };
     let public_builder = HttpServer::new(probe)
         .on_connect(crate::http::mtls::capture_direct_tls_client_certificate)
@@ -1023,6 +1032,15 @@ async fn direct_tls_serves_real_https_and_mtls_without_trusting_forged_headers()
         .send()
         .await
         .unwrap();
+    let sni = public_client
+        .get(format!("https://localhost:{}/sni", public_address.port()))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(sni, "localhost");
     assert_eq!(public_response.version(), reqwest::Version::HTTP_2);
     assert_eq!(public_response.text().await.unwrap(), "none");
 

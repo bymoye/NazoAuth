@@ -42,12 +42,6 @@ const OIDC_LOGOUT_IDEMPOTENCY_UP: &str =
     include_str!("../../../migrations/20260714000100_oidc_logout_idempotency/up.sql");
 const OIDC_LOGOUT_IDEMPOTENCY_DOWN: &str =
     include_str!("../../../migrations/20260714000100_oidc_logout_idempotency/down.sql");
-const OPENID4VP_RECEIPTS_UP: &str =
-    include_str!("../../../migrations/20260822000100_openid4vp_verification_receipts/up.sql");
-const OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_UP: &str =
-    include_str!("../../../migrations/20260822000200_openid4vp_opaque_suite_identifiers/up.sql");
-const OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_DOWN: &str =
-    include_str!("../../../migrations/20260822000200_openid4vp_opaque_suite_identifiers/down.sql");
 const RECOVERY_ROOT_UP: &str =
     include_str!("../../../migrations/20260825000100_controller_recovery_root/up.sql");
 const RECOVERY_ROOT_DOWN: &str =
@@ -111,43 +105,6 @@ struct ExplainRow {
 }
 
 #[test]
-fn openid4vp_receipt_migration_has_bounded_indexed_cleanup_and_tenant_fences() {
-    for required in [
-        "ux_openid4vp_create_request_jti",
-        "ix_openid4vp_cleanup_deadline",
-        "LIMIT 256",
-        "FOR UPDATE SKIP LOCKED",
-        "FOREIGN KEY (tenant_id, transaction_id)",
-        "REFERENCES openid4vp_transactions (tenant_id, id)",
-    ] {
-        assert!(
-            OPENID4VP_RECEIPTS_UP.contains(required),
-            "OpenID4VP migration is missing {required}"
-        );
-    }
-}
-
-#[test]
-fn openid4vp_suite_identifier_migration_is_bounded_and_rollback_safe() {
-    for required in [
-        "verification_suite_plan_id TYPE VARCHAR(128)",
-        "verification_suite_module_id TYPE VARCHAR(128)",
-        "ck_openid4vp_verification_suite_identifiers",
-        "^[A-Za-z0-9._:+-]{1,128}$",
-    ] {
-        assert!(
-            OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_UP.contains(required),
-            "OpenID4VP opaque suite identifier migration is missing {required}"
-        );
-    }
-    assert!(
-        OPENID4VP_OPAQUE_SUITE_IDENTIFIERS_DOWN
-            .contains("drain OpenID4VP verification contexts with opaque suite identifiers"),
-        "rollback must fail closed while opaque suite identifiers remain"
-    );
-}
-
-#[test]
 fn recovery_root_migration_pins_kdf_ttl_uniqueness_and_fail_closed_downgrade() {
     for required in [
         // Only public material is representable; the derivation parameter set
@@ -204,8 +161,6 @@ fn recovery_root_key_history_backfills_current_keys_and_refuses_downgrade() {
 #[test]
 fn persisted_security_state_cut_removes_every_legacy_authority() {
     for required in [
-        "DELETE FROM openid4vp_transactions",
-        "ALTER COLUMN create_request_jti SET NOT NULL",
         "WITH compromised_families AS",
         "token_family_id IS NOT DISTINCT FROM",
         "ALTER COLUMN token_family_id SET NOT NULL",
@@ -245,21 +200,6 @@ async fn persisted_security_state_cut_executes_fail_closed_and_establishes_curre
             SET search_path TO "{schema}", public;
 
             CREATE TABLE users (id UUID PRIMARY KEY);
-            CREATE TABLE openid4vp_transactions (
-                id UUID PRIMARY KEY,
-                create_request_jti TEXT,
-                create_request_sha256 TEXT,
-                create_request_canonical_json TEXT,
-                CONSTRAINT ck_openid4vp_create_request_shape CHECK (
-                    (create_request_jti IS NULL AND create_request_sha256 IS NULL AND create_request_canonical_json IS NULL)
-                    OR (create_request_jti IS NOT NULL AND create_request_sha256 IS NOT NULL AND create_request_canonical_json IS NOT NULL)
-                )
-            );
-            INSERT INTO openid4vp_transactions VALUES
-                ('00000000-0000-0000-0000-000000000011', NULL, NULL, NULL),
-                ('00000000-0000-0000-0000-000000000012',
-                 '00000000-0000-7000-8000-000000000012', repeat('a', 64), '{{}}');
-
             CREATE TABLE oauth_clients (
                 id UUID PRIMARY KEY,
                 client_id TEXT NOT NULL,
@@ -617,7 +557,7 @@ async fn tenant_resource_provenance_cut_keeps_one_deterministic_binding_and_reje
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn openid4vp_cleanup_deadline_query_is_indexable() {
+async fn openid4vp_expiry_cleanup_query_is_indexable() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -634,16 +574,8 @@ async fn openid4vp_cleanup_deadline_query_is_indexable() {
     let plan = sql_query(
         "EXPLAIN (COSTS OFF) \
          SELECT id FROM openid4vp_transactions \
-         WHERE GREATEST( \
-             expires_at, \
-             COALESCE(verification_issuance_expires_at, expires_at), \
-             COALESCE(verification_expires_at, expires_at) \
-         ) <= CURRENT_TIMESTAMP \
-         ORDER BY GREATEST( \
-             expires_at, \
-             COALESCE(verification_issuance_expires_at, expires_at), \
-             COALESCE(verification_expires_at, expires_at) \
-         ), id LIMIT 256",
+         WHERE expires_at <= CURRENT_TIMESTAMP \
+         ORDER BY expires_at, id LIMIT 256",
     )
     .load::<ExplainRow>(&mut connection)
     .await
@@ -653,8 +585,8 @@ async fn openid4vp_cleanup_deadline_query_is_indexable() {
     .collect::<Vec<_>>()
     .join("\n");
     assert!(
-        plan.contains("ix_openid4vp_cleanup_deadline"),
-        "cleanup query must use its effective-deadline index:\n{plan}"
+        plan.contains("ix_openid4vp_transaction_expiry"),
+        "cleanup query must use the transaction expiry index:\n{plan}"
     );
 }
 

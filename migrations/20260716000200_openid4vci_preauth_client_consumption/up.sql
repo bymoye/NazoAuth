@@ -11,4 +11,4 @@ CREATE INDEX ix_openid4vci_preauth_consumption_consumed_at
     ON openid4vci_pre_authorized_code_consumptions (consumed_at);
 
 COMMENT ON TABLE openid4vci_pre_authorized_code_consumptions IS
-    'Per-client consumption receipts for OpenID4VCI pre-authorized codes; preserves replay protection without globally blocking multi-client OIDF issuance flows.';
+    'Per-client consumption receipts for OpenID4VCI pre-authorized codes; preserves replay protection across independent clients.';

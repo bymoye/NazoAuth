@@ -9,6 +9,7 @@ fn snapshot(revision: u64) -> TenantDirectorySnapshot {
                 realm_id: RealmId::new(Uuid::from_u128(2)).unwrap(),
                 organization_id: OrganizationId::new(Uuid::from_u128(3)).unwrap(),
             },
+            runtime_revision: 1,
             issuer: "https://tenant.example.com".to_owned(),
             external_host: "tenant.example.com".to_owned(),
         }],
@@ -32,6 +33,12 @@ fn decoder_rejects_unknown_fields_and_noncanonical_revision() {
     );
     assert_eq!(
         decode_snapshot(&encoded.replace(r#""revision":"7""#, r#""revision":"08""#))
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::CorruptData
+    );
+    assert_eq!(
+        decode_snapshot(&encoded.replace(r#""runtime_revision":"1""#, r#""runtime_revision":"0""#))
             .unwrap_err()
             .kind(),
         crate::ErrorKind::CorruptData

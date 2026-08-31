@@ -75,6 +75,7 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
 
     let initial_binding = nazo_identity::TenantDirectoryBinding {
         tenant: active,
+        runtime_revision: 1,
         issuer: "https://auth.example".to_owned(),
         external_host: "auth.example".to_owned(),
     };
@@ -92,6 +93,7 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
     assert_eq!(outcomes, [false, true]);
     let conflicting = nazo_identity::TenantDirectoryBinding {
         tenant: active,
+        runtime_revision: 1,
         issuer: "https://other.example".to_owned(),
         external_host: "other.example".to_owned(),
     };

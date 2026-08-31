@@ -11,9 +11,7 @@ use crate::signing::{compact_segments, decode_json, decode_protected_header};
 use crate::wire::*;
 use crate::{
     CONTROL_DISCOVERY_JWS_TYPE, CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA,
-    DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_DISCOVERY_LIFETIME_SECONDS,
-    OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE,
-    PROTOCOL_VERSION, ProtocolError,
+    DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_DISCOVERY_LIFETIME_SECONDS, PROTOCOL_VERSION, ProtocolError,
 };
 
 pub fn validate_discovery_request(request: &DiscoveryRequest) -> Result<(), ProtocolError> {
@@ -60,130 +58,6 @@ pub fn verify_deployment_statement(
     Ok(statement)
 }
 
-pub struct Openid4vpVerificationReceiptExpectations<'a> {
-    pub issuer: &'a str,
-    pub audience: &'a str,
-    pub deployment_id: &'a str,
-    pub runtime_instance_id: &'a str,
-    pub instance_key_id: &'a str,
-    pub tenant_id: &'a str,
-    pub transaction_id: &'a str,
-    pub receipt_id: &'a str,
-    pub issuance_request_jti: &'a str,
-    pub evidence_context_sha256: &'a str,
-    pub presentation_binding_sha256: &'a str,
-    pub intent_sha256: &'a str,
-    pub capability_sha256: &'a str,
-}
-
-pub struct Openid4vpVerificationIntentExpectations<'a> {
-    pub issuer: &'a str,
-    pub audience: &'a str,
-    pub deployment_id: &'a str,
-    pub runtime_instance_id: &'a str,
-    pub instance_key_id: &'a str,
-    pub tenant_id: &'a str,
-    pub transaction_id: &'a str,
-    pub evidence_context_sha256: &'a str,
-    pub presentation_binding_sha256: &'a str,
-}
-
-pub fn verify_openid4vp_verification_receipt(
-    compact: &str,
-    expected: &Openid4vpVerificationReceiptExpectations<'_>,
-    key: &VerifyingKey,
-    now: i64,
-) -> Result<Openid4vpVerificationReceipt, ProtocolError> {
-    let receipt: Openid4vpVerificationReceipt = verify_compact(
-        compact,
-        expected.instance_key_id,
-        OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE,
-        key,
-    )?;
-    validate_openid4vp_verification_receipt(&receipt)?;
-    let context_sha256 =
-        crate::signing::canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context)?;
-    let presentation_binding_sha256 =
-        crate::signing::canonical_openid4vp_presentation_binding_sha256(
-            &receipt.presentation_binding,
-        )?;
-    if receipt.iss != expected.issuer
-        || receipt.aud != expected.audience
-        || receipt.deployment_id != expected.deployment_id
-        || receipt.runtime_instance_id != expected.runtime_instance_id
-        || receipt.instance_key_id != expected.instance_key_id
-        || receipt.tenant_id != expected.tenant_id
-        || receipt.transaction_id != expected.transaction_id
-        || receipt.jti != expected.receipt_id
-        || receipt.issuance_request_jti != expected.issuance_request_jti
-        || context_sha256 != expected.evidence_context_sha256
-        || presentation_binding_sha256 != expected.presentation_binding_sha256
-        || receipt.intent_sha256 != expected.intent_sha256
-        || receipt.capability_sha256 != expected.capability_sha256
-    {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification receipt binding does not match expectations",
-        ));
-    }
-    if now < receipt.iat || now >= receipt.exp {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification receipt is outside its validity window",
-        ));
-    }
-    Ok(receipt)
-}
-
-pub fn verify_openid4vp_verification_intent(
-    compact: &str,
-    expected: &Openid4vpVerificationIntentExpectations<'_>,
-    key: &VerifyingKey,
-    now: i64,
-) -> Result<Openid4vpVerificationIntent, ProtocolError> {
-    let intent: Openid4vpVerificationIntent = verify_compact(
-        compact,
-        expected.instance_key_id,
-        OPENID4VP_VERIFICATION_INTENT_JWS_TYPE,
-        key,
-    )?;
-    validate_openid4vp_verification_intent(&intent)?;
-    let context_sha256 =
-        crate::signing::canonical_openid4vp_evidence_context_sha256(&intent.evidence_context)?;
-    let presentation_binding_sha256 =
-        crate::signing::canonical_openid4vp_presentation_binding_sha256(
-            &intent.presentation_binding,
-        )?;
-    if intent.iss != expected.issuer
-        || intent.aud != expected.audience
-        || intent.deployment_id != expected.deployment_id
-        || intent.runtime_instance_id != expected.runtime_instance_id
-        || intent.instance_key_id != expected.instance_key_id
-        || intent.tenant_id != expected.tenant_id
-        || intent.transaction_id != expected.transaction_id
-        || intent.jti != expected.transaction_id
-        || context_sha256 != expected.evidence_context_sha256
-        || presentation_binding_sha256 != expected.presentation_binding_sha256
-        || now < intent.iat
-        || now >= intent.exp
-    {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification intent binding does not match expectations",
-        ));
-    }
-    Ok(intent)
-}
-
-pub(crate) fn validate_openid4vp_evidence_context(
-    context: &Openid4vpEvidenceContext,
-) -> Result<(), ProtocolError> {
-    validate_file_identifier(&context.run_jti)?;
-    validate_lower_hex(&context.artifact_sha256, 64)?;
-    validate_lower_hex(&context.matrix_sha256, 64)?;
-    validate_file_identifier(&context.suite_plan_id)?;
-    validate_file_identifier(&context.suite_module_id)?;
-    validate_identifier(&context.test_name)?;
-    validate_lower_hex(&context.variant_sha256, 64)
-}
-
 /// Validate the caller-owned create idempotency JTI.
 ///
 /// Only canonical lowercase RFC UUIDs with versions 1 through 8 are allowed;
@@ -195,93 +69,6 @@ pub fn validate_openid4vp_create_request_jti(value: &str) -> Result<(), Protocol
     if !matches!(bytes[14], b'1'..=b'8') || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
         return Err(ProtocolError::Policy(
             "invalid OpenID4VP create request JTI",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_openid4vp_presentation_binding(
-    binding: &Openid4vpPresentationBinding,
-) -> Result<(), ProtocolError> {
-    validate_lower_hex(&binding.presentation_request_sha256, 64)?;
-    match (
-        binding.trust_policy.binding_id.as_deref(),
-        binding.trust_policy.resource_id.as_deref(),
-        binding.trust_policy.resource_digest.as_deref(),
-    ) {
-        (None, None, None) => Ok(()),
-        (Some(binding_id), Some(resource_id), Some(resource_digest)) => {
-            validate_uuid(binding_id)?;
-            validate_file_identifier(resource_id)?;
-            validate_lower_hex(resource_digest, 64)
-        }
-        _ => Err(ProtocolError::Policy(
-            "OpenID4VP trust policy binding must be all present or all absent",
-        )),
-    }
-}
-
-pub(crate) fn validate_openid4vp_verification_receipt(
-    receipt: &Openid4vpVerificationReceipt,
-) -> Result<(), ProtocolError> {
-    if receipt.schema != 1 {
-        return Err(ProtocolError::Policy(
-            "unsupported OpenID4VP verification receipt schema",
-        ));
-    }
-    validate_openid4vc_trust_policy_issuer(&receipt.iss)?;
-    validate_openid4vc_trust_policy_issuer(&receipt.aud)?;
-    validate_file_identifier(&receipt.deployment_id)?;
-    validate_file_identifier(&receipt.runtime_instance_id)?;
-    validate_file_identifier(&receipt.instance_key_id)?;
-    validate_uuid(&receipt.tenant_id)?;
-    validate_uuid(&receipt.jti)?;
-    validate_uuid(&receipt.transaction_id)?;
-    validate_uuid(&receipt.issuance_request_jti)?;
-    validate_openid4vp_evidence_context(&receipt.evidence_context)?;
-    validate_openid4vp_presentation_binding(&receipt.presentation_binding)?;
-    validate_lower_hex(&receipt.intent_sha256, 64)?;
-    validate_lower_hex(&receipt.capability_sha256, 64)?;
-    let completed_at = chrono::DateTime::parse_from_rfc3339(&receipt.completed_at)
-        .map_err(|_| ProtocolError::Policy("invalid OpenID4VP receipt completion time"))?;
-    let lifetime = receipt.exp.checked_sub(receipt.iat);
-    if completed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true) != receipt.completed_at
-        || receipt.iat < 0
-        || lifetime.is_none_or(|value| value <= 0 || value > 600)
-        || completed_at.timestamp() > receipt.iat
-    {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification receipt expiry is invalid",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_openid4vp_verification_intent(
-    intent: &Openid4vpVerificationIntent,
-) -> Result<(), ProtocolError> {
-    if intent.schema != 1 {
-        return Err(ProtocolError::Policy(
-            "unsupported OpenID4VP verification intent schema",
-        ));
-    }
-    validate_openid4vc_trust_policy_issuer(&intent.iss)?;
-    validate_openid4vc_trust_policy_issuer(&intent.aud)?;
-    validate_file_identifier(&intent.deployment_id)?;
-    validate_file_identifier(&intent.runtime_instance_id)?;
-    validate_file_identifier(&intent.instance_key_id)?;
-    validate_uuid(&intent.tenant_id)?;
-    validate_uuid(&intent.transaction_id)?;
-    validate_uuid(&intent.jti)?;
-    validate_openid4vp_evidence_context(&intent.evidence_context)?;
-    validate_openid4vp_presentation_binding(&intent.presentation_binding)?;
-    let lifetime = intent.exp.checked_sub(intent.iat);
-    if intent.jti != intent.transaction_id
-        || intent.iat < 0
-        || lifetime.is_none_or(|value| value <= 0 || value > 600)
-    {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification intent window is invalid",
         ));
     }
     Ok(())
@@ -694,19 +481,19 @@ fn validate_openid4vc_trust_jwks_with_options(
         .and_then(serde_json::Value::as_array)
         .filter(|keys| !keys.is_empty())
         .ok_or(ProtocolError::Policy(
-            "OpenID4VC conformance trust requires non-empty JWK Sets",
+            "OpenID4VC trust policy requires non-empty JWK Sets",
         ))?;
     let mut key_ids = std::collections::BTreeSet::new();
     for key in keys {
         let object = key.as_object().ok_or(ProtocolError::Policy(
-            "OpenID4VC conformance trust must contain public keys only",
+            "OpenID4VC trust policy must contain public keys only",
         ))?;
         if ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
             .iter()
             .any(|name| object.contains_key(*name))
         {
             return Err(ProtocolError::Policy(
-                "OpenID4VC conformance trust must contain public keys only",
+                "OpenID4VC trust policy must contain public keys only",
             ));
         }
         if reject_unknown
@@ -725,12 +512,12 @@ fn validate_openid4vc_trust_jwks_with_options(
         if let Some(kid) = kid {
             if !key_ids.insert(kid.to_owned()) {
                 return Err(ProtocolError::Policy(
-                    "OpenID4VC conformance trust keys require unique key ids",
+                    "OpenID4VC trust policy keys require unique key ids",
                 ));
             }
         } else if !client_attestation || keys.len() != 1 {
             return Err(ProtocolError::Policy(
-                "OpenID4VC conformance trust keys require unique key ids",
+                "OpenID4VC trust policy keys require unique key ids",
             ));
         }
         let key_type = object.get("kty").and_then(serde_json::Value::as_str);
@@ -760,7 +547,7 @@ fn validate_openid4vc_trust_jwks_with_options(
             }
             _ => {
                 return Err(ProtocolError::Policy(
-                    "OpenID4VC conformance trust contains an unsupported public key",
+                    "OpenID4VC trust policy contains an unsupported public key",
                 ));
             }
         }

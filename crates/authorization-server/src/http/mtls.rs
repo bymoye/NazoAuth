@@ -39,12 +39,26 @@ const RFC9440_CLIENT_CERT_HEADER: &str = "client-cert";
 
 pub(crate) use nazo_http_actix::ClientCertificateFacts as MtlsClientCertificate;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectTlsServerName(String);
+
+impl DirectTlsServerName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 pub(crate) fn capture_direct_tls_client_certificate(io: &dyn Any, extensions: &mut Extensions) {
     let Some(stream) = io
         .downcast_ref::<actix_tls::accept::rustls_0_23::TlsStream<actix_web::rt::net::TcpStream>>()
     else {
         return;
     };
+    if let Some(server_name) = stream.get_ref().1.server_name()
+        && let Ok(server_name) = nazo_identity::canonical_tenant_host(server_name)
+    {
+        extensions.insert(DirectTlsServerName(server_name));
+    }
     let Some(certificate) = stream
         .get_ref()
         .1

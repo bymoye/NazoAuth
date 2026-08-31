@@ -51,6 +51,6 @@ CREATE INDEX ix_openid4vci_credential_dataset_events_actor
     ON openid4vci_credential_dataset_events (tenant_id, actor_user_id, created_at DESC);
 
 COMMENT ON TABLE openid4vci_credential_datasets IS
-    'Application-encrypted issuer-authoritative credential claims. Protocol handlers never synthesize credential evidence from conformance-suite inputs.';
+    'Application-encrypted issuer-authoritative credential claims. Protocol handlers never synthesize credential evidence from request inputs.';
 COMMENT ON TABLE openid4vci_credential_dataset_events IS
     'Append-only administrative audit for credential dataset mutations; action 1=upsert, 2=delete.';

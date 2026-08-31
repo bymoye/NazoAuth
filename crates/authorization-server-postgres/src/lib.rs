@@ -15,8 +15,9 @@ use nazo_postgres::{
     MtlsTrustAnchorRepository, OAuthClientRepository, Openid4vciDatasetRepository,
     Openid4vciRepository, Openid4vpRepository, PasskeyRepository, PostgresHealthCheck,
     PostgresPoolMetrics, PostgresTenantResourceExecutor, RecoveryRootRepository,
-    RuntimeModuleRepository, ScimEventRepository, ScimRepository, TenantDirectoryRepository,
-    TenantResourceRepository, TokenIssuanceRepository, TokenRepository, UserRepository,
+    RuntimeModuleRepository, ScimEventRepository, ScimRepository, TenantDirectoryControlRepository,
+    TenantDirectoryRepository, TenantResourceRepository, TokenIssuanceRepository, TokenRepository,
+    UserRepository,
 };
 
 const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@127.0.0.1:5432/oauth";
@@ -304,6 +305,12 @@ impl OperatorPersistence for PostgresOperatorPersistence {
             data_encryption_key,
             preparation,
         ))
+    }
+
+    fn tenant_directory_executor(
+        &self,
+    ) -> Arc<dyn nazo_persistence::directory_control::TenantDirectoryControlPort> {
+        Arc::new(TenantDirectoryControlRepository::new(self.pool.clone()))
     }
 
     fn run_migrations(&self) -> OperatorBackendFuture<'_, bool> {

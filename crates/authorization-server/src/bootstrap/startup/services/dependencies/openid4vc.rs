@@ -7,6 +7,7 @@ pub(super) struct Openid4vcServices {
     pub(super) credential_dataset_admin: Option<web::Data<CredentialDatasetAdminService>>,
     pub(super) presentation_endpoint: Option<web::Data<PresentationEndpoint>>,
     pub(super) client_attestation_validator: Option<Arc<Openid4vcClientAttestationValidator>>,
+    pub(super) revocation_policy: Option<CertificateRevocationPolicy>,
 }
 
 pub(super) async fn build(
@@ -27,9 +28,12 @@ pub(super) async fn build(
             .expect("enabled OpenID4VC modules require a data encryption key")
     });
     let trust_policy_store = data_key.map(|key| persistence.openid4vc_trust_policies(key));
-    let openid4vc_crypto = if openid4vc_enabled {
-        let revocation_policy =
-            super::super::super::background::load_revocation_policy(&settings.openid4vc).await?;
+    let revocation_policy = if openid4vc_enabled {
+        Some(super::super::super::background::load_revocation_policy(&settings.openid4vc).await?)
+    } else {
+        None
+    };
+    let openid4vc_crypto = if let Some(revocation_policy) = revocation_policy.as_ref() {
         let certificate_chain = tokio::fs::read(
             settings
                 .openid4vc
@@ -66,7 +70,7 @@ pub(super) async fn build(
                 &certificate_chain,
                 &trust_anchors,
                 nazo_digital_credentials::VcIssuerTrustPolicy::san_bound(),
-                revocation_policy,
+                revocation_policy.clone(),
             )
             .with_context(|| {
                 format!(
@@ -183,24 +187,21 @@ pub(super) async fn build(
         let presentation_store =
             persistence.openid4vp_store(settings.tenant.context.tenant_id.as_uuid(), data_key);
         Some(web::Data::new(PresentationEndpoint::new(
-            Arc::new(
-                ServerPresentationOperations::new(
-                    presentation_store,
-                    settings.tenant.context.tenant_id.as_uuid(),
-                    openid4vc_crypto
-                        .as_ref()
-                        .expect("enabled OpenID4VP requires crypto")
-                        .clone(),
-                    runtime_registry,
-                    trust_policy_store.expect("enabled OpenID4VP requires a trust policy store"),
-                    PresentationVerifierConfig {
-                        issuer: settings.endpoint.issuer.clone(),
-                        wallet_origins: settings.openid4vc.wallet_authorization_origins.clone(),
-                        transaction_ttl_seconds: settings.openid4vc.transaction_ttl_seconds,
-                    },
-                )
-                .with_verification_signer(startup.control_discovery.clone().into_inner()),
-            ),
+            Arc::new(ServerPresentationOperations::new(
+                presentation_store,
+                settings.tenant.context.tenant_id.as_uuid(),
+                openid4vc_crypto
+                    .as_ref()
+                    .expect("enabled OpenID4VP requires crypto")
+                    .clone(),
+                runtime_registry,
+                trust_policy_store.expect("enabled OpenID4VP requires a trust policy store"),
+                PresentationVerifierConfig {
+                    issuer: settings.endpoint.issuer.clone(),
+                    wallet_origins: settings.openid4vc.wallet_authorization_origins.clone(),
+                    transaction_ttl_seconds: settings.openid4vc.transaction_ttl_seconds,
+                },
+            )),
             settings
                 .openid4vc
                 .verifier_management_token
@@ -217,5 +218,6 @@ pub(super) async fn build(
         credential_dataset_admin,
         presentation_endpoint,
         client_attestation_validator,
+        revocation_policy,
     })
 }

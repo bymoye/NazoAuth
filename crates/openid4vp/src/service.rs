@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::{
-    AuthorizationResponse, PresentationCompletionBinding, PresentationError, PresentationResult,
-    PresentationStoreError, PresentationStorePort, PresentationTransaction, ResponseMode,
+    AuthorizationResponse, PresentationError, PresentationResult, PresentationStoreError,
+    PresentationStorePort, PresentationTransaction, ResponseMode,
 };
 
 impl<T> PresentationStorePort for Arc<T>
@@ -65,16 +65,10 @@ where
         transaction_id: uuid::Uuid,
         state_hash: &'a str,
         result: &'a PresentationResult,
-        verification_binding: Option<crate::PresentationCompletionBinding<'a>>,
         now: DateTime<Utc>,
     ) -> crate::PresentationStoreFuture<'a, Result<bool, PresentationStoreError>> {
-        self.as_ref().complete(
-            transaction_id,
-            state_hash,
-            result,
-            verification_binding,
-            now,
-        )
+        self.as_ref()
+            .complete(transaction_id, state_hash, result, now)
     }
 
     fn result<'a>(
@@ -113,7 +107,6 @@ where
         transaction: &PresentationTransaction,
         response: &AuthorizationResponse,
         additional_trust_anchors: &[Vec<u8>],
-        verification_binding: Option<PresentationCompletionBinding<'_>>,
         now: DateTime<Utc>,
     ) -> Result<PresentationResult, PresentationServiceError> {
         if now >= transaction.expires_at
@@ -190,13 +183,7 @@ where
             .to_string();
         if !self
             .store
-            .complete(
-                transaction.id,
-                &state_hash,
-                &result,
-                verification_binding,
-                now,
-            )
+            .complete(transaction.id, &state_hash, &result, now)
             .await?
         {
             return Err(PresentationError::InvalidState.into());

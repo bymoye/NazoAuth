@@ -5,9 +5,6 @@
 
 # Local runtime data created by Docker and development runs
 /runtime/
-oidf-local-results/
-oidf-results-run-*/
-oidf-conformance-suite/
 .codex_remote_handoff/
 .worktrees/
 

@@ -34,8 +34,14 @@ use uuid::Uuid;
 
 use super::{OperatorPersistence, control_journal::SideEffectError};
 use crate::adapters::security::constant_time_eq;
+use nazo_identity::{TenantBoundaryDefinition, TenantProvisioningRequest};
 use nazo_operator_protocol::{
-    ControlOperationPayload, ControlResultData, TenantResourceIdentity, TenantResourceSelector,
+    ControlOperationPayload, ControlResultData, ControlTenantDirectoryBinding,
+    TenantResourceIdentity, TenantResourceSelector,
+};
+use nazo_persistence::directory_control::{
+    DirectoryControlAction, DirectoryControlFrame, DirectoryControlOutcome,
+    TenantDirectoryControlError,
 };
 use nazo_persistence::tenant_resources::{
     ControlTenantResourceFrame, ControlTenantResourceOutcome, PreparedTenantResource,
@@ -66,7 +72,13 @@ pub(super) fn resume_allowed(operation: &ControlOperationPayload) -> bool {
         ControlOperationPayload::TenantResourceApply { .. }
         | ControlOperationPayload::TenantResourceEnumerate { .. }
         | ControlOperationPayload::TenantResourceRevoke { .. }
-        | ControlOperationPayload::RecoveryInvalidate { .. } => true,
+        | ControlOperationPayload::RecoveryInvalidate { .. }
+        | ControlOperationPayload::TenantDirectoryCreate { .. }
+        | ControlOperationPayload::TenantDirectoryUpdate { .. }
+        | ControlOperationPayload::TenantDirectoryDisable { .. }
+        | ControlOperationPayload::TenantDirectoryReload { .. }
+        | ControlOperationPayload::TenantDirectoryFinalize { .. }
+        | ControlOperationPayload::TenantDirectoryDescribe => true,
     }
 }
 
@@ -184,6 +196,226 @@ pub(super) async fn execute_inner(
                 .await
                 .map(Some)
         }
+        ControlOperationPayload::TenantDirectoryCreate {
+            expected_revision,
+            tenant,
+            realm,
+            organization,
+            issuer,
+            external_host,
+        } => {
+            let parse_boundary_id =
+                |boundary: &nazo_operator_protocol::ControlTenantBoundary,
+                 error: &'static str|
+                 -> Result<nazo_identity::TenantId, SideEffectError> {
+                    Uuid::parse_str(&boundary.id)
+                        .map_err(|_| SideEffectError::Terminal(anyhow::anyhow!(error)))?
+                        .try_into()
+                        .map_err(|_| SideEffectError::Terminal(anyhow::anyhow!(error)))
+                };
+            let tenant_id = parse_boundary_id(tenant, "tenant boundary id is invalid")?;
+            let realm_id = Uuid::parse_str(&realm.id)
+                .map_err(|_| {
+                    SideEffectError::Terminal(anyhow::anyhow!("realm boundary id is invalid"))
+                })?
+                .try_into()
+                .map_err(|_| {
+                    SideEffectError::Terminal(anyhow::anyhow!("realm boundary id is invalid"))
+                })?;
+            let organization_id = Uuid::parse_str(&organization.id)
+                .map_err(|_| {
+                    SideEffectError::Terminal(anyhow::anyhow!(
+                        "organization boundary id is invalid"
+                    ))
+                })?
+                .try_into()
+                .map_err(|_| {
+                    SideEffectError::Terminal(anyhow::anyhow!(
+                        "organization boundary id is invalid"
+                    ))
+                })?;
+            let provisioning = TenantProvisioningRequest {
+                tenant: TenantBoundaryDefinition {
+                    id: tenant_id,
+                    slug: tenant.slug.clone(),
+                    display_name: tenant.display_name.clone(),
+                },
+                realm: TenantBoundaryDefinition {
+                    id: realm_id,
+                    slug: realm.slug.clone(),
+                    display_name: realm.display_name.clone(),
+                },
+                organization: TenantBoundaryDefinition {
+                    id: organization_id,
+                    slug: organization.slug.clone(),
+                    display_name: organization.display_name.clone(),
+                },
+                binding: nazo_identity::TenantDirectoryBinding {
+                    tenant: nazo_identity::TenantContext {
+                        tenant_id,
+                        realm_id,
+                        organization_id,
+                    },
+                    runtime_revision: 1,
+                    issuer: issuer.clone(),
+                    external_host: external_host.clone(),
+                },
+            };
+            let persistence = require_persistence(persistence)?;
+            run_directory_control_operation(
+                DirectoryControlAction::Create {
+                    expected_revision: *expected_revision,
+                    provisioning: Box::new(provisioning),
+                },
+                context,
+                persistence,
+            )
+            .await
+            .map(Some)
+        }
+        ControlOperationPayload::TenantDirectoryUpdate {
+            expected_revision,
+            tenant_id,
+            issuer,
+            external_host,
+        } => {
+            let persistence = require_persistence(persistence)?;
+            run_directory_control_operation(
+                DirectoryControlAction::Update {
+                    expected_revision: *expected_revision,
+                    tenant_id: parse_control_tenant_id(tenant_id)?,
+                    issuer: issuer.clone(),
+                    external_host: external_host.clone(),
+                },
+                context,
+                persistence,
+            )
+            .await
+            .map(Some)
+        }
+        ControlOperationPayload::TenantDirectoryDisable {
+            expected_revision,
+            tenant_id,
+        } => {
+            let persistence = require_persistence(persistence)?;
+            run_directory_control_operation(
+                DirectoryControlAction::Disable {
+                    expected_revision: *expected_revision,
+                    tenant_id: parse_control_tenant_id(tenant_id)?,
+                },
+                context,
+                persistence,
+            )
+            .await
+            .map(Some)
+        }
+        ControlOperationPayload::TenantDirectoryReload {
+            expected_revision,
+            tenant_id,
+        } => {
+            let persistence = require_persistence(persistence)?;
+            run_directory_control_operation(
+                DirectoryControlAction::Reload {
+                    expected_revision: *expected_revision,
+                    tenant_id: parse_control_tenant_id(tenant_id)?,
+                },
+                context,
+                persistence,
+            )
+            .await
+            .map(Some)
+        }
+        ControlOperationPayload::TenantDirectoryFinalize {
+            expected_revision,
+            tenant_id,
+        } => {
+            let persistence = require_persistence(persistence)?;
+            run_directory_control_operation(
+                DirectoryControlAction::Finalize {
+                    expected_revision: *expected_revision,
+                    tenant_id: parse_control_tenant_id(tenant_id)?,
+                },
+                context,
+                persistence,
+            )
+            .await
+            .map(Some)
+        }
+        ControlOperationPayload::TenantDirectoryDescribe => {
+            let persistence = require_persistence(persistence)?;
+            run_directory_control_operation(DirectoryControlAction::Describe, context, persistence)
+                .await
+                .map(Some)
+        }
+    }
+}
+
+fn parse_control_tenant_id(tenant_id: &str) -> Result<nazo_identity::TenantId, SideEffectError> {
+    Uuid::parse_str(tenant_id)
+        .map_err(|_| SideEffectError::Terminal(anyhow::anyhow!("tenant id is invalid")))?
+        .try_into()
+        .map_err(|_| SideEffectError::Terminal(anyhow::anyhow!("tenant id is invalid")))
+}
+
+/// Runs one directory lifecycle action through the authoritative atomic
+/// boundary that owns the revision fence, audit, and outcome ledger.
+async fn run_directory_control_operation(
+    action: DirectoryControlAction,
+    context: &ExecutionContext<'_>,
+    persistence: &dyn OperatorPersistence,
+) -> Result<ControlResultData, SideEffectError> {
+    let actor = serde_json::json!({
+        "kind": "controller",
+        "controller_id": context.controller_id,
+        "kid": context.kid,
+    });
+    let outcome = persistence
+        .tenant_directory_executor()
+        .execute_control_operation(DirectoryControlFrame {
+            deployment_id: context.deployment_id,
+            jti: context.operation_id,
+            request_sha256: context.request_hash,
+            actor: &actor,
+            action,
+        })
+        .await
+        .map_err(map_directory_control_error)?;
+    Ok(match outcome {
+        DirectoryControlOutcome::Mutation(outcome) => ControlResultData::TenantDirectoryMutation {
+            action: outcome.action,
+            tenant_id: outcome.tenant_id,
+            previous_revision: outcome.previous_revision,
+            revision: outcome.revision,
+        },
+        DirectoryControlOutcome::Describe(outcome) => ControlResultData::TenantDirectoryDescribe {
+            revision: outcome.revision,
+            tenants: outcome
+                .tenants
+                .into_iter()
+                .map(|binding| ControlTenantDirectoryBinding {
+                    tenant_id: binding.tenant.tenant_id.as_uuid().to_string(),
+                    realm_id: binding.tenant.realm_id.as_uuid().to_string(),
+                    organization_id: binding.tenant.organization_id.as_uuid().to_string(),
+                    runtime_revision: binding.runtime_revision,
+                    issuer: binding.issuer,
+                    external_host: binding.external_host,
+                })
+                .collect(),
+        },
+    })
+}
+
+fn map_directory_control_error(error: TenantDirectoryControlError) -> SideEffectError {
+    match error {
+        TenantDirectoryControlError::Conflict => SideEffectError::Terminal(anyhow::anyhow!(
+            "tenant directory operation lost its consistency fence"
+        )),
+        TenantDirectoryControlError::Rejected => SideEffectError::Terminal(anyhow::anyhow!(
+            "tenant directory operation was rejected by the authoritative directory"
+        )),
+        TenantDirectoryControlError::Unavailable => SideEffectError::Retryable(anyhow::anyhow!(
+            "tenant directory persistence is unavailable"
+        )),
     }
 }
 

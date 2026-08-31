@@ -52,7 +52,6 @@ registration metadata 都是可执行 allowlist。
 | OIDC Implicit OP | 永不支持 | 无启用开关；不宣告 | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html), [RFC 9700 Section 2.1.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1.2), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/) | 由 OAuth Security BCP / OAuth 2.1 方向排除。 |
 | OIDC Hybrid OP | 永不支持 | 无启用开关；不宣告 | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html), [RFC 9700 Section 2.1.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1.2), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/) | OIDC Core 定义了 Hybrid Flow，但它把 ID Token / access token 前通道交付重新带入 authorization-code 交互。RFC 9700 已弃用 implicit 前通道 token 交付；支持的交互式 profile 保持为 code flow + PKCE / sender constraint。 |
 | Resource Owner Password Credentials | 永不支持 | 无启用开关；请求时拒绝 | [RFC 6749 Section 4.3](https://www.rfc-editor.org/rfc/rfc6749.html#section-4.3), [RFC 9700 Section 2.4](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.4), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/) | OAuth Security BCP 明确 password grant MUST NOT be used。 |
-| 旧 OIDF Dynamic OP 认证 profile | 永不支持 | 无启用开关；OIDF Dynamic OP plan 不进入支持矩阵 | [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html), [RFC 7592](https://www.rfc-editor.org/rfc/rfc7592.html), [RFC 9700 Section 2.1.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1.2) | 该认证 profile 要求 implicit/hybrid 元数据；RFC 7591/RFC 7592 动态注册仍支持。 |
 
 ## 规划中的规范与草案
 
@@ -70,7 +69,7 @@ metadata 中宣告的能力。它不是当前部署能力清单。状态为“�
 | OAuth Security BCP Update | 不支持（待审计） | [draft-ietf-oauth-security-topics-update-03](https://datatracker.ietf.org/doc/draft-ietf-oauth-security-topics-update/) 是 [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html) 的增量更新方向。当前支持 RFC 9700，但尚未按该更新草案做逐条差异审计。 | 作为 RFC 9700 delta audit；任何行为变化都必须同步 metadata、测试和文档。 |
 | JWT BCP / JWT Assertion bis | 不支持（待审计） | [draft-ietf-oauth-rfc8725bis-07](https://datatracker.ietf.org/doc/draft-ietf-oauth-rfc8725bis/) 与 [draft-ietf-oauth-rfc7523bis-11](https://datatracker.ietf.org/doc/draft-ietf-oauth-rfc7523bis/) 尚未完成最终发布。当前支持的是 RFC 8725/RFC 7523 行为，不宣称支持这两个 bis 草案。 | 完成算法 allowlist、audience、replay、key binding、cross-JWT confusion 和 `private_key_jwt` 复审。 |
 | OAuth Client Attestation | 支持 OpenID4VCI 1.0 固定引用的 draft-07；默认关闭 | [draft-ietf-oauth-attestation-based-client-auth-07](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-attestation-based-client-auth-07) 是 OpenID4VCI 1.0 Final 明确固定的版本；当前实现支持 `attest_jwt_client_auth`，并将 refresh token 绑定到 Client Instance `cnf` 公钥。只有模块启用且客户端策略要求时才宣告。 | 后续草案及最终 RFC 必须作为独立 delta audit；不能把更新草案的破坏性语法变化混入 HAIP 1.0 / OpenID4VCI 1.0 profile。 |
-| FAPI 2.0 HTTP Signatures | 实验性支持；默认关闭；待稳定规范审计 | [FAPI 2.0 HTTP Signatures working draft](https://openid.bitbucket.io/fapi/fapi-2_0-http-signatures.html) 不是 Final Specification；持久化 `http_message_signatures` 模块控制 `/fapi/resource`，且没有 OIDF 专项 plan。 | 规范稳定或有 adopter 后再决定是否宣告；每个新草案/Final 都必须做 delta audit。 |
+| FAPI 2.0 HTTP Signatures | 实验性支持；默认关闭；待稳定规范审计 | [FAPI 2.0 HTTP Signatures working draft](https://openid.bitbucket.io/fapi/fapi-2_0-http-signatures.html) 不是 Final Specification；持久化 `http_message_signatures` 模块控制 `/fapi/resource`。 | 规范稳定或有 adopter 后再决定是否宣告；每个新草案/Final 都必须做 delta audit。 |
 | Refresh Token and Authorization Expiration | 不支持（待实现） | [draft-ietf-oauth-refresh-token-expiration-03](https://datatracker.ietf.org/doc/draft-ietf-oauth-refresh-token-expiration/) 要求把授权关系和 refresh token 生命周期显式建模；当前 metadata 不宣告这类过期语义。 | 定义授权有效期、refresh-family 状态、撤销语义、metadata 和端到端测试。 |
 | First-Party Applications | 不支持（待实现） | [draft-ietf-oauth-first-party-apps-04](https://datatracker.ietf.org/doc/draft-ietf-oauth-first-party-apps/) 依赖同方/同源部署假设；当前不能把它泛化到第三方客户端。 | 明确 same-party/BFF 边界，并证明不会削弱第三方客户端隔离。 |
 | Client ID Metadata Document | 不支持（待实现） | [draft-ietf-oauth-client-id-metadata-document-02](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/) 涉及 public client 元数据远程获取；当前没有可信获取、缓存和冲突处理模型。 | 定义可信来源、缓存、降级、冲突、动态注册交互和失败策略。 |
@@ -269,7 +268,7 @@ Request Object 仅在客户端和运行策略允许该请求路径时接受。
 | `RS256` | RSA | SHA-256 | `sig` | 接受已注册 client JWK 或解析后的 `jwks_uri` key，要求 `use=sig` 且 `alg=RS256` | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | 基线互操作选项。 |
 | `ES256` | ECDSA P-256 | SHA-256 | `sig` | 接受已注册 client JWK 或解析后的 `jwks_uri` key，要求 `use=sig` 且 `alg=ES256` | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | 支持的非对称选项。 |
 | `PS256` | RSA-PSS | SHA-256 | `sig` | 接受已注册 client JWK 或解析后的 `jwks_uri` key，要求 `use=sig` 且 `alg=PS256` | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | 高保障 / FAPI-compatible 选项。 |
-| `none` | None | None | N/A | 永不支持 | [RFC 9101 Section 4](https://www.rfc-editor.org/rfc/rfc9101.html#section-4), [RFC 8725 Section 3.1](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1) | 受保护 Request Object 表面要求签名；OIDF unsigned 模块 expected skip 是精确白名单。 |
+| `none` | None | None | N/A | 永不支持 | [RFC 9101 Section 4](https://www.rfc-editor.org/rfc/rfc9101.html#section-4), [RFC 8725 Section 3.1](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1) | 受保护 Request Object 表面要求签名。 |
 | `HS*`, `RS384`, `RS512`, `ES384`, `ES512`, `PS384`, `PS512` | Various | Various | `sig` | 不支持 | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 8725 Section 3.1](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1), [RFC 9101 Section 6.1](https://www.rfc-editor.org/rfc/rfc9101.html#section-6.1) | 标准定义的 JOSE 算法，但当前不为 Request Object 宣告；Request Object 验证使用严格的每客户端算法 allowlist。 |
 
 External `request_uri` 不是通用互联网抓取能力。它只接受经过认证客户端元数据精确注册的 HTTPS URI，并且必须通过部署的远程文档安全策略。FAPI profile 继续优先使用 PAR 和服务端签发的 request URI。
@@ -377,7 +376,7 @@ RFC 8705 第 7.4 节还指出：如果授权服务器信任多个 CA，攻击者
 
 支持 `/logout` 上的 RP-Initiated Logout，并严格校验已注册 `post_logout_redirect_uri`。
 
-Front-channel 和 session-management 行为由 OIDF 矩阵验证。浏览器敏感的 logout/session 流程应与高并发 authorization 矩阵分开测试，因为它们依赖共享浏览器状态。
+Front-channel 和 session-management 行为由项目自有协议测试覆盖。浏览器敏感的 logout/session 流程应与高并发 authorization 矩阵分开测试，因为它们依赖共享浏览器状态。
 
 ## Third-Party Initiated Login
 
@@ -391,12 +390,11 @@ Front-channel 和 session-management 行为由 OIDF 矩阵验证。浏览器敏�
 
 ## Dynamic Registration 不是 legacy Dynamic OP
 
-实现的是安全的 RFC 7591 / RFC 7592 动态客户端注册；legacy OIDF Dynamic OP certification profile 永不支持。该 profile 要求 implicit 和 hybrid flow 的 discovery 元数据，而这些能力被 RFC 9700 和 OAuth 2.1 方向排除。
+实现的是安全的 RFC 7591 / RFC 7592 动态客户端注册。Implicit 和 hybrid flow 被 RFC 9700 和 OAuth 2.1 方向排除。
 
 术语应精确使用：
 
 - “Dynamic Client Registration” 指由 initial access token 前提控制的 RFC 7591 / RFC 7592 客户端生命周期支持。
-- “Dynamic OP certification profile” 永不支持。
 
 ## 规范支撑的永不支持边界
 

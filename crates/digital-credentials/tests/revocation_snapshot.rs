@@ -102,13 +102,8 @@ fn required_policy_accepts_unknown_certificate_only_for_explicit_scoped_trust() 
     ));
 
     CertificateRevocationPolicy::required(snapshot)
-        .check_chain_with_scoped_trust(
-            Some(ISSUER),
-            &[certificate],
-            Utc::now(),
-            &[vec![1, 2, 3]],
-        )
-        .expect("an authenticated lease-scoped conformance chain may be absent from the operator snapshot");
+        .check_chain_with_scoped_trust(Some(ISSUER), &[certificate], Utc::now(), &[vec![1, 2, 3]])
+        .expect("an authenticated client-scoped chain may be absent from the operator snapshot");
 }
 
 #[test]

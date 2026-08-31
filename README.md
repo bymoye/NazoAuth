@@ -40,7 +40,7 @@ delivery, and harden the browser client and onboarding flow. Codex
 accelerated repository audits, implementation, tests, specification
 cross-checks, CI diagnosis, and deployment verification. The maintainer chose
 the product and security boundaries, required standards-first behavior instead
-of suite-specific shortcuts, reviewed the changes, and controlled deployment
+of external-client shortcuts, reviewed the changes, and controlled deployment
 and merge decisions.
 
 See the [Build Week engineering record](docs/project/openai-build-week-2026.md)
@@ -73,7 +73,7 @@ composite score:
 | Static security analysis | CodeQL Rust analysis with the `security-extended` query suite. |
 | Dependency policy | GitHub dependency review, `cargo audit`, and `cargo deny` over advisories, bans, licenses, and sources. |
 | Runtime security behavior | Real HTTP E2E, load/race gate, and Valkey outage injection in `conformance-security`. |
-| External protocol conformance | NazoAuthCtl owns signed Suite artifacts, external execution, evidence, and cleanup. The server is exercised only through its public protocol and tenant-resource interfaces. |
+| External protocol validation | Third-party clients exercise only public protocol and tenant-resource interfaces. |
 | Coverage trend | Codecov LCOV upload from the dedicated coverage workflow. |
 | Release provenance | CycloneDX SBOM, Trivy image scan, Sigstore signing, and GitHub artifact attestations. |
 
@@ -83,7 +83,7 @@ composite score:
 
 ## Certification
 
-🏅 External Suite conformance is orchestrated by NazoAuthCtl.
+🏅 External validators interact with NazoAuth exactly like any other client.
 
 ## Features
 

@@ -1,126 +1,59 @@
 # T4：租户级 OpenID4VC
 
-## 必要性判断
+## 必要性与状态
 
-状态：`REQUIRED / NOT STARTED`。
+状态：`IMPLEMENTED / LOCALLY VALIDATED`。
 
-[GitHub #144](https://github.com/nazozero/NazoAuth/issues/144) 明确要求 OpenID4VC 的跨租户隔离，且受限 conformance tenant 必须能运行外部 OpenID4VC 黑盒验证。当前目录模式直接拒绝 OpenID4VC，因此必须实施；但只需把现有生产能力纳入 tenant runtime，不需要新协议框架。
+OpenID4VC 的 SQL 已带 tenant predicate，但此前 crypto、trust、管理令牌与 revocation reloader 由进程全局配置构造。仅删除目录模式拒绝会造成秘密和后台任务跨租户共享，因此必须将真实资源纳入每租户 `TenantRuntime`。
 
-## 当前代码事实与根因
+## 最短实现
 
-OpenID4VC 持久层已有部分 tenant predicate，但 runtime 仍有 process-global 状态：
-
-- data encryption key；
-- signing certificate chain；
-- trust anchors；
-- credential configurations 和 wallet origins；
-- revocation snapshot/reloader；
-- attestation JWKS/management token；
-- OpenID4VP verification signer 与部分 discovery/config。
-
-这些资源由全局 `Settings` 和 process startup 构造。若直接允许动态 tenant，多个 tenant 会共享 crypto、trust、metadata 和后台 lifecycle。tenant-aware SQL 不能消除该风险。
-
-## 最小目标结构
-
-在现有 `TenantRuntime` 中增加可选的具体资源图：
+没有新增 profile 表、Provider map 或任意文件 URL。目录 binding 只增加通用正整数 `runtime_revision`；每个租户使用确定性位置：
 
 ```text
-TenantRuntime
-  -> Option<Arc<TenantOpenId4VcRuntime>> {
-       validated profile/config,
-       tenant crypto and signing material,
-       trust/attestation policy,
-       revocation state,
-       lifecycle stop handles
-     }
+DATA_DIR/tenants/{tenant_uuid}/openid4vc/
+  signing-certificate-chain.pem
+  trust-anchors.pem
+  revocation-snapshot.json   # 仅启用吊销检查时需要
 ```
 
-所有 VCI/VP route 仍使用现有 handler，只是从当前 tenant app-data 取得资源。未启用的 tenant 不挂载或失败关闭相关能力。
+部署级 `OPENID4VC_DATA_ENCRYPTION_KEY` 是 root，不直接供所有租户使用。每个 tenant 使用现有 HKDF 边界按 tenant UUID 和独立 purpose 派生：
 
-## 最短实施路径
+- OpenID4VC data-encryption key；
+- VCI management token；
+- VP management token。
 
-### 1. 枚举真实 process-global 资源
+公共协议配置仍来自同一部署配置，但在构造时复制到各租户不可变服务图；秘密状态不共享。
 
-从以下路径逐项追踪到 handler/background consumer：
+## 生命周期
 
-- `crates/authorization-server/src/settings/config_loader.rs`
-- `crates/authorization-server/src/bootstrap/startup/services/dependencies/openid4vc.rs`
-- `crates/authorization-server/src/bootstrap/startup/background.rs`
-- `crates/authorization-server/src/bootstrap/routes.rs`
-- OpenID4VC VCI/VP/attestation/revocation handler 与 persistence port
+- `load_revocation_policy` 只加载状态，不再产生无 owner 的任务。
+- 每个启用 revocation 的 `TenantRuntime` 启动自己的 reloader handle。
+- runtime 被替换或禁用时，先从新索引移除，再 abort 并 await 旧 worker。
+- binding 未变化时复用整个 runtime；`runtime_revision` 改变时重建目标租户完整服务图，不复用旧 keyset 或 lifecycle。
+- 新材料加载失败时 candidate 不发布，继续服务 last-good。
 
-只有被真实 handler 或后台任务消费的资源进入 tenant graph。未被消费的配置直接删除或标记 `NOT NEEDED`，不迁移成新字段。
-
-### 2. 建立具体 tenant profile
-
-目录 binding 只引用一个已验证的 OpenID4VC profile revision；具体 profile 只包含当前协议需要的字段：
-
-- 启用的 VCI/VP 模块；
-- credential configurations；
-- wallet/origin policy；
-- signing/encryption material revision；
-- trust/attestation/revocation material revision。
-
-公共配置和 trust metadata 可存 PostgreSQL；秘密材料继续由现有 tenant key/material 生命周期持有。禁止使用自由命名的 provider map 或任意 URL 配置链。
-
-如果首个动态租户只需要一套 profile，也仍以 tenant ID 和 revision 绑定，但不预建多 provider 插件系统。
-
-### 3. 将构造移入 `TenantRuntime`
-
-扩展现有 `TenantRuntimeBuilder`，在 candidate 发布前：
-
-1. 加载该 tenant profile；
-2. 校验 crypto/certificate/trust 的 tenant、usage、digest 和 revision；
-3. 构造 VCI/VP/attestation/revocation 资源；
-4. 启动并记录 tenant-owned lifecycle handles；
-5. 任一步失败则整张 candidate 不发布。
-
-现有 `OPENID4VC_*` 全局 Settings 不能再通过 revision-0 静态图激活。只有 tenant profile 及其 material 全部进入 `TenantRuntime` 后，才能解除目录模式的明确拒绝。
-
-### 4. 动态 route 与 metadata
-
-- discovery/issuer metadata 只能从当前 tenant runtime 生成；
-- VCI/VP endpoint availability 由当前 tenant profile 决定；
-- 不能以 process baseline 决定所有 tenant 的 route 行为；
-- nonce、offer、deferred credential、presentation、attestation、revocation cache 全部 tenant-scoped；
-- 相同 kid、nonce、opaque state 或 credential configuration ID 在不同 tenant 下可独立存在但不能互认。
-
-### 5. lifecycle 与 rotation
-
-- profile update 只重建目标 tenant 的 OpenID4VC graph；
-- 未改变 revision 的 tenant 复用现有 graph；
-- revocation/trust reload task 必须由 tenant runtime 持有 stop handle；
-- disable 先从新 index 移除，再停止后台任务；
-- rotation 失败保留 last-good；
-- background job 的每条 payload 必须携带并验证 tenant ID，不能依赖当前全局 Settings。
+运维更新材料的最短路径：原子替换目标租户确定性文件，然后提交签名 `tenant-directory-reload`。该操作只推进 tenant-local runtime revision 与全局目录 revision，不引入 material 类型、路径或 digest 的通用数据库模型。
 
 ## 明确不做
 
-- 不复制 VCI/VP handler；
-- 不建立通用 `CryptoProvider`/`TrustProvider` 插件框架，除非当前已有第二个真实实现；
-- 不为每个 tenant 启动 process-global worker 的副本；只有 tenant-owned 工作才按 tenant 启动；
-- 不把 OIDF dataset、plan、module、Suite origin 或测试凭据加入 profile；
-- 不把全局环境变量静默当作所有动态 tenant 的默认配置；
-- 不因数据库已有 tenant predicate 就删除 fail-closed 检查。
+- 不复制 VCI/VP handler。
+- 不创建 `CryptoProvider`、`TrustProvider` 或 profile 插件框架。
+- 不把测试计划、runner、测试凭据或验证证据加入运行时。
+- 不静默共享数据密钥或管理令牌。
+- 不为文件更新建立 URL indirection。
 
-## 验收
+## 最终验收
 
-至少覆盖两个同时启用 OpenID4VC 的 tenant：
+- 两个租户派生不同的数据密钥及 VCI/VP 管理令牌。
+- 同名 nonce、offer、state、kid 和 credential configuration 不跨租户互认。
+- trust anchor、attestation、VP result 与 revocation state 跨租户失败关闭。
+- 文件替换加 `reload` 无重启生效，其他 tenant runtime 不重建。
+- 损坏材料保留 last-good；disable 后 worker 停止且不再写入。
+- OpenID4VC discovery 与端点行为来自当前 tenant runtime。
 
-- metadata、credential configurations 和 wallet policy 各自独立；
-- 相同 kid/nonce/offer/state 在另一 tenant 被拒绝；
-- tenant A trust anchor/attestation key 不能验证 tenant B；
-- VCI pre-authorized/authorization-code、deferred credential、VP presentation、revocation 全链路隔离；
-- 动态 enable/disable/profile rotation 无重启生效；
-- 一个 tenant profile 损坏时保留整张 last-good index；
-- background reload 停止后无继续写入；
-- revision 0 仍拒绝启动；已初始化目录不再触发当前 OpenID4VC 拒绝。
+外部客户端按标准公开协议进行黑盒验证，不获得任何内部测试接口。
 
-最后运行外部 OpenID4VC 黑盒，但该结果不能替代跨租户负向测试。
+## 回滚
 
-## 停止与回滚
-
-- 任一 process-global crypto/trust consumer 未迁移时，不解除目录模式拒绝；
-- tenant background task 没有明确 owner/stop handle 时不启动；
-- profile/material revision 不一致时保留 last-good；
-- 回滚时 profile revision、key material 和数据库 schema 必须匹配。
+恢复目标租户上一个确定性文件集合并再次推进 `runtime_revision`。如果旧二进制不理解当前 migration head，则不得只回滚二进制。

@@ -3,7 +3,7 @@
 //! PostgreSQL schema backing the Controller Registry.
 //!
 //! Without `NAZO_TEST_DATABASE_URL` (or `DATABASE_URL`) every test skips so
-//! the suite stays hermetic; in CI their absence is a hard failure.
+//! the integration test stays hermetic; in CI their absence is a hard failure.
 
 use std::{
     fs,

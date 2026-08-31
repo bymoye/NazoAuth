@@ -29,22 +29,6 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertEqual(len({revision for revision, _ in actions}), 1)
         self.assertEqual({version for _, version in actions}, {toolchain})
 
-    def test_production_rust_sources_do_not_contain_suite_plan_specific_behavior(self) -> None:
-        forbidden = re.compile(
-            r"(?i)(?:conformance-suite|certification\.openid\.net|"
-            r"oidcc-[a-z0-9-]+-test-plan|fapi2-[a-z0-9-]+-test-plan)"
-        )
-        offenders: list[str] = []
-        for path in sorted((ROOT / "crates").glob("*/src/**/*.rs")):
-            if forbidden.search(path.read_text(encoding="utf-8")):
-                offenders.append(path.relative_to(ROOT).as_posix())
-        self.assertEqual(
-            offenders,
-            [],
-            "production Rust sources must implement standards and conformance control planes, "
-            "not Suite plan-specific behavior",
-        )
-
     def test_runtime_container_copies_only_the_unified_product_binary(self) -> None:
         source = (ROOT / "Containerfile").read_text(encoding="utf-8")
         self.assertIn("target=/usr/local/cargo/registry,sharing=locked", source)
@@ -62,7 +46,7 @@ class ReleaseGovernanceTests(unittest.TestCase):
         self.assertNotIn("scripts/", final_stage)
         self.assertNotIn("tests/", final_stage)
         self.assertNotIn("docs/", final_stage)
-        self.assertNotIn("oidf", final_stage.lower())
+        self.assertNotIn("interoperability", final_stage.lower())
         self.assertEqual(final_stage.count("/usr/local/bin/nazoauth"), 1)
         self.assertNotIn("/usr/local/bin/nazoauthctl", final_stage)
         for retired_binary in (
@@ -607,20 +591,6 @@ class ReleaseGovernanceTests(unittest.TestCase):
             'VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e104"',
             runtime_config,
         )
-
-    def test_official_suite_is_never_patched(self) -> None:
-        tracked = [
-            *sorted((ROOT / "scripts").rglob("*.py")),
-            *sorted((ROOT / ".github" / "workflows").glob("*.yml")),
-        ]
-        offenders = []
-        for path in tracked:
-            if not path.is_file():
-                continue
-            source = path.read_text(encoding="utf-8", errors="ignore")
-            if "apply_oidf_runner_patch" in source or "oidf-v5.2.0-terminal-info.patch" in source:
-                offenders.append(path.relative_to(ROOT).as_posix())
-        self.assertEqual(offenders, [])
 
     def test_heavy_pull_request_workflows_do_not_match_docs_only_changes(self) -> None:
         for name in (

@@ -34,6 +34,7 @@ fn directory_snapshot_maps_active_bindings_and_empty_directory() {
         organization_id: Some(tenant.organization_id.as_uuid()),
         issuer: Some("https://auth.example".to_owned()),
         external_host: Some("auth.example".to_owned()),
+        runtime_revision: Some(1),
     }])
     .expect("complete directory row should map");
     assert_eq!(snapshot.revision, 7);
@@ -49,6 +50,7 @@ fn directory_snapshot_maps_active_bindings_and_empty_directory() {
         organization_id: None,
         issuer: None,
         external_host: None,
+        runtime_revision: None,
     }])
     .expect("directory state without active bindings should map");
     assert_eq!(empty.revision, 8);
@@ -64,6 +66,7 @@ fn directory_snapshot_rejects_incomplete_rows() {
         organization_id: None,
         issuer: Some("https://auth.example".to_owned()),
         external_host: Some("auth.example".to_owned()),
+        runtime_revision: Some(1),
     }])
     .expect_err("partial binding must fail closed");
     assert!(matches!(error, RepositoryError::Consistency(_)));

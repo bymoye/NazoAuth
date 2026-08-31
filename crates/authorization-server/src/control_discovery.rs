@@ -9,7 +9,7 @@ use actix_web::{HttpResponse, web};
 use anyhow::{Context as _, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
     CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA, DeploymentStatement, DiscoveryRequest,
     DiscoveryResponse, DiscoveryStatement, PROTOCOL_VERSION, decode_instance_public_key,
@@ -118,36 +118,6 @@ impl ControlDiscoveryEndpoint {
 
     pub(crate) fn deployment_id(&self) -> &str {
         &self.identity.deployment.deployment_id
-    }
-
-    pub(crate) fn instance_key_id(&self) -> &str {
-        &self.identity.key_id
-    }
-
-    pub(crate) fn instance_verifying_key(&self) -> VerifyingKey {
-        self.identity.signing_key.verifying_key()
-    }
-
-    pub(crate) fn sign_openid4vp_verification_receipt(
-        &self,
-        receipt: &nazo_operator_protocol::Openid4vpVerificationReceipt,
-    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
-        nazo_operator_protocol::sign_openid4vp_verification_receipt(
-            receipt,
-            &self.identity.key_id,
-            &self.identity.signing_key,
-        )
-    }
-
-    pub(crate) fn sign_openid4vp_verification_intent(
-        &self,
-        intent: &nazo_operator_protocol::Openid4vpVerificationIntent,
-    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
-        nazo_operator_protocol::sign_openid4vp_verification_intent(
-            intent,
-            &self.identity.key_id,
-            &self.identity.signing_key,
-        )
     }
 
     fn respond(&self, request: DiscoveryRequest) -> anyhow::Result<DiscoveryResponse> {

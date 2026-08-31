@@ -142,15 +142,13 @@ issuer；`PUBLIC_BASE_URL` 仍必须等于客户端看到的公开 HTTPS 地址�
 
 ### 反向代理与 mTLS
 
-启用 RFC 8705 或完整 OIDF profile 时，TLS 终止代理必须请求客户端证书，并通过
+启用 RFC 8705 客户端认证时，TLS 终止代理必须请求客户端证书，并通过
 RFC 9440 `Client-Cert` header 转交。NazoAuth 再根据客户端注册信息认证该证书；
 代理不得接受公网客户端自行提交的 `Client-Cert` 或 `Client-Cert-Chain`。服务配置
 使用 `MTLS_CERTIFICATE_SOURCE=rfc9440`，`TRUSTED_PROXY_CIDRS` 只填写 NazoAuth
 实际看到的精确代理地址。一个宿主地址足够时，不得信任整个容器网段。
 
-NazoAuthCtl 一致性测试每轮都会生成新的 CA 与叶证书，因此测试部署前的代理不能向
-客户端公布过期的固定 client-CA 列表。开始创建 Suite module 前，必须安装本轮生成的
-公开 CA bundle，并在同一次运行的 cleanup 中恢复旧 bundle。直接使用经过审查的
+直接使用经过审查的
 [`deploy/proxy/haproxy-rfc9440.cfg`](../../deploy/proxy/haproxy-rfc9440.cfg)：它把
 普通 HTTPS 与 `verify required` 的独立 mTLS listener 分开，清除所有入站 forwarding
 和证书 header，并且只写入从已验证 TLS peer 得到的单例 RFC 9440 `Client-Cert`。
@@ -167,20 +165,12 @@ subject/issuer DN 的叶证书可能被 OpenSSL/HAProxy 判为自签证书并拒
 - NazoAuth 只信任精确代理地址，并按已注册证书身份验证收到的叶证书；
 - TLS 1.2 与 TLS 1.3 分别限制为批准的 AES-GCM cipher suite。
 
-本轮 bundle 只能来自 active lease 绑定的公开 `mtls_trust_anchor_pem`。必须原子写入、
-校验整个 bundle、重载代理，并在创建 Suite module 前核对 digest。即使运行被中断，
-cleanup 也必须恢复旧 bundle 并再次重载。共享代理必须串行执行 install/restore；除非
-每轮拥有独立 listener 和 CA bundle，否则不能并发改变代理信任。严禁用
-`ca-ignore-err all` 或 `crt-ignore-err all` 代替安装本轮 CA：这会把全部证书链信任
-委托给应用，并可能削弱只按标准 subject selector 注册的 RFC 8705 客户端。
-
 普通生产客户端若由固定 CA 签发，应把该 CA 安装进 HAProxy，并在独立 mTLS listener
-使用 `verify required`。除非控制面能原子安装并恢复每轮 CA，否则不得让该 listener
-同时承担动态一致性测试证书。
+使用 `verify required`。严禁使用 `ca-ignore-err all` 或 `crt-ignore-err all` 绕过证书链验证。
 
 重载前必须使用相同 HAProxy 镜像或二进制执行
 `haproxy -c -f /path/to/candidate.cfg`，并保存 root-only 的旧配置。重载后验证
-`/health`、Discovery、Suite 未授权边界、AES-GCM 握手成功，以及 CBC 与 CHACHA20
+`/health`、Discovery、mTLS listener 匿名请求被拒绝、AES-GCM 握手成功，以及 CBC 与 CHACHA20
 被拒绝。任一检查失败都应立即恢复旧配置并再次重载。
 
 ## 验证
@@ -237,6 +227,6 @@ snapshot 恢复。完整边界见[一键安装与升级](one-click-update.zh-CN.
 - 对精确提交执行
   [release-security.md](release-security.md) 中的安全与一致性闸门。
 
-如需有意清空数据面并以 OIDF 作为启用闸门，请使用
+如需有意清空数据面，请使用
 [全新环境部署与生产启用](fresh-production-activation.zh-CN.md)。高级配置见
 [configuration.md](configuration.md)。

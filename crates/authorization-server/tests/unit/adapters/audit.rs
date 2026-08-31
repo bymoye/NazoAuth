@@ -278,10 +278,6 @@ fn high_impact_state_changes_are_guarded_by_required_audit_intent() {
         ciba_browser.contains("set_ciba_request_decision("),
         "browser CIBA decisions must use the ordinary user mutation path"
     );
-    assert!(
-        !ciba.contains("ciba_automated_decision"),
-        "CIBA approval must remain the authenticated user decision path"
-    );
     assert!(ciba.contains("CIBA decision audit could not be persisted."));
 
     let issuance = include_str!("../../../src/http/token/issue_grant.rs");

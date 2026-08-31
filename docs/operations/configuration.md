@@ -82,7 +82,7 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window for failed-login throttling |
 | `LOGIN_FAILURE_IP_EMAIL_MAX_ATTEMPTS` | `5` | Maximum failed login attempts per source IP and normalized email in the failed-login window |
 | `AUTHORIZATION_SERVER_PROFILE` | `oauth2-baseline` | Global protocol profile. Every OAuth client must carry an explicit current `security_policy`; rows without it are rejected rather than inferred from this setting. |
-| `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted; conformance-plan names are not runtime profiles. |
+| `CIBA_SECURITY_PROFILE` | `fapi-ciba-id1` | CIBA-specific policy: FAPI-CIBA ID1 with orthogonal poll/ping delivery and private-key/mTLS client authentication, or internal `fapi2-ciba` hardening. Only these canonical values are accepted. |
 | `MFA_TOTP_ENCRYPTION_KEY` / `MFA_TOTP_ENCRYPTION_KEY_ID` | generated under `DATA_DIR/secrets` | Current 32-byte base64url key and derived version id for TOTP seed envelope encryption. Prefer `MFA_TOTP_ENCRYPTION_KEY_FILE` when importing a controlled existing key. |
 | `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional prior key for decrypting existing encrypted envelopes during a controlled key transition. Startup never scans, encrypts, or re-wraps credential rows. |
 | `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` | Independent current 32-byte base64url key and derived id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`; file injection remains available for controlled rotation. Missing or malformed pairs fail startup. |
@@ -182,7 +182,7 @@ for the server/client boundary, default matrix, policy JSON, and upgrade rules.
 
 The explicit persisted `http_message_signatures` runtime-module state changes
 only `/fapi/resource`. It is default-off, has no discovery metadata, and is
-not an OIDF-certified profile.
+not a claimed certification profile.
 Each token's `client_id` must resolve to an active client with an exact public
 JWK matching the request `keyid` and algorithm. Supported algorithms are
 Ed25519, RSA PKCS#1 v1.5 SHA-256 with RSA keys of at least 2048 bits, and
@@ -220,11 +220,9 @@ client assertions, DPoP proofs, access tokens, refresh tokens, authorization
 codes, provider tokens, and secret references must not be logged or returned in
 error responses.
 
-For the concrete HAProxy 3.2 preset, dynamic conformance CA installation,
-atomic reload, and rollback requirements, see
-[`deploy/proxy/README.md`](../../deploy/proxy/README.md). A conformance client CA
-is generated for one run and must not be hard-coded or retained as a permanent
-production trust root.
+For the concrete HAProxy 3.2 preset, trust-bundle installation, atomic reload,
+and rollback requirements, see
+[`deploy/proxy/README.md`](../../deploy/proxy/README.md).
 
 CORS is endpoint-scoped. `CORS_ALLOWED_ORIGINS` is an exact allowlist, not proof
 that a browser client is confidential. Authorization and browser-redirect

@@ -36,66 +36,30 @@ ALTER TABLE openid4vci_credential_dataset_events
     DROP CONSTRAINT IF EXISTS ck_openid4vci_dataset_event_source;
 ALTER TABLE openid4vci_credential_dataset_events
     ADD CONSTRAINT ck_openid4vci_dataset_event_source
-    CHECK (source IN ('admin-session', 'operator-conformance'));
+    CHECK (source = 'admin-session');
 
 ALTER TABLE oauth_client_mtls_trust_anchor_requests
     DROP CONSTRAINT IF EXISTS ck_mtls_trust_anchor_source,
     DROP CONSTRAINT IF EXISTS ck_mtls_trust_anchor_state;
 ALTER TABLE oauth_client_mtls_trust_anchor_requests
-    ADD CONSTRAINT ck_mtls_trust_anchor_source CHECK (
-        source IN ('admin-session', 'operator-conformance')
-    ),
     ADD CONSTRAINT ck_mtls_trust_anchor_state CHECK (
-        (status = 0 AND source IN ('admin-session', 'operator-conformance')
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NULL AND resolved_at IS NULL
+        (status = 0 AND resolved_by_user_id IS NULL AND resolved_at IS NULL
             AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
-        OR (status IN (1, 2) AND source = 'admin-session'
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL
+        OR (status IN (1, 2) AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL
             AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
-        OR (status = 1 AND source = 'operator-conformance'
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NULL AND resolved_at IS NOT NULL
-            AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
-        OR (status = 3 AND source = 'admin-session'
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL
-            AND revoked_by_user_id IS NOT NULL AND revoked_at IS NOT NULL)
-        OR (status = 3 AND source = 'operator-conformance'
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NULL AND resolved_at IS NOT NULL
+        OR (status = 3 AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL
             AND revoked_by_user_id IS NOT NULL AND revoked_at IS NOT NULL)
     );
 
-ALTER TABLE oauth_client_mtls_trust_anchor_requests
-    ALTER COLUMN user_id SET NOT NULL;
+DROP TRIGGER IF EXISTS trg_mtls_trust_event_actor
+    ON oauth_client_mtls_trust_anchor_events;
+DROP FUNCTION IF EXISTS nazo_oauth_validate_mtls_trust_event_actor();
+ALTER TABLE oauth_client_mtls_trust_anchor_events
+    ALTER COLUMN actor_user_id SET NOT NULL;
 
-CREATE OR REPLACE FUNCTION nazo_oauth_validate_mtls_trust_event_actor()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    request_source VARCHAR(32);
-BEGIN
-    SELECT source INTO request_source
-    FROM oauth_client_mtls_trust_anchor_requests
-    WHERE tenant_id = NEW.tenant_id AND id = NEW.request_id;
-    IF request_source IS NULL THEN
-        RAISE EXCEPTION 'mTLS trust event request does not exist'
-            USING ERRCODE = '23503';
-    END IF;
-    IF request_source = 'admin-session' AND NEW.actor_user_id IS NULL THEN
-        RAISE EXCEPTION 'admin-session trust events require an actor'
-            USING ERRCODE = '23514';
-    END IF;
-    IF request_source = 'operator-conformance'
-       AND (
-           (NEW.action IN (0, 1) AND NEW.actor_user_id IS NOT NULL)
-           OR (NEW.action = 3 AND NEW.actor_user_id IS NULL)
-           OR NEW.action = 2
-       ) THEN
-        RAISE EXCEPTION 'operator-conformance trust event actor/action is inconsistent'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
+ALTER TABLE oauth_client_mtls_trust_anchor_requests
+    ALTER COLUMN user_id SET NOT NULL,
+    DROP COLUMN source;
 
 DROP TRIGGER IF EXISTS trg_tenant_resource_operations_append_only
     ON tenant_resource_operations;
@@ -110,7 +74,6 @@ DROP FUNCTION IF EXISTS openid4vc_presentation_trust_policy_is_active(UUID, UUID
 DROP INDEX IF EXISTS ix_openid4vp_transactions_openid4vc_trust_policy;
 ALTER TABLE openid4vp_transactions
     DROP CONSTRAINT IF EXISTS fk_openid4vp_transactions_openid4vc_trust_policy,
-    DROP CONSTRAINT IF EXISTS ck_openid4vp_transactions_trust_owner,
     DROP CONSTRAINT IF EXISTS ck_openid4vp_transactions_trust_policy_binding,
     DROP COLUMN IF EXISTS openid4vc_trust_policy_binding_id,
     DROP COLUMN IF EXISTS openid4vc_trust_policy_resource_id,

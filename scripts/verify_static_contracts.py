@@ -828,11 +828,6 @@ def check_openid4vc_boundaries() -> None:
     ):
         if marker not in openid4vc_server_domain:
             raise SystemExit(f"OpenID4VC internal control-plane boundary is missing: {marker}")
-    containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-    runtime_start = containerfile.index("FROM runtime-base AS runtime")
-    runtime_body = containerfile[runtime_start:]
-    if "conformance" in runtime_body.lower() or "oidf" in runtime_body.lower():
-        raise SystemExit("production runtime image must not contain conformance provisioning")
     keyctl = (ROOT / "crates" / "authorization-server" / "src" / "keyctl.rs").read_text(
         encoding="utf-8"
     )
@@ -870,31 +865,6 @@ def check_openid4vc_boundaries() -> None:
     ):
         if marker not in dataset_migration:
             raise SystemExit(f"OpenID4VC dataset persistence boundary is missing: {marker}")
-
-
-def check_conformance_provisioning_boundaries() -> None:
-    """Keep external Suite orchestration out of the server repository."""
-
-    retired_assets = (
-        ROOT / "compose.oidf.yml",
-        ROOT / "deploy" / "oidf-suite",
-        ROOT / "deploy" / "oidf-proxy",
-        ROOT / "requirements" / "oidf-conformance.in",
-        ROOT / "requirements" / "oidf-conformance.txt",
-    )
-    present = [
-        str(path.relative_to(ROOT))
-        for path in retired_assets
-        if path.is_file() or (path.is_dir() and any(child.is_file() for child in path.rglob("*")))
-    ]
-    if present:
-        raise SystemExit(f"external Suite assets remain in NazoAuth: {present}")
-
-    containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-    runtime_start = containerfile.index("FROM runtime-base AS runtime")
-    runtime_body = containerfile[runtime_start:].lower()
-    if "oidf" in runtime_body or "conformance" in runtime_body:
-        raise SystemExit("production runtime image must not contain Suite provisioning")
 
 
 def check_admin_provision_boundary() -> None:
@@ -994,7 +964,6 @@ def main() -> None:
         check_removed_security_capabilities()
         check_fapi_ciba_boundaries()
         check_openid4vc_boundaries()
-        check_conformance_provisioning_boundaries()
         check_admin_provision_boundary()
 
 

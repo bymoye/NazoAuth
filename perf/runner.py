@@ -56,7 +56,6 @@ PROFILES: dict[str, list[str]] = {
         "authorize_par_session",
         "revoke_refresh_token",
         "metadata_jwks",
-        "ciba_private_key_jwt_dpop_poll",
         "same_user_refresh_token_rotation",
         "same_user_introspect_opaque_refresh_token",
         "same_user_authorize_par_session",

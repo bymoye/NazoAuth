@@ -36,6 +36,7 @@ fn directory_binding(issuer: &str, external_host: &str) -> nazo_identity::Tenant
             )
             .unwrap(),
         },
+        runtime_revision: 1,
         issuer: issuer.to_owned(),
         external_host: external_host.to_owned(),
     }
@@ -92,7 +93,7 @@ fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
 }
 
 #[test]
-fn directory_tenant_rejects_host_mismatch_and_non_dynamic_safe_modes() {
+fn directory_tenant_rejects_host_mismatch_and_shared_storage_roots() {
     let base = [
         ("TRANSPORT_MODE", "trusted-proxy"),
         ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
@@ -115,15 +116,15 @@ fn directory_tenant_rejects_host_mismatch_and_non_dynamic_safe_modes() {
         ("TRANSPORT_MODE", "direct-tls"),
         ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
     ]);
-    assert!(
+    assert_eq!(
         Settings::from_directory_binding(
             &direct,
             &directory_binding("https://auth.example.test", "auth.example.test"),
         )
-        .err()
-        .expect("directory tenant must reject direct TLS")
-        .to_string()
-        .contains("directory-managed tenants do not yet support TRANSPORT_MODE=direct-tls")
+        .expect("directory tenant should use the deployment Direct TLS listener")
+        .endpoint
+        .transport_mode,
+        TransportMode::DirectTls
     );
 
     let keys = ConfigSource::from_owned_pairs_for_test([
@@ -170,6 +171,77 @@ fn directory_tenant_rejects_host_mismatch_and_non_dynamic_safe_modes() {
 }
 
 #[test]
+fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("DATA_DIR", "test-runtime/directory-openid4vc"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+        ("ENABLE_OPENID4VCI_ISSUER", "true"),
+        ("ENABLE_OPENID4VP_VERIFIER", "true"),
+        (
+            "OPENID4VC_DATA_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        (
+            "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
+            ATTESTATION_CREDENTIAL_CONFIGURATIONS,
+        ),
+        (
+            "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+            "openid4vci-management-token-at-least-32-bytes",
+        ),
+        (
+            "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+            "openid4vp-management-token-at-least-32-bytes",
+        ),
+        (
+            "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
+            "https://wallet.example",
+        ),
+        ("OPENID4VC_REVOCATION_POLICY", "required"),
+    ]);
+    let first_binding = directory_binding("https://one.example", "one.example");
+    let mut second_binding = directory_binding("https://two.example", "two.example");
+    second_binding.tenant.tenant_id = nazo_identity::TenantId::new(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000021").unwrap(),
+    )
+    .unwrap();
+    let first = Settings::from_directory_binding(&config, &first_binding).unwrap();
+    let second = Settings::from_directory_binding(&config, &second_binding).unwrap();
+
+    assert_ne!(
+        first.openid4vc.data_encryption_key,
+        second.openid4vc.data_encryption_key
+    );
+    assert_ne!(
+        first.openid4vc.issuer_management_token,
+        second.openid4vc.issuer_management_token
+    );
+    assert_ne!(
+        first.openid4vc.verifier_management_token,
+        second.openid4vc.verifier_management_token
+    );
+    let first_material = first
+        .storage
+        .data_dir
+        .join("tenants/00000000-0000-0000-0000-000000000011/openid4vc");
+    assert_eq!(
+        first.openid4vc.signing_certificate_chain_file,
+        Some(first_material.join("signing-certificate-chain.pem"))
+    );
+    assert_eq!(
+        first.openid4vc.trust_anchors_file,
+        Some(first_material.join("trust-anchors.pem"))
+    );
+    assert_eq!(
+        first.openid4vc.revocation_snapshot_file,
+        Some(first_material.join("revocation-snapshot.json"))
+    );
+}
+
+#[test]
 fn key_attestation_policy_can_defer_trust_to_scoped_runtime_policy() {
     let config = ConfigSource::from_pairs_for_test([
         ("ENABLE_OPENID4VCI_ISSUER", "true"),
@@ -205,7 +277,7 @@ fn key_attestation_policy_can_defer_trust_to_scoped_runtime_policy() {
     ]);
 
     let settings =
-        Settings::from_config(&config).expect("lease-scoped trust is resolved at request time");
+        Settings::from_config(&config).expect("client-scoped trust is resolved at request time");
     assert!(settings.openid4vc.key_attestation_jwks.is_none());
 }
 
@@ -616,9 +688,8 @@ fn ciba_security_profile_accepts_canonical_fapi2_ciba_value() {
 }
 
 #[test]
-fn ciba_security_profile_rejects_conformance_and_migration_aliases() {
+fn ciba_security_profile_rejects_noncanonical_aliases() {
     for value in [
-        "oidf-fapi-ciba",
         "fapi-ciba-id1-plain-private-key-jwt-poll",
         "experimental-fapi2-ciba",
     ] {
@@ -715,7 +786,7 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
         ("CIBA_POLL_INTERVAL_SECONDS", "6"),
         (
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
-            "https://suite.example, https://callback.internal:9443",
+            "https://wallet.example, https://callback.internal:9443",
         ),
         (
             "BACKCHANNEL_LOGOUT_PRIVATE_ORIGINS",
@@ -743,7 +814,7 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
     assert_eq!(settings.ciba.ciba_poll_interval_seconds, 6);
     assert_eq!(
         settings.ciba.ciba_notification_private_origins,
-        ["https://suite.example", "https://callback.internal:9443"]
+        ["https://wallet.example", "https://callback.internal:9443"]
     );
     assert_eq!(
         settings.modules.backchannel_logout_private_origins,

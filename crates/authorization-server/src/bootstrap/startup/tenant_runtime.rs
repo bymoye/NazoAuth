@@ -55,6 +55,7 @@ pub(in crate::bootstrap) struct TenantRuntime {
 struct TenantRuntimeLifecycle {
     key_lifecycle: Option<JoinHandle<()>>,
     ciba_ping_worker: Option<JoinHandle<()>>,
+    openid4vc_revocation_worker: Option<JoinHandle<()>>,
 }
 
 impl TenantRuntime {
@@ -140,9 +141,35 @@ impl TenantRuntime {
         #[cfg(test)]
         let ciba_ping_worker = None;
 
+        let openid4vc_revocation_worker = assembly
+            .openid4vc_revocation_policy()
+            .filter(|policy| policy.is_enabled())
+            .zip(
+                assembly
+                    .startup
+                    .settings
+                    .openid4vc
+                    .revocation_snapshot_file
+                    .as_ref(),
+            )
+            .map(|(policy, path)| {
+                background::spawn_revocation_snapshot_reloader(
+                    policy.clone(),
+                    path.clone(),
+                    Duration::from_secs(
+                        assembly
+                            .startup
+                            .settings
+                            .openid4vc
+                            .revocation_reload_interval_seconds,
+                    ),
+                )
+            });
+
         let key_lifecycle = background::spawn_key_lifecycle(assembly.startup.keyset.clone());
         lifecycle.key_lifecycle = Some(key_lifecycle);
         lifecycle.ciba_ping_worker = ciba_ping_worker;
+        lifecycle.openid4vc_revocation_worker = openid4vc_revocation_worker;
         Ok(())
     }
 
@@ -155,7 +182,7 @@ impl TenantRuntime {
         // manager first receives its cooperative stop signal; its task is not
         // aborted while it may be writing key material.
         assembly.startup.keyset.stop_lifecycle();
-        let (key_lifecycle, ciba_ping_worker) = {
+        let (key_lifecycle, ciba_ping_worker, openid4vc_revocation_worker) = {
             let mut lifecycle = self
                 .lifecycle
                 .lock()
@@ -163,8 +190,17 @@ impl TenantRuntime {
             (
                 lifecycle.key_lifecycle.take(),
                 lifecycle.ciba_ping_worker.take(),
+                lifecycle.openid4vc_revocation_worker.take(),
             )
         };
+        if let Some(worker) = openid4vc_revocation_worker {
+            worker.abort();
+            if let Err(error) = worker.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "tenant OpenID4VC revocation worker stopped unexpectedly");
+            }
+        }
         if let Some(worker) = ciba_ping_worker {
             worker.abort();
             if let Err(error) = worker.await
@@ -287,19 +323,13 @@ impl TenantRuntimeBuildPort for ServiceAssemblyTenantRuntimeBuilder {
     fn build(
         &self,
         binding: &TenantDirectoryBinding,
-        previous_same_tenant: Option<Arc<TenantRuntime>>,
+        _previous_same_tenant: Option<Arc<TenantRuntime>>,
     ) -> TenantRuntimeBuildFuture<'_> {
         let process = self.process.clone();
         let binding = binding.clone();
         Box::pin(async move {
             let settings = Arc::new(Settings::from_directory_binding(&process.config, &binding)?);
-            let reuse = previous_same_tenant.map(|runtime| {
-                (
-                    runtime.assembly().startup.keyset.clone(),
-                    runtime.lifecycle.clone(),
-                )
-            });
-            build_service_runtime(process, binding, settings, reuse).await
+            build_service_runtime(process, binding, settings).await
         })
     }
 }
@@ -308,10 +338,6 @@ async fn build_service_runtime(
     process: Arc<ProcessRuntime>,
     binding: TenantDirectoryBinding,
     settings: Arc<Settings>,
-    reuse: Option<(
-        nazo_key_management::KeyManager,
-        Arc<Mutex<TenantRuntimeLifecycle>>,
-    )>,
 ) -> anyhow::Result<Arc<TenantRuntime>> {
     process
         .persistence
@@ -329,13 +355,8 @@ async fn build_service_runtime(
         .state_backend
         .for_tenant(settings.tenant.context.tenant_id)
         .map_err(|error| anyhow::anyhow!("tenant transient state binding failed: {error}"))?;
-    let (keyset, lifecycle) = match reuse {
-        Some((keyset, lifecycle)) => (keyset, lifecycle),
-        None => (
-            nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?,
-            Arc::new(Mutex::new(TenantRuntimeLifecycle::default())),
-        ),
-    };
+    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
+    let lifecycle = Arc::new(Mutex::new(TenantRuntimeLifecycle::default()));
     tokio::fs::create_dir_all(&settings.storage.avatar_storage_dir).await?;
     let readiness_dependencies =
         web::Data::new(crate::http::well_known::ReadinessDependencies::new(
@@ -663,6 +684,9 @@ fn validate_snapshot(snapshot: &TenantDirectorySnapshot) -> anyhow::Result<()> {
     let mut issuers = BTreeSet::new();
     let mut hosts = BTreeSet::new();
     for binding in &snapshot.tenants {
+        if binding.runtime_revision == 0 {
+            anyhow::bail!("tenant runtime revision must be positive");
+        }
         let external_host = canonical_tenant_host(&binding.external_host).map_err(|error| {
             anyhow::anyhow!("tenant directory external_host is invalid: {error}")
         })?;

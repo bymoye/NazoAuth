@@ -17,6 +17,7 @@ fn snapshot(revision: u64) -> TenantDirectorySnapshot {
                 realm_id: RealmId::new(Uuid::from_u128(2)).unwrap(),
                 organization_id: OrganizationId::new(Uuid::from_u128(3)).unwrap(),
             },
+            runtime_revision: 1,
             issuer: "https://tenant.example.com".to_owned(),
             external_host: "tenant.example.com".to_owned(),
         }],
@@ -66,6 +67,18 @@ async fn cache_is_monotonic_and_authoritative_snapshot_repairs_corruption() {
     assert!(cache.publish_authoritative(&snapshot(2)).await.unwrap());
     assert_eq!(cache.load().await.unwrap(), Some(snapshot(2)));
 
+    assert!(cache.publish_authoritative(&snapshot(3)).await.unwrap());
+    assert_eq!(cache.load().await.unwrap(), Some(snapshot(3)));
+
+    raw.set::<(), _, _>(
+        &physical_key,
+        r#"{"schema_version":2,"integrity":"nazo-tenant-directory-cache-v2","revision":"99","tenants":[{"tenant_id":"00000000-0000-0000-0000-000000000001","realm_id":"00000000-0000-0000-0000-000000000002","organization_id":"00000000-0000-0000-0000-000000000003","runtime_revision":"0","issuer":"https://tenant.example.com","external_host":"tenant.example.com"}]}"#,
+        None,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
     assert!(cache.publish_authoritative(&snapshot(3)).await.unwrap());
     assert_eq!(cache.load().await.unwrap(), Some(snapshot(3)));
 

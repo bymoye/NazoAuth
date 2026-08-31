@@ -2,26 +2,6 @@
 -- cannot understand the resulting schema, and current binaries must not retain
 -- runtime compatibility paths for any shape removed here.
 
--- Pre-receipt OpenID4VP transactions used transaction_id-only AEAD AAD. The
--- create-request binding columns are the durable lineage marker for ciphertext
--- written with the tenant-bound v2 AAD. Child issuance JTIs cascade on delete.
-DELETE FROM openid4vp_transactions
-WHERE create_request_jti IS NULL
-   OR create_request_sha256 IS NULL
-   OR create_request_canonical_json IS NULL;
-
-ALTER TABLE openid4vp_transactions
-    DROP CONSTRAINT ck_openid4vp_create_request_shape,
-    ALTER COLUMN create_request_jti SET NOT NULL,
-    ALTER COLUMN create_request_sha256 SET NOT NULL,
-    ALTER COLUMN create_request_canonical_json SET NOT NULL,
-    ADD CONSTRAINT ck_openid4vp_create_request_shape CHECK (
-        create_request_jti ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-        AND create_request_sha256 ~ '^[0-9a-f]{64}$'
-        AND create_request_canonical_json <> ''
-        AND octet_length(create_request_canonical_json) <= 65536
-    );
-
 CREATE FUNCTION nazo_refresh_auth_context_is_current(context JSONB)
 RETURNS BOOLEAN
 LANGUAGE SQL

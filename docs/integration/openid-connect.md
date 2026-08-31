@@ -59,7 +59,6 @@ executable allowlist.
 | OIDC Implicit OP | Never supported | No enablement switch; not advertised | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html), [RFC 9700 Section 2.1.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1.2), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/) | Excluded by OAuth Security BCP / OAuth 2.1 direction. |
 | OIDC Hybrid OP | Never supported | No enablement switch; not advertised | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html), [RFC 9700 Section 2.1.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1.2), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/) | OIDC Core defines Hybrid Flow, but it reintroduces front-channel ID Token/access-token delivery into an authorization-code interaction. RFC 9700 deprecates implicit front-channel token delivery; the supported interactive profile remains code flow plus PKCE/sender constraints. |
 | Resource Owner Password Credentials | Never supported | No enablement switch; rejected if requested | [RFC 6749 Section 4.3](https://www.rfc-editor.org/rfc/rfc6749.html#section-4.3), [RFC 9700 Section 2.4](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.4), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/) | OAuth Security BCP says the password grant MUST NOT be used. |
-| Legacy OIDF Dynamic OP certification profile | Never supported | No enablement switch; the OIDF Dynamic OP plan is excluded from supported matrices | [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html), [RFC 7592](https://www.rfc-editor.org/rfc/rfc7592.html), [RFC 9700 Section 2.1.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-2.1.2) | That certification profile requires implicit/hybrid metadata; RFC 7591/RFC 7592 dynamic registration remains supported. |
 
 ## Planned specifications and drafts
 
@@ -79,7 +78,7 @@ no executable implementation or complete profile boundary is available yet.
 | OAuth Security BCP Update | Not supported (audit pending) | [draft-ietf-oauth-security-topics-update-03](https://datatracker.ietf.org/doc/draft-ietf-oauth-security-topics-update/) is an update track for [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html). RFC 9700 behavior is supported, but this update draft has not been audited requirement by requirement. | Treat it as an RFC 9700 delta audit; update behavior, metadata, tests, and documentation together. |
 | JWT BCP / JWT Assertion bis | Not supported (audit pending) | [draft-ietf-oauth-rfc8725bis-07](https://datatracker.ietf.org/doc/draft-ietf-oauth-rfc8725bis/) and [draft-ietf-oauth-rfc7523bis-11](https://datatracker.ietf.org/doc/draft-ietf-oauth-rfc7523bis/) are not final yet. Current behavior supports RFC 8725/RFC 7523, not these bis drafts. | Re-audit algorithm allowlists, audience, replay, key binding, cross-JWT confusion, and `private_key_jwt`. |
 | OAuth Client Attestation | Supports the draft-07 version fixed by OpenID4VCI 1.0; disabled by default | [draft-ietf-oauth-attestation-based-client-auth-07](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-attestation-based-client-auth-07) is the version explicitly fixed by OpenID4VCI 1.0 Final. The implementation supports `attest_jwt_client_auth` and binds refresh tokens to the Client Instance `cnf` key. It is advertised only when the module is enabled and client policy requires it. | Later drafts and the eventual RFC require a separate delta audit; breaking syntax changes are not mixed into the HAIP 1.0 / OpenID4VCI 1.0 profile. |
-| FAPI 2.0 HTTP Signatures | Experimental support; disabled by default; stable-spec audit pending | The [FAPI 2.0 HTTP Signatures working draft](https://openid.bitbucket.io/fapi/fapi-2_0-http-signatures.html) is not a Final Specification. The persisted `http_message_signatures` module controls `/fapi/resource`, and there is no dedicated OIDF plan. | Decide whether to advertise only after the spec stabilizes or an adopter requires it; every newer draft or Final requires a delta audit. |
+| FAPI 2.0 HTTP Signatures | Experimental support; disabled by default; stable-spec audit pending | The [FAPI 2.0 HTTP Signatures working draft](https://openid.bitbucket.io/fapi/fapi-2_0-http-signatures.html) is not a Final Specification. The persisted `http_message_signatures` module controls `/fapi/resource`. | Decide whether to advertise only after the spec stabilizes or an adopter requires it; every newer draft or Final requires a delta audit. |
 | Refresh Token and Authorization Expiration | Not supported (planned) | [draft-ietf-oauth-refresh-token-expiration-03](https://datatracker.ietf.org/doc/draft-ietf-oauth-refresh-token-expiration/) requires explicit authorization and refresh-token lifetime modeling; current metadata does not claim these expiration semantics. | Define authorization lifetime, refresh-family state, revocation semantics, metadata, and E2E tests. |
 | First-Party Applications | Not supported (planned) | [draft-ietf-oauth-first-party-apps-04](https://datatracker.ietf.org/doc/draft-ietf-oauth-first-party-apps/) depends on same-party deployment assumptions that must not be generalized to third-party clients. | Define same-party/BFF boundaries and prove third-party client isolation remains intact. |
 | Client ID Metadata Document | Not supported (planned) | [draft-ietf-oauth-client-id-metadata-document-02](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/) implies remote public-client metadata retrieval; there is no trusted fetch, cache, or conflict model yet. | Define trusted sources, cache behavior, downgrade handling, conflicts, DCR interaction, and failure policy. |
@@ -309,7 +308,7 @@ request path.
 | `RS256` | RSA | SHA-256 | `sig` | Accepted with registered client JWK or resolved `jwks_uri` key using `use=sig` and `alg=RS256` | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | Baseline interoperability option. |
 | `ES256` | ECDSA P-256 | SHA-256 | `sig` | Accepted with registered client JWK or resolved `jwks_uri` key using `use=sig` and `alg=ES256` | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | Supported asymmetric option. |
 | `PS256` | RSA-PSS | SHA-256 | `sig` | Accepted with registered client JWK or resolved `jwks_uri` key using `use=sig` and `alg=PS256` | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 9101](https://www.rfc-editor.org/rfc/rfc9101.html) | High-assurance/FAPI-compatible option. |
-| `none` | None | None | N/A | Never supported | [RFC 9101 Section 4](https://www.rfc-editor.org/rfc/rfc9101.html#section-4), [RFC 8725 Section 3.1](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1) | Rejected because signed Request Objects are required for protected request-object surfaces; expected OIDF skips for unsigned modules are bounded and explicit. |
+| `none` | None | None | N/A | Never supported | [RFC 9101 Section 4](https://www.rfc-editor.org/rfc/rfc9101.html#section-4), [RFC 8725 Section 3.1](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1) | Rejected because signed Request Objects are required for protected request-object surfaces. |
 | `HS*`, `RS384`, `RS512`, `ES384`, `ES512`, `PS384`, `PS512` | Various | Various | `sig` | Not accepted | [RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html), [RFC 8725 Section 3.1](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1), [RFC 9101 Section 6.1](https://www.rfc-editor.org/rfc/rfc9101.html#section-6.1) | Standards-defined JOSE algorithms, but not advertised for Request Objects. Request Object validation uses a strict per-client algorithm allowlist. |
 
 External `request_uri` is not a general internet fetch feature. It is accepted
@@ -458,8 +457,8 @@ The provider supports RP-Initiated Logout at `/logout` and validates registered
 `post_logout_redirect_uri` values exactly. Logout integrations should use
 metadata discovery and register all post-logout redirect URIs explicitly.
 
-Front-channel and session-management behavior is profile-tested in the OIDF
-matrix. Browser-sensitive logout/session flows should be tested separately from
+Front-channel and session-management behavior is covered by project-owned protocol tests.
+Browser-sensitive logout/session flows should be tested separately from
 high-concurrency authorization matrices because they depend on shared browser
 state.
 
@@ -478,16 +477,14 @@ the provider.
 
 ## Dynamic registration is not legacy Dynamic OP
 
-The provider implements secure RFC 7591 / RFC 7592 dynamic client registration, but
-the legacy OIDF Dynamic OP certification profile is never supported. That
-profile requires discovery metadata for implicit and hybrid flows, which are
-excluded by RFC 9700 and the OAuth 2.1 direction described below.
+The provider implements secure RFC 7591 / RFC 7592 dynamic client registration.
+Implicit and hybrid flows are excluded by RFC 9700 and the OAuth 2.1 direction
+described below.
 
 Use this terminology precisely:
 
 - "Dynamic Client Registration" means RFC 7591 / RFC 7592 client lifecycle
   support conditional on a configured initial access token.
-- "Dynamic OP certification profile" is never supported.
 
 ## Specification-backed non-implementation boundaries
 

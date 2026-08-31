@@ -1,3 +1,4 @@
+DROP FUNCTION IF EXISTS nazo_openid4vp_cleanup_expired_transactions();
 DROP TABLE IF EXISTS openid4vp_transactions;
 DROP TABLE IF EXISTS openid4vci_notifications;
 DROP TABLE IF EXISTS openid4vci_deferred_transactions;

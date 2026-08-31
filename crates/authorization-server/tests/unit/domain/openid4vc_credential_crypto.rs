@@ -1087,11 +1087,11 @@ fn mdoc_direct_scoped_trust_anchor_is_exact_self_signed_and_lease_scoped() {
             std::slice::from_ref(&certs.ca_der),
             now,
         )
-        .expect("exact direct conformance anchor")
+        .expect("exact direct trust anchor")
     );
     assert!(
         !verify_direct_scoped_trust_anchor(std::slice::from_ref(&certs.ca_der), &[], now)
-            .expect("no active conformance anchor")
+            .expect("no active trust anchor")
     );
     assert!(
         !verify_direct_scoped_trust_anchor(
@@ -1099,7 +1099,7 @@ fn mdoc_direct_scoped_trust_anchor_is_exact_self_signed_and_lease_scoped() {
             std::slice::from_ref(&certs.leaf_der),
             now,
         )
-        .expect("non-CA signer cannot become a direct conformance anchor")
+        .expect("non-CA signer cannot become a direct trust anchor")
     );
     assert!(
         !verify_direct_scoped_trust_anchor(

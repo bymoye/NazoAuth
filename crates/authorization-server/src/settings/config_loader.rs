@@ -53,6 +53,24 @@ pub(crate) fn credential_configurations_from_config(
     Ok(configurations)
 }
 
+fn derive_tenant_secret(
+    root: &[u8],
+    tenant_id: nazo_identity::TenantId,
+    purpose: &'static [u8],
+) -> [u8; 32] {
+    nazo_operator_protocol::hkdf_sha256_v1(root, tenant_id.as_uuid().as_bytes(), purpose, 32)
+        .try_into()
+        .expect("HKDF output length is fixed to 32 bytes")
+}
+
+fn derive_tenant_management_token(
+    root: String,
+    tenant_id: nazo_identity::TenantId,
+    purpose: &'static [u8],
+) -> String {
+    URL_SAFE_NO_PAD.encode(derive_tenant_secret(root.as_bytes(), tenant_id, purpose))
+}
+
 impl Settings {
     pub(crate) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
         Self::from_config_for_tenant(config, None)
@@ -67,6 +85,7 @@ impl Settings {
             TenantOverride::from_issuer(tenant, config.string("ISSUER", &public_base_url))?;
         Ok(nazo_identity::TenantDirectoryBinding {
             tenant,
+            runtime_revision: 1,
             issuer: override_.issuer,
             external_host: override_.host,
         })
@@ -89,15 +108,7 @@ impl Settings {
                 "AVATAR_STORAGE_DIR must not be configured for a directory-managed tenant; tenant avatar directories are derived from DATA_DIR"
             );
         }
-        let snapshot =
-            Self::from_config_for_tenant(config, Some(TenantOverride::from_directory(binding)?))?;
-        if snapshot.endpoint.transport_mode == TransportMode::DirectTls {
-            bail!("directory-managed tenants do not yet support TRANSPORT_MODE=direct-tls");
-        }
-        if snapshot.modules.enable_openid4vci_issuer || snapshot.modules.enable_openid4vp_verifier {
-            bail!("directory-managed tenants do not yet support OpenID4VC modules");
-        }
-        Ok(snapshot)
+        Self::from_config_for_tenant(config, Some(TenantOverride::from_directory(binding)?))
     }
 
     fn from_config_for_tenant(
@@ -271,7 +282,7 @@ impl Settings {
         let enable_openid4vci_issuer = config.bool("ENABLE_OPENID4VCI_ISSUER", false)?;
         let enable_openid4vp_verifier = config.bool("ENABLE_OPENID4VP_VERIFIER", false)?;
         let openid4vc_enabled = enable_openid4vci_issuer || enable_openid4vp_verifier;
-        let openid4vc_data_encryption_key = config
+        let mut openid4vc_data_encryption_key = config
             .optional_string("OPENID4VC_DATA_ENCRYPTION_KEY")
             .map(|value| URL_SAFE_NO_PAD.decode(value).map_err(anyhow::Error::from))
             .transpose()?
@@ -305,7 +316,7 @@ impl Settings {
                     .collect::<std::collections::BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let openid4vci_issuer_management_token =
+        let mut openid4vci_issuer_management_token =
             config.optional_string("OPENID4VCI_ISSUER_MANAGEMENT_TOKEN");
         if openid4vci_issuer_management_token
             .as_ref()
@@ -335,7 +346,7 @@ impl Settings {
         for origin in &wallet_authorization_origins {
             validate_cors_origin(origin)?;
         }
-        let openid4vp_verifier_management_token =
+        let mut openid4vp_verifier_management_token =
             config.optional_string("OPENID4VP_VERIFIER_MANAGEMENT_TOKEN");
         if openid4vp_verifier_management_token
             .as_ref()
@@ -350,14 +361,14 @@ impl Settings {
                 "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN and OPENID4VP_VERIFIER_MANAGEMENT_TOKEN must differ"
             );
         }
-        let openid4vc_signing_certificate_chain_file = config
+        let mut openid4vc_signing_certificate_chain_file = config
             .optional_string("OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE")
             .map(PathBuf::from);
-        let openid4vc_trust_anchors_file = config
+        let mut openid4vc_trust_anchors_file = config
             .optional_string("OPENID4VC_TRUST_ANCHORS_FILE")
             .map(PathBuf::from);
         let openid4vc_revocation_policy = Openid4vcRevocationPolicy::from_config(config)?;
-        let openid4vc_revocation_snapshot_file = config
+        let mut openid4vc_revocation_snapshot_file = config
             .optional_string("OPENID4VC_REVOCATION_SNAPSHOT_FILE")
             .map(PathBuf::from);
         let openid4vc_revocation_reload_interval_seconds = positive_u64(
@@ -368,6 +379,7 @@ impl Settings {
         )?;
         if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
             && openid4vc_revocation_snapshot_file.is_none()
+            && !tenant_specific
         {
             bail!(
                 "OPENID4VC_REVOCATION_SNAPSHOT_FILE is required when OPENID4VC_REVOCATION_POLICY is enabled"
@@ -380,11 +392,12 @@ impl Settings {
         }
         if openid4vc_enabled
             && (openid4vc_data_encryption_key.is_none()
-                || openid4vc_signing_certificate_chain_file.is_none()
-                || openid4vc_trust_anchors_file.is_none())
+                || (!tenant_specific
+                    && (openid4vc_signing_certificate_chain_file.is_none()
+                        || openid4vc_trust_anchors_file.is_none())))
         {
             bail!(
-                "OpenID4VC modules require OPENID4VC_DATA_ENCRYPTION_KEY, OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE, and OPENID4VC_TRUST_ANCHORS_FILE"
+                "OpenID4VC modules require a data encryption root and, outside the tenant directory, explicit certificate and trust-anchor files"
             );
         }
         if enable_openid4vci_issuer && credential_configurations.is_empty() {
@@ -437,6 +450,39 @@ impl Settings {
         }
         let data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
         if tenant_specific {
+            if openid4vc_enabled {
+                let tenant_id = tenant.context.tenant_id;
+                let material_dir = data_dir
+                    .join("tenants")
+                    .join(tenant_id.as_uuid().to_string())
+                    .join("openid4vc");
+                openid4vc_signing_certificate_chain_file =
+                    Some(material_dir.join("signing-certificate-chain.pem"));
+                openid4vc_trust_anchors_file = Some(material_dir.join("trust-anchors.pem"));
+                if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled {
+                    openid4vc_revocation_snapshot_file =
+                        Some(material_dir.join("revocation-snapshot.json"));
+                }
+                openid4vc_data_encryption_key = openid4vc_data_encryption_key.map(|root| {
+                    derive_tenant_secret(&root, tenant_id, b"nazoauth/openid4vc/data-encryption/v1")
+                });
+                openid4vci_issuer_management_token =
+                    openid4vci_issuer_management_token.map(|root| {
+                        derive_tenant_management_token(
+                            root,
+                            tenant_id,
+                            b"nazoauth/openid4vci/management/v1",
+                        )
+                    });
+                openid4vp_verifier_management_token =
+                    openid4vp_verifier_management_token.map(|root| {
+                        derive_tenant_management_token(
+                            root,
+                            tenant_id,
+                            b"nazoauth/openid4vp/management/v1",
+                        )
+                    });
+            }
             task_key_settings.keys_dir = data_dir
                 .join("tenants")
                 .join(tenant.context.tenant_id.as_uuid().to_string())

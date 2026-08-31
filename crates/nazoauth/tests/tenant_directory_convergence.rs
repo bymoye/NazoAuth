@@ -360,6 +360,7 @@ fn provisioning_request(slug: &str, host: &str) -> TenantProvisioningRequest {
                 realm_id,
                 organization_id,
             },
+            runtime_revision: 1,
             issuer: format!("https://{host}"),
             external_host: host.to_owned(),
         },
@@ -533,10 +534,10 @@ async fn exercise_lifecycle(
         ),
     );
     assert!(
-        verify.contains("nazo-tenant-directory-cache-v1"),
+        verify.contains("nazo-tenant-directory-cache-v2"),
         "the directory snapshot key must be present before poisoning: {verify}"
     );
-    let poison = r#"{"schema_version":1,"integrity":"nazo-tenant-directory-cache-v1","revision":"999999","tenants":[]}"#;
+    let poison = r#"{"schema_version":2,"integrity":"nazo-tenant-directory-cache-v2","revision":"999999","tenants":[]}"#;
     resp_command(
         proxy.address(),
         format!(

@@ -21,6 +21,7 @@ fn binding(id: u128, host: &str, issuer: &str) -> TenantDirectoryBinding {
             organization_id: OrganizationId::new(Uuid::from_u128(id + 0x200))
                 .expect("organization id is non-nil"),
         },
+        runtime_revision: 1,
         issuer: issuer.to_owned(),
         external_host: host.to_owned(),
     }
@@ -378,6 +379,42 @@ async fn newer_cached_snapshot_is_published_without_database_read() {
     assert_eq!(fixture.cache.load_count(), 1);
     assert_eq!(fixture.directory.revision_read_count(), 0);
     assert_eq!(fixture.directory.snapshot_read_count(), 0);
+}
+
+#[tokio::test]
+async fn tenant_runtime_revision_rebuilds_only_the_changed_tenant() {
+    let tenant_a = binding(1, "tenant-a.example", "https://tenant-a.example");
+    let tenant_b = binding(2, "tenant-b.example", "https://tenant-b.example");
+    let mut reloaded_a = tenant_a.clone();
+    reloaded_a.runtime_revision = 2;
+    let fixture = Fixture::new(
+        snapshot(1, vec![tenant_a, tenant_b]),
+        [CacheReply::Snapshot(snapshot(
+            2,
+            vec![
+                reloaded_a.clone(),
+                binding(2, "tenant-b.example", "https://tenant-b.example"),
+            ],
+        ))],
+        2,
+        [],
+    )
+    .await;
+    let previous_a = fixture.registry.resolve("tenant-a.example").unwrap();
+    let previous_b = fixture.registry.resolve("tenant-b.example").unwrap();
+
+    assert_eq!(
+        fixture.refresher.refresh_cache_once().await.unwrap(),
+        TenantDirectoryRefreshOutcome::Applied { revision: 2 }
+    );
+
+    let current_a = fixture.registry.resolve("tenant-a.example").unwrap();
+    let current_b = fixture.registry.resolve("tenant-b.example").unwrap();
+    assert!(!Arc::ptr_eq(&previous_a, &current_a));
+    assert!(Arc::ptr_eq(&previous_b, &current_b));
+    assert_eq!(current_a.binding, reloaded_a);
+    assert_eq!(fixture.builder.build_count(), 3);
+    assert_eq!(fixture.builder.build_with_previous_count(), 1);
 }
 
 #[tokio::test]

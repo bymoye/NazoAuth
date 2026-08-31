@@ -82,6 +82,7 @@ fn provisioning_request(
                 realm_id,
                 organization_id,
             },
+            runtime_revision: 1,
             issuer: format!("https://{host}"),
             external_host: host.to_owned(),
         },

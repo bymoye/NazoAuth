@@ -52,7 +52,6 @@ Production deployments treat these as hard security boundaries:
 - Reverse proxies must strip inbound forwarded, mTLS, and certificate headers before adding trusted values.
 - Private signing keys must be backed up and protected with least-privilege filesystem access.
 - PostgreSQL and Valkey must not be exposed to untrusted networks.
-- OIDF conformance evidence must be tied to the exact implementation commit under test.
 
 ## Disclosure
 

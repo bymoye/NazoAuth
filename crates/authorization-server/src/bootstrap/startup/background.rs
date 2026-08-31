@@ -21,13 +21,6 @@ pub(crate) async fn load_revocation_policy(
             CertificateRevocationPolicy::required(Arc::new(snapshot))
         }
     };
-    if policy.is_enabled() {
-        spawn_revocation_snapshot_reloader(
-            policy.clone(),
-            path.clone(),
-            Duration::from_secs(settings.revocation_reload_interval_seconds),
-        );
-    }
     Ok(policy)
 }
 
@@ -52,11 +45,11 @@ pub(crate) async fn read_revocation_snapshot(
     Ok(snapshot)
 }
 
-fn spawn_revocation_snapshot_reloader(
+pub(crate) fn spawn_revocation_snapshot_reloader(
     policy: CertificateRevocationPolicy,
     path: PathBuf,
     interval: Duration,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -84,7 +77,7 @@ fn spawn_revocation_snapshot_reloader(
                 ),
             }
         }
-    });
+    })
 }
 
 /// Start tasks whose ownership is the process lifetime rather than an HTTP

@@ -3,10 +3,6 @@
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const CONTROL_DISCOVERY_JWS_TYPE: &str = "nazoauth-control-discovery+jwt";
 pub const DEPLOYMENT_STATEMENT_JWS_TYPE: &str = "nazoauth-deployment-statement+jwt";
-pub const OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE: &str =
-    "nazoauth-openid4vp-verification-receipt+jwt";
-pub const OPENID4VP_VERIFICATION_INTENT_JWS_TYPE: &str =
-    "nazoauth-openid4vp-verification-intent+jwt";
 pub const CONTROL_DISCOVERY_SCHEMA: u32 = 1;
 pub const CONTROL_DISCOVERY_PRODUCT: &str = "nazoauth";
 pub const MAX_COMPACT_JWS_BYTES: usize = 64 * 1024;
@@ -52,19 +48,14 @@ pub use recovery::{
     parse_recovery_secret, recovery_kid, recovery_public_key_bytes, recovery_verifying_key,
 };
 pub use signing::{
-    canonical_openid4vp_evidence_context_sha256, canonical_openid4vp_normalized_create_request,
-    canonical_openid4vp_presentation_binding_sha256, canonical_tenant_resource_manifest_sha256,
+    canonical_openid4vp_normalized_create_request, canonical_tenant_resource_manifest_sha256,
     compact_sha256, decode_instance_public_key, encode_instance_public_key, instance_key_id,
-    openid4vp_verification_capability_sha256, protected_header, sign_deployment_statement,
-    sign_discovery_statement, sign_openid4vp_verification_intent,
-    sign_openid4vp_verification_receipt,
+    protected_header, sign_deployment_statement, sign_discovery_statement,
 };
 pub use verification::{
-    Openid4vpVerificationIntentExpectations, Openid4vpVerificationReceiptExpectations,
     validate_controller_id, validate_discovery_request, validate_file_identifier_value,
     validate_openid4vc_trust_policy, validate_openid4vp_create_request_jti,
-    verify_deployment_statement, verify_discovery_statement, verify_openid4vp_verification_intent,
-    verify_openid4vp_verification_receipt,
+    verify_deployment_statement, verify_discovery_statement,
 };
 pub use wire::*;
 

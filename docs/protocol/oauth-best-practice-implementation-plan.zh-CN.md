@@ -4,9 +4,7 @@ Last reviewed: 2026-07-11.
 
 > 2026-07-16 状态更新：OpenID4VCI 1.0 Final Credential Issuer 与
 > OpenID4VP 1.0 Final Verifier 已通过独立产品边界进入默认关闭模块；不实现 Wallet
-> 角色。当前能力与 alpha 回归矩阵以
-> 外部 Suite 的已签名制品与执行证据由 NazoAuthCtl 管理。下方 M8 文本保留原始
-> 入场审计背景，不再表示当前实现状态。
+> 角色。下方 M8 文本保留原始入场审计背景，不再表示当前实现状态。
 
 ## 文档定位
 
@@ -38,7 +36,7 @@ OAuth 2.1 draft / OIDC / FAPI 2.0 / FAPI-CIBA / CIBA 相关能力，并同时支
 4. **外部 provider 采用模块化接入**：QQ、微信、Google、Microsoft、企业 SAML 等 provider
    默认关闭，由管理员选择性启用并填写完整配置；provider 差异限制在 adapter 内。
 5. **草案能力只做 watchlist 或内部 profile**：Internet-Draft、Implementer's Draft 或
-   OIDF draft 不得写成最终标准支持。
+   上游 working draft 不得写成最终标准支持。
 6. **新增能力必须先有威胁模型和负向测试**：涉及 redirect、PKCE、PAR/JAR/JARM、DPoP、
    mTLS、audience、issuer、nonce、refresh token、JWT/JWKS、client assertion、provider
    token 或 metadata 的变更，必须包含负向测试和 metadata overclaim 测试。
@@ -49,7 +47,7 @@ OAuth 2.1 draft / OIDC / FAPI 2.0 / FAPI-CIBA / CIBA 相关能力，并同时支
 | --- | --- | --- |
 | OAuth 安全基线 | RFC 9700 OAuth 2.0 Security BCP；OAuth 2.1 仍是 `draft-ietf-oauth-v2-1-15`。 | 以 RFC 9700 和 OAuth 2.1 草案方向作为默认安全约束；不得声明 OAuth 2.1 final RFC 合规。 |
 | FAPI 2.0 | FAPI 2.0 Security Profile Final；FAPI 2.0 Message Signing Final。 | 作为高价值 API 主线；Message Signing 选项单独 gating。 |
-| OIDC | Core、Discovery、DCR、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout、Session Management 等 OIDF 规范。 | 我们作为 OP 时只广告已实现能力；我们作为 RP 时通过 provider adapter 接入外部登录。 |
+| OIDC | Core、Discovery、DCR、RP-Initiated Logout、Back-Channel Logout、Front-Channel Logout、Session Management 等规范。 | 我们作为 OP 时只广告已实现能力；我们作为 RP 时通过 provider adapter 接入外部登录。 |
 | CIBA / FAPI-CIBA | OpenID Connect CIBA Core 1.0 为 Final；已实现的 FAPI-CIBA 仍是 ID1 / Draft-02 兼容 profile，当前 working draft 已为 `fapi-ciba-03`（2026-06-26）。 | CIBA 默认关闭；FAPI-CIBA 做 ID1 兼容 profile；`fapi2-ciba` 只表示内部强化 profile；采用 working draft 前必须单独做 delta 审计。 |
 | OpenID Federation | OpenID Federation 1.1 与 OpenID Federation for OpenID Connect 1.1 是当前规范线。 | 当前非目标；第三方登录不依赖 OpenID Federation 信任链。 |
 | Browser-based apps | OAuth 2.0 for Browser-Based Applications 仍是 draft。 | 默认偏向 BFF/same-site session；纯 SPA token storage 是产品/部署边界。 |
@@ -111,10 +109,6 @@ OAuth 2.1 draft / OIDC / FAPI 2.0 / FAPI-CIBA / CIBA 相关能力，并同时支
 - [x] **M0-02：维护 metadata truth gate**
   - 每次新增或调整公开能力时，同步检查 Discovery、README、profile matrix 和 conformance 记录。
   - 禁止只更新 README 或 Discovery 而没有实现、测试和配置 gate。
-- [x] **M0-03：维护 OIDF 覆盖检索记录**
-  - 每个新增 OAuth/OIDC/FAPI profile 都要查 OIDF conformance suite。
-  - 有官方 plan 时加入本仓库执行矩阵；没有官方 plan 时记录检索日期和缺口。
-
 本次 M0 交付：
 
 - README / README.zh-CN 的路线图入口已从“实施任务书”改为“未来路线图”。
@@ -190,7 +184,7 @@ cargo test --locked authorization --lib
 
 | 子项 | 当前事实源 | M2 状态 |
 | --- | --- | --- |
-| FAPI2 Security Final | `fapi2-security` runtime profile 已强制 PAR、S256、confidential client、FAPI client auth、sender-constrained token、code TTL 与 PAR TTL；`crates/authorization-server/tests/unit/http/authorization/par.rs`、`crates/authorization-server/tests/unit/http/token/dispatch.rs` 和 `crates/authorization-server-core/tests/metadata.rs` 保持对应负向与 metadata-truth 测试。 | 已由官方 `oidf-conformance-full.yml` run `28953799865` 在 18+2 `parallel-isolated` 矩阵中验证。 |
+| FAPI2 Security Final | `fapi2-security` runtime profile 已强制 PAR、S256、confidential client、FAPI client auth、sender-constrained token、code TTL 与 PAR TTL；`crates/authorization-server/tests/unit/http/authorization/par.rs`、`crates/authorization-server/tests/unit/http/token/dispatch.rs` 和 `crates/authorization-server-core/tests/metadata.rs` 保持对应负向与 metadata-truth 测试。 | 已由官方 `interoperability-conformance-full.yml` run `28953799865` 在 18+2 `parallel-isolated` 矩阵中验证。 |
 | Signed request object | `fapi2-message-signing-authz-request` 独立 profile 要求 PAR 中 signed request object；`crates/authorization-server/src/http/authorization/jar.rs` 与 PAR/JAR 测试覆盖 `aud`、`nbf`、`exp`、client 绑定和 replay 边界。 | profile-scoped；不并入 base `fapi2-security`。 |
 | JARM | `fapi2-message-signing-jarm` 独立 profile 继承 FAPI2 Security，并在 request 省略 `response_mode=jwt` 或显式使用默认 query mode 时仍强制签名授权响应；base `fapi2-security` 仍只在协商 `response_mode=jwt` 时签名，不强制全局 JARM。 | profile-scoped；不并入 base `fapi2-security`。 |
 | Signed / nested encrypted introspection | `fapi2-message-signing-introspection` 独立 profile 才发布 RFC 9701 signed introspection 与 JWE metadata；base `fapi2-security` 不发布这些字段。 | profile-scoped；不得在 base profile 中广告。 |
@@ -344,7 +338,7 @@ cargo test --locked session --lib
   - 用户确认 UI、审计、错误语义、token binding、interval/slow_down 和 auth_req_id lifecycle 必须完整。
 - [x] **M6-02：隔离 FAPI-CIBA 与内部 `fapi2-ciba`**
   - `fapi-ciba-id1` 保持官方 FAPI-CIBA ID1 兼容 profile，认证与交付模式正交组合。
-  - `fapi2-ciba` 只声明为内部强化 profile，不在 OIDF/README 中作为官方标准广告。
+  - `fapi2-ciba` 只声明为内部强化 profile，不作为官方标准 profile 广告。
 - [x] **M6-03：保持 CIBA metadata truth**
   - CIBA 的服务器能力由 runtime-module 状态控制，且只有 client 注册 CIBA grant 时才广告和执行。
   - 不把 authorization-code-only 的 PAR、PKCE、`response_type=code` 要求套用到 CIBA。
@@ -375,9 +369,6 @@ cargo test --locked well_known --lib
   - per-client signing/encryption metadata、JWS/JWE alg allowlist、claim minimization、negative tests。
 - [x] **M7-02：NI-013 JARM/JWE encrypted authorization responses**
   - JWE alg/enc policy、key management、metadata gating、decryption negative tests。
-- [x] **M7-03：更新 OIDF matrix**
-  - 若 OIDF suite 有对应 OP plan，加入 full matrix；若没有，记录检索日期和缺口。
-
 验收：
 
 ```powershell
@@ -405,12 +396,11 @@ cargo test --locked well_known --lib
 - [x] **M8-01：产品需求明确**
   - 必须说明谁会使用、接入方式、威胁模型、metadata 或配置面、失败场景和运维责任。
 - [x] **M8-02：规范和 conformance 状态明确**
-  - 标准源、草案版本、OIDF/IETF 状态、conformance suite 覆盖和本地测试策略必须记录。
+  - 标准源、草案版本、IETF 状态和本地测试策略必须记录。
 - [x] **M8-03：不会降低主线安全边界**
   - 不能影响 `oauth2-oidc-baseline`、`fapi2-security`、`fapi2-message-signing-*`、CIBA 和 external provider login 的默认安全属性。
 
 M8 的完成表示三项进入实现路线的治理门禁已经审计并形成
-NazoAuthCtl 的外部 Suite 证据记录
 证据，不表示所有候选协议已经实现或通过认证。后续独立设计已完成 RFC 9865
 SCIM forward cursor pagination，以及默认关闭的 RFC 9967 notice-only SET
 transmitter、事务 outbox 与 RFC 8936 poll/ack/error 投递。OpenID4VCI Credential
@@ -420,7 +410,7 @@ NazoAuthWeb 保持授权服务器同源前端与 server-managed session 边界�
 PKCE；最终 RFC 发布后仍必须执行差异审计。FAPI HTTP Signatures 也已作为第二个
 bounded candidate 完成 M8-01/02/03：仅在持久化 `http_message_signatures` 模块启用
 时约束 `/fapi/resource`，默认关闭、不发布 metadata，并以 2026-06-26 working
-draft、RFC 9421/RFC 9530 Rust 向量和真实 HTTP 正负矩阵作为本地证据。OIDF suite
+draft、RFC 9421/RFC 9530 Rust 向量和真实 HTTP 正负矩阵作为本地证据。
 当前没有专用计划，因此不能表述为认证；草案或 Final Specification 更新时必须重新执行
 delta audit。客户端证明认证已作为 profile-scoped、默认关闭的
 `attest_jwt_client_auth` 能力进入实现状态；这仍不是最终 RFC 一致性声明，后续
@@ -442,7 +432,7 @@ re-entry 条件满足。
 | DCR / DCRM | M3 已完成；NI-004 / NI-005 以 default-closed DCR/DCRM、管理凭据轮换、非秘密审计事件和 onboarding 文档维护。 |
 | Token trust | M4 已完成；NI-003 是 bounded local Token Exchange，NI-006 是第三方 JWT bearer trust 设计完成且实现 deferred，外部 issuer trust 不属于当前默认能力。 |
 | CIBA | M6 已完成；FAPI-CIBA ID1 的 poll/ping × private_key_jwt/mTLS 与内部 `fapi2-ciba` 已隔离。既有 poll 已有官方证据；新增三种组合需由本次 25-plan 矩阵形成新证据。 |
-| 加密响应 | M7 已完成；UserInfo 支持 JSON、JWS、JWE 和 nested JWS/JWE，JARM 支持 per-client 签名与 nested JWE；OIDF signed UserInfo 模块及本地与官方 19+2 全矩阵已纳入验收。 |
+| 加密响应 | M7 已完成；UserInfo 支持 JSON、JWS、JWE 和 nested JWS/JWE，JARM 支持 per-client 签名与 nested JWE；本地正负矩阵已纳入验收。 |
 | 外部第三方登录 | M5 已完成为配置驱动的热插拔 provider registry；外部 OIDC、OAuth2 social、SAML gateway、非敏感 admin onboarding 和本地 session 边界已实现。 |
 | 非目标 | NI-010 OpenID Federation 当前不实现；第三方登录不依赖 OpenID Federation。 |
 | 可选未来项 | M8 候选项已有逐项产品、规范/conformance 与安全边界结论；治理完成不代表运行时支持，具体决定见 2026-07-11 M8 watchlist 证据。 |
@@ -458,12 +448,5 @@ re-entry 条件满足。
 - `README.zh-CN.md`
 - 对应 conformance 记录或本地测试证据
 - 涉及第三方登录时，同步 provider 配置文档、账号绑定说明、登录 E2E/负向测试、管理端启停流程和审计事件说明
-
-每新增一个 RFC、OIDC/FAPI profile 或标准协议能力支持时，必须额外执行 OIDF 一致性套件覆盖检查：
-
-- 检索 OpenID Foundation Conformance Suite 的官方 production/staging 计划、公开源代码和 release notes。
-- 如果 OIDF 已有对应官方测试、计划或矩阵，必须在同一变更中更新本仓库的 OIDF 执行内容。
-- 如果 OIDF 暂无对应官方测试，必须在任务证据或 conformance 记录中写明检索结论和日期。
-- OIDF 官方套件覆盖是额外证据，不替代本地正向、负向、安全边界和 metadata truth 测试。
 
 不得只改 README 或 Discovery metadata 而不补实现与测试。

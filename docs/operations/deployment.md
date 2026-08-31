@@ -170,7 +170,7 @@ HTTPS address seen by clients.
 
 ### Reverse proxy and mTLS
 
-When RFC 8705 or the full OIDF profile is enabled, the TLS terminator must
+When RFC 8705 client authentication is enabled, the TLS terminator must
 request a client certificate and forward it with the RFC 9440 `Client-Cert`
 header. NazoAuth authenticates the certificate against the client registration;
 the proxy must not accept a `Client-Cert` or `Client-Cert-Chain` value supplied
@@ -178,11 +178,7 @@ by the Internet client. Configure `MTLS_CERTIFICATE_SOURCE=rfc9440` and set
 `TRUSTED_PROXY_CIDRS` to the exact address NazoAuth observes for that proxy. Do
 not trust a whole container subnet when one host address is sufficient.
 
-NazoAuthCtl conformance clients use a fresh CA and leaf certificate for every
-run. A proxy in front of a conformance deployment therefore cannot advertise a
-stale, fixed client-CA list. Install the public CA bundle generated for that run
-before starting Suite modules and restore the previous bundle in the same run's
-cleanup path. Use the reviewed HAProxy 3.2 boundary in
+Use the reviewed HAProxy 3.2 boundary in
 [`deploy/proxy/haproxy-rfc9440.cfg`](../../deploy/proxy/haproxy-rfc9440.cfg): it
 separates ordinary HTTPS from a dedicated `verify required` mTLS listener,
 strips all inbound forwarding and certificate headers, and adds only the
@@ -203,25 +199,13 @@ following must remain true:
   against the registered certificate identity;
 - TLS 1.2 and TLS 1.3 are restricted separately to the approved AES-GCM suites.
 
-Build the run bundle only from the public `mtls_trust_anchor_pem` values bound to
-the active lease. Write it atomically, validate the entire bundle, reload the
-proxy, and confirm its digest before creating Suite modules. Cleanup restores
-the previous bundle and reloads the proxy even after interruption. A shared
-proxy must serialize this install/restore lifecycle unless each run has its own
-listener and CA bundle. Never use `ca-ignore-err all` or `crt-ignore-err all` as
-a production substitute for installing the run CA: that delegates all chain
-trust to the application and can weaken RFC 8705 clients registered only by a
-standard subject selector.
-
 For ordinary production clients issued by a stable CA, install that CA in
-HAProxy and use `verify required` on a dedicated mTLS listener. Do not combine
-that listener with run-scoped conformance certificates unless the control plane
-can atomically install and restore their CA.
+HAProxy and use `verify required` on a dedicated mTLS listener.
 
 Before reloading HAProxy, validate the candidate with the same HAProxy image or
 binary (`haproxy -c -f /path/to/candidate.cfg`) and retain a root-only copy of
-the previous configuration. After reload, verify `/health`, Discovery, the
-unauthenticated Suite boundary, an allowed AES-GCM handshake, and rejection of
+the previous configuration. After reload, verify `/health`, Discovery,
+anonymous rejection on the mTLS listener, an allowed AES-GCM handshake, and rejection of
 CBC and CHACHA20. Roll back the saved configuration and reload immediately if
 any check fails.
 
@@ -287,6 +271,6 @@ production:
 - require the exact-commit security and conformance gates described in
   [release-security.md](release-security.md).
 
-For an intentional clean-data replacement with OIDF-gated activation, use
+For an intentional clean-data replacement, use
 [Fresh Deployment and Production Activation](fresh-production-activation.md).
 Advanced settings are documented in [configuration.md](configuration.md).

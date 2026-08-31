@@ -33,7 +33,7 @@ impl ClientRegistrationCrypto {
     }
 
     /// Build the stateless registration validator used by the privileged
-    /// conformance onboarding task. It deliberately has no signing-key
+    /// client onboarding task. It deliberately has no signing-key
     /// handle: onboarding validates client-owned JWKS and supplied secrets,
     /// but must not gain access to server private signing material.
     #[must_use]

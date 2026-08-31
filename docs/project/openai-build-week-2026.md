@@ -56,35 +56,10 @@ conformance baseline. Judges should evaluate only the following extension.
   credential delivery out of URL tokens into an authenticated, owner-bound
   profile flow.
 
-### Black-box conformance and evidence
-
-- [PR #57](https://github.com/nazozero/NazoAuth/pull/57) established isolated
-  parallel OIDF execution rather than letting browser/session plans corrupt one
-  another.
-- [PR #61](https://github.com/nazozero/NazoAuth/pull/61),
-  [PR #62](https://github.com/nazozero/NazoAuth/pull/62),
-  [PR #63](https://github.com/nazozero/NazoAuth/pull/63), and
-  [PR #64](https://github.com/nazozero/NazoAuth/pull/64) added the OpenID4VC
-  dispatcher, public black-box evidence, and an operator-supplied issuer
-  boundary.
-- [PR #74](https://github.com/nazozero/NazoAuth/pull/74) removed privileged
-  database seeding from the public test path. Conformance clients and trust
-  material now go through the ordinary application, approval, one-time
-  delivery, and cleanup control plane.
-- [PR #80](https://github.com/nazozero/NazoAuth/pull/80),
-  [PR #81](https://github.com/nazozero/NazoAuth/pull/81),
-  [PR #82](https://github.com/nazozero/NazoAuth/pull/82),
-  [PR #83](https://github.com/nazozero/NazoAuth/pull/83),
-  [PR #84](https://github.com/nazozero/NazoAuth/pull/84), and
-  [PR #85](https://github.com/nazozero/NazoAuth/pull/85) separated shared
-  browser/user jobs, restored parallel execution where state is isolated,
-  preferred runtime credentials, and retained only credential-free evidence.
-
 ### Security and release hardening
 
-- [PR #76](https://github.com/nazozero/NazoAuth/pull/76) separated conformance
-  tooling from production release artifacts and added repository release
-  governance.
+- [PR #76](https://github.com/nazozero/NazoAuth/pull/76) added repository
+  release governance.
 - [PR #79](https://github.com/nazozero/NazoAuth/pull/79) resolved a repository-
   wide Codex security review, including trust-boundary, cryptographic-key,
   deployment, browser, and artifact-retention findings. Decisions that were
@@ -106,10 +81,8 @@ Codex accelerated:
 - small, reviewable Rust/TypeScript implementation steps;
 - unit, property, integration, HTTP E2E, migration, browser-security, race, and
   failure-injection tests;
-- comparison of behavior against OAuth, OIDC, FAPI, OpenID4VC, SCIM, and OIDF
-  suite contracts;
-- failure diagnosis across local checks, GitHub Actions, deployment, and the
-  public official conformance service;
+- comparison of behavior against OAuth, OIDC, FAPI, OpenID4VC, and SCIM contracts;
+- failure diagnosis across local checks, GitHub Actions, and deployment;
 - security-review triage, remediation, evidence retention, and documentation.
 
 The maintainer made the consequential decisions: crate/domain boundaries,
@@ -117,7 +90,7 @@ which protocol roles are supported or intentionally excluded, production
 onboarding policy, public black-box testing, acceptable concurrency isolation,
 licensing, and whether a change was ready to deploy or merge. The explicit
 instruction was to implement standards correctly and let conformance follow,
-never add suite-specific shortcuts or production backdoors.
+never add validator-specific shortcuts or production backdoors.
 
 ## Run it locally
 
@@ -169,7 +142,7 @@ current desktop and mobile browsers.
 
 - [Certification and conformance evidence](../conformance/certification.md)
 - [OpenID4VC Final matrix](../conformance/openid4vc-final-matrix.md)
-- [Public black-box runbook](../conformance/oidf-public-black-box-runbook.md)
-- [Dated public black-box result](../conformance/2026-07-19-public-black-box-full-oidf-results.md)
+- [Public black-box runbook](../conformance/interoperability-public-black-box-runbook.md)
+- [Dated public black-box result](../conformance/2026-07-19-public-black-box-full-interoperability-results.md)
 - [Release and conformance boundary](../operations/release-boundary.md)
 - [Security review record](../security/codex-security-findings-2026-07-19.md)

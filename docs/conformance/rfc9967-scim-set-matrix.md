@@ -4,14 +4,8 @@
 
 This is a project-owned, conformance-oriented regression matrix for the
 [RFC 9967 SCIM Profile for Security Event Tokens](https://www.rfc-editor.org/rfc/rfc9967.html)
-and its RFC 8936 poll delivery contract. It is not an OpenID Foundation test
-plan, certification result, or certification claim.
-
-The OpenID Foundation Conformance Suite `v5.2.0` contains generic Shared Signals
-Framework transmitter coverage and recognizes SCIM event URIs, but it does not
-contain an end-to-end SCIM provisioning/mutation plan that validates the RFC
-9967 event payloads emitted by a SCIM service. Therefore generic SSF coverage is
-insufficient evidence for this implementation.
+and its RFC 8936 poll delivery contract. It is an implementation regression
+contract, not a certification result or certification claim.
 
 ## Executable matrix
 

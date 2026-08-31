@@ -6,6 +6,7 @@ mod authorization;
 mod authorization_flow;
 pub(crate) mod clients;
 mod controller_registry;
+mod directory_control;
 mod federation;
 mod grants;
 mod mfa;
@@ -44,6 +45,7 @@ pub use controller_registry::{
     IDENTITY_APPROVAL_TTL_SECONDS, IdentityApprovalError, IssuedIdentityApproval,
     MAX_ACTIVE_CONTROLLER_SLOTS, NewControllerSlot, RotateControllerKey, StoredControllerSlot,
 };
+pub use directory_control::TenantDirectoryControlRepository;
 pub use federation::FederationRepository;
 pub use grants::{GrantAuthorization, GrantRepository};
 pub use mfa::MfaRepository;
@@ -52,14 +54,12 @@ pub use mtls_trust::{
     insert_operator_managed_trust_anchor_on_connection,
     revoke_operator_managed_trust_anchor_on_connection,
 };
+pub use nazo_identity::{TenantBoundaryDefinition, TenantProvisioningRequest, TenantRuntimeStatus};
 pub use openid4vc::{
-    IssuedOpenid4vpVerificationEvidence, ManagedCredentialDataset, ManagedCredentialDatasetWrite,
-    NewOpenid4vpVerificationAttachment, NewOpenid4vpVerificationEvidence,
-    Openid4vciDatasetRepository, Openid4vciRepository, Openid4vpRepository,
-    Openid4vpVerificationAttachmentState, PreparedOpenid4vpVerificationEvidence,
-    StoredOpenid4vpVerificationAttachment, StoredOpenid4vpVerificationEvidence,
-    delete_operator_managed_dataset_on_connection, protect_dataset_claims,
-    unprotect_dataset_claims, upsert_operator_managed_dataset_on_connection,
+    ManagedCredentialDataset, ManagedCredentialDatasetWrite, Openid4vciDatasetRepository,
+    Openid4vciRepository, Openid4vpRepository, delete_operator_managed_dataset_on_connection,
+    protect_dataset_claims, unprotect_dataset_claims,
+    upsert_operator_managed_dataset_on_connection,
 };
 pub use passkeys::PasskeyRepository;
 pub use recovery_root::{
@@ -71,10 +71,7 @@ pub use recovery_root::{
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};
 pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;
-pub use tenancy::{
-    ActiveTenantBoundaryRepository, TenantBoundaryDefinition, TenantDirectoryRepository,
-    TenantProvisioningRequest, TenantRuntimeStatus,
-};
+pub use tenancy::{ActiveTenantBoundaryRepository, TenantDirectoryRepository};
 pub use tenant_resources::{
     NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, Openid4vcTrustPolicyClientBind,
     Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke, Openid4vcTrustPolicyWrite,

@@ -1,7 +1,7 @@
 use std::{
     fmt,
     io::Read as _,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -60,7 +60,6 @@ pub(super) struct DirectTlsSnapshotStore {
     current: ArcSwap<DirectTlsGeneration>,
     paths: DirectTlsMaterialPaths,
     endpoint_names: Arc<[String]>,
-    allow_missing_sni: bool,
 }
 
 impl fmt::Debug for DirectTlsSnapshotStore {
@@ -87,14 +86,10 @@ impl DirectTlsSnapshotStore {
         endpoint_names: Arc<[String]>,
     ) -> anyhow::Result<Arc<Self>> {
         let initial = load_generation(&paths, &endpoint_names, 1)?;
-        let allow_missing_sni = endpoint_names
-            .iter()
-            .any(|name| name.parse::<IpAddr>().is_ok());
         Ok(Arc::new(Self {
             current: ArcSwap::from_pointee(initial),
             paths,
             endpoint_names,
-            allow_missing_sni,
         }))
     }
 
@@ -132,14 +127,13 @@ impl DirectTlsSnapshotStore {
     }
 
     pub(super) fn server_key_for(&self, server_name: Option<&str>) -> Option<Arc<CertifiedKey>> {
-        let accepted = match server_name {
-            Some(server_name) => self
-                .endpoint_names
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(server_name)),
-            None => self.allow_missing_sni,
-        };
-        accepted.then(|| Arc::clone(&self.current.load().server_key))
+        // The certificate is deployment-owned and may cover dynamically added
+        // tenant hosts through SANs or a wildcard. Rustls and the client still
+        // validate that coverage. Requiring the process-start issuer list here
+        // would turn a dynamic directory back into a restart-bound allowlist.
+        let server_name = server_name?;
+        nazo_identity::canonical_tenant_host(server_name).ok()?;
+        Some(Arc::clone(&self.current.load().server_key))
     }
 }
 

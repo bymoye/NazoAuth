@@ -53,6 +53,10 @@ impl WorkerTenantDataCache {
     }
 }
 
+fn direct_tls_host_matches(server_name: Option<&str>, host: &str) -> bool {
+    server_name.is_none_or(|server_name| server_name == host)
+}
+
 async fn bind_tenant_app_data<B>(
     registry: TenantRuntimeRegistry,
     cache: Rc<RefCell<WorkerTenantDataCache>>,
@@ -67,6 +71,17 @@ where
             .into_response(HttpResponse::NotFound().finish())
             .map_into_right_body());
     };
+    if !direct_tls_host_matches(
+        request
+            .request()
+            .conn_data::<crate::http::mtls::DirectTlsServerName>()
+            .map(crate::http::mtls::DirectTlsServerName::as_str),
+        &host,
+    ) {
+        return Ok(request
+            .into_response(HttpResponse::MisdirectedRequest().finish())
+            .map_into_right_body());
+    }
     let container = cache.borrow_mut().resolve(registry.load(), &host);
     let Some(container) = container else {
         return Ok(request

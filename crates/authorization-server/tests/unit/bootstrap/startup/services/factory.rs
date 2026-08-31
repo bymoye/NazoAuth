@@ -11,6 +11,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[test]
+async fn direct_tls_sni_and_http_host_must_select_the_same_tenant() {
+    assert!(direct_tls_host_matches(None, "tenant-a.example"));
+    assert!(direct_tls_host_matches(
+        Some("tenant-a.example"),
+        "tenant-a.example"
+    ));
+    assert!(!direct_tls_host_matches(
+        Some("tenant-a.example"),
+        "tenant-b.example"
+    ));
+}
+
 async fn test_request_timeout<B>(
     request: ServiceRequest,
     next: Next<B>,

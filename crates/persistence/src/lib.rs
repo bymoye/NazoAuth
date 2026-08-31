@@ -7,6 +7,7 @@
 //! generic CRUD interface. Database adapters implement these focused ports.
 
 pub mod control_plane;
+pub mod directory_control;
 pub mod openid4vc;
 pub mod operator;
 pub mod tenant_resources;

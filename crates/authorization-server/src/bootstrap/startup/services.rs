@@ -56,6 +56,10 @@ pub(super) struct ServiceAssembly {
 }
 
 impl ServiceAssembly {
+    pub(super) fn openid4vc_revocation_policy(&self) -> Option<&CertificateRevocationPolicy> {
+        self.core.openid4vc_revocation_policy.as_ref()
+    }
+
     pub(super) fn app_data_container(&self) -> Rc<Extensions> {
         fn insert<T: 'static>(extensions: &mut Extensions, value: T) {
             let _ = extensions.insert(value);

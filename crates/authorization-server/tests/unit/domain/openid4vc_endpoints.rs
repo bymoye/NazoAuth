@@ -217,7 +217,7 @@ fn managed_mdoc_dataset_rejects_namespace_and_inner_claim_name_bounds() {
 #[test]
 fn vci_token_dpop_targets_include_public_issuer_endpoint() {
     assert_eq!(
-        token_endpoint_dpop_target_uris("https://issuer.example/", "https://suite.example/token"),
+        token_endpoint_dpop_target_uris("https://issuer.example/", "https://wallet.example/token"),
         vec!["https://issuer.example/token".to_owned()]
     );
     assert_eq!(

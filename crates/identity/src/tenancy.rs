@@ -70,6 +70,9 @@ pub struct TenantContext {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TenantDirectoryBinding {
     pub tenant: TenantContext,
+    /// Monotonic tenant-local generation used to rebuild deterministic
+    /// key/trust/material state without changing the routing identity.
+    pub runtime_revision: u64,
     pub issuer: String,
     pub external_host: String,
 }
@@ -79,6 +82,46 @@ pub struct TenantDirectoryBinding {
 pub struct TenantDirectorySnapshot {
     pub revision: u64,
     pub tenants: Vec<TenantDirectoryBinding>,
+}
+
+/// One identity boundary row a provisioning request must place or bind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TenantBoundaryDefinition<Id> {
+    pub id: Id,
+    pub slug: String,
+    pub display_name: String,
+}
+
+/// A complete tenant boundary plus its canonical routing binding. A
+/// provisioning transaction either creates every referenced row or proves that
+/// an existing row already satisfies the request; it never rewrites a
+/// provisioned binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TenantProvisioningRequest {
+    pub tenant: TenantBoundaryDefinition<TenantId>,
+    pub realm: TenantBoundaryDefinition<RealmId>,
+    pub organization: TenantBoundaryDefinition<OrganizationId>,
+    pub binding: TenantDirectoryBinding,
+}
+
+/// Runtime lifecycle status of one tenant row. The directory snapshot only
+/// routes tenants whose row is active.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TenantRuntimeStatus {
+    Active,
+    Suspended,
+    Deleted,
+}
+
+impl TenantRuntimeStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Deleted => "deleted",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

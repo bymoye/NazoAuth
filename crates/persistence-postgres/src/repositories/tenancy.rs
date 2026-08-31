@@ -2,7 +2,8 @@ use diesel::{OptionalExtension as _, QueryableByName, sql_query, sql_types};
 use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
 use nazo_identity::{
     OrganizationId, RealmId, TenantContext, TenantDirectoryBinding, TenantDirectorySnapshot,
-    TenantId, canonical_tenant_host, ports::RepositoryError,
+    TenantId, TenantProvisioningRequest, TenantRuntimeStatus, canonical_tenant_host,
+    ports::RepositoryError,
 };
 use nazo_persistence::TenantDirectoryStore;
 use uuid::Uuid;
@@ -58,6 +59,8 @@ struct TenantDirectoryRow {
     issuer: Option<String>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     external_host: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::BigInt>)]
+    runtime_revision: Option<i64>,
 }
 
 #[derive(Debug, QueryableByName)]
@@ -78,6 +81,8 @@ struct TenantDirectoryBindingRow {
     issuer: String,
     #[diesel(sql_type = sql_types::Text)]
     external_host: String,
+    #[diesel(sql_type = sql_types::BigInt)]
+    runtime_revision: i64,
 }
 
 enum TenantDirectoryInitialization {
@@ -159,34 +164,7 @@ impl TenantDirectoryRepository {
         let mut connection = get_conn(&self.pool)
             .await
             .map_err(|_| RepositoryError::Unavailable)?;
-        let rows = sql_query(
-            "SELECT directory.revision,
-                    active.tenant_id, active.realm_id, active.organization_id,
-                    active.issuer, active.external_host
-             FROM tenant_runtime_directory_state AS directory
-             LEFT JOIN (
-                 SELECT binding.tenant_id, binding.realm_id, binding.organization_id,
-                        binding.issuer, binding.external_host
-                 FROM tenant_runtime_bindings AS binding
-                 JOIN tenants AS tenant
-                   ON tenant.id = binding.tenant_id AND tenant.status = 'active'
-                 JOIN realms AS realm
-                   ON realm.id = binding.realm_id
-                  AND realm.tenant_id = binding.tenant_id
-                  AND realm.status = 'active'
-                 JOIN organizations AS organization
-                   ON organization.id = binding.organization_id
-                  AND organization.tenant_id = binding.tenant_id
-                  AND organization.status = 'active'
-             ) AS active ON TRUE
-             WHERE directory.singleton
-             ORDER BY active.external_host, active.tenant_id",
-        )
-        .load::<TenantDirectoryRow>(&mut connection)
-        .await
-        .map_err(map_query_error)?;
-
-        directory_snapshot(rows)
+        load_active_on_connection(&mut connection).await
     }
 
     /// Initializes the authoritative directory exactly once after migrations.
@@ -210,7 +188,7 @@ impl TenantDirectoryRepository {
                 .await?;
                 if state.revision != 0 {
                     let existing = sql_query(
-                        "SELECT tenant_id, realm_id, organization_id, issuer, external_host
+                        "SELECT tenant_id, realm_id, organization_id, issuer, external_host, runtime_revision
                          FROM tenant_runtime_bindings
                          WHERE tenant_id = $1",
                     )
@@ -224,6 +202,7 @@ impl TenantDirectoryRepository {
                             && existing.organization_id == binding.tenant.organization_id.as_uuid()
                             && existing.issuer == binding.issuer
                             && existing.external_host == binding.external_host
+                            && existing.runtime_revision == binding.runtime_revision as i64
                     });
                     return Ok(if matches {
                         TenantDirectoryInitialization::AlreadyInitialized
@@ -234,14 +213,15 @@ impl TenantDirectoryRepository {
 
                 sql_query(
                     "INSERT INTO tenant_runtime_bindings
-                        (tenant_id, realm_id, organization_id, issuer, external_host)
-                     VALUES ($1, $2, $3, $4, $5)",
+                        (tenant_id, realm_id, organization_id, issuer, external_host, runtime_revision)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
                 )
                 .bind::<sql_types::Uuid, _>(binding.tenant.tenant_id.as_uuid())
                 .bind::<sql_types::Uuid, _>(binding.tenant.realm_id.as_uuid())
                 .bind::<sql_types::Uuid, _>(binding.tenant.organization_id.as_uuid())
                 .bind::<sql_types::Text, _>(binding.issuer)
                 .bind::<sql_types::Text, _>(binding.external_host)
+                .bind::<sql_types::BigInt, _>(binding.runtime_revision as i64)
                 .execute(connection)
                 .await?;
                 Ok(TenantDirectoryInitialization::Inserted)
@@ -273,49 +253,45 @@ impl TenantDirectoryStore for TenantDirectoryRepository {
     }
 }
 
+/// Reads the authoritative active snapshot on a caller-owned connection so a
+/// control-plane describe can share the caller's transaction.
+pub(crate) async fn load_active_on_connection(
+    connection: &mut AsyncPgConnection,
+) -> Result<TenantDirectorySnapshot, RepositoryError> {
+    let rows = sql_query(
+        "SELECT directory.revision,
+                active.tenant_id, active.realm_id, active.organization_id,
+                active.issuer, active.external_host, active.runtime_revision
+         FROM tenant_runtime_directory_state AS directory
+         LEFT JOIN (
+             SELECT binding.tenant_id, binding.realm_id, binding.organization_id,
+                    binding.issuer, binding.external_host, binding.runtime_revision
+             FROM tenant_runtime_bindings AS binding
+             JOIN tenants AS tenant
+               ON tenant.id = binding.tenant_id AND tenant.status = 'active'
+             JOIN realms AS realm
+               ON realm.id = binding.realm_id
+              AND realm.tenant_id = binding.tenant_id
+              AND realm.status = 'active'
+             JOIN organizations AS organization
+               ON organization.id = binding.organization_id
+              AND organization.tenant_id = binding.tenant_id
+              AND organization.status = 'active'
+         ) AS active ON TRUE
+         WHERE directory.singleton
+         ORDER BY active.external_host, active.tenant_id",
+    )
+    .load::<TenantDirectoryRow>(connection)
+    .await
+    .map_err(map_query_error)?;
+
+    directory_snapshot(rows)
+}
+
 fn map_query_error(error: diesel::result::Error) -> RepositoryError {
     match error {
         diesel::result::Error::NotFound => RepositoryError::NotFound,
         error => RepositoryError::Unexpected(error.to_string()),
-    }
-}
-
-/// One identity boundary row a provisioning request must place or bind.
-#[derive(Clone, Debug)]
-pub struct TenantBoundaryDefinition<Id> {
-    pub id: Id,
-    pub slug: String,
-    pub display_name: String,
-}
-
-/// A complete tenant boundary plus its canonical routing binding. The
-/// transaction either creates every referenced row or proves that an existing
-/// row already satisfies the request; it never rewrites a provisioned
-/// binding.
-#[derive(Clone, Debug)]
-pub struct TenantProvisioningRequest {
-    pub tenant: TenantBoundaryDefinition<TenantId>,
-    pub realm: TenantBoundaryDefinition<RealmId>,
-    pub organization: TenantBoundaryDefinition<OrganizationId>,
-    pub binding: TenantDirectoryBinding,
-}
-
-/// Runtime lifecycle status of one tenant row. The directory snapshot only
-/// routes tenants whose row is active.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TenantRuntimeStatus {
-    Active,
-    Suspended,
-    Deleted,
-}
-
-impl TenantRuntimeStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Suspended => "suspended",
-            Self::Deleted => "deleted",
-        }
     }
 }
 
@@ -492,6 +468,7 @@ fn binding_rows_equal(row: &TenantDirectoryBindingRow, binding: &TenantDirectory
         && row.organization_id == binding.tenant.organization_id.as_uuid()
         && row.issuer == binding.issuer
         && row.external_host == binding.external_host
+        && row.runtime_revision == binding.runtime_revision as i64
 }
 
 /// Applies the same routing-identity rules as the runtime snapshot reader so
@@ -552,93 +529,115 @@ impl TenantDirectoryRepository {
         expected_revision: u64,
         request: TenantProvisioningRequest,
     ) -> Result<u64, RepositoryError> {
-        validate_binding_routing_identity(&request.binding.issuer, &request.binding.external_host)?;
-        if request.tenant.id != request.binding.tenant.tenant_id {
-            return Err(RepositoryError::Consistency(
-                "provisioned tenant row id does not match the binding tenant".to_owned(),
-            ));
-        }
-        if request.binding.tenant.realm_id != request.realm.id
-            || request.binding.tenant.organization_id != request.organization.id
-        {
-            return Err(RepositoryError::Consistency(
-                "provisioning request boundary ids do not match the binding context".to_owned(),
-            ));
-        }
         let mut connection = get_conn(&self.pool)
             .await
             .map_err(|_| RepositoryError::Unavailable)?;
         connection
             .transaction::<_, DirectoryMutationError, _>(async move |connection| {
-                let current = lock_directory_revision(connection).await?;
-                if current != expected_revision {
-                    return Err(RepositoryError::Conflict.into());
-                }
-
-                upsert_active_tenant_boundary(
-                    connection,
-                    request.tenant.id.as_uuid(),
-                    &request.tenant.slug,
-                    &request.tenant.display_name,
-                )
-                .await?;
-                upsert_active_owned_boundary(
-                    connection,
-                    OwnedBoundaryTable::Realm,
-                    request.realm.id.as_uuid(),
-                    request.binding.tenant.tenant_id.as_uuid(),
-                    &request.realm.slug,
-                    &request.realm.display_name,
-                )
-                .await?;
-                upsert_active_owned_boundary(
-                    connection,
-                    OwnedBoundaryTable::Organization,
-                    request.organization.id.as_uuid(),
-                    request.binding.tenant.tenant_id.as_uuid(),
-                    &request.organization.slug,
-                    &request.organization.display_name,
-                )
-                .await?;
-
-                let inserted = sql_query(
-                    "INSERT INTO tenant_runtime_bindings
-                        (tenant_id, realm_id, organization_id, issuer, external_host)
-                     VALUES ($1, $2, $3, $4, $5)
-                     ON CONFLICT (tenant_id) DO NOTHING",
-                )
-                .bind::<sql_types::Uuid, _>(request.binding.tenant.tenant_id.as_uuid())
-                .bind::<sql_types::Uuid, _>(request.binding.tenant.realm_id.as_uuid())
-                .bind::<sql_types::Uuid, _>(request.binding.tenant.organization_id.as_uuid())
-                .bind::<sql_types::Text, _>(&request.binding.issuer)
-                .bind::<sql_types::Text, _>(&request.binding.external_host)
-                .execute(connection)
-                .await
-                .map_err(map_query_error)?;
-                if inserted == 0 {
-                    let existing = sql_query(
-                        "SELECT tenant_id, realm_id, organization_id, issuer, external_host
-                         FROM tenant_runtime_bindings
-                         WHERE tenant_id = $1
-                         FOR UPDATE",
-                    )
-                    .bind::<sql_types::Uuid, _>(request.binding.tenant.tenant_id.as_uuid())
-                    .get_result::<TenantDirectoryBindingRow>(connection)
+                provision_tenant_binding_on_connection(connection, expected_revision, request)
                     .await
-                    .map_err(map_query_error)?;
-                    if !binding_rows_equal(&existing, &request.binding) {
-                        return Err(RepositoryError::Consistency(
-                            "tenant runtime directory is already provisioned with a different binding"
-                                .to_owned(),
-                        ).into());
-                    }
-                }
-                read_directory_revision(connection).await
+                    .map_err(DirectoryMutationError::from)
             })
             .await
             .map_err(RepositoryError::from)
     }
+}
 
+/// Applies the provision mutation on a caller-owned transaction. The caller
+/// owns the transaction so the revision fence, the mutation, the audit event,
+/// and the control outcome ledger can commit atomically together.
+pub(crate) async fn provision_tenant_binding_on_connection(
+    connection: &mut AsyncPgConnection,
+    expected_revision: u64,
+    request: TenantProvisioningRequest,
+) -> Result<u64, RepositoryError> {
+    validate_binding_routing_identity(&request.binding.issuer, &request.binding.external_host)?;
+    if request.tenant.id != request.binding.tenant.tenant_id {
+        return Err(RepositoryError::Consistency(
+            "provisioned tenant row id does not match the binding tenant".to_owned(),
+        ));
+    }
+    if request.binding.tenant.realm_id != request.realm.id
+        || request.binding.tenant.organization_id != request.organization.id
+    {
+        return Err(RepositoryError::Consistency(
+            "provisioning request boundary ids do not match the binding context".to_owned(),
+        ));
+    }
+    connection
+        .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+            let current = lock_directory_revision(connection).await?;
+            if current != expected_revision {
+                return Err(RepositoryError::Conflict.into());
+            }
+
+            upsert_active_tenant_boundary(
+                connection,
+                request.tenant.id.as_uuid(),
+                &request.tenant.slug,
+                &request.tenant.display_name,
+            )
+            .await?;
+            upsert_active_owned_boundary(
+                connection,
+                OwnedBoundaryTable::Realm,
+                request.realm.id.as_uuid(),
+                request.binding.tenant.tenant_id.as_uuid(),
+                &request.realm.slug,
+                &request.realm.display_name,
+            )
+            .await?;
+            upsert_active_owned_boundary(
+                connection,
+                OwnedBoundaryTable::Organization,
+                request.organization.id.as_uuid(),
+                request.binding.tenant.tenant_id.as_uuid(),
+                &request.organization.slug,
+                &request.organization.display_name,
+            )
+            .await?;
+
+            let inserted = sql_query(
+                "INSERT INTO tenant_runtime_bindings
+                    (tenant_id, realm_id, organization_id, issuer, external_host, runtime_revision)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (tenant_id) DO NOTHING",
+            )
+            .bind::<sql_types::Uuid, _>(request.binding.tenant.tenant_id.as_uuid())
+            .bind::<sql_types::Uuid, _>(request.binding.tenant.realm_id.as_uuid())
+            .bind::<sql_types::Uuid, _>(request.binding.tenant.organization_id.as_uuid())
+            .bind::<sql_types::Text, _>(&request.binding.issuer)
+            .bind::<sql_types::Text, _>(&request.binding.external_host)
+            .bind::<sql_types::BigInt, _>(request.binding.runtime_revision as i64)
+            .execute(connection)
+            .await
+            .map_err(map_query_error)?;
+            if inserted == 0 {
+                let existing = sql_query(
+                    "SELECT tenant_id, realm_id, organization_id, issuer, external_host, runtime_revision
+                     FROM tenant_runtime_bindings
+                     WHERE tenant_id = $1
+                     FOR UPDATE",
+                )
+                .bind::<sql_types::Uuid, _>(request.binding.tenant.tenant_id.as_uuid())
+                .get_result::<TenantDirectoryBindingRow>(connection)
+                .await
+                .map_err(map_query_error)?;
+                if !binding_rows_equal(&existing, &request.binding) {
+                    return Err(RepositoryError::Consistency(
+                        "tenant runtime directory is already provisioned with a different binding"
+                            .to_owned(),
+                    )
+                    .into());
+                }
+            }
+            read_directory_revision(connection).await
+        })
+        .await
+        .map_err(RepositoryError::from)
+}
+
+impl TenantDirectoryRepository {
     /// Updates the canonical issuer/host of one existing binding under the
     /// revision fence. Replaying identical values is a bounded no-op that
     /// returns the current revision without advancing it.
@@ -649,43 +648,20 @@ impl TenantDirectoryRepository {
         issuer: String,
         external_host: String,
     ) -> Result<u64, RepositoryError> {
-        validate_binding_routing_identity(&issuer, &external_host)?;
         let mut connection = get_conn(&self.pool)
             .await
             .map_err(|_| RepositoryError::Unavailable)?;
         connection
             .transaction::<_, DirectoryMutationError, _>(async move |connection| {
-                let current = lock_directory_revision(connection).await?;
-                if current != expected_revision {
-                    return Err(RepositoryError::Conflict.into());
-                }
-                let existing = sql_query(
-                    "SELECT tenant_id, realm_id, organization_id, issuer, external_host
-                     FROM tenant_runtime_bindings
-                     WHERE tenant_id = $1
-                     FOR UPDATE",
+                update_tenant_binding_on_connection(
+                    connection,
+                    expected_revision,
+                    tenant_id,
+                    issuer,
+                    external_host,
                 )
-                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                .get_result::<TenantDirectoryBindingRow>(connection)
                 .await
-                .optional()
-                .map_err(map_query_error)?
-                .ok_or(RepositoryError::NotFound)?;
-                if existing.issuer == issuer && existing.external_host == external_host {
-                    return Ok(current);
-                }
-                sql_query(
-                    "UPDATE tenant_runtime_bindings
-                     SET issuer = $2, external_host = $3, updated_at = CURRENT_TIMESTAMP
-                     WHERE tenant_id = $1",
-                )
-                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                .bind::<sql_types::Text, _>(&issuer)
-                .bind::<sql_types::Text, _>(&external_host)
-                .execute(connection)
-                .await
-                .map_err(map_query_error)?;
-                read_directory_revision(connection).await
+                .map_err(DirectoryMutationError::from)
             })
             .await
             .map_err(RepositoryError::from)
@@ -706,43 +682,14 @@ impl TenantDirectoryRepository {
             .map_err(|_| RepositoryError::Unavailable)?;
         connection
             .transaction::<_, DirectoryMutationError, _>(async move |connection| {
-                let current = lock_directory_revision(connection).await?;
-                if current != expected_revision {
-                    return Err(RepositoryError::Conflict.into());
-                }
-                let bound = sql_query(
-                    "SELECT tenant_id FROM tenant_runtime_bindings
-                     WHERE tenant_id = $1
-                     FOR UPDATE",
+                set_tenant_runtime_status_on_connection(
+                    connection,
+                    expected_revision,
+                    tenant_id,
+                    status,
                 )
-                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                .get_result::<TenantBindingPresenceRow>(connection)
                 .await
-                .optional()
-                .map_err(map_query_error)?;
-                match bound {
-                    Some(row) if row.tenant_id == tenant_id.as_uuid() => {}
-                    _ => return Err(RepositoryError::NotFound.into()),
-                }
-                let row = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
-                    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                    .get_result::<BoundaryStatusRow>(connection)
-                    .await
-                    .optional()
-                    .map_err(map_query_error)?
-                    .ok_or(RepositoryError::NotFound)?;
-                if row.status.as_deref() == Some(status.as_str()) {
-                    return Ok(current);
-                }
-                sql_query(
-                    "UPDATE tenants SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-                )
-                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                .bind::<sql_types::Text, _>(status.as_str())
-                .execute(connection)
-                .await
-                .map_err(map_query_error)?;
-                read_directory_revision(connection).await
+                .map_err(DirectoryMutationError::from)
             })
             .await
             .map_err(RepositoryError::from)
@@ -761,37 +708,186 @@ impl TenantDirectoryRepository {
             .map_err(|_| RepositoryError::Unavailable)?;
         connection
             .transaction::<_, DirectoryMutationError, _>(async move |connection| {
-                let current = lock_directory_revision(connection).await?;
-                if current != expected_revision {
-                    return Err(RepositoryError::Conflict.into());
-                }
-                let deleted = sql_query("DELETE FROM tenant_runtime_bindings WHERE tenant_id = $1")
-                    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                    .execute(connection)
+                remove_tenant_binding_on_connection(connection, expected_revision, tenant_id)
                     .await
-                    .map_err(map_query_error)?;
-                if deleted == 0 {
-                    let status = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
-                        .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
-                        .get_result::<BoundaryStatusRow>(connection)
-                        .await
-                        .optional()
-                        .map_err(map_query_error)?;
-                    let finalized = matches!(
-                        status.as_ref().and_then(|row| row.status.as_deref()),
-                        Some("deleted")
-                    );
-                    return if finalized {
-                        Ok(current)
-                    } else {
-                        Err(RepositoryError::NotFound.into())
-                    };
-                }
-                read_directory_revision(connection).await
+                    .map_err(DirectoryMutationError::from)
             })
             .await
             .map_err(RepositoryError::from)
     }
+}
+
+/// Applies the binding update on a caller-owned transaction so the revision
+/// fence, the mutation, the audit event, and the control outcome ledger can
+/// commit atomically together.
+pub(crate) async fn update_tenant_binding_on_connection(
+    connection: &mut AsyncPgConnection,
+    expected_revision: u64,
+    tenant_id: TenantId,
+    issuer: String,
+    external_host: String,
+) -> Result<u64, RepositoryError> {
+    validate_binding_routing_identity(&issuer, &external_host)?;
+    connection
+        .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+            let current = lock_directory_revision(connection).await?;
+            if current != expected_revision {
+                return Err(RepositoryError::Conflict.into());
+            }
+            let existing = sql_query(
+                "SELECT tenant_id, realm_id, organization_id, issuer, external_host, runtime_revision
+                 FROM tenant_runtime_bindings
+                 WHERE tenant_id = $1
+                 FOR UPDATE",
+            )
+            .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+            .get_result::<TenantDirectoryBindingRow>(connection)
+            .await
+            .optional()
+            .map_err(map_query_error)?
+            .ok_or(RepositoryError::NotFound)?;
+            if existing.issuer == issuer && existing.external_host == external_host {
+                return Ok(current);
+            }
+            sql_query(
+                "UPDATE tenant_runtime_bindings
+                 SET issuer = $2, external_host = $3, updated_at = CURRENT_TIMESTAMP
+                 WHERE tenant_id = $1",
+            )
+            .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+            .bind::<sql_types::Text, _>(&issuer)
+            .bind::<sql_types::Text, _>(&external_host)
+            .execute(connection)
+            .await
+            .map_err(map_query_error)?;
+            read_directory_revision(connection).await
+        })
+        .await
+        .map_err(RepositoryError::from)
+}
+
+/// Applies the status transition on a caller-owned transaction.
+pub(crate) async fn set_tenant_runtime_status_on_connection(
+    connection: &mut AsyncPgConnection,
+    expected_revision: u64,
+    tenant_id: TenantId,
+    status: TenantRuntimeStatus,
+) -> Result<u64, RepositoryError> {
+    connection
+        .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+            let current = lock_directory_revision(connection).await?;
+            if current != expected_revision {
+                return Err(RepositoryError::Conflict.into());
+            }
+            let bound = sql_query(
+                "SELECT tenant_id FROM tenant_runtime_bindings
+                 WHERE tenant_id = $1
+                 FOR UPDATE",
+            )
+            .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+            .get_result::<TenantBindingPresenceRow>(connection)
+            .await
+            .optional()
+            .map_err(map_query_error)?;
+            match bound {
+                Some(row) if row.tenant_id == tenant_id.as_uuid() => {}
+                _ => return Err(RepositoryError::NotFound.into()),
+            }
+            let row = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
+                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                .get_result::<BoundaryStatusRow>(connection)
+                .await
+                .optional()
+                .map_err(map_query_error)?
+                .ok_or(RepositoryError::NotFound)?;
+            if row.status.as_deref() == Some(status.as_str()) {
+                return Ok(current);
+            }
+            sql_query(
+                "UPDATE tenants SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            )
+            .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+            .bind::<sql_types::Text, _>(status.as_str())
+            .execute(connection)
+            .await
+            .map_err(map_query_error)?;
+            read_directory_revision(connection).await
+        })
+        .await
+        .map_err(RepositoryError::from)
+}
+
+/// Advances one tenant-local runtime generation under the global directory
+/// fence. The refresher will rebuild only this changed binding and publish it
+/// only after every deterministic material file validates.
+pub(crate) async fn reload_tenant_runtime_on_connection(
+    connection: &mut AsyncPgConnection,
+    expected_revision: u64,
+    tenant_id: TenantId,
+) -> Result<u64, RepositoryError> {
+    connection
+        .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+            let current = lock_directory_revision(connection).await?;
+            if current != expected_revision {
+                return Err(RepositoryError::Conflict.into());
+            }
+            let changed = sql_query(
+                "UPDATE tenant_runtime_bindings
+                 SET runtime_revision = runtime_revision + 1,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE tenant_id = $1",
+            )
+            .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+            .execute(connection)
+            .await
+            .map_err(map_query_error)?;
+            if changed != 1 {
+                return Err(RepositoryError::NotFound.into());
+            }
+            read_directory_revision(connection).await
+        })
+        .await
+        .map_err(RepositoryError::from)
+}
+
+/// Applies the binding removal on a caller-owned transaction.
+pub(crate) async fn remove_tenant_binding_on_connection(
+    connection: &mut AsyncPgConnection,
+    expected_revision: u64,
+    tenant_id: TenantId,
+) -> Result<u64, RepositoryError> {
+    connection
+        .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+            let current = lock_directory_revision(connection).await?;
+            if current != expected_revision {
+                return Err(RepositoryError::Conflict.into());
+            }
+            let deleted = sql_query("DELETE FROM tenant_runtime_bindings WHERE tenant_id = $1")
+                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                .execute(connection)
+                .await
+                .map_err(map_query_error)?;
+            if deleted == 0 {
+                let status = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
+                    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                    .get_result::<BoundaryStatusRow>(connection)
+                    .await
+                    .optional()
+                    .map_err(map_query_error)?;
+                let finalized = matches!(
+                    status.as_ref().and_then(|row| row.status.as_deref()),
+                    Some("deleted")
+                );
+                return if finalized {
+                    Ok(current)
+                } else {
+                    Err(RepositoryError::NotFound.into())
+                };
+            }
+            read_directory_revision(connection).await
+        })
+        .await
+        .map_err(RepositoryError::from)
 }
 
 fn validate_active_boundary(
@@ -867,14 +963,16 @@ fn directory_snapshot(
             row.organization_id,
             row.issuer,
             row.external_host,
+            row.runtime_revision,
         ) {
-            (None, None, None, None, None) => {}
+            (None, None, None, None, None, None) => {}
             (
                 Some(tenant_id),
                 Some(realm_id),
                 Some(organization_id),
                 Some(issuer),
                 Some(external_host),
+                Some(runtime_revision),
             ) => tenants.push(TenantDirectoryBinding {
                 tenant: TenantContext {
                     tenant_id: TenantId::new(tenant_id).map_err(|_| {
@@ -889,6 +987,9 @@ fn directory_snapshot(
                         )
                     })?,
                 },
+                runtime_revision: u64::try_from(runtime_revision).map_err(|_| {
+                    RepositoryError::Consistency("tenant runtime revision is invalid".to_owned())
+                })?,
                 issuer,
                 external_host,
             }),
