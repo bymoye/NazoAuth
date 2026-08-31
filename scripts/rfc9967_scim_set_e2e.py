@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = ROOT / "tests" / "contracts" / "rfc9967-scim-set-matrix.json"
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 ISSUER_URL = os.environ.get("E2E_ISSUER_URL", "http://127.0.0.1:8000").rstrip("/")
+TENANT_HEADERS = {"Host": os.environ.get("E2E_TENANT_HOST", urlparse(ISSUER_URL).netloc)}
 DATABASE_URL = os.environ.get(
     "E2E_DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5432/oauth"
 )
@@ -165,7 +166,12 @@ class MatrixContext:
     jwks: dict[str, Any] | None = None
 
     def headers(self, token: str, **extra: str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {token}", "User-Agent": "nazo-rfc9967-matrix", **extra}
+        return {
+            **TENANT_HEADERS,
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "nazo-rfc9967-matrix",
+            **extra,
+        }
 
     def observe(self, case: str, condition: bool) -> None:
         self.evidence.observe(case, condition)
@@ -260,7 +266,12 @@ class MatrixContext:
 
     def decode_set(self, encoded: str, audience: str) -> tuple[dict[str, Any], dict[str, Any]]:
         if self.jwks is None:
-            self.jwks = expect_json(expect_status(requests.get(f"{BASE_URL}/jwks.json", timeout=10), 200))
+            self.jwks = expect_json(
+                expect_status(
+                    requests.get(f"{BASE_URL}/jwks.json", headers=TENANT_HEADERS, timeout=10),
+                    200,
+                )
+            )
         header = jwt.get_unverified_header(encoded)
         candidates = [key for key in self.jwks.get("keys", []) if key.get("kid") == header.get("kid")]
         if len(candidates) != 1:
@@ -329,7 +340,10 @@ def handlers(context: MatrixContext) -> dict[str, Any]:
         )
 
     def authorization(case: str, _: dict[str, object]) -> None:
-        missing = expect_status(requests.post(f"{BASE_URL}{POLL_PATH}", json={}, timeout=10), 401)
+        missing = expect_status(
+            requests.post(f"{BASE_URL}{POLL_PATH}", json={}, headers=TENANT_HEADERS, timeout=10),
+            401,
+        )
         unregistered = expect_status(
             requests.post(
                 f"{BASE_URL}{POLL_PATH}",

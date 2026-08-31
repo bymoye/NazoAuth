@@ -333,7 +333,7 @@ jobs:
           for _ in $(seq 1 60); do
             if docker run --rm --network nazo-oauth-e2e-net \
               nazo-oauth-e2e-runner:latest python -c \
-              'import urllib.request; urllib.request.urlopen("http://nazo-oauth-e2e-server:8000/health", timeout=2).read(); urllib.request.urlopen("http://nazo-oauth-e2e-server-signed:8000/health", timeout=2).read()'
+              'import urllib.request; headers={"Host":"127.0.0.1:8000"}; urllib.request.urlopen(urllib.request.Request("http://nazo-oauth-e2e-server:8000/health", headers=headers), timeout=2).read(); urllib.request.urlopen(urllib.request.Request("http://nazo-oauth-e2e-server-signed:8000/health", headers=headers), timeout=2).read()'
             then
               ready=true
               break
@@ -352,6 +352,7 @@ jobs:
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
             -e E2E_ISSUER_URL=http://127.0.0.1:8000 \
+            -e E2E_TENANT_HOST=127.0.0.1:8000 \
             -e E2E_DATABASE_URL=postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth \
             nazo-oauth-e2e-runner:latest python scripts/rfc9967_scim_set_e2e.py
       - name: Run load and race gate
@@ -359,6 +360,7 @@ jobs:
           docker run --rm --name nazo-oauth-e2e-runner --network nazo-oauth-e2e-net \
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
+            -e E2E_TENANT_HOST=127.0.0.1:8000 \
             -e LOAD_REQUESTS=400 \
             -e LOAD_CONCURRENCY=32 \
             nazo-oauth-e2e-runner:latest python scripts/full_real_request_load.py
@@ -368,6 +370,7 @@ jobs:
           docker run --rm --name nazo-oauth-e2e-runner --network nazo-oauth-e2e-net \
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
+            -e E2E_TENANT_HOST=127.0.0.1:8000 \
             nazo-oauth-e2e-runner:latest python scripts/valkey_failure_injection.py
       - name: Cleanup
         if: always()
