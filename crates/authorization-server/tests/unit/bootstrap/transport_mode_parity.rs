@@ -6,11 +6,6 @@ use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nazo_http_actix::IpCidr;
 
-struct ProbeEndpoint {
-    client: reqwest::Client,
-    url: String,
-}
-
 async fn mtls_probe(
     request: HttpRequest,
     trusted_proxy_cidrs: web::Data<Vec<IpCidr>>,
@@ -66,8 +61,12 @@ async fn proxy_probe(
     HttpResponse::build(status).body(body)
 }
 
-async fn probe(endpoint: &ProbeEndpoint, forwarded_client_cert: Option<&str>) -> (u16, String) {
-    let request = endpoint.client.get(&endpoint.url);
+async fn probe(
+    client: &reqwest::Client,
+    port: u16,
+    forwarded_client_cert: Option<&str>,
+) -> (u16, String) {
+    let request = client.get(format!("https://localhost:{port}/probe"));
     let request = if let Some(value) = forwarded_client_cert {
         request.header("client-cert", value)
     } else {
@@ -185,36 +184,28 @@ async fn direct_tls_and_trusted_proxy_share_the_same_real_mtls_identity_contract
         .identity(identity)
         .build()
         .unwrap();
-    let direct_mtls = ProbeEndpoint {
-        client: client.clone(),
-        url: format!("https://localhost:{}/probe", direct_mtls_address.port()),
-    };
-    let trusted_proxy = ProbeEndpoint {
-        client: client.clone(),
-        url: format!("https://localhost:{}/probe", proxy_address.port()),
-    };
-    let direct_public = ProbeEndpoint {
-        client,
-        url: format!("https://localhost:{}/probe", direct_public_address.port()),
-    };
-
     assert!(
         anonymous_client
-            .get(&trusted_proxy.url)
+            .get(format!("https://localhost:{}/probe", proxy_address.port()))
             .send()
             .await
             .is_err()
     );
 
-    let direct_result = probe(&direct_mtls, None).await;
-    let proxy_result = probe(&trusted_proxy, None).await;
+    let direct_result = probe(&client, direct_mtls_address.port(), None).await;
+    let proxy_result = probe(&client, proxy_address.port(), None).await;
     assert_eq!(direct_result, proxy_result);
     assert_ne!(direct_result.1, "none");
 
     let forged_header = ":AQ==:";
-    assert_eq!(probe(&direct_public, Some(forged_header)).await.1, "none");
     assert_eq!(
-        probe(&trusted_proxy, Some(forged_header)).await,
+        probe(&client, direct_public_address.port(), Some(forged_header))
+            .await
+            .1,
+        "none"
+    );
+    assert_eq!(
+        probe(&client, proxy_address.port(), Some(forged_header)).await,
         proxy_result
     );
 
