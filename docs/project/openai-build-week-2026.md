@@ -140,9 +140,5 @@ current desktop and mobile browsers.
 
 ## Evidence index
 
-- [Certification and conformance evidence](../conformance/certification.md)
-- [OpenID4VC Final matrix](../conformance/openid4vc-final-matrix.md)
-- [Public black-box runbook](../conformance/interoperability-public-black-box-runbook.md)
-- [Dated public black-box result](../conformance/2026-07-19-public-black-box-full-interoperability-results.md)
 - [Release and conformance boundary](../operations/release-boundary.md)
 - [Security review record](../security/codex-security-findings-2026-07-19.md)
